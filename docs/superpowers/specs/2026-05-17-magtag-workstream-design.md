@@ -36,6 +36,12 @@ Every stream runs `superpowers:requesting-code-review` before merging to `integr
 - **Crashes**: null dereference, stack overflows in ISR/RMT context, uninitialized RTC state on cold boot
 - **Logic errors**: state machine invariants, expiry math, timestamp arithmetic (signed 64-bit overflow)
 - **Undefined behaviour**: pointer aliasing, signed integer overflow, out-of-bounds array access
+- **ESP-IDF API correctness**: every `esp_err_t` return value checked; no fire-and-forget calls to `esp_wifi_*`, `nvs_*`, `esp_sleep_*`; APIs used in the documented sequence (e.g. NVS open → read/write → close)
+- **Power invariants**: no peripheral left enabled across a deep-sleep boundary — NeoPixel power gate (GPIO 21), speaker amplifier (GPIO 16), and WiFi must all be explicitly off before `esp_deep_sleep_start()`
+- **Deep-sleep safety**: no FreeRTOS tasks, timers, or semaphores left running at sleep entry; no stack-local state expected to survive sleep
+- **Library usage**: prefer ESP-IDF built-ins and established libraries over custom re-implementations; flag any hand-rolled protocol or driver that has an existing well-supported alternative
+- **Interface clarity**: public API headers must be self-contained (no implementation leaking into `.h`), function names unambiguous, return types consistent
+- **Test quality**: tests must assert meaningful behaviour, not trivially-true conditions; mock interactions must reflect real HAL contracts
 - **Compile failure**: hard gate — any stream touching C/C++ source must `pio run` or `pio test` clean before review is considered
 
 ---
@@ -312,9 +318,26 @@ Where `display_state_t` carries: `remaining_sec`, `allocation_sec`, `timer_state
 ### Scope
 
 **`buttons.c/h`**:
-- `buttons_configure_wakeup(void)` — calls `esp_sleep_enable_gpio_wakeup()` for GPIOs 15, 12, 14, 11 (active-LOW)
-- `button_id_t buttons_get_wakeup_button(void)` — decodes `esp_sleep_get_wakeup_cause()` + GPIO hold latch to identify which button woke the device
-- 10 ms software debounce via `esp_timer_get_time()`
+
+Button role assignment (from ProductOverview Feature 6):
+
+| ID | GPIO | Role |
+|----|------|------|
+| `BTN_A` | 15 | Start (IDLE/PAUSED → RUNNING, NTP sync first) / Pause (RUNNING → PAUSED) |
+| `BTN_B` | 12 | Reset to IDLE with today's full allocation |
+| `BTN_C` | 14 | Cycle display contrast / brightness (3 levels) |
+| `BTN_D` | 11 | Force NTP re-sync + full display refresh |
+
+All 4 buttons are active-LOW with internal pull-ups. During an EXPIRED alert, any button press dismisses the alert (calls `audio_stop()` + `neopixel_stop()`) before the button's primary action is processed.
+
+Public API:
+- `void buttons_init(void)` — configure GPIOs with INPUT + PULLUP, no action yet
+- `void buttons_configure_wakeup(void)` — calls `esp_sleep_enable_gpio_wakeup()` for all 4 GPIOs; called immediately before `esp_deep_sleep_start()`
+- `button_id_t buttons_get_wakeup_button(void)` — decodes `esp_sleep_get_wakeup_cause()` + reads GPIO levels to identify which button woke the device; returns `BTN_NONE` if wake cause was not GPIO
+- `bool buttons_is_pressed(button_id_t)` — reads current GPIO level (LOW = pressed); used for dismiss-on-any-button logic during alert
+- 10 ms software debounce via `esp_timer_get_time()` applied in `buttons_get_wakeup_button()`
+
+`button_id_t` enum: `BTN_A`, `BTN_B`, `BTN_C`, `BTN_D`, `BTN_NONE`
 
 **`audio.c/h`**:
 - `audio_beep_sequence(void)` — enables GPIO 16 amplifier, plays 3 short beeps via LEDC PWM, repeats every 3 s for 5 cycles (15 s total)
@@ -322,8 +345,9 @@ Where `display_state_t` carries: `remaining_sec`, `allocation_sec`, `timer_state
 - Amplifier disabled between sequences
 
 **`neopixel.c/h`**:
+- GPIO 21 is HIGH (power gate OFF) by default. `neopixel_init()` must assert GPIO 21 HIGH immediately on every boot path — including cold boot and every wake from deep sleep — before any other peripheral code runs. NeoPixels must never be on unless an alert is actively firing.
 - `neopixel_alert_start(void)` — sets GPIO 21 LOW (power gate on), drives RMT on GPIO 1 with slow red pulse
-- `neopixel_stop(void)` — stops RMT, sets GPIO 21 HIGH (power gate off)
+- `neopixel_stop(void)` — stops RMT, asserts GPIO 21 HIGH (power gate off); safe to call even if NeoPixels were already off
 
 **Compile gate**: `pio run` compiles clean.
 
@@ -338,8 +362,10 @@ Where `display_state_t` carries: `remaining_sec`, `allocation_sec`, `timer_state
 
 ### Scope
 
+**Library policy**: use ESP-IDF built-in components throughout — `esp_wifi` for WiFi lifecycle, `esp_netif` for network interface init, `esp_sntp` for time sync. No custom socket-based NTP implementation. Same principle applies across all streams: prefer an established library or ESP-IDF component over hand-rolled code for any protocol or peripheral with existing support.
+
 **`ntp.c/h`**:
-- `esp_err_t ntp_sync(void)` — full lifecycle: WiFi init → connect → SNTP sync (IMMED mode, `sntp_get_sync_status()` polling) → disconnect → WiFi deinit
+- `esp_err_t ntp_sync(void)` — full lifecycle: `esp_netif_init()` → `esp_wifi` init/connect → `esp_sntp` sync (IMMED mode, `sntp_get_sync_status()` polling) → `esp_wifi` disconnect/deinit → `esp_netif` deinit
 - Returns `ESP_OK` on successful sync, error code otherwise
 - Caller reads corrected `time(NULL)` after `ntp_sync()` returns `ESP_OK`
 - **`ntp_sync()` never reads or writes `expiry_wall_time`** — that field is owned by `timer.c`
@@ -356,8 +382,6 @@ Where `display_state_t` carries: `remaining_sec`, `allocation_sec`, `timer_state
 **Depends on**: all streams merged to `integration`
 
 ### Scope
-
-**Button role assignment** — before implementing `main.c`, the 4 buttons (GPIO 15/12/14/11) must be assigned explicit roles (e.g. start/pause, resume, dismiss, reset). This is a product decision not yet captured in ProductOverview. Resolve in Stream 0 and document in ProductOverview Feature 6 before Stream 4 begins.
 
 **`main.c`**:
 ```c
@@ -382,8 +406,12 @@ void app_main(void) {
 
 **`handle_button_wake()`** sequence:
 1. Identify button via `buttons_get_wakeup_button()`
-2. Dispatch on button role (roles defined in Stream 0): start/pause/resume drives state machine transition + `ntp_sync()` if transitioning to RUNNING; dismiss stops alert if EXPIRED
-3. `audio_stop()` + `neopixel_stop()` on dismiss
+2. If state is `EXPIRED`: call `audio_stop()` + `neopixel_stop()` regardless of which button woke the device, then return to deep sleep
+3. Dispatch on button ID:
+   - `BTN_A`: if IDLE or PAUSED → `ntp_sync()` then `timer_start()` / `timer_resume()`; if RUNNING → `timer_pause()`
+   - `BTN_B`: `timer_reset()`, reload today's allocation from `schedule`
+   - `BTN_C`: cycle display contrast level (3 steps, persisted in NVS)
+   - `BTN_D`: `ntp_sync()` then `display_full_refresh(&state)`
 4. `display_full_refresh(&state)`
 5. `esp_deep_sleep_start()`
 
