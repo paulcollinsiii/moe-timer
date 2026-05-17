@@ -1,0 +1,227 @@
+# MagTag Screen Timer — Product Overview
+
+## Purpose
+A screen-time countdown timer for a child, running on the Adafruit MagTag (2025, ESP32-S2). Tracks how much screen time remains each day, respects a holiday/weekend schedule stored in NVS, and visually counts down via an e-ink progress bar. The device is wall- or fridge-mounted (magnetic backing) so the child and parent can see remaining time at a glance.
+
+---
+
+## Hardware Target
+
+| Attribute | Value |
+|-----------|-------|
+| Board | Adafruit MagTag 2025 |
+| Platform.io ID | `adafruit_magtag29_esp32s2` |
+| MCU | ESP32-S2 @ 240 MHz |
+| Flash / PSRAM | 4 MB / 2 MB |
+| Display | 2.9" grayscale e-ink, 296×128 px, SSD1680 controller |
+| Buttons | 4× tactile (GPIO 15/12/14/11, active-LOW, internal pull-up) |
+| NeoPixels | 4× RGB on GPIO 1 (power gate: GPIO 21 LOW = on) |
+| Speaker | Onboard amplifier, shutdown pin GPIO 16 (HIGH = on) |
+| WiFi | 802.11 b/g/n, 2.4 GHz |
+| RTC | None (dedicated RTC chip absent; ESP32-S2 RTC timer used for deep-sleep wakeup) |
+| Battery | 3.7 V LiPo via JST connector |
+
+---
+
+## Features
+
+### 1 · Clock & NTP
+
+- Connect to WiFi and sync via SNTP (`pool.ntp.org`) in three situations:
+  1. **Timer start**: NTP sync is mandatory before the countdown begins.
+  2. **Every 10 minutes while running**: compensate for ESP32 RTC drift.
+  3. **New day detected on wake**: NTP sync to get accurate date for schedule lookup.
+- After each sync, recalculate `expiry_wall_time` (Unix timestamp) and persist in RTC memory.
+- If WiFi is unavailable when required, display a "no sync — check WiFi" message and block timer start until sync succeeds.
+- Timezone configured at compile time as a POSIX TZ string `#define` (e.g. `EST5EDT,M3.2.0,M11.1.0`).
+- Display shows: date (e.g. `Sat May 16`) + current time (HH:MM AM/PM) and `Last sync: HH:MM`.
+
+### 2 · Timer Architecture — Absolute Expiry Time
+
+Rather than counting elapsed seconds, the timer stores the **absolute Unix timestamp at which it should expire** (`expiry_wall_time`). On every wake:
+
+```
+remaining = expiry_wall_time - time(NULL)
+```
+
+This makes the countdown inherently drift-resistant and NTP-correctable: when a new NTP sync occurs, `expiry_wall_time` is adjusted by the measured offset.
+
+Timer state and `expiry_wall_time` are stored in **RTC slow memory** so they survive deep sleep but are reset on a cold power-cycle.
+
+### 3 · Deep Sleep Architecture
+
+The device spends almost all of its time in deep sleep. Wake sources:
+
+| Source | Action on wake |
+|--------|----------------|
+| RTC timer (~55 s) | Partial display refresh + check NTP schedule |
+| GPIO (any button press) | Handle button event, full refresh if needed |
+
+**Wake sequence (every ~55 s)**:
+1. Read current time from ESP32 RTC.
+2. Check for day rollover (compare date to `last_date` in RTC memory) → if new day: wake WiFi, NTP sync, re-init timer to IDLE with new allocation.
+3. If `next_ntp_sync_time` has passed (every 10 min while RUNNING): wake WiFi, NTP sync, adjust `expiry_wall_time`.
+4. Compute `remaining = expiry_wall_time - now`.
+5. Update display (partial refresh; full refresh on every 5th wake or state change).
+6. Return to deep sleep.
+
+WiFi is **off by default**; it is only powered up for NTP syncs and then immediately shut down.
+
+### 4 · Daily Schedule & NVS Config
+
+NVS namespace: `timer_cfg`
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `weekday_min` | u16 | 60 | Weekday allocation (minutes) |
+| `weekend_min` | u16 | 120 | Weekend allocation (minutes) |
+| `holiday_min` | u16 | 120 | Holiday allocation (minutes) |
+| `holidays` | blob | (pre-filled) | Newline-separated `YYYY-MM-DD` holiday dates |
+| `wifi_ssid` | str | "" | WiFi SSID |
+| `wifi_pass` | str | "" | WiFi password |
+
+On first flash the NVS is initialised with hardcoded defaults from `nvs_defaults.h` that includes the current year's US federal holiday list plus common school holidays. Subsequent boots read the stored values.
+
+**Day-type logic**:
+1. Check if today's date is in the `holidays` blob → holiday allocation.
+2. Else if Saturday or Sunday → weekend allocation.
+3. Else → weekday allocation.
+
+### 5 · Timer State Machine
+
+States: `IDLE` → `RUNNING` → `PAUSED` → `EXPIRED`
+
+- `IDLE`: Allocation loaded for today, `expiry_wall_time` not set. Display shows full bar.
+- `RUNNING`: `expiry_wall_time` set. Device deep sleeps between 55-second refresh wakes.
+- `PAUSED`: `remaining_at_pause` saved in RTC memory; `expiry_wall_time` cleared. Deep sleep continues.
+- `EXPIRED`: `remaining = 0`. Alert sequence runs on wake; device skips deep sleep until alert done or dismissed.
+
+Pressing Start from PAUSED re-NTP-syncs and sets `expiry_wall_time = now + remaining_at_pause`.
+
+All state is persisted in **RTC slow memory** (survives deep sleep, lost on cold boot / power cycle).
+
+### 6 · Buttons
+
+| Button | GPIO | Action |
+|--------|------|--------|
+| A | 15 | Start (IDLE/PAUSED → RUNNING, NTP sync first) / Pause (RUNNING → PAUSED) |
+| B | 12 | Reset to IDLE with today's full allocation |
+| C | 14 | Cycle display contrast / brightness (3 levels) |
+| D | 11 | Force NTP re-sync + full display refresh |
+
+All 4 buttons are configured as deep-sleep GPIO wakeup sources. Buttons are debounced in software (10 ms).
+
+### 7 · Display Layout (296×128 px)
+
+```
+┌──────────────────────────────────────────────────┐
+│  Sat May 16  12:34 PM       Last sync: 12:30 PM  │  ← row 0–18
+│                                                  │
+│  ████████████████████░░░░░░░░░░░░░░░░░░░░░░░░░░  │  ← row 26–50 (progress bar, 24 px tall)
+│                                                  │
+│              42 min 30 sec remaining             │  ← row 58–78
+│                                                  │
+│  Weekday · 60 min                    RUNNING     │  ← row 88–108
+└──────────────────────────────────────────────────┘
+```
+
+- **Progress bar**: full-width (280 px usable), fill proportional to `remaining/allocation`. Thick outer border.
+- **Remaining time**: centred; shows minutes and seconds when < 5 min, else minutes only.
+- **State label**: bottom-right (`IDLE`, `RUNNING`, `PAUSED`, `TIME'S UP`).
+- **Day-type + allocation**: bottom-left (e.g. `Holiday · 120 min`).
+
+**Refresh strategy**:
+- Partial refresh on every ~55-second wake while RUNNING.
+- Full refresh on state transitions and every 5th partial refresh (prevents ghosting).
+- Full refresh ~3 s; partial ~0.4 s — both acceptable at the 55-second cadence.
+
+### 8 · Expiry Behaviour
+
+When `remaining ≤ 0`:
+1. **Display**: full refresh to "TIME'S UP" full-screen layout + empty bar.
+2. **Speaker**: 3 short beeps, repeated every 3 seconds, for 5 cycles (15 seconds total). Stops immediately on any button press.
+3. **NeoPixels**: slow red pulse during the 15-second alert. Stops on any button press.
+4. After alert completes (or is dismissed), device returns to EXPIRED state and resumes deep sleep.
+
+### 9 · Power
+
+- Primary: USB-C.
+- Battery: LiPo fallback. Deep sleep and WiFi-off discipline makes battery life viable.
+- NeoPixels and speaker amplifier are powered off except during alert.
+- Deep sleep current target: < 1 mA (ESP32-S2 deep sleep ~20 µA + display static current).
+
+---
+
+## Build System
+
+**Recommended**: Platform.io with ESP-IDF framework.
+
+```ini
+; platformio.ini
+[env:magtag]
+platform = espressif32
+board = adafruit_magtag29_esp32s2
+framework = espidf
+monitor_speed = 115200
+```
+
+Alternatively, pure ESP-IDF v5.x with `idf.py set-target esp32s2` is fully supported.
+
+---
+
+## Module Structure
+
+```
+main/
+  main.c            — app_main: determine wake reason, dispatch to appropriate handler
+  display.c/h       — SSD1680 SPI driver; layout rendering; partial vs full refresh logic
+  timer.c/h         — state machine; expiry time calculation; RTC memory persistence
+  ntp.c/h           — WiFi init/deinit; SNTP sync; drift correction helper
+  nvs_config.c/h    — typed NVS accessors; first-boot defaults init
+  schedule.c/h      — day-type determination (weekday/weekend/holiday); allocation lookup
+  buttons.c/h       — wake reason decode; GPIO wakeup config; debounce
+  audio.c/h         — PWM tone generation; beep pattern sequencer
+  neopixel.c/h      — RMT-based NeoPixel driver; alert pulse pattern
+  nvs_defaults.h    — compile-time default holiday list, allocations, WiFi placeholder
+
+components/
+  ssd1680/          — standalone SSD1680 e-ink SPI driver component
+```
+
+**RTC slow memory layout** (persistent across deep sleep):
+
+```c
+typedef struct {
+    timer_state_t state;             // IDLE / RUNNING / PAUSED / EXPIRED
+    int64_t       expiry_wall_time;  // Unix timestamp when timer expires; 0 if not set
+    int32_t       remaining_at_pause; // seconds saved on PAUSE
+    int32_t       allocation_sec;    // today's allocation in seconds
+    char          last_date[11];     // "YYYY-MM-DD" for day-rollover detection
+    int64_t       next_ntp_sync;     // Unix timestamp of next required NTP sync
+    uint8_t       partial_refresh_count; // resets to 0 after full refresh
+} rtc_state_t;
+```
+
+---
+
+## Out of Scope (v1)
+
+- OTA firmware updates
+- Remote monitoring or companion app
+- Multiple child profiles
+- SD card usage
+- Custom font rendering beyond a small bitmap font header
+- BLE/SmartConfig WiFi provisioning (credentials stored in NVS; set initially via `nvs_gen.py` partition image or a `#warning` placeholder in `nvs_defaults.h`)
+- Adjustable timer allocation via buttons (schedule-driven only)
+
+---
+
+## Implementation Notes for Coding Agents
+
+1. **TDD required**: write unit tests for `schedule.c` (day-type logic), `timer.c` (state machine + expiry math), and `nvs_config.c` (serialisation round-trips) before implementing those modules.
+2. **Worktrees/branches**: all development on feature branches; never commit directly to main.
+3. **SSD1680 driver**: adapt an existing ESP-IDF-compatible driver (e.g. Waveshare ESP32 e-paper examples) to MagTag GPIO assignments — do not write from scratch.
+4. **SNTP**: use the `esp_sntp` component with `CONFIG_SNTP_TIME_SYNC_METHOD_IMMED`; confirm sync via `sntp_get_sync_status()` before setting `expiry_wall_time`.
+5. **Deep sleep wakeup**: `esp_sleep_enable_timer_wakeup(55 * 1000000ULL)` + `esp_sleep_enable_gpio_wakeup()` for all 4 buttons; use `esp_sleep_get_wakeup_cause()` on wake to dispatch correctly.
+6. **RTC memory**: declare `rtc_state_t` with `RTC_DATA_ATTR` so the linker places it in RTC slow memory.
+7. **WiFi lifecycle**: init → connect → sync → disconnect → deinit on every NTP session; never leave WiFi running between syncs.

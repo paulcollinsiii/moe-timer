@@ -1,0 +1,2 @@
+# Force immediate SNTP sync instead of smooth adjustment
+CONFIG_SNTP_TIME_SYNC_METHOD_IMMED=y
