@@ -210,7 +210,6 @@ typedef struct {
 - Remote monitoring or companion app
 - Multiple child profiles
 - SD card usage
-- Custom font rendering beyond a small bitmap font header
 - BLE/SmartConfig WiFi provisioning (credentials stored in NVS; set initially via `nvs_gen.py` partition image or a `#warning` placeholder in `nvs_defaults.h`)
 - Adjustable timer allocation via buttons (schedule-driven only)
 
@@ -220,7 +219,7 @@ typedef struct {
 
 1. **TDD required**: write unit tests for `schedule.c` (day-type logic), `timer.c` (state machine + expiry math), and `nvs_config.c` (serialisation round-trips) before implementing those modules.
 2. **Worktrees/branches**: all development on feature branches; never commit directly to main.
-3. **SSD1680 driver**: adapt an existing ESP-IDF-compatible driver (e.g. Waveshare ESP32 e-paper examples) to MagTag GPIO assignments — do not write from scratch.
+3. **Display library**: LovyanGFX (ESP-IDF native). `display.cpp` is the single C++ translation unit; all other modules are C. `display.h` exposes a C-compatible API with `extern "C"` guards. LovyanGFX handles SSD1680 init, partial/full refresh, and font rendering.
 4. **SNTP**: use the `esp_sntp` component with `CONFIG_SNTP_TIME_SYNC_METHOD_IMMED`; confirm sync via `sntp_get_sync_status()` before setting `expiry_wall_time`.
 5. **Deep sleep wakeup**: `esp_sleep_enable_timer_wakeup(55 * 1000000ULL)` + `esp_sleep_enable_gpio_wakeup()` for all 4 buttons; use `esp_sleep_get_wakeup_cause()` on wake to dispatch correctly.
 6. **RTC memory**: declare `rtc_state_t` with `RTC_DATA_ATTR` so the linker places it in RTC slow memory.
