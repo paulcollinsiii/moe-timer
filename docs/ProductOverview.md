@@ -31,7 +31,7 @@ A screen-time countdown timer for a child, running on the Adafruit MagTag (2025,
   1. **Timer start**: NTP sync is mandatory before the countdown begins.
   2. **Every 10 minutes while running**: compensate for ESP32 RTC drift.
   3. **New day detected on wake**: NTP sync to get accurate date for schedule lookup.
-- After each sync, recalculate `expiry_wall_time` (Unix timestamp) and persist in RTC memory.
+- NTP syncs correct the ESP32 system clock via SNTP. `expiry_wall_time` is **not** modified on sync — since `remaining = expiry_wall_time - time(NULL)`, drift compensation is automatic once the system clock is corrected.
 - If WiFi is unavailable when required, display a "no sync — check WiFi" message and block timer start until sync succeeds.
 - Timezone configured at compile time as a POSIX TZ string `#define` (e.g. `EST5EDT,M3.2.0,M11.1.0`).
 - Display shows: date (e.g. `Sat May 16`) + current time (HH:MM AM/PM) and `Last sync: HH:MM`.
@@ -44,7 +44,7 @@ Rather than counting elapsed seconds, the timer stores the **absolute Unix times
 remaining = expiry_wall_time - time(NULL)
 ```
 
-This makes the countdown inherently drift-resistant and NTP-correctable: when a new NTP sync occurs, `expiry_wall_time` is adjusted by the measured offset.
+This makes the countdown inherently drift-resistant: NTP syncs correct `time(NULL)` via SNTP, so remaining time recalculates correctly without ever modifying `expiry_wall_time`. The only time `expiry_wall_time` changes is at timer start (`IDLE → RUNNING`) or resume after pause (`PAUSED → RUNNING`: `expiry_wall_time = time(NULL) + remaining_at_pause`).
 
 Timer state and `expiry_wall_time` are stored in **RTC slow memory** so they survive deep sleep but are reset on a cold power-cycle.
 
