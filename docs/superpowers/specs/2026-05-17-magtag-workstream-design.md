@@ -115,7 +115,7 @@ Scaffold the following with correct include guards, empty function bodies (retur
 - `src/buttons.c` + `include/buttons.h`
 - `src/audio.c` + `include/audio.h`
 - `src/neopixel.c` + `include/neopixel.h`
-- `components/ssd1680/` — placeholder `CMakeLists.txt` (LovyanGFX replaces the custom driver; this component becomes empty or is removed)
+- `components/ssd1680/` — remove the directory entirely; LovyanGFX replaces the custom driver and is managed as a PlatformIO library dependency, not an ESP-IDF component
 - `src/CMakeLists.txt` — register all source files with ESP-IDF build system
 
 **Compile gate**: `pio run` succeeds with empty stubs.
@@ -273,7 +273,8 @@ void hal_nvs_install(const hal_nvs_t *impl);
 ### Scope
 
 **LovyanGFX configuration** (`src/display.cpp`):
-- `LGFX_Config` struct for SSD1680 with MagTag SPI pins — verify exact pins against Adafruit MagTag 2025 schematic before coding (CLAUDE.md lists: MOSI/CLK/CS/DC/RST/BUSY — confirm)
+- Before writing any code: pull the Adafruit MagTag 2025 schematic and confirm SPI pin assignments (MOSI, CLK, CS, DC, RST, BUSY). CLAUDE.md has a partial list; treat it as unverified until cross-checked against the schematic.
+- `LGFX_Config` struct for SSD1680 with confirmed MagTag SPI pins
 - Partial refresh enabled; full refresh triggered by caller
 
 **C API** (`include/display.h`, `extern "C"` guards):
@@ -356,6 +357,8 @@ Where `display_state_t` carries: `remaining_sec`, `allocation_sec`, `timer_state
 
 ### Scope
 
+**Button role assignment** — before implementing `main.c`, the 4 buttons (GPIO 15/12/14/11) must be assigned explicit roles (e.g. start/pause, resume, dismiss, reset). This is a product decision not yet captured in ProductOverview. Resolve in Stream 0 and document in ProductOverview Feature 6 before Stream 4 begins.
+
 **`main.c`**:
 ```c
 void app_main(void) {
@@ -379,8 +382,8 @@ void app_main(void) {
 
 **`handle_button_wake()`** sequence:
 1. Identify button via `buttons_get_wakeup_button()`
-2. Button A (start/pause/resume): drive state machine transition, `ntp_sync()` if transitioning to RUNNING
-3. Button B (dismiss alert): `audio_stop()`, `neopixel_stop()` if EXPIRED
+2. Dispatch on button role (roles defined in Stream 0): start/pause/resume drives state machine transition + `ntp_sync()` if transitioning to RUNNING; dismiss stops alert if EXPIRED
+3. `audio_stop()` + `neopixel_stop()` on dismiss
 4. `display_full_refresh(&state)`
 5. `esp_deep_sleep_start()`
 
