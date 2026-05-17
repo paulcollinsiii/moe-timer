@@ -1,6 +1,26 @@
-# This file was automatically generated for projects
-# without default 'CMakeLists.txt' file.
-
-FILE(GLOB_RECURSE app_sources ${CMAKE_SOURCE_DIR}/src/*.*)
-
-idf_component_register(SRCS ${app_sources})
+idf_component_register(
+    SRCS
+        "main.c"
+        "timer.c"
+        "display.cpp"
+        "ntp.c"
+        "nvs_config.c"
+        "schedule.c"
+        "buttons.c"
+        "audio.c"
+        "neopixel.c"
+        "hal_time.c"
+        "hal_nvs.c"
+    INCLUDE_DIRS
+        "."
+        "../include"
+    REQUIRES
+        nvs_flash
+        esp_wifi
+        esp_netif
+        esp_timer
+        driver
+        log
+        esp-tls
+        json
+)
