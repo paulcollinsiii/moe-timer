@@ -24,11 +24,7 @@ typedef struct {
     uint8_t partial_refresh_count;
 } rtc_state_t;
 
-#ifndef NATIVE
-extern rtc_state_t RTC_DATA_ATTR g_rtc_state;
-#else
 extern rtc_state_t g_rtc_state;
-#endif
 
 timer_state_t timer_get_state(void);
 void timer_start(time_t now, int32_t allocation_sec);

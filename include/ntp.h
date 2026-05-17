@@ -1,5 +1,9 @@
 #pragma once
-/* esp_err_t: from esp_err.h in magtag build. */
+#ifndef NATIVE
+#include "esp_err.h"
+#else
+typedef int esp_err_t;
+#endif
 
 /* Performs a full WiFi+SNTP sync cycle.
    On ESP_OK, time(NULL) reflects corrected UTC.

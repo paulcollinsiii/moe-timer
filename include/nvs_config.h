@@ -1,7 +1,11 @@
 #pragma once
 #include <stddef.h>
 #include <stdint.h>
-/* esp_err_t: from esp_err.h in magtag build, from esp_compat.h in native. */
+#ifndef NATIVE
+#include "esp_err.h"
+#else
+typedef int esp_err_t;
+#endif
 
 esp_err_t nvs_config_init_defaults(void);
 

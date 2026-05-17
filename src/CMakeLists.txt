@@ -22,5 +22,5 @@ idf_component_register(
         driver
         log
         esp-tls
-        json
+        lwip
 )
