@@ -113,8 +113,8 @@ void test_non_holiday_weekday_not_holiday(void) {
 /* ------------------------------------------------------------------ */
 
 void test_allocation_weekday(void) {
-    hal_nvs_write_u16("weekday_min", 60);
-    TEST_ASSERT_EQUAL_UINT32(3600, schedule_get_allocation_sec(DAY_WEEKDAY));
+    hal_nvs_write_u16("weekday_min", 45);
+    TEST_ASSERT_EQUAL_UINT32(2700, schedule_get_allocation_sec(DAY_WEEKDAY));
 }
 
 void test_allocation_weekend(void) {
@@ -123,8 +123,8 @@ void test_allocation_weekend(void) {
 }
 
 void test_allocation_holiday(void) {
-    hal_nvs_write_u16("holiday_min", 120);
-    TEST_ASSERT_EQUAL_UINT32(7200, schedule_get_allocation_sec(DAY_HOLIDAY));
+    hal_nvs_write_u16("holiday_min", 150);
+    TEST_ASSERT_EQUAL_UINT32(9000, schedule_get_allocation_sec(DAY_HOLIDAY));
 }
 
 void test_allocation_missing_key_falls_back_to_default(void) {
@@ -132,6 +132,14 @@ void test_allocation_missing_key_falls_back_to_default(void) {
     mock_nvs_reset();
     uint32_t alloc = schedule_get_allocation_sec(DAY_WEEKDAY);
     TEST_ASSERT_EQUAL_UINT32(NVS_DEFAULT_WEEKDAY_MIN * 60, alloc);
+}
+
+void test_holiday_falls_back_to_compile_time_defaults(void) {
+    /* Clear NVS entirely — no holidays blob written.
+       2026-01-01 is in NVS_DEFAULT_HOLIDAYS so must still classify as DAY_HOLIDAY. */
+    mock_nvs_reset();
+    mock_time_set(1767225600); /* 2026-01-01 Thu */
+    TEST_ASSERT_EQUAL(DAY_HOLIDAY, schedule_get_day_type(hal_time_now()));
 }
 
 /* ------------------------------------------------------------------ */
@@ -152,6 +160,7 @@ int main(void) {
     RUN_TEST(test_holiday_new_years_day);
     RUN_TEST(test_holiday_takes_priority_over_weekend);
     RUN_TEST(test_non_holiday_weekday_not_holiday);
+    RUN_TEST(test_holiday_falls_back_to_compile_time_defaults);
     RUN_TEST(test_allocation_weekday);
     RUN_TEST(test_allocation_weekend);
     RUN_TEST(test_allocation_holiday);

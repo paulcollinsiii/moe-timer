@@ -6,7 +6,6 @@
 #include <time.h>
 
 #include "hal_nvs.h"
-#include "hal_time.h"
 #include "nvs_defaults.h"
 
 bool schedule_is_holiday(const char *date_str, const char *blob, size_t blob_len) {
@@ -40,10 +39,12 @@ day_type_t schedule_get_day_type(time_t now) {
     snprintf(date_str, sizeof(date_str), "%04d-%02d-%02d", tm_local.tm_year + 1900, tm_local.tm_mon + 1,
              tm_local.tm_mday);
 
-    char blob[2048];
+    char blob[512];
     size_t blob_len = sizeof(blob);
     esp_err_t ret = hal_nvs_read_blob("holidays", blob, &blob_len);
-    if (ret == ESP_OK && schedule_is_holiday(date_str, blob, blob_len)) {
+    const char *holiday_data = (ret == ESP_OK) ? blob : NVS_DEFAULT_HOLIDAYS;
+    size_t holiday_len = (ret == ESP_OK) ? blob_len : strlen(NVS_DEFAULT_HOLIDAYS);
+    if (schedule_is_holiday(date_str, holiday_data, holiday_len)) {
         return DAY_HOLIDAY;
     }
 
