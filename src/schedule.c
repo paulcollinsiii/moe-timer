@@ -1,22 +1,79 @@
 #include "schedule.h"
 
+#include <stdlib.h>
 #include <string.h>
 #include <time.h>
 
 #include "hal_nvs.h"
 #include "hal_time.h"
+#include "nvs_defaults.h"
+
+bool schedule_is_holiday(const char *date_str, const char *blob, size_t blob_len) {
+    size_t date_len = strlen(date_str);
+    if (date_len != 10)
+        return false;
+
+    const char *p = blob;
+    const char *end = blob + blob_len;
+    while (p < end) {
+        const char *nl = p;
+        while (nl < end && *nl != '\n')
+            nl++;
+        const char *line_end = nl;
+        if (line_end > p && *(line_end - 1) == '\r')
+            line_end--;
+        size_t line_len = (size_t)(line_end - p);
+        if (line_len == date_len && memcmp(p, date_str, date_len) == 0) {
+            return true;
+        }
+        p = nl + 1;
+    }
+    return false;
+}
 
 day_type_t schedule_get_day_type(time_t now) {
-    (void)now;
+    struct tm tm_local;
+    localtime_r(&now, &tm_local);
+
+    char date_str[11];
+    snprintf(date_str, sizeof(date_str), "%04d-%02d-%02d", tm_local.tm_year + 1900, tm_local.tm_mon + 1,
+             tm_local.tm_mday);
+
+    char blob[2048];
+    size_t blob_len = sizeof(blob);
+    esp_err_t ret = hal_nvs_read_blob("holidays", blob, &blob_len);
+    if (ret == ESP_OK && schedule_is_holiday(date_str, blob, blob_len)) {
+        return DAY_HOLIDAY;
+    }
+
+    if (tm_local.tm_wday == 0 || tm_local.tm_wday == 6) {
+        return DAY_WEEKEND;
+    }
+
     return DAY_WEEKDAY;
 }
+
 uint32_t schedule_get_allocation_sec(day_type_t day_type) {
-    (void)day_type;
-    return 3600;
-}
-bool schedule_is_holiday(const char *d, const char *b, size_t len) {
-    (void)d;
-    (void)b;
-    (void)len;
-    return false;
+    const char *key;
+    uint16_t default_min;
+
+    switch (day_type) {
+        case DAY_WEEKEND:
+            key = "weekend_min";
+            default_min = NVS_DEFAULT_WEEKEND_MIN;
+            break;
+        case DAY_HOLIDAY:
+            key = "holiday_min";
+            default_min = NVS_DEFAULT_HOLIDAY_MIN;
+            break;
+        case DAY_WEEKDAY:
+        default:
+            key = "weekday_min";
+            default_min = NVS_DEFAULT_WEEKDAY_MIN;
+            break;
+    }
+
+    uint16_t minutes = default_min;
+    hal_nvs_read_u16(key, &minutes);
+    return (uint32_t)minutes * 60u;
 }
