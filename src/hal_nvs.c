@@ -1,8 +1,10 @@
 #include "hal_nvs.h"
 
+#ifndef NATIVE
 #include "esp_log.h"
 #include "nvs.h"
 #include "nvs_flash.h"
+#endif
 
 #define NVS_NAMESPACE "timer_cfg"
 static const char *TAG = "hal_nvs";
