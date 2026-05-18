@@ -8,6 +8,7 @@
 /* ---- u16 helpers ---- */
 
 static esp_err_t get_u16_with_default(const char *key, uint16_t *out, uint16_t default_val) {
+    *out = default_val; /* safe value on any error path */
     esp_err_t ret = hal_nvs_read_u16(key, out);
     if (ret == ESP_ERR_NVS_NOT_FOUND) {
         *out = default_val;
@@ -81,6 +82,8 @@ esp_err_t nvs_config_set_wifi_pass(const char *pass) {
 
 /* ---- blob accessor ---- */
 
+/* buf is NOT null-terminated; callers must use *len and null-terminate before
+ * string operations (e.g. buf[*len] = '\0'). */
 esp_err_t nvs_config_get_holidays(char *buf, size_t *len) {
     return hal_nvs_read_blob("holidays", buf, len);
 }
