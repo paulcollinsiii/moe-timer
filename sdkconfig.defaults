@@ -1,9 +1,6 @@
 # Force immediate SNTP sync instead of smooth adjustment
 CONFIG_SNTP_TIME_SYNC_METHOD_IMMED=y
 
-# Use WPA2 station mode — no enterprise auth needed
-CONFIG_ESP_WIFI_AUTH_OPEN=n
-
 # Timezone configured in code via setenv("TZ", ...)
 # POSIX TZ string is defined as TZ_STRING in ntp.c
 
