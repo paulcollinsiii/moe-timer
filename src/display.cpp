@@ -7,8 +7,11 @@
 
 /* ---- LovyanGFX panel configuration ---- */
 
+/* LovyanGFX 1.2.x does not include Panel_SSD1680. Panel_GDEW0154D67 is used
+   as a structural stand-in for the SPI e-paper interface; replace with a
+   dedicated SSD1680 panel driver once one is available. */
 class LGFX_MagTag : public lgfx::LGFX_Device {
-    lgfx::Panel_SSD1680 _panel;
+    lgfx::Panel_GDEW0154D67 _panel;
     lgfx::Bus_SPI _bus;
 
    public:
@@ -174,7 +177,7 @@ void display_update(const display_state_t *state) {
         s_display.display();
         s_partial_refresh_count = 0;
     } else {
-        s_display.display(true);
+        s_display.display();
     }
 }
 
