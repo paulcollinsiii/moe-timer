@@ -1,0 +1,110 @@
+#include "mock_hal_nvs.h"
+
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+#define MAX_ENTRIES 64
+#define MAX_KEY_LEN 16
+#define MAX_VAL_SIZE 2048
+
+typedef struct {
+    char key[MAX_KEY_LEN];
+    uint8_t data[MAX_VAL_SIZE];
+    size_t len;
+    int used;
+} Entry;
+
+static Entry s_store[MAX_ENTRIES];
+
+void mock_nvs_reset(void) {
+    memset(s_store, 0, sizeof(s_store));
+}
+
+static Entry *find_entry(const char *key) {
+    for (int i = 0; i < MAX_ENTRIES; i++) {
+        if (s_store[i].used && strcmp(s_store[i].key, key) == 0) {
+            return &s_store[i];
+        }
+    }
+    return NULL;
+}
+
+static Entry *alloc_entry(const char *key) {
+    Entry *e = find_entry(key);
+    if (e)
+        return e;
+    for (int i = 0; i < MAX_ENTRIES; i++) {
+        if (!s_store[i].used) {
+            s_store[i].used = 1;
+            strncpy(s_store[i].key, key, MAX_KEY_LEN - 1);
+            s_store[i].key[MAX_KEY_LEN - 1] = '\0';
+            return &s_store[i];
+        }
+    }
+    return NULL; /* store full */
+}
+
+esp_err_t hal_nvs_read_u16(const char *key, uint16_t *out) {
+    const Entry *e = find_entry(key);
+    if (!e || e->len != sizeof(uint16_t))
+        return ESP_ERR_NVS_NOT_FOUND;
+    memcpy(out, e->data, sizeof(uint16_t));
+    return ESP_OK;
+}
+
+esp_err_t hal_nvs_write_u16(const char *key, uint16_t val) {
+    Entry *e = alloc_entry(key);
+    if (!e)
+        return ESP_FAIL;
+    memcpy(e->data, &val, sizeof(uint16_t));
+    e->len = sizeof(uint16_t);
+    return ESP_OK;
+}
+
+esp_err_t hal_nvs_read_str(const char *key, char *buf, size_t *len) {
+    const Entry *e = find_entry(key);
+    if (!e)
+        return ESP_ERR_NVS_NOT_FOUND;
+    size_t copy = (e->len < *len) ? e->len : *len - 1;
+    memcpy(buf, e->data, copy);
+    buf[copy] = '\0';
+    *len = copy;
+    return ESP_OK;
+}
+
+esp_err_t hal_nvs_write_str(const char *key, const char *val) {
+    Entry *e = alloc_entry(key);
+    if (!e)
+        return ESP_FAIL;
+    e->len = strlen(val);
+    if (e->len >= MAX_VAL_SIZE)
+        e->len = MAX_VAL_SIZE - 1;
+    memcpy(e->data, val, e->len);
+    e->data[e->len] = '\0';
+    return ESP_OK;
+}
+
+esp_err_t hal_nvs_read_blob(const char *key, void *buf, size_t *len) {
+    const Entry *e = find_entry(key);
+    if (!e)
+        return ESP_ERR_NVS_NOT_FOUND;
+    if (*len < e->len) {
+        *len = e->len;
+        return ESP_FAIL;
+    }
+    memcpy(buf, e->data, e->len);
+    *len = e->len;
+    return ESP_OK;
+}
+
+esp_err_t hal_nvs_write_blob(const char *key, const void *buf, size_t len) {
+    Entry *e = alloc_entry(key);
+    if (!e)
+        return ESP_FAIL;
+    if (len > MAX_VAL_SIZE)
+        return ESP_FAIL;
+    memcpy(e->data, buf, len);
+    e->len = len;
+    return ESP_OK;
+}
