@@ -1,7 +1,9 @@
 #include <unity.h>
 
-#include "../../src/nvs_config.c"
+/* Pull in mock implementations (single-TU compilation) */
 #include "mock_hal_nvs.c"
+/* Pull in source under test */
+#include "../../src/nvs_config.c"
 
 void setUp(void) {
     mock_nvs_reset();

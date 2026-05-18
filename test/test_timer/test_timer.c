@@ -1,7 +1,9 @@
 #include <unity.h>
 
-#include "../../src/timer.c"
+/* Pull in mock implementations (single-TU compilation) */
 #include "mock_hal_time.c"
+/* Pull in source under test */
+#include "../../src/timer.c"
 
 void setUp(void) {
     timer_reset();
