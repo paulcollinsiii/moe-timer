@@ -4,7 +4,6 @@
 #include "esp_log.h"
 #include "nvs.h"
 #include "nvs_flash.h"
-#endif
 
 #define NVS_NAMESPACE "timer_cfg"
 static const char *TAG = "hal_nvs";
@@ -82,3 +81,5 @@ esp_err_t hal_nvs_write_blob(const char *key, const void *buf, size_t len) {
     nvs_close(h);
     return ret;
 }
+
+#endif /* NATIVE */

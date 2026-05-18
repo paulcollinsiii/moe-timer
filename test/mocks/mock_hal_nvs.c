@@ -31,6 +31,8 @@ static Entry *find_entry(const char *key) {
 }
 
 static Entry *alloc_entry(const char *key) {
+    if (strlen(key) >= MAX_KEY_LEN)
+        return NULL; /* key too long — matches ESP-IDF behavior */
     Entry *e = find_entry(key);
     if (e)
         return e;
@@ -66,10 +68,14 @@ esp_err_t hal_nvs_read_str(const char *key, char *buf, size_t *len) {
     const Entry *e = find_entry(key);
     if (!e)
         return ESP_ERR_NVS_NOT_FOUND;
+    if (buf == NULL || *len == 0) {
+        *len = e->len + 1; /* report required size including NUL */
+        return ESP_OK;
+    }
     size_t copy = (e->len < *len) ? e->len : *len - 1;
     memcpy(buf, e->data, copy);
     buf[copy] = '\0';
-    *len = copy;
+    *len = copy + 1; /* match ESP-IDF: *len includes NUL byte */
     return ESP_OK;
 }
 
