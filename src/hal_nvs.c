@@ -1,5 +1,6 @@
 #include "hal_nvs.h"
 
+#ifndef NATIVE
 #include "esp_log.h"
 #include "nvs.h"
 #include "nvs_flash.h"
@@ -80,3 +81,5 @@ esp_err_t hal_nvs_write_blob(const char *key, const void *buf, size_t len) {
     nvs_close(h);
     return ret;
 }
+
+#endif /* NATIVE */
