@@ -37,12 +37,12 @@ esp_err_t hal_nvs_write_u16(const char *key, uint16_t val) {
     return ret;
 }
 
-esp_err_t hal_nvs_read_str(const char *key, char *buf, size_t len) {
+esp_err_t hal_nvs_read_str(const char *key, char *buf, size_t *len) {
     nvs_handle_t h;
     esp_err_t ret = open_nvs(&h);
     if (ret != ESP_OK)
         return ret;
-    ret = nvs_get_str(h, key, buf, &len);
+    ret = nvs_get_str(h, key, buf, len);
     nvs_close(h);
     return ret;
 }

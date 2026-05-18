@@ -2,6 +2,13 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <time.h>
+#ifndef NATIVE
+#include "esp_attr.h"
+#endif
+
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 typedef enum {
     TIMER_IDLE = 0,
@@ -9,10 +16,6 @@ typedef enum {
     TIMER_PAUSED,
     TIMER_EXPIRED,
 } timer_state_t;
-
-#ifndef NATIVE
-#include "esp_attr.h"
-#endif
 
 typedef struct {
     timer_state_t state;
@@ -36,3 +39,7 @@ bool timer_is_new_day(time_t now);
 void timer_record_date(time_t now);
 bool timer_needs_ntp_sync(time_t now);
 void timer_record_ntp_sync(time_t now);
+
+#ifdef __cplusplus
+}
+#endif

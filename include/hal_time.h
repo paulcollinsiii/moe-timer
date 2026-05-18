@@ -1,6 +1,14 @@
 #pragma once
 #include <time.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /* Returns current Unix timestamp. Wraps time(NULL) in production;
    injectable via mock_time_set() in native tests. */
 time_t hal_time_now(void);
+
+#ifdef __cplusplus
+}
+#endif

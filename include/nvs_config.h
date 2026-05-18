@@ -1,10 +1,11 @@
 #pragma once
 #include <stddef.h>
 #include <stdint.h>
-#ifndef NATIVE
-#include "esp_err.h"
-#else
-typedef int esp_err_t;
+
+#include "esp_compat.h"
+
+#ifdef __cplusplus
+extern "C" {
 #endif
 
 esp_err_t nvs_config_init_defaults(void);
@@ -26,3 +27,7 @@ esp_err_t nvs_config_set_holidays(const char *blob, size_t len);
 
 esp_err_t nvs_config_get_display_contrast(uint8_t *out);
 esp_err_t nvs_config_set_display_contrast(uint8_t val);
+
+#ifdef __cplusplus
+}
+#endif

@@ -9,7 +9,15 @@ typedef enum {
     BTN_NONE,
 } button_id_t;
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 void buttons_init(void);
 void buttons_configure_wakeup(void);
 button_id_t buttons_get_wakeup_button(void);
 bool buttons_is_pressed(button_id_t btn);
+
+#ifdef __cplusplus
+}
+#endif

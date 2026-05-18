@@ -10,6 +10,14 @@ typedef enum {
     DAY_HOLIDAY,
 } day_type_t;
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 day_type_t schedule_get_day_type(time_t now);
 uint32_t schedule_get_allocation_sec(day_type_t day_type);
 bool schedule_is_holiday(const char *date_str, const char *blob, size_t blob_len);
+
+#ifdef __cplusplus
+}
+#endif
