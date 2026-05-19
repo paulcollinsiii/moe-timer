@@ -114,7 +114,7 @@ static esp_err_t ws2812_encoder_create(uint32_t resolution_hz, rmt_encoder_handl
         return ret;
     }
 
-    uint32_t reset_ticks = resolution_hz / 1000000 * 50 / 2;
+    uint32_t reset_ticks = resolution_hz / 1000000 * 100 / 2; /* 100 µs LOW for broad WS2812B compatibility */
     enc->reset_code.level0 = 0;
     enc->reset_code.duration0 = reset_ticks;
     enc->reset_code.level1 = 0;
@@ -157,6 +157,8 @@ void neopixel_init(void) {
     ret = ws2812_encoder_create(RMT_RESOLUTION_HZ, &s_encoder);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "encoder create failed: %s", esp_err_to_name(ret));
+        rmt_del_channel(s_rmt_chan);
+        s_rmt_chan = NULL;
         return;
     }
     rmt_enable(s_rmt_chan);
@@ -180,12 +182,12 @@ static void set_all_red(uint8_t brightness) {
 }
 
 void neopixel_alert_start(void) {
-    if (!s_rmt_chan)
+    if (!s_rmt_chan || !s_encoder)
         return;
     s_stop_requested = false;
     gpio_set_level(NEOPIXEL_POWER_GPIO, 0); /* power gate ON */
     while (!s_stop_requested) {
-        for (int b = 0; b <= 32 && !s_stop_requested; b++) {
+        for (int b = 0; b < 32 && !s_stop_requested; b++) {
             set_all_red((uint8_t)(b * 8));
             flush_pixels();
             vTaskDelay(pdMS_TO_TICKS(30));

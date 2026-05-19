@@ -43,7 +43,7 @@ void buttons_configure_wakeup(void) {
 }
 
 button_id_t buttons_get_wakeup_button(void) {
-    if (esp_sleep_get_wakeup_cause() != ESP_SLEEP_WAKEUP_GPIO) {
+    if (!(esp_sleep_get_wakeup_causes() & BIT(ESP_SLEEP_WAKEUP_GPIO))) {
         return BTN_NONE;
     }
 

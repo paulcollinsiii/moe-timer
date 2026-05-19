@@ -9,7 +9,7 @@
 static const char *TAG = "audio";
 
 #define AMP_ENABLE_GPIO GPIO_NUM_16
-#define BEEP_GPIO GPIO_NUM_17
+#define BEEP_GPIO GPIO_NUM_17 /* TODO: verify against MagTag schematic */
 #define BEEP_FREQ_HZ 1000
 #define LEDC_CHANNEL LEDC_CHANNEL_0
 #define LEDC_TIMER LEDC_TIMER_0
@@ -26,7 +26,10 @@ void audio_init(void) {
         .pull_down_en = GPIO_PULLDOWN_DISABLE,
         .intr_type = GPIO_INTR_DISABLE,
     };
-    gpio_config(&amp_cfg);
+    esp_err_t ret = gpio_config(&amp_cfg);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "gpio_config(amp) failed: %s", esp_err_to_name(ret));
+    }
     gpio_set_level(AMP_ENABLE_GPIO, 0);
 
     ledc_timer_config_t timer_cfg = {
@@ -36,7 +39,7 @@ void audio_init(void) {
         .freq_hz = BEEP_FREQ_HZ,
         .clk_cfg = LEDC_AUTO_CLK,
     };
-    esp_err_t ret = ledc_timer_config(&timer_cfg);
+    ret = ledc_timer_config(&timer_cfg);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "ledc_timer_config failed: %s", esp_err_to_name(ret));
         return;
@@ -80,8 +83,8 @@ void audio_beep_sequence(void) {
                 vTaskDelay(pdMS_TO_TICKS(100));
             }
         }
-        if (!s_stop_requested && cycle < 4) {
-            /* Remaining inter-cycle gap: 3 s total minus 3*(200+100) ms = 2100 ms */
+        if (!s_stop_requested) {
+            /* Remaining inter-cycle gap: 3 s cycle total minus 3*(200+100) ms = 2100 ms */
             vTaskDelay(pdMS_TO_TICKS(2100));
         }
     }
