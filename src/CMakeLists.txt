@@ -21,6 +21,7 @@ idf_component_register(
         esp_event
         esp_timer
         driver
+        esp_driver_rmt
         log
         esp-tls
         lwip

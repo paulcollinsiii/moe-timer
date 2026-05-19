@@ -35,7 +35,7 @@ day_type_t schedule_get_day_type(time_t now) {
     struct tm tm_local;
     localtime_r(&now, &tm_local);
 
-    char date_str[11];
+    char date_str[40];
     snprintf(date_str, sizeof(date_str), "%04d-%02d-%02d", tm_local.tm_year + 1900, tm_local.tm_mon + 1,
              tm_local.tm_mday);
 

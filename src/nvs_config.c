@@ -3,6 +3,7 @@
 #include <string.h>
 
 #include "hal_nvs.h"
+#include "nvs.h"
 #include "nvs_defaults.h"
 
 /* ---- u16 helpers ---- */

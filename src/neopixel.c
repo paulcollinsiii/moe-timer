@@ -1,15 +1,209 @@
 #include "neopixel.h"
 
+#include <string.h>
+
 #include "driver/gpio.h"
+#include "driver/rmt_encoder.h"
+#include "driver/rmt_tx.h"
+#include "esp_log.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 
-#define NEOPIXEL_POWER_GPIO 21
+static const char *TAG = "neopixel";
 
-void neopixel_init(void) {
-    gpio_set_direction(NEOPIXEL_POWER_GPIO, GPIO_MODE_OUTPUT);
-    gpio_set_level(NEOPIXEL_POWER_GPIO, 1); /* HIGH = power gate OFF */
+#define NEOPIXEL_DATA_GPIO GPIO_NUM_1
+#define NEOPIXEL_POWER_GPIO GPIO_NUM_21
+#define NEOPIXEL_COUNT 4
+#define RMT_RESOLUTION_HZ 10000000
+
+/* ---------- Embedded WS2812B RMT encoder ---------- */
+
+typedef struct {
+    rmt_encoder_t base;
+    rmt_encoder_t *bytes_encoder;
+    rmt_encoder_t *copy_encoder;
+    int state;
+    rmt_symbol_word_t reset_code;
+} ws2812_encoder_t;
+
+RMT_ENCODER_FUNC_ATTR
+static size_t ws2812_encode(rmt_encoder_t *encoder, rmt_channel_handle_t channel, const void *data, size_t data_size,
+                            rmt_encode_state_t *ret_state) {
+    ws2812_encoder_t *enc = __containerof(encoder, ws2812_encoder_t, base);
+    rmt_encode_state_t session = RMT_ENCODING_RESET;
+    rmt_encode_state_t state = RMT_ENCODING_RESET;
+    size_t encoded = 0;
+    switch (enc->state) {
+        case 0:
+            encoded += enc->bytes_encoder->encode(enc->bytes_encoder, channel, data, data_size, &session);
+            if (session & RMT_ENCODING_COMPLETE)
+                enc->state = 1;
+            if (session & RMT_ENCODING_MEM_FULL) {
+                state |= RMT_ENCODING_MEM_FULL;
+                goto out;
+            }
+            /* fall-through */
+        case 1:
+            encoded += enc->copy_encoder->encode(enc->copy_encoder, channel, &enc->reset_code, sizeof(enc->reset_code),
+                                                 &session);
+            if (session & RMT_ENCODING_COMPLETE) {
+                enc->state = RMT_ENCODING_RESET;
+                state |= RMT_ENCODING_COMPLETE;
+            }
+            if (session & RMT_ENCODING_MEM_FULL)
+                state |= RMT_ENCODING_MEM_FULL;
+    }
+out:
+    *ret_state = state;
+    return encoded;
 }
 
-void neopixel_alert_start(void) {}
+static esp_err_t ws2812_del(rmt_encoder_t *encoder) {
+    ws2812_encoder_t *enc = __containerof(encoder, ws2812_encoder_t, base);
+    rmt_del_encoder(enc->bytes_encoder);
+    rmt_del_encoder(enc->copy_encoder);
+    free(enc);
+    return ESP_OK;
+}
+
+RMT_ENCODER_FUNC_ATTR
+static esp_err_t ws2812_reset(rmt_encoder_t *encoder) {
+    ws2812_encoder_t *enc = __containerof(encoder, ws2812_encoder_t, base);
+    rmt_encoder_reset(enc->bytes_encoder);
+    rmt_encoder_reset(enc->copy_encoder);
+    enc->state = RMT_ENCODING_RESET;
+    return ESP_OK;
+}
+
+static esp_err_t ws2812_encoder_create(uint32_t resolution_hz, rmt_encoder_handle_t *ret_encoder) {
+    ws2812_encoder_t *enc = rmt_alloc_encoder_mem(sizeof(ws2812_encoder_t));
+    if (!enc) {
+        ESP_LOGE(TAG, "no mem for encoder");
+        return ESP_ERR_NO_MEM;
+    }
+    enc->bytes_encoder = NULL;
+    enc->copy_encoder = NULL;
+    enc->base.encode = ws2812_encode;
+    enc->base.del = ws2812_del;
+    enc->base.reset = ws2812_reset;
+
+    rmt_bytes_encoder_config_t bytes_cfg = {
+        .bit0 = {.level0 = 1,
+                 .duration0 = (uint16_t)(0.3 * resolution_hz / 1000000),
+                 .level1 = 0,
+                 .duration1 = (uint16_t)(0.9 * resolution_hz / 1000000)},
+        .bit1 = {.level0 = 1,
+                 .duration0 = (uint16_t)(0.9 * resolution_hz / 1000000),
+                 .level1 = 0,
+                 .duration1 = (uint16_t)(0.3 * resolution_hz / 1000000)},
+        .flags.msb_first = 1,
+    };
+    esp_err_t ret = rmt_new_bytes_encoder(&bytes_cfg, &enc->bytes_encoder);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "bytes encoder failed: %s", esp_err_to_name(ret));
+        free(enc);
+        return ret;
+    }
+
+    rmt_copy_encoder_config_t copy_cfg = {};
+    ret = rmt_new_copy_encoder(&copy_cfg, &enc->copy_encoder);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "copy encoder failed: %s", esp_err_to_name(ret));
+        rmt_del_encoder(enc->bytes_encoder);
+        free(enc);
+        return ret;
+    }
+
+    uint32_t reset_ticks = resolution_hz / 1000000 * 100 / 2; /* 100 µs LOW for broad WS2812B compatibility */
+    enc->reset_code.level0 = 0;
+    enc->reset_code.duration0 = reset_ticks;
+    enc->reset_code.level1 = 0;
+    enc->reset_code.duration1 = reset_ticks;
+    *ret_encoder = &enc->base;
+    return ESP_OK;
+}
+
+/* ---------- NeoPixel driver ---------- */
+
+static rmt_channel_handle_t s_rmt_chan = NULL;
+static rmt_encoder_handle_t s_encoder = NULL;
+static volatile bool s_stop_requested = false;
+static uint8_t s_pixels[NEOPIXEL_COUNT * 3]; /* GRB byte order: [G, R, B] per LED */
+
+void neopixel_init(void) {
+    /* Power gate OFF (HIGH) first — hard invariant on every boot/wake */
+    gpio_config_t pwr_cfg = {
+        .pin_bit_mask = (1ULL << NEOPIXEL_POWER_GPIO),
+        .mode = GPIO_MODE_OUTPUT,
+        .pull_up_en = GPIO_PULLUP_DISABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE,
+    };
+    gpio_config(&pwr_cfg);
+    gpio_set_level(NEOPIXEL_POWER_GPIO, 1);
+
+    rmt_tx_channel_config_t tx_cfg = {
+        .clk_src = RMT_CLK_SRC_DEFAULT,
+        .gpio_num = NEOPIXEL_DATA_GPIO,
+        .mem_block_symbols = 64,
+        .resolution_hz = RMT_RESOLUTION_HZ,
+        .trans_queue_depth = 4,
+    };
+    esp_err_t ret = rmt_new_tx_channel(&tx_cfg, &s_rmt_chan);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "rmt_new_tx_channel failed: %s", esp_err_to_name(ret));
+        return;
+    }
+    ret = ws2812_encoder_create(RMT_RESOLUTION_HZ, &s_encoder);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "encoder create failed: %s", esp_err_to_name(ret));
+        rmt_del_channel(s_rmt_chan);
+        s_rmt_chan = NULL;
+        return;
+    }
+    rmt_enable(s_rmt_chan);
+    memset(s_pixels, 0, sizeof(s_pixels));
+}
+
+static void flush_pixels(void) {
+    if (!s_rmt_chan || !s_encoder)
+        return;
+    rmt_transmit_config_t tx_cfg = {.loop_count = 0};
+    rmt_transmit(s_rmt_chan, s_encoder, s_pixels, sizeof(s_pixels), &tx_cfg);
+    rmt_tx_wait_all_done(s_rmt_chan, portMAX_DELAY);
+}
+
+static void set_all_red(uint8_t brightness) {
+    for (int i = 0; i < NEOPIXEL_COUNT; i++) {
+        s_pixels[i * 3 + 0] = 0;
+        s_pixels[i * 3 + 1] = brightness;
+        s_pixels[i * 3 + 2] = 0;
+    }
+}
+
+void neopixel_alert_start(void) {
+    if (!s_rmt_chan || !s_encoder)
+        return;
+    s_stop_requested = false;
+    gpio_set_level(NEOPIXEL_POWER_GPIO, 0); /* power gate ON */
+    while (!s_stop_requested) {
+        for (int b = 0; b < 32 && !s_stop_requested; b++) {
+            set_all_red((uint8_t)(b * 8));
+            flush_pixels();
+            vTaskDelay(pdMS_TO_TICKS(30));
+        }
+        for (int b = 32; b >= 0 && !s_stop_requested; b--) {
+            set_all_red((uint8_t)(b * 8));
+            flush_pixels();
+            vTaskDelay(pdMS_TO_TICKS(30));
+        }
+    }
+    neopixel_stop();
+}
+
 void neopixel_stop(void) {
-    gpio_set_level(NEOPIXEL_POWER_GPIO, 1); /* safe even if already off */
+    s_stop_requested = true;
+    memset(s_pixels, 0, sizeof(s_pixels));
+    flush_pixels();
+    gpio_set_level(NEOPIXEL_POWER_GPIO, 1); /* power gate OFF */
 }
