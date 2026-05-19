@@ -29,8 +29,11 @@ void timer_start(time_t now, int32_t allocation_sec) {
 }
 
 int32_t timer_tick(time_t now) {
+    if (g_rtc_state.state == TIMER_PAUSED) {
+        return g_rtc_state.remaining_at_pause;
+    }
     if (g_rtc_state.state != TIMER_RUNNING) {
-        return (int32_t)(g_rtc_state.expiry_wall_time - (int64_t)now);
+        return 0; /* IDLE or EXPIRED */
     }
     int64_t remaining = g_rtc_state.expiry_wall_time - (int64_t)now;
     if (remaining <= 0) {
@@ -43,7 +46,7 @@ int32_t timer_tick(time_t now) {
 
 void timer_pause(time_t now) {
     if (g_rtc_state.state != TIMER_RUNNING)
-        return;
+        return; /* no-op; caller checks state */
     int64_t remaining = g_rtc_state.expiry_wall_time - (int64_t)now;
     g_rtc_state.remaining_at_pause = (remaining > 0) ? (int32_t)remaining : 0;
     g_rtc_state.expiry_wall_time = 0;
@@ -52,7 +55,7 @@ void timer_pause(time_t now) {
 
 void timer_resume(time_t now) {
     if (g_rtc_state.state != TIMER_PAUSED)
-        return;
+        return; /* no-op; caller checks state */
     g_rtc_state.expiry_wall_time = (int64_t)now + g_rtc_state.remaining_at_pause;
     g_rtc_state.state = TIMER_RUNNING;
 }
@@ -81,5 +84,5 @@ bool timer_needs_ntp_sync(time_t now) {
 }
 
 void timer_record_ntp_sync(time_t now) {
-    g_rtc_state.next_ntp_sync = (int64_t)now + 600; /* 10 minutes */
+    g_rtc_state.next_ntp_sync = (int64_t)now + NTP_SYNC_INTERVAL_SEC;
 }

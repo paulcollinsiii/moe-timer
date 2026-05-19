@@ -162,7 +162,19 @@ void test_needs_ntp_sync_false_immediately_after_sync(void) {
 
 void test_needs_ntp_sync_true_after_10_minutes(void) {
     timer_record_ntp_sync(T0);
-    TEST_ASSERT_TRUE(timer_needs_ntp_sync(T0 + 601));
+    TEST_ASSERT_TRUE(timer_needs_ntp_sync(T0 + NTP_SYNC_INTERVAL_SEC + 1));
+}
+
+void test_tick_while_paused_returns_remaining_at_pause(void) {
+    timer_start(T0, 3600);
+    timer_pause(T0 + 1000);                 /* remaining_at_pause = 2600 */
+    int32_t result = timer_tick(T0 + 9999); /* arbitrary time, shouldn't matter */
+    TEST_ASSERT_EQUAL_INT32(2600, result);
+}
+
+void test_is_new_day_true_on_cold_boot(void) {
+    /* After timer_reset(), last_date is zeroed — cold boot should force re-init */
+    TEST_ASSERT_TRUE(timer_is_new_day(T0));
 }
 
 int main(void) {
@@ -179,6 +191,7 @@ int main(void) {
     RUN_TEST(test_tick_transitions_to_expired_when_time_elapsed);
     RUN_TEST(test_tick_returns_non_positive_when_expired);
     RUN_TEST(test_tick_at_exact_expiry_transitions);
+    RUN_TEST(test_tick_while_paused_returns_remaining_at_pause);
     RUN_TEST(test_pause_sets_state_paused);
     RUN_TEST(test_pause_saves_remaining_at_pause);
     RUN_TEST(test_pause_clears_expiry_wall_time);
@@ -188,6 +201,7 @@ int main(void) {
     RUN_TEST(test_full_cycle_idle_run_pause_resume_expire);
     RUN_TEST(test_is_new_day_false_when_same_date);
     RUN_TEST(test_is_new_day_true_after_midnight);
+    RUN_TEST(test_is_new_day_true_on_cold_boot);
     RUN_TEST(test_needs_ntp_sync_false_immediately_after_sync);
     RUN_TEST(test_needs_ntp_sync_true_after_10_minutes);
     return UNITY_END();
