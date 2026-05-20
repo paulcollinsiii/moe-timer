@@ -1,6 +1,5 @@
 #include "timer.h"
 
-#include <stdio.h>
 #include <string.h>
 #include <time.h>
 
@@ -60,21 +59,34 @@ void timer_resume(time_t now) {
     g_rtc_state.state = TIMER_RUNNING;
 }
 
+static void fill_date(char *buf, int year, int mon, int day) {
+    buf[0] = '0' + (year / 1000) % 10;
+    buf[1] = '0' + (year / 100) % 10;
+    buf[2] = '0' + (year / 10) % 10;
+    buf[3] = '0' + year % 10;
+    buf[4] = '-';
+    buf[5] = '0' + mon / 10;
+    buf[6] = '0' + mon % 10;
+    buf[7] = '-';
+    buf[8] = '0' + day / 10;
+    buf[9] = '0' + day % 10;
+    buf[10] = '\0';
+}
+
 bool timer_is_new_day(time_t now) {
     if (g_rtc_state.last_date[0] == '\0')
         return true;
     struct tm tm_now;
     localtime_r(&now, &tm_now);
     char today[11];
-    snprintf(today, sizeof(today), "%04d-%02d-%02d", tm_now.tm_year + 1900, tm_now.tm_mon + 1, tm_now.tm_mday);
+    fill_date(today, tm_now.tm_year + 1900, tm_now.tm_mon + 1, tm_now.tm_mday);
     return (strcmp(today, g_rtc_state.last_date) != 0);
 }
 
 void timer_record_date(time_t now) {
     struct tm tm_now;
     localtime_r(&now, &tm_now);
-    snprintf(g_rtc_state.last_date, sizeof(g_rtc_state.last_date), "%04d-%02d-%02d", tm_now.tm_year + 1900,
-             tm_now.tm_mon + 1, tm_now.tm_mday);
+    fill_date(g_rtc_state.last_date, tm_now.tm_year + 1900, tm_now.tm_mon + 1, tm_now.tm_mday);
 }
 
 bool timer_needs_ntp_sync(time_t now) {
