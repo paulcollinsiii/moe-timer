@@ -6,6 +6,8 @@
 #include "esp_attr.h"
 #endif
 
+#define NTP_SYNC_INTERVAL_SEC 600 /* 10-minute recheck window */
+
 #ifdef __cplusplus
 extern "C" {
 #endif
