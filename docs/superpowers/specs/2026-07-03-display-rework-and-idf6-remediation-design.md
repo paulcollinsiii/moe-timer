@@ -18,7 +18,7 @@ Additionally, `build/` artifacts are tracked in git.
 
 | Decision | Choice |
 |---|---|
-| Toolchain | Pure ESP-IDF 6.x with `idf.py`; PlatformIO retained only for native unit tests |
+| Toolchain | Pure ESP-IDF 6.x with `idf.py`; PlatformIO removed entirely (native tests move to host CMake + ctest) |
 | Panel driver | Custom `components/ssd1680` (own code; reference Adafruit_EPD, GxEPD2, CircuitPython SSD1680, aivoprykk) |
 | Graphics/text | LVGL 9 managed component, I1 (1-bit) render format |
 | Button C | Unbound in v1 (e-ink has no contrast; feature dropped) |
@@ -40,13 +40,14 @@ Public API (`ssd1680.h`):
 - `ssd1680_init(const ssd1680_config_t *cfg)` — SPI bus + panel init. Config carries pins (SCK 36, MOSI 35, CS 8, DC 7, RST 6, BUSY 5), resolution 296×128.
 - `ssd1680_write_framebuffer(const uint8_t *buf)` — write 1-bit buffer to controller RAM.
 - `ssd1680_refresh(ssd1680_refresh_mode_t mode)` — `SSD1680_REFRESH_FULL` (cmd 0x22 = 0xF7) or `SSD1680_REFRESH_PARTIAL` (partial LUT).
-- `ssd1680_sleep(void)` — deep-sleep mode cmd (0x10).
-- All BUSY-pin waits have a timeout (order of 5 s); on timeout: log error, return `ESP_ERR_TIMEOUT`, never hang. Caller proceeds to deep sleep regardless — a wall-mounted device must not wedge.
+- `ssd1680_sleep(void)` — panel deep-sleep mode 1 (cmd 0x10 = 0x01, RAM-retaining).
+- All BUSY-pin waits have a timeout (order of 5 s); on timeout: log error, return `ESP_ERR_TIMEOUT`, never block forever. Rationale: if the BUSY line never clears (damaged panel, loose flex cable, SPI miswire), the wake handler must still finish and re-enter deep sleep so the timer keeps timing — the alternative is a frozen device that drains the battery until someone power-cycles it.
 
 Behavioural rules:
 
 - Panel gets a hardware reset on every wake (mandatory after panel deep sleep).
-- Panel is put to sleep (0x10) after **every** refresh — power draw and panel longevity.
+- Panel is put to sleep after **every** refresh — power draw and panel longevity. Driver uses SSD1680 deep-sleep **mode 1** (0x10 = 0x01, RAM-retaining) so the controller keeps the previous frame for partial-refresh waveforms; the MagTag's panel rail is always powered.
+- **Panel-protection is enforced in the driver, independent of caller policy:** (1) refreshes are serialized on BUSY completion — a new refresh cannot start while one is in progress; (2) a minimum interval between refresh commands (default 1 s, configurable) is enforced against a last-refresh timestamp kept in RTC memory, so the floor holds across deep-sleep wakes and protects the panel from a runaway wake loop. The floor is small enough that rapid legitimate button presses stay responsive (BUSY serialization already spaces refreshes by the 0.4–3 s the panel physically takes).
 - Init, LUT, and partial-refresh sequences derived from Adafruit_EPD / GxEPD2 / CircuitPython drivers that run this exact MagTag panel.
 
 ### LVGL integration (in src/display.c)
@@ -54,9 +55,10 @@ Behavioural rules:
 - `lvgl/lvgl ^9.x` via `src/idf_component.yml` (managed component).
 - One `lv_display` with `LV_COLOR_FORMAT_I1`, full-frame draw buffer (296×128÷8 + palette ≈ 4.8 KB, plain SRAM).
 - Flush callback repacks the I1 buffer into SSD1680 RAM layout (portrait byte order) and calls the driver.
-- **Refresh-mode policy stays in display.c, not LVGL and not the driver:** partial refresh on 55 s ticks; full refresh on state transitions and every 5th partial (anti-ghosting), matching ProductOverview §7.
+- **Refresh-mode policy lives in display.c** (partial refresh on 55 s ticks; full refresh on state transitions and every 5th partial, matching ProductOverview §7) — it is UX. **Panel protection lives in the driver** (see behavioural rules above) — policy bugs cannot damage the panel.
 - Fonts: built-in Montserrat via Kconfig (`LV_FONT_MONTSERRAT_12/16/28/48` — final sizes chosen during implementation to fit the spec'd layout rows).
 - Per-wake sequence: boot → `lv_init` → build widget tree from `display_state_t` → render once (`lv_refr_now`) → flush → `ssd1680_refresh` → `ssd1680_sleep` → deep sleep. LVGL state is rebuilt from scratch each wake; nothing LVGL survives deep sleep.
+- **Partial refresh works despite the per-wake rebuild.** Two unrelated meanings of "partial": the MCU always re-renders the *full frame* into its own buffer (4.8 KB, trivial); "partial refresh" refers to the *panel waveform*, which diffs the new frame against the previous frame held in the **controller's own RAM** — preserved across wakes by RAM-retaining deep-sleep mode 1. Fallback if hardware bring-up shows RAM retention is unreliable: write both RAM planes (0x24/0x26) every wake; costs transient ghosting that the every-5th full refresh already cleans up.
 
 ### src/display.c (replaces display.cpp)
 
@@ -80,8 +82,8 @@ Behavioural rules:
 ## Build system & repo hygiene
 
 - ESP-IDF 6.0.1 installed in the devcontainer (persistent volume, mirroring the existing `pio-packages` pattern); `.devcontainer` and `docs/developer_setup.md` updated. Firmware builds are `idf.py build|flash|monitor`.
-- `platformio.ini`: `[env:magtag]` and the LovyanGFX dependency deleted; `[env:native]` kept solely as the Unity test runner (`pio test -e native`, no Espressif toolchain required).
-- `build/` removed from git tracking; `.gitignore` added covering `build/` and `managed_components/`.
+- **PlatformIO removed entirely** (`platformio.ini` deleted, PIO dropped from the devcontainer). It was only acting as the native test runner; see Testing below for the replacement. Project dependencies become just gcc + cmake (already in the container) + ESP-IDF.
+- `build/` removed from git tracking; `.gitignore` added covering `build/`, `managed_components/`, and the host-test build dir.
 
 ## Error handling
 
@@ -91,7 +93,7 @@ Behavioural rules:
 
 ## Testing & validation
 
-1. **Native (TDD):** existing suites (`test_timer`, `test_schedule`, `test_nvs_config`, `test_display`) keep passing via `pio test -e native`. New or changed pure logic gets tests first (per CLAUDE.md).
+1. **Native (TDD):** existing suites (`test_timer`, `test_schedule`, `test_nvs_config`, `test_display`) migrate from `pio test -e native` to a small host-side CMake project (`test/CMakeLists.txt`) with **vendored Unity** (three MIT-licensed files) — one executable per suite, run via `ctest`. The test sources and mocks are already plain C and carry over unchanged; only the runner changes. New or changed pure logic gets tests first (per CLAUDE.md).
 2. **Compile gate:** `idf.py build` completes clean. This is the acceptance bar for all driver/LVGL work before hardware is available.
 3. **Hardware smoke test (deferred to a scheduled session):** `docs/hardware_smoke_test.md` — ordered checklist: flash; first-boot IDLE screen; Button A start (NTP-gated); 55 s partial refresh cadence; full refresh on 5th wake (no ghosting); pause/resume; forced expiry alert (beeps + red pulse, button dismissal); Button D forced sync; day-rollover reallocation; wake-from-deep-sleep via every button.
 
@@ -103,7 +105,7 @@ Behavioural rules:
 | Button C cycles contrast (3 levels) | Button C unbound in v1 | E-ink has no contrast/brightness |
 | `contrast_level` in display state / NVS | Removed | Same |
 | `esp_sleep_enable_gpio_wakeup()` | EXT1 `ANY_LOW` wakeup on GPIOs 11/12/14/15 | GPIO wakeup is light-sleep-only on ESP32-S2 |
-| PlatformIO recommended; IDF 5.x alternative | ESP-IDF 6.0.1 + `idf.py`; PlatformIO for native tests only | Codebase already migrated to 6.0.1; PIO espidf integration unmaintained |
+| PlatformIO recommended; IDF 5.x alternative | ESP-IDF 6.0.1 + `idf.py`; PlatformIO removed, host tests via CMake/ctest + vendored Unity | Codebase already migrated to 6.0.1; PIO espidf integration unmaintained; one less dependency |
 | (silent on panel power) | Panel deep-sleep cmd after every refresh; hw reset each wake | Power + panel health |
 | NTP every 10 min while RUNNING | Unchanged | Device predominantly USB-powered |
 
