@@ -3,7 +3,9 @@
 #include <string.h>
 
 #include "hal_nvs.h"
+#ifndef NATIVE
 #include "nvs.h"
+#endif
 #include "nvs_defaults.h"
 
 /* ---- u16 helpers ---- */
