@@ -81,7 +81,7 @@ Behavioural rules:
 
 ## Build system & repo hygiene
 
-- ESP-IDF 6.0.1 installed in the devcontainer (persistent volume, mirroring the existing `pio-packages` pattern); `.devcontainer` and `docs/developer_setup.md` updated. Firmware builds are `idf.py build|flash|monitor`.
+- ESP-IDF 6.0.1 **baked into the devcontainer image** (Dockerfile `RUN` layer clones IDF and installs the ESP32-S2 toolchain), so container rebuilds start with a working environment; `.devcontainer` and `docs/developer_setup.md` updated. Firmware builds are `idf.py build|flash|monitor`. (User-requested change from the earlier volume-based approach, 2026-07-03.)
 - **PlatformIO removed entirely** (`platformio.ini` deleted, PIO dropped from the devcontainer). It was only acting as the native test runner; see Testing below for the replacement. Project dependencies become just gcc + cmake (already in the container) + ESP-IDF.
 - `build/` removed from git tracking; `.gitignore` added covering `build/`, `managed_components/`, and the host-test build dir.
 

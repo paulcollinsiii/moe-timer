@@ -21,8 +21,7 @@
 | Create | `.gitignore` | untrack build artifacts |
 | Create | `test/unity/{unity.c,unity.h,unity_internals.h}` | vendored Unity v2.6.0 (MIT) |
 | Create | `test/CMakeLists.txt` | host test runner (ctest) |
-| Create | `scripts/install-esp-idf.sh` | one-shot IDF 6.0.1 install |
-| Modify | `.devcontainer/Dockerfile`, `.devcontainer/devcontainer.json` | IDF prereqs, drop PIO |
+| Modify | `.devcontainer/Dockerfile`, `.devcontainer/devcontainer.json` | bake ESP-IDF 6.0.1 into image, drop PIO |
 | Modify | `CMakeLists.txt` (root) | project name, standard IDF layout |
 | Create | `components/ssd1680/{CMakeLists.txt,include/ssd1680.h,ssd1680.c,ssd1680_guard.c}` | panel driver + refresh guard |
 | Create | `test/test_ssd1680/test_ssd1680.c` | guard-logic host tests |
@@ -227,36 +226,13 @@ git commit -m "refactor(nvs): remove display-contrast config (e-ink has no contr
 ### Task 5: ESP-IDF 6.0.1 toolchain + project layout + baseline build
 
 **Files:**
-- Create: `scripts/install-esp-idf.sh`
 - Modify: `.devcontainer/Dockerfile`, `.devcontainer/devcontainer.json`, `CMakeLists.txt` (root)
 - Rename: `src/` → `main/`
 - Delete: `src/display.cpp`; Create: `main/display.c` (temporary stub)
 
-- [ ] **Step 1: Create `scripts/install-esp-idf.sh`**
+- [ ] **Step 1: Update `.devcontainer/Dockerfile` — bake ESP-IDF into the image**
 
-```bash
-#!/usr/bin/env bash
-# Installs ESP-IDF v6.0.1 into $HOME/esp/esp-idf (idempotent).
-set -euo pipefail
-IDF_VERSION="v6.0.1"
-IDF_DIR="$HOME/esp/esp-idf"
-
-if [ ! -f "$IDF_DIR/export.sh" ]; then
-    mkdir -p "$HOME/esp"
-    git clone --branch "$IDF_VERSION" --depth 1 --recursive --shallow-submodules \
-        https://github.com/espressif/esp-idf.git "$IDF_DIR"
-fi
-"$IDF_DIR/install.sh" esp32s2
-echo "ESP-IDF $IDF_VERSION ready. Activate with: source $IDF_DIR/export.sh"
-```
-
-```bash
-chmod +x scripts/install-esp-idf.sh
-```
-
-- [ ] **Step 2: Update `.devcontainer/Dockerfile`**
-
-Replace the PlatformIO install (`USER vscode` / `RUN pip3 install --user platformio` lines and the `mkdir -p /workspaces/.pio ...` clause) with IDF prerequisites. The apt line becomes:
+Replace the PlatformIO install (`USER vscode` / `RUN pip3 install --user platformio` lines and the `mkdir -p /workspaces/.pio ...` clause) with IDF prerequisites and a baked-in IDF install, so devcontainer rebuilds start with a working environment (Docker layer cache makes rebuilds cheap). The apt line becomes:
 
 ```dockerfile
 RUN apt-get update && apt-get install -y \
@@ -274,24 +250,29 @@ RUN apt-get update && apt-get install -y \
 Keep the nvm/node section and the dialout/plugdev/claude lines; end the file with:
 
 ```dockerfile
+# Bake ESP-IDF v6.0.1 + ESP32-S2 toolchain into the image so container
+# rebuilds start with a working environment. (~3 GB layer, cached.)
 USER vscode
-RUN mkdir -p /home/vscode/esp
+RUN mkdir -p /home/vscode/esp \
+    && git clone --branch v6.0.1 --depth 1 --recursive --shallow-submodules \
+       https://github.com/espressif/esp-idf.git /home/vscode/esp/esp-idf \
+    && /home/vscode/esp/esp-idf/install.sh esp32s2 \
+    && rm -rf /home/vscode/.espressif/dist
 ```
 
-- [ ] **Step 3: Update `.devcontainer/devcontainer.json`**
+- [ ] **Step 2: Update `.devcontainer/devcontainer.json`**
 
-- In `mounts`: replace the `platformio-packages` entry with:
-  - `"source=esp-idf,target=/home/vscode/esp,type=volume"`
-  - `"source=esp-idf-tools,target=/home/vscode/.espressif,type=volume"`
+- In `mounts`: **delete** the `platformio-packages` entry. Do NOT add volumes at `/home/vscode/esp` or `/home/vscode/.espressif` — an empty named volume mounted there would shadow the baked-in install.
 - In `containerEnv`: remove `PLATFORMIO_CORE_DIR`.
 - In extensions: remove `platformio.platformio-ide`.
-- Add: `"postCreateCommand": "sudo chown -R vscode:vscode /home/vscode/esp /home/vscode/.espressif && bash scripts/install-esp-idf.sh"`
 
-- [ ] **Step 4: Install ESP-IDF now (current container has no volume mounts yet — installs to home dir, same path)**
+- [ ] **Step 3: Install ESP-IDF in the *running* container now (same commands the Dockerfile bakes in; the image rebuild only benefits future containers)**
 
 ```bash
 mkdir -p ~/esp ~/.espressif
-bash scripts/install-esp-idf.sh
+git clone --branch v6.0.1 --depth 1 --recursive --shallow-submodules \
+    https://github.com/espressif/esp-idf.git ~/esp/esp-idf
+~/esp/esp-idf/install.sh esp32s2
 ```
 Expected: ~10 min (2 GB clone + toolchain). Run in background if desired; do not proceed until it finishes. Verify:
 
@@ -1548,11 +1529,11 @@ git commit -m "feat(main): wire wake dispatch, day rollover, NTP gating, and exp
 
 Keep the devcontainer/USB sections' structure but replace all PlatformIO content:
 - Prerequisites: unchanged except remove PlatformIO extension mention.
-- Getting started: first-run executes `scripts/install-esp-idf.sh` via `postCreateCommand` (~10 min, cached in the `esp-idf`/`esp-idf-tools` volumes).
+- Getting started: ESP-IDF v6.0.1 + the ESP32-S2 toolchain are baked into the devcontainer image (Dockerfile `RUN` layer) — the first image build downloads ~2 GB once; container rebuilds reuse the cached layer and start ready.
 - Building: `source ~/esp/esp-idf/export.sh` then `idf.py build` / `idf.py -p /dev/ttyACM0 flash monitor`.
 - Tests: `cmake -S test -B test/build && cmake --build test/build && ctest --test-dir test/build --output-on-failure`.
 - Project layout table: `main/` (was `src/`), `components/ssd1680/`, `test/` (ctest + vendored Unity), remove `platformio.ini` and `lib/` rows, remove the `project/` path prefix (it is wrong — the repo root is the project).
-- Toolchain cache section: replace `pio-packages` with the two ESP-IDF volumes.
+- Toolchain cache section: replace the `pio-packages` volume text with a note that the toolchain lives in the image layer; `docker builder prune` reclaims it if the image is rebuilt from scratch.
 
 - [ ] **Step 2: Create `docs/hardware_smoke_test.md`**
 
