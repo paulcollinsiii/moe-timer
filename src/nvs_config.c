@@ -95,19 +95,6 @@ esp_err_t nvs_config_set_holidays(const char *blob, size_t len) {
     return hal_nvs_write_blob("holidays", blob, len);
 }
 
-/* ---- display contrast accessor ---- */
-
-esp_err_t nvs_config_get_display_contrast(uint8_t *out) {
-    uint16_t tmp;
-    esp_err_t ret = get_u16_with_default("disp_contrast", &tmp, NVS_DEFAULT_CONTRAST);
-    *out = (uint8_t)tmp;
-    return ret;
-}
-
-esp_err_t nvs_config_set_display_contrast(uint8_t val) {
-    return hal_nvs_write_u16("disp_contrast", (uint16_t)val);
-}
-
 /* ---- init defaults ---- */
 
 esp_err_t nvs_config_init_defaults(void) {
@@ -122,10 +109,6 @@ esp_err_t nvs_config_init_defaults(void) {
         return ret;
 
     ret = init_u16_if_missing("holiday_min", NVS_DEFAULT_HOLIDAY_MIN);
-    if (ret != ESP_OK)
-        return ret;
-
-    ret = init_u16_if_missing("disp_contrast", NVS_DEFAULT_CONTRAST);
     if (ret != ESP_OK)
         return ret;
 
