@@ -27,4 +27,5 @@ idf_component_register(
         log
         esp-tls
         lwip
+        ssd1680
 )
