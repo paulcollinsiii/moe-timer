@@ -41,6 +41,16 @@ credentials.**
         device; C just redraws).
 14. [ ] **Panel protection**: mash buttons rapidly — refreshes serialize, log
         shows `refresh rejected` if under 1 s apart, no crash.
-15. [ ] **Idle current** (optional, needs a meter): deep-sleep current < 1 mA.
+15. [ ] **Held-button dismissal**: dismiss the expiry alert while *holding*
+        each button — the hold must not re-fire the button's action after the
+        device sleeps and re-wakes (enter_deep_sleep waits for release).
+16. [ ] **Buttons after first sleep cycle**: after at least one full
+        sleep/wake cycle, verify buttons still read correctly during an alert
+        (guards the RTC pad-hold release in buttons_init).
+17. [ ] **Speaker pin**: confirm beeps come from the speaker (GPIO 17 carries
+        a `verify against schematic` note in audio.c).
+18. [ ] **Idle current** (optional, needs a meter): deep-sleep current < 1 mA.
+        GPIO 21 (NeoPixel gate) and GPIO 16 (amp enable) are held through
+        sleep — if current is high, probe those nets first.
 
 Record failures with the monitor log snippet and the step number.

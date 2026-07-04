@@ -4,6 +4,7 @@
 #include "audio.h"
 #include "buttons.h"
 #include "display.h"
+#include "driver/gpio.h"
 #include "esp_log.h"
 #include "esp_sleep.h"
 #include "freertos/FreeRTOS.h"
@@ -24,6 +25,25 @@ static const char *TAG = "main";
 static RTC_DATA_ATTR time_t s_last_ntp_sync;
 
 static void enter_deep_sleep(void) {
+    /* EXT1 ANY_LOW is level-triggered: a still-held button would re-wake
+       instantly and re-fire its action. Wait (bounded) for release. */
+    for (int i = 0; i < 30; i++) {
+        bool held = false;
+        for (int b = 0; b < 4; b++) {
+            held = held || buttons_is_pressed((button_id_t)b);
+        }
+        if (!held)
+            break;
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+
+    /* Digital pads float in deep sleep; hold the power-control pins so the
+       NeoPixel gate (21, HIGH = off) and amp enable (16, LOW = off) cannot
+       drift on and drain the battery. Released in the *_init() on wake. */
+    gpio_hold_en(GPIO_NUM_21);
+    gpio_hold_en(GPIO_NUM_16);
+    gpio_deep_sleep_hold_en();
+
     buttons_configure_wakeup();
     esp_sleep_enable_timer_wakeup(WAKE_INTERVAL_US);
     ESP_LOGI(TAG, "Entering deep sleep");
@@ -44,9 +64,14 @@ static esp_err_t try_ntp_sync(void) {
 
 static display_state_t make_state(int32_t remaining, time_t now) {
     day_type_t dt = schedule_get_day_type(now);
+    uint32_t alloc = schedule_get_allocation_sec(dt);
+    /* IDLE shows today's full allocation (full bar), not 0 (ProductOverview) */
+    if (timer_get_state() == TIMER_IDLE) {
+        remaining = (int32_t)alloc;
+    }
     return (display_state_t){
         .remaining_sec = remaining,
-        .allocation_sec = schedule_get_allocation_sec(dt),
+        .allocation_sec = alloc,
         .timer_state = timer_get_state(),
         .day_type = dt,
         .wall_time = now,

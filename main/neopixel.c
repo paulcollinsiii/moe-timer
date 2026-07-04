@@ -131,7 +131,10 @@ static volatile bool s_stop_requested = false;
 static uint8_t s_pixels[NEOPIXEL_COUNT * 3]; /* GRB byte order: [G, R, B] per LED */
 
 void neopixel_init(void) {
-    /* Power gate OFF (HIGH) first — hard invariant on every boot/wake */
+    /* Release the deep-sleep hold placed by enter_deep_sleep() so the pin
+       can be reconfigured; power gate OFF (HIGH) first — hard invariant on
+       every boot/wake */
+    gpio_hold_dis(NEOPIXEL_POWER_GPIO);
     gpio_config_t pwr_cfg = {
         .pin_bit_mask = (1ULL << NEOPIXEL_POWER_GPIO),
         .mode = GPIO_MODE_OUTPUT,

@@ -19,6 +19,11 @@ static const gpio_num_t BTN_GPIOS[4] = {
 
 void buttons_init(void) {
     for (int i = 0; i < 4; i++) {
+        /* ext1_wakeup_prepare() enables pad HOLD on all EXT1 pins when the
+           RTC peripheral domain powers down, and hold persists through the
+           deep-sleep reset — without releasing it, gpio_config() below is
+           latched out and digital button reads break after the first wake. */
+        rtc_gpio_hold_dis(BTN_GPIOS[i]);
         /* Pins may still be latched to the RTC domain from the previous
            deep sleep; release them so digital reads work. */
         rtc_gpio_deinit(BTN_GPIOS[i]);
