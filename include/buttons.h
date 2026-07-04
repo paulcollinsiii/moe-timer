@@ -4,7 +4,7 @@
 typedef enum {
     BTN_A = 0, /* GPIO 15 — Start/Pause */
     BTN_B,     /* GPIO 12 — Reset */
-    BTN_C,     /* GPIO 14 — Cycle contrast */
+    BTN_C,     /* GPIO 14 — unbound in v1 */
     BTN_D,     /* GPIO 11 — Force NTP sync */
     BTN_NONE,
 } button_id_t;

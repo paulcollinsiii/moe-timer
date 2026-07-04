@@ -2,7 +2,8 @@ idf_component_register(
     SRCS
         "main.c"
         "timer.c"
-        "display.cpp"
+        "display.c"
+        "display_layout.c"
         "ntp.c"
         "nvs_config.c"
         "schedule.c"
@@ -20,9 +21,11 @@ idf_component_register(
         esp_netif
         esp_event
         esp_timer
-        driver
+        esp_driver_gpio
+        esp_driver_ledc
         esp_driver_rmt
         log
         esp-tls
         lwip
+        ssd1680
 )

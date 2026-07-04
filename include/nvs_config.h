@@ -25,9 +25,6 @@ esp_err_t nvs_config_set_wifi_pass(const char *pass);
 esp_err_t nvs_config_get_holidays(char *buf, size_t *len);
 esp_err_t nvs_config_set_holidays(const char *blob, size_t len);
 
-esp_err_t nvs_config_get_display_contrast(uint8_t *out);
-esp_err_t nvs_config_set_display_contrast(uint8_t val);
-
 #ifdef __cplusplus
 }
 #endif

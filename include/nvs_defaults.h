@@ -5,7 +5,6 @@
 #define NVS_DEFAULT_HOLIDAY_MIN 120
 #define NVS_DEFAULT_WIFI_SSID ""
 #define NVS_DEFAULT_WIFI_PASS ""
-#define NVS_DEFAULT_CONTRAST 1
 
 /* US Federal Holidays 2026 — newline-separated YYYY-MM-DD */
 #define NVS_DEFAULT_HOLIDAYS \

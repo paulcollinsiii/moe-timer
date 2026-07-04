@@ -14,11 +14,6 @@
 
 static const char *TAG = "ntp";
 
-/* POSIX TZ string — compile-time timezone.
-   Format: POSIX TZ rule, e.g. "EST5EDT,M3.2.0,M11.1.0" for US Eastern.
-   Change for your locale. */
-#define TZ_STRING "EST5EDT,M3.2.0,M11.1.0"
-
 /* Maximum time to wait for WiFi connection and SNTP sync */
 #define WIFI_CONNECT_TIMEOUT_MS 15000
 #define SNTP_SYNC_TIMEOUT_MS 15000
@@ -68,7 +63,13 @@ esp_err_t ntp_sync(void) {
         return ret;
     }
 
-    esp_netif_create_default_wifi_sta();
+    /* Create the default STA netif once per boot — creating it per sync
+       leaks a netif + duplicate default handlers (two syncs per wake is a
+       routine path: day rollover + mandatory start sync). */
+    static esp_netif_t *s_sta_netif;
+    if (!s_sta_netif) {
+        s_sta_netif = esp_netif_create_default_wifi_sta();
+    }
 
     s_wifi_event_group = xEventGroupCreate();
     if (!s_wifi_event_group) {
@@ -76,9 +77,13 @@ esp_err_t ntp_sync(void) {
         return ESP_ERR_NO_MEM;
     }
 
-    esp_event_handler_instance_t inst_wifi, inst_ip;
-    esp_event_handler_instance_register(WIFI_EVENT, ESP_EVENT_ANY_ID, wifi_event_handler, NULL, &inst_wifi);
-    esp_event_handler_instance_register(IP_EVENT, IP_EVENT_STA_GOT_IP, wifi_event_handler, NULL, &inst_ip);
+    esp_event_handler_instance_t inst_wifi = NULL, inst_ip = NULL;
+    ret = esp_event_handler_instance_register(WIFI_EVENT, ESP_EVENT_ANY_ID, wifi_event_handler, NULL, &inst_wifi);
+    if (ret != ESP_OK)
+        goto cleanup_events;
+    ret = esp_event_handler_instance_register(IP_EVENT, IP_EVENT_STA_GOT_IP, wifi_event_handler, NULL, &inst_ip);
+    if (ret != ESP_OK)
+        goto cleanup_events;
 
     wifi_init_config_t wifi_init_cfg = WIFI_INIT_CONFIG_DEFAULT();
     ret = esp_wifi_init(&wifi_init_cfg);
@@ -119,11 +124,13 @@ esp_err_t ntp_sync(void) {
     }
 
     /* ---- SNTP sync ---- */
-    setenv("TZ", TZ_STRING, 1);
-    tzset();
-
+    /* TZ is set once at boot in app_main (MAGTAG_TZ). */
     esp_sntp_setoperatingmode(SNTP_OPMODE_POLL);
     esp_sntp_setservername(0, "pool.ntp.org");
+    /* Immediate clock step (not smooth adjust) — the countdown math relies
+       on time(NULL) being corrected in one jump. Runtime call replaces the
+       CONFIG_SNTP_TIME_SYNC_METHOD kconfig removed in IDF 6. */
+    esp_sntp_set_sync_mode(SNTP_SYNC_MODE_IMMED);
     esp_sntp_init();
 
     int sntp_wait_ms = 0;
@@ -151,8 +158,10 @@ cleanup_wifi:
     esp_wifi_deinit();
 
 cleanup_events:
-    esp_event_handler_instance_unregister(WIFI_EVENT, ESP_EVENT_ANY_ID, inst_wifi);
-    esp_event_handler_instance_unregister(IP_EVENT, IP_EVENT_STA_GOT_IP, inst_ip);
+    if (inst_wifi)
+        esp_event_handler_instance_unregister(WIFI_EVENT, ESP_EVENT_ANY_ID, inst_wifi);
+    if (inst_ip)
+        esp_event_handler_instance_unregister(IP_EVENT, IP_EVENT_STA_GOT_IP, inst_ip);
     vEventGroupDelete(s_wifi_event_group);
     s_wifi_event_group = NULL;
 

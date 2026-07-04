@@ -19,6 +19,8 @@ static const char *TAG = "audio";
 static volatile bool s_stop_requested = false;
 
 void audio_init(void) {
+    /* Release the deep-sleep hold placed by enter_deep_sleep() */
+    gpio_hold_dis(AMP_ENABLE_GPIO);
     gpio_config_t amp_cfg = {
         .pin_bit_mask = (1ULL << AMP_ENABLE_GPIO),
         .mode = GPIO_MODE_OUTPUT,

@@ -1,6 +1,9 @@
 .claude/
-.pio/
 .vscode/
 .worktrees/
 sdkconfig
+sdkconfig.old
 build/
+managed_components/
+dependencies.lock
+test/build/

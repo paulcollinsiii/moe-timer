@@ -3,7 +3,7 @@
 #include <unity.h>
 
 /* Single-TU compilation */
-#include "../../src/nvs_config.c"
+#include "../../main/nvs_config.c"
 #include "mock_hal_nvs.c"
 
 void setUp(void) {
@@ -132,24 +132,6 @@ void test_holidays_blob_round_trip(void) {
 }
 
 /* ------------------------------------------------------------------ */
-/* Display contrast                                                      */
-/* ------------------------------------------------------------------ */
-
-void test_display_contrast_round_trip(void) {
-    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_set_display_contrast(2));
-    uint8_t val = 0;
-    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_display_contrast(&val));
-    TEST_ASSERT_EQUAL_UINT8(2, val);
-}
-
-void test_display_contrast_missing_returns_default(void) {
-    /* No write — should fall back to NVS_DEFAULT_CONTRAST */
-    uint8_t val = 255; /* sentinel */
-    nvs_config_get_display_contrast(&val);
-    TEST_ASSERT_EQUAL_UINT8(NVS_DEFAULT_CONTRAST, val);
-}
-
-/* ------------------------------------------------------------------ */
 /* Missing key fallback                                                  */
 /* ------------------------------------------------------------------ */
 
@@ -177,8 +159,6 @@ int main(void) {
     RUN_TEST(test_wifi_pass_round_trip);
     RUN_TEST(test_wifi_ssid_max_length);
     RUN_TEST(test_holidays_blob_round_trip);
-    RUN_TEST(test_display_contrast_round_trip);
-    RUN_TEST(test_display_contrast_missing_returns_default);
     RUN_TEST(test_get_weekday_min_missing_returns_default);
     return UNITY_END();
 }
