@@ -1,5 +1,8 @@
 default_stages: [pre-commit]
 
+# Vendored third-party code (Unity test framework) keeps upstream formatting.
+exclude: ^test/unity/
+
 repos:
   # ── Housekeeping & branch protection ─────────────────────────────────────────
   - repo: https://github.com/pre-commit/pre-commit-hooks
