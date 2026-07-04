@@ -3,7 +3,7 @@
 #include <unity.h>
 
 /* Single-TU compilation */
-#include "../../src/timer.c"
+#include "../../main/timer.c"
 #include "mock_hal_time.c"
 
 /* Base timestamp: 2026-01-05 00:00:00 UTC (Monday) */

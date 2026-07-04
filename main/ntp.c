@@ -124,6 +124,10 @@ esp_err_t ntp_sync(void) {
 
     esp_sntp_setoperatingmode(SNTP_OPMODE_POLL);
     esp_sntp_setservername(0, "pool.ntp.org");
+    /* Immediate clock step (not smooth adjust) — the countdown math relies
+       on time(NULL) being corrected in one jump. Runtime call replaces the
+       CONFIG_SNTP_TIME_SYNC_METHOD kconfig removed in IDF 6. */
+    esp_sntp_set_sync_mode(SNTP_SYNC_MODE_IMMED);
     esp_sntp_init();
 
     int sntp_wait_ms = 0;

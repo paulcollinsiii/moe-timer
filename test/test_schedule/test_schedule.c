@@ -7,7 +7,7 @@
 // clang-format off
 #include "mock_hal_time.c"
 #include "mock_hal_nvs.c"
-#include "../../src/schedule.c"
+#include "../../main/schedule.c"
 // clang-format on
 
 /* ------------------------------------------------------------------ */

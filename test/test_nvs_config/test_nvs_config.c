@@ -3,7 +3,7 @@
 #include <unity.h>
 
 /* Single-TU compilation */
-#include "../../src/nvs_config.c"
+#include "../../main/nvs_config.c"
 #include "mock_hal_nvs.c"
 
 void setUp(void) {
