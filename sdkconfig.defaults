@@ -1,8 +1,16 @@
 # Immediate SNTP sync is set at runtime via esp_sntp_set_sync_mode() in
 # ntp.c — the old CONFIG_SNTP_TIME_SYNC_METHOD kconfig was removed in IDF 6.
 
+# 4 MB flash; app (~1.2 MB with LVGL + WiFi) needs the large 1.5 MB
+# single-app partition instead of the 1 MB default.
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+CONFIG_PARTITION_TABLE_SINGLE_APP_LARGE=y
+
 # LVGL: 1-bit rendering for the e-paper panel
 CONFIG_LV_COLOR_DEPTH_1=y
+# Use the C library allocator instead of LVGL's 64 KB static pool — the
+# static pool overflows ESP32-S2 DRAM once the WiFi stack is linked in.
+CONFIG_LV_USE_CLIB_MALLOC=y
 CONFIG_LV_FONT_MONTSERRAT_12=y
 CONFIG_LV_FONT_MONTSERRAT_28=y
 CONFIG_LV_FONT_MONTSERRAT_48=y
