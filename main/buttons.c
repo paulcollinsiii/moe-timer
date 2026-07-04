@@ -1,7 +1,9 @@
 #include "buttons.h"
 
 #include "driver/gpio.h"
+#include "driver/rtc_io.h"
 #include "esp_log.h"
+#include "esp_rom_sys.h"
 #include "esp_sleep.h"
 
 static const char *TAG = "buttons";
@@ -17,6 +19,9 @@ static const gpio_num_t BTN_GPIOS[4] = {
 
 void buttons_init(void) {
     for (int i = 0; i < 4; i++) {
+        /* Pins may still be latched to the RTC domain from the previous
+           deep sleep; release them so digital reads work. */
+        rtc_gpio_deinit(BTN_GPIOS[i]);
         gpio_config_t cfg = {
             .pin_bit_mask = (1ULL << BTN_GPIOS[i]),
             .mode = GPIO_MODE_INPUT,
@@ -32,31 +37,46 @@ void buttons_init(void) {
 }
 
 void buttons_configure_wakeup(void) {
-    esp_err_t ret = esp_sleep_enable_gpio_wakeup();
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "enable_gpio_wakeup failed: %s", esp_err_to_name(ret));
-        return;
-    }
+    uint64_t mask = 0;
     for (int i = 0; i < 4; i++) {
-        gpio_wakeup_enable(BTN_GPIOS[i], GPIO_INTR_LOW_LEVEL);
+        gpio_num_t pin = BTN_GPIOS[i];
+        rtc_gpio_init(pin);
+        rtc_gpio_set_direction(pin, RTC_GPIO_MODE_INPUT_ONLY);
+        rtc_gpio_pullup_en(pin); /* buttons are active-low; hold high in sleep */
+        rtc_gpio_pulldown_dis(pin);
+        mask |= 1ULL << pin;
+    }
+    /* GPIO wakeup (esp_sleep_enable_gpio_wakeup) is light-sleep-only on
+       ESP32-S2 — deep sleep requires EXT1 on RTC-capable pins
+       (11/12/14/15 all are). */
+    esp_err_t ret = esp_sleep_enable_ext1_wakeup_io(mask, ESP_EXT1_WAKEUP_ANY_LOW);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "ext1 wakeup config failed: %s", esp_err_to_name(ret));
     }
 }
 
 button_id_t buttons_get_wakeup_button(void) {
-    if (!(esp_sleep_get_wakeup_causes() & BIT(ESP_SLEEP_WAKEUP_GPIO))) {
+    if (!(esp_sleep_get_wakeup_causes() & BIT(ESP_SLEEP_WAKEUP_EXT1))) {
         return BTN_NONE;
     }
 
-    esp_rom_delay_us(DEBOUNCE_US);
-
+    /* EXT1 status latches which pin(s) triggered the wake */
+    uint64_t status = esp_sleep_get_ext1_wakeup_status();
     for (int i = 0; i < 4; i++) {
-        if (gpio_get_level(BTN_GPIOS[i]) == 0) {
+        if (status & (1ULL << BTN_GPIOS[i])) {
             ESP_LOGI(TAG, "Wakeup button: %d (GPIO %d)", i, BTN_GPIOS[i]);
             return (button_id_t)i;
         }
     }
 
-    ESP_LOGW(TAG, "GPIO wakeup but no button active after debounce");
+    /* Fallback: latch was empty — debounce then scan levels */
+    esp_rom_delay_us(DEBOUNCE_US);
+    for (int i = 0; i < 4; i++) {
+        if (gpio_get_level(BTN_GPIOS[i]) == 0) {
+            return (button_id_t)i;
+        }
+    }
+    ESP_LOGW(TAG, "EXT1 wakeup but no button identified");
     return BTN_NONE;
 }
 
