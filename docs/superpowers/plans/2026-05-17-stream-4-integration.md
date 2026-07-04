@@ -36,6 +36,8 @@ Expected: commits from `feature/foundation`, `feature/test-harness`, `feature/sc
 
 - [ ] **Step 2: Branch from integration**
 
+Checkout this branch in a new worktree, use the /using-git-worktrees skill
+
 ```bash
 git checkout -b feature/integration
 ```
