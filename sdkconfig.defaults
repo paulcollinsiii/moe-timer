@@ -1,2 +1,9 @@
 # Immediate SNTP sync is set at runtime via esp_sntp_set_sync_mode() in
 # ntp.c — the old CONFIG_SNTP_TIME_SYNC_METHOD kconfig was removed in IDF 6.
+
+# LVGL: 1-bit rendering for the e-paper panel
+CONFIG_LV_COLOR_DEPTH_1=y
+CONFIG_LV_FONT_MONTSERRAT_12=y
+CONFIG_LV_FONT_MONTSERRAT_28=y
+CONFIG_LV_FONT_MONTSERRAT_48=y
+CONFIG_LV_FONT_DEFAULT_MONTSERRAT_12=y
