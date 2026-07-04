@@ -3,6 +3,7 @@ idf_component_register(
         "main.c"
         "timer.c"
         "display.c"
+        "display_layout.c"
         "ntp.c"
         "nvs_config.c"
         "schedule.c"
