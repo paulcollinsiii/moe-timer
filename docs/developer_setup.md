@@ -60,6 +60,22 @@ source ~/esp/esp-idf/export.sh
 idf.py -p /dev/ttyACM0 flash monitor    # Ctrl+] exits the monitor
 ```
 
+**For ongoing log watching use `tools/monitor.sh` instead of `idf.py
+monitor`** — the device deep-sleeps between wakes, and both a plain monitor
+and ModemManager toggle DTR/RTS in ways the S2 native-USB console treats as
+a reset (see the header comments in `tools/logcat.py`).
+
+Console-over-native-USB caveats (inherent, not bugs):
+
+- Output printed before the host opens the port is **dropped**. Short wakes
+  (no WiFi sync, ~1.5 s of logging) often show few or no lines — the wake
+  still happened; judge by the e-ink/LEDs. Wakes that sync WiFi log long
+  enough to be captured.
+- Lines can appear **truncated/merged** (`main_task: Calling aI (618)
+  wifi:...`): the ROM CDC TX buffer is tiny and overflow bytes are silently
+  discarded until the host starts draining. Lossy transport, not corruption.
+- For complete boot logs, the fallback is a UART adapter on the debug pads.
+
 See [hardware_smoke_test.md](hardware_smoke_test.md) for the on-device validation checklist.
 
 ---
