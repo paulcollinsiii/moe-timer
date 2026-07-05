@@ -17,16 +17,22 @@ typedef enum {
     TIMER_RUNNING,
     TIMER_PAUSED,
     TIMER_EXPIRED,
+    TIMER_BREAK, /* appended (=4): snapshots store state as uint8 */
 } timer_state_t;
 
 typedef struct {
     timer_state_t state;
     int64_t expiry_wall_time;   /* Unix ts; 0 if unset */
-    int32_t remaining_at_pause; /* seconds saved on PAUSE */
+    int32_t remaining_at_pause; /* seconds saved on PAUSE/BREAK */
     int32_t allocation_sec;
     char last_date[11]; /* "YYYY-MM-DD\0" */
     int64_t next_ntp_sync;
     uint8_t partial_refresh_count;
+    /* Eye-rest accrual: completed RUNNING seconds since last break/reset,
+       plus the wall time the current run segment started (0 unless RUNNING). */
+    int32_t run_accum_sec;
+    int64_t run_started_wall;
+    int64_t break_expiry_wall; /* wall time the current break ends; 0 unless BREAK */
 } rtc_state_t;
 
 extern rtc_state_t g_rtc_state;
@@ -61,6 +67,12 @@ bool timer_is_new_day(time_t now);
 void timer_record_date(time_t now);
 bool timer_needs_ntp_sync(time_t now);
 void timer_record_ntp_sync(time_t now);
+
+/* Eye-rest break: accrued RUNNING seconds trigger an enforced break. */
+int32_t timer_run_accum(time_t now);                      /* accum incl. current run segment */
+bool timer_break_due(time_t now, int32_t interval_sec);   /* RUNNING && accum >= interval */
+void timer_start_break(time_t now, int32_t duration_sec); /* RUNNING->BREAK; freezes remaining */
+int32_t timer_break_remaining(time_t now);                /* BREAK: seconds left, else 0 */
 
 /* Crash recovery: capture g_rtc_state into a snapshot / restore it when the
    snapshot validates (version, checksum, plausibility) AND its date is
