@@ -18,4 +18,21 @@ menu "MagTag Timer"
             allocation only resets on day rollover — otherwise the timer's
             user could refund their own screen time.
 
+    config MAGTAG_BREAK_INTERVAL_MIN
+        int "Eye-rest break interval (minutes of running time)"
+        default 30
+        range 0 480
+        help
+            After this many minutes of accumulated RUNNING time, the timer
+            auto-pauses into an enforced Screen Break. 0 disables eye-rest
+            breaks entirely.
+
+    config MAGTAG_BREAK_DURATION_MIN
+        int "Eye-rest break duration (minutes)"
+        default 15
+        range 1 120
+        help
+            Length of the enforced Screen Break. When it ends the device
+            chimes and waits in PAUSED for a manual resume (Button A).
+
 endmenu
