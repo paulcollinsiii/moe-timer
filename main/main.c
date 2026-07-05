@@ -43,19 +43,22 @@ static void save_timer_snapshot(void) {
     }
 }
 
-/* After a panic/external reset, RTC memory is wiped but the RTC clock
-   itself survives — restore today's timer state from NVS instead of
-   letting the rollover refund the allocation. On a true power-on the
-   clock is invalid, the snapshot's date can't match, and this no-ops. */
-static void try_restore_timer_snapshot(void) {
+/* After a panic/external reset OR power cycle, RTC memory is wiped —
+   restore today's timer state from NVS instead of letting the rollover
+   refund the allocation. Returns true when state was restored. Called
+   twice: at boot (works after a panic, where the RTC clock survives) and
+   again after the rollover's NTP sync (covers power-on, where the clock
+   is invalid until corrected). */
+static bool try_restore_timer_snapshot(time_t now) {
     if (g_rtc_state.last_date[0] != '\0')
-        return; /* RTC state intact — normal deep-sleep wake */
+        return false; /* RTC state intact — normal deep-sleep wake */
     timer_snapshot_t snap;
     if (nvs_config_load_timer_snapshot(&snap) != ESP_OK)
-        return;
-    if (timer_restore_snapshot(&snap, time(NULL))) {
-        ESP_LOGW(TAG, "Timer state restored from NVS snapshot (crash recovery), state=%d", (int)timer_get_state());
-    }
+        return false;
+    if (!timer_restore_snapshot(&snap, now))
+        return false;
+    ESP_LOGW(TAG, "Timer state restored from NVS snapshot, state=%d", (int)timer_get_state());
+    return true;
 }
 
 static void enter_deep_sleep(void) {
@@ -210,8 +213,48 @@ static void handle_day_rollover(time_t *now) {
     /* Fail-open: reset to IDLE with today's allocation even if sync fails */
     try_ntp_sync();
     *now = time(NULL);
+    /* Power cycling must not refund the allocation: with the clock now
+       corrected, a same-day NVS snapshot beats a reset. Only a genuine
+       date change (or Button B in parent mode) resets the day. */
+    if (try_restore_timer_snapshot(*now)) {
+        return;
+    }
     timer_reset();
     timer_record_date(*now);
+}
+
+/* ---- final-minute watch ------------------------------------------------ */
+
+/* With <=60 s left, a 55 s sleep can overshoot expiry by most of a minute.
+   Stay awake instead: lock the clock with one sync, keep the state pixel
+   lit, and fire TIME'S UP within a tick of wall time. Runs at most once
+   per day (right before expiry), so the battery cost is negligible. */
+#define FINAL_MINUTE_SEC 60
+
+static void maybe_wait_for_expiry(void) {
+    if (timer_get_state() != TIMER_RUNNING)
+        return;
+    time_t now = time(NULL);
+    int64_t remaining = g_rtc_state.expiry_wall_time - (int64_t)now;
+    if (remaining <= 0 || remaining > FINAL_MINUTE_SEC)
+        return;
+
+    ESP_LOGI(TAG, "Final minute: staying awake (%lld s remaining)", (long long)remaining);
+    /* Expiry is a wall time, so a clock step here directly sharpens the
+       moment the alert fires. Skip when recently synced (drift over the
+       10-min window is sub-second) or when the sync itself (~5-9 s)
+       would blow past the expiry. */
+    if (timer_needs_ntp_sync(now) && remaining > 15) {
+        try_ntp_sync();
+    }
+    neopixel_show_timer_state();
+
+    while (g_rtc_state.expiry_wall_time - (int64_t)time(NULL) > 0) {
+        vTaskDelay(pdMS_TO_TICKS(250));
+    }
+    timer_tick(time(NULL)); /* RUNNING -> EXPIRED */
+    display_timesup();
+    run_expiry_alert();
 }
 
 /* ---- wake handlers ----------------------------------------------------- */
@@ -237,6 +280,7 @@ static void handle_timer_tick(void) {
     } else {
         display_update(&st); /* partial; policy promotes every 5th to full */
     }
+    maybe_wait_for_expiry();
     enter_deep_sleep();
 }
 
@@ -313,6 +357,7 @@ static void handle_button_wake(void) {
         display_full_refresh(&st);   /* button wakes always full-refresh */
         neopixel_stop();
     }
+    maybe_wait_for_expiry();
     enter_deep_sleep();
 }
 
@@ -333,7 +378,7 @@ void app_main(void) {
 
     /* Must run after TZ is set (date comparison) and before the wake
        handlers (whose rollover check would otherwise reset the timer). */
-    try_restore_timer_snapshot();
+    try_restore_timer_snapshot(time(NULL));
 
     buttons_init();
     audio_init();

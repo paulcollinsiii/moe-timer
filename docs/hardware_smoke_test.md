@@ -24,8 +24,8 @@ credentials.**
        header shows sync time, bar full, state `RUNNING`. With bad WiFi creds:
        timer still starts (fail-open), WiFi pixel blinks red 3x, remaining
        time counts down on the uncorrected clock.
-6. [ ] **Countdown**: remaining decreases ~55 s per wake; below 5 min it shows
-       `M min S sec`.
+6. [ ] **Countdown**: remaining decreases ~55 s per wake, shown as
+       `HH:MM:SS`.
 7. [ ] **Button A (pause/resume)**: pause shows `PAUSED`, remaining freezes
        across wakes; resume is immediate (AMBER -> GREEN after ~250 ms, sync
        after) and continues from the frozen value.
@@ -37,9 +37,13 @@ credentials.**
         erase NVS: `idf.py erase-flash`), let it expire: TIME'S UP screen,
         3 beeps x 5 cycles, red NeoPixel pulse; any button stops the alert
         immediately; device returns to deep sleep after.
-12. [ ] **Day rollover**: fake it by clearing `last_date` (power-cycle resets
-        RTC memory) or wait past midnight: wake re-syncs and resets to IDLE
-        with the new day's allocation.
+12. [ ] **Day rollover**: only a genuine date change resets the allocation.
+        Power cycling does NOT fake it — the boot re-syncs, restores the
+        same-day NVS snapshot, and the countdown continues (see case 19).
+        To test a real rollover, erase the NVS region so no same-day
+        snapshot exists (`python -m esptool --chip esp32s2 erase-region
+        0x9000 0x6000`) or wait past midnight: wake re-syncs and resets to
+        IDLE with the new day's allocation.
 13. [ ] **Every button wakes from deep sleep** (A, B, C, D each wake the
         device; C just redraws).
 14. [ ] **Panel protection**: mash buttons rapidly — refreshes serialize, log
@@ -56,10 +60,17 @@ credentials.**
         GPIO 21 (NeoPixel gate) and GPIO 16 (amp enable) are held through
         sleep — if current is high, probe those nets first.
 19. [ ] **Crash recovery**: with the timer RUNNING, press the reset button
-        (or cause any reboot that is not a power loss). On the next boot the
-        log shows `Timer state restored from NVS snapshot` and the countdown
-        continues — the allocation is NOT refunded. A true power-off still
-        comes back IDLE (RTC clock lost, snapshot date can't validate).
+        or power-cycle. On the next boot (after the boot sync corrects the
+        clock, for power-on) the log shows `Timer state restored from NVS
+        snapshot` and the countdown continues — the allocation is NOT
+        refunded. Refunding requires Button B (parent mode, case 20) or a
+        genuine day rollover. With WiFi unavailable on a power-on the
+        restore cannot validate (no clock) and the device fails open to
+        IDLE.
+21. [ ] **Final minute**: when a wake finds <=60 s remaining, the device
+        stays awake (state pixel lit, one clock-locking sync if due) and
+        TIME'S UP + beeps fire within ~1 s of the actual expiry wall time,
+        instead of sleeping up to 55 s past it.
 20. [ ] **Production reset gate**: with `CONFIG_MAGTAG_PARENT_TESTING=n`,
         Button B logs `Button B reset disabled` and does not reset; the
         allocation resets only on day rollover. (Default build: =y, B resets.)

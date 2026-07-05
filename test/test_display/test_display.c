@@ -42,38 +42,38 @@ void test_bar_just_expired(void) {
     TEST_ASSERT_EQUAL_UINT16(0, display_bar_fill_px(-1, 3600));
 }
 
-/* ---- display_format_remaining ---- */
+/* ---- display_format_remaining: HH:MM:SS always ---- */
 
-void test_format_shows_minutes_only_above_5_min(void) {
+void test_format_hours_minutes_seconds(void) {
     char buf[64];
-    display_format_remaining(buf, sizeof(buf), 600); /* 10 min */
-    TEST_ASSERT_EQUAL_STRING("10 min", buf);
+    display_format_remaining(buf, sizeof(buf), 3600); /* 1 h */
+    TEST_ASSERT_EQUAL_STRING("01:00:00", buf);
+    display_format_remaining(buf, sizeof(buf), 7325); /* 2 h 2 min 5 s */
+    TEST_ASSERT_EQUAL_STRING("02:02:05", buf);
 }
 
-void test_format_shows_minutes_only_at_exactly_5_min(void) {
+void test_format_minutes_and_seconds(void) {
     char buf[64];
-    display_format_remaining(buf, sizeof(buf), 300); /* 5 min */
-    TEST_ASSERT_EQUAL_STRING("5 min", buf);
-}
-
-void test_format_shows_minutes_and_seconds_below_5_min(void) {
-    char buf[64];
-    display_format_remaining(buf, sizeof(buf), 299); /* 4 min 59 sec */
-    TEST_ASSERT_EQUAL_STRING("4 min 59 sec", buf);
+    display_format_remaining(buf, sizeof(buf), 600);
+    TEST_ASSERT_EQUAL_STRING("00:10:00", buf);
+    display_format_remaining(buf, sizeof(buf), 299);
+    TEST_ASSERT_EQUAL_STRING("00:04:59", buf);
+    display_format_remaining(buf, sizeof(buf), 145);
+    TEST_ASSERT_EQUAL_STRING("00:02:25", buf);
 }
 
 void test_format_shows_zero_when_expired(void) {
     char buf[64];
     display_format_remaining(buf, sizeof(buf), 0);
-    TEST_ASSERT_EQUAL_STRING("0 min", buf);
+    TEST_ASSERT_EQUAL_STRING("00:00:00", buf);
     display_format_remaining(buf, sizeof(buf), -1);
-    TEST_ASSERT_EQUAL_STRING("0 min", buf);
+    TEST_ASSERT_EQUAL_STRING("00:00:00", buf);
 }
 
 void test_format_1_min_30_sec(void) {
     char buf[64];
     display_format_remaining(buf, sizeof(buf), 90);
-    TEST_ASSERT_EQUAL_STRING("1 min 30 sec", buf);
+    TEST_ASSERT_EQUAL_STRING("00:01:30", buf);
 }
 
 /* display_fb_invert_byte_cols: inverts byte columns [b0..b1] of every row —
@@ -150,9 +150,8 @@ int main(void) {
     RUN_TEST(test_bar_half_fill);
     RUN_TEST(test_bar_quarter_fill);
     RUN_TEST(test_bar_just_expired);
-    RUN_TEST(test_format_shows_minutes_only_above_5_min);
-    RUN_TEST(test_format_shows_minutes_only_at_exactly_5_min);
-    RUN_TEST(test_format_shows_minutes_and_seconds_below_5_min);
+    RUN_TEST(test_format_hours_minutes_seconds);
+    RUN_TEST(test_format_minutes_and_seconds);
     RUN_TEST(test_format_shows_zero_when_expired);
     RUN_TEST(test_format_1_min_30_sec);
     RUN_TEST(test_invert_byte_cols_middle_column);

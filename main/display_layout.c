@@ -46,13 +46,8 @@ int display_fb_invert_dirty_rows(uint8_t *fb, const uint8_t *prev, int rows, int
 }
 
 void display_format_remaining(char *buf, size_t len, int32_t remaining_sec) {
-    if (remaining_sec <= 0) {
-        snprintf(buf, len, "0 min");
-        return;
-    }
-    if (remaining_sec < 300) {
-        snprintf(buf, len, "%ld min %ld sec", (long)(remaining_sec / 60), (long)(remaining_sec % 60));
-    } else {
-        snprintf(buf, len, "%ld min", (long)(remaining_sec / 60));
-    }
+    if (remaining_sec < 0)
+        remaining_sec = 0;
+    snprintf(buf, len, "%02ld:%02ld:%02ld", (long)(remaining_sec / 3600), (long)((remaining_sec / 60) % 60),
+             (long)(remaining_sec % 60));
 }

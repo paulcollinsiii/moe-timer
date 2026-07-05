@@ -57,7 +57,7 @@ remaining = expiry_wall_time - time(NULL)
 
 This makes the countdown inherently drift-resistant: NTP syncs correct `time(NULL)` via SNTP, so remaining time recalculates correctly without ever modifying `expiry_wall_time`. The only time `expiry_wall_time` changes is at timer start (`IDLE → RUNNING`) or resume after pause (`PAUSED → RUNNING`: `expiry_wall_time = time(NULL) + remaining_at_pause`).
 
-Timer state and `expiry_wall_time` are stored in **RTC slow memory** so they survive deep sleep but are reset on a cold power-cycle.
+Timer state and `expiry_wall_time` are stored in **RTC slow memory** (survives deep sleep) and additionally snapshotted to **NVS** on every state transition (XOR checksum + version + plausibility validation). After a panic, external reset, or power cycle the boot path restores the snapshot as long as its stored date is still today — so losing power does not refund the day's allocation. The allocation resets only on a genuine day rollover or via Button B when `CONFIG_MAGTAG_PARENT_TESTING` is enabled.
 
 ### 3 · Deep Sleep Architecture
 
@@ -74,7 +74,9 @@ The device spends almost all of its time in deep sleep. Wake sources:
 3. If `next_ntp_sync_time` has passed (every 10 min while RUNNING): wake WiFi, NTP sync, adjust `expiry_wall_time`.
 4. Compute `remaining = expiry_wall_time - now`.
 5. Update display (partial refresh; full refresh on every 5th wake or state change).
-6. Return to deep sleep.
+6. If RUNNING with <=60 s remaining: stay awake (state pixel lit, clock-locking
+   sync if due) and fire TIME'S UP within ~1 s of the expiry wall time.
+7. Return to deep sleep.
 
 WiFi is **off by default**; it is only powered up for NTP syncs and then immediately shut down.
 
@@ -109,7 +111,7 @@ States: `IDLE` → `RUNNING` → `PAUSED` → `EXPIRED`
 
 Pressing Start from PAUSED re-NTP-syncs and sets `expiry_wall_time = now + remaining_at_pause`.
 
-All state is persisted in **RTC slow memory** (survives deep sleep, lost on cold boot / power cycle).
+All state is persisted in **RTC slow memory** (survives deep sleep) with an NVS snapshot as crash/power-loss backup (restored when still same-day; see section 2).
 
 ### 6 · Buttons
 
@@ -130,7 +132,7 @@ All 4 buttons are configured as deep-sleep GPIO wakeup sources. Buttons are debo
 │                                                  │
 │  ████████████████████░░░░░░░░░░░░░░░░░░░░░░░░░░  │  ← row 26–50 (progress bar, 24 px tall)
 │                                                  │
-│              42 min 30 sec remaining             │  ← row 58–78
+│              00:42:30 remaining             │  ← row 58–78
 │                                                  │
 │  Weekday · 60 min                    RUNNING     │  ← row 88–108
 └──────────────────────────────────────────────────┘
