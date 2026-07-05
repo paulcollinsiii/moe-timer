@@ -117,9 +117,9 @@ All state is persisted in **RTC slow memory** (survives deep sleep) with an NVS 
 
 | Button | GPIO | Action |
 |--------|------|--------|
-| A | 15 | Start (IDLE/PAUSED → RUNNING, NTP sync first) / Pause (RUNNING → PAUSED) |
-| B | 12 | Reset to IDLE with today's full allocation |
-| C | 14 | Cycle display contrast / brightness (3 levels) |
+| A | 15 | Start (IDLE/PAUSED → RUNNING, immediate; NTP sync after) / Pause (RUNNING → PAUSED) |
+| B | 14 | Reset to IDLE with today's full allocation (only when `CONFIG_MAGTAG_PARENT_TESTING=y`) |
+| C | 12 | Unbound in v1 (wakes + redraws only) |
 | D | 11 | Force NTP re-sync + full display refresh |
 
 All 4 buttons are configured as deep-sleep GPIO wakeup sources. Buttons are debounced in software (10 ms).
@@ -139,7 +139,7 @@ All 4 buttons are configured as deep-sleep GPIO wakeup sources. Buttons are debo
 ```
 
 - **Progress bar**: full-width (280 px usable), fill proportional to `remaining/allocation`. Thick outer border.
-- **Remaining time**: centred; shows minutes and seconds when < 5 min, else minutes only.
+- **Remaining time**: centred; always `HH:MM:SS`.
 - **State label**: bottom-right (`IDLE`, `RUNNING`, `PAUSED`, `TIME'S UP`).
 - **Day-type + allocation**: bottom-left (e.g. `Holiday · 120 min`).
 
