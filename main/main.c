@@ -206,6 +206,10 @@ static void run_expiry_alert(void) {
    alert is dismissed or times out — the big screen would only last until
    the next tick redraw anyway. */
 static void fire_expiry_alert(void) {
+    /* Persist EXPIRED before the ~15 s alert + redraw, not at the eventual
+       enter_deep_sleep: an EN reset or power cut mid-alert would otherwise
+       restore the stale RUNNING snapshot and replay the final minute. */
+    save_timer_snapshot();
     display_timesup();
     run_expiry_alert();
     time_t now = time(NULL);
@@ -362,6 +366,9 @@ static void handle_button_wake(void) {
     if (timer_get_state() == TIMER_EXPIRED && before != TIMER_EXPIRED) {
         fire_expiry_alert(); /* alert owns the NeoPixels (red pulse) */
     } else {
+        /* Includes EXPIRED: any button returns the display to the main
+           layout (empty bar, TIME'S UP state) via a full refresh. */
+        ESP_LOGI(TAG, "button %d: state %d -> %d, full refresh", (int)btn, (int)before, (int)timer_get_state());
         neopixel_show_timer_state(); /* resulting state, shown during refresh */
         display_full_refresh(&st);   /* button wakes always full-refresh */
         neopixel_stop();

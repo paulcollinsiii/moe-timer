@@ -66,7 +66,9 @@ credentials.**
         refunded. Refunding requires Button B (parent mode, case 20) or a
         genuine day rollover. With WiFi unavailable on a power-on the
         restore cannot validate (no clock) and the device fails open to
-        IDLE.
+        IDLE. Note: EN reset mid-run (before expiry) intentionally restores
+        the in-flight countdown — that is crash recovery, not a refund; the
+        run resumes with the remaining time it had.
 21. [ ] **Final minute**: when a wake finds <=60 s remaining, the device
         stays awake (state pixel lit, one clock-locking sync if due) and
         TIME'S UP + beeps fire within ~1 s of the actual expiry wall time,

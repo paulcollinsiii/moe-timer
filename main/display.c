@@ -79,7 +79,15 @@ static void flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map)
        post-alert main screen — must wake and re-init the panel first, or
        it silently writes to a sleeping controller. */
     if (s_panel_slept) {
-        if (ssd1680_init(&PINS) != ESP_OK) {
+        esp_err_t ret = ssd1680_init(&PINS);
+        if (ret != ESP_OK) {
+            /* BUSY can straggle coming out of panel deep sleep — retry
+               once rather than silently dropping the frame (a dropped
+               frame leaves e.g. the big TIME'S UP screen stuck). */
+            vTaskDelay(pdMS_TO_TICKS(100));
+            ret = ssd1680_init(&PINS);
+        }
+        if (ret != ESP_OK) {
             ESP_LOGE(TAG, "panel re-init failed - dropping frame");
             lv_display_flush_ready(disp);
             return;
