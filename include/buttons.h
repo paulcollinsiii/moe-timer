@@ -3,8 +3,8 @@
 
 typedef enum {
     BTN_A = 0, /* GPIO 15 — Start/Pause */
-    BTN_B,     /* GPIO 12 — Reset */
-    BTN_C,     /* GPIO 14 — unbound in v1 */
+    BTN_B,     /* GPIO 14 — Reset (parent-testing builds only) */
+    BTN_C,     /* GPIO 12 — unbound in v1; not a wake source */
     BTN_D,     /* GPIO 11 — Force NTP sync */
     BTN_NONE,
 } button_id_t;

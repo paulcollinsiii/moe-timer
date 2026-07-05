@@ -31,8 +31,8 @@ credentials.**
        after) and continues from the frozen value.
 8. [ ] **Button B (reset)**: returns to IDLE with today's full allocation.
 9. [ ] **Button D (force sync)**: WiFi cycle + full refresh; sync time updates.
-10. [ ] **Button C**: wakes the device and redraws, but changes nothing
-        (unbound in v1).
+10. [ ] **Button C**: does nothing at all — not a wake source (kept out of
+        the EXT1 mask so mashing it cannot burn battery or refreshes).
 11. [ ] **Expiry**: temporarily lower `NVS_DEFAULT_WEEKDAY_MIN` to 1-2 min (and
         erase NVS: `idf.py erase-flash`), let it expire: TIME'S UP screen,
         3 beeps x 5 cycles, red NeoPixel pulse; any button stops the alert
@@ -44,8 +44,9 @@ credentials.**
         snapshot exists (`python -m esptool --chip esp32s2 erase-region
         0x9000 0x6000`) or wait past midnight: wake re-syncs and resets to
         IDLE with the new day's allocation.
-13. [ ] **Every button wakes from deep sleep** (A, B, C, D each wake the
-        device; C just redraws).
+13. [ ] **Wake buttons**: A and D wake the device; B wakes only in
+        parent-testing builds (`CONFIG_MAGTAG_PARENT_TESTING=y`); C never
+        wakes.
 14. [ ] **Panel protection**: mash buttons rapidly — refreshes serialize, log
         shows `refresh rejected` if under 1 s apart, no crash.
 15. [ ] **Held-button dismissal**: dismiss the expiry alert while *holding*

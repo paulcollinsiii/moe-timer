@@ -122,7 +122,7 @@ All state is persisted in **RTC slow memory** (survives deep sleep) with an NVS 
 | C | 12 | Unbound in v1 (wakes + redraws only) |
 | D | 11 | Force NTP re-sync + full display refresh |
 
-All 4 buttons are configured as deep-sleep GPIO wakeup sources. Buttons are debounced in software (10 ms).
+Wake sources: A and D always; B only when `CONFIG_MAGTAG_PARENT_TESTING=y`; C is never a wake source (mashing an unbound button must not burn battery or panel refreshes). Buttons are debounced in software (10 ms).
 
 ### 7 · Display Layout (296×128 px)
 
