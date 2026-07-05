@@ -50,6 +50,10 @@ static uint8_t s_fb_cache[SSD1680_FB_SIZE]; /* last frame, for 0x26 bookkeeping 
 
 /* Survives deep sleep so the refresh-rate guard holds across wakes. */
 static RTC_DATA_ATTR int64_t s_last_refresh_sec;
+/* True once previous-frame RAM (0x26) has been written this power cycle.
+   Zeroed on power-on reset — panel RAM is garbage then, and a partial
+   diff against it corrupts the screen (seen in hardware bring-up). */
+static RTC_DATA_ATTR bool s_prev_frame_valid;
 
 static esp_err_t busy_wait(void) {
     int waited = 0;
@@ -187,6 +191,13 @@ esp_err_t ssd1680_refresh(ssd1680_refresh_mode_t mode) {
         return ESP_ERR_INVALID_STATE;
     }
 
+    ssd1680_refresh_mode_t resolved =
+        (ssd1680_refresh_mode_t)ssd1680_resolve_refresh_mode((int)mode, s_prev_frame_valid);
+    if (resolved != mode) {
+        ESP_LOGI(TAG, "partial promoted to full: no valid previous frame this power cycle");
+        mode = resolved;
+    }
+
     if (mode == SSD1680_REFRESH_PARTIAL) {
         ESP_RETURN_ON_ERROR(cmd_with_data(CMD_BORDER_WAVEFORM, (const uint8_t[]){0x80}, 1), TAG, "border");
         ESP_RETURN_ON_ERROR(cmd_with_data(CMD_DISP_UPDATE_CTRL2, (const uint8_t[]){0xFF}, 1), TAG, "ctrl2");
@@ -201,9 +212,14 @@ esp_err_t ssd1680_refresh(ssd1680_refresh_mode_t mode) {
 
     /* Bookkeeping for the next partial diff: previous-frame RAM = this frame */
     ESP_RETURN_ON_ERROR(write_ram(CMD_WRITE_RAM_RED, s_fb_cache), TAG, "prev frame");
+    s_prev_frame_valid = true;
 
     s_last_refresh_sec = now;
     return ESP_OK;
+}
+
+bool ssd1680_partial_diff_ready(void) {
+    return s_initialized && s_prev_frame_valid;
 }
 
 esp_err_t ssd1680_sleep(void) {

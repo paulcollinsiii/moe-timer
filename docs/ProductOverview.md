@@ -14,7 +14,7 @@ A screen-time countdown timer for a child, running on the Adafruit MagTag (2025,
 | MCU | ESP32-S2 @ 240 MHz |
 | Flash / PSRAM | 4 MB / 2 MB |
 | Display | 2.9" grayscale e-ink, 296×128 px, SSD1680 controller |
-| Buttons | 4× tactile (GPIO 15/12/14/11, active-LOW, internal pull-up) |
+| Buttons | 4× tactile (GPIO 15/14/12/11 (A/B/C/D), active-LOW, internal pull-up) |
 | NeoPixels | 4× RGB on GPIO 1 (power gate: GPIO 21 LOW = on) |
 | Speaker | Onboard amplifier, shutdown pin GPIO 16 (HIGH = on) |
 | WiFi | 802.11 b/g/n, 2.4 GHz |
@@ -28,11 +28,22 @@ A screen-time countdown timer for a child, running on the Adafruit MagTag (2025,
 ### 1 · Clock & NTP
 
 - Connect to WiFi and sync via SNTP (`pool.ntp.org`) in three situations:
-  1. **Timer start**: NTP sync is mandatory before the countdown begins.
+  1. **Timer start/resume**: the countdown starts **immediately** on the
+     current clock (instant user feedback); NTP sync runs right after. Any
+     clock step the sync applies is measured against the monotonic clock and
+     added to `expiry_wall_time` via `timer_shift_expiry()`, preserving the
+     remaining duration exactly.
   2. **Every 10 minutes while running**: compensate for ESP32 RTC drift.
   3. **New day detected on wake**: NTP sync to get accurate date for schedule lookup.
-- NTP syncs correct the ESP32 system clock via SNTP. `expiry_wall_time` is **not** modified on sync — since `remaining = expiry_wall_time - time(NULL)`, drift compensation is automatic once the system clock is corrected.
-- If WiFi is unavailable when required, display a "no sync — check WiFi" message and block timer start until sync succeeds.
+- Routine NTP syncs correct only the ESP32 system clock. `expiry_wall_time` is
+  **not** modified on sync — since `remaining = expiry_wall_time - time(NULL)`,
+  drift compensation is automatic once the system clock is corrected. The one
+  exception is the start/resume flow above, where the expiry was computed from
+  a possibly-uncorrected clock and is shifted by the measured step.
+- If WiFi is unavailable, the timer fails open: it keeps running on the
+  uncorrected clock (remaining time stays a consistent duration; only the
+  displayed wall-clock time may be off). Sync failure is signalled on the
+  WiFi NeoPixel (red blinks) when `CONFIG_MAGTAG_SYNC_LED_FEEDBACK` is on.
 - Timezone configured at compile time as a POSIX TZ string `#define` (e.g. `EST5EDT,M3.2.0,M11.1.0`).
 - Display shows: date (e.g. `Sat May 16`) + current time (HH:MM AM/PM) and `Last sync: HH:MM`.
 

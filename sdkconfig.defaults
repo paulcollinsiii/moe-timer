@@ -1,6 +1,10 @@
 # Immediate SNTP sync is set at runtime via esp_sntp_set_sync_mode() in
 # ntp.c — the old CONFIG_SNTP_TIME_SYNC_METHOD kconfig was removed in IDF 6.
 
+# Console over the ESP32-S2 native USB (the MagTag has no UART bridge chip).
+# Without this, logs go to UART0 pins and /dev/ttyACM0 carries no output.
+CONFIG_ESP_CONSOLE_USB_CDC=y
+
 # 4 MB flash; app (~1.2 MB with LVGL + WiFi) needs the large 1.5 MB
 # single-app partition instead of the 1 MB default.
 CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y

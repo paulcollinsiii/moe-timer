@@ -18,16 +18,37 @@ static const char *TAG = "ntp";
 #define WIFI_CONNECT_TIMEOUT_MS 15000
 #define SNTP_SYNC_TIMEOUT_MS 15000
 
+/* On warm wakes the driver fast-reconnects from NVS-stored channel/BSSID;
+   that first attempt routinely bounces once before a clean association, so
+   a single disconnect must not be treated as failure (IDF station-example
+   pattern). */
+#define WIFI_CONNECT_MAX_RETRY 5
+
 static EventGroupHandle_t s_wifi_event_group = NULL;
 #define WIFI_CONNECTED_BIT BIT0
 #define WIFI_FAIL_BIT BIT1
+#define WIFI_STOPPED_BIT BIT2
+
+static volatile int s_retry_num;
+static volatile bool s_retry_enabled; /* false during teardown: our own
+                                         esp_wifi_disconnect() also fires
+                                         STA_DISCONNECTED */
 
 /* ---- Event handler ---- */
 
 static void wifi_event_handler(void *arg, esp_event_base_t event_base, int32_t event_id, void *event_data) {
     if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
-        ESP_LOGW(TAG, "WiFi disconnected");
-        xEventGroupSetBits(s_wifi_event_group, WIFI_FAIL_BIT);
+        wifi_event_sta_disconnected_t *dis = (wifi_event_sta_disconnected_t *)event_data;
+        ESP_LOGW(TAG, "WiFi disconnected (reason %d)", dis ? dis->reason : -1);
+        if (s_retry_enabled && s_retry_num < WIFI_CONNECT_MAX_RETRY) {
+            s_retry_num++;
+            ESP_LOGI(TAG, "Retrying connect (%d/%d)", s_retry_num, WIFI_CONNECT_MAX_RETRY);
+            esp_wifi_connect();
+        } else {
+            xEventGroupSetBits(s_wifi_event_group, WIFI_FAIL_BIT);
+        }
+    } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_STOP) {
+        xEventGroupSetBits(s_wifi_event_group, WIFI_STOPPED_BIT);
     } else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
         ESP_LOGI(TAG, "Got IP address");
         xEventGroupSetBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
@@ -109,6 +130,8 @@ esp_err_t ntp_sync(void) {
     if (ret != ESP_OK)
         goto cleanup_wifi_started;
 
+    s_retry_num = 0;
+    s_retry_enabled = true;
     ret = esp_wifi_connect();
     if (ret != ESP_OK)
         goto cleanup_wifi_started;
@@ -151,8 +174,13 @@ cleanup_sntp:
     esp_sntp_stop();
 
 cleanup_wifi_started:
+    s_retry_enabled = false;
     esp_wifi_disconnect();
     esp_wifi_stop();
+    /* Stop is asynchronous; deinit before STA_STOP lands fails with
+       ESP_ERR_WIFI_STOP_STATE (0x3014). Bounded wait, then deinit anyway —
+       deep sleep reboots us, so a leaked driver cannot accumulate. */
+    xEventGroupWaitBits(s_wifi_event_group, WIFI_STOPPED_BIT, pdFALSE, pdFALSE, pdMS_TO_TICKS(1000));
 
 cleanup_wifi:
     esp_wifi_deinit();

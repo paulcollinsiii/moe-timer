@@ -8,10 +8,13 @@
 
 static const char *TAG = "buttons";
 
+/* Adafruit MagTag pinout: A=D15, B=D14, C=D12, D=D11. Verified in hardware
+   bring-up 2026-07: with B/C swapped, physical Button C fired the BTN_B
+   (reset) action. */
 static const gpio_num_t BTN_GPIOS[4] = {
     GPIO_NUM_15, /* BTN_A */
-    GPIO_NUM_12, /* BTN_B */
-    GPIO_NUM_14, /* BTN_C */
+    GPIO_NUM_14, /* BTN_B */
+    GPIO_NUM_12, /* BTN_C */
     GPIO_NUM_11, /* BTN_D */
 };
 
