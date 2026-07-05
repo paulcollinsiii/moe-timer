@@ -252,15 +252,16 @@ static void build_screen(const display_state_t *st) {
     lv_obj_set_style_text_font(state, &lv_font_montserrat_12, 0);
     lv_obj_align(state, LV_ALIGN_BOTTOM_RIGHT, -4, -18);
 
-    /* Bottom edge: labels centred over the physical buttons. The buttons
-       sit on a 15 mm pitch on the 73.3 mm board while the display active
-       area is ~67 mm wide and centred — in screen pixels (296/66.9 mm)
-       that is a 66 px pitch starting at x=41, NOT four equal 74 px cells.
-       Tune BTN_X0/BTN_PITCH here if hardware shows the row misaligned.
+    /* Bottom edge: labels centred over the physical buttons. Calibrated
+       on hardware (2026-07): button D's centre lands at screen x=239 and
+       the pitch is 74 px, so the row runs 17/91/165/239 — the display
+       active area is offset ~20 px relative to the button row, it is NOT
+       centred over it. Tune BTN_X0 (slides row) / BTN_PITCH (stretches)
+       if a future panel batch differs.
        A shows the action a press will take; B only when the parent-mode
        reset is compiled in; C unbound; D = sync. */
-#define BTN_X0 41    /* screen x of button A's centre */
-#define BTN_PITCH 66 /* px between adjacent button centres */
+#define BTN_X0 17    /* screen x of button A's centre */
+#define BTN_PITCH 74 /* px between adjacent button centres */
 #define BTN_MID_OFS(i) (BTN_X0 + (i)*BTN_PITCH - DISP_HOR / 2)
     const char *a_sym = NULL;
     switch (display_button_a_label(st->timer_state)) {
