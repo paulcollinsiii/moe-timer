@@ -42,7 +42,7 @@ extern rtc_state_t g_rtc_state;
    day's entire allocation. Bump the version on any layout change — the
    XOR checksum (carried over from the MicroPython predecessor) then
    invalidates stale-layout blobs even if NVS hands them back intact. */
-#define TIMER_SNAPSHOT_VERSION 1
+#define TIMER_SNAPSHOT_VERSION 2 /* v2: eye-rest break state + accrual */
 
 typedef struct {
     uint8_t version;
@@ -51,6 +51,9 @@ typedef struct {
     int32_t remaining_at_pause;
     int32_t allocation_sec;
     int64_t expiry_wall_time;
+    int32_t run_accum_sec;
+    int64_t run_started_wall;
+    int64_t break_expiry_wall;
     char date[11]; /* day the snapshot belongs to; stale days never restore */
 } timer_snapshot_t;
 

@@ -408,6 +408,49 @@ void test_restore_snapshot_running_past_expiry_becomes_expired(void) {
     TEST_ASSERT_TRUE(timer_tick(T0 + 500) <= 0); /* stays expired, no transition */
 }
 
+void test_snapshot_restores_mid_break_with_same_end_time(void) {
+    /* Power cycle mid-break must neither restart nor shorten the break */
+    timer_start(T0, 3600);
+    timer_start_break(T0 + 1800, 900);
+    timer_record_date(T0);
+    timer_snapshot_t snap;
+    timer_make_snapshot(&snap);
+
+    timer_reset();
+    TEST_ASSERT_TRUE(timer_restore_snapshot(&snap, T0 + 2000));
+    TEST_ASSERT_EQUAL(TIMER_BREAK, timer_get_state());
+    TEST_ASSERT_EQUAL_INT64((int64_t)T0 + 2700, g_rtc_state.break_expiry_wall);
+    TEST_ASSERT_EQUAL_INT32(700, timer_break_remaining(T0 + 2000));
+    TEST_ASSERT_EQUAL_INT32(1800, g_rtc_state.remaining_at_pause);
+}
+
+void test_snapshot_restore_break_past_end_becomes_paused(void) {
+    timer_start(T0, 3600);
+    timer_start_break(T0 + 1800, 900);
+    timer_record_date(T0);
+    timer_snapshot_t snap;
+    timer_make_snapshot(&snap);
+
+    timer_reset();
+    TEST_ASSERT_TRUE(timer_restore_snapshot(&snap, T0 + 3000)); /* past T0+2700 */
+    TEST_ASSERT_EQUAL(TIMER_PAUSED, timer_get_state());
+    TEST_ASSERT_EQUAL_INT64(0, g_rtc_state.break_expiry_wall);
+    TEST_ASSERT_EQUAL_INT32(1800, timer_tick(T0 + 3000));
+}
+
+void test_snapshot_restore_running_preserves_accrual(void) {
+    timer_start(T0, 7200);
+    timer_pause(T0 + 600);
+    timer_resume(T0 + 9000);
+    timer_record_date(T0);
+    timer_snapshot_t snap;
+    timer_make_snapshot(&snap);
+
+    timer_reset();
+    TEST_ASSERT_TRUE(timer_restore_snapshot(&snap, T0 + 9300));
+    TEST_ASSERT_EQUAL_INT32(900, timer_run_accum(T0 + 9300));
+}
+
 void test_restore_snapshot_expired_state_restores(void) {
     /* Crash after expiry must not refund time: EXPIRED snapshot restores */
     timer_start(T0, 100);
@@ -469,6 +512,9 @@ int main(void) {
     RUN_TEST(test_restore_snapshot_rejected_on_invalid_state_enum);
     RUN_TEST(test_restore_snapshot_rejected_on_implausible_expiry);
     RUN_TEST(test_restore_snapshot_rejected_all_zeros);
+    RUN_TEST(test_snapshot_restores_mid_break_with_same_end_time);
+    RUN_TEST(test_snapshot_restore_break_past_end_becomes_paused);
+    RUN_TEST(test_snapshot_restore_running_preserves_accrual);
     RUN_TEST(test_restore_snapshot_running_past_expiry_becomes_expired);
     RUN_TEST(test_restore_snapshot_expired_state_restores);
     return UNITY_END();

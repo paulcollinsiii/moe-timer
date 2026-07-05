@@ -191,6 +191,9 @@ void timer_make_snapshot(timer_snapshot_t *out) {
     out->remaining_at_pause = g_rtc_state.remaining_at_pause;
     out->allocation_sec = g_rtc_state.allocation_sec;
     out->expiry_wall_time = g_rtc_state.expiry_wall_time;
+    out->run_accum_sec = g_rtc_state.run_accum_sec;
+    out->run_started_wall = g_rtc_state.run_started_wall;
+    out->break_expiry_wall = g_rtc_state.break_expiry_wall;
     memcpy(out->date, g_rtc_state.last_date, sizeof(out->date));
     out->checksum = timer_snapshot_checksum(out);
 }
@@ -203,7 +206,7 @@ static bool snapshot_valid(const timer_snapshot_t *snap, time_t now) {
         return false;
     if (timer_snapshot_checksum(snap) != snap->checksum)
         return false;
-    if (snap->state > TIMER_EXPIRED)
+    if (snap->state > TIMER_BREAK)
         return false;
     if (snap->allocation_sec < 0 || snap->allocation_sec > SNAPSHOT_MAX_HORIZON_SEC)
         return false;
@@ -211,6 +214,11 @@ static bool snapshot_valid(const timer_snapshot_t *snap, time_t now) {
         return false;
     if (snap->state == TIMER_RUNNING) {
         int64_t delta = snap->expiry_wall_time - (int64_t)now;
+        if (delta > SNAPSHOT_MAX_HORIZON_SEC || delta < -SNAPSHOT_MAX_HORIZON_SEC)
+            return false;
+    }
+    if (snap->state == TIMER_BREAK) {
+        int64_t delta = snap->break_expiry_wall - (int64_t)now;
         if (delta > SNAPSHOT_MAX_HORIZON_SEC || delta < -SNAPSHOT_MAX_HORIZON_SEC)
             return false;
     }
@@ -232,12 +240,20 @@ bool timer_restore_snapshot(const timer_snapshot_t *snap, time_t now) {
     g_rtc_state.remaining_at_pause = snap->remaining_at_pause;
     g_rtc_state.allocation_sec = snap->allocation_sec;
     g_rtc_state.expiry_wall_time = snap->expiry_wall_time;
+    g_rtc_state.run_accum_sec = snap->run_accum_sec;
+    g_rtc_state.run_started_wall = snap->run_started_wall;
+    g_rtc_state.break_expiry_wall = snap->break_expiry_wall;
     memcpy(g_rtc_state.last_date, snap->date, sizeof(g_rtc_state.last_date));
     /* Expiry passed while powered off (snapshot saved before the EXPIRED
        transition landed): restore directly as EXPIRED so the next tick
        does not re-transition and re-fire the already-heard alert. */
     if (g_rtc_state.state == TIMER_RUNNING && g_rtc_state.expiry_wall_time <= (int64_t)now) {
         g_rtc_state.state = TIMER_EXPIRED;
+    }
+    /* Break finished while powered off: restore as PAUSED (manual resume) */
+    if (g_rtc_state.state == TIMER_BREAK && g_rtc_state.break_expiry_wall <= (int64_t)now) {
+        g_rtc_state.state = TIMER_PAUSED;
+        g_rtc_state.break_expiry_wall = 0;
     }
     return true;
 }
