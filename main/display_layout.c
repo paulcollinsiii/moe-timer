@@ -15,6 +15,18 @@ uint16_t display_bar_fill_px(int32_t remaining_sec, uint32_t allocation_sec) {
     return (uint16_t)((uint32_t)remaining_sec * BAR_FILL_MAX_PX / allocation_sec);
 }
 
+int display_battery_icon_level(int pct) {
+    if (pct <= 10)
+        return 0;
+    if (pct <= 35)
+        return 1;
+    if (pct <= 60)
+        return 2;
+    if (pct <= 85)
+        return 3;
+    return 4;
+}
+
 display_btn_label_t display_button_a_label(timer_state_t state) {
     switch (state) {
         case TIMER_RUNNING:

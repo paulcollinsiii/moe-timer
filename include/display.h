@@ -35,6 +35,8 @@ typedef enum {
 
 /* Pure layout math (display_layout.c) — host-tested */
 display_btn_label_t display_button_a_label(timer_state_t state);
+/* Battery icon bucket 0=empty..4=full; display.c maps to LV_SYMBOL_BATTERY_*. */
+int display_battery_icon_level(int pct);
 uint16_t display_bar_fill_px(int32_t remaining_sec, uint32_t allocation_sec);
 void display_format_remaining(char *buf, size_t len, int32_t remaining_sec);
 /* Invert byte columns [b0..b1] (clamped) of every row in a row-major 1bpp
