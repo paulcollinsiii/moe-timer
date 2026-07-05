@@ -201,6 +201,18 @@ static void run_expiry_alert(void) {
     vTaskDelay(pdMS_TO_TICKS(100)); /* let alert tasks observe stop flags and exit */
 }
 
+/* Full expiry sequence: big TIME'S UP screen, beeps + red pulse, then back
+   to the main layout (empty bar, TIME'S UP state in the corner) once the
+   alert is dismissed or times out — the big screen would only last until
+   the next tick redraw anyway. */
+static void fire_expiry_alert(void) {
+    display_timesup();
+    run_expiry_alert();
+    time_t now = time(NULL);
+    display_state_t st = make_state(timer_tick(now), now);
+    display_full_refresh(&st);
+}
+
 /* ---- day rollover ----------------------------------------------------- */
 
 static void handle_day_rollover(time_t *now) {
@@ -253,8 +265,7 @@ static void maybe_wait_for_expiry(void) {
         vTaskDelay(pdMS_TO_TICKS(250));
     }
     timer_tick(time(NULL)); /* RUNNING -> EXPIRED */
-    display_timesup();
-    run_expiry_alert();
+    fire_expiry_alert();
 }
 
 /* ---- wake handlers ----------------------------------------------------- */
@@ -273,8 +284,7 @@ static void handle_timer_tick(void) {
     display_state_t st = make_state(remaining, now);
 
     if (timer_get_state() == TIMER_EXPIRED && before != TIMER_EXPIRED) {
-        display_timesup();
-        run_expiry_alert();
+        fire_expiry_alert();
     } else if (timer_get_state() != before) {
         display_full_refresh(&st);
     } else {
@@ -350,8 +360,7 @@ static void handle_button_wake(void) {
     display_state_t st = make_state(remaining, now);
 
     if (timer_get_state() == TIMER_EXPIRED && before != TIMER_EXPIRED) {
-        display_timesup();
-        run_expiry_alert(); /* alert owns the NeoPixels (red pulse) */
+        fire_expiry_alert(); /* alert owns the NeoPixels (red pulse) */
     } else {
         neopixel_show_timer_state(); /* resulting state, shown during refresh */
         display_full_refresh(&st);   /* button wakes always full-refresh */

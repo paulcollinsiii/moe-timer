@@ -9,6 +9,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "lvgl.h"
+#include "sdkconfig.h"
 #include "ssd1680.h"
 
 static const char *TAG = "display";
@@ -32,6 +33,7 @@ static RTC_DATA_ATTR uint8_t s_prev_fb[SSD1680_FB_SIZE];
 static RTC_DATA_ATTR bool s_prev_fb_valid;
 static lv_display_t *s_disp;
 static bool s_initialized;
+static bool s_panel_slept; /* panel in deep sleep — must re-init before next flush */
 static ssd1680_refresh_mode_t s_pending_mode = SSD1680_REFRESH_FULL;
 
 /* Bring-up knobs: if the image is rotated 180 deg or mirrored on hardware,
@@ -72,6 +74,19 @@ static void flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map)
     (void)area;                      /* RENDER_MODE_FULL: always the whole frame */
     const uint8_t *src = px_map + 8; /* skip I1 palette header */
 
+    /* Every flush ends in panel deep sleep (mode 1, registers lost). A
+       second render in the same awake period — final-minute TIME'S UP,
+       post-alert main screen — must wake and re-init the panel first, or
+       it silently writes to a sleeping controller. */
+    if (s_panel_slept) {
+        if (ssd1680_init(&PINS) != ESP_OK) {
+            ESP_LOGE(TAG, "panel re-init failed - dropping frame");
+            lv_display_flush_ready(disp);
+            return;
+        }
+        s_panel_slept = false;
+    }
+
     /* Transpose landscape 296x128 -> panel portrait 128x296. */
     memset(s_panel_fb, 0, sizeof(s_panel_fb));
     for (int y = 0; y < DISP_VER; y++) {
@@ -107,6 +122,7 @@ static void flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map)
         }
     }
     ssd1680_sleep();
+    s_panel_slept = true;
     lv_display_flush_ready(disp);
 }
 
@@ -223,17 +239,45 @@ static void build_screen(const display_state_t *st) {
     lv_obj_set_style_text_font(rem, &lv_font_montserrat_28, 0);
     lv_obj_align(rem, LV_ALIGN_TOP_MID, 0, 58);
 
-    /* Bottom row: day-type + allocation (left), state (right) */
+    /* Status row (moved up to make room for button labels): day-type +
+       allocation (left), state (right) */
     snprintf(buf, sizeof(buf), "%s - %u min", day_type_str(st->day_type), (unsigned)(st->allocation_sec / 60));
     lv_obj_t *day = lv_label_create(scr);
     lv_label_set_text(day, buf);
     lv_obj_set_style_text_font(day, &lv_font_montserrat_12, 0);
-    lv_obj_align(day, LV_ALIGN_BOTTOM_LEFT, 4, -4);
+    lv_obj_align(day, LV_ALIGN_BOTTOM_LEFT, 4, -18);
 
     lv_obj_t *state = lv_label_create(scr);
     lv_label_set_text(state, state_str(st->timer_state));
     lv_obj_set_style_text_font(state, &lv_font_montserrat_12, 0);
-    lv_obj_align(state, LV_ALIGN_BOTTOM_RIGHT, -4, -4);
+    lv_obj_align(state, LV_ALIGN_BOTTOM_RIGHT, -4, -18);
+
+    /* Bottom edge: labels above the physical buttons (A B C D left to
+       right, 296/4 = 74 px per button -> centres at +-111 and +-37).
+       A shows the action a press will take; B only when the parent-mode
+       reset is compiled in; C unbound; D = sync. */
+    const char *a_sym = NULL;
+    if (st->timer_state == TIMER_RUNNING) {
+        a_sym = LV_SYMBOL_PAUSE;
+    } else if (st->timer_state == TIMER_IDLE || st->timer_state == TIMER_PAUSED) {
+        a_sym = LV_SYMBOL_PLAY;
+    } /* EXPIRED: A does nothing - no label */
+    if (a_sym) {
+        lv_obj_t *lbl_a = lv_label_create(scr);
+        lv_label_set_text(lbl_a, a_sym);
+        lv_obj_set_style_text_font(lbl_a, &lv_font_montserrat_12, 0);
+        lv_obj_align(lbl_a, LV_ALIGN_BOTTOM_MID, -111, -2);
+    }
+#if CONFIG_MAGTAG_PARENT_TESTING
+    lv_obj_t *lbl_b = lv_label_create(scr);
+    lv_label_set_text(lbl_b, "Reset");
+    lv_obj_set_style_text_font(lbl_b, &lv_font_montserrat_12, 0);
+    lv_obj_align(lbl_b, LV_ALIGN_BOTTOM_MID, -37, -2);
+#endif
+    lv_obj_t *lbl_d = lv_label_create(scr);
+    lv_label_set_text(lbl_d, LV_SYMBOL_REFRESH);
+    lv_obj_set_style_text_font(lbl_d, &lv_font_montserrat_12, 0);
+    lv_obj_align(lbl_d, LV_ALIGN_BOTTOM_MID, 111, -2);
 }
 
 static void render(ssd1680_refresh_mode_t mode) {

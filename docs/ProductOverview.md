@@ -132,11 +132,17 @@ All 4 buttons are configured as deep-sleep GPIO wakeup sources. Buttons are debo
 │                                                  │
 │  ████████████████████░░░░░░░░░░░░░░░░░░░░░░░░░░  │  ← row 26–50 (progress bar, 24 px tall)
 │                                                  │
-│              00:42:30 remaining             │  ← row 58–78
+│              00:42:30 remaining                  │  ← row 58–78
 │                                                  │
-│  Weekday · 60 min                    RUNNING     │  ← row 88–108
+│  Weekday · 60 min                    RUNNING     │  ← status row (moved up)
+│     ⏸        Reset                  ⟳            │  ← button labels (A B _ D)
 └──────────────────────────────────────────────────┘
 ```
+
+Button labels sit above the physical buttons: A shows the action a press
+will take (play when IDLE/PAUSED, pause when RUNNING, hidden when EXPIRED),
+"Reset" appears only when `CONFIG_MAGTAG_PARENT_TESTING=y`, C is unlabelled
+(unbound), D is the sync/refresh symbol.
 
 - **Progress bar**: full-width (280 px usable), fill proportional to `remaining/allocation`. Thick outer border.
 - **Remaining time**: centred; always `HH:MM:SS`.

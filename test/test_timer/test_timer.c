@@ -322,6 +322,22 @@ void test_restore_snapshot_rejected_all_zeros(void) {
     TEST_ASSERT_EQUAL(TIMER_IDLE, timer_get_state());
 }
 
+void test_restore_snapshot_running_past_expiry_becomes_expired(void) {
+    /* Power cut before the EXPIRED snapshot was saved: the stored state is
+       RUNNING but the expiry passed while unplugged. Restoring as RUNNING
+       would re-transition on the next tick and re-fire the alert — the
+       moment already passed, so restore directly as EXPIRED (silent). */
+    timer_start(T0, 100);
+    timer_record_date(T0);
+    timer_snapshot_t snap;
+    timer_make_snapshot(&snap);
+
+    timer_reset();
+    TEST_ASSERT_TRUE(timer_restore_snapshot(&snap, T0 + 500));
+    TEST_ASSERT_EQUAL(TIMER_EXPIRED, timer_get_state());
+    TEST_ASSERT_TRUE(timer_tick(T0 + 500) <= 0); /* stays expired, no transition */
+}
+
 void test_restore_snapshot_expired_state_restores(void) {
     /* Crash after expiry must not refund time: EXPIRED snapshot restores */
     timer_start(T0, 100);
@@ -375,6 +391,7 @@ int main(void) {
     RUN_TEST(test_restore_snapshot_rejected_on_invalid_state_enum);
     RUN_TEST(test_restore_snapshot_rejected_on_implausible_expiry);
     RUN_TEST(test_restore_snapshot_rejected_all_zeros);
+    RUN_TEST(test_restore_snapshot_running_past_expiry_becomes_expired);
     RUN_TEST(test_restore_snapshot_expired_state_restores);
     return UNITY_END();
 }

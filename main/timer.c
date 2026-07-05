@@ -174,5 +174,11 @@ bool timer_restore_snapshot(const timer_snapshot_t *snap, time_t now) {
     g_rtc_state.allocation_sec = snap->allocation_sec;
     g_rtc_state.expiry_wall_time = snap->expiry_wall_time;
     memcpy(g_rtc_state.last_date, snap->date, sizeof(g_rtc_state.last_date));
+    /* Expiry passed while powered off (snapshot saved before the EXPIRED
+       transition landed): restore directly as EXPIRED so the next tick
+       does not re-transition and re-fire the already-heard alert. */
+    if (g_rtc_state.state == TIMER_RUNNING && g_rtc_state.expiry_wall_time <= (int64_t)now) {
+        g_rtc_state.state = TIMER_EXPIRED;
+    }
     return true;
 }
