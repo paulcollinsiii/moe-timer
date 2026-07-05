@@ -381,6 +381,15 @@ void app_main(void) {
     /* MUST be first peripheral call: GPIO 21 power gate HIGH (NeoPixels off) */
     neopixel_init();
 
+    /* Panic-loop breaker: the S2 ROM USB console can panic when a host
+       port-open races boot prints (seen in bring-up). Each panic reboots,
+       re-enumerates USB, and re-races — freezing the device for as long
+       as a monitor keeps reconnecting. After a panic, stay quiet briefly
+       so the host's open completes against silence and the loop breaks. */
+    if (esp_reset_reason() == ESP_RST_PANIC) {
+        vTaskDelay(pdMS_TO_TICKS(2000));
+    }
+
     esp_err_t ret = nvs_flash_init();
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
         ESP_ERROR_CHECK(nvs_flash_erase());
