@@ -114,7 +114,46 @@ esp_err_t nvs_config_load_timer_snapshot(timer_snapshot_t *out) {
 
 /* ---- init defaults ---- */
 
+static esp_err_t reseed_all_defaults(void) {
+    esp_err_t ret;
+
+    ret = hal_nvs_write_u16("weekday_min", NVS_DEFAULT_WEEKDAY_MIN);
+    if (ret != ESP_OK)
+        return ret;
+    ret = hal_nvs_write_u16("weekend_min", NVS_DEFAULT_WEEKEND_MIN);
+    if (ret != ESP_OK)
+        return ret;
+    ret = hal_nvs_write_u16("holiday_min", NVS_DEFAULT_HOLIDAY_MIN);
+    if (ret != ESP_OK)
+        return ret;
+    ret = hal_nvs_write_str("wifi_ssid", NVS_DEFAULT_WIFI_SSID);
+    if (ret != ESP_OK)
+        return ret;
+    ret = hal_nvs_write_str("wifi_pass", NVS_DEFAULT_WIFI_PASS);
+    if (ret != ESP_OK)
+        return ret;
+    ret = hal_nvs_write_blob("holidays", NVS_DEFAULT_HOLIDAYS, strlen(NVS_DEFAULT_HOLIDAYS));
+    if (ret != ESP_OK)
+        return ret;
+    /* Stamp last: a power cut mid-reseed re-runs the whole reseed */
+    return hal_nvs_write_u16("defaults_ver", NVS_DEFAULTS_VERSION);
+}
+
 esp_err_t nvs_config_init_defaults(void) {
+    /* Version stamp: when the compile-time defaults change (bump
+       NVS_DEFAULTS_VERSION in nvs_defaults.h), overwrite everything —
+       no erase-flash needed. A missing stamp also reseeds (covers
+       devices seeded before the stamp existed). */
+    uint16_t ver = 0;
+    esp_err_t vret = hal_nvs_read_u16("defaults_ver", &ver);
+    if (vret == ESP_ERR_NVS_NOT_FOUND || (vret == ESP_OK && ver != NVS_DEFAULTS_VERSION)) {
+        return reseed_all_defaults();
+    }
+    if (vret != ESP_OK)
+        return vret;
+
+    /* Stamp current: fill in only missing keys (repairs partial state
+       without touching runtime-set values). */
     esp_err_t ret;
 
     ret = init_u16_if_missing("weekday_min", NVS_DEFAULT_WEEKDAY_MIN);

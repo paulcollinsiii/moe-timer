@@ -146,6 +146,57 @@ void test_get_weekday_min_missing_returns_default(void) {
 /* ------------------------------------------------------------------ */
 
 /* ------------------------------------------------------------------ */
+/* defaults version stamp                                              */
+/* ------------------------------------------------------------------ */
+
+void test_init_defaults_writes_version_stamp(void) {
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_init_defaults());
+    uint16_t ver = 0;
+    TEST_ASSERT_EQUAL(ESP_OK, hal_nvs_read_u16("defaults_ver", &ver));
+    TEST_ASSERT_EQUAL_UINT16(NVS_DEFAULTS_VERSION, ver);
+}
+
+void test_init_defaults_reseeds_on_version_bump(void) {
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_init_defaults());
+    /* Simulate values seeded by an older firmware build */
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_set_weekday_min(99));
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_set_wifi_ssid("old-ssid"));
+    TEST_ASSERT_EQUAL(ESP_OK, hal_nvs_write_u16("defaults_ver", NVS_DEFAULTS_VERSION - 1));
+
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_init_defaults());
+
+    uint16_t val = 0;
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_weekday_min(&val));
+    TEST_ASSERT_EQUAL_UINT16(NVS_DEFAULT_WEEKDAY_MIN, val);
+    char ssid[64];
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_wifi_ssid(ssid, sizeof(ssid)));
+    TEST_ASSERT_EQUAL_STRING(NVS_DEFAULT_WIFI_SSID, ssid);
+    uint16_t ver = 0;
+    TEST_ASSERT_EQUAL(ESP_OK, hal_nvs_read_u16("defaults_ver", &ver));
+    TEST_ASSERT_EQUAL_UINT16(NVS_DEFAULTS_VERSION, ver);
+}
+
+void test_init_defaults_missing_version_key_reseeds(void) {
+    /* Field devices seeded before the stamp existed: no defaults_ver key */
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_set_weekday_min(45));
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_init_defaults());
+    uint16_t val = 0;
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_weekday_min(&val));
+    TEST_ASSERT_EQUAL_UINT16(NVS_DEFAULT_WEEKDAY_MIN, val);
+}
+
+void test_init_defaults_same_version_preserves_values(void) {
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_init_defaults());
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_set_weekday_min(99));
+
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_init_defaults());
+
+    uint16_t val = 0;
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_weekday_min(&val));
+    TEST_ASSERT_EQUAL_UINT16(99, val); /* not clobbered */
+}
+
+/* ------------------------------------------------------------------ */
 /* timer snapshot (crash/reset recovery)                               */
 /* ------------------------------------------------------------------ */
 
@@ -197,6 +248,10 @@ int main(void) {
     RUN_TEST(test_wifi_ssid_max_length);
     RUN_TEST(test_holidays_blob_round_trip);
     RUN_TEST(test_get_weekday_min_missing_returns_default);
+    RUN_TEST(test_init_defaults_writes_version_stamp);
+    RUN_TEST(test_init_defaults_reseeds_on_version_bump);
+    RUN_TEST(test_init_defaults_missing_version_key_reseeds);
+    RUN_TEST(test_init_defaults_same_version_preserves_values);
     RUN_TEST(test_timer_snapshot_round_trip);
     RUN_TEST(test_timer_snapshot_missing_returns_not_found);
     RUN_TEST(test_timer_snapshot_rejects_wrong_version);
