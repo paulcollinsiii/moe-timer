@@ -14,6 +14,9 @@ typedef struct {
     time_t wall_time;
     time_t last_sync_time;
     uint8_t battery_pct; /* 0-100 */
+    /* Eye-rest break (valid when timer_state == TIMER_BREAK) */
+    int32_t break_remaining_sec;
+    uint32_t break_duration_sec;
 } display_state_t;
 
 #ifdef __cplusplus

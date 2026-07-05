@@ -158,6 +158,9 @@ static void neopixel_show_timer_state(void) {
         case TIMER_EXPIRED:
             neopixel_set_pixel(NP_STATE_PIXEL, 25, 0, 0);
             break;
+        case TIMER_BREAK:
+            neopixel_set_pixel(NP_STATE_PIXEL, 0, 10, 25); /* blue-cyan */
+            break;
         default:
             neopixel_set_pixel(NP_STATE_PIXEL, 10, 10, 10);
             break;

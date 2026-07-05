@@ -140,6 +140,11 @@ void test_button_a_hidden_when_expired(void) {
     TEST_ASSERT_EQUAL(DISPLAY_BTN_LABEL_NONE, display_button_a_label(TIMER_EXPIRED));
 }
 
+void test_button_a_hidden_during_break(void) {
+    /* Cannot resume early during an enforced break */
+    TEST_ASSERT_EQUAL(DISPLAY_BTN_LABEL_NONE, display_button_a_label(TIMER_BREAK));
+}
+
 /* display_fb_invert_dirty_rows: inverts band bytes only in rows where the
    frame differs from the previous frame — so the cleaning flash covers just
    the changed characters, not the whole band. */
@@ -196,6 +201,7 @@ int main(void) {
     RUN_TEST(test_button_a_shows_play_when_paused);
     RUN_TEST(test_button_a_shows_pause_when_running);
     RUN_TEST(test_button_a_hidden_when_expired);
+    RUN_TEST(test_button_a_hidden_during_break);
     RUN_TEST(test_invert_dirty_rows_only_touches_changed_rows);
     RUN_TEST(test_invert_dirty_rows_clamps_range);
     RUN_TEST(test_invert_dirty_rows_no_change_returns_zero);
