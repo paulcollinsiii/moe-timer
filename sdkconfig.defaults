@@ -1,3 +1,9 @@
+# Chip target. Must live here, not only in the generated sdkconfig:
+# deleting sdkconfig (the documented way to pick up new defaults) otherwise
+# silently falls back to plain esp32, which fails the build on S2-only
+# symbols (e.g. ESP_EXT1_WAKEUP_ANY_LOW).
+CONFIG_IDF_TARGET="esp32s2"
+
 # Immediate SNTP sync is set at runtime via esp_sntp_set_sync_mode() in
 # ntp.c — the old CONFIG_SNTP_TIME_SYNC_METHOD kconfig was removed in IDF 6.
 
