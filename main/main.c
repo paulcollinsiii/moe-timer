@@ -185,6 +185,8 @@ static display_state_t make_state(int32_t remaining, time_t now) {
         .wall_time = now,
         .last_sync_time = s_last_ntp_sync,
         .battery_pct = (uint8_t)pct,
+        .break_remaining_sec = timer_break_remaining(now),
+        .break_duration_sec = (uint32_t)CONFIG_MAGTAG_BREAK_DURATION_MIN * 60,
     };
 }
 
@@ -241,6 +243,57 @@ static void run_expiry_alert(void) {
     vTaskDelay(pdMS_TO_TICKS(100)); /* let the audio task observe its stop flag and exit */
 }
 
+/* ---- eye-rest break ---------------------------------------------------- */
+
+static void break_alarm_task(void *arg) {
+    (void)arg;
+    audio_break_alarm(); /* ~6 s, stop-flag aware */
+    s_audio_done = true;
+    vTaskDelete(NULL);
+}
+
+/* Break-start alarm: audible only (the state pixel is already blue and the
+   inverted screen carries the visual weight). Any button silences it. */
+static void run_break_alarm(void) {
+    s_audio_done = false;
+    xTaskCreate(break_alarm_task, "brk_alarm", 2048, NULL, 5, NULL);
+    bool silenced = false;
+    for (int i = 0; i < 80 && !s_audio_done && !silenced; i++) {
+        for (int b = 0; b < 4; b++) {
+            if (buttons_is_pressed((button_id_t)b)) {
+                ESP_LOGI(TAG, "Break alarm silenced by button");
+                silenced = true;
+                break;
+            }
+        }
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+    audio_stop();
+    vTaskDelay(pdMS_TO_TICKS(100)); /* let the alarm task observe the stop flag */
+}
+
+/* Returns true when a break was started (caller should go straight to
+   sleep). Persists BREAK before the alarm, same rationale as the EXPIRED
+   at-transition save. */
+static bool maybe_start_break(time_t now) {
+#if CONFIG_MAGTAG_BREAK_INTERVAL_MIN > 0
+    if (!timer_break_due(now, CONFIG_MAGTAG_BREAK_INTERVAL_MIN * 60))
+        return false;
+    ESP_LOGI(TAG, "Screen break due (accum %ld s)", (long)timer_run_accum(now));
+    timer_start_break(now, CONFIG_MAGTAG_BREAK_DURATION_MIN * 60);
+    save_timer_snapshot();
+    display_state_t st = make_state(timer_tick(now), now);
+    neopixel_show_timer_state(); /* blue during the refresh */
+    display_full_refresh(&st);   /* inverted SCREEN BREAK layout */
+    run_break_alarm();
+    neopixel_stop();
+    return true;
+#else
+    (void)now;
+    return false;
+#endif
+}
+
 /* Full expiry sequence: big TIME'S UP screen, beeps + red pulse, then back
    to the main layout (empty bar, TIME'S UP state in the corner) once the
    alert is dismissed or times out — the big screen would only last until
@@ -281,13 +334,29 @@ static void handle_day_rollover(time_t *now) {
 
 /* ---- final-minute watch ------------------------------------------------ */
 
-/* With <=60 s left, a 55 s sleep can overshoot expiry by most of a minute.
-   Stay awake instead: lock the clock with one sync, keep the state pixel
-   lit, and fire TIME'S UP within a tick of wall time. Runs at most once
-   per day (right before expiry), so the battery cost is negligible. */
+/* With <=60 s to an event, a 55 s sleep overshoots it by most of a minute.
+   Stay awake instead. Covers both the expiry (TIME'S UP within a tick of
+   wall time) and the break end (chime + PAUSED screen on time). */
 #define FINAL_MINUTE_SEC 60
 
-static void maybe_wait_for_expiry(void) {
+static void maybe_wait_for_event(void) {
+    if (timer_get_state() == TIMER_BREAK) {
+        int32_t brem = timer_break_remaining(time(NULL));
+        if (brem <= 0 || brem > FINAL_MINUTE_SEC)
+            return;
+        ESP_LOGI(TAG, "Break ends in %ld s: staying awake", (long)brem);
+        neopixel_show_timer_state();
+        while (timer_break_remaining(time(NULL)) > 0) {
+            vTaskDelay(pdMS_TO_TICKS(250));
+        }
+        time_t now = time(NULL);
+        int32_t remaining = timer_tick(now); /* BREAK -> PAUSED */
+        audio_break_over_chime();
+        display_state_t st = make_state(remaining, now);
+        display_full_refresh(&st);
+        return;
+    }
+
     if (timer_get_state() != TIMER_RUNNING)
         return;
     time_t now = time(NULL);
@@ -323,9 +392,17 @@ static void handle_timer_tick(void) {
         now = time(NULL);
     }
 
+    if (maybe_start_break(now)) {
+        enter_deep_sleep(); /* break just started; sleep through it */
+    }
+
     timer_state_t before = timer_get_state();
     int32_t remaining = timer_tick(now);
     display_state_t st = make_state(remaining, now);
+
+    if (before == TIMER_BREAK && timer_get_state() == TIMER_PAUSED) {
+        audio_break_over_chime(); /* break over — ready to resume */
+    }
 
     if (timer_get_state() == TIMER_EXPIRED && before != TIMER_EXPIRED) {
         fire_expiry_alert();
@@ -334,7 +411,7 @@ static void handle_timer_tick(void) {
     } else {
         display_update(&st); /* partial; policy promotes every 5th to full */
     }
-    maybe_wait_for_expiry();
+    maybe_wait_for_event();
     enter_deep_sleep();
 }
 
@@ -360,7 +437,9 @@ static void handle_button_wake(void) {
 
     switch (btn) {
         case BTN_A:
-            if (before == TIMER_RUNNING) {
+            if (before == TIMER_BREAK) {
+                ESP_LOGI(TAG, "button A ignored during screen break");
+            } else if (before == TIMER_RUNNING) {
                 timer_pause(now);
             } else if (before == TIMER_IDLE || before == TIMER_PAUSED) {
                 /* Start/resume immediately — waiting on NTP first confused
@@ -410,8 +489,16 @@ static void handle_button_wake(void) {
             break;
     }
 
+    if (maybe_start_break(now)) {
+        enter_deep_sleep(); /* e.g. resume with accrual already past the interval */
+    }
+
     int32_t remaining = timer_tick(now);
     display_state_t st = make_state(remaining, now);
+
+    if (before == TIMER_BREAK && timer_get_state() == TIMER_PAUSED) {
+        audio_break_over_chime(); /* break over — ready to resume */
+    }
 
     if (timer_get_state() == TIMER_EXPIRED && before != TIMER_EXPIRED) {
         fire_expiry_alert(); /* alert owns the NeoPixels (red pulse) */
@@ -423,7 +510,7 @@ static void handle_button_wake(void) {
         display_full_refresh(&st);   /* button wakes always full-refresh */
         neopixel_stop();
     }
-    maybe_wait_for_expiry();
+    maybe_wait_for_event();
     enter_deep_sleep();
 }
 
