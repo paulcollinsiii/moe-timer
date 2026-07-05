@@ -252,10 +252,16 @@ static void build_screen(const display_state_t *st) {
     lv_obj_set_style_text_font(state, &lv_font_montserrat_12, 0);
     lv_obj_align(state, LV_ALIGN_BOTTOM_RIGHT, -4, -18);
 
-    /* Bottom edge: labels above the physical buttons (A B C D left to
-       right, 296/4 = 74 px per button -> centres at +-111 and +-37).
+    /* Bottom edge: labels centred over the physical buttons. The buttons
+       sit on a 15 mm pitch on the 73.3 mm board while the display active
+       area is ~67 mm wide and centred — in screen pixels (296/66.9 mm)
+       that is a 66 px pitch starting at x=41, NOT four equal 74 px cells.
+       Tune BTN_X0/BTN_PITCH here if hardware shows the row misaligned.
        A shows the action a press will take; B only when the parent-mode
        reset is compiled in; C unbound; D = sync. */
+#define BTN_X0 41    /* screen x of button A's centre */
+#define BTN_PITCH 66 /* px between adjacent button centres */
+#define BTN_MID_OFS(i) (BTN_X0 + (i)*BTN_PITCH - DISP_HOR / 2)
     const char *a_sym = NULL;
     switch (display_button_a_label(st->timer_state)) {
         case DISPLAY_BTN_LABEL_PLAY:
@@ -271,18 +277,18 @@ static void build_screen(const display_state_t *st) {
         lv_obj_t *lbl_a = lv_label_create(scr);
         lv_label_set_text(lbl_a, a_sym);
         lv_obj_set_style_text_font(lbl_a, &lv_font_montserrat_12, 0);
-        lv_obj_align(lbl_a, LV_ALIGN_BOTTOM_MID, -111, -2);
+        lv_obj_align(lbl_a, LV_ALIGN_BOTTOM_MID, BTN_MID_OFS(0), -2);
     }
 #if CONFIG_MAGTAG_PARENT_TESTING
     lv_obj_t *lbl_b = lv_label_create(scr);
     lv_label_set_text(lbl_b, "Reset");
     lv_obj_set_style_text_font(lbl_b, &lv_font_montserrat_12, 0);
-    lv_obj_align(lbl_b, LV_ALIGN_BOTTOM_MID, -37, -2);
+    lv_obj_align(lbl_b, LV_ALIGN_BOTTOM_MID, BTN_MID_OFS(1), -2);
 #endif
     lv_obj_t *lbl_d = lv_label_create(scr);
     lv_label_set_text(lbl_d, LV_SYMBOL_REFRESH);
     lv_obj_set_style_text_font(lbl_d, &lv_font_montserrat_12, 0);
-    lv_obj_align(lbl_d, LV_ALIGN_BOTTOM_MID, 111, -2);
+    lv_obj_align(lbl_d, LV_ALIGN_BOTTOM_MID, BTN_MID_OFS(3), -2);
 }
 
 static void render(ssd1680_refresh_mode_t mode) {
