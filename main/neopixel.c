@@ -214,6 +214,10 @@ void neopixel_set_pixel(int idx, uint8_t r, uint8_t g, uint8_t b) {
     flush_pixels();
 }
 
+void neopixel_request_stop(void) {
+    s_stop_requested = true;
+}
+
 void neopixel_stop(void) {
     s_stop_requested = true;
     memset(s_pixels, 0, sizeof(s_pixels));

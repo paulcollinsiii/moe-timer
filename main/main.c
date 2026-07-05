@@ -165,10 +165,12 @@ static display_state_t make_state(int32_t remaining, time_t now) {
 /* ---- expiry alert ---------------------------------------------------- */
 
 static volatile bool s_audio_done;
+static volatile bool s_np_alert_done;
 
 static void neopixel_alert_task(void *arg) {
     (void)arg;
-    neopixel_alert_start(); /* blocks until neopixel_stop() sets its flag */
+    neopixel_alert_start(); /* loops until the stop flag; does its own final flush */
+    s_np_alert_done = true;
     vTaskDelete(NULL);
 }
 
@@ -181,6 +183,7 @@ static void audio_alert_task(void *arg) {
 
 static void run_expiry_alert(void) {
     s_audio_done = false;
+    s_np_alert_done = false;
     xTaskCreate(neopixel_alert_task, "np_alert", 2048, NULL, 5, NULL);
     xTaskCreate(audio_alert_task, "beep", 2048, NULL, 5, NULL);
 
@@ -197,8 +200,19 @@ static void run_expiry_alert(void) {
         vTaskDelay(pdMS_TO_TICKS(100));
     }
     audio_stop();
-    neopixel_stop();
-    vTaskDelay(pdMS_TO_TICKS(100)); /* let alert tasks observe stop flags and exit */
+    /* Flag only — calling neopixel_stop() here raced the alert task's own
+       flush_pixels(): two tasks on one RMT channel wedged
+       rmt_tx_wait_all_done(portMAX_DELAY) forever (device stuck awake on
+       the TIME'S UP screen, buttons dead; found in hardware smoke test). */
+    neopixel_request_stop();
+    for (int i = 0; i < 40 && !s_np_alert_done; i++) {
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
+    if (!s_np_alert_done) {
+        ESP_LOGW(TAG, "np_alert task did not finish; forcing LED off");
+    }
+    neopixel_stop();                /* single-task now — idempotent gate-off */
+    vTaskDelay(pdMS_TO_TICKS(100)); /* let the audio task observe its stop flag and exit */
 }
 
 /* Full expiry sequence: big TIME'S UP screen, beeps + red pulse, then back
