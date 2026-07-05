@@ -5,22 +5,20 @@
   },
   "workspaceFolder": "/workspaces/${localWorkspaceFolderBasename}",
   "runArgs": [
-    "--privileged"
+    "--privileged",
+    "--device=/dev/ttyACM0:/dev/ttyACM0"
   ],
   "mounts": [
     "source=/dev/bus/usb,target=/dev/bus/usb,type=bind",
-    "source=claude-code-config,target=/home/vscode/.claude,type=volume",
-    "source=platformio-packages,target=/workspaces/.pio,type=volume"
+    "source=claude-code-config,target=/home/vscode/.claude,type=volume"
   ],
   "remoteUser": "vscode",
   "containerEnv": {
-    "PLATFORMIO_CORE_DIR": "/workspaces/.pio",
     "CLAUDE_CODE_CONFIG_DIR": "/home/vscode/.claude"
   },
   "customizations": {
     "vscode": {
       "extensions": [
-        "platformio.platformio-ide",
         "ms-vscode.cpptools",
         "ms-vscode.cmake-tools",
         "twxs.cmake",

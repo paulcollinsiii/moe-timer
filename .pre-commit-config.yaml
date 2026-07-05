@@ -1,0 +1,55 @@
+default_stages: [pre-commit]
+
+# Vendored third-party code (Unity test framework) keeps upstream formatting.
+exclude: ^test/unity/
+
+repos:
+  # ── Housekeeping & branch protection ─────────────────────────────────────────
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+      - id: check-json
+      - id: check-merge-conflict
+      - id: check-added-large-files
+        args: [--maxkb=500]
+      - id: no-commit-to-branch
+        args: [--branch, main]
+
+  # ── C/C++ formatting ──────────────────────────────────────────────────────────
+  - repo: local
+    hooks:
+      - id: clang-format
+        name: clang-format (C/H files)
+        language: system
+        entry: clang-format --dry-run --Werror
+        files: \.(c|h)$
+        exclude: ^(build/|\.pio/)
+
+  # ── Static analysis ───────────────────────────────────────────────────────────
+  - repo: local
+    hooks:
+      - id: cppcheck
+        name: cppcheck static analysis
+        language: system
+        entry: cppcheck
+        args:
+          - --std=c11
+          - --enable=warning,style
+          - --suppressions-list=.cppcheck-suppressions
+          - --error-exitcode=1
+          - --inline-suppr
+          - --quiet
+        files: \.(c|h)$
+        exclude: ^(build/|\.pio/)
+
+  # ── Commit message format ─────────────────────────────────────────────────────
+  - repo: local
+    hooks:
+      - id: conventional-commit-msg
+        name: Conventional commit message
+        language: script
+        entry: scripts/check-commit-msg.sh
+        stages: [commit-msg]

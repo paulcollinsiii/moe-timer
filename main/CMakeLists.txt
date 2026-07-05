@@ -1,0 +1,31 @@
+idf_component_register(
+    SRCS
+        "main.c"
+        "timer.c"
+        "display.c"
+        "display_layout.c"
+        "ntp.c"
+        "nvs_config.c"
+        "schedule.c"
+        "buttons.c"
+        "audio.c"
+        "neopixel.c"
+        "hal_time.c"
+        "hal_nvs.c"
+    INCLUDE_DIRS
+        "."
+        "../include"
+    REQUIRES
+        nvs_flash
+        esp_wifi
+        esp_netif
+        esp_event
+        esp_timer
+        esp_driver_gpio
+        esp_driver_ledc
+        esp_driver_rmt
+        log
+        esp-tls
+        lwip
+        ssd1680
+)

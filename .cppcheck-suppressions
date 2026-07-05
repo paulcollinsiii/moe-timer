@@ -1,0 +1,18 @@
+# .cppcheck-suppressions
+# Global suppressions for ESP-IDF / embedded C false positives.
+# Format: checkId[:filename[:lineNumber]]
+# Narrow these to file-specific suppressions as the codebase grows.
+
+# ISR functions and FreeRTOS task callbacks are registered via function pointer;
+# cppcheck cannot trace these references and flags them as unused.
+unusedFunction
+
+# C89-style declarations at function top are required by some ESP-IDF headers.
+variableScope
+
+# RTC_DATA_ATTR variables (deep-sleep persistent) are initialized at first boot
+# and read after subsequent wakeups; cppcheck sees them as potentially uninitialized.
+uninitvar
+
+# Peripheral register writes (GPIO, SPI, RMT, etc.) appear as unread values.
+unreadVariable
