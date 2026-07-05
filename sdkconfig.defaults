@@ -10,6 +10,10 @@ CONFIG_ESP_CONSOLE_USB_CDC=y
 CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
 CONFIG_PARTITION_TABLE_SINGLE_APP_LARGE=y
 
+# Button B manual reset enabled (parent-testing build). Set =n for a
+# production build where only day rollover refills the allocation.
+CONFIG_MAGTAG_PARENT_TESTING=y
+
 # LVGL: 1-bit rendering for the e-paper panel
 CONFIG_LV_COLOR_DEPTH_1=y
 # Use the C library allocator instead of LVGL's 64 KB static pool — the
