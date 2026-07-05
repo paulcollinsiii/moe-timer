@@ -11,10 +11,12 @@
 /* Minimum seconds between panel refreshes (runaway protection). */
 #define SSD1680_MIN_REFRESH_INTERVAL_SEC 1
 
-/* MagTag FPC-7519rev.b panels map source 0 to RAM byte 1 (colstart = 8 px).
-   Symptom of a wrong value: image shifted 8 px along the short axis.
-   Reference: Adafruit_EPD ssd1680_fpc7519_init_code (_xram_offset = 1). */
-#define SSD1680_XRAM_OFFSET 1
+/* Hardware bring-up (2026-07): with offset 1 (Adafruit_EPD
+   ssd1680_fpc7519_init_code value) the panel shows an 8 px noise stripe at
+   source 0 — this FPC-7519rev.b panel maps source 0 to RAM byte 0.
+   Symptom of a wrong value: image shifted 8 px along the short axis, with a
+   noise stripe of never-written RAM on the edge it shifted away from. */
+#define SSD1680_XRAM_OFFSET 0
 
 typedef enum {
     SSD1680_REFRESH_FULL,    /* full inversion flash — best quality */
@@ -48,8 +50,13 @@ esp_err_t ssd1680_refresh(ssd1680_refresh_mode_t mode);
 /* Panel deep-sleep mode 1 (RAM retained). Call after every refresh. */
 esp_err_t ssd1680_sleep(void);
 
+/* True once previous-frame RAM is valid this power cycle — i.e. a partial
+   refresh would actually diff instead of being promoted to full. */
+bool ssd1680_partial_diff_ready(void);
+
 /* Pure guard logic (ssd1680_guard.c) — exposed for host tests. */
 bool ssd1680_refresh_allowed(int64_t now_sec, int64_t last_refresh_sec, int32_t min_interval_sec);
+int ssd1680_resolve_refresh_mode(int requested_mode, bool prev_frame_valid);
 
 #ifdef __cplusplus
 }

@@ -177,6 +177,180 @@ void test_is_new_day_true_on_cold_boot(void) {
     TEST_ASSERT_TRUE(timer_is_new_day(T0));
 }
 
+/* timer_shift_expiry: after an immediate start on an unsynced clock, the
+   post-start NTP sync steps time(NULL); the expiry must step with it. */
+
+void test_shift_expiry_forward_while_running(void) {
+    timer_start(T0, 3600);
+    timer_shift_expiry(120); /* clock stepped 2 min forward */
+    TEST_ASSERT_EQUAL_INT64((int64_t)T0 + 3600 + 120, g_rtc_state.expiry_wall_time);
+    TEST_ASSERT_EQUAL_INT32(3600, timer_tick(T0 + 120)); /* remaining unchanged */
+}
+
+void test_shift_expiry_backward_while_running(void) {
+    timer_start(T0, 3600);
+    timer_shift_expiry(-90);
+    TEST_ASSERT_EQUAL_INT64((int64_t)T0 + 3600 - 90, g_rtc_state.expiry_wall_time);
+}
+
+void test_shift_expiry_noop_when_paused(void) {
+    /* remaining_at_pause is a duration, not a wall time — never shifted */
+    timer_start(T0, 3600);
+    timer_pause(T0 + 1000);
+    timer_shift_expiry(120);
+    TEST_ASSERT_EQUAL_INT32(2600, g_rtc_state.remaining_at_pause);
+    TEST_ASSERT_EQUAL_INT64(0, g_rtc_state.expiry_wall_time);
+}
+
+void test_shift_expiry_noop_when_idle(void) {
+    timer_shift_expiry(120);
+    TEST_ASSERT_EQUAL_INT64(0, g_rtc_state.expiry_wall_time);
+    TEST_ASSERT_EQUAL(TIMER_IDLE, timer_get_state());
+}
+
+/* Snapshot make/restore: crash recovery — a panic wipes RTC memory, so the
+   state is persisted to NVS and restored when the stored date is today. */
+
+void test_make_snapshot_captures_running_state(void) {
+    timer_start(T0, 3600);
+    timer_record_date(T0);
+    timer_snapshot_t snap;
+    timer_make_snapshot(&snap);
+    TEST_ASSERT_EQUAL_UINT8(TIMER_SNAPSHOT_VERSION, snap.version);
+    TEST_ASSERT_EQUAL_UINT8(TIMER_RUNNING, snap.state);
+    TEST_ASSERT_EQUAL_INT64((int64_t)T0 + 3600, snap.expiry_wall_time);
+    TEST_ASSERT_EQUAL_INT32(3600, snap.allocation_sec);
+    TEST_ASSERT_EQUAL_STRING(g_rtc_state.last_date, snap.date);
+}
+
+void test_restore_snapshot_running_when_date_matches(void) {
+    timer_start(T0, 3600);
+    timer_record_date(T0);
+    timer_snapshot_t snap;
+    timer_make_snapshot(&snap);
+
+    timer_reset(); /* simulate the RTC wipe */
+    TEST_ASSERT_TRUE(timer_restore_snapshot(&snap, T0 + 500));
+    TEST_ASSERT_EQUAL(TIMER_RUNNING, timer_get_state());
+    TEST_ASSERT_EQUAL_INT64((int64_t)T0 + 3600, g_rtc_state.expiry_wall_time);
+    TEST_ASSERT_EQUAL_INT32(3600, g_rtc_state.allocation_sec);
+    TEST_ASSERT_EQUAL_STRING(snap.date, g_rtc_state.last_date);
+    TEST_ASSERT_EQUAL_INT32(3100, timer_tick(T0 + 500)); /* countdown continues */
+}
+
+void test_restore_snapshot_paused_preserves_remaining(void) {
+    timer_start(T0, 3600);
+    timer_pause(T0 + 1000); /* remaining 2600 */
+    timer_record_date(T0);
+    timer_snapshot_t snap;
+    timer_make_snapshot(&snap);
+
+    timer_reset();
+    TEST_ASSERT_TRUE(timer_restore_snapshot(&snap, T0 + 5000));
+    TEST_ASSERT_EQUAL(TIMER_PAUSED, timer_get_state());
+    TEST_ASSERT_EQUAL_INT32(2600, timer_tick(T0 + 5000));
+}
+
+void test_restore_snapshot_rejected_when_date_differs(void) {
+    timer_start(T0, 3600);
+    timer_record_date(T0);
+    timer_snapshot_t snap;
+    timer_make_snapshot(&snap);
+
+    timer_reset();
+    /* Next day: yesterday's snapshot must not refund or restore anything */
+    TEST_ASSERT_FALSE(timer_restore_snapshot(&snap, T0 + 86400));
+    TEST_ASSERT_EQUAL(TIMER_IDLE, timer_get_state());
+    TEST_ASSERT_EQUAL_INT64(0, g_rtc_state.expiry_wall_time);
+}
+
+void test_restore_snapshot_rejected_on_version_mismatch(void) {
+    timer_start(T0, 3600);
+    timer_record_date(T0);
+    timer_snapshot_t snap;
+    timer_make_snapshot(&snap);
+    snap.version = 99;
+
+    timer_reset();
+    TEST_ASSERT_FALSE(timer_restore_snapshot(&snap, T0 + 500));
+    TEST_ASSERT_EQUAL(TIMER_IDLE, timer_get_state());
+}
+
+void test_restore_snapshot_rejected_on_checksum_mismatch(void) {
+    timer_start(T0, 3600);
+    timer_record_date(T0);
+    timer_snapshot_t snap;
+    timer_make_snapshot(&snap);
+    snap.allocation_sec ^= 0x4; /* corrupt one field, checksum now stale */
+
+    timer_reset();
+    TEST_ASSERT_FALSE(timer_restore_snapshot(&snap, T0 + 500));
+    TEST_ASSERT_EQUAL(TIMER_IDLE, timer_get_state());
+}
+
+void test_restore_snapshot_rejected_on_invalid_state_enum(void) {
+    timer_start(T0, 3600);
+    timer_record_date(T0);
+    timer_snapshot_t snap;
+    timer_make_snapshot(&snap);
+    snap.state = 200;
+    snap.checksum = timer_snapshot_checksum(&snap); /* checksum passes... */
+
+    timer_reset();
+    TEST_ASSERT_FALSE(timer_restore_snapshot(&snap, T0 + 500)); /* ...state check rejects */
+    TEST_ASSERT_EQUAL(TIMER_IDLE, timer_get_state());
+}
+
+void test_restore_snapshot_rejected_on_implausible_expiry(void) {
+    timer_start(T0, 3600);
+    timer_record_date(T0);
+    timer_snapshot_t snap;
+    timer_make_snapshot(&snap);
+    snap.expiry_wall_time = (int64_t)T0 + 30 * 86400; /* 30 days out — nonsense */
+    snap.checksum = timer_snapshot_checksum(&snap);
+
+    timer_reset();
+    TEST_ASSERT_FALSE(timer_restore_snapshot(&snap, T0 + 500));
+    TEST_ASSERT_EQUAL(TIMER_IDLE, timer_get_state());
+}
+
+void test_restore_snapshot_rejected_all_zeros(void) {
+    /* All-zeros XORs to 0 — indistinguishable from blank storage; reject */
+    timer_snapshot_t snap;
+    memset(&snap, 0, sizeof(snap));
+    TEST_ASSERT_FALSE(timer_restore_snapshot(&snap, T0));
+    TEST_ASSERT_EQUAL(TIMER_IDLE, timer_get_state());
+}
+
+void test_restore_snapshot_running_past_expiry_becomes_expired(void) {
+    /* Power cut before the EXPIRED snapshot was saved: the stored state is
+       RUNNING but the expiry passed while unplugged. Restoring as RUNNING
+       would re-transition on the next tick and re-fire the alert — the
+       moment already passed, so restore directly as EXPIRED (silent). */
+    timer_start(T0, 100);
+    timer_record_date(T0);
+    timer_snapshot_t snap;
+    timer_make_snapshot(&snap);
+
+    timer_reset();
+    TEST_ASSERT_TRUE(timer_restore_snapshot(&snap, T0 + 500));
+    TEST_ASSERT_EQUAL(TIMER_EXPIRED, timer_get_state());
+    TEST_ASSERT_TRUE(timer_tick(T0 + 500) <= 0); /* stays expired, no transition */
+}
+
+void test_restore_snapshot_expired_state_restores(void) {
+    /* Crash after expiry must not refund time: EXPIRED snapshot restores */
+    timer_start(T0, 100);
+    timer_tick(T0 + 200); /* -> EXPIRED */
+    timer_record_date(T0);
+    timer_snapshot_t snap;
+    timer_make_snapshot(&snap);
+
+    timer_reset();
+    TEST_ASSERT_TRUE(timer_restore_snapshot(&snap, T0 + 500));
+    TEST_ASSERT_EQUAL(TIMER_EXPIRED, timer_get_state());
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_reset_state_is_idle);
@@ -204,5 +378,20 @@ int main(void) {
     RUN_TEST(test_is_new_day_true_on_cold_boot);
     RUN_TEST(test_needs_ntp_sync_false_immediately_after_sync);
     RUN_TEST(test_needs_ntp_sync_true_after_10_minutes);
+    RUN_TEST(test_shift_expiry_forward_while_running);
+    RUN_TEST(test_shift_expiry_backward_while_running);
+    RUN_TEST(test_shift_expiry_noop_when_paused);
+    RUN_TEST(test_shift_expiry_noop_when_idle);
+    RUN_TEST(test_make_snapshot_captures_running_state);
+    RUN_TEST(test_restore_snapshot_running_when_date_matches);
+    RUN_TEST(test_restore_snapshot_paused_preserves_remaining);
+    RUN_TEST(test_restore_snapshot_rejected_when_date_differs);
+    RUN_TEST(test_restore_snapshot_rejected_on_version_mismatch);
+    RUN_TEST(test_restore_snapshot_rejected_on_checksum_mismatch);
+    RUN_TEST(test_restore_snapshot_rejected_on_invalid_state_enum);
+    RUN_TEST(test_restore_snapshot_rejected_on_implausible_expiry);
+    RUN_TEST(test_restore_snapshot_rejected_all_zeros);
+    RUN_TEST(test_restore_snapshot_running_past_expiry_becomes_expired);
+    RUN_TEST(test_restore_snapshot_expired_state_restores);
     return UNITY_END();
 }

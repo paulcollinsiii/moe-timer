@@ -5,13 +5,17 @@
 #include "esp_log.h"
 #include "esp_rom_sys.h"
 #include "esp_sleep.h"
+#include "sdkconfig.h"
 
 static const char *TAG = "buttons";
 
+/* Adafruit MagTag pinout: A=D15, B=D14, C=D12, D=D11. Verified in hardware
+   bring-up 2026-07: with B/C swapped, physical Button C fired the BTN_B
+   (reset) action. */
 static const gpio_num_t BTN_GPIOS[4] = {
     GPIO_NUM_15, /* BTN_A */
-    GPIO_NUM_12, /* BTN_B */
-    GPIO_NUM_14, /* BTN_C */
+    GPIO_NUM_14, /* BTN_B */
+    GPIO_NUM_12, /* BTN_C */
     GPIO_NUM_11, /* BTN_D */
 };
 
@@ -41,9 +45,31 @@ void buttons_init(void) {
     }
 }
 
+/* Wake policy (UX: prevent button mashing from burning battery/refreshes):
+   C is unbound and must not even wake the device; B only wakes when the
+   parent-testing reset is compiled in. Non-wake buttons are left out of
+   the EXT1 mask AND unconfigured in the RTC domain (an open button on an
+   isolated pad draws nothing; a pull-up would leak ~70 uA while held). */
+static bool is_wake_source(int i) {
+    switch ((button_id_t)i) {
+        case BTN_C:
+            return false;
+        case BTN_B:
+#if CONFIG_MAGTAG_PARENT_TESTING
+            return true;
+#else
+            return false;
+#endif
+        default:
+            return true;
+    }
+}
+
 void buttons_configure_wakeup(void) {
     uint64_t mask = 0;
     for (int i = 0; i < 4; i++) {
+        if (!is_wake_source(i))
+            continue;
         gpio_num_t pin = BTN_GPIOS[i];
         rtc_gpio_init(pin);
         rtc_gpio_set_direction(pin, RTC_GPIO_MODE_INPUT_ONLY);

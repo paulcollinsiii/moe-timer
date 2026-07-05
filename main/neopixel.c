@@ -204,6 +204,20 @@ void neopixel_alert_start(void) {
     neopixel_stop();
 }
 
+void neopixel_set_pixel(int idx, uint8_t r, uint8_t g, uint8_t b) {
+    if (!s_rmt_chan || !s_encoder || idx < 0 || idx >= NEOPIXEL_COUNT)
+        return;
+    s_pixels[idx * 3 + 0] = g; /* GRB byte order */
+    s_pixels[idx * 3 + 1] = r;
+    s_pixels[idx * 3 + 2] = b;
+    gpio_set_level(NEOPIXEL_POWER_GPIO, 0); /* power gate ON */
+    flush_pixels();
+}
+
+void neopixel_request_stop(void) {
+    s_stop_requested = true;
+}
+
 void neopixel_stop(void) {
     s_stop_requested = true;
     memset(s_pixels, 0, sizeof(s_pixels));
