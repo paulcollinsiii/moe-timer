@@ -95,6 +95,23 @@ esp_err_t nvs_config_set_holidays(const char *blob, size_t len) {
     return hal_nvs_write_blob("holidays", blob, len);
 }
 
+/* ---- timer snapshot (crash recovery) ---- */
+
+esp_err_t nvs_config_save_timer_snapshot(const timer_snapshot_t *snap) {
+    return hal_nvs_write_blob("timer_snap", snap, sizeof(*snap));
+}
+
+esp_err_t nvs_config_load_timer_snapshot(timer_snapshot_t *out) {
+    size_t len = sizeof(*out);
+    esp_err_t ret = hal_nvs_read_blob("timer_snap", out, &len);
+    if (ret != ESP_OK)
+        return ret;
+    /* Size or version drift after a firmware update = stale layout */
+    if (len != sizeof(*out) || out->version != TIMER_SNAPSHOT_VERSION)
+        return ESP_ERR_INVALID_VERSION;
+    return ESP_OK;
+}
+
 /* ---- init defaults ---- */
 
 esp_err_t nvs_config_init_defaults(void) {

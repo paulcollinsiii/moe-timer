@@ -145,6 +145,43 @@ void test_get_weekday_min_missing_returns_default(void) {
 /* Runner                                                               */
 /* ------------------------------------------------------------------ */
 
+/* ------------------------------------------------------------------ */
+/* timer snapshot (crash/reset recovery)                               */
+/* ------------------------------------------------------------------ */
+
+void test_timer_snapshot_round_trip(void) {
+    timer_snapshot_t snap = {
+        .version = TIMER_SNAPSHOT_VERSION,
+        .state = 1, /* TIMER_RUNNING */
+        .remaining_at_pause = 0,
+        .allocation_sec = 3600,
+        .expiry_wall_time = 1767574800,
+        .date = "2026-01-05",
+    };
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_save_timer_snapshot(&snap));
+
+    timer_snapshot_t out;
+    memset(&out, 0, sizeof(out));
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_load_timer_snapshot(&out));
+    TEST_ASSERT_EQUAL_UINT8(TIMER_SNAPSHOT_VERSION, out.version);
+    TEST_ASSERT_EQUAL_UINT8(1, out.state);
+    TEST_ASSERT_EQUAL_INT32(3600, out.allocation_sec);
+    TEST_ASSERT_EQUAL_INT64(1767574800, out.expiry_wall_time);
+    TEST_ASSERT_EQUAL_STRING("2026-01-05", out.date);
+}
+
+void test_timer_snapshot_missing_returns_not_found(void) {
+    timer_snapshot_t out;
+    TEST_ASSERT_EQUAL(ESP_ERR_NVS_NOT_FOUND, nvs_config_load_timer_snapshot(&out));
+}
+
+void test_timer_snapshot_rejects_wrong_version(void) {
+    timer_snapshot_t snap = {.version = 99, .state = 1, .date = "2026-01-05"};
+    hal_nvs_write_blob("timer_snap", &snap, sizeof(snap));
+    timer_snapshot_t out;
+    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_VERSION, nvs_config_load_timer_snapshot(&out));
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_init_defaults_writes_weekday_min);
@@ -160,5 +197,8 @@ int main(void) {
     RUN_TEST(test_wifi_ssid_max_length);
     RUN_TEST(test_holidays_blob_round_trip);
     RUN_TEST(test_get_weekday_min_missing_returns_default);
+    RUN_TEST(test_timer_snapshot_round_trip);
+    RUN_TEST(test_timer_snapshot_missing_returns_not_found);
+    RUN_TEST(test_timer_snapshot_rejects_wrong_version);
     return UNITY_END();
 }

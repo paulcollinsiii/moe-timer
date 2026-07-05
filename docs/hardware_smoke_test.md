@@ -19,13 +19,16 @@ credentials.**
 3. [ ] **55 s tick**: device deep-sleeps, wakes ~55 s later, partial refresh
        (no black/white flash).
 4. [ ] **Anti-ghosting**: every 5th wake does a full refresh (visible flash).
-5. [ ] **Button A (start)**: WiFi joins, SNTP syncs, header shows sync time,
-       bar full, state `RUNNING`. With bad WiFi creds: "No sync - check WiFi"
-       screen, still IDLE.
+5. [ ] **Button A (start)**: timer starts immediately (state pixel WHITE ->
+       GREEN after ~250 ms), then WiFi joins and SNTP syncs (WiFi pixel blue);
+       header shows sync time, bar full, state `RUNNING`. With bad WiFi creds:
+       timer still starts (fail-open), WiFi pixel blinks red 3x, remaining
+       time counts down on the uncorrected clock.
 6. [ ] **Countdown**: remaining decreases ~55 s per wake; below 5 min it shows
        `M min S sec`.
 7. [ ] **Button A (pause/resume)**: pause shows `PAUSED`, remaining freezes
-       across wakes; resume continues from the frozen value.
+       across wakes; resume is immediate (AMBER -> GREEN after ~250 ms, sync
+       after) and continues from the frozen value.
 8. [ ] **Button B (reset)**: returns to IDLE with today's full allocation.
 9. [ ] **Button D (force sync)**: WiFi cycle + full refresh; sync time updates.
 10. [ ] **Button C**: wakes the device and redraws, but changes nothing
@@ -52,5 +55,13 @@ credentials.**
 18. [ ] **Idle current** (optional, needs a meter): deep-sleep current < 1 mA.
         GPIO 21 (NeoPixel gate) and GPIO 16 (amp enable) are held through
         sleep — if current is high, probe those nets first.
+19. [ ] **Crash recovery**: with the timer RUNNING, press the reset button
+        (or cause any reboot that is not a power loss). On the next boot the
+        log shows `Timer state restored from NVS snapshot` and the countdown
+        continues — the allocation is NOT refunded. A true power-off still
+        comes back IDLE (RTC clock lost, snapshot date can't validate).
+20. [ ] **Production reset gate**: with `CONFIG_MAGTAG_PARENT_TESTING=n`,
+        Button B logs `Button B reset disabled` and does not reset; the
+        allocation resets only on day rollover. (Default build: =y, B resets.)
 
 Record failures with the monitor log snippet and the step number.

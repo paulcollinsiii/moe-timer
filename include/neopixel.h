@@ -1,5 +1,7 @@
 #pragma once
 
+#include <stdint.h>
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -11,6 +13,11 @@ extern "C" {
 void neopixel_init(void);
 void neopixel_alert_start(void); /* GPIO 21 LOW, slow red pulse */
 void neopixel_stop(void);        /* stops RMT, GPIO 21 HIGH; safe if already off */
+
+/* Set one pixel (0-3), leaving the others unchanged (turns the power gate
+   ON). Call neopixel_stop() to turn everything off — never enter deep
+   sleep with the gate LOW. */
+void neopixel_set_pixel(int idx, uint8_t r, uint8_t g, uint8_t b);
 
 #ifdef __cplusplus
 }

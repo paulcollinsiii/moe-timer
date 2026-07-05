@@ -28,6 +28,12 @@ void display_sync_failed(void);                          /* "No sync - check WiF
 /* Pure layout math (display_layout.c) — host-tested */
 uint16_t display_bar_fill_px(int32_t remaining_sec, uint32_t allocation_sec);
 void display_format_remaining(char *buf, size_t len, int32_t remaining_sec);
+/* Invert byte columns [b0..b1] (clamped) of every row in a row-major 1bpp
+   framebuffer — builds the inverse pass of the ghost-cleaning double partial. */
+void display_fb_invert_byte_cols(uint8_t *fb, int rows, int row_bytes, int b0, int b1);
+/* Same, but only rows where fb differs from prev within [b0..b1] — limits
+   the cleaning flash to the characters that changed. Returns dirty rows. */
+int display_fb_invert_dirty_rows(uint8_t *fb, const uint8_t *prev, int rows, int row_bytes, int b0, int b1);
 
 #ifdef __cplusplus
 }

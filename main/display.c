@@ -6,6 +6,8 @@
 
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "lvgl.h"
 #include "ssd1680.h"
 
@@ -22,6 +24,12 @@ static const ssd1680_pins_t PINS = {
 /* LVGL I1 draw buffer: 8-byte palette header + 1 bit per pixel */
 static uint8_t s_lvbuf[8 + DISP_HOR * DISP_VER / 8];
 static uint8_t s_panel_fb[SSD1680_FB_SIZE];
+static uint8_t s_panel_clean[SSD1680_FB_SIZE]; /* inverse pass of the double partial */
+/* Previous displayed frame, kept across deep sleep so the cleaning pass can
+   be limited to the characters that actually changed. Zeroed (invalid) on
+   power-on reset, like the panel's own previous-frame RAM. */
+static RTC_DATA_ATTR uint8_t s_prev_fb[SSD1680_FB_SIZE];
+static RTC_DATA_ATTR bool s_prev_fb_valid;
 static lv_display_t *s_disp;
 static bool s_initialized;
 static ssd1680_refresh_mode_t s_pending_mode = SSD1680_REFRESH_FULL;
@@ -33,6 +41,31 @@ static ssd1680_refresh_mode_t s_pending_mode = SSD1680_REFRESH_FULL;
 
 static uint32_t tick_ms(void) {
     return (uint32_t)(esp_timer_get_time() / 1000);
+}
+
+/* Landscape row bands holding per-wake text (header date/time/sync,
+   remaining-time text). Partial refreshes drive them inverse->true — a
+   localized flash — so the text does not accumulate ghosting between the
+   every-5th-wake full refreshes. Byte-aligned outward, so bands may clean
+   up to 7 extra rows on each edge. */
+static const struct {
+    int y0, y1;
+} CLEAN_BANDS[] = {
+    {0, 22},  /* header row */
+    {54, 96}, /* remaining-time text */
+};
+
+/* Invert band bytes only where fb differs from the previous frame; returns
+   the number of dirty portrait rows (0 = nothing in the bands changed). */
+static int invert_clean_bands(uint8_t *fb) {
+    int dirty = 0;
+    for (size_t i = 0; i < sizeof(CLEAN_BANDS) / sizeof(CLEAN_BANDS[0]); i++) {
+        /* Landscape row y maps to panel x bit px (see flush_cb transpose) */
+        int p0 = ROT_FLIP_X ? (DISP_VER - 1 - CLEAN_BANDS[i].y1) : CLEAN_BANDS[i].y0;
+        int p1 = ROT_FLIP_X ? (DISP_VER - 1 - CLEAN_BANDS[i].y0) : CLEAN_BANDS[i].y1;
+        dirty += display_fb_invert_dirty_rows(fb, s_prev_fb, SSD1680_HEIGHT, SSD1680_WIDTH / 8, p0 / 8, p1 / 8);
+    }
+    return dirty;
 }
 
 static void flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map) {
@@ -53,8 +86,25 @@ static void flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map)
         }
     }
 
+    /* Ghost-cleaning double partial: pass 1 inverts the changed characters
+       inside the text bands, pass 2 restores the true frame, so those
+       pixels are driven both ways. Skipped when nothing in the bands
+       changed or when previous-frame state is invalid (driver would
+       promote to full anyway). The 1.1 s delay satisfies the driver's 1 s
+       refresh-rate guard. */
+    if (s_pending_mode == SSD1680_REFRESH_PARTIAL && ssd1680_partial_diff_ready() && s_prev_fb_valid) {
+        memcpy(s_panel_clean, s_panel_fb, sizeof(s_panel_clean));
+        if (invert_clean_bands(s_panel_clean) > 0 && ssd1680_write_framebuffer(s_panel_clean) == ESP_OK &&
+            ssd1680_refresh(SSD1680_REFRESH_PARTIAL) == ESP_OK) {
+            vTaskDelay(pdMS_TO_TICKS(1100));
+        }
+    }
+
     if (ssd1680_write_framebuffer(s_panel_fb) == ESP_OK) {
-        ssd1680_refresh(s_pending_mode); /* errors logged inside; never blocks past timeout */
+        if (ssd1680_refresh(s_pending_mode) == ESP_OK) { /* errors logged inside */
+            memcpy(s_prev_fb, s_panel_fb, sizeof(s_prev_fb));
+            s_prev_fb_valid = true;
+        }
     }
     ssd1680_sleep();
     lv_display_flush_ready(disp);
@@ -140,6 +190,8 @@ static void build_screen(const display_state_t *st) {
     lv_obj_t *hdr = lv_label_create(scr);
     lv_label_set_text(hdr, buf);
     lv_obj_set_style_text_font(hdr, &lv_font_montserrat_12, 0);
+    /* At 12 pt the ':' hugs the preceding digit — open it up slightly */
+    lv_obj_set_style_text_letter_space(hdr, 1, 0);
     lv_obj_align(hdr, LV_ALIGN_TOP_LEFT, 4, 3);
 
     if (st->last_sync_time > 0) {
@@ -153,6 +205,7 @@ static void build_screen(const display_state_t *st) {
     lv_obj_t *sync = lv_label_create(scr);
     lv_label_set_text(sync, buf);
     lv_obj_set_style_text_font(sync, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_letter_space(sync, 1, 0);
     lv_obj_align(sync, LV_ALIGN_TOP_RIGHT, -4, 3);
 
     /* Row 26-50: progress bar, 284x24 with 2 px border */

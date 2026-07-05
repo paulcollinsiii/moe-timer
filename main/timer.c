@@ -59,6 +59,16 @@ void timer_resume(time_t now) {
     g_rtc_state.state = TIMER_RUNNING;
 }
 
+void timer_shift_expiry(int64_t delta_sec) {
+    /* Only meaningful while RUNNING: the timer now starts immediately on an
+       uncorrected clock, and the post-start NTP sync may step time(NULL);
+       the expiry (a wall time) must step by the same amount so the
+       remaining duration is preserved. PAUSED stores a duration — no shift. */
+    if (g_rtc_state.state != TIMER_RUNNING || g_rtc_state.expiry_wall_time == 0)
+        return;
+    g_rtc_state.expiry_wall_time += delta_sec;
+}
+
 static void fill_date(char *buf, int year, int mon, int day) {
     buf[0] = '0' + (year / 1000) % 10;
     buf[1] = '0' + (year / 100) % 10;
@@ -97,4 +107,72 @@ bool timer_needs_ntp_sync(time_t now) {
 
 void timer_record_ntp_sync(time_t now) {
     g_rtc_state.next_ntp_sync = (int64_t)now + NTP_SYNC_INTERVAL_SEC;
+}
+
+/* ---- crash-recovery snapshot ---- */
+
+/* Widest plausible expiry horizon (also bounds allocation): corrupt data
+   that slips past the checksum still cannot restore a nonsense timer. */
+#define SNAPSHOT_MAX_HORIZON_SEC (7 * 86400)
+
+uint8_t timer_snapshot_checksum(const timer_snapshot_t *snap) {
+    timer_snapshot_t tmp = *snap;
+    tmp.checksum = 0;
+    const uint8_t *p = (const uint8_t *)&tmp;
+    uint8_t x = 0;
+    for (size_t i = 0; i < sizeof(tmp); i++)
+        x ^= p[i];
+    return x;
+}
+
+void timer_make_snapshot(timer_snapshot_t *out) {
+    memset(out, 0, sizeof(*out));
+    out->version = TIMER_SNAPSHOT_VERSION;
+    out->state = (uint8_t)g_rtc_state.state;
+    out->remaining_at_pause = g_rtc_state.remaining_at_pause;
+    out->allocation_sec = g_rtc_state.allocation_sec;
+    out->expiry_wall_time = g_rtc_state.expiry_wall_time;
+    memcpy(out->date, g_rtc_state.last_date, sizeof(out->date));
+    out->checksum = timer_snapshot_checksum(out);
+}
+
+static bool snapshot_valid(const timer_snapshot_t *snap, time_t now) {
+    if (snap->version != TIMER_SNAPSHOT_VERSION)
+        return false;
+    /* All-zeros XORs to 0 — indistinguishable from blank storage */
+    if (snap->state == 0 && snap->expiry_wall_time == 0 && snap->date[0] == '\0')
+        return false;
+    if (timer_snapshot_checksum(snap) != snap->checksum)
+        return false;
+    if (snap->state > TIMER_EXPIRED)
+        return false;
+    if (snap->allocation_sec < 0 || snap->allocation_sec > SNAPSHOT_MAX_HORIZON_SEC)
+        return false;
+    if (snap->remaining_at_pause < 0 || snap->remaining_at_pause > snap->allocation_sec)
+        return false;
+    if (snap->state == TIMER_RUNNING) {
+        int64_t delta = snap->expiry_wall_time - (int64_t)now;
+        if (delta > SNAPSHOT_MAX_HORIZON_SEC || delta < -SNAPSHOT_MAX_HORIZON_SEC)
+            return false;
+    }
+    return true;
+}
+
+bool timer_restore_snapshot(const timer_snapshot_t *snap, time_t now) {
+    if (!snapshot_valid(snap, now))
+        return false;
+    /* Stale day: never restore yesterday's timer (rollover will reset) */
+    struct tm tm_now;
+    localtime_r(&now, &tm_now);
+    char today[11];
+    fill_date(today, tm_now.tm_year + 1900, tm_now.tm_mon + 1, tm_now.tm_mday);
+    if (strcmp(today, snap->date) != 0)
+        return false;
+
+    g_rtc_state.state = (timer_state_t)snap->state;
+    g_rtc_state.remaining_at_pause = snap->remaining_at_pause;
+    g_rtc_state.allocation_sec = snap->allocation_sec;
+    g_rtc_state.expiry_wall_time = snap->expiry_wall_time;
+    memcpy(g_rtc_state.last_date, snap->date, sizeof(g_rtc_state.last_date));
+    return true;
 }

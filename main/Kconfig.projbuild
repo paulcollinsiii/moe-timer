@@ -1,0 +1,21 @@
+menu "MagTag Timer"
+
+    config MAGTAG_SYNC_LED_FEEDBACK
+        bool "NeoPixel feedback during NTP sync"
+        default y
+        help
+            Show blue on the NeoPixels while WiFi is up and SNTP sync is in
+            progress, and blink red three times if the sync fails. Useful
+            during bring-up/debugging; disable for production builds
+            (CONFIG_MAGTAG_SYNC_LED_FEEDBACK=n in sdkconfig.defaults).
+
+    config MAGTAG_PARENT_TESTING
+        bool "Button B manually resets the timer"
+        default y
+        help
+            Testing convenience: Button B resets the timer to IDLE with the
+            full daily allocation. Disable for production builds so the
+            allocation only resets on day rollover — otherwise the timer's
+            user could refund their own screen time.
+
+endmenu
