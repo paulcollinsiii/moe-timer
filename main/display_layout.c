@@ -3,6 +3,8 @@
 #include <stdint.h>
 #include <stdio.h>
 
+#include "display.h"
+
 #define BAR_FILL_MAX_PX 280u
 
 uint16_t display_bar_fill_px(int32_t remaining_sec, uint32_t allocation_sec) {
@@ -11,6 +13,18 @@ uint16_t display_bar_fill_px(int32_t remaining_sec, uint32_t allocation_sec) {
     if ((uint32_t)remaining_sec >= allocation_sec)
         return BAR_FILL_MAX_PX;
     return (uint16_t)((uint32_t)remaining_sec * BAR_FILL_MAX_PX / allocation_sec);
+}
+
+display_btn_label_t display_button_a_label(timer_state_t state) {
+    switch (state) {
+        case TIMER_RUNNING:
+            return DISPLAY_BTN_LABEL_PAUSE;
+        case TIMER_IDLE:
+        case TIMER_PAUSED:
+            return DISPLAY_BTN_LABEL_PLAY;
+        default:
+            return DISPLAY_BTN_LABEL_NONE; /* EXPIRED: a press does nothing */
+    }
 }
 
 void display_fb_invert_byte_cols(uint8_t *fb, int rows, int row_bytes, int b0, int b1) {

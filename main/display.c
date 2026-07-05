@@ -257,11 +257,16 @@ static void build_screen(const display_state_t *st) {
        A shows the action a press will take; B only when the parent-mode
        reset is compiled in; C unbound; D = sync. */
     const char *a_sym = NULL;
-    if (st->timer_state == TIMER_RUNNING) {
-        a_sym = LV_SYMBOL_PAUSE;
-    } else if (st->timer_state == TIMER_IDLE || st->timer_state == TIMER_PAUSED) {
-        a_sym = LV_SYMBOL_PLAY;
-    } /* EXPIRED: A does nothing - no label */
+    switch (display_button_a_label(st->timer_state)) {
+        case DISPLAY_BTN_LABEL_PLAY:
+            a_sym = LV_SYMBOL_PLAY;
+            break;
+        case DISPLAY_BTN_LABEL_PAUSE:
+            a_sym = LV_SYMBOL_PAUSE;
+            break;
+        default:
+            break;
+    }
     if (a_sym) {
         lv_obj_t *lbl_a = lv_label_create(scr);
         lv_label_set_text(lbl_a, a_sym);
