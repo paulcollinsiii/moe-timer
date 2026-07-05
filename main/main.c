@@ -27,6 +27,14 @@ static const char *TAG = "main";
 
 static RTC_DATA_ATTR time_t s_last_ntp_sync;
 
+/* Held-through-sleep guard: EXT1 ANY_LOW is level-triggered, so a button
+   still held when the release-wait in enter_deep_sleep() times out (3 s)
+   re-wakes the chip instantly and would re-fire its action. Record what
+   was held at sleep entry; an immediate re-wake by one of those buttons
+   is a continuation to ignore, not a new press. */
+static RTC_DATA_ATTR uint8_t s_held_mask_at_sleep;
+static RTC_DATA_ATTR int64_t s_sleep_entry_time;
+
 /* Persist the timer to NVS so a panic/reset (which wipes RTC memory)
    cannot refund the day's allocation. Write only on change — snapshot
    fields are stable across routine RUNNING ticks, so this costs flash
@@ -74,6 +82,16 @@ static void enter_deep_sleep(void) {
             break;
         vTaskDelay(pdMS_TO_TICKS(100));
     }
+
+    /* Snapshot still-held buttons for the continuation guard. Must read
+       BEFORE buttons_configure_wakeup() switches the pads to the RTC mux
+       (digital gpio_get_level is unreliable after that). */
+    s_held_mask_at_sleep = 0;
+    for (int b = 0; b < 4; b++) {
+        if (buttons_is_pressed((button_id_t)b))
+            s_held_mask_at_sleep |= (uint8_t)(1u << b);
+    }
+    s_sleep_entry_time = (int64_t)time(NULL);
 
     /* No code path may sleep with the NeoPixel gate LOW — the hold below
        would keep the LEDs powered all night. */
@@ -313,13 +331,23 @@ static void handle_timer_tick(void) {
 }
 
 static void handle_button_wake(void) {
+    button_id_t btn = buttons_get_wakeup_button();
+
+    /* Continuation of a hold, not a new press: same button as at sleep
+       entry and the sleep lasted no time at all. Skip all action AND
+       display work (a hold would otherwise churn the panel every ~3 s)
+       and go back to waiting for release. */
+    if (btn != BTN_NONE && (s_held_mask_at_sleep & (1u << (int)btn)) && (int64_t)time(NULL) - s_sleep_entry_time <= 2) {
+        ESP_LOGI(TAG, "button %d still held from previous wake - ignoring", (int)btn);
+        enter_deep_sleep(); /* does not return */
+    }
+
     /* Immediate "button heard" ack — current state colour, updated to the
        resulting state below once the action has run. */
     neopixel_show_timer_state();
 
     time_t now = time(NULL);
     handle_day_rollover(&now);
-    button_id_t btn = buttons_get_wakeup_button();
     timer_state_t before = timer_get_state();
 
     switch (btn) {

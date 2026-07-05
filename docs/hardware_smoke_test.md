@@ -49,8 +49,11 @@ credentials.**
 14. [ ] **Panel protection**: mash buttons rapidly — refreshes serialize, log
         shows `refresh rejected` if under 1 s apart, no crash.
 15. [ ] **Held-button dismissal**: dismiss the expiry alert while *holding*
-        each button — the hold must not re-fire the button's action after the
-        device sleeps and re-wakes (enter_deep_sleep waits for release).
+        each button (also try holding two at once) — the hold must not
+        re-fire the button's action. enter_deep_sleep waits up to 3 s for
+        release, then sleeps with the held mask recorded; instant re-wakes
+        by a recorded button log `still held from previous wake - ignoring`
+        and loop harmlessly until release.
 16. [ ] **Buttons after first sleep cycle**: after at least one full
         sleep/wake cycle, verify buttons still read correctly during an alert
         (guards the RTC pad-hold release in buttons_init).
