@@ -13,6 +13,7 @@ typedef struct {
     day_type_t day_type;
     time_t wall_time;
     time_t last_sync_time;
+    uint8_t battery_pct; /* 0-100 */
 } display_state_t;
 
 #ifdef __cplusplus

@@ -3,6 +3,7 @@
 #include <time.h>
 
 #include "audio.h"
+#include "battery.h"
 #include "buttons.h"
 #include "display.h"
 #include "driver/gpio.h"
@@ -170,6 +171,9 @@ static display_state_t make_state(int32_t remaining, time_t now) {
     if (timer_get_state() == TIMER_IDLE) {
         remaining = (int32_t)alloc;
     }
+    int mv = battery_read_mv();
+    int pct = battery_percent_from_mv(mv);
+    ESP_LOGI(TAG, "battery: %d mV (%d%%)", mv, pct);
     return (display_state_t){
         .remaining_sec = remaining,
         .allocation_sec = alloc,
@@ -177,6 +181,7 @@ static display_state_t make_state(int32_t remaining, time_t now) {
         .day_type = dt,
         .wall_time = now,
         .last_sync_time = s_last_ntp_sync,
+        .battery_pct = (uint8_t)pct,
     };
 }
 
@@ -448,6 +453,7 @@ void app_main(void) {
     try_restore_timer_snapshot(time(NULL));
 
     buttons_init();
+    battery_init();
     audio_init();
     display_init();
 

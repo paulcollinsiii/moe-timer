@@ -240,12 +240,21 @@ static void build_screen(const display_state_t *st) {
     lv_bar_set_value(bar, display_bar_fill_px(st->remaining_sec, st->allocation_sec), LV_ANIM_OFF);
     style_bar(bar);
 
-    /* Row 58-86: remaining time, centred */
+    /* Row 58-86: battery (left, 12 pt) + remaining time (right, 28 pt) */
+    static const char *BATT_SYMS[] = {LV_SYMBOL_BATTERY_EMPTY, LV_SYMBOL_BATTERY_1, LV_SYMBOL_BATTERY_2,
+                                      LV_SYMBOL_BATTERY_3, LV_SYMBOL_BATTERY_FULL};
+    snprintf(buf, sizeof(buf), "%s %u%%", BATT_SYMS[display_battery_icon_level(st->battery_pct)],
+             (unsigned)st->battery_pct);
+    lv_obj_t *batt = lv_label_create(scr);
+    lv_label_set_text(batt, buf);
+    lv_obj_set_style_text_font(batt, &lv_font_montserrat_12, 0);
+    lv_obj_align(batt, LV_ALIGN_TOP_LEFT, 4, 66);
+
     display_format_remaining(buf, sizeof(buf), st->remaining_sec);
     lv_obj_t *rem = lv_label_create(scr);
     lv_label_set_text(rem, buf);
     lv_obj_set_style_text_font(rem, &lv_font_montserrat_28, 0);
-    lv_obj_align(rem, LV_ALIGN_TOP_MID, 0, 58);
+    lv_obj_align(rem, LV_ALIGN_TOP_RIGHT, -4, 58);
 
     /* Status row (moved up to make room for button labels): day-type +
        allocation (left), state (right) */
