@@ -238,9 +238,9 @@ static void run_expiry_alert(void) {
     neopixel_alert_pulse_begin(248, 0, 0); /* red; task + teardown owned by the module */
     xTaskCreate(audio_alert_task, "beep", 2048, NULL, 5, NULL);
 
-    /* Poll for dismissal; cap slightly past the 15 s sequence */
+    /* Poll for dismissal; cap slightly past the alarm (3 s per cycle) */
     bool dismissed = false;
-    for (int i = 0; i < 160 && !s_audio_done && !dismissed; i++) {
+    for (int i = 0; i < CONFIG_MAGTAG_EXPIRY_ALARM_CYCLES * 30 + 10 && !s_audio_done && !dismissed; i++) {
         for (int b = 0; b < 4; b++) {
             if (buttons_is_pressed((button_id_t)b)) {
                 ESP_LOGI(TAG, "Alert dismissed by button");
@@ -271,8 +271,9 @@ static void run_break_alarm(void) {
     s_audio_done = false;
     neopixel_alert_pulse_begin(0, 150, 220); /* cyan — matches the BREAK identity */
     xTaskCreate(break_alarm_task, "brk_alarm", 2048, NULL, 5, NULL);
+    /* Cap slightly past the alarm (~2.2 s per cycle) */
     bool silenced = false;
-    for (int i = 0; i < 80 && !s_audio_done && !silenced; i++) {
+    for (int i = 0; i < CONFIG_MAGTAG_BREAK_ALARM_CYCLES * 22 + 10 && !s_audio_done && !silenced; i++) {
         for (int b = 0; b < 4; b++) {
             if (buttons_is_pressed((button_id_t)b)) {
                 ESP_LOGI(TAG, "Break alarm silenced by button");
