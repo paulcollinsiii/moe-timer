@@ -38,6 +38,7 @@ CONFIG_MAGTAG_IDLE_SYNC_INTERVAL_MIN=60
 # Status NeoPixels dark 22:30-08:00 local (HHMM; start == end disables)
 CONFIG_MAGTAG_QUIET_START_HHMM=2230
 CONFIG_MAGTAG_QUIET_END_HHMM=800
+CONFIG_MAGTAG_STATUS_LED_BRIGHTNESS=100
 
 # Larger font for the inverted break-screen footer (12 pt renders poorly
 # white-on-black on e-ink)

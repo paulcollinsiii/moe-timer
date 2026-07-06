@@ -150,9 +150,8 @@ static void enter_deep_sleep(void) {
 /* WiFi lifecycle is entirely inside ntp_sync(): init->connect->sync->deinit */
 static esp_err_t try_ntp_sync(void) {
 #if CONFIG_MAGTAG_SYNC_LED_FEEDBACK
-    bool leds = !status_leds_quiet();
-    if (leds)
-        neopixel_set_pixel(NP_WIFI_PIXEL, 0, 0, 20); /* blue: sync in progress */
+    /* status class: quiet hours + brightness handled inside the module */
+    neopixel_status_pixel(NP_WIFI_PIXEL, 0, 0, 20); /* blue: sync in progress */
 #endif
     esp_err_t ret = ntp_sync();
     if (ret == ESP_OK) {
@@ -161,10 +160,10 @@ static esp_err_t try_ntp_sync(void) {
     } else {
         ESP_LOGW(TAG, "NTP sync failed: %s", esp_err_to_name(ret));
 #if CONFIG_MAGTAG_SYNC_LED_FEEDBACK
-        for (int i = 0; leds && i < 3; i++) {
-            neopixel_set_pixel(NP_WIFI_PIXEL, 30, 0, 0);
+        for (int i = 0; i < 3; i++) {
+            neopixel_status_pixel(NP_WIFI_PIXEL, 30, 0, 0);
             vTaskDelay(pdMS_TO_TICKS(150));
-            neopixel_set_pixel(NP_WIFI_PIXEL, 0, 0, 0);
+            neopixel_status_pixel(NP_WIFI_PIXEL, 0, 0, 0);
             vTaskDelay(pdMS_TO_TICKS(150));
         }
 #endif
@@ -172,33 +171,30 @@ static esp_err_t try_ntp_sync(void) {
 #if CONFIG_MAGTAG_SYNC_LED_FEEDBACK
     /* Clear only the WiFi pixel — the state pixel stays lit through the
        e-ink refresh; enter_deep_sleep() guarantees the gate goes HIGH. */
-    if (leds)
-        neopixel_set_pixel(NP_WIFI_PIXEL, 0, 0, 0);
+    neopixel_status_pixel(NP_WIFI_PIXEL, 0, 0, 0);
 #endif
     return ret;
 }
 
 /* Traffic-light state feedback while the slow e-ink refresh runs:
    RUNNING = green, PAUSED = amber, EXPIRED = red, BREAK = cyan,
-   IDLE = white. Dark during quiet hours. */
+   IDLE = white. Status class — quiet hours handled by the module. */
 static void neopixel_show_timer_state(void) {
-    if (status_leds_quiet())
-        return;
     switch (timer_get_state()) {
         case TIMER_RUNNING:
-            neopixel_set_pixel(NP_STATE_PIXEL, 0, 20, 0);
+            neopixel_status_pixel(NP_STATE_PIXEL, 0, 20, 0);
             break;
         case TIMER_PAUSED:
-            neopixel_set_pixel(NP_STATE_PIXEL, 25, 15, 0);
+            neopixel_status_pixel(NP_STATE_PIXEL, 25, 15, 0);
             break;
         case TIMER_EXPIRED:
-            neopixel_set_pixel(NP_STATE_PIXEL, 25, 0, 0);
+            neopixel_status_pixel(NP_STATE_PIXEL, 25, 0, 0);
             break;
         case TIMER_BREAK:
-            neopixel_set_pixel(NP_STATE_PIXEL, 0, 10, 25); /* blue-cyan */
+            neopixel_status_pixel(NP_STATE_PIXEL, 0, 10, 25); /* blue-cyan */
             break;
         default:
-            neopixel_set_pixel(NP_STATE_PIXEL, 10, 10, 10);
+            neopixel_status_pixel(NP_STATE_PIXEL, 10, 10, 10);
             break;
     }
 }
@@ -229,14 +225,6 @@ static display_state_t make_state(int32_t remaining, time_t now) {
 /* ---- expiry alert ---------------------------------------------------- */
 
 static volatile bool s_audio_done;
-static volatile bool s_np_alert_done;
-
-static void neopixel_alert_task(void *arg) {
-    (void)arg;
-    neopixel_alert_start(); /* loops until the stop flag; does its own final flush */
-    s_np_alert_done = true;
-    vTaskDelete(NULL);
-}
 
 static void audio_alert_task(void *arg) {
     (void)arg;
@@ -247,8 +235,7 @@ static void audio_alert_task(void *arg) {
 
 static void run_expiry_alert(void) {
     s_audio_done = false;
-    s_np_alert_done = false;
-    xTaskCreate(neopixel_alert_task, "np_alert", 2048, NULL, 5, NULL);
+    neopixel_alert_pulse_begin(248, 0, 0); /* red; task + teardown owned by the module */
     xTaskCreate(audio_alert_task, "beep", 2048, NULL, 5, NULL);
 
     /* Poll for dismissal; cap slightly past the 15 s sequence */
@@ -264,18 +251,7 @@ static void run_expiry_alert(void) {
         vTaskDelay(pdMS_TO_TICKS(100));
     }
     audio_stop();
-    /* Flag only — calling neopixel_stop() here raced the alert task's own
-       flush_pixels(): two tasks on one RMT channel wedged
-       rmt_tx_wait_all_done(portMAX_DELAY) forever (device stuck awake on
-       the TIME'S UP screen, buttons dead; found in hardware smoke test). */
-    neopixel_request_stop();
-    for (int i = 0; i < 40 && !s_np_alert_done; i++) {
-        vTaskDelay(pdMS_TO_TICKS(50));
-    }
-    if (!s_np_alert_done) {
-        ESP_LOGW(TAG, "np_alert task did not finish; forcing LED off");
-    }
-    neopixel_stop();                /* single-task now — idempotent gate-off */
+    neopixel_alert_pulse_end();
     vTaskDelay(pdMS_TO_TICKS(100)); /* let the audio task observe its stop flag and exit */
 }
 
@@ -288,21 +264,12 @@ static void break_alarm_task(void *arg) {
     vTaskDelete(NULL);
 }
 
-static void break_pulse_task(void *arg) {
-    (void)arg;
-    neopixel_pulse_start(0, 150, 220); /* cyan — matches the BREAK identity */
-    s_np_alert_done = true;
-    vTaskDelete(NULL);
-}
-
 /* Break-start alarm: beeps + cyan pulse. Alert-class, so it fires during
    quiet hours (like the expiry alert — it accompanies an audible alarm).
-   Any button silences it. Teardown uses the request/done handshake — a
-   direct neopixel_stop() would race the pulse task's RMT flush. */
+   Any button silences it. */
 static void run_break_alarm(void) {
     s_audio_done = false;
-    s_np_alert_done = false;
-    xTaskCreate(break_pulse_task, "brk_pulse", 2048, NULL, 5, NULL);
+    neopixel_alert_pulse_begin(0, 150, 220); /* cyan — matches the BREAK identity */
     xTaskCreate(break_alarm_task, "brk_alarm", 2048, NULL, 5, NULL);
     bool silenced = false;
     for (int i = 0; i < 80 && !s_audio_done && !silenced; i++) {
@@ -316,14 +283,7 @@ static void run_break_alarm(void) {
         vTaskDelay(pdMS_TO_TICKS(100));
     }
     audio_stop();
-    neopixel_request_stop();
-    for (int i = 0; i < 40 && !s_np_alert_done; i++) {
-        vTaskDelay(pdMS_TO_TICKS(50));
-    }
-    if (!s_np_alert_done) {
-        ESP_LOGW(TAG, "brk_pulse task did not finish; forcing LED off");
-    }
-    neopixel_stop();                /* single-task now — idempotent gate-off */
+    neopixel_alert_pulse_end();
     vTaskDelay(pdMS_TO_TICKS(100)); /* let the alarm task observe the stop flag */
 }
 
@@ -579,6 +539,8 @@ static void handle_button_wake(void) {
 void app_main(void) {
     /* MUST be first peripheral call: GPIO 21 power gate HIGH (NeoPixels off) */
     neopixel_init();
+    neopixel_set_quiet_cb(status_leds_quiet);
+    neopixel_set_status_brightness(CONFIG_MAGTAG_STATUS_LED_BRIGHTNESS);
 
     /* Panic-loop breaker: the S2 ROM USB console can panic when a host
        port-open races boot prints (seen in bring-up). Each panic reboots,

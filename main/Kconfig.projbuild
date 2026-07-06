@@ -69,6 +69,15 @@ menu "MagTag Timer"
             long intervals make the displayed clock visibly wrong.
             RUNNING keeps its own fixed 10-minute cadence.
 
+    config MAGTAG_STATUS_LED_BRIGHTNESS
+        int "Status NeoPixel brightness (percent)"
+        default 100
+        range 5 100
+        help
+            Percent scale applied to status pixels (state colour, WiFi sync
+            feedback, final-countdown binary display). Alert pulses (expiry
+            red, break cyan) are NOT scaled — they accompany alarms.
+
     config MAGTAG_QUIET_START_HHMM
         int "NeoPixel quiet hours start (HHMM, 24h)"
         default 2230
