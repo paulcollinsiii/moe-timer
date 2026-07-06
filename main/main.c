@@ -17,6 +17,7 @@
 #include "ntp.h"
 #include "nvs_config.h"
 #include "nvs_flash.h"
+#include "quiet_hours.h"
 #include "schedule.h"
 #include "timer.h"
 
@@ -25,6 +26,18 @@ static const char *TAG = "main";
 /* Compile-time timezone (ProductOverview section 1) */
 #define MAGTAG_TZ "EST5EDT,M3.2.0,M11.1.0"
 #define WAKE_INTERVAL_US (55ULL * 1000000ULL)
+/* IDLE shows only the clock — sync hourly instead of every 10 min */
+#define IDLE_SYNC_INTERVAL_SEC 3600
+
+/* Status pixels stay dark during configured quiet hours (alert pulses are
+   exempt — they accompany an audible, dismissable alarm). */
+static bool status_leds_quiet(void) {
+    time_t now = time(NULL);
+    struct tm tm;
+    localtime_r(&now, &tm);
+    return quiet_hours_active(tm.tm_hour * 60 + tm.tm_min, quiet_hhmm_to_minutes(CONFIG_MAGTAG_QUIET_START_HHMM),
+                              quiet_hhmm_to_minutes(CONFIG_MAGTAG_QUIET_END_HHMM));
+}
 
 static RTC_DATA_ATTR time_t s_last_ntp_sync;
 
@@ -106,8 +119,20 @@ static void enter_deep_sleep(void) {
     gpio_deep_sleep_hold_en();
 
     buttons_configure_wakeup();
-    esp_sleep_enable_timer_wakeup(WAKE_INTERVAL_US);
-    ESP_LOGI(TAG, "Entering deep sleep");
+
+    /* IDLE shows only the wall clock, so align wakes to minute boundaries:
+       the header time then flips in step with real clocks. Other states
+       keep the fixed ~55 s cadence (their countdowns aren't minute-aligned
+       anyway, and RUNNING must not stretch the tick near expiry). */
+    uint64_t sleep_us = WAKE_INTERVAL_US;
+    if (timer_get_state() == TIMER_IDLE) {
+        int to_boundary = 60 - (int)(time(NULL) % 60);
+        if (to_boundary < 5)
+            to_boundary += 60; /* too close — take the following minute */
+        sleep_us = (uint64_t)to_boundary * 1000000ULL;
+    }
+    esp_sleep_enable_timer_wakeup(sleep_us);
+    ESP_LOGI(TAG, "Entering deep sleep (%llu s)", (unsigned long long)(sleep_us / 1000000ULL));
     esp_deep_sleep_start();
 }
 
@@ -120,7 +145,9 @@ static void enter_deep_sleep(void) {
 /* WiFi lifecycle is entirely inside ntp_sync(): init->connect->sync->deinit */
 static esp_err_t try_ntp_sync(void) {
 #if CONFIG_MAGTAG_SYNC_LED_FEEDBACK
-    neopixel_set_pixel(NP_WIFI_PIXEL, 0, 0, 20); /* blue: sync in progress */
+    bool leds = !status_leds_quiet();
+    if (leds)
+        neopixel_set_pixel(NP_WIFI_PIXEL, 0, 0, 20); /* blue: sync in progress */
 #endif
     esp_err_t ret = ntp_sync();
     if (ret == ESP_OK) {
@@ -129,7 +156,7 @@ static esp_err_t try_ntp_sync(void) {
     } else {
         ESP_LOGW(TAG, "NTP sync failed: %s", esp_err_to_name(ret));
 #if CONFIG_MAGTAG_SYNC_LED_FEEDBACK
-        for (int i = 0; i < 3; i++) {
+        for (int i = 0; leds && i < 3; i++) {
             neopixel_set_pixel(NP_WIFI_PIXEL, 30, 0, 0);
             vTaskDelay(pdMS_TO_TICKS(150));
             neopixel_set_pixel(NP_WIFI_PIXEL, 0, 0, 0);
@@ -140,14 +167,18 @@ static esp_err_t try_ntp_sync(void) {
 #if CONFIG_MAGTAG_SYNC_LED_FEEDBACK
     /* Clear only the WiFi pixel — the state pixel stays lit through the
        e-ink refresh; enter_deep_sleep() guarantees the gate goes HIGH. */
-    neopixel_set_pixel(NP_WIFI_PIXEL, 0, 0, 0);
+    if (leds)
+        neopixel_set_pixel(NP_WIFI_PIXEL, 0, 0, 0);
 #endif
     return ret;
 }
 
 /* Traffic-light state feedback while the slow e-ink refresh runs:
-   RUNNING = green, PAUSED = amber, EXPIRED = red, IDLE = white. */
+   RUNNING = green, PAUSED = amber, EXPIRED = red, BREAK = cyan,
+   IDLE = white. Dark during quiet hours. */
 static void neopixel_show_timer_state(void) {
+    if (status_leds_quiet())
+        return;
     switch (timer_get_state()) {
         case TIMER_RUNNING:
             neopixel_set_pixel(NP_STATE_PIXEL, 0, 20, 0);
@@ -388,6 +419,12 @@ static void handle_timer_tick(void) {
     handle_day_rollover(&now);
 
     if (timer_get_state() == TIMER_RUNNING && timer_needs_ntp_sync(now)) {
+        try_ntp_sync();
+        now = time(NULL);
+    } else if (timer_get_state() == TIMER_IDLE &&
+               (s_last_ntp_sync == 0 || now - s_last_ntp_sync >= IDLE_SYNC_INTERVAL_SEC)) {
+        /* IDLE only shows the clock — hourly keeps it honest at a fraction
+           of the RUNNING cadence's battery cost */
         try_ntp_sync();
         now = time(NULL);
     }

@@ -99,6 +99,14 @@ credentials.**
 27. [ ] **Pause accrual**: run ~half the interval, pause, wait, resume —
         the break still fires after a total of ~interval of running time
         (pauses don't reset the accrual).
+28. [ ] **IDLE minute alignment**: while IDLE, the header time flips within
+        a few seconds of real clocks (wakes align to minute boundaries; log
+        shows `Entering deep sleep (N s)` with varying N). IDLE syncs NTP
+        hourly instead of every 10 min.
+29. [ ] **Quiet hours**: between 22:30 and 08:00 local (menuconfig:
+        MAGTAG_QUIET_START/END_HHMM) button/status NeoPixels stay dark;
+        the expiry alert's red pulse still fires. Set start == end to
+        disable for testing.
 20. [ ] **Production reset gate**: with `CONFIG_MAGTAG_PARENT_TESTING=n`,
         Button B logs `Button B reset disabled` and does not reset; the
         allocation resets only on day rollover. (Default build: =y, B resets.)

@@ -358,7 +358,9 @@ static void build_break_screen(const display_state_t *st) {
     snprintf(buf, sizeof(buf), "Timer paused - %s left", rem_buf);
     lv_obj_t *foot = lv_label_create(scr);
     lv_label_set_text(foot, buf);
-    lv_obj_set_style_text_font(foot, &lv_font_montserrat_12, 0);
+    /* 12 pt renders illegibly white-on-black on e-ink (thin strokes eaten
+       by the inversion) — 16 pt keeps the footer readable. */
+    lv_obj_set_style_text_font(foot, &lv_font_montserrat_16, 0);
     lv_obj_align(foot, LV_ALIGN_BOTTOM_MID, 0, -4);
 }
 

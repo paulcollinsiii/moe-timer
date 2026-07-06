@@ -58,4 +58,23 @@ menu "MagTag Timer"
             Length of the enforced Screen Break. When it ends the device
             chimes and waits in PAUSED for a manual resume (Button A).
 
+    config MAGTAG_QUIET_START_HHMM
+        int "NeoPixel quiet hours start (HHMM, 24h)"
+        default 2230
+        range 0 2359
+        help
+            Status NeoPixels (state pixel, WiFi sync feedback) stay dark
+            from this local time until the quiet-hours end. Encoded as
+            HHMM: 2230 = 10:30 PM. Set start == end to disable quiet
+            hours. Alert pulses (expiry) are NOT suppressed — they
+            accompany an audible alarm and are dismissable.
+
+    config MAGTAG_QUIET_END_HHMM
+        int "NeoPixel quiet hours end (HHMM, 24h)"
+        default 800
+        range 0 2359
+        help
+            Local time the status NeoPixels come back. 800 = 8:00 AM. A
+            window with start > end wraps midnight.
+
 endmenu
