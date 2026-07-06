@@ -361,12 +361,24 @@ static void handle_day_rollover(time_t *now) {
    any wake inside SLEEP_PLAN_WATCH_SEC stays awake so the expiry (TIME'S
    UP) or break end (chime + PAUSED) fires within a tick of wall time. */
 
-/* Renders should land on :00 so the header clock and the countdown's
-   constant seconds-digit read cleanly. Bounded: wakes that are
-   legitimately mid-minute (event watch) must not stall here. */
-static void wait_for_minute_boundary(int max_wait_sec) {
-    int to = 60 - (int)(time(NULL) % 60);
-    if (to < 60 && to <= max_wait_sec) {
+/* Absorb the wake residue so the render lands on the state's grid:
+   RUNNING/BREAK on the countdown's round minute (the display truly reads
+   1:11:00), clock-only states on the wall :00. Bounded — wakes that are
+   legitimately off-grid (event watch handoff, slow sync) render where
+   they are and self-correct next cycle. */
+static void wait_for_render_grid(int max_wait_sec) {
+    time_t now = time(NULL);
+    int to;
+    if (timer_get_state() == TIMER_RUNNING) {
+        to = (int)((g_rtc_state.expiry_wall_time - (int64_t)now) % 60);
+    } else if (timer_get_state() == TIMER_BREAK) {
+        to = timer_break_remaining(now) % 60;
+    } else {
+        to = 60 - (int)(now % 60);
+        if (to == 60)
+            to = 0; /* already on the wall boundary */
+    }
+    if (to > 0 && to <= max_wait_sec) {
         vTaskDelay(pdMS_TO_TICKS(to * 1000));
     }
 }
@@ -456,16 +468,35 @@ static void handle_timer_tick(void) {
         enter_deep_sleep(); /* break just started; sleep through it */
     }
 
-    /* Land the render on :00 — the planner woke us on (or, when a sync
-       was due, ~20 s before) the boundary; absorb the residue here so the
-       rendered time and countdown read cleanly. 25 s covers the sync lead
-       without stalling event-watch wakes. */
-    wait_for_minute_boundary(25);
+    /* Land the render on the state's grid — the planner woke us on (or,
+       when a sync was due, ~20 s before) the grid point; absorb the
+       residue here. 25 s covers the sync lead without stalling
+       event-watch wakes. */
+    wait_for_render_grid(25);
     now = time(NULL);
 
     timer_state_t before = timer_get_state();
     int32_t remaining = timer_tick(now);
-    display_state_t st = make_state(remaining, now);
+
+    /* The grid wait makes the true remaining a round minute at render
+       time; snap away +-2 s of wake/render jitter so 1:10:59 never shows.
+       Genuinely off-grid renders (slow sync) stay honest. */
+    int32_t shown = remaining;
+    if (timer_get_state() == TIMER_RUNNING && remaining > SLEEP_PLAN_WATCH_SEC) {
+        int32_t m = shown % 60;
+        if (m <= 2)
+            shown -= m;
+        else if (m >= 58)
+            shown += 60 - m;
+    }
+    display_state_t st = make_state(shown, now);
+    if (st.timer_state == TIMER_BREAK && st.break_remaining_sec > SLEEP_PLAN_WATCH_SEC) {
+        int32_t m = st.break_remaining_sec % 60;
+        if (m <= 2)
+            st.break_remaining_sec -= m;
+        else if (m >= 58)
+            st.break_remaining_sec += 60 - m;
+    }
 
     if (before == TIMER_BREAK && timer_get_state() == TIMER_PAUSED) {
         audio_break_over_chime(); /* break over — ready to resume */

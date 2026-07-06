@@ -106,11 +106,12 @@ credentials.**
         `Entering deep sleep (N s)` with varying N). IDLE/PAUSED/EXPIRED
         re-sync NTP on MAGTAG_IDLE_SYNC_INTERVAL_MIN (default 60 min);
         RUNNING on MAGTAG_RUNNING_SYNC_INTERVAL_MIN (default 10 min).
-30. [ ] **RUNNING renders on :00**: while RUNNING, the countdown's seconds
-        digit stays constant across wakes (renders land on the minute).
-        When the sync is due, the log shows an early wake
-        (`Entering deep sleep (N s)` with N ~ boundary-20) and the render
-        still lands at :00 after the sync.
+30. [ ] **RUNNING renders on the countdown grid**: a start/resume shows one
+        precise value (e.g. 1:12:23); every subsequent tick render shows a
+        round minute (1:12:00, 1:11:00...) because wakes land when the
+        remaining value crosses its own minute grid. When the sync is due,
+        the log shows an early wake (~20 s before the grid point) and the
+        render still lands on the grid after the sync.
 31. [ ] **Status LED brightness**: MAGTAG_STATUS_LED_BRIGHTNESS (menuconfig)
         visibly scales the state/sync/countdown pixels; alert pulses
         (expiry red, break cyan) are unaffected. Alarm lengths follow

@@ -69,10 +69,13 @@ The device spends almost all of its time in deep sleep. Wake sources:
 | GPIO (wake-button press) | Handle button event, full refresh if needed |
 
 Sleep durations come from a pure, host-tested planner (`main/sleep_plan.c`):
-wakes align to wall-clock minute boundaries in every state (renders land on
-:00), RUNNING wakes ~20 s early when an NTP sync is due, and pre-event wakes
-land ~70 s before an expiry/break end so the awake watch loop fires the
-event on time.
+clock-only states (IDLE/PAUSED/EXPIRED) align wakes to wall-clock minute
+boundaries (header time flips with real clocks); RUNNING/BREAK align to the
+countdown's own minute grid so the displayed remaining truly reads round
+values (start/resume shows one precise value, then 1:12:00, 1:11:00, ...).
+RUNNING wakes ~20 s early when an NTP sync is due, and pre-event wakes land
+~70 s before an expiry/break end so the awake watch loop fires the event on
+time.
 
 **Wake sequence (roughly once per minute)**:
 1. Read current time from ESP32 RTC.
