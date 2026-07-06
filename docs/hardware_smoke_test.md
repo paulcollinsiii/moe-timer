@@ -99,10 +99,13 @@ credentials.**
 27. [ ] **Pause accrual**: run ~half the interval, pause, wait, resume —
         the break still fires after a total of ~interval of running time
         (pauses don't reset the accrual).
-28. [ ] **IDLE minute alignment**: while IDLE, the header time flips within
-        a few seconds of real clocks (wakes align to minute boundaries; log
-        shows `Entering deep sleep (N s)` with varying N). IDLE syncs NTP
-        hourly instead of every 10 min.
+28. [ ] **Minute alignment (non-RUNNING)**: while IDLE/PAUSED/EXPIRED (and
+        during a break), the header time flips within a few seconds of real
+        clocks (wakes align to minute boundaries; log shows
+        `Entering deep sleep (N s)` with varying N). These states re-sync
+        NTP on the MAGTAG_IDLE_SYNC_INTERVAL_MIN cadence (default 60 min;
+        the S2's RC-oscillator drift makes longer intervals visibly wrong).
+        RUNNING keeps its fixed 55 s tick and 10-min sync.
 29. [ ] **Quiet hours**: between 22:30 and 08:00 local (menuconfig:
         MAGTAG_QUIET_START/END_HHMM) button/status NeoPixels stay dark;
         the expiry alert's red pulse still fires. Set start == end to

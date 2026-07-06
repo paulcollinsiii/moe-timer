@@ -58,6 +58,17 @@ menu "MagTag Timer"
             Length of the enforced Screen Break. When it ends the device
             chimes and waits in PAUSED for a manual resume (Button A).
 
+    config MAGTAG_IDLE_SYNC_INTERVAL_MIN
+        int "NTP sync interval while IDLE (minutes)"
+        default 60
+        range 5 1440
+        help
+            How often the clock re-syncs while the timer is IDLE. The
+            ESP32-S2 has no crystal-backed RTC — deep-sleep timekeeping
+            runs on an RC oscillator that can drift minutes per day, so
+            long intervals make the displayed clock visibly wrong.
+            RUNNING keeps its own fixed 10-minute cadence.
+
     config MAGTAG_QUIET_START_HHMM
         int "NeoPixel quiet hours start (HHMM, 24h)"
         default 2230

@@ -26,8 +26,11 @@ static const char *TAG = "main";
 /* Compile-time timezone (ProductOverview section 1) */
 #define MAGTAG_TZ "EST5EDT,M3.2.0,M11.1.0"
 #define WAKE_INTERVAL_US (55ULL * 1000000ULL)
-/* IDLE shows only the clock — sync hourly instead of every 10 min */
-#define IDLE_SYNC_INTERVAL_SEC 3600
+/* IDLE shows only the clock — sync on the menuconfig cadence (default
+   hourly) instead of every 10 min. The S2 has no crystal-backed RTC; its
+   RC-oscillator timekeeping can drift minutes/day, so don't set this too
+   long. */
+#define IDLE_SYNC_INTERVAL_SEC (CONFIG_MAGTAG_IDLE_SYNC_INTERVAL_MIN * 60)
 
 /* Status pixels stay dark during configured quiet hours (alert pulses are
    exempt — they accompany an audible, dismissable alarm). */
@@ -120,12 +123,14 @@ static void enter_deep_sleep(void) {
 
     buttons_configure_wakeup();
 
-    /* IDLE shows only the wall clock, so align wakes to minute boundaries:
-       the header time then flips in step with real clocks. Other states
-       keep the fixed ~55 s cadence (their countdowns aren't minute-aligned
-       anyway, and RUNNING must not stretch the tick near expiry). */
+    /* Non-RUNNING states only show the wall clock (or a minute-scale break
+       countdown), so align wakes to minute boundaries: the header time
+       flips in step with real clocks. RUNNING keeps the fixed ~55 s tick
+       (expiry precision comes from the final-minute watch; stretching the
+       cadence would fight it). Alignment precision is bounded by the S2's
+       RC-oscillator sleep drift — the periodic NTP sync keeps it honest. */
     uint64_t sleep_us = WAKE_INTERVAL_US;
-    if (timer_get_state() == TIMER_IDLE) {
+    if (timer_get_state() != TIMER_RUNNING) {
         int to_boundary = 60 - (int)(time(NULL) % 60);
         if (to_boundary < 5)
             to_boundary += 60; /* too close — take the following minute */
@@ -421,10 +426,11 @@ static void handle_timer_tick(void) {
     if (timer_get_state() == TIMER_RUNNING && timer_needs_ntp_sync(now)) {
         try_ntp_sync();
         now = time(NULL);
-    } else if (timer_get_state() == TIMER_IDLE &&
+    } else if ((timer_get_state() == TIMER_IDLE || timer_get_state() == TIMER_PAUSED ||
+                timer_get_state() == TIMER_EXPIRED) &&
                (s_last_ntp_sync == 0 || now - s_last_ntp_sync >= IDLE_SYNC_INTERVAL_SEC)) {
-        /* IDLE only shows the clock — hourly keeps it honest at a fraction
-           of the RUNNING cadence's battery cost */
+        /* Long-lived clock-only states: re-sync on the slower IDLE cadence
+           so the minute-aligned header doesn't visibly drift */
         try_ntp_sync();
         now = time(NULL);
     }
