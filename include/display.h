@@ -13,6 +13,10 @@ typedef struct {
     day_type_t day_type;
     time_t wall_time;
     time_t last_sync_time;
+    uint8_t battery_pct; /* 0-100 */
+    /* Eye-rest break (valid when timer_state == TIMER_BREAK) */
+    int32_t break_remaining_sec;
+    uint32_t break_duration_sec;
 } display_state_t;
 
 #ifdef __cplusplus
@@ -35,6 +39,8 @@ typedef enum {
 
 /* Pure layout math (display_layout.c) — host-tested */
 display_btn_label_t display_button_a_label(timer_state_t state);
+/* Battery icon bucket 0=empty..4=full; display.c maps to LV_SYMBOL_BATTERY_*. */
+int display_battery_icon_level(int pct);
 uint16_t display_bar_fill_px(int32_t remaining_sec, uint32_t allocation_sec);
 void display_format_remaining(char *buf, size_t len, int32_t remaining_sec);
 /* Invert byte columns [b0..b1] (clamped) of every row in a row-major 1bpp

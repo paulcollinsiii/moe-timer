@@ -9,7 +9,10 @@ idf_component_register(
         "schedule.c"
         "buttons.c"
         "audio.c"
+        "battery.c"
+        "battery_soc.c"
         "neopixel.c"
+        "quiet_hours.c"
         "hal_time.c"
         "hal_nvs.c"
     INCLUDE_DIRS
@@ -24,6 +27,7 @@ idf_component_register(
         esp_driver_gpio
         esp_driver_ledc
         esp_driver_rmt
+        esp_adc
         log
         esp-tls
         lwip

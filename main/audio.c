@@ -94,6 +94,38 @@ void audio_beep_sequence(void) {
     beep_off();
 }
 
+void audio_break_alarm(void) {
+    s_stop_requested = false;
+
+    /* Distinct from the expiry alarm: 2 beeps x 3 cycles (~6 s) */
+    for (int cycle = 0; cycle < 3 && !s_stop_requested; cycle++) {
+        for (int beep = 0; beep < 2 && !s_stop_requested; beep++) {
+            beep_on();
+            vTaskDelay(pdMS_TO_TICKS(300));
+            beep_off();
+            if (!s_stop_requested) {
+                vTaskDelay(pdMS_TO_TICKS(150));
+            }
+        }
+        if (!s_stop_requested) {
+            vTaskDelay(pdMS_TO_TICKS(1100));
+        }
+    }
+
+    beep_off();
+}
+
+void audio_break_over_chime(void) {
+    /* Single short double-beep (~0.6 s); fire-and-forget, no dismissal */
+    beep_on();
+    vTaskDelay(pdMS_TO_TICKS(150));
+    beep_off();
+    vTaskDelay(pdMS_TO_TICKS(100));
+    beep_on();
+    vTaskDelay(pdMS_TO_TICKS(300));
+    beep_off();
+}
+
 void audio_stop(void) {
     s_stop_requested = true;
     beep_off();

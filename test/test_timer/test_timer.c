@@ -208,6 +208,76 @@ void test_shift_expiry_noop_when_idle(void) {
     TEST_ASSERT_EQUAL(TIMER_IDLE, timer_get_state());
 }
 
+/* ---- eye-rest: run-time accrual + TIMER_BREAK ---- */
+
+void test_run_accum_counts_running_time(void) {
+    timer_start(T0, 7200);
+    TEST_ASSERT_EQUAL_INT32(600, timer_run_accum(T0 + 600));
+}
+
+void test_run_accum_excludes_pause_gaps(void) {
+    timer_start(T0, 7200);
+    timer_pause(T0 + 600);
+    TEST_ASSERT_EQUAL_INT32(600, timer_run_accum(T0 + 9000)); /* frozen while paused */
+    timer_resume(T0 + 9000);
+    TEST_ASSERT_EQUAL_INT32(900, timer_run_accum(T0 + 9300));
+}
+
+void test_break_due_at_interval_only_when_running(void) {
+    timer_start(T0, 7200);
+    TEST_ASSERT_FALSE(timer_break_due(T0 + 1799, 1800));
+    TEST_ASSERT_TRUE(timer_break_due(T0 + 1800, 1800));
+    timer_pause(T0 + 1800); /* accum 1800, but PAUSED never triggers */
+    TEST_ASSERT_FALSE(timer_break_due(T0 + 2000, 1800));
+    timer_reset();
+    TEST_ASSERT_FALSE(timer_break_due(T0 + 9999, 1800)); /* IDLE */
+}
+
+void test_start_break_freezes_timer_and_arms_break(void) {
+    timer_start(T0, 3600);
+    timer_start_break(T0 + 1800, 900);
+    TEST_ASSERT_EQUAL(TIMER_BREAK, timer_get_state());
+    TEST_ASSERT_EQUAL_INT32(1800, g_rtc_state.remaining_at_pause);
+    TEST_ASSERT_EQUAL_INT64(0, g_rtc_state.expiry_wall_time);
+    TEST_ASSERT_EQUAL_INT32(0, timer_run_accum(T0 + 1800)); /* accrual resets */
+    TEST_ASSERT_EQUAL_INT64((int64_t)T0 + 2700, g_rtc_state.break_expiry_wall);
+}
+
+void test_break_remaining_counts_down(void) {
+    timer_start(T0, 3600);
+    timer_start_break(T0 + 1800, 900);
+    TEST_ASSERT_EQUAL_INT32(700, timer_break_remaining(T0 + 2000));
+    timer_reset();
+    TEST_ASSERT_EQUAL_INT32(0, timer_break_remaining(T0 + 2000)); /* not BREAK */
+}
+
+void test_tick_during_break_holds_then_transitions_to_paused(void) {
+    timer_start(T0, 3600);
+    timer_start_break(T0 + 1800, 900);
+    TEST_ASSERT_EQUAL_INT32(1800, timer_tick(T0 + 2000)); /* frozen screen-time */
+    TEST_ASSERT_EQUAL(TIMER_BREAK, timer_get_state());
+    TEST_ASSERT_EQUAL_INT32(1800, timer_tick(T0 + 2700)); /* break over */
+    TEST_ASSERT_EQUAL(TIMER_PAUSED, timer_get_state());
+    TEST_ASSERT_EQUAL_INT64(0, g_rtc_state.break_expiry_wall);
+    timer_resume(T0 + 2700);
+    TEST_ASSERT_EQUAL(TIMER_RUNNING, timer_get_state());
+    TEST_ASSERT_EQUAL_INT32(1800, timer_tick(T0 + 2700));
+}
+
+void test_shift_expiry_shifts_run_started_wall_when_running(void) {
+    timer_start(T0, 3600);
+    timer_shift_expiry(120); /* clock stepped forward */
+    /* accrual measured on the stepped clock stays correct */
+    TEST_ASSERT_EQUAL_INT32(600, timer_run_accum(T0 + 120 + 600));
+}
+
+void test_shift_expiry_shifts_break_expiry_when_in_break(void) {
+    timer_start(T0, 3600);
+    timer_start_break(T0 + 100, 900);
+    timer_shift_expiry(60);
+    TEST_ASSERT_EQUAL_INT64((int64_t)T0 + 1000 + 60, g_rtc_state.break_expiry_wall);
+}
+
 /* Snapshot make/restore: crash recovery — a panic wipes RTC memory, so the
    state is persisted to NVS and restored when the stored date is today. */
 
@@ -338,6 +408,49 @@ void test_restore_snapshot_running_past_expiry_becomes_expired(void) {
     TEST_ASSERT_TRUE(timer_tick(T0 + 500) <= 0); /* stays expired, no transition */
 }
 
+void test_snapshot_restores_mid_break_with_same_end_time(void) {
+    /* Power cycle mid-break must neither restart nor shorten the break */
+    timer_start(T0, 3600);
+    timer_start_break(T0 + 1800, 900);
+    timer_record_date(T0);
+    timer_snapshot_t snap;
+    timer_make_snapshot(&snap);
+
+    timer_reset();
+    TEST_ASSERT_TRUE(timer_restore_snapshot(&snap, T0 + 2000));
+    TEST_ASSERT_EQUAL(TIMER_BREAK, timer_get_state());
+    TEST_ASSERT_EQUAL_INT64((int64_t)T0 + 2700, g_rtc_state.break_expiry_wall);
+    TEST_ASSERT_EQUAL_INT32(700, timer_break_remaining(T0 + 2000));
+    TEST_ASSERT_EQUAL_INT32(1800, g_rtc_state.remaining_at_pause);
+}
+
+void test_snapshot_restore_break_past_end_becomes_paused(void) {
+    timer_start(T0, 3600);
+    timer_start_break(T0 + 1800, 900);
+    timer_record_date(T0);
+    timer_snapshot_t snap;
+    timer_make_snapshot(&snap);
+
+    timer_reset();
+    TEST_ASSERT_TRUE(timer_restore_snapshot(&snap, T0 + 3000)); /* past T0+2700 */
+    TEST_ASSERT_EQUAL(TIMER_PAUSED, timer_get_state());
+    TEST_ASSERT_EQUAL_INT64(0, g_rtc_state.break_expiry_wall);
+    TEST_ASSERT_EQUAL_INT32(1800, timer_tick(T0 + 3000));
+}
+
+void test_snapshot_restore_running_preserves_accrual(void) {
+    timer_start(T0, 7200);
+    timer_pause(T0 + 600);
+    timer_resume(T0 + 9000);
+    timer_record_date(T0);
+    timer_snapshot_t snap;
+    timer_make_snapshot(&snap);
+
+    timer_reset();
+    TEST_ASSERT_TRUE(timer_restore_snapshot(&snap, T0 + 9300));
+    TEST_ASSERT_EQUAL_INT32(900, timer_run_accum(T0 + 9300));
+}
+
 void test_restore_snapshot_expired_state_restores(void) {
     /* Crash after expiry must not refund time: EXPIRED snapshot restores */
     timer_start(T0, 100);
@@ -382,6 +495,14 @@ int main(void) {
     RUN_TEST(test_shift_expiry_backward_while_running);
     RUN_TEST(test_shift_expiry_noop_when_paused);
     RUN_TEST(test_shift_expiry_noop_when_idle);
+    RUN_TEST(test_run_accum_counts_running_time);
+    RUN_TEST(test_run_accum_excludes_pause_gaps);
+    RUN_TEST(test_break_due_at_interval_only_when_running);
+    RUN_TEST(test_start_break_freezes_timer_and_arms_break);
+    RUN_TEST(test_break_remaining_counts_down);
+    RUN_TEST(test_tick_during_break_holds_then_transitions_to_paused);
+    RUN_TEST(test_shift_expiry_shifts_run_started_wall_when_running);
+    RUN_TEST(test_shift_expiry_shifts_break_expiry_when_in_break);
     RUN_TEST(test_make_snapshot_captures_running_state);
     RUN_TEST(test_restore_snapshot_running_when_date_matches);
     RUN_TEST(test_restore_snapshot_paused_preserves_remaining);
@@ -391,6 +512,9 @@ int main(void) {
     RUN_TEST(test_restore_snapshot_rejected_on_invalid_state_enum);
     RUN_TEST(test_restore_snapshot_rejected_on_implausible_expiry);
     RUN_TEST(test_restore_snapshot_rejected_all_zeros);
+    RUN_TEST(test_snapshot_restores_mid_break_with_same_end_time);
+    RUN_TEST(test_snapshot_restore_break_past_end_becomes_paused);
+    RUN_TEST(test_snapshot_restore_running_preserves_accrual);
     RUN_TEST(test_restore_snapshot_running_past_expiry_becomes_expired);
     RUN_TEST(test_restore_snapshot_expired_state_restores);
     return UNITY_END();

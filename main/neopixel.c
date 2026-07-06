@@ -176,32 +176,37 @@ static void flush_pixels(void) {
     rmt_tx_wait_all_done(s_rmt_chan, portMAX_DELAY);
 }
 
-static void set_all_red(uint8_t brightness) {
+/* Scale a colour by step/32 onto all pixels (GRB byte order) */
+static void set_all_scaled(uint8_t r, uint8_t g, uint8_t b, int step) {
     for (int i = 0; i < NEOPIXEL_COUNT; i++) {
-        s_pixels[i * 3 + 0] = 0;
-        s_pixels[i * 3 + 1] = brightness;
-        s_pixels[i * 3 + 2] = 0;
+        s_pixels[i * 3 + 0] = (uint8_t)((int)g * step / 32);
+        s_pixels[i * 3 + 1] = (uint8_t)((int)r * step / 32);
+        s_pixels[i * 3 + 2] = (uint8_t)((int)b * step / 32);
     }
 }
 
-void neopixel_alert_start(void) {
+void neopixel_pulse_start(uint8_t r, uint8_t g, uint8_t b) {
     if (!s_rmt_chan || !s_encoder)
         return;
     s_stop_requested = false;
     gpio_set_level(NEOPIXEL_POWER_GPIO, 0); /* power gate ON */
     while (!s_stop_requested) {
-        for (int b = 0; b < 32 && !s_stop_requested; b++) {
-            set_all_red((uint8_t)(b * 8));
+        for (int step = 0; step < 32 && !s_stop_requested; step++) {
+            set_all_scaled(r, g, b, step);
             flush_pixels();
             vTaskDelay(pdMS_TO_TICKS(30));
         }
-        for (int b = 32; b >= 0 && !s_stop_requested; b--) {
-            set_all_red((uint8_t)(b * 8));
+        for (int step = 32; step >= 0 && !s_stop_requested; step--) {
+            set_all_scaled(r, g, b, step);
             flush_pixels();
             vTaskDelay(pdMS_TO_TICKS(30));
         }
     }
     neopixel_stop();
+}
+
+void neopixel_alert_start(void) {
+    neopixel_pulse_start(248, 0, 0); /* expiry: red, same brightness as before */
 }
 
 void neopixel_set_pixel(int idx, uint8_t r, uint8_t g, uint8_t b) {

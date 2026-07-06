@@ -3,6 +3,7 @@
 #include <time.h>
 
 #include "audio.h"
+#include "battery.h"
 #include "buttons.h"
 #include "display.h"
 #include "driver/gpio.h"
@@ -16,6 +17,7 @@
 #include "ntp.h"
 #include "nvs_config.h"
 #include "nvs_flash.h"
+#include "quiet_hours.h"
 #include "schedule.h"
 #include "timer.h"
 
@@ -24,6 +26,21 @@ static const char *TAG = "main";
 /* Compile-time timezone (ProductOverview section 1) */
 #define MAGTAG_TZ "EST5EDT,M3.2.0,M11.1.0"
 #define WAKE_INTERVAL_US (55ULL * 1000000ULL)
+/* IDLE shows only the clock — sync on the menuconfig cadence (default
+   hourly) instead of every 10 min. The S2 has no crystal-backed RTC; its
+   RC-oscillator timekeeping can drift minutes/day, so don't set this too
+   long. */
+#define IDLE_SYNC_INTERVAL_SEC (CONFIG_MAGTAG_IDLE_SYNC_INTERVAL_MIN * 60)
+
+/* Status pixels stay dark during configured quiet hours (alert pulses are
+   exempt — they accompany an audible, dismissable alarm). */
+static bool status_leds_quiet(void) {
+    time_t now = time(NULL);
+    struct tm tm;
+    localtime_r(&now, &tm);
+    return quiet_hours_active(tm.tm_hour * 60 + tm.tm_min, quiet_hhmm_to_minutes(CONFIG_MAGTAG_QUIET_START_HHMM),
+                              quiet_hhmm_to_minutes(CONFIG_MAGTAG_QUIET_END_HHMM));
+}
 
 static RTC_DATA_ATTR time_t s_last_ntp_sync;
 
@@ -105,8 +122,22 @@ static void enter_deep_sleep(void) {
     gpio_deep_sleep_hold_en();
 
     buttons_configure_wakeup();
-    esp_sleep_enable_timer_wakeup(WAKE_INTERVAL_US);
-    ESP_LOGI(TAG, "Entering deep sleep");
+
+    /* Non-RUNNING states only show the wall clock (or a minute-scale break
+       countdown), so align wakes to minute boundaries: the header time
+       flips in step with real clocks. RUNNING keeps the fixed ~55 s tick
+       (expiry precision comes from the final-minute watch; stretching the
+       cadence would fight it). Alignment precision is bounded by the S2's
+       RC-oscillator sleep drift — the periodic NTP sync keeps it honest. */
+    uint64_t sleep_us = WAKE_INTERVAL_US;
+    if (timer_get_state() != TIMER_RUNNING) {
+        int to_boundary = 60 - (int)(time(NULL) % 60);
+        if (to_boundary < 5)
+            to_boundary += 60; /* too close — take the following minute */
+        sleep_us = (uint64_t)to_boundary * 1000000ULL;
+    }
+    esp_sleep_enable_timer_wakeup(sleep_us);
+    ESP_LOGI(TAG, "Entering deep sleep (%llu s)", (unsigned long long)(sleep_us / 1000000ULL));
     esp_deep_sleep_start();
 }
 
@@ -119,7 +150,9 @@ static void enter_deep_sleep(void) {
 /* WiFi lifecycle is entirely inside ntp_sync(): init->connect->sync->deinit */
 static esp_err_t try_ntp_sync(void) {
 #if CONFIG_MAGTAG_SYNC_LED_FEEDBACK
-    neopixel_set_pixel(NP_WIFI_PIXEL, 0, 0, 20); /* blue: sync in progress */
+    bool leds = !status_leds_quiet();
+    if (leds)
+        neopixel_set_pixel(NP_WIFI_PIXEL, 0, 0, 20); /* blue: sync in progress */
 #endif
     esp_err_t ret = ntp_sync();
     if (ret == ESP_OK) {
@@ -128,7 +161,7 @@ static esp_err_t try_ntp_sync(void) {
     } else {
         ESP_LOGW(TAG, "NTP sync failed: %s", esp_err_to_name(ret));
 #if CONFIG_MAGTAG_SYNC_LED_FEEDBACK
-        for (int i = 0; i < 3; i++) {
+        for (int i = 0; leds && i < 3; i++) {
             neopixel_set_pixel(NP_WIFI_PIXEL, 30, 0, 0);
             vTaskDelay(pdMS_TO_TICKS(150));
             neopixel_set_pixel(NP_WIFI_PIXEL, 0, 0, 0);
@@ -139,14 +172,18 @@ static esp_err_t try_ntp_sync(void) {
 #if CONFIG_MAGTAG_SYNC_LED_FEEDBACK
     /* Clear only the WiFi pixel — the state pixel stays lit through the
        e-ink refresh; enter_deep_sleep() guarantees the gate goes HIGH. */
-    neopixel_set_pixel(NP_WIFI_PIXEL, 0, 0, 0);
+    if (leds)
+        neopixel_set_pixel(NP_WIFI_PIXEL, 0, 0, 0);
 #endif
     return ret;
 }
 
 /* Traffic-light state feedback while the slow e-ink refresh runs:
-   RUNNING = green, PAUSED = amber, EXPIRED = red, IDLE = white. */
+   RUNNING = green, PAUSED = amber, EXPIRED = red, BREAK = cyan,
+   IDLE = white. Dark during quiet hours. */
 static void neopixel_show_timer_state(void) {
+    if (status_leds_quiet())
+        return;
     switch (timer_get_state()) {
         case TIMER_RUNNING:
             neopixel_set_pixel(NP_STATE_PIXEL, 0, 20, 0);
@@ -156,6 +193,9 @@ static void neopixel_show_timer_state(void) {
             break;
         case TIMER_EXPIRED:
             neopixel_set_pixel(NP_STATE_PIXEL, 25, 0, 0);
+            break;
+        case TIMER_BREAK:
+            neopixel_set_pixel(NP_STATE_PIXEL, 0, 10, 25); /* blue-cyan */
             break;
         default:
             neopixel_set_pixel(NP_STATE_PIXEL, 10, 10, 10);
@@ -170,6 +210,9 @@ static display_state_t make_state(int32_t remaining, time_t now) {
     if (timer_get_state() == TIMER_IDLE) {
         remaining = (int32_t)alloc;
     }
+    int mv = battery_read_mv();
+    int pct = battery_percent_from_mv(mv);
+    ESP_LOGI(TAG, "battery: %d mV (%d%%)", mv, pct);
     return (display_state_t){
         .remaining_sec = remaining,
         .allocation_sec = alloc,
@@ -177,6 +220,9 @@ static display_state_t make_state(int32_t remaining, time_t now) {
         .day_type = dt,
         .wall_time = now,
         .last_sync_time = s_last_ntp_sync,
+        .battery_pct = (uint8_t)pct,
+        .break_remaining_sec = timer_break_remaining(now),
+        .break_duration_sec = (uint32_t)CONFIG_MAGTAG_BREAK_DURATION_MIN * 60,
     };
 }
 
@@ -233,6 +279,76 @@ static void run_expiry_alert(void) {
     vTaskDelay(pdMS_TO_TICKS(100)); /* let the audio task observe its stop flag and exit */
 }
 
+/* ---- eye-rest break ---------------------------------------------------- */
+
+static void break_alarm_task(void *arg) {
+    (void)arg;
+    audio_break_alarm(); /* ~6 s, stop-flag aware */
+    s_audio_done = true;
+    vTaskDelete(NULL);
+}
+
+static void break_pulse_task(void *arg) {
+    (void)arg;
+    neopixel_pulse_start(0, 150, 220); /* cyan — matches the BREAK identity */
+    s_np_alert_done = true;
+    vTaskDelete(NULL);
+}
+
+/* Break-start alarm: beeps + cyan pulse. Alert-class, so it fires during
+   quiet hours (like the expiry alert — it accompanies an audible alarm).
+   Any button silences it. Teardown uses the request/done handshake — a
+   direct neopixel_stop() would race the pulse task's RMT flush. */
+static void run_break_alarm(void) {
+    s_audio_done = false;
+    s_np_alert_done = false;
+    xTaskCreate(break_pulse_task, "brk_pulse", 2048, NULL, 5, NULL);
+    xTaskCreate(break_alarm_task, "brk_alarm", 2048, NULL, 5, NULL);
+    bool silenced = false;
+    for (int i = 0; i < 80 && !s_audio_done && !silenced; i++) {
+        for (int b = 0; b < 4; b++) {
+            if (buttons_is_pressed((button_id_t)b)) {
+                ESP_LOGI(TAG, "Break alarm silenced by button");
+                silenced = true;
+                break;
+            }
+        }
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+    audio_stop();
+    neopixel_request_stop();
+    for (int i = 0; i < 40 && !s_np_alert_done; i++) {
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
+    if (!s_np_alert_done) {
+        ESP_LOGW(TAG, "brk_pulse task did not finish; forcing LED off");
+    }
+    neopixel_stop();                /* single-task now — idempotent gate-off */
+    vTaskDelay(pdMS_TO_TICKS(100)); /* let the alarm task observe the stop flag */
+}
+
+/* Returns true when a break was started (caller should go straight to
+   sleep). Persists BREAK before the alarm, same rationale as the EXPIRED
+   at-transition save. */
+static bool maybe_start_break(time_t now) {
+#if CONFIG_MAGTAG_BREAK_INTERVAL_MIN > 0
+    if (!timer_break_due(now, CONFIG_MAGTAG_BREAK_INTERVAL_MIN * 60))
+        return false;
+    ESP_LOGI(TAG, "Screen break due (accum %ld s)", (long)timer_run_accum(now));
+    timer_start_break(now, CONFIG_MAGTAG_BREAK_DURATION_MIN * 60);
+    save_timer_snapshot();
+    display_state_t st = make_state(timer_tick(now), now);
+    neopixel_show_timer_state(); /* blue during the refresh */
+    display_full_refresh(&st);   /* inverted SCREEN BREAK layout */
+    run_break_alarm();
+    neopixel_stop();
+    return true;
+#else
+    (void)now;
+    return false;
+#endif
+}
+
 /* Full expiry sequence: big TIME'S UP screen, beeps + red pulse, then back
    to the main layout (empty bar, TIME'S UP state in the corner) once the
    alert is dismissed or times out — the big screen would only last until
@@ -273,13 +389,29 @@ static void handle_day_rollover(time_t *now) {
 
 /* ---- final-minute watch ------------------------------------------------ */
 
-/* With <=60 s left, a 55 s sleep can overshoot expiry by most of a minute.
-   Stay awake instead: lock the clock with one sync, keep the state pixel
-   lit, and fire TIME'S UP within a tick of wall time. Runs at most once
-   per day (right before expiry), so the battery cost is negligible. */
+/* With <=60 s to an event, a 55 s sleep overshoots it by most of a minute.
+   Stay awake instead. Covers both the expiry (TIME'S UP within a tick of
+   wall time) and the break end (chime + PAUSED screen on time). */
 #define FINAL_MINUTE_SEC 60
 
-static void maybe_wait_for_expiry(void) {
+static void maybe_wait_for_event(void) {
+    if (timer_get_state() == TIMER_BREAK) {
+        int32_t brem = timer_break_remaining(time(NULL));
+        if (brem <= 0 || brem > FINAL_MINUTE_SEC)
+            return;
+        ESP_LOGI(TAG, "Break ends in %ld s: staying awake", (long)brem);
+        neopixel_show_timer_state();
+        while (timer_break_remaining(time(NULL)) > 0) {
+            vTaskDelay(pdMS_TO_TICKS(250));
+        }
+        time_t now = time(NULL);
+        int32_t remaining = timer_tick(now); /* BREAK -> PAUSED */
+        audio_break_over_chime();
+        display_state_t st = make_state(remaining, now);
+        display_full_refresh(&st);
+        return;
+    }
+
     if (timer_get_state() != TIMER_RUNNING)
         return;
     time_t now = time(NULL);
@@ -313,11 +445,26 @@ static void handle_timer_tick(void) {
     if (timer_get_state() == TIMER_RUNNING && timer_needs_ntp_sync(now)) {
         try_ntp_sync();
         now = time(NULL);
+    } else if ((timer_get_state() == TIMER_IDLE || timer_get_state() == TIMER_PAUSED ||
+                timer_get_state() == TIMER_EXPIRED) &&
+               (s_last_ntp_sync == 0 || now - s_last_ntp_sync >= IDLE_SYNC_INTERVAL_SEC)) {
+        /* Long-lived clock-only states: re-sync on the slower IDLE cadence
+           so the minute-aligned header doesn't visibly drift */
+        try_ntp_sync();
+        now = time(NULL);
+    }
+
+    if (maybe_start_break(now)) {
+        enter_deep_sleep(); /* break just started; sleep through it */
     }
 
     timer_state_t before = timer_get_state();
     int32_t remaining = timer_tick(now);
     display_state_t st = make_state(remaining, now);
+
+    if (before == TIMER_BREAK && timer_get_state() == TIMER_PAUSED) {
+        audio_break_over_chime(); /* break over — ready to resume */
+    }
 
     if (timer_get_state() == TIMER_EXPIRED && before != TIMER_EXPIRED) {
         fire_expiry_alert();
@@ -326,7 +473,7 @@ static void handle_timer_tick(void) {
     } else {
         display_update(&st); /* partial; policy promotes every 5th to full */
     }
-    maybe_wait_for_expiry();
+    maybe_wait_for_event();
     enter_deep_sleep();
 }
 
@@ -352,7 +499,9 @@ static void handle_button_wake(void) {
 
     switch (btn) {
         case BTN_A:
-            if (before == TIMER_RUNNING) {
+            if (before == TIMER_BREAK) {
+                ESP_LOGI(TAG, "button A ignored during screen break");
+            } else if (before == TIMER_RUNNING) {
                 timer_pause(now);
             } else if (before == TIMER_IDLE || before == TIMER_PAUSED) {
                 /* Start/resume immediately — waiting on NTP first confused
@@ -402,8 +551,16 @@ static void handle_button_wake(void) {
             break;
     }
 
+    if (maybe_start_break(now)) {
+        enter_deep_sleep(); /* e.g. resume with accrual already past the interval */
+    }
+
     int32_t remaining = timer_tick(now);
     display_state_t st = make_state(remaining, now);
+
+    if (before == TIMER_BREAK && timer_get_state() == TIMER_PAUSED) {
+        audio_break_over_chime(); /* break over — ready to resume */
+    }
 
     if (timer_get_state() == TIMER_EXPIRED && before != TIMER_EXPIRED) {
         fire_expiry_alert(); /* alert owns the NeoPixels (red pulse) */
@@ -415,7 +572,7 @@ static void handle_button_wake(void) {
         display_full_refresh(&st);   /* button wakes always full-refresh */
         neopixel_stop();
     }
-    maybe_wait_for_expiry();
+    maybe_wait_for_event();
     enter_deep_sleep();
 }
 
@@ -448,6 +605,7 @@ void app_main(void) {
     try_restore_timer_snapshot(time(NULL));
 
     buttons_init();
+    battery_init();
     audio_init();
     display_init();
 

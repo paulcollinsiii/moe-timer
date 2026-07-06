@@ -77,6 +77,39 @@ credentials.**
         stays awake (state pixel lit, one clock-locking sync if due) and
         TIME'S UP + beeps fire within ~1 s of the actual expiry wall time,
         instead of sleeping up to 55 s past it.
+22. [ ] **Battery gauge**: log shows `battery: N mV (P%)` each wake; on USB
+        ~4300+ mV -> 100%, on LiPo 3300-4200 mV with a plausible %. Icon +
+        percent render left of the right-justified HH:MM:SS.
+23. [ ] **Break fires**: (shorten via menuconfig: interval 2 min, duration
+        1 min) with the timer RUNNING, after ~interval of accumulated run
+        time the device flips to the inverted SCREEN BREAK screen and the
+        break alarm fires: 2-beep pattern + pulsing cyan NeoPixels (alert-
+        class — fires during quiet hours too); any button silences it.
+        Break start may lag the interval by up to one 55 s tick.
+24. [ ] **Break is enforced**: during the break, Button A logs
+        `button A ignored during screen break` and nothing resumes. B
+        (parent mode) still resets; D still syncs.
+25. [ ] **Break end**: at the end of the break (within ~1 s), double-beep
+        chime, display returns to the normal layout showing PAUSED with the
+        frozen remaining time; Button A resumes and accrual starts fresh
+        (next break ~interval later).
+26. [ ] **Break persistence**: power-cycle mid-break -> after the boot sync
+        the break resumes with the SAME end time (not restarted). Power
+        cycle after break end -> comes back PAUSED.
+27. [ ] **Pause accrual**: run ~half the interval, pause, wait, resume —
+        the break still fires after a total of ~interval of running time
+        (pauses don't reset the accrual).
+28. [ ] **Minute alignment (non-RUNNING)**: while IDLE/PAUSED/EXPIRED (and
+        during a break), the header time flips within a few seconds of real
+        clocks (wakes align to minute boundaries; log shows
+        `Entering deep sleep (N s)` with varying N). These states re-sync
+        NTP on the MAGTAG_IDLE_SYNC_INTERVAL_MIN cadence (default 60 min;
+        the S2's RC-oscillator drift makes longer intervals visibly wrong).
+        RUNNING keeps its fixed 55 s tick and 10-min sync.
+29. [ ] **Quiet hours**: between 22:30 and 08:00 local (menuconfig:
+        MAGTAG_QUIET_START/END_HHMM) button/status NeoPixels stay dark;
+        alert pulses (expiry red, break cyan) still fire. Set start == end
+        to disable for testing.
 20. [ ] **Production reset gate**: with `CONFIG_MAGTAG_PARENT_TESTING=n`,
         Button B logs `Button B reset disabled` and does not reset; the
         allocation resets only on day rollover. (Default build: =y, B resets.)
