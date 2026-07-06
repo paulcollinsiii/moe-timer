@@ -398,15 +398,36 @@ static void maybe_wait_for_event(void) {
 
     ESP_LOGI(TAG, "Final minute: staying awake (%lld s remaining)", (long long)remaining);
     /* Expiry is a wall time, so a clock step here directly sharpens the
-       moment the alert fires. Skip when recently synced (drift over the
-       10-min window is sub-second) or when the sync itself (~5-9 s)
-       would blow past the expiry. */
+       moment the alert fires. Skip when recently synced or when the sync
+       itself (~5-9 s) would blow past the expiry. */
     if (timer_needs_ntp_sync(now) && remaining > 15) {
         try_ntp_sync();
     }
     neopixel_show_timer_state();
 
-    while (g_rtc_state.expiry_wall_time - (int64_t)time(NULL) > 0) {
+    /* Countdown: partial display steps at the quarter-minute marks (values
+       pinned so the text reads exactly 00:01:00/45/30/15), and the last
+       15 s on the pixels as a binary count (status class: light green,
+       brightness-scaled, muted by quiet hours). */
+    static const int32_t STEPS[] = {60, 45, 30, 15};
+    const int n_steps = (int)(sizeof(STEPS) / sizeof(STEPS[0]));
+    int next_step = 0;
+    int64_t rem = g_rtc_state.expiry_wall_time - (int64_t)time(NULL);
+    while (next_step < n_steps && (int64_t)STEPS[next_step] > rem) {
+        next_step++; /* woke late (e.g. slow sync): skip already-passed steps */
+    }
+    int32_t leds_shown = -1;
+    while ((rem = g_rtc_state.expiry_wall_time - (int64_t)time(NULL)) > 0) {
+        if (next_step < n_steps && rem <= (int64_t)STEPS[next_step]) {
+            time_t step_now = time(NULL);
+            display_state_t st = make_state(STEPS[next_step], step_now);
+            display_update(&st); /* partial; ~2-3 s, well under the 15 s spacing */
+            next_step++;
+        }
+        if (rem <= 15 && (int32_t)rem != leds_shown) {
+            neopixel_status_binary4((uint8_t)rem, 20, 60, 20); /* light green */
+            leds_shown = (int32_t)rem;
+        }
         vTaskDelay(pdMS_TO_TICKS(250));
     }
     timer_tick(time(NULL)); /* RUNNING -> EXPIRED */
