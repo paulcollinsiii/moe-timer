@@ -82,10 +82,10 @@ credentials.**
         percent render left of the right-justified HH:MM:SS.
 23. [ ] **Break fires**: (shorten via menuconfig: interval 2 min, duration
         1 min) with the timer RUNNING, after ~interval of accumulated run
-        time the device flips to the inverted SCREEN BREAK screen, state
-        pixel blue-cyan, break alarm sounds (2-beep pattern); any button
-        silences the alarm. Break start may lag the interval by up to one
-        55 s tick.
+        time the device flips to the inverted SCREEN BREAK screen and the
+        break alarm fires: 2-beep pattern + pulsing cyan NeoPixels (alert-
+        class — fires during quiet hours too); any button silences it.
+        Break start may lag the interval by up to one 55 s tick.
 24. [ ] **Break is enforced**: during the break, Button A logs
         `button A ignored during screen break` and nothing resumes. B
         (parent mode) still resets; D still syncs.
@@ -108,8 +108,8 @@ credentials.**
         RUNNING keeps its fixed 55 s tick and 10-min sync.
 29. [ ] **Quiet hours**: between 22:30 and 08:00 local (menuconfig:
         MAGTAG_QUIET_START/END_HHMM) button/status NeoPixels stay dark;
-        the expiry alert's red pulse still fires. Set start == end to
-        disable for testing.
+        alert pulses (expiry red, break cyan) still fire. Set start == end
+        to disable for testing.
 20. [ ] **Production reset gate**: with `CONFIG_MAGTAG_PARENT_TESTING=n`,
         Button B logs `Button B reset disabled` and does not reset; the
         allocation resets only on day rollover. (Default build: =y, B resets.)

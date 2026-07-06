@@ -288,10 +288,21 @@ static void break_alarm_task(void *arg) {
     vTaskDelete(NULL);
 }
 
-/* Break-start alarm: audible only (the state pixel is already blue and the
-   inverted screen carries the visual weight). Any button silences it. */
+static void break_pulse_task(void *arg) {
+    (void)arg;
+    neopixel_pulse_start(0, 150, 220); /* cyan — matches the BREAK identity */
+    s_np_alert_done = true;
+    vTaskDelete(NULL);
+}
+
+/* Break-start alarm: beeps + cyan pulse. Alert-class, so it fires during
+   quiet hours (like the expiry alert — it accompanies an audible alarm).
+   Any button silences it. Teardown uses the request/done handshake — a
+   direct neopixel_stop() would race the pulse task's RMT flush. */
 static void run_break_alarm(void) {
     s_audio_done = false;
+    s_np_alert_done = false;
+    xTaskCreate(break_pulse_task, "brk_pulse", 2048, NULL, 5, NULL);
     xTaskCreate(break_alarm_task, "brk_alarm", 2048, NULL, 5, NULL);
     bool silenced = false;
     for (int i = 0; i < 80 && !s_audio_done && !silenced; i++) {
@@ -305,6 +316,14 @@ static void run_break_alarm(void) {
         vTaskDelay(pdMS_TO_TICKS(100));
     }
     audio_stop();
+    neopixel_request_stop();
+    for (int i = 0; i < 40 && !s_np_alert_done; i++) {
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
+    if (!s_np_alert_done) {
+        ESP_LOGW(TAG, "brk_pulse task did not finish; forcing LED off");
+    }
+    neopixel_stop();                /* single-task now — idempotent gate-off */
     vTaskDelay(pdMS_TO_TICKS(100)); /* let the alarm task observe the stop flag */
 }
 
