@@ -93,7 +93,7 @@ NVS namespace: `timer_cfg`
 | `wifi_ssid` | str | "" | WiFi SSID |
 | `wifi_pass` | str | "" | WiFi password |
 
-On first flash the NVS is initialised with hardcoded defaults from `nvs_defaults.h` that includes the current year's US federal holiday list plus common school holidays. Subsequent boots read the stored values.
+On first flash the NVS is initialised from `nvs_defaults.h` (holiday list, WiFi from `credentials.local.h`) with the allocation minutes coming from menuconfig (`MagTag Timer` menu → `CONFIG_MAGTAG_WEEKDAY/WEEKEND/HOLIDAY_MIN`). The stored stamp is a fingerprint of those values, so changing any allocation in menuconfig re-seeds NVS on the next boot — no erase needed. Subsequent boots with an unchanged fingerprint read the stored values.
 
 **Day-type logic**:
 1. Check if today's date is in the `holidays` blob → holiday allocation.
@@ -102,12 +102,30 @@ On first flash the NVS is initialised with hardcoded defaults from `nvs_defaults
 
 ### 5 · Timer State Machine
 
-States: `IDLE` → `RUNNING` → `PAUSED` → `EXPIRED`
+States: `IDLE` → `RUNNING` → `PAUSED` → `EXPIRED`, plus `BREAK` (eye rest)
 
 - `IDLE`: Allocation loaded for today, `expiry_wall_time` not set. Display shows full bar.
 - `RUNNING`: `expiry_wall_time` set. Device deep sleeps between 55-second refresh wakes.
 - `PAUSED`: `remaining_at_pause` saved in RTC memory; `expiry_wall_time` cleared. Deep sleep continues.
 - `EXPIRED`: `remaining = 0`. Alert sequence runs on wake; device skips deep sleep until alert done or dismissed.
+- `BREAK`: enforced eye-rest pause (see 5a). Screen time frozen like PAUSED; break end is an absolute wall time.
+
+### 5a · Eye Rest (Screen Break)
+
+Every `CONFIG_MAGTAG_BREAK_INTERVAL_MIN` minutes (default 30, 0 disables) of
+**accumulated RUNNING time** — pauses don't reset the accrual — the timer
+auto-transitions to `BREAK` for `CONFIG_MAGTAG_BREAK_DURATION_MIN` minutes
+(default 15):
+
+- Entry: screen-time frozen (like pause), accrual reset, short break alarm
+  (2 beeps × 3, any button silences), display flips to the **inverted**
+  SCREEN BREAK layout with its own countdown + draining bar.
+- During: Button A is ignored (no early resume); B (parent mode) and D work.
+- End: double-beep chime, display returns to the normal layout in `PAUSED`;
+  Button A resumes the screen timer. Break end within ~1 s of wall time
+  (final-minute stay-awake, same mechanism as expiry).
+- Break state and accrual persist in the NVS snapshot (v2): a power cycle
+  mid-break resumes the break with the same absolute end time.
 
 Pressing Start from PAUSED re-NTP-syncs and sets `expiry_wall_time = now + remaining_at_pause`.
 
@@ -132,7 +150,7 @@ Wake sources: A and D always; B only when `CONFIG_MAGTAG_PARENT_TESTING=y`; C is
 │                                                  │
 │  ████████████████████░░░░░░░░░░░░░░░░░░░░░░░░░░  │  ← row 26–50 (progress bar, 24 px tall)
 │                                                  │
-│              00:42:30 remaining                  │  ← row 58–78
+│  ▮85%                       00:42:30             │  ← row 58–78 (battery left, remaining right)
 │                                                  │
 │  Weekday · 60 min                    RUNNING     │  ← status row (moved up)
 │     ⏸        Reset                  ⟳            │  ← button labels (A B _ D)

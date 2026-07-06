@@ -10,6 +10,9 @@ extern "C" {
 #endif
 
 esp_err_t nvs_config_init_defaults(void);
+/* Stamp derived from NVS_DEFAULTS_VERSION + the compile-time allocation
+   defaults; init_defaults reseeds when the stored stamp differs. */
+uint16_t nvs_config_defaults_fingerprint(void);
 
 esp_err_t nvs_config_get_weekday_min(uint16_t *out);
 esp_err_t nvs_config_set_weekday_min(uint16_t val);

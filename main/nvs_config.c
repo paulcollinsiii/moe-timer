@@ -114,6 +114,19 @@ esp_err_t nvs_config_load_timer_snapshot(timer_snapshot_t *out) {
 
 /* ---- init defaults ---- */
 
+uint16_t nvs_config_defaults_fingerprint(void) {
+    /* Mixes the version salt with the allocation values so ANY change to
+       the compile-time defaults (menuconfig) produces a different stamp
+       and triggers a reseed on the next boot. Never returns 0 (that would
+       be indistinguishable from blank NVS). */
+    uint32_t fp = NVS_DEFAULTS_VERSION;
+    fp = fp * 31u + NVS_DEFAULT_WEEKDAY_MIN;
+    fp = fp * 31u + NVS_DEFAULT_WEEKEND_MIN;
+    fp = fp * 31u + NVS_DEFAULT_HOLIDAY_MIN;
+    uint16_t out = (uint16_t)(fp ^ (fp >> 16));
+    return (out == 0) ? 1 : out;
+}
+
 static esp_err_t reseed_all_defaults(void) {
     esp_err_t ret;
 
@@ -136,17 +149,17 @@ static esp_err_t reseed_all_defaults(void) {
     if (ret != ESP_OK)
         return ret;
     /* Stamp last: a power cut mid-reseed re-runs the whole reseed */
-    return hal_nvs_write_u16("defaults_ver", NVS_DEFAULTS_VERSION);
+    return hal_nvs_write_u16("defaults_ver", nvs_config_defaults_fingerprint());
 }
 
 esp_err_t nvs_config_init_defaults(void) {
-    /* Version stamp: when the compile-time defaults change (bump
-       NVS_DEFAULTS_VERSION in nvs_defaults.h), overwrite everything —
-       no erase-flash needed. A missing stamp also reseeds (covers
-       devices seeded before the stamp existed). */
+    /* Fingerprint stamp: when the compile-time defaults change (menuconfig
+       allocation values or an NVS_DEFAULTS_VERSION bump), overwrite
+       everything — no erase-flash needed. A missing stamp also reseeds
+       (covers devices seeded before the stamp existed). */
     uint16_t ver = 0;
     esp_err_t vret = hal_nvs_read_u16("defaults_ver", &ver);
-    if (vret == ESP_ERR_NVS_NOT_FOUND || (vret == ESP_OK && ver != NVS_DEFAULTS_VERSION)) {
+    if (vret == ESP_ERR_NVS_NOT_FOUND || (vret == ESP_OK && ver != nvs_config_defaults_fingerprint())) {
         return reseed_all_defaults();
     }
     if (vret != ESP_OK)

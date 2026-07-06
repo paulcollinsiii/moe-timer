@@ -106,6 +106,21 @@ void test_invert_byte_cols_clamps_out_of_range(void) {
     TEST_ASSERT_EQUAL_HEX8(0x44, fb[0][1]);
 }
 
+/* ---- display_battery_icon_level: 0=empty .. 4=full ---- */
+
+void test_battery_icon_boundaries(void) {
+    TEST_ASSERT_EQUAL_INT(0, display_battery_icon_level(0));
+    TEST_ASSERT_EQUAL_INT(0, display_battery_icon_level(10));
+    TEST_ASSERT_EQUAL_INT(1, display_battery_icon_level(11));
+    TEST_ASSERT_EQUAL_INT(1, display_battery_icon_level(35));
+    TEST_ASSERT_EQUAL_INT(2, display_battery_icon_level(36));
+    TEST_ASSERT_EQUAL_INT(2, display_battery_icon_level(60));
+    TEST_ASSERT_EQUAL_INT(3, display_battery_icon_level(61));
+    TEST_ASSERT_EQUAL_INT(3, display_battery_icon_level(85));
+    TEST_ASSERT_EQUAL_INT(4, display_battery_icon_level(86));
+    TEST_ASSERT_EQUAL_INT(4, display_battery_icon_level(100));
+}
+
 /* ---- display_button_a_label: A shows the action a press will take ---- */
 
 void test_button_a_shows_play_when_idle(void) {
@@ -123,6 +138,11 @@ void test_button_a_shows_pause_when_running(void) {
 void test_button_a_hidden_when_expired(void) {
     /* A press does nothing in EXPIRED — advertising one would mislead */
     TEST_ASSERT_EQUAL(DISPLAY_BTN_LABEL_NONE, display_button_a_label(TIMER_EXPIRED));
+}
+
+void test_button_a_hidden_during_break(void) {
+    /* Cannot resume early during an enforced break */
+    TEST_ASSERT_EQUAL(DISPLAY_BTN_LABEL_NONE, display_button_a_label(TIMER_BREAK));
 }
 
 /* display_fb_invert_dirty_rows: inverts band bytes only in rows where the
@@ -176,10 +196,12 @@ int main(void) {
     RUN_TEST(test_invert_byte_cols_middle_column);
     RUN_TEST(test_invert_byte_cols_full_width);
     RUN_TEST(test_invert_byte_cols_clamps_out_of_range);
+    RUN_TEST(test_battery_icon_boundaries);
     RUN_TEST(test_button_a_shows_play_when_idle);
     RUN_TEST(test_button_a_shows_play_when_paused);
     RUN_TEST(test_button_a_shows_pause_when_running);
     RUN_TEST(test_button_a_hidden_when_expired);
+    RUN_TEST(test_button_a_hidden_during_break);
     RUN_TEST(test_invert_dirty_rows_only_touches_changed_rows);
     RUN_TEST(test_invert_dirty_rows_clamps_range);
     RUN_TEST(test_invert_dirty_rows_no_change_returns_zero);

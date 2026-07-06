@@ -166,6 +166,8 @@ static const char *state_str(timer_state_t st) {
             return "PAUSED";
         case TIMER_EXPIRED:
             return "TIME'S UP";
+        case TIMER_BREAK:
+            return "BREAK";
         default:
             return "IDLE";
     }
@@ -177,6 +179,16 @@ static lv_obj_t *fresh_screen(void) {
     lv_obj_set_style_bg_color(scr, lv_color_white(), 0);
     lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
     lv_obj_set_style_text_color(scr, lv_color_black(), 0);
+    return scr;
+}
+
+/* Inverted variant for the Screen Break layout — unmistakable at a glance */
+static lv_obj_t *fresh_screen_inverted(void) {
+    lv_obj_t *scr = lv_screen_active();
+    lv_obj_clean(scr);
+    lv_obj_set_style_bg_color(scr, lv_color_black(), 0);
+    lv_obj_set_style_bg_opa(scr, LV_OPA_COVER, 0);
+    lv_obj_set_style_text_color(scr, lv_color_white(), 0);
     return scr;
 }
 
@@ -240,12 +252,21 @@ static void build_screen(const display_state_t *st) {
     lv_bar_set_value(bar, display_bar_fill_px(st->remaining_sec, st->allocation_sec), LV_ANIM_OFF);
     style_bar(bar);
 
-    /* Row 58-86: remaining time, centred */
+    /* Row 58-86: battery (left, 12 pt) + remaining time (right, 28 pt) */
+    static const char *BATT_SYMS[] = {LV_SYMBOL_BATTERY_EMPTY, LV_SYMBOL_BATTERY_1, LV_SYMBOL_BATTERY_2,
+                                      LV_SYMBOL_BATTERY_3, LV_SYMBOL_BATTERY_FULL};
+    snprintf(buf, sizeof(buf), "%s %u%%", BATT_SYMS[display_battery_icon_level(st->battery_pct)],
+             (unsigned)st->battery_pct);
+    lv_obj_t *batt = lv_label_create(scr);
+    lv_label_set_text(batt, buf);
+    lv_obj_set_style_text_font(batt, &lv_font_montserrat_12, 0);
+    lv_obj_align(batt, LV_ALIGN_TOP_LEFT, 4, 66);
+
     display_format_remaining(buf, sizeof(buf), st->remaining_sec);
     lv_obj_t *rem = lv_label_create(scr);
     lv_label_set_text(rem, buf);
     lv_obj_set_style_text_font(rem, &lv_font_montserrat_28, 0);
-    lv_obj_align(rem, LV_ALIGN_TOP_MID, 0, 58);
+    lv_obj_align(rem, LV_ALIGN_TOP_RIGHT, -4, 58);
 
     /* Status row (moved up to make room for button labels): day-type +
        allocation (left), state (right) */
@@ -300,6 +321,49 @@ static void build_screen(const display_state_t *st) {
     lv_obj_align(lbl_d, LV_ALIGN_BOTTOM_MID, BTN_MID_OFS(3), -2);
 }
 
+/* Screen Break layout (inverted): title, draining break bar, break
+   countdown, and the frozen screen-time remaining as a footer. */
+static void build_break_screen(const display_state_t *st) {
+    lv_obj_t *scr = fresh_screen_inverted();
+    char buf[64];
+
+    lv_obj_t *title = lv_label_create(scr);
+    lv_label_set_text(title, "SCREEN BREAK");
+    lv_obj_set_style_text_font(title, &lv_font_montserrat_28, 0);
+    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 4);
+
+    /* Break-progress bar: white indicator draining on the black screen */
+    lv_obj_t *bar = lv_bar_create(scr);
+    lv_obj_set_size(bar, 284, 16);
+    lv_obj_align(bar, LV_ALIGN_TOP_MID, 0, 40);
+    lv_bar_set_range(bar, 0, 280);
+    lv_bar_set_value(bar, display_bar_fill_px(st->break_remaining_sec, st->break_duration_sec), LV_ANIM_OFF);
+    lv_obj_set_style_radius(bar, 0, LV_PART_MAIN);
+    lv_obj_set_style_bg_color(bar, lv_color_black(), LV_PART_MAIN);
+    lv_obj_set_style_bg_opa(bar, LV_OPA_COVER, LV_PART_MAIN);
+    lv_obj_set_style_border_width(bar, 2, LV_PART_MAIN);
+    lv_obj_set_style_border_color(bar, lv_color_white(), LV_PART_MAIN);
+    lv_obj_set_style_radius(bar, 0, LV_PART_INDICATOR);
+    lv_obj_set_style_bg_color(bar, lv_color_white(), LV_PART_INDICATOR);
+    lv_obj_set_style_bg_opa(bar, LV_OPA_COVER, LV_PART_INDICATOR);
+
+    display_format_remaining(buf, sizeof(buf), st->break_remaining_sec);
+    lv_obj_t *cnt = lv_label_create(scr);
+    lv_label_set_text(cnt, buf);
+    lv_obj_set_style_text_font(cnt, &lv_font_montserrat_48, 0);
+    lv_obj_align(cnt, LV_ALIGN_TOP_MID, 0, 62);
+
+    char rem_buf[16];
+    display_format_remaining(rem_buf, sizeof(rem_buf), st->remaining_sec);
+    snprintf(buf, sizeof(buf), "Timer paused - %s left", rem_buf);
+    lv_obj_t *foot = lv_label_create(scr);
+    lv_label_set_text(foot, buf);
+    /* 12 pt renders illegibly white-on-black on e-ink (thin strokes eaten
+       by the inversion) — 16 pt keeps the footer readable. */
+    lv_obj_set_style_text_font(foot, &lv_font_montserrat_16, 0);
+    lv_obj_align(foot, LV_ALIGN_BOTTOM_MID, 0, -4);
+}
+
 static void render(ssd1680_refresh_mode_t mode) {
     s_pending_mode = mode;
     lv_refr_now(s_disp); /* renders + calls flush_cb synchronously */
@@ -308,7 +372,11 @@ static void render(ssd1680_refresh_mode_t mode) {
 void display_update(const display_state_t *st) {
     if (!s_initialized)
         display_init();
-    build_screen(st);
+    if (st->timer_state == TIMER_BREAK) {
+        build_break_screen(st);
+    } else {
+        build_screen(st);
+    }
     /* Policy: full refresh every Nth partial (anti-ghosting). The counter
        lives in RTC memory so the cadence survives deep sleep. */
     g_rtc_state.partial_refresh_count++;
@@ -323,7 +391,11 @@ void display_update(const display_state_t *st) {
 void display_full_refresh(const display_state_t *st) {
     if (!s_initialized)
         display_init();
-    build_screen(st);
+    if (st->timer_state == TIMER_BREAK) {
+        build_break_screen(st);
+    } else {
+        build_screen(st);
+    }
     g_rtc_state.partial_refresh_count = 0;
     render(SSD1680_REFRESH_FULL);
 }

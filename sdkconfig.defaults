@@ -20,6 +20,29 @@ CONFIG_PARTITION_TABLE_SINGLE_APP_LARGE=y
 # production build where only day rollover refills the allocation.
 CONFIG_MAGTAG_PARENT_TESTING=y
 
+# Daily screen-time allocations (minutes). Seed NVS; changing any of
+# these (menuconfig or here) re-seeds NVS on the next boot automatically
+# via the defaults fingerprint.
+CONFIG_MAGTAG_WEEKDAY_MIN=60
+CONFIG_MAGTAG_WEEKEND_MIN=120
+CONFIG_MAGTAG_HOLIDAY_MIN=120
+
+# Eye-rest: enforced Screen Break every 30 min of running time, 15 min
+# long. Interval 0 disables breaks.
+CONFIG_MAGTAG_BREAK_INTERVAL_MIN=30
+CONFIG_MAGTAG_BREAK_DURATION_MIN=15
+
+# IDLE clock re-sync cadence (S2 RC-oscillator drift is minutes/day)
+CONFIG_MAGTAG_IDLE_SYNC_INTERVAL_MIN=60
+
+# Status NeoPixels dark 22:30-08:00 local (HHMM; start == end disables)
+CONFIG_MAGTAG_QUIET_START_HHMM=2230
+CONFIG_MAGTAG_QUIET_END_HHMM=800
+
+# Larger font for the inverted break-screen footer (12 pt renders poorly
+# white-on-black on e-ink)
+CONFIG_LV_FONT_MONTSERRAT_16=y
+
 # LVGL: 1-bit rendering for the e-paper panel
 CONFIG_LV_COLOR_DEPTH_1=y
 # Use the C library allocator instead of LVGL's 64 KB static pool — the
