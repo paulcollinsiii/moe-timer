@@ -9,15 +9,27 @@
 #endif
 #endif
 
-/* Bump this whenever any default below changes: on the next boot,
-   nvs_config_init_defaults() re-seeds ALL defaults over whatever is in
-   NVS (no erase-flash needed). While there is no runtime settings UI,
-   overwriting everything is the honest behaviour. */
-#define NVS_DEFAULTS_VERSION 2 /* v2: production allocations after smoke testing */
+/* Base salt for the defaults stamp. The stored stamp is a FINGERPRINT of
+   this version plus the allocation values below (see
+   nvs_config_defaults_fingerprint), so a menuconfig change to any
+   allocation re-seeds NVS on the next boot automatically — bump this only
+   to force a re-seed for some other reason (e.g. new holiday list). */
+#define NVS_DEFAULTS_VERSION 2
 
+/* Allocations come from menuconfig (MagTag Timer menu) on firmware builds;
+   host tests have no sdkconfig and use the fixed fallbacks. */
+#ifndef NATIVE
+#include "sdkconfig.h"
+#endif
+#ifdef CONFIG_MAGTAG_WEEKDAY_MIN
+#define NVS_DEFAULT_WEEKDAY_MIN CONFIG_MAGTAG_WEEKDAY_MIN
+#define NVS_DEFAULT_WEEKEND_MIN CONFIG_MAGTAG_WEEKEND_MIN
+#define NVS_DEFAULT_HOLIDAY_MIN CONFIG_MAGTAG_HOLIDAY_MIN
+#else
 #define NVS_DEFAULT_WEEKDAY_MIN 60
 #define NVS_DEFAULT_WEEKEND_MIN 120
 #define NVS_DEFAULT_HOLIDAY_MIN 120
+#endif
 #ifndef NVS_DEFAULT_WIFI_SSID
 #define NVS_DEFAULT_WIFI_SSID ""
 #endif

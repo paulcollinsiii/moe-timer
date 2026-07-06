@@ -93,7 +93,7 @@ NVS namespace: `timer_cfg`
 | `wifi_ssid` | str | "" | WiFi SSID |
 | `wifi_pass` | str | "" | WiFi password |
 
-On first flash the NVS is initialised with hardcoded defaults from `nvs_defaults.h` that includes the current year's US federal holiday list plus common school holidays. Subsequent boots read the stored values.
+On first flash the NVS is initialised from `nvs_defaults.h` (holiday list, WiFi from `credentials.local.h`) with the allocation minutes coming from menuconfig (`MagTag Timer` menu → `CONFIG_MAGTAG_WEEKDAY/WEEKEND/HOLIDAY_MIN`). The stored stamp is a fingerprint of those values, so changing any allocation in menuconfig re-seeds NVS on the next boot — no erase needed. Subsequent boots with an unchanged fingerprint read the stored values.
 
 **Day-type logic**:
 1. Check if today's date is in the `holidays` blob → holiday allocation.

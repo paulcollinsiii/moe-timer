@@ -18,6 +18,29 @@ menu "MagTag Timer"
             allocation only resets on day rollover — otherwise the timer's
             user could refund their own screen time.
 
+    config MAGTAG_WEEKDAY_MIN
+        int "Weekday screen-time allocation (minutes)"
+        default 60
+        range 1 1440
+        help
+            Daily allocation on weekdays. Seeds NVS; changing this (or any
+            allocation) reseeds NVS defaults on the next boot automatically
+            (the stored stamp is a fingerprint of these values).
+
+    config MAGTAG_WEEKEND_MIN
+        int "Weekend screen-time allocation (minutes)"
+        default 120
+        range 1 1440
+        help
+            Daily allocation on Saturdays and Sundays.
+
+    config MAGTAG_HOLIDAY_MIN
+        int "Holiday screen-time allocation (minutes)"
+        default 120
+        range 1 1440
+        help
+            Daily allocation on dates in the NVS holiday list.
+
     config MAGTAG_BREAK_INTERVAL_MIN
         int "Eye-rest break interval (minutes of running time)"
         default 30

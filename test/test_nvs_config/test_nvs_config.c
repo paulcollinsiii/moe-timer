@@ -149,19 +149,27 @@ void test_get_weekday_min_missing_returns_default(void) {
 /* defaults version stamp                                              */
 /* ------------------------------------------------------------------ */
 
-void test_init_defaults_writes_version_stamp(void) {
+void test_init_defaults_writes_fingerprint_stamp(void) {
     TEST_ASSERT_EQUAL(ESP_OK, nvs_config_init_defaults());
     uint16_t ver = 0;
     TEST_ASSERT_EQUAL(ESP_OK, hal_nvs_read_u16("defaults_ver", &ver));
-    TEST_ASSERT_EQUAL_UINT16(NVS_DEFAULTS_VERSION, ver);
+    /* Stamp is a fingerprint of the compile-time defaults, so a menuconfig
+       change to any allocation reseeds without a manual version bump */
+    TEST_ASSERT_EQUAL_UINT16(nvs_config_defaults_fingerprint(), ver);
 }
 
-void test_init_defaults_reseeds_on_version_bump(void) {
+void test_defaults_fingerprint_is_nonzero_and_stable(void) {
+    /* 0 would collide with blank NVS; stability keeps reseed idempotent */
+    TEST_ASSERT_NOT_EQUAL(0, nvs_config_defaults_fingerprint());
+    TEST_ASSERT_EQUAL_UINT16(nvs_config_defaults_fingerprint(), nvs_config_defaults_fingerprint());
+}
+
+void test_init_defaults_reseeds_on_fingerprint_change(void) {
     TEST_ASSERT_EQUAL(ESP_OK, nvs_config_init_defaults());
-    /* Simulate values seeded by an older firmware build */
+    /* Simulate values seeded by a build with different compile-time defaults */
     TEST_ASSERT_EQUAL(ESP_OK, nvs_config_set_weekday_min(99));
     TEST_ASSERT_EQUAL(ESP_OK, nvs_config_set_wifi_ssid("old-ssid"));
-    TEST_ASSERT_EQUAL(ESP_OK, hal_nvs_write_u16("defaults_ver", NVS_DEFAULTS_VERSION - 1));
+    TEST_ASSERT_EQUAL(ESP_OK, hal_nvs_write_u16("defaults_ver", (uint16_t)(nvs_config_defaults_fingerprint() - 1)));
 
     TEST_ASSERT_EQUAL(ESP_OK, nvs_config_init_defaults());
 
@@ -173,7 +181,7 @@ void test_init_defaults_reseeds_on_version_bump(void) {
     TEST_ASSERT_EQUAL_STRING(NVS_DEFAULT_WIFI_SSID, ssid);
     uint16_t ver = 0;
     TEST_ASSERT_EQUAL(ESP_OK, hal_nvs_read_u16("defaults_ver", &ver));
-    TEST_ASSERT_EQUAL_UINT16(NVS_DEFAULTS_VERSION, ver);
+    TEST_ASSERT_EQUAL_UINT16(nvs_config_defaults_fingerprint(), ver);
 }
 
 void test_init_defaults_missing_version_key_reseeds(void) {
@@ -248,8 +256,9 @@ int main(void) {
     RUN_TEST(test_wifi_ssid_max_length);
     RUN_TEST(test_holidays_blob_round_trip);
     RUN_TEST(test_get_weekday_min_missing_returns_default);
-    RUN_TEST(test_init_defaults_writes_version_stamp);
-    RUN_TEST(test_init_defaults_reseeds_on_version_bump);
+    RUN_TEST(test_init_defaults_writes_fingerprint_stamp);
+    RUN_TEST(test_defaults_fingerprint_is_nonzero_and_stable);
+    RUN_TEST(test_init_defaults_reseeds_on_fingerprint_change);
     RUN_TEST(test_init_defaults_missing_version_key_reseeds);
     RUN_TEST(test_init_defaults_same_version_preserves_values);
     RUN_TEST(test_timer_snapshot_round_trip);
