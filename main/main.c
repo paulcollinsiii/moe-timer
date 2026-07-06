@@ -19,13 +19,13 @@
 #include "nvs_flash.h"
 #include "quiet_hours.h"
 #include "schedule.h"
+#include "sleep_plan.h"
 #include "timer.h"
 
 static const char *TAG = "main";
 
 /* Compile-time timezone (ProductOverview section 1) */
 #define MAGTAG_TZ "EST5EDT,M3.2.0,M11.1.0"
-#define WAKE_INTERVAL_US (55ULL * 1000000ULL)
 /* IDLE shows only the clock — sync on the menuconfig cadence (default
    hourly) instead of every 10 min. The S2 has no crystal-backed RTC; its
    RC-oscillator timekeeping can drift minutes/day, so don't set this too
@@ -123,19 +123,26 @@ static void enter_deep_sleep(void) {
 
     buttons_configure_wakeup();
 
-    /* Non-RUNNING states only show the wall clock (or a minute-scale break
-       countdown), so align wakes to minute boundaries: the header time
-       flips in step with real clocks. RUNNING keeps the fixed ~55 s tick
-       (expiry precision comes from the final-minute watch; stretching the
-       cadence would fight it). Alignment precision is bounded by the S2's
-       RC-oscillator sleep drift — the periodic NTP sync keeps it honest. */
-    uint64_t sleep_us = WAKE_INTERVAL_US;
-    if (timer_get_state() != TIMER_RUNNING) {
-        int to_boundary = 60 - (int)(time(NULL) % 60);
-        if (to_boundary < 5)
-            to_boundary += 60; /* too close — take the following minute */
-        sleep_us = (uint64_t)to_boundary * 1000000ULL;
+    /* All sleep-duration policy lives in the pure, host-tested planner
+       (sleep_plan.c): minute-boundary alignment for clean renders, the
+       NTP early-wake lead, and the expiry/break-end event lead. Alignment
+       precision is bounded by the S2's RC-oscillator sleep drift — the
+       periodic NTP sync keeps it honest. */
+    time_t plan_now = time(NULL);
+    sleep_plan_in_t plan_in = {
+        .state = timer_get_state(),
+        .sec_into_minute = (int)(plan_now % 60),
+        .event_remaining_sec = 0,
+        .sync_due_by_next_wake = false,
+    };
+    if (plan_in.state == TIMER_RUNNING) {
+        plan_in.event_remaining_sec = (int32_t)(g_rtc_state.expiry_wall_time - (int64_t)plan_now);
+        /* due if the recheck window lapses before the wake after next */
+        plan_in.sync_due_by_next_wake = timer_needs_ntp_sync(plan_now + 90);
+    } else if (plan_in.state == TIMER_BREAK) {
+        plan_in.event_remaining_sec = timer_break_remaining(plan_now);
     }
+    uint64_t sleep_us = (uint64_t)sleep_plan_seconds(&plan_in) * 1000000ULL;
     esp_sleep_enable_timer_wakeup(sleep_us);
     ESP_LOGI(TAG, "Entering deep sleep (%llu s)", (unsigned long long)(sleep_us / 1000000ULL));
     esp_deep_sleep_start();
@@ -348,17 +355,26 @@ static void handle_day_rollover(time_t *now) {
     timer_record_date(*now);
 }
 
-/* ---- final-minute watch ------------------------------------------------ */
+/* ---- event watch ------------------------------------------------------- */
 
-/* With <=60 s to an event, a 55 s sleep overshoots it by most of a minute.
-   Stay awake instead. Covers both the expiry (TIME'S UP within a tick of
-   wall time) and the break end (chime + PAUSED screen on time). */
-#define FINAL_MINUTE_SEC 60
+/* The planner lands the pre-event wake ~SLEEP_PLAN_EVENT_LEAD_SEC out;
+   any wake inside SLEEP_PLAN_WATCH_SEC stays awake so the expiry (TIME'S
+   UP) or break end (chime + PAUSED) fires within a tick of wall time. */
+
+/* Renders should land on :00 so the header clock and the countdown's
+   constant seconds-digit read cleanly. Bounded: wakes that are
+   legitimately mid-minute (event watch) must not stall here. */
+static void wait_for_minute_boundary(int max_wait_sec) {
+    int to = 60 - (int)(time(NULL) % 60);
+    if (to < 60 && to <= max_wait_sec) {
+        vTaskDelay(pdMS_TO_TICKS(to * 1000));
+    }
+}
 
 static void maybe_wait_for_event(void) {
     if (timer_get_state() == TIMER_BREAK) {
         int32_t brem = timer_break_remaining(time(NULL));
-        if (brem <= 0 || brem > FINAL_MINUTE_SEC)
+        if (brem <= 0 || brem > SLEEP_PLAN_WATCH_SEC)
             return;
         ESP_LOGI(TAG, "Break ends in %ld s: staying awake", (long)brem);
         neopixel_show_timer_state();
@@ -377,7 +393,7 @@ static void maybe_wait_for_event(void) {
         return;
     time_t now = time(NULL);
     int64_t remaining = g_rtc_state.expiry_wall_time - (int64_t)now;
-    if (remaining <= 0 || remaining > FINAL_MINUTE_SEC)
+    if (remaining <= 0 || remaining > SLEEP_PLAN_WATCH_SEC)
         return;
 
     ESP_LOGI(TAG, "Final minute: staying awake (%lld s remaining)", (long long)remaining);
@@ -418,6 +434,13 @@ static void handle_timer_tick(void) {
     if (maybe_start_break(now)) {
         enter_deep_sleep(); /* break just started; sleep through it */
     }
+
+    /* Land the render on :00 — the planner woke us on (or, when a sync
+       was due, ~20 s before) the boundary; absorb the residue here so the
+       rendered time and countdown read cleanly. 25 s covers the sync lead
+       without stalling event-watch wakes. */
+    wait_for_minute_boundary(25);
+    now = time(NULL);
 
     timer_state_t before = timer_get_state();
     int32_t remaining = timer_tick(now);
