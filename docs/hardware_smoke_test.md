@@ -31,8 +31,11 @@ credentials.**
        after) and continues from the frozen value.
 8. [ ] **Button B (reset)**: returns to IDLE with today's full allocation.
 9. [ ] **Button D (force sync)**: WiFi cycle + full refresh; sync time updates.
-10. [ ] **Button C**: does nothing at all — not a wake source (kept out of
-        the EXT1 mask so mashing it cannot burn battery or refreshes).
+10. [ ] **Button C**: with no extra timers configured (the default), does
+        nothing at all — not a wake source (kept out of the EXT1 mask so
+        mashing it cannot burn battery or refreshes). With an extra timer
+        configured (`MAGTAG_TIMER1_NAME` etc.), swaps the selected timer
+        (refused while RUNNING or during a Screen Break).
 11. [ ] **Expiry**: temporarily lower `NVS_DEFAULT_WEEKDAY_MIN` to 1-2 min (and
         erase NVS: `idf.py erase-flash`), let it expire: TIME'S UP screen,
         3 beeps x 5 cycles, red NeoPixel pulse; any button stops the alert

@@ -151,11 +151,22 @@ All state is persisted in **RTC slow memory** (survives deep sleep) with an NVS 
 | Button | GPIO | Action |
 |--------|------|--------|
 | A | 15 | Start (IDLE/PAUSED → RUNNING, immediate; NTP sync after) / Pause (RUNNING → PAUSED) |
-| B | 14 | Reset to IDLE with today's full allocation (only when `CONFIG_MAGTAG_PARENT_TESTING=y`) |
-| C | 12 | Unbound in v1 (wakes + redraws only) |
+| B | 14 | Reset the **selected** timer to IDLE at full duration: always for a reloadable extra timer (except mid-run), otherwise only when `CONFIG_MAGTAG_PARENT_TESTING=y` |
+| C | 12 | Swap timer type (Screen → extra 1 → … → Screen); refused while RUNNING or in a Screen Break |
 | D | 11 | Force NTP re-sync + full display refresh |
 
-Wake sources: A and D always; B only when `CONFIG_MAGTAG_PARENT_TESTING=y`; C is never a wake source (mashing an unbound button must not burn battery or panel refreshes). Buttons are debounced in software (10 ms).
+Wake sources: A and D always; B when `CONFIG_MAGTAG_PARENT_TESTING=y` or any reloadable extra timer is configured; C only when extra timers are configured (an unbound button must not burn battery or panel refreshes when mashed). Buttons are debounced in software (10 ms).
+
+### 6a · Extra timers (v1.3)
+
+Up to four additional countdown timers (menuconfig: `MAGTAG_TIMER<n>_NAME/_MIN/_RELOADABLE`; an empty name disables the slot) for things like Piano practice or Meditation. They are plain countdowns sharing the Screen timer's alerts, NeoPixel sequences, NTP cadence, and RTC + NVS-snapshot persistence, but:
+
+- No eye-rest breaks (Screen-only).
+- Fixed configured duration instead of the day-schedule allocation.
+- **Reloadable** timers reset to full via Button B on the same day, no ParentTesting needed. The mode line then counts the day's completed runs (reached 00:00): `Meditation (x2) - 10 min`. A mid-run reset does not count; non-reloadable timers never show a counter — once expired they stay depleted until rollover.
+- Day rollover resets every timer, clears the counters, and reverts the selection to Screen.
+
+Only the selected timer can be RUNNING — swapping requires a pause, so pause/expiry state of a deselected timer is frozen until you swap back.
 
 ### 7 · Display Layout (296×128 px)
 
@@ -174,8 +185,12 @@ Wake sources: A and D always; B only when `CONFIG_MAGTAG_PARENT_TESTING=y`; C is
 
 Button labels sit above the physical buttons: A shows the action a press
 will take (play when IDLE/PAUSED, pause when RUNNING, hidden when EXPIRED),
-"Reset" appears only when `CONFIG_MAGTAG_PARENT_TESTING=y`, C is unlabelled
-(unbound), D is the sync/refresh symbol.
+"Reset" appears when `CONFIG_MAGTAG_PARENT_TESTING=y` or the selected timer
+is reloadable (and not RUNNING), C shows a swap arrow when extra timers are
+configured and the state allows swapping, D is the sync/refresh symbol.
+When an extra timer is selected, the bottom-left mode line shows its name,
+completion counter, and duration (e.g. `Meditation (x2) · 10 min`) instead
+of the day-type + allocation.
 
 - **Progress bar**: full-width (280 px usable), fill proportional to `remaining/allocation`. Thick outer border.
 - **Remaining time**: centred; always `HH:MM:SS`.
