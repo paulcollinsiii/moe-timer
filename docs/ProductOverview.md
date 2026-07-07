@@ -88,10 +88,15 @@ time.
 7. Return to deep sleep.
 
 Buttons are normally dispatched on EXT1 wake, which would make the device
-deaf while it is awake — so the long awake waits (render-grid alignment,
-final-minute event watch) poll Button A directly and pause immediately.
-Pausing inside the final minute cancels the pending expiry; the other
-buttons keep their wake-press semantics.
+deaf while it is awake. While awake, a GPIO negative-edge ISR latches every
+press the moment it lands — even inside an e-ink flush or NTP sync — and
+the awake checkpoints consume the latch: Button A pauses from the
+render-grid wait and the final-minute event watch (cancelling the pending
+expiry), and any latched press dismisses the TIME'S UP / break alarms. The
+handlers detach at sleep entry before the pads move to the RTC mux;
+unconsumed latches are plain RAM and evaporate in deep sleep. Latched
+B/C/D presses are dropped — those buttons keep wake-press semantics — and
+held-button logic (release wait, continuation guard) stays level-based.
 
 WiFi is **off by default**; it is only powered up for NTP syncs and then immediately shut down.
 

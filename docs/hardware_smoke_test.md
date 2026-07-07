@@ -86,8 +86,11 @@ credentials.**
         on the four pixels in binary (light green, dim; dark during quiet
         hours), and TIME'S UP + red pulse + beeps fire within ~1 s of the
         expiry wall time. Pressing A anywhere in the final minute pauses
-        instead (PAUSED full refresh, no alarm) — the watch loop polls the
-        button; expiry only fires if the countdown truly reaches zero.
+        instead (PAUSED full refresh, no alarm) — presses are ISR-latched,
+        so even a quick tap DURING one of the quarter-mark partial
+        refreshes registers and pauses as soon as the flush completes;
+        expiry only fires if the countdown truly reaches zero. Quick taps
+        also dismiss the TIME'S UP / break alarms reliably.
 22. [ ] **Battery gauge**: log shows `battery: N mV (P%)` each wake; on USB
         ~4300+ mV -> 100%, on LiPo 3300-4200 mV with a plausible %. Icon +
         percent render left of the right-justified HH:MM:SS.
