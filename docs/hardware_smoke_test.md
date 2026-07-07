@@ -73,10 +73,12 @@ credentials.**
         IDLE. Note: EN reset mid-run (before expiry) intentionally restores
         the in-flight countdown — that is crash recovery, not a refund; the
         run resumes with the remaining time it had.
-21. [ ] **Final minute**: when a wake finds <=60 s remaining, the device
-        stays awake (state pixel lit, one clock-locking sync if due) and
-        TIME'S UP + beeps fire within ~1 s of the actual expiry wall time,
-        instead of sleeping up to 55 s past it.
+21. [ ] **Final-minute countdown**: the pre-expiry wake lands ~70 s out
+        (planner); the display then steps through 00:01:00 / 00:00:45 /
+        00:00:30 / 00:00:15 as partial refreshes, the last 15 s count down
+        on the four pixels in binary (light green, dim; dark during quiet
+        hours), and TIME'S UP + red pulse + beeps fire within ~1 s of the
+        expiry wall time.
 22. [ ] **Battery gauge**: log shows `battery: N mV (P%)` each wake; on USB
         ~4300+ mV -> 100%, on LiPo 3300-4200 mV with a plausible %. Icon +
         percent render left of the right-justified HH:MM:SS.
@@ -99,13 +101,21 @@ credentials.**
 27. [ ] **Pause accrual**: run ~half the interval, pause, wait, resume —
         the break still fires after a total of ~interval of running time
         (pauses don't reset the accrual).
-28. [ ] **Minute alignment (non-RUNNING)**: while IDLE/PAUSED/EXPIRED (and
-        during a break), the header time flips within a few seconds of real
-        clocks (wakes align to minute boundaries; log shows
-        `Entering deep sleep (N s)` with varying N). These states re-sync
-        NTP on the MAGTAG_IDLE_SYNC_INTERVAL_MIN cadence (default 60 min;
-        the S2's RC-oscillator drift makes longer intervals visibly wrong).
-        RUNNING keeps its fixed 55 s tick and 10-min sync.
+28. [ ] **Minute alignment (all states)**: the header time flips within a
+        few seconds of real clocks in every state (log shows
+        `Entering deep sleep (N s)` with varying N). IDLE/PAUSED/EXPIRED
+        re-sync NTP on MAGTAG_IDLE_SYNC_INTERVAL_MIN (default 60 min);
+        RUNNING on MAGTAG_RUNNING_SYNC_INTERVAL_MIN (default 10 min).
+30. [ ] **RUNNING renders on the countdown grid**: a start/resume shows one
+        precise value (e.g. 1:12:23); every subsequent tick render shows a
+        round minute (1:12:00, 1:11:00...) because wakes land when the
+        remaining value crosses its own minute grid. When the sync is due,
+        the log shows an early wake (~20 s before the grid point) and the
+        render still lands on the grid after the sync.
+31. [ ] **Status LED brightness**: MAGTAG_STATUS_LED_BRIGHTNESS (menuconfig)
+        visibly scales the state/sync/countdown pixels; alert pulses
+        (expiry red, break cyan) are unaffected. Alarm lengths follow
+        MAGTAG_EXPIRY/BREAK_ALARM_CYCLES.
 29. [ ] **Quiet hours**: between 22:30 and 08:00 local (menuconfig:
         MAGTAG_QUIET_START/END_HHMM) button/status NeoPixels stay dark;
         alert pulses (expiry red, break cyan) still fire. Set start == end

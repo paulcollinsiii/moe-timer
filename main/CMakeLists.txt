@@ -13,6 +13,7 @@ idf_component_register(
         "battery_soc.c"
         "neopixel.c"
         "quiet_hours.c"
+        "sleep_plan.c"
         "hal_time.c"
         "hal_nvs.c"
     INCLUDE_DIRS
