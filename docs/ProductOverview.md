@@ -87,6 +87,12 @@ time.
    sync if due) and fire TIME'S UP within ~1 s of the expiry wall time.
 7. Return to deep sleep.
 
+Buttons are normally dispatched on EXT1 wake, which would make the device
+deaf while it is awake — so the long awake waits (render-grid alignment,
+final-minute event watch) poll Button A directly and pause immediately.
+Pausing inside the final minute cancels the pending expiry; the other
+buttons keep their wake-press semantics.
+
 WiFi is **off by default**; it is only powered up for NTP syncs and then immediately shut down.
 
 ### 4 · Daily Schedule & NVS Config

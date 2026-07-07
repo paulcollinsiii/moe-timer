@@ -376,11 +376,25 @@ static void handle_day_rollover(time_t *now) {
    any wake inside SLEEP_PLAN_WATCH_SEC stays awake so the expiry (TIME'S
    UP) or break end (chime + PAUSED) fires within a tick of wall time. */
 
+/* Buttons are only dispatched on EXT1 wake — while the firmware is awake
+   a press would vanish. Long awake waits poll this instead: a Button A
+   press while RUNNING pauses immediately (the one action that must not
+   be lost — pause is time-sensitive). Returns true when it paused. */
+static bool poll_pause_button(void) {
+    if (timer_get_state() != TIMER_RUNNING || !buttons_is_pressed(BTN_A))
+        return false;
+    time_t now = time(NULL);
+    timer_pause(now);
+    ESP_LOGI(TAG, "button A while awake: paused");
+    return true;
+}
+
 /* Absorb the wake residue so the render lands on the state's grid:
    RUNNING/BREAK on the countdown's round minute (the display truly reads
    1:11:00), clock-only states on the wall :00. Bounded — wakes that are
    legitimately off-grid (event watch handoff, slow sync) render where
-   they are and self-correct next cycle. */
+   they are and self-correct next cycle. Aborts early on a pause press
+   (the caller then renders PAUSED, off-grid but honest). */
 static void wait_for_render_grid(int max_wait_sec) {
     time_t now = time(NULL);
     int to;
@@ -394,7 +408,11 @@ static void wait_for_render_grid(int max_wait_sec) {
             to = 0; /* already on the wall boundary */
     }
     if (to > 0 && to <= max_wait_sec) {
-        vTaskDelay(pdMS_TO_TICKS(to * 1000));
+        for (int i = 0; i < to * 10; i++) {
+            if (poll_pause_button())
+                return;
+            vTaskDelay(pdMS_TO_TICKS(100));
+        }
     }
 }
 
@@ -445,6 +463,17 @@ static void maybe_wait_for_event(void) {
     }
     int32_t leds_shown = -1;
     while ((rem = timer_expiry_wall() - (int64_t)time(NULL)) > 0) {
+        /* The event watch owns the whole final minute — without this poll
+           a pause press here would be lost and the expiry unavoidable. */
+        if (poll_pause_button()) {
+            neopixel_stop(); /* clear the binary-countdown pixels */
+            time_t pnow = time(NULL);
+            display_state_t st = make_state(timer_tick(pnow), pnow);
+            neopixel_show_timer_state(); /* amber during the refresh */
+            display_full_refresh(&st);
+            neopixel_stop();
+            return;
+        }
         if (next_step < n_steps && rem <= (int64_t)STEPS[next_step]) {
             time_t step_now = time(NULL);
             display_state_t st = make_state(STEPS[next_step], step_now);
@@ -486,11 +515,12 @@ static void handle_timer_tick(void) {
     /* Land the render on the state's grid — the planner woke us on (or,
        when a sync was due, ~20 s before) the grid point; absorb the
        residue here. 25 s covers the sync lead without stalling
-       event-watch wakes. */
+       event-watch wakes. Captured BEFORE the wait: a pause press during
+       it must register as a state change (full refresh). */
+    timer_state_t before = timer_get_state();
     wait_for_render_grid(25);
     now = time(NULL);
 
-    timer_state_t before = timer_get_state();
     int32_t remaining = timer_tick(now);
 
     /* The grid wait makes the true remaining a round minute at render
