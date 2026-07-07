@@ -26,6 +26,12 @@ static const char *TAG = "main";
 
 /* Compile-time timezone (ProductOverview section 1) */
 #define MAGTAG_TZ "EST5EDT,M3.2.0,M11.1.0"
+/* Kconfig bool as a C expression (defined as 1 when =y, absent when =n) */
+#if CONFIG_MAGTAG_PARENT_TESTING
+#define PARENT_TESTING true
+#else
+#define PARENT_TESTING false
+#endif
 /* IDLE shows only the clock — sync on the menuconfig cadence (default
    hourly) instead of every 10 min. The S2 has no crystal-backed RTC; its
    RC-oscillator timekeeping can drift minutes/day, so don't set this too
@@ -136,7 +142,7 @@ static void enter_deep_sleep(void) {
         .sync_due_by_next_wake = false,
     };
     if (plan_in.state == TIMER_RUNNING) {
-        plan_in.event_remaining_sec = (int32_t)(g_rtc_state.expiry_wall_time - (int64_t)plan_now);
+        plan_in.event_remaining_sec = (int32_t)(timer_expiry_wall() - (int64_t)plan_now);
         /* due if the recheck window lapses before the wake after next */
         plan_in.sync_due_by_next_wake = timer_needs_ntp_sync(plan_now + 90);
     } else if (plan_in.state == TIMER_BREAK) {
@@ -208,24 +214,33 @@ static void neopixel_show_timer_state(void) {
 
 static display_state_t make_state(int32_t remaining, time_t now) {
     day_type_t dt = schedule_get_day_type(now);
-    uint32_t alloc = schedule_get_allocation_sec(dt);
+    /* Extra timers have a fixed configured duration; Screen (slot 0)
+       follows the day schedule. */
+    const timer_def_t *def = timer_active_def();
+    uint32_t alloc = (def != NULL) ? (uint32_t)def->duration_sec : schedule_get_allocation_sec(dt);
     /* IDLE shows today's full allocation (full bar), not 0 (ProductOverview) */
     if (timer_get_state() == TIMER_IDLE) {
         remaining = (int32_t)alloc;
     }
+    timer_state_t ts = timer_get_state();
     int mv = battery_read_mv();
     int pct = battery_percent_from_mv(mv);
     ESP_LOGI(TAG, "battery: %d mV (%d%%)", mv, pct);
     return (display_state_t){
         .remaining_sec = remaining,
         .allocation_sec = alloc,
-        .timer_state = timer_get_state(),
+        .timer_state = ts,
         .day_type = dt,
         .wall_time = now,
         .last_sync_time = s_last_ntp_sync,
         .battery_pct = (uint8_t)pct,
         .break_remaining_sec = timer_break_remaining(now),
         .break_duration_sec = (uint32_t)CONFIG_MAGTAG_BREAK_DURATION_MIN * 60,
+        .timer_name = (def != NULL) ? def->name : NULL,
+        .completions = timer_completions(),
+        .reloadable = (def != NULL) && def->reloadable,
+        .swap_available = timer_swap_allowed(),
+        .reload_available = timer_reload_allowed(PARENT_TESTING),
     };
 }
 
@@ -242,18 +257,22 @@ static void audio_alert_task(void *arg) {
 
 static void run_expiry_alert(void) {
     s_audio_done = false;
+    buttons_take_pressed();                /* drain: a press from BEFORE the alarm must not pre-dismiss it */
     neopixel_alert_pulse_begin(248, 0, 0); /* red; task + teardown owned by the module */
     xTaskCreate(audio_alert_task, "beep", 2048, NULL, 5, NULL);
 
-    /* Poll for dismissal; cap slightly past the alarm (3 s per cycle) */
+    /* Wait for dismissal — latched taps of any length count, the level
+       scan catches a button already held down through the drain; cap
+       slightly past the alarm (3 s per cycle). */
     bool dismissed = false;
     for (int i = 0; i < CONFIG_MAGTAG_EXPIRY_ALARM_CYCLES * 30 + 10 && !s_audio_done && !dismissed; i++) {
-        for (int b = 0; b < 4; b++) {
-            if (buttons_is_pressed((button_id_t)b)) {
-                ESP_LOGI(TAG, "Alert dismissed by button");
-                dismissed = true;
-                break;
-            }
+        dismissed = buttons_take_pressed() != 0;
+        for (int b = 0; b < 4 && !dismissed; b++) {
+            dismissed = buttons_is_pressed((button_id_t)b);
+        }
+        if (dismissed) {
+            ESP_LOGI(TAG, "Alert dismissed by button");
+            break;
         }
         vTaskDelay(pdMS_TO_TICKS(100));
     }
@@ -276,17 +295,19 @@ static void break_alarm_task(void *arg) {
    Any button silences it. */
 static void run_break_alarm(void) {
     s_audio_done = false;
+    buttons_take_pressed();                  /* drain: only presses AFTER the alarm starts silence it */
     neopixel_alert_pulse_begin(0, 150, 220); /* cyan — matches the BREAK identity */
     xTaskCreate(break_alarm_task, "brk_alarm", 2048, NULL, 5, NULL);
     /* Cap slightly past the alarm (~2.2 s per cycle) */
     bool silenced = false;
     for (int i = 0; i < CONFIG_MAGTAG_BREAK_ALARM_CYCLES * 22 + 10 && !s_audio_done && !silenced; i++) {
-        for (int b = 0; b < 4; b++) {
-            if (buttons_is_pressed((button_id_t)b)) {
-                ESP_LOGI(TAG, "Break alarm silenced by button");
-                silenced = true;
-                break;
-            }
+        silenced = buttons_take_pressed() != 0;
+        for (int b = 0; b < 4 && !silenced; b++) {
+            silenced = buttons_is_pressed((button_id_t)b);
+        }
+        if (silenced) {
+            ESP_LOGI(TAG, "Break alarm silenced by button");
+            break;
         }
         vTaskDelay(pdMS_TO_TICKS(100));
     }
@@ -361,16 +382,35 @@ static void handle_day_rollover(time_t *now) {
    any wake inside SLEEP_PLAN_WATCH_SEC stays awake so the expiry (TIME'S
    UP) or break end (chime + PAUSED) fires within a tick of wall time. */
 
+/* Buttons are only dispatched on EXT1 wake — while the firmware is awake
+   a press would vanish. Long awake waits poll this instead: a Button A
+   press while RUNNING pauses immediately (the one action that must not
+   be lost — pause is time-sensitive). The GPIO ISR latches the edge the
+   moment it lands (even inside an e-ink flush or NTP sync); this consumes
+   the latch, so no press is ever lost to a blind spot. Latched B/C/D
+   presses in the same take are dropped by design (wake-press-only
+   semantics). Returns true when it paused. */
+static bool poll_pause_button(void) {
+    bool a_pressed = (buttons_take_pressed() & (1u << BTN_A)) != 0;
+    if (timer_get_state() != TIMER_RUNNING || !a_pressed)
+        return false;
+    time_t now = time(NULL);
+    timer_pause(now);
+    ESP_LOGI(TAG, "button A while awake: paused");
+    return true;
+}
+
 /* Absorb the wake residue so the render lands on the state's grid:
    RUNNING/BREAK on the countdown's round minute (the display truly reads
    1:11:00), clock-only states on the wall :00. Bounded — wakes that are
    legitimately off-grid (event watch handoff, slow sync) render where
-   they are and self-correct next cycle. */
+   they are and self-correct next cycle. Aborts early on a pause press
+   (the caller then renders PAUSED, off-grid but honest). */
 static void wait_for_render_grid(int max_wait_sec) {
     time_t now = time(NULL);
     int to;
     if (timer_get_state() == TIMER_RUNNING) {
-        to = (int)((g_rtc_state.expiry_wall_time - (int64_t)now) % 60);
+        to = (int)((timer_expiry_wall() - (int64_t)now) % 60);
     } else if (timer_get_state() == TIMER_BREAK) {
         to = timer_break_remaining(now) % 60;
     } else {
@@ -379,7 +419,11 @@ static void wait_for_render_grid(int max_wait_sec) {
             to = 0; /* already on the wall boundary */
     }
     if (to > 0 && to <= max_wait_sec) {
-        vTaskDelay(pdMS_TO_TICKS(to * 1000));
+        for (int i = 0; i < to * 10; i++) {
+            if (poll_pause_button())
+                return;
+            vTaskDelay(pdMS_TO_TICKS(100));
+        }
     }
 }
 
@@ -404,11 +448,12 @@ static void maybe_wait_for_event(void) {
     if (timer_get_state() != TIMER_RUNNING)
         return;
     time_t now = time(NULL);
-    int64_t remaining = g_rtc_state.expiry_wall_time - (int64_t)now;
+    int64_t remaining = timer_expiry_wall() - (int64_t)now;
     if (remaining <= 0 || remaining > SLEEP_PLAN_WATCH_SEC)
         return;
 
     ESP_LOGI(TAG, "Final minute: staying awake (%lld s remaining)", (long long)remaining);
+    buttons_take_pressed(); /* only presses made DURING the watch may pause */
     /* Expiry is a wall time, so a clock step here directly sharpens the
        moment the alert fires. Skip when recently synced or when the sync
        itself (~5-9 s) would blow past the expiry. */
@@ -424,12 +469,23 @@ static void maybe_wait_for_event(void) {
     static const int32_t STEPS[] = {60, 45, 30, 15};
     const int n_steps = (int)(sizeof(STEPS) / sizeof(STEPS[0]));
     int next_step = 0;
-    int64_t rem = g_rtc_state.expiry_wall_time - (int64_t)time(NULL);
+    int64_t rem = timer_expiry_wall() - (int64_t)time(NULL);
     while (next_step < n_steps && (int64_t)STEPS[next_step] > rem) {
         next_step++; /* woke late (e.g. slow sync): skip already-passed steps */
     }
     int32_t leds_shown = -1;
-    while ((rem = g_rtc_state.expiry_wall_time - (int64_t)time(NULL)) > 0) {
+    while ((rem = timer_expiry_wall() - (int64_t)time(NULL)) > 0) {
+        /* The event watch owns the whole final minute — without this poll
+           a pause press here would be lost and the expiry unavoidable. */
+        if (poll_pause_button()) {
+            neopixel_stop(); /* clear the binary-countdown pixels */
+            time_t pnow = time(NULL);
+            display_state_t st = make_state(timer_tick(pnow), pnow);
+            neopixel_show_timer_state(); /* amber during the refresh */
+            display_full_refresh(&st);
+            neopixel_stop();
+            return;
+        }
         if (next_step < n_steps && rem <= (int64_t)STEPS[next_step]) {
             time_t step_now = time(NULL);
             display_state_t st = make_state(STEPS[next_step], step_now);
@@ -471,11 +527,12 @@ static void handle_timer_tick(void) {
     /* Land the render on the state's grid — the planner woke us on (or,
        when a sync was due, ~20 s before) the grid point; absorb the
        residue here. 25 s covers the sync lead without stalling
-       event-watch wakes. */
+       event-watch wakes. Captured BEFORE the wait: a pause press during
+       it must register as a state change (full refresh). */
+    timer_state_t before = timer_get_state();
     wait_for_render_grid(25);
     now = time(NULL);
 
-    timer_state_t before = timer_get_state();
     int32_t remaining = timer_tick(now);
 
     /* The grid wait makes the true remaining a round minute at render
@@ -545,8 +602,10 @@ static void handle_button_wake(void) {
                    expiry via timer_shift_expiry (measured against the
                    monotonic clock, which NTP cannot step). */
                 if (before == TIMER_IDLE) {
-                    day_type_t dt = schedule_get_day_type(now);
-                    timer_start(now, (int32_t)schedule_get_allocation_sec(dt));
+                    const timer_def_t *def = timer_active_def();
+                    int32_t alloc = (def != NULL) ? def->duration_sec
+                                                  : (int32_t)schedule_get_allocation_sec(schedule_get_day_type(now));
+                    timer_start(now, alloc);
                 } else {
                     timer_resume(now);
                 }
@@ -569,23 +628,41 @@ static void handle_button_wake(void) {
             }
             break;
         case BTN_B:
-#if CONFIG_MAGTAG_PARENT_TESTING
-            timer_reset();
-            timer_record_date(now);
-#else
-            /* Production: allocation resets only on day rollover */
-            ESP_LOGI(TAG, "Button B reset disabled (MAGTAG_PARENT_TESTING=n)");
-#endif
+            /* Reset the selected timer to full: reloadable extras without
+               ParentTesting, anything else with it — never while RUNNING
+               (B is dropped from the wake mask then, same as C; this guard
+               covers presses that ride in on another wake). */
+            if (!timer_reload_allowed(PARENT_TESTING) || !timer_reload()) {
+                ESP_LOGI(TAG, "Button B reset unavailable (state %d)", (int)before);
+            }
+            break;
+        case BTN_C:
+            /* Swap timer type; refused while RUNNING (pause first) or in a
+               Screen Break (enforced). Landing on an already-EXPIRED timer
+               is a selection change, not a transition — refresh the
+               baseline so the expiry alert does not re-fire below. */
+            if (timer_select_next()) {
+                ESP_LOGI(TAG, "button C: selected slot %d", timer_active_slot());
+                before = timer_get_state();
+            } else {
+                ESP_LOGI(TAG, "button C swap unavailable (state %d)", (int)before);
+            }
             break;
         case BTN_D:
             try_ntp_sync();
             now = time(NULL);
             break;
-        case BTN_C: /* unbound in v1 */
         case BTN_NONE:
         default:
             break;
     }
+
+    /* Drain latch: the wake press itself was handled via the EXT1 decode
+       above; its release bounce (or a second tap during the action) must
+       not replay through the awake-press consumers below — e.g. a resume
+       with <70 s remaining flows straight into the final-minute watch,
+       where a stale A edge would instantly re-pause. */
+    buttons_take_pressed();
 
     if (maybe_start_break(now)) {
         enter_deep_sleep(); /* e.g. resume with accrual already past the interval */
@@ -637,6 +714,10 @@ void app_main(void) {
 
     setenv("TZ", MAGTAG_TZ, 1);
     tzset();
+
+    /* Slot definitions live in rodata, not RTC memory — install them
+       before the first timer_* call on every boot/wake. */
+    timer_defs_install();
 
     /* Must run after TZ is set (date comparison) and before the wake
        handlers (whose rollover check would otherwise reset the timer). */

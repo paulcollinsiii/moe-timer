@@ -29,10 +29,17 @@ credentials.**
 7. [ ] **Button A (pause/resume)**: pause shows `PAUSED`, remaining freezes
        across wakes; resume is immediate (AMBER -> GREEN after ~250 ms, sync
        after) and continues from the frozen value.
-8. [ ] **Button B (reset)**: returns to IDLE with today's full allocation.
+8. [ ] **Button B (reset)**: with the timer PAUSED (or expired), returns to
+       IDLE with today's full allocation. While RUNNING, B is dropped from
+       the wake mask — pressing it does nothing (no wake, no refresh).
 9. [ ] **Button D (force sync)**: WiFi cycle + full refresh; sync time updates.
-10. [ ] **Button C**: does nothing at all — not a wake source (kept out of
-        the EXT1 mask so mashing it cannot burn battery or refreshes).
+10. [ ] **Button C**: with no extra timers configured (the default), does
+        nothing at all — not a wake source (kept out of the EXT1 mask so
+        mashing it cannot burn battery or refreshes). With an extra timer
+        configured (`MAGTAG_TIMER1_NAME` etc.), swaps the selected timer.
+        While a timer is RUNNING or in a Screen Break, C is dropped from
+        the wake mask entirely — pressing it does nothing (no wake, no
+        refresh) until the timer is paused.
 11. [ ] **Expiry**: temporarily lower `NVS_DEFAULT_WEEKDAY_MIN` to 1-2 min (and
         erase NVS: `idf.py erase-flash`), let it expire: TIME'S UP screen,
         3 beeps x 5 cycles, red NeoPixel pulse; any button stops the alert
@@ -78,7 +85,12 @@ credentials.**
         00:00:30 / 00:00:15 as partial refreshes, the last 15 s count down
         on the four pixels in binary (light green, dim; dark during quiet
         hours), and TIME'S UP + red pulse + beeps fire within ~1 s of the
-        expiry wall time.
+        expiry wall time. Pressing A anywhere in the final minute pauses
+        instead (PAUSED full refresh, no alarm) — presses are ISR-latched,
+        so even a quick tap DURING one of the quarter-mark partial
+        refreshes registers and pauses as soon as the flush completes;
+        expiry only fires if the countdown truly reaches zero. Quick taps
+        also dismiss the TIME'S UP / break alarms reliably.
 22. [ ] **Battery gauge**: log shows `battery: N mV (P%)` each wake; on USB
         ~4300+ mV -> 100%, on LiPo 3300-4200 mV with a plausible %. Icon +
         percent render left of the right-justified HH:MM:SS.

@@ -180,8 +180,33 @@ void test_invert_dirty_rows_no_change_returns_zero(void) {
     TEST_ASSERT_EQUAL_HEX8(0x12, fb[0][0]);
 }
 
+/* ---- display_format_mode_line (extra timers) ---- */
+
+void test_mode_line_extra_timer_without_completions(void) {
+    char buf[48];
+    display_format_mode_line(buf, sizeof(buf), "Meditation", 0, true, 600);
+    TEST_ASSERT_EQUAL_STRING("Meditation - 10 min", buf);
+}
+
+void test_mode_line_extra_timer_with_completions(void) {
+    char buf[48];
+    display_format_mode_line(buf, sizeof(buf), "Meditation", 1, true, 600);
+    TEST_ASSERT_EQUAL_STRING("Meditation (x1) - 10 min", buf);
+    display_format_mode_line(buf, sizeof(buf), "Meditation", 2, true, 600);
+    TEST_ASSERT_EQUAL_STRING("Meditation (x2) - 10 min", buf);
+}
+
+void test_mode_line_non_reloadable_never_shows_counter(void) {
+    char buf[48];
+    display_format_mode_line(buf, sizeof(buf), "Violin", 3, false, 900);
+    TEST_ASSERT_EQUAL_STRING("Violin - 15 min", buf);
+}
+
 int main(void) {
     UNITY_BEGIN();
+    RUN_TEST(test_mode_line_extra_timer_without_completions);
+    RUN_TEST(test_mode_line_extra_timer_with_completions);
+    RUN_TEST(test_mode_line_non_reloadable_never_shows_counter);
     RUN_TEST(test_bar_full_when_remaining_equals_allocation);
     RUN_TEST(test_bar_full_when_remaining_exceeds_allocation);
     RUN_TEST(test_bar_zero_when_expired);
