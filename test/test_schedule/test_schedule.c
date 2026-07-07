@@ -135,11 +135,62 @@ void test_allocation_missing_key_falls_back_to_default(void) {
 }
 
 void test_holiday_falls_back_to_compile_time_defaults(void) {
-    /* Clear NVS entirely — no holidays blob written.
-       2026-01-01 is in NVS_DEFAULT_HOLIDAYS so must still classify as DAY_HOLIDAY. */
+    /* Clear NVS entirely — no holidays blob written. 2026-12-25 (winter
+       break) is in NVS_DEFAULT_HOLIDAYS so must classify as DAY_HOLIDAY. */
     mock_nvs_reset();
-    mock_time_set(1767225600); /* 2026-01-01 Thu */
+    mock_time_set(1798156800); /* 2026-12-25 Fri */
     TEST_ASSERT_EQUAL(DAY_HOLIDAY, schedule_get_day_type(hal_time_now()));
+}
+
+/* ------------------------------------------------------------------ */
+/* Summer break (Dublin 2026-27: school 2026-08-20 .. 2027-05-28)      */
+/* ------------------------------------------------------------------ */
+
+void test_is_summer_boundaries(void) {
+    TEST_ASSERT_FALSE(schedule_is_summer("2026-01-05")); /* previous school year */
+    TEST_ASSERT_FALSE(schedule_is_summer("2026-05-28")); /* 25-26 last day */
+    TEST_ASSERT_TRUE(schedule_is_summer("2026-05-29"));  /* summer begins */
+    TEST_ASSERT_TRUE(schedule_is_summer("2026-07-15"));  /* mid summer */
+    TEST_ASSERT_TRUE(schedule_is_summer("2026-08-19"));  /* day before school */
+    TEST_ASSERT_FALSE(schedule_is_summer("2026-08-20")); /* first day of school */
+    TEST_ASSERT_FALSE(schedule_is_summer("2027-05-28")); /* last day of school */
+    TEST_ASSERT_TRUE(schedule_is_summer("2027-05-29"));  /* summer resumes */
+}
+
+void test_summer_weekday_is_summer(void) {
+    mock_time_set(1784073600); /* 2026-07-15 Wed */
+    TEST_ASSERT_EQUAL(DAY_SUMMER, schedule_get_day_type(hal_time_now()));
+    mock_time_set(1811808000); /* 2027-06-01 Tue */
+    TEST_ASSERT_EQUAL(DAY_SUMMER, schedule_get_day_type(hal_time_now()));
+}
+
+void test_weekend_beats_summer(void) {
+    mock_time_set(1784332800); /* 2026-07-18 Sat, mid summer */
+    TEST_ASSERT_EQUAL(DAY_WEEKEND, schedule_get_day_type(hal_time_now()));
+}
+
+void test_holiday_beats_summer(void) {
+    const char *holidays = "2026-07-15\n";
+    hal_nvs_write_blob("holidays", holidays, strlen(holidays));
+    mock_time_set(1784073600); /* 2026-07-15 Wed, in the blob */
+    TEST_ASSERT_EQUAL(DAY_HOLIDAY, schedule_get_day_type(hal_time_now()));
+}
+
+void test_school_year_weekday_not_summer(void) {
+    mock_time_set(1788825600); /* 2026-09-08 Tue */
+    TEST_ASSERT_EQUAL(DAY_WEEKDAY, schedule_get_day_type(hal_time_now()));
+    mock_time_set(1811462400); /* 2027-05-28 Fri — last day is a school day */
+    TEST_ASSERT_EQUAL(DAY_WEEKDAY, schedule_get_day_type(hal_time_now()));
+}
+
+void test_allocation_summer(void) {
+    hal_nvs_write_u16("summer_min", 90);
+    TEST_ASSERT_EQUAL_UINT32(90u * 60u, schedule_get_allocation_sec(DAY_SUMMER));
+}
+
+void test_allocation_summer_missing_key_falls_back(void) {
+    /* setUp seeds no summer_min: compile-time default 120 min */
+    TEST_ASSERT_EQUAL_UINT32(120u * 60u, schedule_get_allocation_sec(DAY_SUMMER));
 }
 
 /* ------------------------------------------------------------------ */
@@ -165,5 +216,12 @@ int main(void) {
     RUN_TEST(test_allocation_weekend);
     RUN_TEST(test_allocation_holiday);
     RUN_TEST(test_allocation_missing_key_falls_back_to_default);
+    RUN_TEST(test_is_summer_boundaries);
+    RUN_TEST(test_summer_weekday_is_summer);
+    RUN_TEST(test_weekend_beats_summer);
+    RUN_TEST(test_holiday_beats_summer);
+    RUN_TEST(test_school_year_weekday_not_summer);
+    RUN_TEST(test_allocation_summer);
+    RUN_TEST(test_allocation_summer_missing_key_falls_back);
     return UNITY_END();
 }

@@ -41,6 +41,15 @@ menu "MagTag Timer"
         help
             Daily allocation on dates in the NVS holiday list.
 
+    config MAGTAG_SUMMER_MIN
+        int "Summer-break screen-time allocation (minutes)"
+        default 120
+        range 1 1440
+        help
+            Weekday allocation during school summer break (outside the
+            school year defined in nvs_defaults.h). Weekends and listed
+            holidays keep their own allocations.
+
     config MAGTAG_BREAK_INTERVAL_MIN
         int "Eye-rest break interval (minutes of running time)"
         default 30

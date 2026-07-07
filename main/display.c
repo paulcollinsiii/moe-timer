@@ -153,6 +153,8 @@ static const char *day_type_str(day_type_t dt) {
             return "Weekend";
         case DAY_HOLIDAY:
             return "Holiday";
+        case DAY_SUMMER:
+            return "Summer";
         default:
             return "Weekday";
     }
