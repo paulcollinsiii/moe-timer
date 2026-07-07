@@ -31,6 +31,16 @@ bool schedule_is_holiday(const char *date_str, const char *blob, size_t blob_len
     return false;
 }
 
+bool schedule_is_summer(const char *date_str) {
+    /* ISO dates compare lexicographically. Summer = the bounded window
+       between school years (dates before SUMMER_START belong to the
+       previous school year, not summer), plus everything after this
+       year's last day (until next year's calendar is loaded). */
+    if (strcmp(date_str, NVS_DEFAULT_SCHOOL_END) > 0)
+        return true;
+    return strcmp(date_str, NVS_DEFAULT_SUMMER_START) >= 0 && strcmp(date_str, NVS_DEFAULT_SCHOOL_START) < 0;
+}
+
 day_type_t schedule_get_day_type(time_t now) {
     struct tm tm_local;
     localtime_r(&now, &tm_local);
@@ -52,6 +62,11 @@ day_type_t schedule_get_day_type(time_t now) {
         return DAY_WEEKEND;
     }
 
+    /* Summer upgrades weekdays only (holiday/weekend checked above) */
+    if (schedule_is_summer(date_str)) {
+        return DAY_SUMMER;
+    }
+
     return DAY_WEEKDAY;
 }
 
@@ -67,6 +82,10 @@ uint32_t schedule_get_allocation_sec(day_type_t day_type) {
         case DAY_HOLIDAY:
             key = "holiday_min";
             default_min = NVS_DEFAULT_HOLIDAY_MIN;
+            break;
+        case DAY_SUMMER:
+            key = "summer_min";
+            default_min = NVS_DEFAULT_SUMMER_MIN;
             break;
         case DAY_WEEKDAY:
         default:

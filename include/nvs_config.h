@@ -20,6 +20,8 @@ esp_err_t nvs_config_get_weekend_min(uint16_t *out);
 esp_err_t nvs_config_set_weekend_min(uint16_t val);
 esp_err_t nvs_config_get_holiday_min(uint16_t *out);
 esp_err_t nvs_config_set_holiday_min(uint16_t val);
+esp_err_t nvs_config_get_summer_min(uint16_t *out);
+esp_err_t nvs_config_set_summer_min(uint16_t val);
 
 esp_err_t nvs_config_get_wifi_ssid(char *buf, size_t len);
 esp_err_t nvs_config_set_wifi_ssid(const char *ssid);

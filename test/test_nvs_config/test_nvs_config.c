@@ -44,8 +44,24 @@ void test_init_defaults_writes_holiday_blob(void) {
     TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_holidays(buf, &len));
     /* Blob must contain at least one YYYY-MM-DD date */
     TEST_ASSERT_TRUE(len >= 10);
-    /* New Year's Day must be present */
-    TEST_ASSERT_NOT_NULL(strstr(buf, "2026-01-01"));
+    /* Dublin 2026-27 calendar: New Year's Day 2027 (winter break) present;
+       Veterans Day 2026 (school in session) must NOT be */
+    TEST_ASSERT_NOT_NULL(strstr(buf, "2027-01-01"));
+    TEST_ASSERT_NULL(strstr(buf, "2026-11-11"));
+}
+
+void test_summer_min_round_trip(void) {
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_set_summer_min(90));
+    uint16_t val = 0;
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_summer_min(&val));
+    TEST_ASSERT_EQUAL_UINT16(90, val);
+}
+
+void test_init_defaults_writes_summer_min(void) {
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_init_defaults());
+    uint16_t val = 0;
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_summer_min(&val));
+    TEST_ASSERT_EQUAL_UINT16(NVS_DEFAULT_SUMMER_MIN, val);
 }
 
 void test_init_defaults_is_idempotent(void) {
@@ -247,6 +263,8 @@ int main(void) {
     RUN_TEST(test_init_defaults_writes_weekend_min);
     RUN_TEST(test_init_defaults_writes_holiday_min);
     RUN_TEST(test_init_defaults_writes_holiday_blob);
+    RUN_TEST(test_summer_min_round_trip);
+    RUN_TEST(test_init_defaults_writes_summer_min);
     RUN_TEST(test_init_defaults_is_idempotent);
     RUN_TEST(test_weekday_min_round_trip);
     RUN_TEST(test_weekend_min_round_trip);

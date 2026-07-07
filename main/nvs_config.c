@@ -55,6 +55,14 @@ esp_err_t nvs_config_set_holiday_min(uint16_t val) {
     return hal_nvs_write_u16("holiday_min", val);
 }
 
+esp_err_t nvs_config_get_summer_min(uint16_t *out) {
+    return get_u16_with_default("summer_min", out, NVS_DEFAULT_SUMMER_MIN);
+}
+
+esp_err_t nvs_config_set_summer_min(uint16_t val) {
+    return hal_nvs_write_u16("summer_min", val);
+}
+
 /* ---- string accessors ---- */
 
 esp_err_t nvs_config_get_wifi_ssid(char *buf, size_t len) {
@@ -123,6 +131,7 @@ uint16_t nvs_config_defaults_fingerprint(void) {
     fp = fp * 31u + NVS_DEFAULT_WEEKDAY_MIN;
     fp = fp * 31u + NVS_DEFAULT_WEEKEND_MIN;
     fp = fp * 31u + NVS_DEFAULT_HOLIDAY_MIN;
+    fp = fp * 31u + NVS_DEFAULT_SUMMER_MIN;
     uint16_t out = (uint16_t)(fp ^ (fp >> 16));
     return (out == 0) ? 1 : out;
 }
@@ -137,6 +146,9 @@ static esp_err_t reseed_all_defaults(void) {
     if (ret != ESP_OK)
         return ret;
     ret = hal_nvs_write_u16("holiday_min", NVS_DEFAULT_HOLIDAY_MIN);
+    if (ret != ESP_OK)
+        return ret;
+    ret = hal_nvs_write_u16("summer_min", NVS_DEFAULT_SUMMER_MIN);
     if (ret != ESP_OK)
         return ret;
     ret = hal_nvs_write_str("wifi_ssid", NVS_DEFAULT_WIFI_SSID);
@@ -178,6 +190,10 @@ esp_err_t nvs_config_init_defaults(void) {
         return ret;
 
     ret = init_u16_if_missing("holiday_min", NVS_DEFAULT_HOLIDAY_MIN);
+    if (ret != ESP_OK)
+        return ret;
+
+    ret = init_u16_if_missing("summer_min", NVS_DEFAULT_SUMMER_MIN);
     if (ret != ESP_OK)
         return ret;
 
