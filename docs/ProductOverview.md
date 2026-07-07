@@ -87,6 +87,17 @@ time.
    sync if due) and fire TIME'S UP within ~1 s of the expiry wall time.
 7. Return to deep sleep.
 
+Buttons are normally dispatched on EXT1 wake, which would make the device
+deaf while it is awake. While awake, a GPIO negative-edge ISR latches every
+press the moment it lands — even inside an e-ink flush or NTP sync — and
+the awake checkpoints consume the latch: Button A pauses from the
+render-grid wait and the final-minute event watch (cancelling the pending
+expiry), and any latched press dismisses the TIME'S UP / break alarms. The
+handlers detach at sleep entry before the pads move to the RTC mux;
+unconsumed latches are plain RAM and evaporate in deep sleep. Latched
+B/C/D presses are dropped — those buttons keep wake-press semantics — and
+held-button logic (release wait, continuation guard) stays level-based.
+
 WiFi is **off by default**; it is only powered up for NTP syncs and then immediately shut down.
 
 ### 4 · Daily Schedule & NVS Config
@@ -151,11 +162,22 @@ All state is persisted in **RTC slow memory** (survives deep sleep) with an NVS 
 | Button | GPIO | Action |
 |--------|------|--------|
 | A | 15 | Start (IDLE/PAUSED → RUNNING, immediate; NTP sync after) / Pause (RUNNING → PAUSED) |
-| B | 14 | Reset to IDLE with today's full allocation (only when `CONFIG_MAGTAG_PARENT_TESTING=y`) |
-| C | 12 | Unbound in v1 (wakes + redraws only) |
+| B | 14 | Reset the **selected** timer to IDLE at full duration — never while RUNNING (pause first): for a reloadable extra timer always, otherwise only when `CONFIG_MAGTAG_PARENT_TESTING=y` |
+| C | 12 | Swap timer type (Screen → extra 1 → … → Screen); refused while RUNNING or in a Screen Break |
 | D | 11 | Force NTP re-sync + full display refresh |
 
-Wake sources: A and D always; B only when `CONFIG_MAGTAG_PARENT_TESTING=y`; C is never a wake source (mashing an unbound button must not burn battery or panel refreshes). Buttons are debounced in software (10 ms).
+Wake sources: A and D always; B and C only when their press would succeed, since the EXT1 mask is rebuilt at every sleep entry and a press that could only be refused must not burn battery or a panel refresh. B: the selected timer is reloadable or `CONFIG_MAGTAG_PARENT_TESTING=y`, and never while RUNNING (pause first). C: extra timers configured AND the active timer not RUNNING/in a Screen Break. Buttons are debounced in software (10 ms).
+
+### 6a · Extra timers (v1.3)
+
+Up to four additional countdown timers (menuconfig: `MAGTAG_TIMER<n>_NAME/_MIN/_RELOADABLE`; an empty name disables the slot) for things like Piano practice or Meditation. They are plain countdowns sharing the Screen timer's alerts, NeoPixel sequences, NTP cadence, and RTC + NVS-snapshot persistence, but:
+
+- No eye-rest breaks (Screen-only).
+- Fixed configured duration instead of the day-schedule allocation.
+- **Reloadable** timers reset to full via Button B on the same day, no ParentTesting needed. The mode line then counts the day's completed runs (reached 00:00): `Meditation (x2) - 10 min`. A mid-run reset does not count; non-reloadable timers never show a counter — once expired they stay depleted until rollover.
+- Day rollover resets every timer, clears the counters, and reverts the selection to Screen.
+
+Only the selected timer can be RUNNING — swapping requires a pause, so pause/expiry state of a deselected timer is frozen until you swap back.
 
 ### 7 · Display Layout (296×128 px)
 
@@ -174,8 +196,12 @@ Wake sources: A and D always; B only when `CONFIG_MAGTAG_PARENT_TESTING=y`; C is
 
 Button labels sit above the physical buttons: A shows the action a press
 will take (play when IDLE/PAUSED, pause when RUNNING, hidden when EXPIRED),
-"Reset" appears only when `CONFIG_MAGTAG_PARENT_TESTING=y`, C is unlabelled
-(unbound), D is the sync/refresh symbol.
+"Reset" appears when `CONFIG_MAGTAG_PARENT_TESTING=y` or the selected timer
+is reloadable (and not RUNNING), C shows a swap arrow when extra timers are
+configured and the state allows swapping, D is the sync/refresh symbol.
+When an extra timer is selected, the bottom-left mode line shows its name,
+completion counter, and duration (e.g. `Meditation (x2) · 10 min`) instead
+of the day-type + allocation.
 
 - **Progress bar**: full-width (280 px usable), fill proportional to `remaining/allocation`. Thick outer border.
 - **Remaining time**: centred; always `HH:MM:SS`.

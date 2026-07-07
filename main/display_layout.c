@@ -71,6 +71,17 @@ int display_fb_invert_dirty_rows(uint8_t *fb, const uint8_t *prev, int rows, int
     return dirty;
 }
 
+void display_format_mode_line(char *buf, size_t len, const char *name, uint16_t completions, bool reloadable,
+                              uint32_t allocation_sec) {
+    /* Completions only surface on reloadable timers — a depleted
+       non-reloadable timer just shows its empty bar until rollover. */
+    if (reloadable && completions > 0) {
+        snprintf(buf, len, "%s (x%u) - %u min", name, (unsigned)completions, (unsigned)(allocation_sec / 60));
+    } else {
+        snprintf(buf, len, "%s - %u min", name, (unsigned)(allocation_sec / 60));
+    }
+}
+
 void display_format_remaining(char *buf, size_t len, int32_t remaining_sec) {
     if (remaining_sec < 0)
         remaining_sec = 0;
