@@ -9,6 +9,7 @@ idf_component_register(
         "nvs_config.c"
         "schedule.c"
         "buttons.c"
+        "button_latch.c"
         "audio.c"
         "battery.c"
         "battery_soc.c"

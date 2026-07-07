@@ -257,18 +257,22 @@ static void audio_alert_task(void *arg) {
 
 static void run_expiry_alert(void) {
     s_audio_done = false;
+    buttons_take_pressed();                /* drain: a press from BEFORE the alarm must not pre-dismiss it */
     neopixel_alert_pulse_begin(248, 0, 0); /* red; task + teardown owned by the module */
     xTaskCreate(audio_alert_task, "beep", 2048, NULL, 5, NULL);
 
-    /* Poll for dismissal; cap slightly past the alarm (3 s per cycle) */
+    /* Wait for dismissal — latched taps of any length count, the level
+       scan catches a button already held down through the drain; cap
+       slightly past the alarm (3 s per cycle). */
     bool dismissed = false;
     for (int i = 0; i < CONFIG_MAGTAG_EXPIRY_ALARM_CYCLES * 30 + 10 && !s_audio_done && !dismissed; i++) {
-        for (int b = 0; b < 4; b++) {
-            if (buttons_is_pressed((button_id_t)b)) {
-                ESP_LOGI(TAG, "Alert dismissed by button");
-                dismissed = true;
-                break;
-            }
+        dismissed = buttons_take_pressed() != 0;
+        for (int b = 0; b < 4 && !dismissed; b++) {
+            dismissed = buttons_is_pressed((button_id_t)b);
+        }
+        if (dismissed) {
+            ESP_LOGI(TAG, "Alert dismissed by button");
+            break;
         }
         vTaskDelay(pdMS_TO_TICKS(100));
     }
@@ -291,17 +295,19 @@ static void break_alarm_task(void *arg) {
    Any button silences it. */
 static void run_break_alarm(void) {
     s_audio_done = false;
+    buttons_take_pressed();                  /* drain: only presses AFTER the alarm starts silence it */
     neopixel_alert_pulse_begin(0, 150, 220); /* cyan — matches the BREAK identity */
     xTaskCreate(break_alarm_task, "brk_alarm", 2048, NULL, 5, NULL);
     /* Cap slightly past the alarm (~2.2 s per cycle) */
     bool silenced = false;
     for (int i = 0; i < CONFIG_MAGTAG_BREAK_ALARM_CYCLES * 22 + 10 && !s_audio_done && !silenced; i++) {
-        for (int b = 0; b < 4; b++) {
-            if (buttons_is_pressed((button_id_t)b)) {
-                ESP_LOGI(TAG, "Break alarm silenced by button");
-                silenced = true;
-                break;
-            }
+        silenced = buttons_take_pressed() != 0;
+        for (int b = 0; b < 4 && !silenced; b++) {
+            silenced = buttons_is_pressed((button_id_t)b);
+        }
+        if (silenced) {
+            ESP_LOGI(TAG, "Break alarm silenced by button");
+            break;
         }
         vTaskDelay(pdMS_TO_TICKS(100));
     }
@@ -379,9 +385,14 @@ static void handle_day_rollover(time_t *now) {
 /* Buttons are only dispatched on EXT1 wake — while the firmware is awake
    a press would vanish. Long awake waits poll this instead: a Button A
    press while RUNNING pauses immediately (the one action that must not
-   be lost — pause is time-sensitive). Returns true when it paused. */
+   be lost — pause is time-sensitive). The GPIO ISR latches the edge the
+   moment it lands (even inside an e-ink flush or NTP sync); this consumes
+   the latch, so no press is ever lost to a blind spot. Latched B/C/D
+   presses in the same take are dropped by design (wake-press-only
+   semantics). Returns true when it paused. */
 static bool poll_pause_button(void) {
-    if (timer_get_state() != TIMER_RUNNING || !buttons_is_pressed(BTN_A))
+    bool a_pressed = (buttons_take_pressed() & (1u << BTN_A)) != 0;
+    if (timer_get_state() != TIMER_RUNNING || !a_pressed)
         return false;
     time_t now = time(NULL);
     timer_pause(now);
@@ -442,6 +453,7 @@ static void maybe_wait_for_event(void) {
         return;
 
     ESP_LOGI(TAG, "Final minute: staying awake (%lld s remaining)", (long long)remaining);
+    buttons_take_pressed(); /* only presses made DURING the watch may pause */
     /* Expiry is a wall time, so a clock step here directly sharpens the
        moment the alert fires. Skip when recently synced or when the sync
        itself (~5-9 s) would blow past the expiry. */
@@ -644,6 +656,13 @@ static void handle_button_wake(void) {
         default:
             break;
     }
+
+    /* Drain latch: the wake press itself was handled via the EXT1 decode
+       above; its release bounce (or a second tap during the action) must
+       not replay through the awake-press consumers below — e.g. a resume
+       with <70 s remaining flows straight into the final-minute watch,
+       where a stale A edge would instantly re-pause. */
+    buttons_take_pressed();
 
     if (maybe_start_break(now)) {
         enter_deep_sleep(); /* e.g. resume with accrual already past the interval */

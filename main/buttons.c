@@ -1,10 +1,13 @@
 #include "buttons.h"
 
+#include "button_latch.h"
 #include "driver/gpio.h"
 #include "driver/rtc_io.h"
 #include "esp_log.h"
 #include "esp_rom_sys.h"
 #include "esp_sleep.h"
+#include "esp_timer.h"
+#include "freertos/FreeRTOS.h"
 #include "sdkconfig.h"
 #include "timer.h"
 
@@ -21,6 +24,47 @@ static const gpio_num_t BTN_GPIOS[4] = {
 };
 
 #define DEBOUNCE_US 10000 /* 10 ms */
+
+/* ---- awake press latch (ISR-fed; see button_latch.h) ---------------- */
+
+static portMUX_TYPE s_latch_mux = portMUX_INITIALIZER_UNLOCKED;
+
+static void IRAM_ATTR button_isr(void *arg) {
+    portENTER_CRITICAL_ISR(&s_latch_mux);
+    button_latch_record((int)(intptr_t)arg, esp_timer_get_time());
+    portEXIT_CRITICAL_ISR(&s_latch_mux);
+}
+
+/* Latch presses while awake. No false latch for the wake button: it is
+   already low at boot, so no falling edge fires. */
+static void buttons_watch_begin(void) {
+    esp_err_t ret = gpio_install_isr_service(0);
+    if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) { /* INVALID_STATE = already installed */
+        ESP_LOGE(TAG, "isr service install failed: %s", esp_err_to_name(ret));
+        return;
+    }
+    portENTER_CRITICAL(&s_latch_mux);
+    button_latch_reset();
+    portEXIT_CRITICAL(&s_latch_mux);
+    for (int i = 0; i < 4; i++) {
+        gpio_set_intr_type(BTN_GPIOS[i], GPIO_INTR_NEGEDGE);
+        gpio_isr_handler_add(BTN_GPIOS[i], button_isr, (void *)(intptr_t)i);
+    }
+}
+
+/* Detach before buttons_configure_wakeup() moves the pads to the RTC mux. */
+static void buttons_watch_end(void) {
+    for (int i = 0; i < 4; i++) {
+        gpio_isr_handler_remove(BTN_GPIOS[i]);
+    }
+}
+
+uint8_t buttons_take_pressed(void) {
+    portENTER_CRITICAL(&s_latch_mux);
+    uint8_t mask = button_latch_take();
+    portEXIT_CRITICAL(&s_latch_mux);
+    return mask;
+}
 
 void buttons_init(void) {
     for (int i = 0; i < 4; i++) {
@@ -44,6 +88,7 @@ void buttons_init(void) {
             ESP_LOGE(TAG, "gpio_config failed for GPIO %d: %s", BTN_GPIOS[i], esp_err_to_name(ret));
         }
     }
+    buttons_watch_begin();
 }
 
 /* Wake policy (UX: prevent button mashing from burning battery/refreshes):
@@ -71,6 +116,7 @@ static bool is_wake_source(int i) {
 }
 
 void buttons_configure_wakeup(void) {
+    buttons_watch_end();
     uint64_t mask = 0;
     for (int i = 0; i < 4; i++) {
         if (!is_wake_source(i))
