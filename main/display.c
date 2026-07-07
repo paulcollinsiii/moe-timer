@@ -192,6 +192,14 @@ void display_timesup(void) {
     render(SSD1680_REFRESH_FULL);
 }
 
+void display_charge_me(void) {
+    if (!s_initialized)
+        display_init();
+    display_screens_build_charge_me();
+    g_rtc_state.partial_refresh_count = 0;
+    render(SSD1680_REFRESH_FULL);
+}
+
 void display_sync_failed(void) {
     if (!s_initialized)
         display_init();

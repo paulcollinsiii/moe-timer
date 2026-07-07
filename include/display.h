@@ -23,6 +23,7 @@ typedef struct {
     bool reloadable;
     bool swap_available;   /* Button C label (extras exist, state allows swap) */
     bool reload_available; /* Button B label without ParentTesting */
+    bool charge_warn;      /* battery <= 15%: Charge Me!!! badge on the bar */
 } display_state_t;
 
 #ifdef __cplusplus
@@ -34,6 +35,7 @@ void display_update(const display_state_t *state);       /* partial-refresh poli
 void display_full_refresh(const display_state_t *state); /* forced full refresh */
 void display_timesup(void);                              /* TIME'S UP layout, full refresh */
 void display_sync_failed(void);                          /* "No sync - check WiFi" layout */
+void display_charge_me(void);                            /* battery lock layout, full refresh */
 
 /* Button A label: the action a press will take in the given state.
    display.c maps these to LV_SYMBOL_PLAY/PAUSE (layout code stays LVGL-free). */

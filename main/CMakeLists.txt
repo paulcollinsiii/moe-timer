@@ -15,6 +15,7 @@ idf_component_register(
         "audio.c"
         "battery.c"
         "battery_soc.c"
+        "battery_policy.c"
         "neopixel.c"
         "quiet_hours.c"
         "sleep_plan.c"

@@ -145,6 +145,21 @@ void test_break_screen(void) {
     assert_matches_golden("break_screen");
 }
 
+void test_main_low_battery_warn_badge(void) {
+    /* <= 15%: the progress bar carries the Charge Me!!! badge */
+    display_state_t st = base_state();
+    st.battery_pct = 15;
+    st.charge_warn = true;
+    display_screens_build_main(&st);
+    assert_matches_golden("main_warn_badge");
+}
+
+void test_charge_me_screen(void) {
+    /* <= 10%: full stop — the panel says only Charge Me! */
+    display_screens_build_charge_me();
+    assert_matches_golden("charge_me");
+}
+
 void test_timesup_screen(void) {
     display_screens_build_timesup();
     assert_matches_golden("timesup");
@@ -169,6 +184,8 @@ int main(void) {
     RUN_TEST(test_main_paused_reloadable);
     RUN_TEST(test_main_expired);
     RUN_TEST(test_break_screen);
+    RUN_TEST(test_main_low_battery_warn_badge);
+    RUN_TEST(test_charge_me_screen);
     RUN_TEST(test_timesup_screen);
     RUN_TEST(test_sync_failed_screen);
     return UNITY_END();

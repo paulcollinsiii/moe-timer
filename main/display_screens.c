@@ -115,6 +115,19 @@ void display_screens_build_main(const display_state_t *st) {
     lv_bar_set_value(bar, display_bar_fill_px(st->remaining_sec, st->allocation_sec), LV_ANIM_OFF);
     style_bar(bar);
 
+    /* Low battery (<= 15%): badge riding the bar — white background so it
+       reads over both the filled (black) and empty parts of the bar */
+    if (st->charge_warn) {
+        lv_obj_t *warn = lv_label_create(scr);
+        lv_label_set_text(warn, "Charge Me!!!");
+        lv_obj_set_style_text_font(warn, &lv_font_montserrat_16, 0);
+        lv_obj_set_style_text_color(warn, lv_color_black(), 0);
+        lv_obj_set_style_bg_color(warn, lv_color_white(), 0);
+        lv_obj_set_style_bg_opa(warn, LV_OPA_COVER, 0);
+        lv_obj_set_style_pad_hor(warn, 6, 0);
+        lv_obj_align(warn, LV_ALIGN_TOP_MID, 0, 29);
+    }
+
     /* Row 58-86: battery (left, 12 pt) + remaining time (right, 28 pt) */
     static const char *BATT_SYMS[] = {LV_SYMBOL_BATTERY_EMPTY, LV_SYMBOL_BATTERY_1, LV_SYMBOL_BATTERY_2,
                                       LV_SYMBOL_BATTERY_3, LV_SYMBOL_BATTERY_FULL};
@@ -262,5 +275,15 @@ void display_screens_build_sync_failed(void) {
     lv_obj_t *msg = lv_label_create(scr);
     lv_label_set_text(msg, "No sync - check WiFi");
     lv_obj_set_style_text_font(msg, &lv_font_montserrat_28, 0);
+    lv_obj_align(msg, LV_ALIGN_CENTER, 0, 0);
+}
+
+/* Battery lock (<= 10%): the panel says only this until the pack charges
+   back above the warn band. */
+void display_screens_build_charge_me(void) {
+    lv_obj_t *scr = fresh_screen();
+    lv_obj_t *msg = lv_label_create(scr);
+    lv_label_set_text(msg, "Charge Me!");
+    lv_obj_set_style_text_font(msg, &lv_font_montserrat_48, 0);
     lv_obj_align(msg, LV_ALIGN_CENTER, 0, 0);
 }

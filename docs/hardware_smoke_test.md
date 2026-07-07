@@ -94,6 +94,11 @@ credentials.**
 22. [ ] **Battery gauge**: log shows `battery: N mV (P%)` each wake; on USB
         ~4300+ mV -> 100%, on LiPo 3300-4200 mV with a plausible %. Icon +
         percent render left of the right-justified HH:MM:SS.
+23. [ ] **Low battery**: at <= 15% the bar carries a "Charge Me!!!" badge;
+        at <= 10% the panel shows only "Charge Me!", buttons go dead, and
+        the log shows 600 s charge-lock sleeps with no further refreshes.
+        Charging past 15% restores the normal layout on the next wake
+        (a RUNNING timer will have been paused at lock entry).
 23. [ ] **Break fires**: (shorten via menuconfig: interval 2 min, duration
         1 min) with the timer RUNNING, after ~interval of accumulated run
         time the device flips to the inverted SCREEN BREAK screen and the

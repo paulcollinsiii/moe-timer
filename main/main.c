@@ -4,6 +4,7 @@
 
 #include "audio.h"
 #include "battery.h"
+#include "battery_policy.h"
 #include "buttons.h"
 #include "display.h"
 #include "driver/gpio.h"
@@ -58,6 +59,14 @@ static RTC_DATA_ATTR time_t s_last_ntp_sync;
    is a continuation to ignore, not a new press. */
 static RTC_DATA_ATTR uint8_t s_held_mask_at_sleep;
 static RTC_DATA_ATTR int64_t s_sleep_entry_time;
+
+/* Battery charge lock (<= 10%, released > 15%): the Charge Me! screen is
+   painted once, then the device sleeps long intervals with buttons and
+   all timer/NTP work disabled — an e-ink refresh during brownout can
+   leave persistent artifacts, and every wake costs charge it can't spare. */
+static RTC_DATA_ATTR bool s_charge_locked;
+static bool s_charge_lock_released; /* recovery wake: repaint over Charge Me! */
+#define CHARGE_LOCK_SLEEP_SEC 600
 
 /* Persist the timer to NVS so a panic/reset (which wipes RTC memory)
    cannot refund the day's allocation. Write only on change — snapshot
@@ -127,6 +136,15 @@ static void enter_deep_sleep(void) {
     gpio_hold_en(GPIO_NUM_21);
     gpio_hold_en(GPIO_NUM_16);
     gpio_deep_sleep_hold_en();
+
+    /* Charge-locked: no button wake sources (a press could only burn a
+       refresh the battery can't afford) and a fixed long interval instead
+       of the planner — wakes only re-check the battery. */
+    if (s_charge_locked) {
+        esp_sleep_enable_timer_wakeup((uint64_t)CHARGE_LOCK_SLEEP_SEC * 1000000ULL);
+        ESP_LOGI(TAG, "Entering deep sleep (charge lock, %d s)", CHARGE_LOCK_SLEEP_SEC);
+        esp_deep_sleep_start();
+    }
 
     buttons_configure_wakeup();
 
@@ -238,11 +256,40 @@ static display_state_t make_state(int32_t remaining, time_t now) {
         .break_remaining_sec = timer_break_remaining(now),
         .break_duration_sec = (uint32_t)CONFIG_MAGTAG_BREAK_DURATION_MIN * 60,
         .timer_name = (def != NULL) ? def->name : NULL,
+        .charge_warn = battery_policy_evaluate(pct, false) != BATT_OK,
         .completions = timer_completions(),
         .reloadable = (def != NULL) && def->reloadable,
         .swap_available = timer_swap_allowed(),
         .reload_available = timer_reload_allowed(PARENT_TESTING),
     };
+}
+
+/* ---- battery charge lock ---------------------------------------------- */
+
+/* Runs before wake dispatch. Returns normally when operation may continue;
+   when the battery is in the lock band it paints Charge Me! once (pausing
+   a RUNNING timer so the allocation doesn't burn while the device is
+   unusable), then sleeps — this call does not return. */
+static void check_charge_lock(void) {
+    int pct = battery_percent_from_mv(battery_read_mv());
+    batt_policy_t pol = battery_policy_evaluate(pct, s_charge_locked);
+    if (pol != BATT_LOCK) {
+        if (s_charge_locked) {
+            s_charge_locked = false;
+            s_charge_lock_released = true; /* repaint over the Charge Me! screen */
+            ESP_LOGW(TAG, "Charge lock released (%d%%)", pct);
+        }
+        return;
+    }
+    if (!s_charge_locked) {
+        s_charge_locked = true;
+        ESP_LOGW(TAG, "Charge lock engaged (%d%%)", pct);
+        if (timer_get_state() == TIMER_RUNNING) {
+            timer_pause(time(NULL));
+        }
+        display_charge_me(); /* one full refresh; later wakes leave the panel alone */
+    }
+    enter_deep_sleep(); /* lock-aware: long interval, no button wake */
 }
 
 /* ---- expiry alert ---------------------------------------------------- */
@@ -546,7 +593,11 @@ static void handle_timer_tick(void) {
         audio_break_over_chime(); /* break over — ready to resume */
     }
 
-    switch (wake_policy_render(before, timer_get_state(), false)) {
+    wake_render_t wr = wake_policy_render(before, timer_get_state(), false);
+    if (s_charge_lock_released && wr == WAKE_RENDER_PARTIAL) {
+        wr = WAKE_RENDER_FULL; /* the panel still shows Charge Me! — repaint fully */
+    }
+    switch (wr) {
         case WAKE_RENDER_EXPIRY_ALERT:
             fire_expiry_alert();
             break;
@@ -748,6 +799,9 @@ void app_main(void) {
     /* Reset reason distinguishes a real cold boot from an external reset
        (e.g. monitor DTR/RTS) — both report wake cause UNDEFINED. */
     ESP_LOGI(TAG, "Wakeup causes: 0x%08lx, reset reason: %d", (unsigned long)causes, (int)esp_reset_reason());
+
+    /* Battery gate before any wake work: does not return while locked */
+    check_charge_lock();
 
     if (causes & BIT(ESP_SLEEP_WAKEUP_EXT1)) {
         handle_button_wake();
