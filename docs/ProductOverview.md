@@ -98,16 +98,22 @@ NVS namespace: `timer_cfg`
 | `weekday_min` | u16 | 60 | Weekday allocation (minutes) |
 | `weekend_min` | u16 | 120 | Weekend allocation (minutes) |
 | `holiday_min` | u16 | 120 | Holiday allocation (minutes) |
+| `summer_min` | u16 | 120 | Summer-break weekday allocation (minutes) |
 | `holidays` | blob | (pre-filled) | Newline-separated `YYYY-MM-DD` holiday dates |
 | `wifi_ssid` | str | "" | WiFi SSID |
 | `wifi_pass` | str | "" | WiFi password |
 
 On first flash the NVS is initialised from `nvs_defaults.h` (holiday list, WiFi from `credentials.local.h`) with the allocation minutes coming from menuconfig (`MagTag Timer` menu → `CONFIG_MAGTAG_WEEKDAY/WEEKEND/HOLIDAY_MIN`). The stored stamp is a fingerprint of those values, so changing any allocation in menuconfig re-seeds NVS on the next boot — no erase needed. Subsequent boots with an unchanged fingerprint read the stored values.
 
-**Day-type logic**:
+**Day-type logic** (precedence: holiday > weekend > summer > weekday):
 1. Check if today's date is in the `holidays` blob → holiday allocation.
 2. Else if Saturday or Sunday → weekend allocation.
-3. Else → weekday allocation.
+3. Else if outside the school year (`NVS_DEFAULT_SUMMER_START`/`SCHOOL_START`/`SCHOOL_END` in `nvs_defaults.h`, from the Dublin City Schools calendar — update yearly) → summer allocation.
+4. Else → weekday allocation.
+
+The holiday list is the Dublin City Schools (Grizzell MS) 2026-27 calendar's
+weekday no-school days, not generic federal holidays — days like Veterans
+Day, when school is in session, are deliberately regular weekdays.
 
 ### 5 · Timer State Machine
 

@@ -116,6 +116,11 @@ credentials.**
         visibly scales the state/sync/countdown pixels; alert pulses
         (expiry red, break cyan) are unaffected. Alarm lengths follow
         MAGTAG_EXPIRY/BREAK_ALARM_CYCLES.
+32. [ ] **Summer category**: on a summer-break weekday the footer reads
+        `Summer - 120 min` (MAGTAG_SUMMER_MIN); weekends still read
+        `Weekend`. After 2026-08-20 (first day of school) weekdays revert
+        to `Weekday`, and Dublin no-school days (e.g. 2026-10-16) read
+        `Holiday`.
 29. [ ] **Quiet hours**: between 22:30 and 08:00 local (menuconfig:
         MAGTAG_QUIET_START/END_HHMM) button/status NeoPixels stay dark;
         alert pulses (expiry red, break cyan) still fire. Set start == end

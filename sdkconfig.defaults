@@ -26,6 +26,7 @@ CONFIG_MAGTAG_PARENT_TESTING=y
 CONFIG_MAGTAG_WEEKDAY_MIN=60
 CONFIG_MAGTAG_WEEKEND_MIN=120
 CONFIG_MAGTAG_HOLIDAY_MIN=120
+CONFIG_MAGTAG_SUMMER_MIN=120
 
 # Eye-rest: enforced Screen Break every 30 min of running time, 15 min
 # long. Interval 0 disables breaks.
