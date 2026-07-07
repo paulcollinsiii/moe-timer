@@ -67,6 +67,79 @@ menu "MagTag Timer"
             Length of the enforced Screen Break. When it ends the device
             chimes and waits in PAUSED for a manual resume (Button A).
 
+    comment "Extra timers (Button C swaps; empty name disables a slot)"
+
+    config MAGTAG_TIMER1_NAME
+        string "Extra timer 1 name"
+        default ""
+        help
+            Display name of extra countdown timer 1 (e.g. "Piano"). Keep it
+            short (~12 chars) — it renders at 12 pt next to the completion
+            counter and duration. Empty disables the slot. Extra timers are
+            plain countdowns: no eye-rest breaks, same alerts and NTP
+            behaviour as the Screen timer. Button C cycles between enabled
+            timers (blocked while one is RUNNING or in a Screen Break).
+
+    config MAGTAG_TIMER1_MIN
+        int "Extra timer 1 duration (minutes)"
+        default 15
+        range 1 1440
+        depends on MAGTAG_TIMER1_NAME != ""
+
+    config MAGTAG_TIMER1_RELOADABLE
+        bool "Extra timer 1 reloadable"
+        default n
+        depends on MAGTAG_TIMER1_NAME != ""
+        help
+            Button B resets this timer to full (same day, no ParentTesting
+            needed) whenever it is not RUNNING. The mode line then shows how
+            often it ran to completion today, e.g. "Piano (x2) - 15 min".
+
+    config MAGTAG_TIMER2_NAME
+        string "Extra timer 2 name"
+        default ""
+
+    config MAGTAG_TIMER2_MIN
+        int "Extra timer 2 duration (minutes)"
+        default 15
+        range 1 1440
+        depends on MAGTAG_TIMER2_NAME != ""
+
+    config MAGTAG_TIMER2_RELOADABLE
+        bool "Extra timer 2 reloadable"
+        default n
+        depends on MAGTAG_TIMER2_NAME != ""
+
+    config MAGTAG_TIMER3_NAME
+        string "Extra timer 3 name"
+        default ""
+
+    config MAGTAG_TIMER3_MIN
+        int "Extra timer 3 duration (minutes)"
+        default 15
+        range 1 1440
+        depends on MAGTAG_TIMER3_NAME != ""
+
+    config MAGTAG_TIMER3_RELOADABLE
+        bool "Extra timer 3 reloadable"
+        default n
+        depends on MAGTAG_TIMER3_NAME != ""
+
+    config MAGTAG_TIMER4_NAME
+        string "Extra timer 4 name"
+        default ""
+
+    config MAGTAG_TIMER4_MIN
+        int "Extra timer 4 duration (minutes)"
+        default 15
+        range 1 1440
+        depends on MAGTAG_TIMER4_NAME != ""
+
+    config MAGTAG_TIMER4_RELOADABLE
+        bool "Extra timer 4 reloadable"
+        default n
+        depends on MAGTAG_TIMER4_NAME != ""
+
     config MAGTAG_IDLE_SYNC_INTERVAL_MIN
         int "NTP sync interval while IDLE (minutes)"
         default 60

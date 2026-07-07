@@ -136,7 +136,7 @@ static void enter_deep_sleep(void) {
         .sync_due_by_next_wake = false,
     };
     if (plan_in.state == TIMER_RUNNING) {
-        plan_in.event_remaining_sec = (int32_t)(g_rtc_state.expiry_wall_time - (int64_t)plan_now);
+        plan_in.event_remaining_sec = (int32_t)(timer_expiry_wall() - (int64_t)plan_now);
         /* due if the recheck window lapses before the wake after next */
         plan_in.sync_due_by_next_wake = timer_needs_ntp_sync(plan_now + 90);
     } else if (plan_in.state == TIMER_BREAK) {
@@ -208,24 +208,33 @@ static void neopixel_show_timer_state(void) {
 
 static display_state_t make_state(int32_t remaining, time_t now) {
     day_type_t dt = schedule_get_day_type(now);
-    uint32_t alloc = schedule_get_allocation_sec(dt);
+    /* Extra timers have a fixed configured duration; Screen (slot 0)
+       follows the day schedule. */
+    const timer_def_t *def = timer_active_def();
+    uint32_t alloc = (def != NULL) ? (uint32_t)def->duration_sec : schedule_get_allocation_sec(dt);
     /* IDLE shows today's full allocation (full bar), not 0 (ProductOverview) */
     if (timer_get_state() == TIMER_IDLE) {
         remaining = (int32_t)alloc;
     }
+    timer_state_t ts = timer_get_state();
     int mv = battery_read_mv();
     int pct = battery_percent_from_mv(mv);
     ESP_LOGI(TAG, "battery: %d mV (%d%%)", mv, pct);
     return (display_state_t){
         .remaining_sec = remaining,
         .allocation_sec = alloc,
-        .timer_state = timer_get_state(),
+        .timer_state = ts,
         .day_type = dt,
         .wall_time = now,
         .last_sync_time = s_last_ntp_sync,
         .battery_pct = (uint8_t)pct,
         .break_remaining_sec = timer_break_remaining(now),
         .break_duration_sec = (uint32_t)CONFIG_MAGTAG_BREAK_DURATION_MIN * 60,
+        .timer_name = (def != NULL) ? def->name : NULL,
+        .completions = timer_completions(),
+        .reloadable = (def != NULL) && def->reloadable,
+        .swap_available = timer_extra_count() > 0 && ts != TIMER_RUNNING && ts != TIMER_BREAK,
+        .reload_available = (def != NULL) && def->reloadable && ts != TIMER_RUNNING,
     };
 }
 
@@ -370,7 +379,7 @@ static void wait_for_render_grid(int max_wait_sec) {
     time_t now = time(NULL);
     int to;
     if (timer_get_state() == TIMER_RUNNING) {
-        to = (int)((g_rtc_state.expiry_wall_time - (int64_t)now) % 60);
+        to = (int)((timer_expiry_wall() - (int64_t)now) % 60);
     } else if (timer_get_state() == TIMER_BREAK) {
         to = timer_break_remaining(now) % 60;
     } else {
@@ -404,7 +413,7 @@ static void maybe_wait_for_event(void) {
     if (timer_get_state() != TIMER_RUNNING)
         return;
     time_t now = time(NULL);
-    int64_t remaining = g_rtc_state.expiry_wall_time - (int64_t)now;
+    int64_t remaining = timer_expiry_wall() - (int64_t)now;
     if (remaining <= 0 || remaining > SLEEP_PLAN_WATCH_SEC)
         return;
 
@@ -424,12 +433,12 @@ static void maybe_wait_for_event(void) {
     static const int32_t STEPS[] = {60, 45, 30, 15};
     const int n_steps = (int)(sizeof(STEPS) / sizeof(STEPS[0]));
     int next_step = 0;
-    int64_t rem = g_rtc_state.expiry_wall_time - (int64_t)time(NULL);
+    int64_t rem = timer_expiry_wall() - (int64_t)time(NULL);
     while (next_step < n_steps && (int64_t)STEPS[next_step] > rem) {
         next_step++; /* woke late (e.g. slow sync): skip already-passed steps */
     }
     int32_t leds_shown = -1;
-    while ((rem = g_rtc_state.expiry_wall_time - (int64_t)time(NULL)) > 0) {
+    while ((rem = timer_expiry_wall() - (int64_t)time(NULL)) > 0) {
         if (next_step < n_steps && rem <= (int64_t)STEPS[next_step]) {
             time_t step_now = time(NULL);
             display_state_t st = make_state(STEPS[next_step], step_now);
@@ -545,8 +554,10 @@ static void handle_button_wake(void) {
                    expiry via timer_shift_expiry (measured against the
                    monotonic clock, which NTP cannot step). */
                 if (before == TIMER_IDLE) {
-                    day_type_t dt = schedule_get_day_type(now);
-                    timer_start(now, (int32_t)schedule_get_allocation_sec(dt));
+                    const timer_def_t *def = timer_active_def();
+                    int32_t alloc = (def != NULL) ? def->duration_sec
+                                                  : (int32_t)schedule_get_allocation_sec(schedule_get_day_type(now));
+                    timer_start(now, alloc);
                 } else {
                     timer_resume(now);
                 }
@@ -568,20 +579,45 @@ static void handle_button_wake(void) {
                 now = time(NULL);
             }
             break;
-        case BTN_B:
+        case BTN_B: {
+            const timer_def_t *def = timer_active_def();
+            if (def != NULL && def->reloadable) {
+                /* Reloadable timers reset to full without ParentTesting —
+                   but never mid-run (pause first, same as the swap rule). */
+                if (!timer_reload()) {
+                    ESP_LOGI(TAG, "Button B reload refused while RUNNING");
+                }
+            } else {
 #if CONFIG_MAGTAG_PARENT_TESTING
-            timer_reset();
-            timer_record_date(now);
+                /* Parent reset: only the selected timer, any state (the
+                   pause keeps the old reset-anytime testing workflow). */
+                if (timer_get_state() == TIMER_RUNNING) {
+                    timer_pause(now);
+                }
+                timer_reload();
 #else
-            /* Production: allocation resets only on day rollover */
-            ESP_LOGI(TAG, "Button B reset disabled (MAGTAG_PARENT_TESTING=n)");
+                /* Production: allocation resets only on day rollover */
+                ESP_LOGI(TAG, "Button B reset disabled (MAGTAG_PARENT_TESTING=n)");
 #endif
+            }
+            break;
+        }
+        case BTN_C:
+            /* Swap timer type; refused while RUNNING (pause first) or in a
+               Screen Break (enforced). Landing on an already-EXPIRED timer
+               is a selection change, not a transition — refresh the
+               baseline so the expiry alert does not re-fire below. */
+            if (timer_select_next()) {
+                ESP_LOGI(TAG, "button C: selected slot %d", timer_active_slot());
+                before = timer_get_state();
+            } else {
+                ESP_LOGI(TAG, "button C swap unavailable (state %d)", (int)before);
+            }
             break;
         case BTN_D:
             try_ntp_sync();
             now = time(NULL);
             break;
-        case BTN_C: /* unbound in v1 */
         case BTN_NONE:
         default:
             break;
@@ -637,6 +673,10 @@ void app_main(void) {
 
     setenv("TZ", MAGTAG_TZ, 1);
     tzset();
+
+    /* Slot definitions live in rodata, not RTC memory — install them
+       before the first timer_* call on every boot/wake. */
+    timer_defs_install();
 
     /* Must run after TZ is set (date comparison) and before the wake
        handlers (whose rollover check would otherwise reset the timer). */

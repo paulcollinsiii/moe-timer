@@ -270,9 +270,14 @@ static void build_screen(const display_state_t *st) {
     lv_obj_set_style_text_font(rem, &lv_font_montserrat_28, 0);
     lv_obj_align(rem, LV_ALIGN_TOP_RIGHT, -4, 58);
 
-    /* Status row (moved up to make room for button labels): day-type +
-       allocation (left), state (right) */
-    snprintf(buf, sizeof(buf), "%s - %u min", day_type_str(st->day_type), (unsigned)(st->allocation_sec / 60));
+    /* Status row (moved up to make room for button labels): mode line
+       (left: day-type + allocation, or the extra timer's name/counter),
+       state (right) */
+    if (st->timer_name != NULL && st->timer_name[0] != '\0') {
+        display_format_mode_line(buf, sizeof(buf), st->timer_name, st->completions, st->reloadable, st->allocation_sec);
+    } else {
+        snprintf(buf, sizeof(buf), "%s - %u min", day_type_str(st->day_type), (unsigned)(st->allocation_sec / 60));
+    }
     lv_obj_t *day = lv_label_create(scr);
     lv_label_set_text(day, buf);
     lv_obj_set_style_text_font(day, &lv_font_montserrat_12, 0);
@@ -312,11 +317,22 @@ static void build_screen(const display_state_t *st) {
         lv_obj_align(lbl_a, LV_ALIGN_BOTTOM_MID, BTN_MID_OFS(0), -2);
     }
 #if CONFIG_MAGTAG_PARENT_TESTING
-    lv_obj_t *lbl_b = lv_label_create(scr);
-    lv_label_set_text(lbl_b, "Reset");
-    lv_obj_set_style_text_font(lbl_b, &lv_font_montserrat_12, 0);
-    lv_obj_align(lbl_b, LV_ALIGN_BOTTOM_MID, BTN_MID_OFS(1), -2);
+    bool show_reset = true; /* parent reset works on any selected timer */
+#else
+    bool show_reset = st->reload_available;
 #endif
+    if (show_reset) {
+        lv_obj_t *lbl_b = lv_label_create(scr);
+        lv_label_set_text(lbl_b, "Reset");
+        lv_obj_set_style_text_font(lbl_b, &lv_font_montserrat_12, 0);
+        lv_obj_align(lbl_b, LV_ALIGN_BOTTOM_MID, BTN_MID_OFS(1), -2);
+    }
+    if (st->swap_available) {
+        lv_obj_t *lbl_c = lv_label_create(scr);
+        lv_label_set_text(lbl_c, LV_SYMBOL_RIGHT); /* swap timer type */
+        lv_obj_set_style_text_font(lbl_c, &lv_font_montserrat_12, 0);
+        lv_obj_align(lbl_c, LV_ALIGN_BOTTOM_MID, BTN_MID_OFS(2), -2);
+    }
     lv_obj_t *lbl_d = lv_label_create(scr);
     lv_label_set_text(lbl_d, LV_SYMBOL_REFRESH);
     lv_obj_set_style_text_font(lbl_d, &lv_font_montserrat_12, 0);

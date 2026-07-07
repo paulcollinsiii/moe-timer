@@ -17,6 +17,12 @@ typedef struct {
     /* Eye-rest break (valid when timer_state == TIMER_BREAK) */
     int32_t break_remaining_sec;
     uint32_t break_duration_sec;
+    /* Extra timers (v1.3): NULL/"" name = Screen (day-type mode line) */
+    const char *timer_name;
+    uint16_t completions;
+    bool reloadable;
+    bool swap_available;   /* Button C label (extras exist, state allows swap) */
+    bool reload_available; /* Button B label without ParentTesting */
 } display_state_t;
 
 #ifdef __cplusplus

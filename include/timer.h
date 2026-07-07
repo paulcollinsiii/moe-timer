@@ -99,6 +99,8 @@ typedef struct {
 /* Slot management. timer_set_defs must run before any other call each boot
    (defs live in flash/rodata, not RTC memory); defs[0] (Screen) is ignored. */
 void timer_set_defs(const timer_def_t *defs, int count);
+/* Firmware glue (main/timer_defs.c): installs the menuconfig-built table. */
+void timer_defs_install(void);
 int timer_active_slot(void);
 /* Definition of the active slot; NULL for slot 0 (Screen uses schedule.c). */
 const timer_def_t *timer_active_def(void);

@@ -2,6 +2,7 @@ idf_component_register(
     SRCS
         "main.c"
         "timer.c"
+        "timer_defs.c"
         "display.c"
         "display_layout.c"
         "ntp.c"

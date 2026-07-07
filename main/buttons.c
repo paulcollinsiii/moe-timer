@@ -6,6 +6,7 @@
 #include "esp_rom_sys.h"
 #include "esp_sleep.h"
 #include "sdkconfig.h"
+#include "timer.h"
 
 static const char *TAG = "buttons";
 
@@ -46,19 +47,20 @@ void buttons_init(void) {
 }
 
 /* Wake policy (UX: prevent button mashing from burning battery/refreshes):
-   C is unbound and must not even wake the device; B only wakes when the
-   parent-testing reset is compiled in. Non-wake buttons are left out of
-   the EXT1 mask AND unconfigured in the RTC domain (an open button on an
-   isolated pad draws nothing; a pull-up would leak ~70 uA while held). */
+   C wakes only when extra timers exist for it to swap between; B wakes for
+   the parent-testing reset or when a reloadable extra timer needs it.
+   Non-wake buttons are left out of the EXT1 mask AND unconfigured in the
+   RTC domain (an open button on an isolated pad draws nothing; a pull-up
+   would leak ~70 uA while held). */
 static bool is_wake_source(int i) {
     switch ((button_id_t)i) {
         case BTN_C:
-            return false;
+            return timer_extra_count() > 0;
         case BTN_B:
 #if CONFIG_MAGTAG_PARENT_TESTING
             return true;
 #else
-            return false;
+            return timer_any_reloadable();
 #endif
         default:
             return true;
