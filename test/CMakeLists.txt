@@ -16,9 +16,14 @@ function(add_host_test name)
       ${CMAKE_CURRENT_SOURCE_DIR}/mocks
       ${CMAKE_CURRENT_SOURCE_DIR}/../include)
   target_compile_definitions(${name} PRIVATE NATIVE)
+  # Sanitizers give the negative-input tests (corrupt snapshots, malformed
+  # NVS blobs) real teeth: an out-of-bounds read fails the suite instead of
+  # silently returning garbage.
   target_compile_options(${name} PRIVATE
       -include ${CMAKE_CURRENT_SOURCE_DIR}/mocks/esp_compat.h
-      -Wall -Wextra)
+      -Wall -Wextra
+      -fsanitize=address,undefined -fno-omit-frame-pointer)
+  target_link_options(${name} PRIVATE -fsanitize=address,undefined)
   target_link_libraries(${name} unity)
   add_test(NAME ${name} COMMAND ${name})
 endfunction()

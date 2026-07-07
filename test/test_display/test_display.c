@@ -202,11 +202,23 @@ void test_mode_line_non_reloadable_never_shows_counter(void) {
     TEST_ASSERT_EQUAL_STRING("Violin - 15 min", buf);
 }
 
+void test_mode_line_truncates_cleanly_in_small_buffer(void) {
+    /* Kconfig help asks for short names but cannot enforce it — a long
+       name must truncate with a terminator, never overflow. Full text is
+       "ExtraLongTimerName (x12) - 90 min". */
+    char buf[20];
+    memset(buf, (char)0xAA, sizeof(buf));
+    display_format_mode_line(buf, sizeof(buf), "ExtraLongTimerName", 12, true, 5400);
+    TEST_ASSERT_EQUAL_UINT(19, strlen(buf));
+    TEST_ASSERT_EQUAL_MEMORY("ExtraLongTimerName ", buf, 19);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_mode_line_extra_timer_without_completions);
     RUN_TEST(test_mode_line_extra_timer_with_completions);
     RUN_TEST(test_mode_line_non_reloadable_never_shows_counter);
+    RUN_TEST(test_mode_line_truncates_cleanly_in_small_buffer);
     RUN_TEST(test_bar_full_when_remaining_equals_allocation);
     RUN_TEST(test_bar_full_when_remaining_exceeds_allocation);
     RUN_TEST(test_bar_zero_when_expired);
