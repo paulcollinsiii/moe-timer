@@ -522,6 +522,28 @@ void test_select_next_noop_without_extras(void) {
     TEST_ASSERT_EQUAL_INT(0, timer_active_slot());
 }
 
+void test_swap_allowed_tracks_state_and_extras(void) {
+    /* Drives the Button C wake mask: C must not even wake the device when
+       a press could only burn a full refresh (swap refused). */
+    TEST_ASSERT_TRUE(timer_swap_allowed()); /* IDLE + extras */
+    timer_start(T0, 3600);
+    TEST_ASSERT_FALSE(timer_swap_allowed()); /* RUNNING */
+    timer_pause(T0 + 100);
+    TEST_ASSERT_TRUE(timer_swap_allowed()); /* PAUSED */
+    timer_resume(T0 + 200);
+    timer_start_break(T0 + 300, 900);
+    TEST_ASSERT_FALSE(timer_swap_allowed()); /* BREAK (enforced) */
+    timer_reset();
+    timer_start(T0, 100);
+    timer_tick(T0 + 200); /* -> EXPIRED */
+    TEST_ASSERT_TRUE(timer_swap_allowed());
+}
+
+void test_swap_allowed_false_without_extras(void) {
+    timer_set_defs(NULL, 0);
+    TEST_ASSERT_FALSE(timer_swap_allowed());
+}
+
 /* ---- multi-timer slots: per-slot independence ---- */
 
 void test_slot_states_are_independent(void) {
@@ -790,6 +812,8 @@ int main(void) {
     RUN_TEST(test_select_next_refused_during_break);
     RUN_TEST(test_select_next_allowed_when_paused_or_expired);
     RUN_TEST(test_select_next_noop_without_extras);
+    RUN_TEST(test_swap_allowed_tracks_state_and_extras);
+    RUN_TEST(test_swap_allowed_false_without_extras);
     RUN_TEST(test_slot_states_are_independent);
     RUN_TEST(test_expiry_wall_accessor_tracks_active_slot);
     RUN_TEST(test_break_never_due_on_extra_slot);

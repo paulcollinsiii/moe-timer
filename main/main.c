@@ -233,7 +233,7 @@ static display_state_t make_state(int32_t remaining, time_t now) {
         .timer_name = (def != NULL) ? def->name : NULL,
         .completions = timer_completions(),
         .reloadable = (def != NULL) && def->reloadable,
-        .swap_available = timer_extra_count() > 0 && ts != TIMER_RUNNING && ts != TIMER_BREAK,
+        .swap_available = timer_swap_allowed(),
         .reload_available = (def != NULL) && def->reloadable && ts != TIMER_RUNNING,
     };
 }

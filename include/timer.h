@@ -106,6 +106,11 @@ int timer_active_slot(void);
 const timer_def_t *timer_active_def(void);
 int timer_extra_count(void);     /* enabled extra slots */
 bool timer_any_reloadable(void); /* any enabled extra slot reloadable */
+/* True when a Button C swap would succeed: extras exist and the active
+   slot is not RUNNING/BREAK. Also gates C as an EXT1 wake source — a
+   press that can only be refused must not wake the device and burn a
+   full refresh. */
+bool timer_swap_allowed(void);
 /* Cycle to the next enabled slot (0 -> 1 -> ... -> 0). Refused (false)
    while the active slot is RUNNING or BREAK, or when no extras exist. */
 bool timer_select_next(void);

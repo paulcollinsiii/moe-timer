@@ -155,7 +155,7 @@ All state is persisted in **RTC slow memory** (survives deep sleep) with an NVS 
 | C | 12 | Swap timer type (Screen → extra 1 → … → Screen); refused while RUNNING or in a Screen Break |
 | D | 11 | Force NTP re-sync + full display refresh |
 
-Wake sources: A and D always; B when `CONFIG_MAGTAG_PARENT_TESTING=y` or any reloadable extra timer is configured; C only when extra timers are configured (an unbound button must not burn battery or panel refreshes when mashed). Buttons are debounced in software (10 ms).
+Wake sources: A and D always; B when `CONFIG_MAGTAG_PARENT_TESTING=y` or any reloadable extra timer is configured; C only when a swap would succeed — extra timers configured AND the active timer not RUNNING/in a Screen Break (the EXT1 mask is rebuilt at every sleep entry; a press that could only be refused must not burn battery or a panel refresh). Buttons are debounced in software (10 ms).
 
 ### 6a · Extra timers (v1.3)
 

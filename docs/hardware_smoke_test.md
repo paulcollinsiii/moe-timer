@@ -34,8 +34,10 @@ credentials.**
 10. [ ] **Button C**: with no extra timers configured (the default), does
         nothing at all — not a wake source (kept out of the EXT1 mask so
         mashing it cannot burn battery or refreshes). With an extra timer
-        configured (`MAGTAG_TIMER1_NAME` etc.), swaps the selected timer
-        (refused while RUNNING or during a Screen Break).
+        configured (`MAGTAG_TIMER1_NAME` etc.), swaps the selected timer.
+        While a timer is RUNNING or in a Screen Break, C is dropped from
+        the wake mask entirely — pressing it does nothing (no wake, no
+        refresh) until the timer is paused.
 11. [ ] **Expiry**: temporarily lower `NVS_DEFAULT_WEEKDAY_MIN` to 1-2 min (and
         erase NVS: `idf.py erase-flash`), let it expire: TIME'S UP screen,
         3 beeps x 5 cycles, red NeoPixel pulse; any button stops the alert

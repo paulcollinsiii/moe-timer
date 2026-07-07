@@ -64,10 +64,16 @@ bool timer_any_reloadable(void) {
     return false;
 }
 
-bool timer_select_next(void) {
+bool timer_swap_allowed(void) {
     timer_state_t st = active()->state;
     if (st == TIMER_RUNNING || st == TIMER_BREAK)
         return false; /* pause first; BREAK is enforced */
+    return timer_extra_count() > 0;
+}
+
+bool timer_select_next(void) {
+    if (!timer_swap_allowed())
+        return false;
     for (int i = 1; i < TIMER_SLOT_COUNT; i++) {
         int cand = (g_rtc_state.active_slot + i) % TIMER_SLOT_COUNT;
         if (slot_enabled(cand)) {
