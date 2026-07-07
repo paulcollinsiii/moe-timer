@@ -5,6 +5,7 @@
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "sdkconfig.h"
 
 static const char *TAG = "audio";
 
@@ -76,7 +77,7 @@ static void beep_off(void) {
 void audio_beep_sequence(void) {
     s_stop_requested = false;
 
-    for (int cycle = 0; cycle < 5 && !s_stop_requested; cycle++) {
+    for (int cycle = 0; cycle < CONFIG_MAGTAG_EXPIRY_ALARM_CYCLES && !s_stop_requested; cycle++) {
         for (int beep = 0; beep < 3 && !s_stop_requested; beep++) {
             beep_on();
             vTaskDelay(pdMS_TO_TICKS(200));
@@ -97,8 +98,8 @@ void audio_beep_sequence(void) {
 void audio_break_alarm(void) {
     s_stop_requested = false;
 
-    /* Distinct from the expiry alarm: 2 beeps x 3 cycles (~6 s) */
-    for (int cycle = 0; cycle < 3 && !s_stop_requested; cycle++) {
+    /* Distinct from the expiry alarm: 2 beeps per cycle (~2.2 s each) */
+    for (int cycle = 0; cycle < CONFIG_MAGTAG_BREAK_ALARM_CYCLES && !s_stop_requested; cycle++) {
         for (int beep = 0; beep < 2 && !s_stop_requested; beep++) {
             beep_on();
             vTaskDelay(pdMS_TO_TICKS(300));

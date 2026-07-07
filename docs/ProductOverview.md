@@ -65,10 +65,19 @@ The device spends almost all of its time in deep sleep. Wake sources:
 
 | Source | Action on wake |
 |--------|----------------|
-| RTC timer (~55 s) | Partial display refresh + check NTP schedule |
-| GPIO (any button press) | Handle button event, full refresh if needed |
+| RTC timer (planner-scheduled) | Partial display refresh + check NTP schedule |
+| GPIO (wake-button press) | Handle button event, full refresh if needed |
 
-**Wake sequence (every ~55 s)**:
+Sleep durations come from a pure, host-tested planner (`main/sleep_plan.c`):
+clock-only states (IDLE/PAUSED/EXPIRED) align wakes to wall-clock minute
+boundaries (header time flips with real clocks); RUNNING/BREAK align to the
+countdown's own minute grid so the displayed remaining truly reads round
+values (start/resume shows one precise value, then 1:12:00, 1:11:00, ...).
+RUNNING wakes ~20 s early when an NTP sync is due, and pre-event wakes land
+~70 s before an expiry/break end so the awake watch loop fires the event on
+time.
+
+**Wake sequence (roughly once per minute)**:
 1. Read current time from ESP32 RTC.
 2. Check for day rollover (compare date to `last_date` in RTC memory) → if new day: wake WiFi, NTP sync, re-init timer to IDLE with new allocation.
 3. If `next_ntp_sync_time` has passed (every 10 min while RUNNING): wake WiFi, NTP sync, adjust `expiry_wall_time`.

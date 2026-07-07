@@ -6,7 +6,16 @@
 #include "esp_attr.h"
 #endif
 
-#define NTP_SYNC_INTERVAL_SEC 600 /* 10-minute recheck window */
+/* RUNNING clock-recheck window: menuconfig on firmware builds; host tests
+   have no sdkconfig and use the fixed fallback (pattern: nvs_defaults.h). */
+#ifndef NATIVE
+#include "sdkconfig.h"
+#endif
+#ifdef CONFIG_MAGTAG_RUNNING_SYNC_INTERVAL_MIN
+#define NTP_SYNC_INTERVAL_SEC (CONFIG_MAGTAG_RUNNING_SYNC_INTERVAL_MIN * 60)
+#else
+#define NTP_SYNC_INTERVAL_SEC 600
+#endif
 
 #ifdef __cplusplus
 extern "C" {

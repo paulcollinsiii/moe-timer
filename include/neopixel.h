@@ -1,5 +1,6 @@
 #pragma once
 
+#include <stdbool.h>
 #include <stdint.h>
 
 #ifdef __cplusplus
@@ -7,26 +8,31 @@ extern "C" {
 #endif
 
 /* Must be called on every boot/wake before any other peripheral code.
-   Ensures GPIO 21 (power gate) is HIGH (off).
-   TODO(stream-neopixel): call gpio_hold_en(21) + gpio_deep_sleep_hold_en()
-   after setting HIGH so the pin doesn't float during deep sleep. */
+   Ensures GPIO 21 (power gate) is HIGH (off). */
 void neopixel_init(void);
-void neopixel_alert_start(void); /* GPIO 21 LOW, slow red pulse (expiry) */
-/* Slow pulse in an arbitrary colour; blocks until the stop flag like
-   neopixel_alert_start. Run from a dedicated task; tear down via
-   neopixel_request_stop + done-flag handshake (see below). */
-void neopixel_pulse_start(uint8_t r, uint8_t g, uint8_t b);
-void neopixel_stop(void); /* stops RMT, GPIO 21 HIGH; safe if already off */
-/* Flag-only stop request — safe from any task. neopixel_stop() flushes the
-   RMT channel and MUST NOT run concurrently with neopixel_alert_start's
-   loop (two tasks on one RMT channel can deadlock rmt_tx_wait_all_done);
-   the alert task performs its own final flush after seeing the flag. */
-void neopixel_request_stop(void);
-
-/* Set one pixel (0-3), leaving the others unchanged (turns the power gate
-   ON). Call neopixel_stop() to turn everything off — never enter deep
+/* Everything off, RMT flushed, GPIO 21 HIGH; idempotent. Never enter deep
    sleep with the gate LOW. */
-void neopixel_set_pixel(int idx, uint8_t r, uint8_t g, uint8_t b);
+void neopixel_stop(void);
+
+/* Library configuration, injected from main so the module stays clock- and
+   Kconfig-agnostic. */
+void neopixel_set_quiet_cb(bool (*is_quiet)(void));
+void neopixel_set_status_brightness(uint8_t pct); /* 0-100 scale, status class only */
+
+/* STATUS class — silently no-ops while the quiet callback returns true;
+   colours are scaled by the status brightness. */
+void neopixel_status_pixel(int idx, uint8_t r, uint8_t g, uint8_t b);
+/* 4-bit binary display: pixel 0 (over button A) = bit3 ... pixel 3 = bit0. */
+void neopixel_status_binary4(uint8_t value, uint8_t r, uint8_t g, uint8_t b);
+
+/* HIGHPRI class — ignores quiet hours (accompanies audible alarms). */
+void neopixel_highpri_pixel(int idx, uint8_t r, uint8_t g, uint8_t b);
+/* Slow pulse on all pixels via an internally-owned task. Exactly one task
+   may drive the RMT channel (two deadlock rmt_tx_wait_all_done), so the
+   task lives here: begin spawns it, end sets the stop flag, joins with a
+   2 s cap, and forces the LEDs off. */
+void neopixel_alert_pulse_begin(uint8_t r, uint8_t g, uint8_t b);
+void neopixel_alert_pulse_end(void);
 
 #ifdef __cplusplus
 }

@@ -130,6 +130,34 @@ static rmt_encoder_handle_t s_encoder = NULL;
 static volatile bool s_stop_requested = false;
 static uint8_t s_pixels[NEOPIXEL_COUNT * 3]; /* GRB byte order: [G, R, B] per LED */
 
+/* Library configuration, injected from main (this module stays clock- and
+   Kconfig-agnostic): quiet-hours predicate + status brightness scale. */
+static bool (*s_quiet_cb)(void);
+static uint8_t s_status_brightness = 100; /* percent */
+
+/* Internal pulse task state. INVARIANT: exactly one task may drive the RMT
+   channel — concurrent flush_pixels from two tasks deadlocks
+   rmt_tx_wait_all_done(portMAX_DELAY) (found the hard way in bring-up).
+   The pulse task is owned here; callers only begin/end. */
+static volatile bool s_pulse_done = true;
+static uint8_t s_pulse_r, s_pulse_g, s_pulse_b;
+
+void neopixel_set_quiet_cb(bool (*is_quiet)(void)) {
+    s_quiet_cb = is_quiet;
+}
+
+void neopixel_set_status_brightness(uint8_t pct) {
+    s_status_brightness = (pct > 100) ? 100 : pct;
+}
+
+static bool status_muted(void) {
+    return s_quiet_cb && s_quiet_cb();
+}
+
+static uint8_t scale_status(uint8_t ch) {
+    return (uint8_t)((int)ch * s_status_brightness / 100);
+}
+
 void neopixel_init(void) {
     /* Release the deep-sleep hold placed by enter_deep_sleep() so the pin
        can be reconfigured; power gate OFF (HIGH) first — hard invariant on
@@ -185,31 +213,51 @@ static void set_all_scaled(uint8_t r, uint8_t g, uint8_t b, int step) {
     }
 }
 
-void neopixel_pulse_start(uint8_t r, uint8_t g, uint8_t b) {
-    if (!s_rmt_chan || !s_encoder)
-        return;
-    s_stop_requested = false;
+static void pulse_task(void *arg) {
+    (void)arg;
     gpio_set_level(NEOPIXEL_POWER_GPIO, 0); /* power gate ON */
     while (!s_stop_requested) {
         for (int step = 0; step < 32 && !s_stop_requested; step++) {
-            set_all_scaled(r, g, b, step);
+            set_all_scaled(s_pulse_r, s_pulse_g, s_pulse_b, step);
             flush_pixels();
             vTaskDelay(pdMS_TO_TICKS(30));
         }
         for (int step = 32; step >= 0 && !s_stop_requested; step--) {
-            set_all_scaled(r, g, b, step);
+            set_all_scaled(s_pulse_r, s_pulse_g, s_pulse_b, step);
             flush_pixels();
             vTaskDelay(pdMS_TO_TICKS(30));
         }
     }
-    neopixel_stop();
+    neopixel_stop(); /* the task's OWN final flush — single-threaded */
+    s_pulse_done = true;
+    vTaskDelete(NULL);
 }
 
-void neopixel_alert_start(void) {
-    neopixel_pulse_start(248, 0, 0); /* expiry: red, same brightness as before */
+void neopixel_alert_pulse_begin(uint8_t r, uint8_t g, uint8_t b) {
+    if (!s_rmt_chan || !s_encoder || !s_pulse_done)
+        return; /* already pulsing */
+    s_pulse_r = r;
+    s_pulse_g = g;
+    s_pulse_b = b;
+    s_stop_requested = false;
+    s_pulse_done = false;
+    if (xTaskCreate(pulse_task, "np_pulse", 2048, NULL, 5, NULL) != pdPASS) {
+        s_pulse_done = true;
+    }
 }
 
-void neopixel_set_pixel(int idx, uint8_t r, uint8_t g, uint8_t b) {
+void neopixel_alert_pulse_end(void) {
+    s_stop_requested = true;
+    for (int i = 0; i < 40 && !s_pulse_done; i++) {
+        vTaskDelay(pdMS_TO_TICKS(50));
+    }
+    if (!s_pulse_done) {
+        ESP_LOGW(TAG, "pulse task did not finish; forcing LEDs off");
+    }
+    neopixel_stop(); /* idempotent gate-off; safe once the task is done */
+}
+
+void neopixel_highpri_pixel(int idx, uint8_t r, uint8_t g, uint8_t b) {
     if (!s_rmt_chan || !s_encoder || idx < 0 || idx >= NEOPIXEL_COUNT)
         return;
     s_pixels[idx * 3 + 0] = g; /* GRB byte order */
@@ -219,8 +267,24 @@ void neopixel_set_pixel(int idx, uint8_t r, uint8_t g, uint8_t b) {
     flush_pixels();
 }
 
-void neopixel_request_stop(void) {
-    s_stop_requested = true;
+void neopixel_status_pixel(int idx, uint8_t r, uint8_t g, uint8_t b) {
+    if (status_muted())
+        return;
+    neopixel_highpri_pixel(idx, scale_status(r), scale_status(g), scale_status(b));
+}
+
+void neopixel_status_binary4(uint8_t value, uint8_t r, uint8_t g, uint8_t b) {
+    if (status_muted() || !s_rmt_chan || !s_encoder)
+        return;
+    for (int i = 0; i < NEOPIXEL_COUNT; i++) {
+        /* pixel 0 (over button A) = bit3 ... pixel 3 = bit0 */
+        bool lit = (value >> (3 - i)) & 1;
+        s_pixels[i * 3 + 0] = lit ? scale_status(g) : 0;
+        s_pixels[i * 3 + 1] = lit ? scale_status(r) : 0;
+        s_pixels[i * 3 + 2] = lit ? scale_status(b) : 0;
+    }
+    gpio_set_level(NEOPIXEL_POWER_GPIO, 0); /* power gate ON */
+    flush_pixels();
 }
 
 void neopixel_stop(void) {
