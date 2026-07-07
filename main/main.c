@@ -21,6 +21,7 @@
 #include "schedule.h"
 #include "sleep_plan.h"
 #include "timer.h"
+#include "wake_policy.h"
 
 static const char *TAG = "main";
 
@@ -508,14 +509,8 @@ static void handle_timer_tick(void) {
     time_t now = time(NULL);
     handle_day_rollover(&now);
 
-    if (timer_get_state() == TIMER_RUNNING && timer_needs_ntp_sync(now)) {
-        try_ntp_sync();
-        now = time(NULL);
-    } else if ((timer_get_state() == TIMER_IDLE || timer_get_state() == TIMER_PAUSED ||
-                timer_get_state() == TIMER_EXPIRED) &&
-               (s_last_ntp_sync == 0 || now - s_last_ntp_sync >= IDLE_SYNC_INTERVAL_SEC)) {
-        /* Long-lived clock-only states: re-sync on the slower IDLE cadence
-           so the minute-aligned header doesn't visibly drift */
+    if (wake_policy_sync_due(timer_get_state(), timer_needs_ntp_sync(now), now, s_last_ntp_sync,
+                             IDLE_SYNC_INTERVAL_SEC)) {
         try_ntp_sync();
         now = time(NULL);
     }
@@ -536,35 +531,31 @@ static void handle_timer_tick(void) {
     int32_t remaining = timer_tick(now);
 
     /* The grid wait makes the true remaining a round minute at render
-       time; snap away +-2 s of wake/render jitter so 1:10:59 never shows.
+       time; snap away wake/render jitter so 1:10:59 never shows.
        Genuinely off-grid renders (slow sync) stay honest. */
     int32_t shown = remaining;
-    if (timer_get_state() == TIMER_RUNNING && remaining > SLEEP_PLAN_WATCH_SEC) {
-        int32_t m = shown % 60;
-        if (m <= 2)
-            shown -= m;
-        else if (m >= 58)
-            shown += 60 - m;
+    if (timer_get_state() == TIMER_RUNNING) {
+        shown = wake_policy_snap_minute(shown, SLEEP_PLAN_WATCH_SEC);
     }
     display_state_t st = make_state(shown, now);
-    if (st.timer_state == TIMER_BREAK && st.break_remaining_sec > SLEEP_PLAN_WATCH_SEC) {
-        int32_t m = st.break_remaining_sec % 60;
-        if (m <= 2)
-            st.break_remaining_sec -= m;
-        else if (m >= 58)
-            st.break_remaining_sec += 60 - m;
+    if (st.timer_state == TIMER_BREAK) {
+        st.break_remaining_sec = wake_policy_snap_minute(st.break_remaining_sec, SLEEP_PLAN_WATCH_SEC);
     }
 
     if (before == TIMER_BREAK && timer_get_state() == TIMER_PAUSED) {
         audio_break_over_chime(); /* break over — ready to resume */
     }
 
-    if (timer_get_state() == TIMER_EXPIRED && before != TIMER_EXPIRED) {
-        fire_expiry_alert();
-    } else if (timer_get_state() != before) {
-        display_full_refresh(&st);
-    } else {
-        display_update(&st); /* partial; policy promotes every 5th to full */
+    switch (wake_policy_render(before, timer_get_state(), false)) {
+        case WAKE_RENDER_EXPIRY_ALERT:
+            fire_expiry_alert();
+            break;
+        case WAKE_RENDER_FULL:
+            display_full_refresh(&st);
+            break;
+        default:
+            display_update(&st); /* partial; policy promotes every 5th to full */
+            break;
     }
     maybe_wait_for_event();
     enter_deep_sleep();
@@ -675,7 +666,7 @@ static void handle_button_wake(void) {
         audio_break_over_chime(); /* break over — ready to resume */
     }
 
-    if (timer_get_state() == TIMER_EXPIRED && before != TIMER_EXPIRED) {
+    if (wake_policy_render(before, timer_get_state(), true) == WAKE_RENDER_EXPIRY_ALERT) {
         fire_expiry_alert(); /* alert owns the NeoPixels (red pulse) */
     } else {
         /* Includes EXPIRED: any button returns the display to the main
@@ -689,9 +680,34 @@ static void handle_button_wake(void) {
     enter_deep_sleep();
 }
 
+/* Last-resort battery protection: no wake may run forever (WiFi driver
+   hang, stuck BUSY, firmware bug) — the CPU would otherwise stay awake
+   until the battery dies. Runs in the esp_timer task; enter_deep_sleep
+   persists the snapshot first, so no allocation is lost. A mid-refresh
+   force-sleep can leave the panel scruffy for one frame — acceptable for
+   a path that only fires when something is already wedged. */
+static void awake_failsafe_cb(void *arg) {
+    (void)arg;
+    ESP_LOGE(TAG, "Awake failsafe: still awake after %d s - forcing deep sleep", CONFIG_MAGTAG_MAX_AWAKE_SEC);
+    enter_deep_sleep();
+}
+
+static void arm_awake_failsafe(void) {
+    static const esp_timer_create_args_t args = {.callback = awake_failsafe_cb, .name = "awake_cap"};
+    esp_timer_handle_t t;
+    esp_err_t ret = esp_timer_create(&args, &t);
+    if (ret == ESP_OK) {
+        ret = esp_timer_start_once(t, (uint64_t)CONFIG_MAGTAG_MAX_AWAKE_SEC * 1000000ULL);
+    }
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "awake failsafe not armed: %s", esp_err_to_name(ret));
+    }
+}
+
 void app_main(void) {
     /* MUST be first peripheral call: GPIO 21 power gate HIGH (NeoPixels off) */
     neopixel_init();
+    arm_awake_failsafe();
     neopixel_set_quiet_cb(status_leds_quiet);
     neopixel_set_status_brightness(CONFIG_MAGTAG_STATUS_LED_BRIGHTNESS);
 

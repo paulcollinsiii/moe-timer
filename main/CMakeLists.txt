@@ -3,6 +3,7 @@ idf_component_register(
         "main.c"
         "timer.c"
         "timer_defs.c"
+        "wake_policy.c"
         "display.c"
         "display_layout.c"
         "ntp.c"
