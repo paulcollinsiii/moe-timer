@@ -29,7 +29,9 @@ credentials.**
 7. [ ] **Button A (pause/resume)**: pause shows `PAUSED`, remaining freezes
        across wakes; resume is immediate (AMBER -> GREEN after ~250 ms, sync
        after) and continues from the frozen value.
-8. [ ] **Button B (reset)**: returns to IDLE with today's full allocation.
+8. [ ] **Button B (reset)**: with the timer PAUSED (or expired), returns to
+       IDLE with today's full allocation. While RUNNING, B is dropped from
+       the wake mask — pressing it does nothing (no wake, no refresh).
 9. [ ] **Button D (force sync)**: WiFi cycle + full refresh; sync time updates.
 10. [ ] **Button C**: with no extra timers configured (the default), does
         nothing at all — not a wake source (kept out of the EXT1 mask so

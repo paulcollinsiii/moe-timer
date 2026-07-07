@@ -56,14 +56,6 @@ int timer_extra_count(void) {
     return n;
 }
 
-bool timer_any_reloadable(void) {
-    for (int i = 1; i < TIMER_SLOT_COUNT; i++) {
-        if (slot_enabled(i) && s_defs[i].reloadable)
-            return true;
-    }
-    return false;
-}
-
 bool timer_swap_allowed(void) {
     timer_state_t st = active()->state;
     if (st == TIMER_RUNNING || st == TIMER_BREAK)
@@ -82,6 +74,15 @@ bool timer_select_next(void) {
         }
     }
     return false; /* no other enabled slot */
+}
+
+bool timer_reload_allowed(bool parent_testing) {
+    if (active()->state == TIMER_RUNNING)
+        return false; /* can't reset a running timer — pause first */
+    const timer_def_t *def = timer_active_def();
+    if (def != NULL && def->reloadable)
+        return true;
+    return parent_testing; /* incl. the parent escape from a Screen Break */
 }
 
 bool timer_reload(void) {

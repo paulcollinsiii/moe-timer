@@ -104,8 +104,7 @@ void timer_defs_install(void);
 int timer_active_slot(void);
 /* Definition of the active slot; NULL for slot 0 (Screen uses schedule.c). */
 const timer_def_t *timer_active_def(void);
-int timer_extra_count(void);     /* enabled extra slots */
-bool timer_any_reloadable(void); /* any enabled extra slot reloadable */
+int timer_extra_count(void); /* enabled extra slots */
 /* True when a Button C swap would succeed: extras exist and the active
    slot is not RUNNING/BREAK. Also gates C as an EXT1 wake source — a
    press that can only be refused must not wake the device and burn a
@@ -114,6 +113,11 @@ bool timer_swap_allowed(void);
 /* Cycle to the next enabled slot (0 -> 1 -> ... -> 0). Refused (false)
    while the active slot is RUNNING or BREAK, or when no extras exist. */
 bool timer_select_next(void);
+/* True when a Button B press would reset the active slot: never while
+   RUNNING; otherwise when the slot is reloadable or parent_testing is
+   compiled in. Also gates B as an EXT1 wake source (same rationale as
+   timer_swap_allowed). */
+bool timer_reload_allowed(bool parent_testing);
 /* Return the active slot to IDLE at full duration, keeping its completion
    counter. Refused (false) while RUNNING. */
 bool timer_reload(void);

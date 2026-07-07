@@ -26,6 +26,12 @@ static const char *TAG = "main";
 
 /* Compile-time timezone (ProductOverview section 1) */
 #define MAGTAG_TZ "EST5EDT,M3.2.0,M11.1.0"
+/* Kconfig bool as a C expression (defined as 1 when =y, absent when =n) */
+#if CONFIG_MAGTAG_PARENT_TESTING
+#define PARENT_TESTING true
+#else
+#define PARENT_TESTING false
+#endif
 /* IDLE shows only the clock — sync on the menuconfig cadence (default
    hourly) instead of every 10 min. The S2 has no crystal-backed RTC; its
    RC-oscillator timekeeping can drift minutes/day, so don't set this too
@@ -234,7 +240,7 @@ static display_state_t make_state(int32_t remaining, time_t now) {
         .completions = timer_completions(),
         .reloadable = (def != NULL) && def->reloadable,
         .swap_available = timer_swap_allowed(),
-        .reload_available = (def != NULL) && def->reloadable && ts != TIMER_RUNNING,
+        .reload_available = timer_reload_allowed(PARENT_TESTING),
     };
 }
 
@@ -579,29 +585,15 @@ static void handle_button_wake(void) {
                 now = time(NULL);
             }
             break;
-        case BTN_B: {
-            const timer_def_t *def = timer_active_def();
-            if (def != NULL && def->reloadable) {
-                /* Reloadable timers reset to full without ParentTesting —
-                   but never mid-run (pause first, same as the swap rule). */
-                if (!timer_reload()) {
-                    ESP_LOGI(TAG, "Button B reload refused while RUNNING");
-                }
-            } else {
-#if CONFIG_MAGTAG_PARENT_TESTING
-                /* Parent reset: only the selected timer, any state (the
-                   pause keeps the old reset-anytime testing workflow). */
-                if (timer_get_state() == TIMER_RUNNING) {
-                    timer_pause(now);
-                }
-                timer_reload();
-#else
-                /* Production: allocation resets only on day rollover */
-                ESP_LOGI(TAG, "Button B reset disabled (MAGTAG_PARENT_TESTING=n)");
-#endif
+        case BTN_B:
+            /* Reset the selected timer to full: reloadable extras without
+               ParentTesting, anything else with it — never while RUNNING
+               (B is dropped from the wake mask then, same as C; this guard
+               covers presses that ride in on another wake). */
+            if (!timer_reload_allowed(PARENT_TESTING) || !timer_reload()) {
+                ESP_LOGI(TAG, "Button B reset unavailable (state %d)", (int)before);
             }
             break;
-        }
         case BTN_C:
             /* Swap timer type; refused while RUNNING (pause first) or in a
                Screen Break (enforced). Landing on an already-EXPIRED timer

@@ -151,11 +151,11 @@ All state is persisted in **RTC slow memory** (survives deep sleep) with an NVS 
 | Button | GPIO | Action |
 |--------|------|--------|
 | A | 15 | Start (IDLE/PAUSED → RUNNING, immediate; NTP sync after) / Pause (RUNNING → PAUSED) |
-| B | 14 | Reset the **selected** timer to IDLE at full duration: always for a reloadable extra timer (except mid-run), otherwise only when `CONFIG_MAGTAG_PARENT_TESTING=y` |
+| B | 14 | Reset the **selected** timer to IDLE at full duration — never while RUNNING (pause first): for a reloadable extra timer always, otherwise only when `CONFIG_MAGTAG_PARENT_TESTING=y` |
 | C | 12 | Swap timer type (Screen → extra 1 → … → Screen); refused while RUNNING or in a Screen Break |
 | D | 11 | Force NTP re-sync + full display refresh |
 
-Wake sources: A and D always; B when `CONFIG_MAGTAG_PARENT_TESTING=y` or any reloadable extra timer is configured; C only when a swap would succeed — extra timers configured AND the active timer not RUNNING/in a Screen Break (the EXT1 mask is rebuilt at every sleep entry; a press that could only be refused must not burn battery or a panel refresh). Buttons are debounced in software (10 ms).
+Wake sources: A and D always; B and C only when their press would succeed, since the EXT1 mask is rebuilt at every sleep entry and a press that could only be refused must not burn battery or a panel refresh. B: the selected timer is reloadable or `CONFIG_MAGTAG_PARENT_TESTING=y`, and never while RUNNING (pause first). C: extra timers configured AND the active timer not RUNNING/in a Screen Break. Buttons are debounced in software (10 ms).
 
 ### 6a · Extra timers (v1.3)
 

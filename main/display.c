@@ -316,12 +316,9 @@ static void build_screen(const display_state_t *st) {
         lv_obj_set_style_text_font(lbl_a, &lv_font_montserrat_12, 0);
         lv_obj_align(lbl_a, LV_ALIGN_BOTTOM_MID, BTN_MID_OFS(0), -2);
     }
-#if CONFIG_MAGTAG_PARENT_TESTING
-    bool show_reset = true; /* parent reset works on any selected timer */
-#else
-    bool show_reset = st->reload_available;
-#endif
-    if (show_reset) {
+    /* reload_available already folds in ParentTesting and the not-RUNNING
+       rule (timer_reload_allowed) — label shows iff a press would work. */
+    if (st->reload_available) {
         lv_obj_t *lbl_b = lv_label_create(scr);
         lv_label_set_text(lbl_b, "Reset");
         lv_obj_set_style_text_font(lbl_b, &lv_font_montserrat_12, 0);

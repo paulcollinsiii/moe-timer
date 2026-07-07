@@ -49,20 +49,21 @@ void buttons_init(void) {
 /* Wake policy (UX: prevent button mashing from burning battery/refreshes):
    C wakes only when a swap would actually succeed — extra timers exist and
    the active timer is not RUNNING/BREAK (the mask is rebuilt at every
-   sleep entry, so it tracks the state machine); B wakes for the
-   parent-testing reset or when a reloadable extra timer needs it.
-   Non-wake buttons are left out of the EXT1 mask AND unconfigured in the
-   RTC domain (an open button on an isolated pad draws nothing; a pull-up
-   would leak ~70 uA while held). */
+   sleep entry, so it tracks the state machine); B likewise wakes only
+   when a reset would succeed — a reloadable selected timer or the
+   parent-testing reset, and never while RUNNING. Non-wake buttons are
+   left out of the EXT1 mask AND unconfigured in the RTC domain (an open
+   button on an isolated pad draws nothing; a pull-up would leak ~70 uA
+   while held). */
 static bool is_wake_source(int i) {
     switch ((button_id_t)i) {
         case BTN_C:
             return timer_swap_allowed();
         case BTN_B:
 #if CONFIG_MAGTAG_PARENT_TESTING
-            return true;
+            return timer_reload_allowed(true);
 #else
-            return timer_any_reloadable();
+            return timer_reload_allowed(false);
 #endif
         default:
             return true;

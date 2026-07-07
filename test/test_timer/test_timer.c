@@ -544,6 +544,26 @@ void test_swap_allowed_false_without_extras(void) {
     TEST_ASSERT_FALSE(timer_swap_allowed());
 }
 
+void test_reload_allowed_reloadable_timer_except_running(void) {
+    /* Drives the Button B wake mask: no ParentTesting needed on Piano */
+    timer_select_next(); /* Piano (reloadable) */
+    TEST_ASSERT_TRUE(timer_reload_allowed(false));
+    timer_start(T0, 900);
+    TEST_ASSERT_FALSE(timer_reload_allowed(false)); /* can't reset a running timer */
+    TEST_ASSERT_FALSE(timer_reload_allowed(true));  /* not even in parent mode */
+    timer_pause(T0 + 100);
+    TEST_ASSERT_TRUE(timer_reload_allowed(false));
+}
+
+void test_reload_allowed_non_reloadable_needs_parent_testing(void) {
+    TEST_ASSERT_FALSE(timer_reload_allowed(false)); /* Screen, production */
+    TEST_ASSERT_TRUE(timer_reload_allowed(true));   /* Screen, parent mode */
+    timer_start(T0, 3600);
+    timer_start_break(T0 + 1800, 900);
+    TEST_ASSERT_FALSE(timer_reload_allowed(false));
+    TEST_ASSERT_TRUE(timer_reload_allowed(true)); /* parent escape from a break */
+}
+
 /* ---- multi-timer slots: per-slot independence ---- */
 
 void test_slot_states_are_independent(void) {
@@ -814,6 +834,8 @@ int main(void) {
     RUN_TEST(test_select_next_noop_without_extras);
     RUN_TEST(test_swap_allowed_tracks_state_and_extras);
     RUN_TEST(test_swap_allowed_false_without_extras);
+    RUN_TEST(test_reload_allowed_reloadable_timer_except_running);
+    RUN_TEST(test_reload_allowed_non_reloadable_needs_parent_testing);
     RUN_TEST(test_slot_states_are_independent);
     RUN_TEST(test_expiry_wall_accessor_tracks_active_slot);
     RUN_TEST(test_break_never_due_on_extra_slot);
