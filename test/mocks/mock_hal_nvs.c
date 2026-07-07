@@ -16,9 +16,24 @@ typedef struct {
 } Entry;
 
 static Entry s_store[MAX_ENTRIES];
+static int s_fail_writes;
 
 void mock_nvs_reset(void) {
     memset(s_store, 0, sizeof(s_store));
+    s_fail_writes = 0;
+}
+
+void mock_nvs_fail_writes(int count) {
+    s_fail_writes = count;
+}
+
+/* Consume one injected failure; true = this write must return ESP_FAIL. */
+static int take_write_failure(void) {
+    if (s_fail_writes == 0)
+        return 0;
+    if (s_fail_writes > 0)
+        s_fail_writes--;
+    return 1;
 }
 
 static Entry *find_entry(const char *key) {
@@ -56,6 +71,8 @@ esp_err_t hal_nvs_read_u16(const char *key, uint16_t *out) {
 }
 
 esp_err_t hal_nvs_write_u16(const char *key, uint16_t val) {
+    if (take_write_failure())
+        return ESP_FAIL;
     Entry *e = alloc_entry(key);
     if (!e)
         return ESP_FAIL;
@@ -80,6 +97,8 @@ esp_err_t hal_nvs_read_str(const char *key, char *buf, size_t *len) {
 }
 
 esp_err_t hal_nvs_write_str(const char *key, const char *val) {
+    if (take_write_failure())
+        return ESP_FAIL;
     Entry *e = alloc_entry(key);
     if (!e)
         return ESP_FAIL;
@@ -105,6 +124,8 @@ esp_err_t hal_nvs_read_blob(const char *key, void *buf, size_t *len) {
 }
 
 esp_err_t hal_nvs_write_blob(const char *key, const void *buf, size_t len) {
+    if (take_write_failure())
+        return ESP_FAIL;
     Entry *e = alloc_entry(key);
     if (!e)
         return ESP_FAIL;

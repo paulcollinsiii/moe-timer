@@ -194,6 +194,37 @@ void test_allocation_summer_missing_key_falls_back(void) {
 }
 
 /* ------------------------------------------------------------------ */
+/* Malformed holiday blobs (NVS content is external input)              */
+/* ------------------------------------------------------------------ */
+
+void test_is_holiday_garbage_blob_no_match_no_crash(void) {
+    /* Non-text bytes, a stray CR mid-line, and a date with a junk tail */
+    char garbage[40];
+    memset(garbage, 0xEE, sizeof(garbage));
+    memcpy(garbage + 3, "garbage\rnot-a-date\n2026-01-01junk\n", 34);
+    TEST_ASSERT_FALSE(schedule_is_holiday("2026-01-01", garbage, sizeof(garbage)));
+}
+
+void test_is_holiday_unterminated_blob_respects_length(void) {
+    /* Exactly one date, no newline, no NUL inside the given length —
+       the parser must never read past blob + blob_len. */
+    char blob[10];
+    memcpy(blob, "2026-01-01", 10);
+    TEST_ASSERT_TRUE(schedule_is_holiday("2026-01-01", blob, sizeof(blob)));
+    TEST_ASSERT_FALSE(schedule_is_holiday("2026-01-02", blob, sizeof(blob)));
+}
+
+void test_is_holiday_short_and_empty_lines_skipped(void) {
+    const char blob[] = "2026\n\n01-01\n2026-07-04\n";
+    TEST_ASSERT_TRUE(schedule_is_holiday("2026-07-04", blob, sizeof(blob) - 1));
+    TEST_ASSERT_FALSE(schedule_is_holiday("2026-01-01", blob, sizeof(blob) - 1));
+}
+
+void test_is_holiday_empty_blob(void) {
+    TEST_ASSERT_FALSE(schedule_is_holiday("2026-01-01", "", 0));
+}
+
+/* ------------------------------------------------------------------ */
 /* Runner                                                               */
 /* ------------------------------------------------------------------ */
 
@@ -223,5 +254,9 @@ int main(void) {
     RUN_TEST(test_school_year_weekday_not_summer);
     RUN_TEST(test_allocation_summer);
     RUN_TEST(test_allocation_summer_missing_key_falls_back);
+    RUN_TEST(test_is_holiday_garbage_blob_no_match_no_crash);
+    RUN_TEST(test_is_holiday_unterminated_blob_respects_length);
+    RUN_TEST(test_is_holiday_short_and_empty_lines_skipped);
+    RUN_TEST(test_is_holiday_empty_blob);
     return UNITY_END();
 }

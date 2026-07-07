@@ -14,6 +14,9 @@ bool schedule_is_holiday(const char *date_str, const char *blob, size_t blob_len
         return false;
 
     const char *p = blob;
+    /* One-past-the-end is legal C; cppcheck's portability check flags any
+       base+size it can trace to a concrete array — suppress, don't contort. */
+    // cppcheck-suppress pointerOutOfBounds
     const char *end = blob + blob_len;
     while (p < end) {
         const char *nl = p;
