@@ -28,6 +28,26 @@ function(add_host_test name)
   add_test(NAME ${name} COMMAND ${name})
 endfunction()
 
+# ---- display golden-render suite: real LVGL compiled for the host ----
+file(GLOB_RECURSE LVGL_SRCS ${CMAKE_CURRENT_SOURCE_DIR}/../managed_components/lvgl__lvgl/src/*.c)
+add_library(lvgl_host STATIC ${LVGL_SRCS})
+target_include_directories(lvgl_host PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}/../managed_components/lvgl__lvgl)
+target_compile_definitions(lvgl_host PUBLIC
+    LV_CONF_PATH="${CMAKE_CURRENT_SOURCE_DIR}/mocks/lv_conf_host.h")
+
+add_executable(test_display_render test_display_render/test_display_render.c)
+target_include_directories(test_display_render PRIVATE mocks ../include)
+target_compile_definitions(test_display_render PRIVATE NATIVE
+    GOLDEN_DIR="${CMAKE_CURRENT_SOURCE_DIR}/test_display_render/golden")
+target_compile_options(test_display_render PRIVATE
+    -include ${CMAKE_CURRENT_SOURCE_DIR}/mocks/esp_compat.h
+    -Wall -Wextra
+    -fsanitize=address,undefined -fno-omit-frame-pointer)
+target_link_options(test_display_render PRIVATE -fsanitize=address,undefined)
+target_link_libraries(test_display_render unity lvgl_host m)
+add_test(NAME test_display_render COMMAND test_display_render)
+
 add_host_test(test_timer)
 add_host_test(test_schedule)
 add_host_test(test_nvs_config)

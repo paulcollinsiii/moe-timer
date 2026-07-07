@@ -5,6 +5,7 @@ idf_component_register(
         "timer_defs.c"
         "wake_policy.c"
         "display.c"
+        "display_screens.c"
         "display_layout.c"
         "ntp.c"
         "nvs_config.c"
