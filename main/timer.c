@@ -140,7 +140,8 @@ int32_t timer_tick(time_t now) {
     int64_t remaining = sl->expiry_wall_time - (int64_t)now;
     if (remaining <= 0) {
         sl->state = TIMER_EXPIRED;
-        sl->completions++; /* the run reached 00:00 */
+        if (sl->completions != UINT16_MAX)
+            sl->completions++; /* the run reached 00:00; saturate, never wrap */
         return (int32_t)remaining;
     }
     /* expiry_wall_time is NOT modified here */
@@ -369,7 +370,8 @@ bool timer_restore_snapshot(const timer_snapshot_t *snap, time_t now) {
            run still reached 00:00 — count it. */
         if (sl->state == TIMER_RUNNING && sl->expiry_wall_time <= (int64_t)now) {
             sl->state = TIMER_EXPIRED;
-            sl->completions++;
+            if (sl->completions != UINT16_MAX)
+                sl->completions++;
         }
         /* Break finished while powered off: restore as PAUSED (manual resume) */
         if (sl->state == TIMER_BREAK && sl->break_expiry_wall <= (int64_t)now) {
@@ -378,5 +380,10 @@ bool timer_restore_snapshot(const timer_snapshot_t *snap, time_t now) {
         }
     }
     memcpy(g_rtc_state.last_date, snap->date, sizeof(g_rtc_state.last_date));
+    /* The firmware may have been reflashed with this slot removed from
+       menuconfig — never strand the device on a slot the buttons can no
+       longer reach (its state stays restored; only the selection moves). */
+    if (!slot_enabled(g_rtc_state.active_slot))
+        g_rtc_state.active_slot = 0;
     return true;
 }

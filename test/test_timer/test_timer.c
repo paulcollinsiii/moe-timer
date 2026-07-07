@@ -1,3 +1,4 @@
+#include <stdlib.h>
 #include <string.h>
 #include <time.h>
 #include <unity.h>
@@ -773,6 +774,121 @@ void test_snapshot_rejected_on_invalid_state_in_any_slot(void) {
     TEST_ASSERT_EQUAL(TIMER_IDLE, timer_get_state());
 }
 
+/* ---- gap tests (2026-07 review): pins, edges, and corruption ---- */
+
+void test_reload_screen_slot_escapes_break_and_keeps_date(void) {
+    /* Parent-mode B during an enforced break: the one break escape hatch */
+    timer_record_date(T0);
+    timer_start(T0, 3600);
+    timer_start_break(T0 + 1800, 900);
+    TEST_ASSERT_TRUE(timer_reload());
+    TEST_ASSERT_EQUAL(TIMER_IDLE, timer_get_state());
+    TEST_ASSERT_EQUAL_INT64(0, g_rtc_state.slots[0].break_expiry_wall);
+    TEST_ASSERT_EQUAL_INT32(0, g_rtc_state.slots[0].remaining_at_pause);
+    TEST_ASSERT_EQUAL_INT32(0, timer_run_accum(T0 + 2000));
+    /* last_date untouched — reload must never fake a day rollover */
+    TEST_ASSERT_FALSE(timer_is_new_day(T0 + 3600));
+}
+
+void test_set_defs_count_clamped_to_slot_count(void) {
+    timer_set_defs(TEST_DEFS, 99); /* must not read past the table */
+    TEST_ASSERT_EQUAL_INT(3, timer_extra_count());
+}
+
+void test_set_defs_shorter_table_disables_missing_slots(void) {
+    timer_set_defs(TEST_DEFS, 2); /* only Screen + Piano visible */
+    TEST_ASSERT_EQUAL_INT(1, timer_extra_count());
+    TEST_ASSERT_TRUE(timer_select_next());
+    TEST_ASSERT_EQUAL_INT(1, timer_active_slot());
+    TEST_ASSERT_TRUE(timer_select_next()); /* wraps straight back to Screen */
+    TEST_ASSERT_EQUAL_INT(0, timer_active_slot());
+}
+
+void test_is_new_day_tracks_local_date_across_dst(void) {
+    /* is_new_day compares LOCAL calendar dates, not 24 h spans — pin that
+       on both DST transitions (device TZ is US Eastern). */
+    char *old_tz = getenv("TZ");
+    setenv("TZ", "EST5EDT,M3.2.0,M11.1.0", 1);
+    tzset();
+
+    /* Fall-back day (2026-11-01) is 25 h long: 24 h after 00:30 EDT it is
+       still Nov 1 (23:30 EST); the new day arrives at the 25 h mark. */
+    struct tm tm = {0};
+    tm.tm_year = 2026 - 1900;
+    tm.tm_mon = 10; /* November */
+    tm.tm_mday = 1;
+    tm.tm_min = 30;
+    tm.tm_isdst = -1;
+    time_t fall = mktime(&tm);
+    timer_record_date(fall);
+    TEST_ASSERT_FALSE(timer_is_new_day(fall + 24 * 3600));
+    TEST_ASSERT_TRUE(timer_is_new_day(fall + 25 * 3600));
+
+    /* Spring-forward day (2026-03-08) is 23 h long: the new local date
+       already arrives 23 h after 00:30 EST. */
+    memset(&tm, 0, sizeof(tm));
+    tm.tm_year = 2026 - 1900;
+    tm.tm_mon = 2; /* March */
+    tm.tm_mday = 8;
+    tm.tm_min = 30;
+    tm.tm_isdst = -1;
+    time_t spring = mktime(&tm);
+    timer_record_date(spring);
+    TEST_ASSERT_TRUE(timer_is_new_day(spring + 23 * 3600));
+
+    if (old_tz)
+        setenv("TZ", old_tz, 1);
+    else
+        unsetenv("TZ");
+    tzset();
+}
+
+void test_start_with_zero_allocation_expires_on_first_tick(void) {
+    /* Callers guard (Kconfig range >= 1 min; slot_enabled needs duration>0);
+       pin the fallback: no hang, no negative-duration weirdness. */
+    timer_start(T0, 0);
+    TEST_ASSERT_EQUAL(TIMER_RUNNING, timer_get_state());
+    TEST_ASSERT_TRUE(timer_tick(T0) <= 0);
+    TEST_ASSERT_EQUAL(TIMER_EXPIRED, timer_get_state());
+}
+
+void test_tick_with_clock_stepped_backwards_stays_running(void) {
+    /* NTP steps the clock back without a matching timer_shift_expiry:
+       remaining exceeds the allocation (bar clamps at full), no expiry. */
+    timer_start(T0, 3600);
+    TEST_ASSERT_EQUAL_INT32(4100, timer_tick(T0 - 500));
+    TEST_ASSERT_EQUAL(TIMER_RUNNING, timer_get_state());
+}
+
+void test_completions_saturate_at_uint16_max(void) {
+    timer_select_next(); /* Piano */
+    g_rtc_state.slots[1].completions = UINT16_MAX;
+    timer_start(T0, 900);
+    timer_tick(T0 + 901); /* must not wrap to 0 and erase the history */
+    TEST_ASSERT_EQUAL_UINT16(UINT16_MAX, timer_completions());
+}
+
+static const timer_def_t DEFS_NO_EXTRAS[TIMER_SLOT_COUNT] = {
+    {"Screen", 0, false}, {"", 0, false}, {"", 0, false}, {"", 0, false}, {"", 0, false},
+};
+
+void test_snapshot_restore_falls_back_when_active_slot_disabled(void) {
+    /* Reflashing with a slot removed from menuconfig must not strand the
+       device on a dead slot the buttons can no longer leave. */
+    timer_select_next(); /* Piano */
+    timer_start(T0, 900);
+    timer_pause(T0 + 200);
+    timer_record_date(T0);
+    timer_snapshot_t snap;
+    timer_make_snapshot(&snap);
+
+    timer_reset();
+    timer_set_defs(DEFS_NO_EXTRAS, TIMER_SLOT_COUNT); /* Piano gone */
+    TEST_ASSERT_TRUE(timer_restore_snapshot(&snap, T0 + 500));
+    TEST_ASSERT_EQUAL_INT(0, timer_active_slot());
+    TEST_ASSERT_EQUAL(TIMER_IDLE, timer_get_state()); /* Screen was idle */
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_reset_state_is_idle);
@@ -853,5 +969,13 @@ int main(void) {
     RUN_TEST(test_snapshot_restore_expired_while_off_increments_completions);
     RUN_TEST(test_snapshot_rejected_on_bad_active_slot);
     RUN_TEST(test_snapshot_rejected_on_invalid_state_in_any_slot);
+    RUN_TEST(test_reload_screen_slot_escapes_break_and_keeps_date);
+    RUN_TEST(test_set_defs_count_clamped_to_slot_count);
+    RUN_TEST(test_set_defs_shorter_table_disables_missing_slots);
+    RUN_TEST(test_is_new_day_tracks_local_date_across_dst);
+    RUN_TEST(test_start_with_zero_allocation_expires_on_first_tick);
+    RUN_TEST(test_tick_with_clock_stepped_backwards_stays_running);
+    RUN_TEST(test_completions_saturate_at_uint16_max);
+    RUN_TEST(test_snapshot_restore_falls_back_when_active_slot_disabled);
     return UNITY_END();
 }

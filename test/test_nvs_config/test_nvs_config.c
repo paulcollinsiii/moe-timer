@@ -257,6 +257,26 @@ void test_timer_snapshot_missing_returns_not_found(void) {
     TEST_ASSERT_EQUAL(ESP_ERR_NVS_NOT_FOUND, nvs_config_load_timer_snapshot(&out));
 }
 
+void test_timer_snapshot_save_propagates_write_failure(void) {
+    /* The snapshot is the anti-refund mechanism — a silent save failure
+       must at least surface as an error to the caller. */
+    timer_snapshot_t snap = {.version = TIMER_SNAPSHOT_VERSION, .slots[0].state = 1, .date = "2026-01-05"};
+    mock_nvs_fail_writes(1);
+    TEST_ASSERT_NOT_EQUAL(ESP_OK, nvs_config_save_timer_snapshot(&snap));
+    /* Store untouched by the failed write */
+    timer_snapshot_t out;
+    TEST_ASSERT_EQUAL(ESP_ERR_NVS_NOT_FOUND, nvs_config_load_timer_snapshot(&out));
+}
+
+void test_set_weekday_min_propagates_write_failure(void) {
+    mock_nvs_fail_writes(1);
+    TEST_ASSERT_NOT_EQUAL(ESP_OK, nvs_config_set_weekday_min(45));
+    /* Store untouched: reads fall back to the compile-time default */
+    uint16_t val = 0;
+    nvs_config_get_weekday_min(&val);
+    TEST_ASSERT_EQUAL_UINT16(NVS_DEFAULT_WEEKDAY_MIN, val);
+}
+
 void test_timer_snapshot_rejects_wrong_version(void) {
     timer_snapshot_t snap = {.version = 99, .slots[0].state = 1, .date = "2026-01-05"};
     hal_nvs_write_blob("timer_snap", &snap, sizeof(snap));
@@ -286,6 +306,8 @@ int main(void) {
     RUN_TEST(test_init_defaults_reseeds_on_fingerprint_change);
     RUN_TEST(test_init_defaults_missing_version_key_reseeds);
     RUN_TEST(test_init_defaults_same_version_preserves_values);
+    RUN_TEST(test_timer_snapshot_save_propagates_write_failure);
+    RUN_TEST(test_set_weekday_min_propagates_write_failure);
     RUN_TEST(test_timer_snapshot_round_trip);
     RUN_TEST(test_timer_snapshot_missing_returns_not_found);
     RUN_TEST(test_timer_snapshot_rejects_wrong_version);
