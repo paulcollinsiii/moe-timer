@@ -70,11 +70,76 @@ automation:
           message: "The screen timer battery is at 10% — charge it."
 ```
 
-## Phases 2 and 3 (planned)
+## Config from Home Assistant
 
-- **Config in**: retained `magtag/<id>/config` JSON — allocations, quiet
-  hours, break settings, timezone, holidays (fed from an HA Local
-  Calendar), device name, and the four extra-timer definitions.
-- **Commands**: retained `magtag/<id>/cmd` — grant extra minutes to a
-  timer ("chores done: +15 min"), and a locate alarm ("help, I lost the
-  timer") that beeps on the next window until a button is pressed.
+Publish a **retained** JSON document to `magtag/<id>/config`; the device
+applies it on its next window and republishes the applied version to
+`magtag/<id>/config_ack`. Every field is optional except `ver` — the
+device applies a document only when `ver` differs from the last one it
+applied, so a retained message is safe to leave on the topic. A rejected
+field is named in the ack's `errors` list but never blocks the others.
+
+```json
+{
+  "ver": "20260708",
+  "name": "Kitchen MagTag",
+  "tz": "EST5EDT,M3.2.0,M11.1.0",
+  "weekday_min": 60, "weekend_min": 120, "holiday_min": 120, "summer_min": 120,
+  "quiet_start": 2230, "quiet_end": 800,
+  "break_interval_min": 30, "break_duration_min": 15,
+  "summer_start": "2026-05-29", "school_start": "2026-08-20", "school_end": "2027-05-28",
+  "holidays": ["2026-10-16", "2026-11-03"],
+  "timers": [
+    {"name": "Piano", "min": 15, "reload": true},
+    {},
+    {"name": "Meditation", "min": 10, "reload": true},
+    {}
+  ]
+}
+```
+
+- `tz` is a POSIX TZ string. `quiet_*` are HHMM. `timers` is up to 4
+  entries; `{}` disables that slot. Timezone and timer-definition changes
+  take effect on the device's next boot/operation (the running slot is
+  never disturbed mid-run).
+- `holidays` replaces the stored list (rolling ~45-date cap).
+
+### Driving it from helpers
+
+Create `input_number`/`input_text`/`input_boolean` helpers for the
+settings you want to expose, then one automation republishes the whole
+retained document (with a fresh `ver`) whenever any of them changes:
+
+```yaml
+automation:
+  - alias: "MagTag push config"
+    trigger:
+      - platform: state
+        entity_id:
+          - input_number.magtag_weekday_min
+          - input_text.magtag_tz
+          # ...one line per helper
+    action:
+      - service: mqtt.publish
+        data:
+          topic: "magtag/magtag-xxxxxx/config"
+          retain: true
+          payload: >
+            {"ver":"{{ now().timestamp() | int }}",
+             "tz":"{{ states('input_text.magtag_tz') }}",
+             "weekday_min":{{ states('input_number.magtag_weekday_min') | int }}}
+```
+
+### Holidays from a calendar
+
+Keep school days-off in an HA **Local Calendar** ("School Days Off") and
+run a nightly automation that reads the next 12 months of all-day events
+and republishes the config with the extracted `holidays` array — so the
+family manages no-school days on a normal calendar UI, and the device
+picks them up automatically.
+
+## Commands (planned — phase 3)
+
+Retained `magtag/<id>/cmd` — grant extra minutes to a timer ("chores done:
++15 min") and a locate alarm ("help, I lost the timer") that beeps on the
+next window until a button is pressed.

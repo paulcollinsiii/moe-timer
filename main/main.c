@@ -20,6 +20,7 @@
 #include "neopixel.h"
 #include "ntp.h"
 #include "nvs_config.h"
+#include "nvs_defaults.h"
 #include "nvs_flash.h"
 #include "quiet_hours.h"
 #include "schedule.h"
@@ -31,8 +32,8 @@
 
 static const char *TAG = "main";
 
-/* Compile-time timezone (ProductOverview section 1) */
-#define MAGTAG_TZ "EST5EDT,M3.2.0,M11.1.0"
+/* Timezone default lives in nvs_defaults.h (NVS_DEFAULT_TZ); the active TZ
+   comes from NVS at boot so HA can change it (ProductOverview section 1). */
 /* Kconfig bool as a C expression (defined as 1 when =y, absent when =n) */
 #if CONFIG_MAGTAG_PARENT_TESTING
 #define PARENT_TESTING true
@@ -51,8 +52,10 @@ static bool status_leds_quiet(void) {
     time_t now = time(NULL);
     struct tm tm;
     localtime_r(&now, &tm);
-    return quiet_hours_active(tm.tm_hour * 60 + tm.tm_min, quiet_hhmm_to_minutes(CONFIG_MAGTAG_QUIET_START_HHMM),
-                              quiet_hhmm_to_minutes(CONFIG_MAGTAG_QUIET_END_HHMM));
+    uint16_t qstart = NVS_DEFAULT_QUIET_START, qend = NVS_DEFAULT_QUIET_END;
+    nvs_config_get_quiet_start(&qstart);
+    nvs_config_get_quiet_end(&qend);
+    return quiet_hours_active(tm.tm_hour * 60 + tm.tm_min, quiet_hhmm_to_minutes(qstart), quiet_hhmm_to_minutes(qend));
 }
 
 static RTC_DATA_ATTR time_t s_last_ntp_sync;
@@ -330,6 +333,8 @@ static display_state_t make_state(int32_t remaining, time_t now) {
     int mv = battery_read_mv();
     int pct = battery_percent_from_mv(mv);
     ESP_LOGI(TAG, "battery: %d mV (%d%%)", mv, pct);
+    uint16_t break_dur = NVS_DEFAULT_BREAK_DURATION_MIN;
+    nvs_config_get_break_duration_min(&break_dur);
     return (display_state_t){
         .remaining_sec = remaining,
         .allocation_sec = alloc,
@@ -339,7 +344,7 @@ static display_state_t make_state(int32_t remaining, time_t now) {
         .last_sync_time = s_last_ntp_sync,
         .battery_pct = (uint8_t)pct,
         .break_remaining_sec = timer_break_remaining(now),
-        .break_duration_sec = (uint32_t)CONFIG_MAGTAG_BREAK_DURATION_MIN * 60,
+        .break_duration_sec = (uint32_t)break_dur * 60,
         .timer_name = (def != NULL) ? def->name : NULL,
         .charge_warn = battery_policy_evaluate(pct, false) != BATT_OK,
         .completions = timer_completions(),
@@ -456,11 +461,15 @@ static void run_break_alarm(void) {
    sleep). Persists BREAK before the alarm, same rationale as the EXPIRED
    at-transition save. */
 static bool maybe_start_break(time_t now) {
-#if CONFIG_MAGTAG_BREAK_INTERVAL_MIN > 0
-    if (!timer_break_due(now, CONFIG_MAGTAG_BREAK_INTERVAL_MIN * 60))
+    uint16_t interval_min = NVS_DEFAULT_BREAK_INTERVAL_MIN, duration_min = NVS_DEFAULT_BREAK_DURATION_MIN;
+    nvs_config_get_break_interval_min(&interval_min);
+    nvs_config_get_break_duration_min(&duration_min);
+    if (interval_min == 0) /* eye-rest breaks disabled */
+        return false;
+    if (!timer_break_due(now, (int32_t)interval_min * 60))
         return false;
     ESP_LOGI(TAG, "Screen break due (accum %ld s)", (long)timer_run_accum(now));
-    timer_start_break(now, CONFIG_MAGTAG_BREAK_DURATION_MIN * 60);
+    timer_start_break(now, (int32_t)duration_min * 60);
     save_timer_snapshot();
     display_state_t st = make_state(timer_tick(now), now);
     neopixel_show_timer_state(); /* blue during the refresh */
@@ -468,10 +477,6 @@ static bool maybe_start_break(time_t now) {
     run_break_alarm();
     neopixel_stop();
     return true;
-#else
-    (void)now;
-    return false;
-#endif
 }
 
 /* Full expiry sequence: big TIME'S UP screen, beeps + red pulse, then back
@@ -903,7 +908,10 @@ void app_main(void) {
     ESP_ERROR_CHECK(ret);
     ESP_ERROR_CHECK(nvs_config_init_defaults());
 
-    setenv("TZ", MAGTAG_TZ, 1);
+    /* TZ from NVS (HA config-in) with the compile-time default as fallback */
+    char tz[48];
+    nvs_config_get_tz(tz, sizeof(tz));
+    setenv("TZ", tz, 1);
     tzset();
 
     /* Slot definitions live in rodata, not RTC memory — install them

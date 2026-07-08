@@ -34,14 +34,28 @@ bool schedule_is_holiday(const char *date_str, const char *blob, size_t blob_len
     return false;
 }
 
+/* School-year boundary from NVS (HA config-in, phase 2) with the
+   compile-time default as fallback — read raw like the holiday blob so
+   schedule.c stays dependency-light (host tests link only the mock NVS). */
+static void read_date_key(const char *key, const char *def, char *buf, size_t len) {
+    size_t rlen = len;
+    if (hal_nvs_read_str(key, buf, &rlen) != ESP_OK || buf[0] == '\0') {
+        snprintf(buf, len, "%s", def);
+    }
+}
+
 bool schedule_is_summer(const char *date_str) {
     /* ISO dates compare lexicographically. Summer = the bounded window
        between school years (dates before SUMMER_START belong to the
        previous school year, not summer), plus everything after this
        year's last day (until next year's calendar is loaded). */
-    if (strcmp(date_str, NVS_DEFAULT_SCHOOL_END) > 0)
+    char summer_start[16], school_start[16], school_end[16];
+    read_date_key("summer_start", NVS_DEFAULT_SUMMER_START, summer_start, sizeof(summer_start));
+    read_date_key("school_start", NVS_DEFAULT_SCHOOL_START, school_start, sizeof(school_start));
+    read_date_key("school_end", NVS_DEFAULT_SCHOOL_END, school_end, sizeof(school_end));
+    if (strcmp(date_str, school_end) > 0)
         return true;
-    return strcmp(date_str, NVS_DEFAULT_SUMMER_START) >= 0 && strcmp(date_str, NVS_DEFAULT_SCHOOL_START) < 0;
+    return strcmp(date_str, summer_start) >= 0 && strcmp(date_str, school_start) < 0;
 }
 
 day_type_t schedule_get_day_type(time_t now) {
