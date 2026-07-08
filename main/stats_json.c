@@ -30,17 +30,21 @@ static const char *jesc(char *tmp, size_t tmplen, const char *s) {
 }
 
 int stats_json_stat(char *buf, size_t len, const stats_snapshot_t *s) {
-    char name[64];
+    /* Every string field is escaped (and NULL-flattened to "") — the pure
+       boundary must never invoke UB on a bad/NULL field. */
+    char state[24], name[64], day[24], fw[32];
     int pos = 0;
     pos = jcat(buf, len, pos,
                "{\"batt_pct\":%d,\"batt_mv\":%d,\"light_mv\":%d,\"state\":\"%s\",\"active_timer\":\"%s\","
                "\"remaining_s\":%ld,\"allocation_s\":%lu,\"day_type\":\"%s\",\"completions\":[",
-               s->batt_pct, s->batt_mv, s->light_mv, s->state, jesc(name, sizeof(name), s->active_timer),
-               (long)s->remaining_s, (unsigned long)s->allocation_s, s->day_type);
+               s->batt_pct, s->batt_mv, s->light_mv, jesc(state, sizeof(state), s->state),
+               jesc(name, sizeof(name), s->active_timer), (long)s->remaining_s, (unsigned long)s->allocation_s,
+               jesc(day, sizeof(day), s->day_type));
     for (int i = 0; i < TIMER_EXTRA_SLOTS; i++) {
         pos = jcat(buf, len, pos, i ? ",%u" : "%u", (unsigned)s->completions[i]);
     }
-    pos = jcat(buf, len, pos, "],\"charge_lock\":%s,\"fw\":\"%s\"}", s->charge_lock ? "true" : "false", s->fw);
+    pos = jcat(buf, len, pos, "],\"charge_lock\":%s,\"fw\":\"%s\"}", s->charge_lock ? "true" : "false",
+               jesc(fw, sizeof(fw), s->fw));
     return pos;
 }
 
