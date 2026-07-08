@@ -64,6 +64,21 @@
 #endif
 #endif
 
+/* HA config-in defaults (phase 2): consumed by nvs_config getters when the
+   key was never written; menuconfig values on firmware, fixed on host. */
+#define NVS_DEFAULT_TZ "EST5EDT,M3.2.0,M11.1.0"
+#ifdef CONFIG_MAGTAG_QUIET_START_HHMM
+#define NVS_DEFAULT_QUIET_START CONFIG_MAGTAG_QUIET_START_HHMM
+#define NVS_DEFAULT_QUIET_END CONFIG_MAGTAG_QUIET_END_HHMM
+#define NVS_DEFAULT_BREAK_INTERVAL_MIN CONFIG_MAGTAG_BREAK_INTERVAL_MIN
+#define NVS_DEFAULT_BREAK_DURATION_MIN CONFIG_MAGTAG_BREAK_DURATION_MIN
+#else
+#define NVS_DEFAULT_QUIET_START 2230
+#define NVS_DEFAULT_QUIET_END 800
+#define NVS_DEFAULT_BREAK_INTERVAL_MIN 30
+#define NVS_DEFAULT_BREAK_DURATION_MIN 15
+#endif
+
 /* Dublin City Schools (Grizzell MS) 2026-27 school year.
    Source: dublinschools.net 2026-27 school calendar. Update yearly. */
 #define NVS_DEFAULT_SUMMER_START "2026-05-29" /* ~day after the 2025-26 last day */

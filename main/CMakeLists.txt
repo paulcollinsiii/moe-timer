@@ -11,9 +11,11 @@ idf_component_register(
         "wifi_session.c"
         "stats_json.c"
         "mqtt_ha.c"
+        "config_apply.c"
         "device_id.c"
         "light.c"
         "nvs_config.c"
+        "../lib/cJSON/cJSON.c"
         "schedule.c"
         "buttons.c"
         "button_latch.c"
@@ -29,6 +31,7 @@ idf_component_register(
     INCLUDE_DIRS
         "."
         "../include"
+        "../lib/cJSON"
     REQUIRES
         nvs_flash
         esp_wifi

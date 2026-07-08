@@ -1,7 +1,8 @@
 default_stages: [pre-commit]
 
-# Vendored third-party code (Unity test framework) keeps upstream formatting.
-exclude: ^test/unity/
+# Vendored third-party code (Unity test framework, cJSON) keeps upstream
+# formatting and is exempt from our static analysis.
+exclude: ^(test/unity/|lib/cJSON/)
 
 repos:
   # ── Housekeeping & branch protection ─────────────────────────────────────────
