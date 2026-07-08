@@ -58,6 +58,30 @@ void test_grant_out_of_range_rejected(void) {
     TEST_ASSERT_EQUAL(CMD_INVALID, cmd_apply("{\"id\":\"x2\",\"grant\":{\"min\":9999}}", &a, ack, sizeof(ack)));
 }
 
+void test_grant_boundary_minutes_accepted(void) {
+    cmd_action_t a;
+    char ack[128];
+    TEST_ASSERT_EQUAL(CMD_GRANT, cmd_apply("{\"id\":\"lo\",\"grant\":{\"min\":1}}", &a, ack, sizeof(ack)));
+    TEST_ASSERT_EQUAL_INT32(60, a.sec);
+    TEST_ASSERT_EQUAL(CMD_GRANT, cmd_apply("{\"id\":\"hi\",\"grant\":{\"min\":240}}", &a, ack, sizeof(ack)));
+    TEST_ASSERT_EQUAL_INT32(14400, a.sec);
+}
+
+void test_grant_non_object_rejected(void) {
+    cmd_action_t a;
+    char ack[128];
+    /* "grant":15 — not an object; the min lookup finds nothing → reject */
+    TEST_ASSERT_EQUAL(CMD_INVALID, cmd_apply("{\"id\":\"x\",\"grant\":15}", &a, ack, sizeof(ack)));
+}
+
+void test_grant_wins_when_both_present(void) {
+    cmd_action_t a;
+    char ack[128];
+    /* Documented precedence: grant is handled before locate */
+    TEST_ASSERT_EQUAL(CMD_GRANT,
+                      cmd_apply("{\"id\":\"x\",\"grant\":{\"min\":15},\"locate\":true}", &a, ack, sizeof(ack)));
+}
+
 /* ---- locate ---- */
 
 void test_locate(void) {
@@ -108,6 +132,9 @@ int main(void) {
     RUN_TEST(test_grant_named_timer);
     RUN_TEST(test_grant_unknown_timer_rejected);
     RUN_TEST(test_grant_out_of_range_rejected);
+    RUN_TEST(test_grant_boundary_minutes_accepted);
+    RUN_TEST(test_grant_non_object_rejected);
+    RUN_TEST(test_grant_wins_when_both_present);
     RUN_TEST(test_locate);
     RUN_TEST(test_duplicate_id_skipped);
     RUN_TEST(test_missing_id_invalid);

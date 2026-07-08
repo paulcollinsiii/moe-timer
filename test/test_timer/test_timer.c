@@ -531,6 +531,16 @@ void test_slot_def_accessor(void) {
     TEST_ASSERT_NULL(timer_slot_def(TIMER_SLOT_COUNT)); /* out of range */
 }
 
+void test_slot_by_name(void) {
+    TEST_ASSERT_EQUAL_INT(0, timer_slot_by_name("Screen"));
+    TEST_ASSERT_EQUAL_INT(0, timer_slot_by_name(NULL)); /* default Screen */
+    TEST_ASSERT_EQUAL_INT(0, timer_slot_by_name(""));
+    TEST_ASSERT_EQUAL_INT(1, timer_slot_by_name("Piano"));
+    TEST_ASSERT_EQUAL_INT(3, timer_slot_by_name("Meditation"));
+    TEST_ASSERT_EQUAL_INT(4, timer_slot_by_name("Violin"));
+    TEST_ASSERT_EQUAL_INT(-1, timer_slot_by_name("Guitar")); /* not configured */
+}
+
 void test_swap_allowed_tracks_state_and_extras(void) {
     /* Drives the Button C wake mask: C must not even wake the device when
        a press could only burn a full refresh (swap refused). */
@@ -1030,6 +1040,7 @@ int main(void) {
     RUN_TEST(test_select_next_allowed_when_paused_or_expired);
     RUN_TEST(test_select_next_noop_without_extras);
     RUN_TEST(test_slot_def_accessor);
+    RUN_TEST(test_slot_by_name);
     RUN_TEST(test_swap_allowed_tracks_state_and_extras);
     RUN_TEST(test_swap_allowed_false_without_extras);
     RUN_TEST(test_reload_allowed_reloadable_timer_except_running);
