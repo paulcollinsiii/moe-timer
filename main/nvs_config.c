@@ -215,6 +215,13 @@ esp_err_t nvs_config_set_cfg_ver(const char *ver) {
     return hal_nvs_write_str("cfg_ver", ver);
 }
 
+esp_err_t nvs_config_get_cmd_id(char *buf, size_t len) {
+    return get_str_empty_default("cmd_id", buf, len);
+}
+esp_err_t nvs_config_set_cmd_id(const char *id) {
+    return hal_nvs_write_str("cmd_id", id);
+}
+
 esp_err_t nvs_config_get_timer_defs(nvs_timer_defs_blob_t *out) {
     size_t len = sizeof(*out);
     esp_err_t ret = hal_nvs_read_blob("timer_defs", out, &len);

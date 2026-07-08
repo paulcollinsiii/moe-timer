@@ -12,6 +12,7 @@ idf_component_register(
         "stats_json.c"
         "mqtt_ha.c"
         "config_apply.c"
+        "cmd_apply.c"
         "device_id.c"
         "light.c"
         "nvs_config.c"

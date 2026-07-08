@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "cmd_apply.h"
 #include "config_apply.h"
 #include "device_id.h"
 #include "esp_log.h"
@@ -34,6 +35,19 @@ static volatile int s_pub_acks;
 static char s_config_buf[CONFIG_BUF_MAX];
 static volatile bool s_config_received;
 static int s_config_topic_len; /* strlen of magtag/<id>/config, for matching */
+
+/* Retained command (HA→device), same collection pattern as config. */
+#define CMD_BUF_MAX 256
+static char s_cmd_buf[CMD_BUF_MAX];
+static volatile bool s_cmd_received;
+static int s_cmd_topic_len;
+static bool s_locate_pending; /* set when a locate command applied; main.c consumes */
+
+bool mqtt_ha_locate_pending(void) {
+    bool p = s_locate_pending;
+    s_locate_pending = false;
+    return p;
+}
 
 /* Pending daily summary (captured at rollover, published next window;
    plain RAM — an unsent summary after a crash is an acceptable loss). */
@@ -67,15 +81,22 @@ static void mqtt_event_handler(void *arg, esp_event_base_t base, int32_t event_i
             s_pub_acks++;
             break;
         case MQTT_EVENT_DATA:
-            /* Only the config topic is subscribed; a chunked payload
-               (data_len < total_data_len) is copied by absolute offset.
-               An empty retained payload (topic cleared) is ignored. */
-            if (ev->topic != NULL && ev->topic_len == s_config_topic_len && ev->total_data_len > 0 &&
-                ev->total_data_len < CONFIG_BUF_MAX) {
+            /* config and cmd are the only subscriptions; a chunked payload
+               (data_len < total_data_len) is copied by absolute offset. An
+               empty retained payload (topic cleared) is ignored here. */
+            if (ev->topic == NULL || ev->total_data_len <= 0)
+                break;
+            if (ev->topic_len == s_config_topic_len && ev->total_data_len < CONFIG_BUF_MAX) {
                 memcpy(s_config_buf + ev->current_data_offset, ev->data, ev->data_len);
                 if (ev->current_data_offset + ev->data_len >= ev->total_data_len) {
                     s_config_buf[ev->total_data_len] = '\0';
                     s_config_received = true;
+                }
+            } else if (ev->topic_len == s_cmd_topic_len && ev->total_data_len < CMD_BUF_MAX) {
+                memcpy(s_cmd_buf + ev->current_data_offset, ev->data, ev->data_len);
+                if (ev->current_data_offset + ev->data_len >= ev->total_data_len) {
+                    s_cmd_buf[ev->total_data_len] = '\0';
+                    s_cmd_received = true;
                 }
             }
             break;
@@ -160,12 +181,15 @@ void mqtt_ha_window(const stats_snapshot_t *snap) {
     char topic[96];
     static char payload[768];
 
-    /* Subscribe to the retained config topic first, so the broker's
+    /* Subscribe to the retained config + cmd topics first, so the broker's
        delivery overlaps the stat publishes below (no separate wait). */
     s_config_received = false;
-    char config_topic[96];
+    s_cmd_received = false;
+    char config_topic[96], cmd_topic[96];
     s_config_topic_len = snprintf(config_topic, sizeof(config_topic), "magtag/%s/config", device_id());
+    s_cmd_topic_len = snprintf(cmd_topic, sizeof(cmd_topic), "magtag/%s/cmd", device_id());
     esp_mqtt_client_subscribe(client, config_topic, 1);
+    esp_mqtt_client_subscribe(client, cmd_topic, 1);
 
     /* Discovery: once per schema bump (covers new entities and renames) */
     uint16_t disc_ver = 0;
@@ -206,32 +230,47 @@ void mqtt_ha_window(const stats_snapshot_t *snap) {
         ESP_LOGW(TAG, "publish drain incomplete (%d/%d)", s_pub_acks, published);
     }
 
-    /* Apply the retained config if it arrived (give it a moment past the
-       publish drain). config_apply writes NVS; a changed timezone/timer
-       def takes effect on the next boot/operation. */
+    /* Retained config + cmd arrive right after subscribe; give them a
+       moment past the publish drain to land. */
     int cfg_wait = 0;
-    while (!s_config_received && cfg_wait < 1500) {
+    while (!(s_config_received && s_cmd_received) && cfg_wait < 1500) {
         vTaskDelay(pdMS_TO_TICKS(100));
         cfg_wait += 100;
     }
+
+    char ack[256];
     if (s_config_received) {
-        char ack[256];
+        /* config_apply writes NVS; a changed timezone/timer def takes
+           effect on the next boot/operation. */
         config_result_t r = config_apply(s_config_buf, ack, sizeof(ack));
         if (r != CONFIG_SKIPPED) {
             snprintf(topic, sizeof(topic), "magtag/%s/config_ack", device_id());
-            int msg_id = esp_mqtt_client_publish(client, topic, ack, 0, 1, 1);
-            if (msg_id >= 0) {
-                /* brief drain so the ack survives disconnect */
-                int w = 0;
-                int target = s_pub_acks + 1;
-                while (s_pub_acks < target && w < 1000) {
-                    vTaskDelay(pdMS_TO_TICKS(100));
-                    w += 100;
-                }
-            }
+            esp_mqtt_client_publish(client, topic, ack, 0, 1, 1); /* retained ack */
             ESP_LOGI(TAG, "config applied (result %d)", (int)r);
         }
     }
+
+    if (s_cmd_received) {
+        cmd_action_t act;
+        cmd_result_t cr = cmd_apply(s_cmd_buf, &act, ack, sizeof(ack));
+        if (cr == CMD_GRANT || cr == CMD_LOCATE) {
+            if (cr == CMD_GRANT) {
+                /* Pure state change; persisted at the next enter_deep_sleep */
+                timer_grant(act.slot, act.sec);
+            } else {
+                s_locate_pending = true; /* main.c runs the alarm after the window */
+            }
+            snprintf(topic, sizeof(topic), "magtag/%s/event", device_id());
+            esp_mqtt_client_publish(client, topic, ack, 0, 1, 0); /* event ack, not retained */
+            /* Clear the retained command so it isn't re-delivered/re-applied */
+            snprintf(topic, sizeof(topic), "magtag/%s/cmd", device_id());
+            esp_mqtt_client_publish(client, topic, "", 0, 1, 1);
+            ESP_LOGI(TAG, "command applied (result %d)", (int)cr);
+        }
+    }
+
+    /* Final drain so the acks + cleared-topic publishes survive disconnect */
+    vTaskDelay(pdMS_TO_TICKS(400));
 
 out_started:
     esp_mqtt_client_stop(client);

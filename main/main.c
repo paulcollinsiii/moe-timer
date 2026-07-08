@@ -256,6 +256,8 @@ static void stats_collect(stats_snapshot_t *out) {
     out->fw = esp_app_get_description()->version;
 }
 
+static void run_locate_alarm(void); /* defined with the awake-failsafe helpers */
+
 /* One radio window: WiFi up, SNTP correction, HA MQTT session, WiFi down.
    The return reflects the SNTP result only — MQTT is best-effort and can
    never fail the sync that opened the window. */
@@ -276,6 +278,11 @@ static esp_err_t try_net_window(void) {
         stats_collect(&snap);
         mqtt_ha_window(&snap);
         wifi_session_end();
+        /* Locate command applied this window? Alarm now, after the radio
+           is down (audio/LEDs, and it extends the awake failsafe). */
+        if (mqtt_ha_locate_pending()) {
+            run_locate_alarm();
+        }
     }
     if (ret != ESP_OK) {
         ESP_LOGW(TAG, "NTP sync failed: %s", esp_err_to_name(ret));
@@ -872,16 +879,55 @@ static void awake_failsafe_cb(void *arg) {
     enter_deep_sleep();
 }
 
+static esp_timer_handle_t s_failsafe_timer;
+
 static void arm_awake_failsafe(void) {
     static const esp_timer_create_args_t args = {.callback = awake_failsafe_cb, .name = "awake_cap"};
-    esp_timer_handle_t t;
-    esp_err_t ret = esp_timer_create(&args, &t);
+    esp_err_t ret = esp_timer_create(&args, &s_failsafe_timer);
     if (ret == ESP_OK) {
-        ret = esp_timer_start_once(t, (uint64_t)CONFIG_MAGTAG_MAX_AWAKE_SEC * 1000000ULL);
+        ret = esp_timer_start_once(s_failsafe_timer, (uint64_t)CONFIG_MAGTAG_MAX_AWAKE_SEC * 1000000ULL);
     }
     if (ret != ESP_OK) {
         ESP_LOGW(TAG, "awake failsafe not armed: %s", esp_err_to_name(ret));
     }
+}
+
+/* Push the awake failsafe out so a long deliberate awake stretch (the
+   locate alarm) isn't cut short by it. */
+static void extend_awake_failsafe(int seconds) {
+    if (s_failsafe_timer != NULL) {
+        esp_timer_stop(s_failsafe_timer);
+        esp_timer_start_once(s_failsafe_timer, (uint64_t)seconds * 1000000ULL);
+    }
+}
+
+/* "Help, I lost the timer": HA locate command → beep + red pulse on the
+   next window until a button press or ~10 min. Runs after WiFi is down
+   (audio/LEDs need the radio quiet and the amp gate settled). */
+#define LOCATE_MAX_SEC 600
+
+static void run_locate_alarm(void) {
+    ESP_LOGI(TAG, "Locate: alarming until dismissed (<= %d s)", LOCATE_MAX_SEC);
+    extend_awake_failsafe(LOCATE_MAX_SEC + 60);
+    buttons_take_pressed(); /* drop any stale latched press */
+    int64_t start = (int64_t)time(NULL);
+    bool dismissed = false;
+    while (!dismissed && (int64_t)time(NULL) - start < LOCATE_MAX_SEC) {
+        s_audio_done = false;
+        neopixel_alert_pulse_begin(248, 0, 0); /* red, module owns teardown */
+        xTaskCreate(audio_alert_task, "locate", 2048, NULL, 5, NULL);
+        for (int i = 0; i < 40 && !s_audio_done && !dismissed; i++) {
+            if (buttons_take_pressed() != 0)
+                dismissed = true;
+            for (int b = 0; b < 4 && !dismissed; b++)
+                dismissed = buttons_is_pressed((button_id_t)b);
+            vTaskDelay(pdMS_TO_TICKS(100));
+        }
+        audio_stop();
+        neopixel_alert_pulse_end();
+    }
+    neopixel_stop();
+    ESP_LOGI(TAG, "Locate: %s", dismissed ? "dismissed" : "timed out");
 }
 
 void app_main(void) {
