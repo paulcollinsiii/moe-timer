@@ -73,3 +73,15 @@ target_compile_options(test_config_apply PRIVATE
 target_link_options(test_config_apply PRIVATE -fsanitize=address,undefined)
 target_link_libraries(test_config_apply unity m)
 add_test(NAME test_config_apply COMMAND test_config_apply)
+
+add_executable(test_cmd_apply test_cmd_apply/test_cmd_apply.c
+    ${CMAKE_CURRENT_SOURCE_DIR}/../lib/cJSON/cJSON.c)
+target_include_directories(test_cmd_apply PRIVATE mocks ../include ../lib/cJSON)
+target_compile_definitions(test_cmd_apply PRIVATE NATIVE)
+target_compile_options(test_cmd_apply PRIVATE
+    -include ${CMAKE_CURRENT_SOURCE_DIR}/mocks/esp_compat.h
+    -Wall -Wextra
+    -fsanitize=address,undefined -fno-omit-frame-pointer)
+target_link_options(test_cmd_apply PRIVATE -fsanitize=address,undefined)
+target_link_libraries(test_cmd_apply unity m)
+add_test(NAME test_cmd_apply COMMAND test_cmd_apply)

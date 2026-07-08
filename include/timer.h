@@ -58,6 +58,7 @@ typedef struct {
     int64_t run_started_wall;
     int64_t break_expiry_wall; /* wall time the current break ends; 0 unless BREAK */
     uint16_t completions;      /* runs that reached expiry today */
+    int32_t bonus_sec;         /* HA grant banked while IDLE; folded in at timer_start */
 } timer_slot_state_t;
 
 typedef struct {
@@ -75,7 +76,7 @@ extern rtc_state_t g_rtc_state;
    day's entire allocation. Bump the version on any layout change — the
    XOR checksum (carried over from the MicroPython predecessor) then
    invalidates stale-layout blobs even if NVS hands them back intact. */
-#define TIMER_SNAPSHOT_VERSION 3 /* v3: multi-timer slots + completion counters */
+#define TIMER_SNAPSHOT_VERSION 4 /* v4: + per-slot HA grant bonus */
 
 typedef struct {
     uint8_t state; /* timer_state_t */
@@ -86,6 +87,7 @@ typedef struct {
     int64_t run_started_wall;
     int64_t break_expiry_wall;
     uint16_t completions;
+    int32_t bonus_sec;
 } timer_snapshot_slot_t;
 
 typedef struct {
@@ -106,6 +108,9 @@ int timer_active_slot(void);
 const timer_def_t *timer_active_def(void);
 /* Definition of any slot; NULL for slot 0, disabled, or out of range. */
 const timer_def_t *timer_slot_def(int slot);
+/* Slot index for a timer name; 0 for "Screen"/NULL/"", -1 if no enabled
+   extra slot matches (HA grant targeting). */
+int timer_slot_by_name(const char *name);
 int timer_extra_count(void); /* enabled extra slots */
 /* True when a Button C swap would succeed: extras exist and the active
    slot is not RUNNING/BREAK. Also gates C as an EXT1 wake source — a
@@ -123,6 +128,11 @@ bool timer_reload_allowed(bool parent_testing);
 /* Return the active slot to IDLE at full duration, keeping its completion
    counter. Refused (false) while RUNNING. */
 bool timer_reload(void);
+/* Grant extra seconds to a slot (HA command). IDLE banks a bonus realized
+   at the next start; RUNNING/PAUSED/BREAK extend in place; EXPIRED becomes
+   PAUSED holding the grant (press A to use it). Works on any slot — no now
+   needed (RUNNING extends the stored wall expiry; the rest store durations). */
+void timer_grant(int slot, int32_t sec);
 
 timer_state_t timer_get_state(void);
 void timer_start(time_t now, int32_t allocation_sec);

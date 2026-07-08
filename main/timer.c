@@ -40,6 +40,16 @@ int timer_active_slot(void) {
     return g_rtc_state.active_slot;
 }
 
+int timer_slot_by_name(const char *name) {
+    if (name == NULL || name[0] == '\0' || strcmp(name, "Screen") == 0)
+        return 0;
+    for (int i = 1; i < TIMER_SLOT_COUNT; i++) {
+        if (slot_enabled(i) && strcmp(s_defs[i].name, name) == 0)
+            return i;
+    }
+    return -1; /* no such enabled timer */
+}
+
 const timer_def_t *timer_slot_def(int slot) {
     if (slot <= 0 || !slot_enabled(slot))
         return NULL; /* Screen (0), disabled, or out of range */
@@ -121,11 +131,41 @@ void timer_reset(void) {
 
 void timer_start(time_t now, int32_t allocation_sec) {
     timer_slot_state_t *sl = active();
+    allocation_sec += sl->bonus_sec; /* fold in any HA grant banked while IDLE */
+    sl->bonus_sec = 0;
     sl->state = TIMER_RUNNING;
     sl->allocation_sec = allocation_sec;
     sl->expiry_wall_time = (int64_t)now + allocation_sec;
     sl->run_accum_sec = 0;
     sl->run_started_wall = (int64_t)now;
+}
+
+void timer_grant(int slot, int32_t sec) {
+    if (slot < 0 || slot >= TIMER_SLOT_COUNT || sec <= 0)
+        return;
+    timer_slot_state_t *sl = &g_rtc_state.slots[slot];
+    switch (sl->state) {
+        case TIMER_RUNNING:
+            sl->expiry_wall_time += sec;
+            sl->allocation_sec += sec;
+            break;
+        case TIMER_PAUSED:
+        case TIMER_BREAK:
+            sl->remaining_at_pause += sec;
+            sl->allocation_sec += sec;
+            break;
+        case TIMER_EXPIRED:
+            /* Chores-done grant after time ran out: hold it PAUSED so the
+               kid presses A to start — never auto-run, and the expiry
+               alert (already heard) must not re-fire. */
+            sl->state = TIMER_PAUSED;
+            sl->remaining_at_pause = sec;
+            sl->allocation_sec += sec;
+            break;
+        default: /* IDLE: bank it; timer_start folds it into the allocation */
+            sl->bonus_sec += sec;
+            break;
+    }
 }
 
 int32_t timer_tick(time_t now) {
@@ -310,6 +350,7 @@ void timer_make_snapshot(timer_snapshot_t *out) {
         os->run_started_wall = sl->run_started_wall;
         os->break_expiry_wall = sl->break_expiry_wall;
         os->completions = sl->completions;
+        os->bonus_sec = sl->bonus_sec;
     }
     memcpy(out->date, g_rtc_state.last_date, sizeof(out->date));
     out->checksum = timer_snapshot_checksum(out);
@@ -332,6 +373,8 @@ static bool snapshot_valid(const timer_snapshot_t *snap, time_t now) {
         if (sl->allocation_sec < 0 || sl->allocation_sec > SNAPSHOT_MAX_HORIZON_SEC)
             return false;
         if (sl->remaining_at_pause < 0 || sl->remaining_at_pause > sl->allocation_sec)
+            return false;
+        if (sl->bonus_sec < 0 || sl->bonus_sec > SNAPSHOT_MAX_HORIZON_SEC)
             return false;
         if (sl->state == TIMER_RUNNING) {
             int64_t delta = sl->expiry_wall_time - (int64_t)now;
@@ -370,6 +413,7 @@ bool timer_restore_snapshot(const timer_snapshot_t *snap, time_t now) {
         sl->run_started_wall = ss->run_started_wall;
         sl->break_expiry_wall = ss->break_expiry_wall;
         sl->completions = ss->completions;
+        sl->bonus_sec = ss->bonus_sec;
         /* Expiry passed while powered off (snapshot saved before the EXPIRED
            transition landed): restore directly as EXPIRED so the next tick
            does not re-transition and re-fire the already-heard alert. The

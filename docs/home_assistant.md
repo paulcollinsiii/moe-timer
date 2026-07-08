@@ -138,8 +138,47 @@ and republishes the config with the extracted `holidays` array — so the
 family manages no-school days on a normal calendar UI, and the device
 picks them up automatically.
 
-## Commands (planned — phase 3)
+## Commands
 
-Retained `magtag/<id>/cmd` — grant extra minutes to a timer ("chores done:
-+15 min") and a locate alarm ("help, I lost the timer") that beeps on the
-next window until a button is pressed.
+Publish a **retained** JSON command to `magtag/<id>/cmd`. Each command
+carries a unique `id`; the device applies it once (dedup on `id`), acks on
+`magtag/<id>/event`, and then clears the retained topic so it isn't
+re-applied. Applied within one sync window (Button D forces it).
+
+### Grant extra time
+
+```json
+{"id": "1751990400", "grant": {"timer": "Screen", "min": 15}}
+```
+
+`timer` defaults to Screen if omitted; `min` is 1–240. Behaviour by state:
+IDLE banks the minutes and adds them when the timer next starts; RUNNING
+extends in place; PAUSED/BREAK add to the frozen remaining; **EXPIRED**
+(the usual "chores done, time already ran out" case) flips to PAUSED
+holding the granted minutes — the kid presses A to start it, and the
+expiry alarm does not re-fire.
+
+```yaml
+script:
+  magtag_grant_15:
+    sequence:
+      - service: mqtt.publish
+        data:
+          topic: "magtag/magtag-xxxxxx/cmd"
+          retain: true
+          payload: '{"id":"{{ now().timestamp() | int }}","grant":{"min":15}}'
+```
+
+### Locate ("help, I lost the timer")
+
+```json
+{"id": "1751990500", "locate": true}
+```
+
+On its next window the device beeps with a red pulse until a button is
+pressed or ~10 minutes pass. (Battery-charge-locked devices don't open
+windows, so locate won't reach a dead device — check the charge-lock
+sensor first.)
+
+A dashboard button per command (grant / locate), each publishing with
+`id: "{{ now().timestamp() | int }}"`, is the simplest HA surface.
