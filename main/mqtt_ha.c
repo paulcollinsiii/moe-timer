@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "config_apply.h"
 #include "device_id.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
@@ -26,6 +27,14 @@ static EventGroupHandle_t s_eg;
 
 static volatile int s_pub_acks;
 
+/* Retained config document collected during the window (HA→device). The
+   broker delivers it right after subscribe; we buffer it here and apply it
+   after the stat publishes. Sized for the documented config schema. */
+#define CONFIG_BUF_MAX 1024
+static char s_config_buf[CONFIG_BUF_MAX];
+static volatile bool s_config_received;
+static int s_config_topic_len; /* strlen of magtag/<id>/config, for matching */
+
 /* Pending daily summary (captured at rollover, published next window;
    plain RAM — an unsent summary after a crash is an acceptable loss). */
 static struct {
@@ -45,7 +54,7 @@ void mqtt_ha_queue_summary(const char *date, int32_t screen_used_s, const uint16
 static void mqtt_event_handler(void *arg, esp_event_base_t base, int32_t event_id, void *event_data) {
     (void)arg;
     (void)base;
-    (void)event_data;
+    esp_mqtt_event_handle_t ev = (esp_mqtt_event_handle_t)event_data;
     switch ((esp_mqtt_event_id_t)event_id) {
         case MQTT_EVENT_CONNECTED:
             xEventGroupSetBits(s_eg, EG_CONNECTED);
@@ -56,6 +65,19 @@ static void mqtt_event_handler(void *arg, esp_event_base_t base, int32_t event_i
             break;
         case MQTT_EVENT_PUBLISHED:
             s_pub_acks++;
+            break;
+        case MQTT_EVENT_DATA:
+            /* Only the config topic is subscribed; a chunked payload
+               (data_len < total_data_len) is copied by absolute offset.
+               An empty retained payload (topic cleared) is ignored. */
+            if (ev->topic != NULL && ev->topic_len == s_config_topic_len && ev->total_data_len > 0 &&
+                ev->total_data_len < CONFIG_BUF_MAX) {
+                memcpy(s_config_buf + ev->current_data_offset, ev->data, ev->data_len);
+                if (ev->current_data_offset + ev->data_len >= ev->total_data_len) {
+                    s_config_buf[ev->total_data_len] = '\0';
+                    s_config_received = true;
+                }
+            }
             break;
         default:
             break;
@@ -138,6 +160,13 @@ void mqtt_ha_window(const stats_snapshot_t *snap) {
     char topic[96];
     static char payload[768];
 
+    /* Subscribe to the retained config topic first, so the broker's
+       delivery overlaps the stat publishes below (no separate wait). */
+    s_config_received = false;
+    char config_topic[96];
+    s_config_topic_len = snprintf(config_topic, sizeof(config_topic), "magtag/%s/config", device_id());
+    esp_mqtt_client_subscribe(client, config_topic, 1);
+
     /* Discovery: once per schema bump (covers new entities and renames) */
     uint16_t disc_ver = 0;
     hal_nvs_read_u16("disc_ver", &disc_ver);
@@ -175,6 +204,33 @@ void mqtt_ha_window(const stats_snapshot_t *snap) {
         ESP_LOGI(TAG, "published %d messages", published);
     } else {
         ESP_LOGW(TAG, "publish drain incomplete (%d/%d)", s_pub_acks, published);
+    }
+
+    /* Apply the retained config if it arrived (give it a moment past the
+       publish drain). config_apply writes NVS; a changed timezone/timer
+       def takes effect on the next boot/operation. */
+    int cfg_wait = 0;
+    while (!s_config_received && cfg_wait < 1500) {
+        vTaskDelay(pdMS_TO_TICKS(100));
+        cfg_wait += 100;
+    }
+    if (s_config_received) {
+        char ack[256];
+        config_result_t r = config_apply(s_config_buf, ack, sizeof(ack));
+        if (r != CONFIG_SKIPPED) {
+            snprintf(topic, sizeof(topic), "magtag/%s/config_ack", device_id());
+            int msg_id = esp_mqtt_client_publish(client, topic, ack, 0, 1, 1);
+            if (msg_id >= 0) {
+                /* brief drain so the ack survives disconnect */
+                int w = 0;
+                int target = s_pub_acks + 1;
+                while (s_pub_acks < target && w < 1000) {
+                    vTaskDelay(pdMS_TO_TICKS(100));
+                    w += 100;
+                }
+            }
+            ESP_LOGI(TAG, "config applied (result %d)", (int)r);
+        }
     }
 
 out_started:

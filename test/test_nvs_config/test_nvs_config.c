@@ -252,6 +252,100 @@ void test_init_defaults_seeds_mqtt_keys(void) {
 }
 
 /* ------------------------------------------------------------------ */
+/* HA config-in keys (phase 2)                                         */
+/* ------------------------------------------------------------------ */
+
+void test_tz_defaults_and_round_trip(void) {
+    char buf[64];
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_tz(buf, sizeof(buf)));
+    TEST_ASSERT_EQUAL_STRING(NVS_DEFAULT_TZ, buf); /* compile-time default */
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_set_tz("GMT0IST,M3.5.0/1,M10.5.0"));
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_tz(buf, sizeof(buf)));
+    TEST_ASSERT_EQUAL_STRING("GMT0IST,M3.5.0/1,M10.5.0", buf);
+}
+
+void test_quiet_hours_defaults_and_round_trip(void) {
+    uint16_t v = 0;
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_quiet_start(&v));
+    TEST_ASSERT_EQUAL_UINT16(NVS_DEFAULT_QUIET_START, v);
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_set_quiet_start(2100));
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_quiet_start(&v));
+    TEST_ASSERT_EQUAL_UINT16(2100, v);
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_quiet_end(&v));
+    TEST_ASSERT_EQUAL_UINT16(NVS_DEFAULT_QUIET_END, v);
+}
+
+void test_break_settings_defaults_and_round_trip(void) {
+    uint16_t v = 0;
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_break_interval_min(&v));
+    TEST_ASSERT_EQUAL_UINT16(NVS_DEFAULT_BREAK_INTERVAL_MIN, v);
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_set_break_interval_min(45));
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_break_interval_min(&v));
+    TEST_ASSERT_EQUAL_UINT16(45, v);
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_break_duration_min(&v));
+    TEST_ASSERT_EQUAL_UINT16(NVS_DEFAULT_BREAK_DURATION_MIN, v);
+}
+
+void test_school_window_defaults_and_round_trip(void) {
+    char buf[16];
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_school_start(buf, sizeof(buf)));
+    TEST_ASSERT_EQUAL_STRING(NVS_DEFAULT_SCHOOL_START, buf);
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_set_school_start("2027-08-19"));
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_school_start(buf, sizeof(buf)));
+    TEST_ASSERT_EQUAL_STRING("2027-08-19", buf);
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_school_end(buf, sizeof(buf)));
+    TEST_ASSERT_EQUAL_STRING(NVS_DEFAULT_SCHOOL_END, buf);
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_summer_start(buf, sizeof(buf)));
+    TEST_ASSERT_EQUAL_STRING(NVS_DEFAULT_SUMMER_START, buf);
+}
+
+void test_cfg_ver_round_trip(void) {
+    char buf[24];
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_cfg_ver(buf, sizeof(buf)));
+    TEST_ASSERT_EQUAL_STRING("", buf); /* never applied */
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_set_cfg_ver("20260708"));
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_cfg_ver(buf, sizeof(buf)));
+    TEST_ASSERT_EQUAL_STRING("20260708", buf);
+}
+
+void test_timer_defs_blob_round_trip(void) {
+    nvs_timer_defs_blob_t defs = {.version = TIMER_DEFS_BLOB_VERSION};
+    snprintf(defs.defs[0].name, sizeof(defs.defs[0].name), "Piano");
+    defs.defs[0].min = 20;
+    defs.defs[0].reload = 1;
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_set_timer_defs(&defs));
+
+    nvs_timer_defs_blob_t out;
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_timer_defs(&out));
+    TEST_ASSERT_EQUAL_STRING("Piano", out.defs[0].name);
+    TEST_ASSERT_EQUAL_INT32(20, out.defs[0].min);
+    TEST_ASSERT_EQUAL_UINT8(1, out.defs[0].reload);
+    TEST_ASSERT_EQUAL_STRING("", out.defs[1].name); /* disabled slot */
+}
+
+void test_timer_defs_blob_missing_or_stale_version(void) {
+    nvs_timer_defs_blob_t out;
+    TEST_ASSERT_EQUAL(ESP_ERR_NVS_NOT_FOUND, nvs_config_get_timer_defs(&out));
+    nvs_timer_defs_blob_t defs = {.version = 99};
+    hal_nvs_write_blob("timer_defs", &defs, sizeof(defs));
+    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_VERSION, nvs_config_get_timer_defs(&out));
+}
+
+void test_reseed_clears_cfg_ver(void) {
+    /* A Kconfig-fingerprint reseed overwrites HA-managed keys; clearing
+       cfg_ver makes the retained HA config re-apply on the next window,
+       so HA stays source-of-truth after a reflash. */
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_init_defaults());
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_set_cfg_ver("20260708"));
+    /* Force a reseed: corrupt the stored fingerprint stamp */
+    hal_nvs_write_u16("defaults_ver", 0x5555);
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_init_defaults());
+    char buf[24] = "junk";
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_cfg_ver(buf, sizeof(buf)));
+    TEST_ASSERT_EQUAL_STRING("", buf);
+}
+
+/* ------------------------------------------------------------------ */
 /* timer snapshot (crash/reset recovery)                               */
 /* ------------------------------------------------------------------ */
 
@@ -337,6 +431,14 @@ int main(void) {
     RUN_TEST(test_init_defaults_reseeds_on_fingerprint_change);
     RUN_TEST(test_init_defaults_missing_version_key_reseeds);
     RUN_TEST(test_init_defaults_same_version_preserves_values);
+    RUN_TEST(test_tz_defaults_and_round_trip);
+    RUN_TEST(test_quiet_hours_defaults_and_round_trip);
+    RUN_TEST(test_break_settings_defaults_and_round_trip);
+    RUN_TEST(test_school_window_defaults_and_round_trip);
+    RUN_TEST(test_cfg_ver_round_trip);
+    RUN_TEST(test_timer_defs_blob_round_trip);
+    RUN_TEST(test_timer_defs_blob_missing_or_stale_version);
+    RUN_TEST(test_reseed_clears_cfg_ver);
     RUN_TEST(test_mqtt_settings_round_trip);
     RUN_TEST(test_mqtt_settings_missing_read_as_empty);
     RUN_TEST(test_init_defaults_seeds_mqtt_keys);

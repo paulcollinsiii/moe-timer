@@ -1,5 +1,6 @@
 #include "nvs_config.h"
 
+#include <stdio.h>
 #include <string.h>
 
 #include "hal_nvs.h"
@@ -74,6 +75,16 @@ static esp_err_t get_str_empty_default(const char *key, char *buf, size_t len) {
     return ret;
 }
 
+static esp_err_t get_str_with_default(const char *key, char *buf, size_t len, const char *def) {
+    size_t rlen = len;
+    esp_err_t ret = hal_nvs_read_str(key, buf, &rlen);
+    if (ret == ESP_ERR_NVS_NOT_FOUND) {
+        snprintf(buf, len, "%s", def);
+        return ESP_OK;
+    }
+    return ret;
+}
+
 esp_err_t nvs_config_get_mqtt_uri(char *buf, size_t len) {
     return get_str_empty_default("mqtt_uri", buf, len);
 }
@@ -134,6 +145,87 @@ esp_err_t nvs_config_get_holidays(char *buf, size_t *len) {
 
 esp_err_t nvs_config_set_holidays(const char *blob, size_t len) {
     return hal_nvs_write_blob("holidays", blob, len);
+}
+
+/* ---- HA config-in keys (phase 2) ---- */
+
+esp_err_t nvs_config_get_tz(char *buf, size_t len) {
+    return get_str_with_default("tz", buf, len, NVS_DEFAULT_TZ);
+}
+esp_err_t nvs_config_set_tz(const char *tz) {
+    return hal_nvs_write_str("tz", tz);
+}
+
+esp_err_t nvs_config_get_quiet_start(uint16_t *out) {
+    return get_u16_with_default("quiet_start", out, NVS_DEFAULT_QUIET_START);
+}
+esp_err_t nvs_config_set_quiet_start(uint16_t hhmm) {
+    return hal_nvs_write_u16("quiet_start", hhmm);
+}
+esp_err_t nvs_config_get_quiet_end(uint16_t *out) {
+    return get_u16_with_default("quiet_end", out, NVS_DEFAULT_QUIET_END);
+}
+esp_err_t nvs_config_set_quiet_end(uint16_t hhmm) {
+    return hal_nvs_write_u16("quiet_end", hhmm);
+}
+
+esp_err_t nvs_config_get_break_interval_min(uint16_t *out) {
+    return get_u16_with_default("break_int", out, NVS_DEFAULT_BREAK_INTERVAL_MIN);
+}
+esp_err_t nvs_config_set_break_interval_min(uint16_t min) {
+    return hal_nvs_write_u16("break_int", min);
+}
+esp_err_t nvs_config_get_break_duration_min(uint16_t *out) {
+    return get_u16_with_default("break_dur", out, NVS_DEFAULT_BREAK_DURATION_MIN);
+}
+esp_err_t nvs_config_set_break_duration_min(uint16_t min) {
+    return hal_nvs_write_u16("break_dur", min);
+}
+
+esp_err_t nvs_config_get_summer_start(char *buf, size_t len) {
+    return get_str_with_default("summer_start", buf, len, NVS_DEFAULT_SUMMER_START);
+}
+esp_err_t nvs_config_set_summer_start(const char *date) {
+    return hal_nvs_write_str("summer_start", date);
+}
+esp_err_t nvs_config_get_school_start(char *buf, size_t len) {
+    return get_str_with_default("school_start", buf, len, NVS_DEFAULT_SCHOOL_START);
+}
+esp_err_t nvs_config_set_school_start(const char *date) {
+    return hal_nvs_write_str("school_start", date);
+}
+esp_err_t nvs_config_get_school_end(char *buf, size_t len) {
+    return get_str_with_default("school_end", buf, len, NVS_DEFAULT_SCHOOL_END);
+}
+esp_err_t nvs_config_set_school_end(const char *date) {
+    return hal_nvs_write_str("school_end", date);
+}
+
+esp_err_t nvs_config_get_dev_name(char *buf, size_t len) {
+    return get_str_empty_default("dev_name", buf, len);
+}
+esp_err_t nvs_config_set_dev_name(const char *name) {
+    return hal_nvs_write_str("dev_name", name);
+}
+
+esp_err_t nvs_config_get_cfg_ver(char *buf, size_t len) {
+    return get_str_empty_default("cfg_ver", buf, len);
+}
+esp_err_t nvs_config_set_cfg_ver(const char *ver) {
+    return hal_nvs_write_str("cfg_ver", ver);
+}
+
+esp_err_t nvs_config_get_timer_defs(nvs_timer_defs_blob_t *out) {
+    size_t len = sizeof(*out);
+    esp_err_t ret = hal_nvs_read_blob("timer_defs", out, &len);
+    if (ret != ESP_OK)
+        return ret;
+    if (len != sizeof(*out) || out->version != TIMER_DEFS_BLOB_VERSION)
+        return ESP_ERR_INVALID_VERSION;
+    return ESP_OK;
+}
+esp_err_t nvs_config_set_timer_defs(const nvs_timer_defs_blob_t *defs) {
+    return hal_nvs_write_blob("timer_defs", defs, sizeof(*defs));
 }
 
 /* ---- timer snapshot (crash recovery) ---- */
@@ -200,6 +292,13 @@ static esp_err_t reseed_all_defaults(void) {
     if (ret != ESP_OK)
         return ret;
     ret = hal_nvs_write_blob("holidays", NVS_DEFAULT_HOLIDAYS, strlen(NVS_DEFAULT_HOLIDAYS));
+    if (ret != ESP_OK)
+        return ret;
+    /* A reseed reverts every HA-managed key to the Kconfig default, so the
+       applied HA config version no longer describes what's stored: clear
+       it and the retained HA config re-applies on the next window (HA stays
+       source-of-truth across a reflash that bumps the fingerprint). */
+    ret = hal_nvs_write_str("cfg_ver", "");
     if (ret != ESP_OK)
         return ret;
     /* Stamp last: a power cut mid-reseed re-runs the whole reseed */
