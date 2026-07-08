@@ -8,6 +8,11 @@ idf_component_register(
         "display_screens.c"
         "display_layout.c"
         "ntp.c"
+        "wifi_session.c"
+        "stats_json.c"
+        "mqtt_ha.c"
+        "device_id.c"
+        "light.c"
         "nvs_config.c"
         "schedule.c"
         "buttons.c"
@@ -37,5 +42,7 @@ idf_component_register(
         log
         esp-tls
         lwip
+        espressif__mqtt
+        esp_app_format
         ssd1680
 )

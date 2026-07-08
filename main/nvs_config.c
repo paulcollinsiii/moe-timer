@@ -65,6 +65,39 @@ esp_err_t nvs_config_set_summer_min(uint16_t val) {
 
 /* ---- string accessors ---- */
 
+static esp_err_t get_str_empty_default(const char *key, char *buf, size_t len) {
+    esp_err_t ret = hal_nvs_read_str(key, buf, &len);
+    if (ret == ESP_ERR_NVS_NOT_FOUND) {
+        buf[0] = '\0';
+        return ESP_OK;
+    }
+    return ret;
+}
+
+esp_err_t nvs_config_get_mqtt_uri(char *buf, size_t len) {
+    return get_str_empty_default("mqtt_uri", buf, len);
+}
+
+esp_err_t nvs_config_set_mqtt_uri(const char *uri) {
+    return hal_nvs_write_str("mqtt_uri", uri);
+}
+
+esp_err_t nvs_config_get_mqtt_user(char *buf, size_t len) {
+    return get_str_empty_default("mqtt_user", buf, len);
+}
+
+esp_err_t nvs_config_set_mqtt_user(const char *user) {
+    return hal_nvs_write_str("mqtt_user", user);
+}
+
+esp_err_t nvs_config_get_mqtt_pass(char *buf, size_t len) {
+    return get_str_empty_default("mqtt_pass", buf, len);
+}
+
+esp_err_t nvs_config_set_mqtt_pass(const char *pass) {
+    return hal_nvs_write_str("mqtt_pass", pass);
+}
+
 esp_err_t nvs_config_get_wifi_ssid(char *buf, size_t len) {
     esp_err_t ret = hal_nvs_read_str("wifi_ssid", buf, &len);
     if (ret == ESP_ERR_NVS_NOT_FOUND) {
@@ -157,6 +190,15 @@ static esp_err_t reseed_all_defaults(void) {
     ret = hal_nvs_write_str("wifi_pass", NVS_DEFAULT_WIFI_PASS);
     if (ret != ESP_OK)
         return ret;
+    ret = hal_nvs_write_str("mqtt_uri", NVS_DEFAULT_MQTT_URI);
+    if (ret != ESP_OK)
+        return ret;
+    ret = hal_nvs_write_str("mqtt_user", NVS_DEFAULT_MQTT_USER);
+    if (ret != ESP_OK)
+        return ret;
+    ret = hal_nvs_write_str("mqtt_pass", NVS_DEFAULT_MQTT_PASS);
+    if (ret != ESP_OK)
+        return ret;
     ret = hal_nvs_write_blob("holidays", NVS_DEFAULT_HOLIDAYS, strlen(NVS_DEFAULT_HOLIDAYS));
     if (ret != ESP_OK)
         return ret;
@@ -210,6 +252,22 @@ esp_err_t nvs_config_init_defaults(void) {
         ret = hal_nvs_write_str("wifi_pass", NVS_DEFAULT_WIFI_PASS);
         if (ret != ESP_OK)
             return ret;
+    }
+    static const struct {
+        const char *key;
+        const char *def;
+    } MQTT_DEFAULTS[] = {
+        {"mqtt_uri", NVS_DEFAULT_MQTT_URI},
+        {"mqtt_user", NVS_DEFAULT_MQTT_USER},
+        {"mqtt_pass", NVS_DEFAULT_MQTT_PASS},
+    };
+    for (size_t i = 0; i < sizeof(MQTT_DEFAULTS) / sizeof(MQTT_DEFAULTS[0]); i++) {
+        tmp_len = sizeof(tmp);
+        if (hal_nvs_read_str(MQTT_DEFAULTS[i].key, tmp, &tmp_len) == ESP_ERR_NVS_NOT_FOUND) {
+            ret = hal_nvs_write_str(MQTT_DEFAULTS[i].key, MQTT_DEFAULTS[i].def);
+            if (ret != ESP_OK)
+                return ret;
+        }
     }
 
     /* Holiday blob: write only if missing */
