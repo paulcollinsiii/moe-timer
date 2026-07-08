@@ -140,6 +140,18 @@ menu "MagTag Timer"
         default n
         depends on MAGTAG_TIMER4_NAME != ""
 
+    config MAGTAG_MAX_AWAKE_SEC
+        int "Awake failsafe: force deep sleep after (seconds)"
+        default 180
+        range 30 600
+        help
+            Last-resort battery protection: if a wake is still running
+            after this many seconds (WiFi driver hang, stuck BUSY line,
+            firmware bug), the device saves the timer snapshot and forces
+            deep sleep. The longest legitimate wake (final-minute watch +
+            expiry alarm + refreshes) is ~2 minutes; keep a margin above
+            that.
+
     config MAGTAG_IDLE_SYNC_INTERVAL_MIN
         int "NTP sync interval while IDLE (minutes)"
         default 60

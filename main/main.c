@@ -4,6 +4,7 @@
 
 #include "audio.h"
 #include "battery.h"
+#include "battery_policy.h"
 #include "buttons.h"
 #include "display.h"
 #include "driver/gpio.h"
@@ -21,6 +22,7 @@
 #include "schedule.h"
 #include "sleep_plan.h"
 #include "timer.h"
+#include "wake_policy.h"
 
 static const char *TAG = "main";
 
@@ -57,6 +59,14 @@ static RTC_DATA_ATTR time_t s_last_ntp_sync;
    is a continuation to ignore, not a new press. */
 static RTC_DATA_ATTR uint8_t s_held_mask_at_sleep;
 static RTC_DATA_ATTR int64_t s_sleep_entry_time;
+
+/* Battery charge lock (<= 10%, released > 15%): the Charge Me! screen is
+   painted once, then the device sleeps long intervals with buttons and
+   all timer/NTP work disabled — an e-ink refresh during brownout can
+   leave persistent artifacts, and every wake costs charge it can't spare. */
+static RTC_DATA_ATTR bool s_charge_locked;
+static bool s_charge_lock_released; /* recovery wake: repaint over Charge Me! */
+#define CHARGE_LOCK_SLEEP_SEC 600
 
 /* Persist the timer to NVS so a panic/reset (which wipes RTC memory)
    cannot refund the day's allocation. Write only on change — snapshot
@@ -126,6 +136,15 @@ static void enter_deep_sleep(void) {
     gpio_hold_en(GPIO_NUM_21);
     gpio_hold_en(GPIO_NUM_16);
     gpio_deep_sleep_hold_en();
+
+    /* Charge-locked: no button wake sources (a press could only burn a
+       refresh the battery can't afford) and a fixed long interval instead
+       of the planner — wakes only re-check the battery. */
+    if (s_charge_locked) {
+        esp_sleep_enable_timer_wakeup((uint64_t)CHARGE_LOCK_SLEEP_SEC * 1000000ULL);
+        ESP_LOGI(TAG, "Entering deep sleep (charge lock, %d s)", CHARGE_LOCK_SLEEP_SEC);
+        esp_deep_sleep_start();
+    }
 
     buttons_configure_wakeup();
 
@@ -237,11 +256,40 @@ static display_state_t make_state(int32_t remaining, time_t now) {
         .break_remaining_sec = timer_break_remaining(now),
         .break_duration_sec = (uint32_t)CONFIG_MAGTAG_BREAK_DURATION_MIN * 60,
         .timer_name = (def != NULL) ? def->name : NULL,
+        .charge_warn = battery_policy_evaluate(pct, false) != BATT_OK,
         .completions = timer_completions(),
         .reloadable = (def != NULL) && def->reloadable,
         .swap_available = timer_swap_allowed(),
         .reload_available = timer_reload_allowed(PARENT_TESTING),
     };
+}
+
+/* ---- battery charge lock ---------------------------------------------- */
+
+/* Runs before wake dispatch. Returns normally when operation may continue;
+   when the battery is in the lock band it paints Charge Me! once (pausing
+   a RUNNING timer so the allocation doesn't burn while the device is
+   unusable), then sleeps — this call does not return. */
+static void check_charge_lock(void) {
+    int pct = battery_percent_from_mv(battery_read_mv());
+    batt_policy_t pol = battery_policy_evaluate(pct, s_charge_locked);
+    if (pol != BATT_LOCK) {
+        if (s_charge_locked) {
+            s_charge_locked = false;
+            s_charge_lock_released = true; /* repaint over the Charge Me! screen */
+            ESP_LOGW(TAG, "Charge lock released (%d%%)", pct);
+        }
+        return;
+    }
+    if (!s_charge_locked) {
+        s_charge_locked = true;
+        ESP_LOGW(TAG, "Charge lock engaged (%d%%)", pct);
+        if (timer_get_state() == TIMER_RUNNING) {
+            timer_pause(time(NULL));
+        }
+        display_charge_me(); /* one full refresh; later wakes leave the panel alone */
+    }
+    enter_deep_sleep(); /* lock-aware: long interval, no button wake */
 }
 
 /* ---- expiry alert ---------------------------------------------------- */
@@ -508,14 +556,8 @@ static void handle_timer_tick(void) {
     time_t now = time(NULL);
     handle_day_rollover(&now);
 
-    if (timer_get_state() == TIMER_RUNNING && timer_needs_ntp_sync(now)) {
-        try_ntp_sync();
-        now = time(NULL);
-    } else if ((timer_get_state() == TIMER_IDLE || timer_get_state() == TIMER_PAUSED ||
-                timer_get_state() == TIMER_EXPIRED) &&
-               (s_last_ntp_sync == 0 || now - s_last_ntp_sync >= IDLE_SYNC_INTERVAL_SEC)) {
-        /* Long-lived clock-only states: re-sync on the slower IDLE cadence
-           so the minute-aligned header doesn't visibly drift */
+    if (wake_policy_sync_due(timer_get_state(), timer_needs_ntp_sync(now), now, s_last_ntp_sync,
+                             IDLE_SYNC_INTERVAL_SEC)) {
         try_ntp_sync();
         now = time(NULL);
     }
@@ -536,35 +578,35 @@ static void handle_timer_tick(void) {
     int32_t remaining = timer_tick(now);
 
     /* The grid wait makes the true remaining a round minute at render
-       time; snap away +-2 s of wake/render jitter so 1:10:59 never shows.
+       time; snap away wake/render jitter so 1:10:59 never shows.
        Genuinely off-grid renders (slow sync) stay honest. */
     int32_t shown = remaining;
-    if (timer_get_state() == TIMER_RUNNING && remaining > SLEEP_PLAN_WATCH_SEC) {
-        int32_t m = shown % 60;
-        if (m <= 2)
-            shown -= m;
-        else if (m >= 58)
-            shown += 60 - m;
+    if (timer_get_state() == TIMER_RUNNING) {
+        shown = wake_policy_snap_minute(shown, SLEEP_PLAN_WATCH_SEC);
     }
     display_state_t st = make_state(shown, now);
-    if (st.timer_state == TIMER_BREAK && st.break_remaining_sec > SLEEP_PLAN_WATCH_SEC) {
-        int32_t m = st.break_remaining_sec % 60;
-        if (m <= 2)
-            st.break_remaining_sec -= m;
-        else if (m >= 58)
-            st.break_remaining_sec += 60 - m;
+    if (st.timer_state == TIMER_BREAK) {
+        st.break_remaining_sec = wake_policy_snap_minute(st.break_remaining_sec, SLEEP_PLAN_WATCH_SEC);
     }
 
     if (before == TIMER_BREAK && timer_get_state() == TIMER_PAUSED) {
         audio_break_over_chime(); /* break over — ready to resume */
     }
 
-    if (timer_get_state() == TIMER_EXPIRED && before != TIMER_EXPIRED) {
-        fire_expiry_alert();
-    } else if (timer_get_state() != before) {
-        display_full_refresh(&st);
-    } else {
-        display_update(&st); /* partial; policy promotes every 5th to full */
+    wake_render_t wr = wake_policy_render(before, timer_get_state(), false);
+    if (s_charge_lock_released && wr == WAKE_RENDER_PARTIAL) {
+        wr = WAKE_RENDER_FULL; /* the panel still shows Charge Me! — repaint fully */
+    }
+    switch (wr) {
+        case WAKE_RENDER_EXPIRY_ALERT:
+            fire_expiry_alert();
+            break;
+        case WAKE_RENDER_FULL:
+            display_full_refresh(&st);
+            break;
+        default:
+            display_update(&st); /* partial; policy promotes every 5th to full */
+            break;
     }
     maybe_wait_for_event();
     enter_deep_sleep();
@@ -675,7 +717,7 @@ static void handle_button_wake(void) {
         audio_break_over_chime(); /* break over — ready to resume */
     }
 
-    if (timer_get_state() == TIMER_EXPIRED && before != TIMER_EXPIRED) {
+    if (wake_policy_render(before, timer_get_state(), true) == WAKE_RENDER_EXPIRY_ALERT) {
         fire_expiry_alert(); /* alert owns the NeoPixels (red pulse) */
     } else {
         /* Includes EXPIRED: any button returns the display to the main
@@ -689,9 +731,34 @@ static void handle_button_wake(void) {
     enter_deep_sleep();
 }
 
+/* Last-resort battery protection: no wake may run forever (WiFi driver
+   hang, stuck BUSY, firmware bug) — the CPU would otherwise stay awake
+   until the battery dies. Runs in the esp_timer task; enter_deep_sleep
+   persists the snapshot first, so no allocation is lost. A mid-refresh
+   force-sleep can leave the panel scruffy for one frame — acceptable for
+   a path that only fires when something is already wedged. */
+static void awake_failsafe_cb(void *arg) {
+    (void)arg;
+    ESP_LOGE(TAG, "Awake failsafe: still awake after %d s - forcing deep sleep", CONFIG_MAGTAG_MAX_AWAKE_SEC);
+    enter_deep_sleep();
+}
+
+static void arm_awake_failsafe(void) {
+    static const esp_timer_create_args_t args = {.callback = awake_failsafe_cb, .name = "awake_cap"};
+    esp_timer_handle_t t;
+    esp_err_t ret = esp_timer_create(&args, &t);
+    if (ret == ESP_OK) {
+        ret = esp_timer_start_once(t, (uint64_t)CONFIG_MAGTAG_MAX_AWAKE_SEC * 1000000ULL);
+    }
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "awake failsafe not armed: %s", esp_err_to_name(ret));
+    }
+}
+
 void app_main(void) {
     /* MUST be first peripheral call: GPIO 21 power gate HIGH (NeoPixels off) */
     neopixel_init();
+    arm_awake_failsafe();
     neopixel_set_quiet_cb(status_leds_quiet);
     neopixel_set_status_brightness(CONFIG_MAGTAG_STATUS_LED_BRIGHTNESS);
 
@@ -732,6 +799,9 @@ void app_main(void) {
     /* Reset reason distinguishes a real cold boot from an external reset
        (e.g. monitor DTR/RTS) — both report wake cause UNDEFINED. */
     ESP_LOGI(TAG, "Wakeup causes: 0x%08lx, reset reason: %d", (unsigned long)causes, (int)esp_reset_reason());
+
+    /* Battery gate before any wake work: does not return while locked */
+    check_charge_lock();
 
     if (causes & BIT(ESP_SLEEP_WAKEUP_EXT1)) {
         handle_button_wake();

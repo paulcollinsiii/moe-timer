@@ -100,6 +100,10 @@ held-button logic (release wait, continuation guard) stays level-based.
 
 WiFi is **off by default**; it is only powered up for NTP syncs and then immediately shut down.
 
+**Low battery** (checked before every wake dispatch):
+- **<= 15%**: the progress bar carries a `Charge Me!!!` badge; everything else keeps working.
+- **<= 10% (charge lock)**: a RUNNING timer is paused (the allocation must not burn while the device is unusable), the panel is painted once with `Charge Me!` and then left alone (an e-ink refresh during brownout can leave persistent artifacts), buttons are dropped from the wake mask, and the device sleeps 10-minute intervals that only re-check the battery. The lock releases with hysteresis — only once the reading clears the warn band (> 15%) — and the next normal wake repaints the full layout.
+
 ### 4 · Daily Schedule & NVS Config
 
 NVS namespace: `timer_cfg`
