@@ -45,6 +45,10 @@ void battery_init(void) {
     }
 }
 
+void *battery_adc_unit(void) {
+    return s_adc; /* shared with light.c — one owner per ADC unit */
+}
+
 int battery_read_mv(void) {
     if (!s_adc)
         return -1;

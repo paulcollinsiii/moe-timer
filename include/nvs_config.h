@@ -23,6 +23,14 @@ esp_err_t nvs_config_set_holiday_min(uint16_t val);
 esp_err_t nvs_config_get_summer_min(uint16_t *out);
 esp_err_t nvs_config_set_summer_min(uint16_t val);
 
+/* MQTT broker (HA integration). Empty URI = MQTT disabled. */
+esp_err_t nvs_config_get_mqtt_uri(char *buf, size_t len);
+esp_err_t nvs_config_set_mqtt_uri(const char *uri);
+esp_err_t nvs_config_get_mqtt_user(char *buf, size_t len);
+esp_err_t nvs_config_set_mqtt_user(const char *user);
+esp_err_t nvs_config_get_mqtt_pass(char *buf, size_t len);
+esp_err_t nvs_config_set_mqtt_pass(const char *pass);
+
 esp_err_t nvs_config_get_wifi_ssid(char *buf, size_t len);
 esp_err_t nvs_config_set_wifi_ssid(const char *ssid);
 esp_err_t nvs_config_get_wifi_pass(char *buf, size_t len);

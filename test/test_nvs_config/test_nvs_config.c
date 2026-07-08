@@ -221,6 +221,37 @@ void test_init_defaults_same_version_preserves_values(void) {
 }
 
 /* ------------------------------------------------------------------ */
+/* MQTT broker settings (HA integration)                               */
+/* ------------------------------------------------------------------ */
+
+void test_mqtt_settings_round_trip(void) {
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_set_mqtt_uri("mqtt://ha.local:1883"));
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_set_mqtt_user("magtag"));
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_set_mqtt_pass("hunter2"));
+    char buf[96];
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_mqtt_uri(buf, sizeof(buf)));
+    TEST_ASSERT_EQUAL_STRING("mqtt://ha.local:1883", buf);
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_mqtt_user(buf, sizeof(buf)));
+    TEST_ASSERT_EQUAL_STRING("magtag", buf);
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_mqtt_pass(buf, sizeof(buf)));
+    TEST_ASSERT_EQUAL_STRING("hunter2", buf);
+}
+
+void test_mqtt_settings_missing_read_as_empty(void) {
+    char buf[96] = "junk";
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_mqtt_uri(buf, sizeof(buf)));
+    TEST_ASSERT_EQUAL_STRING("", buf); /* empty = MQTT disabled */
+}
+
+void test_init_defaults_seeds_mqtt_keys(void) {
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_init_defaults());
+    char buf[96];
+    size_t len = sizeof(buf);
+    /* Key exists after seeding (value = compile-time default) */
+    TEST_ASSERT_EQUAL(ESP_OK, hal_nvs_read_str("mqtt_uri", buf, &len));
+}
+
+/* ------------------------------------------------------------------ */
 /* timer snapshot (crash/reset recovery)                               */
 /* ------------------------------------------------------------------ */
 
@@ -306,6 +337,9 @@ int main(void) {
     RUN_TEST(test_init_defaults_reseeds_on_fingerprint_change);
     RUN_TEST(test_init_defaults_missing_version_key_reseeds);
     RUN_TEST(test_init_defaults_same_version_preserves_values);
+    RUN_TEST(test_mqtt_settings_round_trip);
+    RUN_TEST(test_mqtt_settings_missing_read_as_empty);
+    RUN_TEST(test_init_defaults_seeds_mqtt_keys);
     RUN_TEST(test_timer_snapshot_save_propagates_write_failure);
     RUN_TEST(test_set_weekday_min_propagates_write_failure);
     RUN_TEST(test_timer_snapshot_round_trip);
