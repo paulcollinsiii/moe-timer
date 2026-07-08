@@ -897,6 +897,79 @@ void test_snapshot_restore_falls_back_when_active_slot_disabled(void) {
     TEST_ASSERT_EQUAL(TIMER_IDLE, timer_get_state()); /* Screen was idle */
 }
 
+/* ---- HA grant: extra time from Home Assistant (phase 3) ---- */
+
+void test_grant_idle_banks_bonus_realized_at_start(void) {
+    /* Screen idle: a grant banks bonus, consumed when the timer starts */
+    timer_grant(0, 900);
+    TEST_ASSERT_EQUAL(TIMER_IDLE, timer_get_state()); /* still idle */
+    TEST_ASSERT_EQUAL_INT32(900, g_rtc_state.slots[0].bonus_sec);
+    timer_start(T0, 3600); /* base alloc 3600 + 900 bonus */
+    TEST_ASSERT_EQUAL_INT32(4500, g_rtc_state.slots[0].allocation_sec);
+    TEST_ASSERT_EQUAL_INT32(0, g_rtc_state.slots[0].bonus_sec); /* consumed */
+    TEST_ASSERT_EQUAL_INT32(4500, timer_tick(T0));
+}
+
+void test_grant_running_extends_expiry_and_allocation(void) {
+    timer_start(T0, 3600);
+    timer_grant(0, 600);
+    TEST_ASSERT_EQUAL_INT64((int64_t)T0 + 4200, g_rtc_state.slots[0].expiry_wall_time);
+    TEST_ASSERT_EQUAL_INT32(4200, g_rtc_state.slots[0].allocation_sec);
+    TEST_ASSERT_EQUAL_INT32(4200, timer_tick(T0));
+}
+
+void test_grant_paused_extends_remaining(void) {
+    timer_start(T0, 3600);
+    timer_pause(T0 + 1000); /* 2600 left */
+    timer_grant(0, 400);
+    TEST_ASSERT_EQUAL_INT32(3000, g_rtc_state.slots[0].remaining_at_pause);
+    TEST_ASSERT_EQUAL_INT32(4000, g_rtc_state.slots[0].allocation_sec);
+}
+
+void test_grant_expired_becomes_paused_holding_grant(void) {
+    /* The chores-done case: time already ran out, +15 min → PAUSED,
+       press A to use it (never auto-RUNNING, alert never re-fires). */
+    timer_start(T0, 100);
+    timer_tick(T0 + 200); /* EXPIRED */
+    timer_grant(0, 900);
+    TEST_ASSERT_EQUAL(TIMER_PAUSED, timer_get_state());
+    TEST_ASSERT_EQUAL_INT32(900, g_rtc_state.slots[0].remaining_at_pause);
+    timer_resume(T0 + 300);
+    TEST_ASSERT_EQUAL_INT32(900, timer_tick(T0 + 300));
+}
+
+void test_grant_targets_named_non_active_slot(void) {
+    /* Active = Screen; grant Piano (slot 1) while it sits idle */
+    timer_grant(1, 600);
+    TEST_ASSERT_EQUAL_INT(0, timer_active_slot()); /* selection unchanged */
+    TEST_ASSERT_EQUAL_INT32(600, g_rtc_state.slots[1].bonus_sec);
+    TEST_ASSERT_EQUAL_INT32(0, g_rtc_state.slots[0].bonus_sec); /* Screen untouched */
+    timer_select_next();                                        /* -> Piano */
+    timer_start(T0, 900);                                       /* 900 + 600 bonus */
+    TEST_ASSERT_EQUAL_INT32(1500, g_rtc_state.slots[1].allocation_sec);
+}
+
+void test_grant_break_extends_frozen_screen_time(void) {
+    timer_start(T0, 3600);
+    timer_start_break(T0 + 1800, 900); /* 1800 screen-time frozen */
+    timer_grant(0, 300);
+    TEST_ASSERT_EQUAL(TIMER_BREAK, timer_get_state()); /* break intact */
+    TEST_ASSERT_EQUAL_INT32(2100, g_rtc_state.slots[0].remaining_at_pause);
+}
+
+void test_snapshot_v4_round_trips_bonus(void) {
+    timer_grant(1, 600); /* Piano idle bonus */
+    timer_start(T0, 3600);
+    timer_record_date(T0);
+    timer_snapshot_t snap;
+    timer_make_snapshot(&snap);
+    TEST_ASSERT_EQUAL_UINT8(4, snap.version);
+
+    timer_reset();
+    TEST_ASSERT_TRUE(timer_restore_snapshot(&snap, T0 + 100));
+    TEST_ASSERT_EQUAL_INT32(600, g_rtc_state.slots[1].bonus_sec);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_reset_state_is_idle);
@@ -978,6 +1051,13 @@ int main(void) {
     RUN_TEST(test_snapshot_restore_expired_while_off_increments_completions);
     RUN_TEST(test_snapshot_rejected_on_bad_active_slot);
     RUN_TEST(test_snapshot_rejected_on_invalid_state_in_any_slot);
+    RUN_TEST(test_grant_idle_banks_bonus_realized_at_start);
+    RUN_TEST(test_grant_running_extends_expiry_and_allocation);
+    RUN_TEST(test_grant_paused_extends_remaining);
+    RUN_TEST(test_grant_expired_becomes_paused_holding_grant);
+    RUN_TEST(test_grant_targets_named_non_active_slot);
+    RUN_TEST(test_grant_break_extends_frozen_screen_time);
+    RUN_TEST(test_snapshot_v4_round_trips_bonus);
     RUN_TEST(test_reload_screen_slot_escapes_break_and_keeps_date);
     RUN_TEST(test_set_defs_count_clamped_to_slot_count);
     RUN_TEST(test_set_defs_shorter_table_disables_missing_slots);

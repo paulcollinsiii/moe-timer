@@ -16,8 +16,13 @@ extern "C" {
 void mqtt_ha_queue_summary(const char *date, int32_t screen_used_s, const uint16_t completions[TIMER_EXTRA_SLOTS]);
 
 /* Connect, publish discovery (when the schema version changed), publish
-   the stat snapshot + any queued summary, disconnect. Bounded ~10 s. */
+   the stat snapshot + any queued summary, apply retained config/command,
+   disconnect. Bounded ~10 s. */
 void mqtt_ha_window(const stats_snapshot_t *snap);
+
+/* True (once) if a locate command was applied this window — main.c runs
+   the locate alarm after the window closes (audio/LEDs, WiFi down). */
+bool mqtt_ha_locate_pending(void);
 
 #ifdef __cplusplus
 }

@@ -62,6 +62,9 @@ esp_err_t nvs_config_set_dev_name(const char *name);
    the retained HA config re-applies after a reflash). */
 esp_err_t nvs_config_get_cfg_ver(char *buf, size_t len);
 esp_err_t nvs_config_set_cfg_ver(const char *ver);
+/* Last applied command id (apply-once dedup for the retained cmd topic). */
+esp_err_t nvs_config_get_cmd_id(char *buf, size_t len);
+esp_err_t nvs_config_set_cmd_id(const char *id);
 
 /* Extra-timer definitions from HA (timer_defs_install falls back to the
    Kconfig table when absent). Version/size drift reads as stale. */
