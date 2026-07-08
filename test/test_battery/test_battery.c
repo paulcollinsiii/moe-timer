@@ -1,7 +1,10 @@
 #include <unity.h>
 
-/* Single-TU compilation of the pure SoC curve (no ESP-IDF headers) */
+/* Single-TU compilation of the pure SoC curve + low-battery policy */
+// clang-format off
 #include "../../main/battery_soc.c"
+#include "../../main/battery_policy.c"
+// clang-format on
 
 void setUp(void) {}
 void tearDown(void) {}
@@ -40,6 +43,31 @@ void test_empty_and_garbage_clamp_to_zero(void) {
     TEST_ASSERT_EQUAL_INT(0, battery_percent_from_mv(-100));
 }
 
+/* ---- low-battery policy: 15% warn badge, 10% charge lock ---- */
+
+void test_policy_ok_above_warn_threshold(void) {
+    TEST_ASSERT_EQUAL(BATT_OK, battery_policy_evaluate(100, false));
+    TEST_ASSERT_EQUAL(BATT_OK, battery_policy_evaluate(16, false));
+}
+
+void test_policy_warn_at_15_down_to_11(void) {
+    TEST_ASSERT_EQUAL(BATT_WARN, battery_policy_evaluate(15, false));
+    TEST_ASSERT_EQUAL(BATT_WARN, battery_policy_evaluate(11, false));
+}
+
+void test_policy_lock_at_10_and_below(void) {
+    TEST_ASSERT_EQUAL(BATT_LOCK, battery_policy_evaluate(10, false));
+    TEST_ASSERT_EQUAL(BATT_LOCK, battery_policy_evaluate(0, false));
+}
+
+void test_policy_lock_hysteresis_releases_above_warn(void) {
+    /* Once locked, readings bouncing around 10% must not flap the screen:
+       stay locked through the whole warn band, release only above 15%. */
+    TEST_ASSERT_EQUAL(BATT_LOCK, battery_policy_evaluate(11, true));
+    TEST_ASSERT_EQUAL(BATT_LOCK, battery_policy_evaluate(15, true));
+    TEST_ASSERT_EQUAL(BATT_OK, battery_policy_evaluate(16, true));
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_full_at_and_above_4150);
@@ -47,5 +75,9 @@ int main(void) {
     RUN_TEST(test_mid_segments_interpolation);
     RUN_TEST(test_bottom_segment_interpolation);
     RUN_TEST(test_empty_and_garbage_clamp_to_zero);
+    RUN_TEST(test_policy_ok_above_warn_threshold);
+    RUN_TEST(test_policy_warn_at_15_down_to_11);
+    RUN_TEST(test_policy_lock_at_10_and_below);
+    RUN_TEST(test_policy_lock_hysteresis_releases_above_warn);
     return UNITY_END();
 }
