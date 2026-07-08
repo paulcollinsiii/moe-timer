@@ -39,6 +39,31 @@
 #define NVS_DEFAULT_WIFI_PASS ""
 #endif
 
+/* MQTT broker for the Home Assistant integration. Set in
+   credentials.local.h (preferred — gitignored, like WiFi) or via
+   menuconfig; empty URI disables MQTT entirely. */
+#ifndef NVS_DEFAULT_MQTT_URI
+#ifdef CONFIG_MAGTAG_MQTT_URI
+#define NVS_DEFAULT_MQTT_URI CONFIG_MAGTAG_MQTT_URI
+#else
+#define NVS_DEFAULT_MQTT_URI ""
+#endif
+#endif
+#ifndef NVS_DEFAULT_MQTT_USER
+#ifdef CONFIG_MAGTAG_MQTT_USER
+#define NVS_DEFAULT_MQTT_USER CONFIG_MAGTAG_MQTT_USER
+#else
+#define NVS_DEFAULT_MQTT_USER ""
+#endif
+#endif
+#ifndef NVS_DEFAULT_MQTT_PASS
+#ifdef CONFIG_MAGTAG_MQTT_PASS
+#define NVS_DEFAULT_MQTT_PASS CONFIG_MAGTAG_MQTT_PASS
+#else
+#define NVS_DEFAULT_MQTT_PASS ""
+#endif
+#endif
+
 /* Dublin City Schools (Grizzell MS) 2026-27 school year.
    Source: dublinschools.net 2026-27 school calendar. Update yearly. */
 #define NVS_DEFAULT_SUMMER_START "2026-05-29" /* ~day after the 2025-26 last day */

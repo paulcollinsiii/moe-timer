@@ -8,12 +8,15 @@
 #include "buttons.h"
 #include "display.h"
 #include "driver/gpio.h"
+#include "esp_app_desc.h"
 #include "esp_log.h"
 #include "esp_sleep.h"
 #include "esp_system.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "light.h"
+#include "mqtt_ha.h"
 #include "neopixel.h"
 #include "ntp.h"
 #include "nvs_config.h"
@@ -21,8 +24,10 @@
 #include "quiet_hours.h"
 #include "schedule.h"
 #include "sleep_plan.h"
+#include "stats_json.h"
 #include "timer.h"
 #include "wake_policy.h"
+#include "wifi_session.h"
 
 static const char *TAG = "main";
 
@@ -179,17 +184,97 @@ static void enter_deep_sleep(void) {
 #define NP_STATE_PIXEL 0
 #define NP_WIFI_PIXEL 3
 
-/* WiFi lifecycle is entirely inside ntp_sync(): init->connect->sync->deinit */
-static esp_err_t try_ntp_sync(void) {
+static const char *timer_state_str(timer_state_t st) {
+    switch (st) {
+        case TIMER_RUNNING:
+            return "RUNNING";
+        case TIMER_PAUSED:
+            return "PAUSED";
+        case TIMER_EXPIRED:
+            return "EXPIRED";
+        case TIMER_BREAK:
+            return "BREAK";
+        default:
+            return "IDLE";
+    }
+}
+
+static const char *day_type_name(day_type_t dt) {
+    switch (dt) {
+        case DAY_WEEKEND:
+            return "Weekend";
+        case DAY_HOLIDAY:
+            return "Holiday";
+        case DAY_SUMMER:
+            return "Summer";
+        default:
+            return "Weekday";
+    }
+}
+
+/* Side-effect-free stat snapshot for the HA session (no timer_tick — a
+   read here must never transition the state machine). */
+static void stats_collect(stats_snapshot_t *out) {
+    memset(out, 0, sizeof(*out));
+    time_t now = time(NULL);
+    out->batt_mv = battery_read_mv();
+    out->batt_pct = battery_percent_from_mv(out->batt_mv);
+    out->light_mv = light_read_mv();
+    timer_state_t st = timer_get_state();
+    out->state = timer_state_str(st);
+    const timer_def_t *def = timer_active_def();
+    out->active_timer = (def != NULL) ? def->name : "Screen";
+    day_type_t dt = schedule_get_day_type(now);
+    out->day_type = day_type_name(dt);
+    uint32_t alloc = (def != NULL) ? (uint32_t)def->duration_sec : schedule_get_allocation_sec(dt);
+    out->allocation_s = alloc;
+    const timer_slot_state_t *sl = &g_rtc_state.slots[g_rtc_state.active_slot];
+    switch (st) {
+        case TIMER_RUNNING:
+            out->remaining_s = (int32_t)(sl->expiry_wall_time - (int64_t)now);
+            break;
+        case TIMER_PAUSED:
+        case TIMER_BREAK:
+            out->remaining_s = sl->remaining_at_pause;
+            break;
+        case TIMER_IDLE:
+            out->remaining_s = (int32_t)alloc;
+            break;
+        default: /* EXPIRED */
+            out->remaining_s = 0;
+            break;
+    }
+    if (out->remaining_s < 0)
+        out->remaining_s = 0;
+    for (int i = 0; i < TIMER_EXTRA_SLOTS; i++) {
+        out->completions[i] = g_rtc_state.slots[1 + i].completions;
+    }
+    out->charge_lock = s_charge_locked;
+    out->fw = esp_app_get_description()->version;
+}
+
+/* One radio window: WiFi up, SNTP correction, HA MQTT session, WiFi down.
+   The return reflects the SNTP result only — MQTT is best-effort and can
+   never fail the sync that opened the window. */
+static esp_err_t try_net_window(void) {
 #if CONFIG_MAGTAG_SYNC_LED_FEEDBACK
     /* status class: quiet hours + brightness handled inside the module */
-    neopixel_status_pixel(NP_WIFI_PIXEL, 0, 0, 20); /* blue: sync in progress */
+    neopixel_status_pixel(NP_WIFI_PIXEL, 0, 0, 20); /* blue: window open */
 #endif
-    esp_err_t ret = ntp_sync();
+    esp_err_t ret = wifi_session_begin();
     if (ret == ESP_OK) {
-        s_last_ntp_sync = time(NULL);
-        timer_record_ntp_sync(s_last_ntp_sync);
-    } else {
+        ret = ntp_sync_in_session();
+        if (ret == ESP_OK) {
+            s_last_ntp_sync = time(NULL);
+            timer_record_ntp_sync(s_last_ntp_sync);
+        }
+        /* Stats ride the same window, after the clock correction */
+        stats_snapshot_t snap;
+        stats_collect(&snap);
+        mqtt_ha_window(&snap);
+        wifi_session_end();
+    }
+    if (ret != ESP_OK) {
         ESP_LOGW(TAG, "NTP sync failed: %s", esp_err_to_name(ret));
 #if CONFIG_MAGTAG_SYNC_LED_FEEDBACK
         for (int i = 0; i < 3; i++) {
@@ -288,6 +373,9 @@ static void check_charge_lock(void) {
             timer_pause(time(NULL));
         }
         display_charge_me(); /* one full refresh; later wakes leave the panel alone */
+        /* Best-effort HA notification (charge_lock: true) — the last stat
+           before the long battery-recheck sleeps begin. */
+        try_net_window();
     }
     enter_deep_sleep(); /* lock-aware: long interval, no button wake */
 }
@@ -404,6 +492,41 @@ static void fire_expiry_alert(void) {
 
 /* ---- day rollover ----------------------------------------------------- */
 
+/* Yesterday's usage numbers for HA, captured BEFORE the rollover resets
+   the slots; published by the rollover's own network window. */
+static void queue_rollover_summary(void) {
+    if (g_rtc_state.last_date[0] == '\0') {
+        return; /* cold boot / restored-from-nothing: no day to report */
+    }
+    const timer_slot_state_t *s0 = &g_rtc_state.slots[0];
+    int32_t remaining;
+    switch (s0->state) {
+        case TIMER_RUNNING:
+            remaining = (int32_t)(s0->expiry_wall_time - (int64_t)time(NULL));
+            break;
+        case TIMER_PAUSED:
+        case TIMER_BREAK:
+            remaining = s0->remaining_at_pause;
+            break;
+        case TIMER_EXPIRED:
+            remaining = 0;
+            break;
+        default: /* IDLE: never started — allocation_sec is still 0 */
+            remaining = s0->allocation_sec;
+            break;
+    }
+    if (remaining < 0)
+        remaining = 0;
+    int32_t used = s0->allocation_sec - remaining;
+    if (used < 0)
+        used = 0;
+    uint16_t comp[TIMER_EXTRA_SLOTS];
+    for (int i = 0; i < TIMER_EXTRA_SLOTS; i++) {
+        comp[i] = g_rtc_state.slots[1 + i].completions;
+    }
+    mqtt_ha_queue_summary(g_rtc_state.last_date, used, comp);
+}
+
 static void handle_day_rollover(time_t *now) {
     if (!timer_is_new_day(*now))
         return;
@@ -411,8 +534,9 @@ static void handle_day_rollover(time_t *now) {
        date has NOT actually changed, this pinpoints why (bad stored date
        vs. stepped clock). */
     ESP_LOGW(TAG, "Day rollover (last_date='%s', now=%lld)", g_rtc_state.last_date, (long long)*now);
+    queue_rollover_summary(); /* yesterday's stats, before any reset */
     /* Fail-open: reset to IDLE with today's allocation even if sync fails */
-    try_ntp_sync();
+    try_net_window();
     *now = time(NULL);
     /* Power cycling must not refund the allocation: with the clock now
        corrected, a same-day NVS snapshot beats a reset. Only a genuine
@@ -506,7 +630,7 @@ static void maybe_wait_for_event(void) {
        moment the alert fires. Skip when recently synced or when the sync
        itself (~5-9 s) would blow past the expiry. */
     if (timer_needs_ntp_sync(now) && remaining > 15) {
-        try_ntp_sync();
+        try_net_window();
     }
     neopixel_show_timer_state();
 
@@ -558,7 +682,7 @@ static void handle_timer_tick(void) {
 
     if (wake_policy_sync_due(timer_get_state(), timer_needs_ntp_sync(now), now, s_last_ntp_sync,
                              IDLE_SYNC_INTERVAL_SEC)) {
-        try_ntp_sync();
+        try_net_window();
         now = time(NULL);
     }
 
@@ -658,7 +782,7 @@ static void handle_button_wake(void) {
 
                 int64_t mono_before_us = esp_timer_get_time();
                 time_t wall_before = time(NULL);
-                if (try_ntp_sync() == ESP_OK) {
+                if (try_net_window() == ESP_OK) {
                     int64_t elapsed_sec = (esp_timer_get_time() - mono_before_us) / 1000000;
                     int64_t step = (int64_t)time(NULL) - ((int64_t)wall_before + elapsed_sec);
                     timer_shift_expiry(step);
@@ -691,7 +815,7 @@ static void handle_button_wake(void) {
             }
             break;
         case BTN_D:
-            try_ntp_sync();
+            try_net_window();
             now = time(NULL);
             break;
         case BTN_NONE:
@@ -792,6 +916,7 @@ void app_main(void) {
 
     buttons_init();
     battery_init();
+    light_init();
     audio_init();
     display_init();
 

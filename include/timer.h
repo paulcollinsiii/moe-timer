@@ -104,6 +104,8 @@ void timer_defs_install(void);
 int timer_active_slot(void);
 /* Definition of the active slot; NULL for slot 0 (Screen uses schedule.c). */
 const timer_def_t *timer_active_def(void);
+/* Definition of any slot; NULL for slot 0, disabled, or out of range. */
+const timer_def_t *timer_slot_def(int slot);
 int timer_extra_count(void); /* enabled extra slots */
 /* True when a Button C swap would succeed: extras exist and the active
    slot is not RUNNING/BREAK. Also gates C as an EXT1 wake source — a

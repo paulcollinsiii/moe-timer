@@ -40,6 +40,12 @@ int timer_active_slot(void) {
     return g_rtc_state.active_slot;
 }
 
+const timer_def_t *timer_slot_def(int slot) {
+    if (slot <= 0 || !slot_enabled(slot))
+        return NULL; /* Screen (0), disabled, or out of range */
+    return &s_defs[slot];
+}
+
 const timer_def_t *timer_active_def(void) {
     int slot = g_rtc_state.active_slot;
     if (slot == 0 || slot >= s_defs_count)

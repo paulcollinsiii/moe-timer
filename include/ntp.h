@@ -5,10 +5,10 @@
 extern "C" {
 #endif
 
-/* Performs a full WiFi+SNTP sync cycle.
+/* SNTP clock sync; requires an open wifi_session window.
    On ESP_OK, time(NULL) reflects corrected UTC.
    Does NOT read or write expiry_wall_time. */
-esp_err_t ntp_sync(void);
+esp_err_t ntp_sync_in_session(void);
 
 #ifdef __cplusplus
 }
