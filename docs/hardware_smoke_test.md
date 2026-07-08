@@ -148,4 +148,37 @@ credentials.**
         to `Weekday`, and Dublin no-school days (e.g. 2026-10-16) read
         `Holiday`.
 
+## Home Assistant integration (v1.4)
+
+Requires a broker URI in NVS (`NVS_DEFAULT_MQTT_URI` in
+`include/credentials.local.h`, or menuconfig). Full HA-side verification
+(entity discovery, config_ack, dashboards) is in `docs/home_assistant.md`;
+these items cover the on-hardware behaviour.
+
+34. [ ] **Ambient light sensor**: log shows a plausible `light_mv` in the
+        stat payload (or add a temporary `ESP_LOGI`); covering GPIO 3 with a
+        finger vs. a bright light visibly changes the value. Confirms the
+        ALS-PT19 read and that light.c sharing battery.c's ADC1 unit works
+        (battery % must still read correctly in the same wake).
+35. [ ] **Network window (MQTT enabled)**: a sync wake connects WiFi, syncs
+        NTP, then connects the broker and publishes — log shows
+        `published N messages`; the device appears under MQTT in HA within
+        one window. The window is ~1-3 s longer than a plain NTP sync.
+36. [ ] **MQTT disabled**: with an empty broker URI, the sync wake does NTP
+        only (no broker connect attempt, no added delay, no error spam) —
+        confirms the empty-URI skip path.
+37. [ ] **Grant on hardware**: publish a grant to an EXPIRED Screen timer
+        (see home_assistant.md); on the next window the panel shows PAUSED
+        holding the granted time and Button A starts it — the TIME'S UP
+        alarm does NOT re-fire. A grant while RUNNING extends the countdown
+        in place.
+38. [ ] **Locate alarm**: publish a locate command; on the next window the
+        device beeps with a red NeoPixel pulse until any button is pressed
+        (or ~10 min). Confirm it does not trip the awake failsafe early and
+        that the normal layout returns after dismissal.
+39. [ ] **Daily summary**: after a day rollover, the log/HA shows a
+        `summary` publish (screen seconds used + per-timer completions) for
+        the finished day; the charge-lock entry (case 23) publishes one
+        final stat with `charge_lock` true before the long sleeps.
+
 Record failures with the monitor log snippet and the step number.
