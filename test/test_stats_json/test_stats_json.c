@@ -62,6 +62,25 @@ void test_stat_payload_reports_needed_length_when_truncated(void) {
     TEST_ASSERT_EQUAL_CHAR('\0', buf[sizeof(buf) - 1]); /* still terminated */
 }
 
+void test_stat_payload_null_string_fields_are_safe(void) {
+    /* A NULL state/day_type/fw/active_timer must not crash the builder
+       (defensive: main.c always populates them, but the payload builder
+       is the pure boundary and should never invoke UB on bad input). */
+    char buf[512];
+    stats_snapshot_t s = base_snapshot();
+    s.state = NULL;
+    s.active_timer = NULL;
+    s.day_type = NULL;
+    s.fw = NULL;
+    int n = stats_json_stat(buf, sizeof(buf), &s);
+    TEST_ASSERT_GREATER_THAN_INT(0, n);
+    /* NULL renders as empty strings, JSON stays well-formed */
+    TEST_ASSERT_NOT_NULL(strstr(buf, "\"state\":\"\""));
+    TEST_ASSERT_NOT_NULL(strstr(buf, "\"active_timer\":\"\""));
+    TEST_ASSERT_NOT_NULL(strstr(buf, "\"day_type\":\"\""));
+    TEST_ASSERT_NOT_NULL(strstr(buf, "\"fw\":\"\""));
+}
+
 /* ---- daily summary ---- */
 
 void test_summary_payload_exact(void) {
@@ -160,6 +179,7 @@ int main(void) {
     RUN_TEST(test_stat_payload_charge_lock_true);
     RUN_TEST(test_stat_payload_escapes_timer_name);
     RUN_TEST(test_stat_payload_reports_needed_length_when_truncated);
+    RUN_TEST(test_stat_payload_null_string_fields_are_safe);
     RUN_TEST(test_summary_payload_exact);
     RUN_TEST(test_discovery_entity_table_is_populated);
     RUN_TEST(test_discovery_topic);

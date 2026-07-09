@@ -100,6 +100,86 @@ void test_bad_date_shape_rejected(void) {
     TEST_ASSERT_NOT_NULL(strstr(ack, "school_start"));
 }
 
+void test_valid_dates_applied(void) {
+    char ack[256];
+    apply(
+        "{\"ver\":\"1\",\"summer_start\":\"2027-06-01\",\"school_start\":\"2027-08-18\","
+        "\"school_end\":\"2028-05-26\"}",
+        ack, sizeof(ack));
+    char s[16];
+    nvs_config_get_summer_start(s, sizeof(s));
+    TEST_ASSERT_EQUAL_STRING("2027-06-01", s);
+    nvs_config_get_school_start(s, sizeof(s));
+    TEST_ASSERT_EQUAL_STRING("2027-08-18", s);
+    nvs_config_get_school_end(s, sizeof(s));
+    TEST_ASSERT_EQUAL_STRING("2028-05-26", s);
+    TEST_ASSERT_NOT_NULL(strstr(ack, "\"ok\":true"));
+}
+
+void test_impossible_calendar_date_rejected(void) {
+    /* Correct shape, impossible month/day — must be rejected, not stored */
+    char ack[256];
+    apply("{\"ver\":\"1\",\"school_start\":\"2026-13-45\"}", ack, sizeof(ack));
+    char s[16];
+    nvs_config_get_school_start(s, sizeof(s));
+    TEST_ASSERT_EQUAL_STRING(NVS_DEFAULT_SCHOOL_START, s);
+    TEST_ASSERT_NOT_NULL(strstr(ack, "school_start"));
+}
+
+void test_numeric_ver_accepted(void) {
+    /* ver may arrive as a JSON number (now().timestamp()|int in HA) */
+    char ack[256];
+    TEST_ASSERT_EQUAL(CONFIG_APPLIED, apply("{\"ver\":20260708,\"weekday_min\":50}", ack, sizeof(ack)));
+    char s[24];
+    nvs_config_get_cfg_ver(s, sizeof(s));
+    TEST_ASSERT_EQUAL_STRING("20260708", s);
+    /* same numeric ver is then idempotent */
+    TEST_ASSERT_EQUAL(CONFIG_SKIPPED, apply("{\"ver\":20260708,\"weekday_min\":77}", ack, sizeof(ack)));
+}
+
+void test_legal_edge_values_applied(void) {
+    char ack[256];
+    /* quiet_start 0 (midnight) and break_interval_min 0 (breaks disabled)
+       are both in range and must apply, not error */
+    apply("{\"ver\":\"1\",\"quiet_start\":0,\"break_interval_min\":0}", ack, sizeof(ack));
+    uint16_t v;
+    nvs_config_get_quiet_start(&v);
+    TEST_ASSERT_EQUAL_UINT16(0, v);
+    nvs_config_get_break_interval_min(&v);
+    TEST_ASSERT_EQUAL_UINT16(0, v);
+    TEST_ASSERT_NOT_NULL(strstr(ack, "\"ok\":true"));
+}
+
+void test_short_timers_array_disables_trailing_slots(void) {
+    char ack[256];
+    apply("{\"ver\":\"1\",\"timers\":[{\"name\":\"Piano\",\"min\":15}]}", ack, sizeof(ack));
+    nvs_timer_defs_blob_t defs;
+    nvs_config_get_timer_defs(&defs);
+    TEST_ASSERT_EQUAL_STRING("Piano", defs.defs[0].name);
+    TEST_ASSERT_EQUAL_STRING("", defs.defs[1].name); /* absent entries = disabled */
+    TEST_ASSERT_EQUAL_STRING("", defs.defs[2].name);
+    TEST_ASSERT_EQUAL_STRING("", defs.defs[3].name);
+}
+
+void test_timers_wrong_type_rejected(void) {
+    char ack[256];
+    apply("{\"ver\":\"1\",\"timers\":5}", ack, sizeof(ack));
+    TEST_ASSERT_NOT_NULL(strstr(ack, "timers"));
+    nvs_timer_defs_blob_t defs;
+    TEST_ASSERT_EQUAL(ESP_ERR_NVS_NOT_FOUND, nvs_config_get_timer_defs(&defs));
+}
+
+void test_holidays_non_string_element_rejected_keeps_good(void) {
+    char ack[256];
+    apply("{\"ver\":\"1\",\"holidays\":[\"2026-10-16\",42,\"2026-12-25\"]}", ack, sizeof(ack));
+    char blob[512];
+    size_t len = sizeof(blob);
+    nvs_config_get_holidays(blob, &len);
+    blob[len] = '\0';
+    TEST_ASSERT_EQUAL_STRING("2026-10-16\n2026-12-25\n", blob);
+    TEST_ASSERT_NOT_NULL(strstr(ack, "holidays"));
+}
+
 /* ---- malformed / missing ver ---- */
 
 void test_missing_ver_is_invalid(void) {
@@ -195,6 +275,13 @@ int main(void) {
     RUN_TEST(test_partial_document_touches_only_present_fields);
     RUN_TEST(test_invalid_field_reported_but_others_apply);
     RUN_TEST(test_bad_date_shape_rejected);
+    RUN_TEST(test_valid_dates_applied);
+    RUN_TEST(test_impossible_calendar_date_rejected);
+    RUN_TEST(test_numeric_ver_accepted);
+    RUN_TEST(test_legal_edge_values_applied);
+    RUN_TEST(test_short_timers_array_disables_trailing_slots);
+    RUN_TEST(test_timers_wrong_type_rejected);
+    RUN_TEST(test_holidays_non_string_element_rejected_keeps_good);
     RUN_TEST(test_missing_ver_is_invalid);
     RUN_TEST(test_malformed_json_is_invalid_no_crash);
     RUN_TEST(test_holidays_array_becomes_newline_blob);

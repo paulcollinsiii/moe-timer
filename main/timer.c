@@ -120,6 +120,36 @@ int64_t timer_expiry_wall(void) {
     return active()->expiry_wall_time;
 }
 
+int32_t timer_slot_remaining(int slot, time_t now, int32_t idle_fallback) {
+    if (slot < 0 || slot >= TIMER_SLOT_COUNT)
+        return 0;
+    const timer_slot_state_t *sl = &g_rtc_state.slots[slot];
+    int32_t r;
+    switch (sl->state) {
+        case TIMER_RUNNING:
+            r = (int32_t)(sl->expiry_wall_time - (int64_t)now);
+            break;
+        case TIMER_PAUSED:
+        case TIMER_BREAK:
+            r = sl->remaining_at_pause;
+            break;
+        case TIMER_IDLE:
+            r = idle_fallback;
+            break;
+        default: /* EXPIRED */
+            r = 0;
+            break;
+    }
+    return (r > 0) ? r : 0;
+}
+
+int32_t timer_screen_used_sec(time_t now) {
+    const timer_slot_state_t *s0 = &g_rtc_state.slots[0];
+    int32_t remaining = timer_slot_remaining(0, now, s0->allocation_sec);
+    int32_t used = s0->allocation_sec - remaining;
+    return (used > 0) ? used : 0;
+}
+
 uint16_t timer_completions(void) {
     return active()->completions;
 }

@@ -149,6 +149,12 @@ bool timer_needs_ntp_sync(time_t now);
 void timer_record_ntp_sync(time_t now);
 int64_t timer_expiry_wall(void);  /* active slot's expiry wall time (0 if unset) */
 uint16_t timer_completions(void); /* active slot's completed runs today */
+/* Display-facing remaining seconds for any slot, without ticking (no state
+   change): RUNNING = expiry-now, PAUSED/BREAK = frozen remaining, IDLE =
+   idle_fallback (caller's allocation), EXPIRED = 0; clamped >= 0. */
+int32_t timer_slot_remaining(int slot, time_t now, int32_t idle_fallback);
+/* Screen-timer (slot 0) seconds consumed today: allocation - remaining. */
+int32_t timer_screen_used_sec(time_t now);
 
 /* Eye-rest break: accrued RUNNING seconds trigger an enforced break.
    Screen-only — timer_break_due is always false on extra slots. */
