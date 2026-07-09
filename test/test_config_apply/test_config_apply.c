@@ -20,6 +20,34 @@ static config_result_t apply(const char *json, char *ack, size_t acklen) {
     return config_apply(json, ack, acklen);
 }
 
+/* ---- is_iso_date: real calendar validity (mktime round-trip) ---- */
+
+void test_is_iso_date_accepts_valid(void) {
+    TEST_ASSERT_TRUE(is_iso_date("2026-08-20"));
+    TEST_ASSERT_TRUE(is_iso_date("2026-01-01"));
+    TEST_ASSERT_TRUE(is_iso_date("2026-12-31"));
+    TEST_ASSERT_TRUE(is_iso_date("2028-02-29")); /* leap year */
+}
+
+void test_is_iso_date_rejects_bad_shape(void) {
+    TEST_ASSERT_FALSE(is_iso_date(NULL));
+    TEST_ASSERT_FALSE(is_iso_date(""));
+    TEST_ASSERT_FALSE(is_iso_date("2026-8-20"));  /* not zero-padded */
+    TEST_ASSERT_FALSE(is_iso_date("2026/08/20")); /* wrong separators */
+    TEST_ASSERT_FALSE(is_iso_date("not-a-date"));
+    TEST_ASSERT_FALSE(is_iso_date("2026-08-2x"));
+}
+
+void test_is_iso_date_rejects_impossible_calendar_dates(void) {
+    TEST_ASSERT_FALSE(is_iso_date("2026-13-45")); /* month & day out of range */
+    TEST_ASSERT_FALSE(is_iso_date("2026-00-10")); /* month 0 */
+    TEST_ASSERT_FALSE(is_iso_date("2026-02-00")); /* day 0 */
+    TEST_ASSERT_FALSE(is_iso_date("2026-02-31")); /* Feb has no 31st */
+    TEST_ASSERT_FALSE(is_iso_date("2026-04-31")); /* April has 30 days */
+    TEST_ASSERT_FALSE(is_iso_date("2026-02-29")); /* 2026 is not a leap year */
+    TEST_ASSERT_FALSE(is_iso_date("2100-02-29")); /* century non-leap */
+}
+
 /* ---- version gating ---- */
 
 void test_full_document_applies_and_stores_ver(void) {
@@ -269,6 +297,9 @@ void test_timers_overlong_name_rejected(void) {
 
 int main(void) {
     UNITY_BEGIN();
+    RUN_TEST(test_is_iso_date_accepts_valid);
+    RUN_TEST(test_is_iso_date_rejects_bad_shape);
+    RUN_TEST(test_is_iso_date_rejects_impossible_calendar_dates);
     RUN_TEST(test_full_document_applies_and_stores_ver);
     RUN_TEST(test_same_ver_skips_without_writing);
     RUN_TEST(test_new_ver_reapplies);
