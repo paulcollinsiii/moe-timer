@@ -8,6 +8,7 @@
 #include "cJSON.h"
 #include "mock_hal_nvs.c"
 #include "../../main/nvs_config.c"
+#include "../../main/quiet_hours.c"
 #include "../../main/config_apply.c"
 // clang-format on
 
@@ -165,6 +166,18 @@ void test_numeric_ver_accepted(void) {
     TEST_ASSERT_EQUAL(CONFIG_SKIPPED, apply("{\"ver\":20260708,\"weekday_min\":77}", ack, sizeof(ack)));
 }
 
+void test_quiet_hhmm_out_of_range_minute_rejected(void) {
+    char ack[256];
+    /* 2260 passes a naive 0..2359 range but minute 60 is not a real time */
+    apply("{\"ver\":\"1\",\"quiet_start\":2260,\"quiet_end\":830}", ack, sizeof(ack));
+    uint16_t v;
+    nvs_config_get_quiet_start(&v);
+    TEST_ASSERT_EQUAL_UINT16(NVS_DEFAULT_QUIET_START, v); /* rejected */
+    nvs_config_get_quiet_end(&v);
+    TEST_ASSERT_EQUAL_UINT16(830, v); /* valid sibling still applied */
+    TEST_ASSERT_NOT_NULL(strstr(ack, "quiet_start"));
+}
+
 void test_legal_edge_values_applied(void) {
     char ack[256];
     /* quiet_start 0 (midnight) and break_interval_min 0 (breaks disabled)
@@ -309,6 +322,7 @@ int main(void) {
     RUN_TEST(test_valid_dates_applied);
     RUN_TEST(test_impossible_calendar_date_rejected);
     RUN_TEST(test_numeric_ver_accepted);
+    RUN_TEST(test_quiet_hhmm_out_of_range_minute_rejected);
     RUN_TEST(test_legal_edge_values_applied);
     RUN_TEST(test_short_timers_array_disables_trailing_slots);
     RUN_TEST(test_timers_wrong_type_rejected);

@@ -1,5 +1,6 @@
 #include "timer.h"
 
+#include <stdio.h>
 #include <string.h>
 #include <time.h>
 
@@ -309,18 +310,9 @@ void timer_shift_expiry(int64_t delta_sec) {
     }
 }
 
+/* buf must hold 11 bytes ("YYYY-MM-DD\0"). Same format as schedule.c. */
 static void fill_date(char *buf, int year, int mon, int day) {
-    buf[0] = '0' + (year / 1000) % 10;
-    buf[1] = '0' + (year / 100) % 10;
-    buf[2] = '0' + (year / 10) % 10;
-    buf[3] = '0' + year % 10;
-    buf[4] = '-';
-    buf[5] = '0' + mon / 10;
-    buf[6] = '0' + mon % 10;
-    buf[7] = '-';
-    buf[8] = '0' + day / 10;
-    buf[9] = '0' + day % 10;
-    buf[10] = '\0';
+    snprintf(buf, 11, "%04d-%02d-%02d", year, mon, day);
 }
 
 bool timer_is_new_day(time_t now) {
