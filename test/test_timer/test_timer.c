@@ -907,6 +907,58 @@ void test_snapshot_restore_falls_back_when_active_slot_disabled(void) {
     TEST_ASSERT_EQUAL(TIMER_IDLE, timer_get_state()); /* Screen was idle */
 }
 
+/* ---- display-remaining + screen-used primitives (shared, pure) ---- */
+
+void test_slot_remaining_per_state(void) {
+    /* RUNNING: expiry - now */
+    timer_start(T0, 3600);
+    TEST_ASSERT_EQUAL_INT32(3000, timer_slot_remaining(0, T0 + 600, 3600));
+    /* RUNNING past expiry clamps to 0, never negative */
+    TEST_ASSERT_EQUAL_INT32(0, timer_slot_remaining(0, T0 + 5000, 3600));
+    /* PAUSED: the frozen remaining, now irrelevant */
+    timer_pause(T0 + 600);
+    TEST_ASSERT_EQUAL_INT32(3000, timer_slot_remaining(0, T0 + 99999, 3600));
+    /* IDLE: the caller's fallback (allocation for a full bar) */
+    timer_reset();
+    TEST_ASSERT_EQUAL_INT32(3600, timer_slot_remaining(0, T0, 3600));
+    /* EXPIRED: 0 */
+    timer_start(T0, 100);
+    timer_tick(T0 + 200);
+    TEST_ASSERT_EQUAL_INT32(0, timer_slot_remaining(0, T0 + 200, 100));
+}
+
+void test_slot_remaining_reads_the_named_slot(void) {
+    timer_select_next(); /* Piano active */
+    timer_start(T0, 900);
+    timer_pause(T0 + 100); /* Piano paused, 800 left */
+    /* Screen (slot 0) is still IDLE → fallback; Piano (slot 1) → 800 */
+    TEST_ASSERT_EQUAL_INT32(1234, timer_slot_remaining(0, T0 + 100, 1234));
+    TEST_ASSERT_EQUAL_INT32(800, timer_slot_remaining(1, T0 + 100, 900));
+}
+
+void test_screen_used_sec_per_state(void) {
+    /* Never started: 0 used (IDLE, allocation still 0) */
+    TEST_ASSERT_EQUAL_INT32(0, timer_screen_used_sec(T0));
+    /* RUNNING 600 s into a 3600 s allocation → 600 used */
+    timer_start(T0, 3600);
+    TEST_ASSERT_EQUAL_INT32(600, timer_screen_used_sec(T0 + 600));
+    /* PAUSED after 1000 s → 1000 used */
+    timer_pause(T0 + 1000);
+    TEST_ASSERT_EQUAL_INT32(1000, timer_screen_used_sec(T0 + 9999));
+    /* EXPIRED → the whole allocation counts as used */
+    timer_reset();
+    timer_start(T0, 100);
+    timer_tick(T0 + 200);
+    TEST_ASSERT_EQUAL_INT32(100, timer_screen_used_sec(T0 + 200));
+}
+
+void test_screen_used_sec_is_slot_zero_only(void) {
+    /* An extra timer running must not affect Screen's used-today */
+    timer_select_next(); /* Piano */
+    timer_start(T0, 900);
+    TEST_ASSERT_EQUAL_INT32(0, timer_screen_used_sec(T0 + 300)); /* Screen never ran */
+}
+
 /* ---- HA grant: extra time from Home Assistant (phase 3) ---- */
 
 void test_grant_idle_banks_bonus_realized_at_start(void) {
@@ -1062,6 +1114,10 @@ int main(void) {
     RUN_TEST(test_snapshot_restore_expired_while_off_increments_completions);
     RUN_TEST(test_snapshot_rejected_on_bad_active_slot);
     RUN_TEST(test_snapshot_rejected_on_invalid_state_in_any_slot);
+    RUN_TEST(test_slot_remaining_per_state);
+    RUN_TEST(test_slot_remaining_reads_the_named_slot);
+    RUN_TEST(test_screen_used_sec_per_state);
+    RUN_TEST(test_screen_used_sec_is_slot_zero_only);
     RUN_TEST(test_grant_idle_banks_bonus_realized_at_start);
     RUN_TEST(test_grant_running_extends_expiry_and_allocation);
     RUN_TEST(test_grant_paused_extends_remaining);

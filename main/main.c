@@ -231,24 +231,7 @@ static void stats_collect(stats_snapshot_t *out) {
     out->day_type = day_type_name(dt);
     uint32_t alloc = (def != NULL) ? (uint32_t)def->duration_sec : schedule_get_allocation_sec(dt);
     out->allocation_s = alloc;
-    const timer_slot_state_t *sl = &g_rtc_state.slots[g_rtc_state.active_slot];
-    switch (st) {
-        case TIMER_RUNNING:
-            out->remaining_s = (int32_t)(sl->expiry_wall_time - (int64_t)now);
-            break;
-        case TIMER_PAUSED:
-        case TIMER_BREAK:
-            out->remaining_s = sl->remaining_at_pause;
-            break;
-        case TIMER_IDLE:
-            out->remaining_s = (int32_t)alloc;
-            break;
-        default: /* EXPIRED */
-            out->remaining_s = 0;
-            break;
-    }
-    if (out->remaining_s < 0)
-        out->remaining_s = 0;
+    out->remaining_s = timer_slot_remaining(g_rtc_state.active_slot, now, (int32_t)alloc);
     for (int i = 0; i < TIMER_EXTRA_SLOTS; i++) {
         out->completions[i] = g_rtc_state.slots[1 + i].completions;
     }
@@ -510,28 +493,7 @@ static void queue_rollover_summary(void) {
     if (g_rtc_state.last_date[0] == '\0') {
         return; /* cold boot / restored-from-nothing: no day to report */
     }
-    const timer_slot_state_t *s0 = &g_rtc_state.slots[0];
-    int32_t remaining;
-    switch (s0->state) {
-        case TIMER_RUNNING:
-            remaining = (int32_t)(s0->expiry_wall_time - (int64_t)time(NULL));
-            break;
-        case TIMER_PAUSED:
-        case TIMER_BREAK:
-            remaining = s0->remaining_at_pause;
-            break;
-        case TIMER_EXPIRED:
-            remaining = 0;
-            break;
-        default: /* IDLE: never started — allocation_sec is still 0 */
-            remaining = s0->allocation_sec;
-            break;
-    }
-    if (remaining < 0)
-        remaining = 0;
-    int32_t used = s0->allocation_sec - remaining;
-    if (used < 0)
-        used = 0;
+    int32_t used = timer_screen_used_sec(time(NULL));
     uint16_t comp[TIMER_EXTRA_SLOTS];
     for (int i = 0; i < TIMER_EXTRA_SLOTS; i++) {
         comp[i] = g_rtc_state.slots[1 + i].completions;
