@@ -154,6 +154,20 @@ void test_full_cycle_idle_run_pause_resume_expire(void) {
     TEST_ASSERT_EQUAL(TIMER_EXPIRED, timer_get_state());
 }
 
+void test_record_date_formats_yyyy_mm_dd(void) {
+    /* Pin the exact stored format (guards the fill_date implementation) */
+    char *old_tz = getenv("TZ");
+    setenv("TZ", "UTC0", 1);
+    tzset();
+    timer_record_date(T0); /* 2026-01-05 00:00:00 UTC */
+    TEST_ASSERT_EQUAL_STRING("2026-01-05", g_rtc_state.last_date);
+    if (old_tz)
+        setenv("TZ", old_tz, 1);
+    else
+        unsetenv("TZ");
+    tzset();
+}
+
 void test_is_new_day_false_when_same_date(void) {
     timer_record_date(T0);
     TEST_ASSERT_FALSE(timer_is_new_day(T0 + 3600));
@@ -1054,6 +1068,7 @@ int main(void) {
     RUN_TEST(test_resume_sets_expiry_from_remaining_at_pause);
     RUN_TEST(test_resume_preserves_remaining_within_one_second);
     RUN_TEST(test_full_cycle_idle_run_pause_resume_expire);
+    RUN_TEST(test_record_date_formats_yyyy_mm_dd);
     RUN_TEST(test_is_new_day_false_when_same_date);
     RUN_TEST(test_is_new_day_true_after_midnight);
     RUN_TEST(test_is_new_day_true_on_cold_boot);

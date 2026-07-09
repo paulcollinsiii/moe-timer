@@ -13,3 +13,9 @@ bool quiet_hours_active(int now_min, int start_min, int end_min) {
 int quiet_hhmm_to_minutes(int hhmm) {
     return (hhmm / 100) * 60 + (hhmm % 100);
 }
+
+bool quiet_hhmm_valid(int hhmm) {
+    if (hhmm < 0 || hhmm > 2359)
+        return false;
+    return (hhmm / 100) <= 23 && (hhmm % 100) <= 59;
+}
