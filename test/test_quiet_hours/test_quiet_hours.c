@@ -46,6 +46,20 @@ void test_hhmm_to_minutes(void) {
     TEST_ASSERT_EQUAL_INT(1439, quiet_hhmm_to_minutes(2359));
 }
 
+void test_hhmm_valid(void) {
+    TEST_ASSERT_TRUE(quiet_hhmm_valid(0));    /* 00:00 */
+    TEST_ASSERT_TRUE(quiet_hhmm_valid(2359)); /* 23:59 */
+    TEST_ASSERT_TRUE(quiet_hhmm_valid(2230));
+    TEST_ASSERT_TRUE(quiet_hhmm_valid(800));
+    /* A 0..2359 range check alone lets these through, but they aren't
+       real times — the minutes/hour fields are out of range. */
+    TEST_ASSERT_FALSE(quiet_hhmm_valid(2260)); /* minute 60 */
+    TEST_ASSERT_FALSE(quiet_hhmm_valid(2299)); /* minute 99 */
+    TEST_ASSERT_FALSE(quiet_hhmm_valid(2400)); /* hour 24 */
+    TEST_ASSERT_FALSE(quiet_hhmm_valid(-1));
+    TEST_ASSERT_FALSE(quiet_hhmm_valid(9999));
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_active_late_evening);
@@ -54,5 +68,6 @@ int main(void) {
     RUN_TEST(test_non_wrapping_window);
     RUN_TEST(test_equal_start_end_disables);
     RUN_TEST(test_hhmm_to_minutes);
+    RUN_TEST(test_hhmm_valid);
     return UNITY_END();
 }
