@@ -3,6 +3,7 @@
 
 #include <stdio.h>
 #include <string.h>
+#include <time.h>
 
 #include "cJSON.h"
 #include "nvs_config.h"
@@ -35,12 +36,22 @@ static bool is_iso_date(const char *s) {
             return false;
         }
     }
-    /* Reject shape-valid but impossible dates (e.g. 2026-13-45). Loose
-       month/day bounds — a real calendar check isn't worth it, this only
-       needs to keep obvious garbage out of the stored schedule. */
+    int year = (s[0] - '0') * 1000 + (s[1] - '0') * 100 + (s[2] - '0') * 10 + (s[3] - '0');
     int month = (s[5] - '0') * 10 + (s[6] - '0');
     int day = (s[8] - '0') * 10 + (s[9] - '0');
-    return month >= 1 && month <= 12 && day >= 1 && day <= 31;
+    /* Calendar validity (month lengths, leap years) via a mktime round
+       trip: mktime normalizes an impossible date (Feb 31 -> Mar 3), so if
+       it changed any field the date was invalid. Noon dodges DST-gap
+       midnights; libc owns all the corner cases. */
+    struct tm tm = {0};
+    tm.tm_year = year - 1900;
+    tm.tm_mon = month - 1;
+    tm.tm_mday = day;
+    tm.tm_hour = 12;
+    tm.tm_isdst = -1;
+    if (mktime(&tm) == (time_t)-1)
+        return false;
+    return tm.tm_year == year - 1900 && tm.tm_mon == month - 1 && tm.tm_mday == day;
 }
 
 /* Apply a bounded integer field to a u16 setter; records the field name on
