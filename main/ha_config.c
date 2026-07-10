@@ -55,7 +55,7 @@ const char *ha_config_json_escape(char *tmp, size_t tmplen, const char *s) {
 #define TIMER_MIN(n)                                                                                    \
     {                                                                                                   \
         .key = "timer" #n "_min", .component = "number", .name = "Timer " #n " minutes", .unit = "min", \
-        .kind = CFG_TMIN, .lo = 1, .hi = 1440, .step = 5, .slot = n                                     \
+        .kind = CFG_TMIN, .lo = 1, .hi = 1440, .step = 1, .slot = n                                     \
     }
 #define TIMER_RELOAD(n)                                                                                             \
     {                                                                                                               \
@@ -68,16 +68,18 @@ const char *ha_config_json_escape(char *tmp, size_t tmplen, const char *s) {
 _Static_assert(TIMER_EXTRA_SLOTS >= 4, "ha_config registry assumes >= 4 extra-timer slots");
 
 static const cfg_field_t FIELDS[] = {
-    NUM_U16("weekday_min", "Weekday allocation", "min", 1, 1440, 5, nvs_config_set_weekday_min,
+    /* step=1: HA validates entries against min+k*step, so a step of 5 with
+       a min of 1 rejects round values (30, 45, 60). Keep it 1. */
+    NUM_U16("weekday_min", "Weekday allocation", "min", 1, 1440, 1, nvs_config_set_weekday_min,
             nvs_config_get_weekday_min),
-    NUM_U16("weekend_min", "Weekend allocation", "min", 1, 1440, 5, nvs_config_set_weekend_min,
+    NUM_U16("weekend_min", "Weekend allocation", "min", 1, 1440, 1, nvs_config_set_weekend_min,
             nvs_config_get_weekend_min),
-    NUM_U16("holiday_min", "Holiday allocation", "min", 1, 1440, 5, nvs_config_set_holiday_min,
+    NUM_U16("holiday_min", "Holiday allocation", "min", 1, 1440, 1, nvs_config_set_holiday_min,
             nvs_config_get_holiday_min),
-    NUM_U16("summer_min", "Summer allocation", "min", 1, 1440, 5, nvs_config_set_summer_min, nvs_config_get_summer_min),
+    NUM_U16("summer_min", "Summer allocation", "min", 1, 1440, 1, nvs_config_set_summer_min, nvs_config_get_summer_min),
     NUM_HHMM("quiet_start", "Quiet hours start (HHMM)", nvs_config_set_quiet_start, nvs_config_get_quiet_start),
     NUM_HHMM("quiet_end", "Quiet hours end (HHMM)", nvs_config_set_quiet_end, nvs_config_get_quiet_end),
-    NUM_U16("break_interval_min", "Break interval", "min", 0, 480, 5, nvs_config_set_break_interval_min,
+    NUM_U16("break_interval_min", "Break interval", "min", 0, 480, 1, nvs_config_set_break_interval_min,
             nvs_config_get_break_interval_min),
     NUM_U16("break_duration_min", "Break duration", "min", 1, 120, 1, nvs_config_set_break_duration_min,
             nvs_config_get_break_duration_min),
@@ -280,7 +282,9 @@ int ha_config_discovery(char *buf, size_t len, const char *dev_id, const char *d
                "\"val_tpl\":\"{{ value_json.%s }}\",\"cmd_t\":\"magtag/%s/set/%s\",\"retain\":true",
                f->name, dev_id, f->key, dev_id, f->key, dev_id, f->key);
     if (strcmp(f->component, "number") == 0) {
-        pos = jcat(buf, len, pos, ",\"min\":%d,\"max\":%d,\"step\":%d", f->lo, f->hi, f->step);
+        /* mode:box -> numeric entry field, not a slider (sliders are painful
+           for wide ranges like 1..1440). */
+        pos = jcat(buf, len, pos, ",\"min\":%d,\"max\":%d,\"step\":%d,\"mode\":\"box\"", f->lo, f->hi, f->step);
         if (f->unit != NULL)
             pos = jcat(buf, len, pos, ",\"unit_of_meas\":\"%s\"", f->unit);
     } else if (strcmp(f->component, "text") == 0) {

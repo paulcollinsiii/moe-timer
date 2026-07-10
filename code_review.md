@@ -4,6 +4,8 @@ Reviewed against plan `~/.claude/plans/harmonic-sniffing-abelson.md` (editable H
 Scope: commits `9699371..4c1694a`. Host tests: **16/16 pass** as of this review.
 Findings are ordered by severity. Nothing has been fixed — this is documentation for the implementing agent.
 
+> **Re-review of fix commit `7e183d4`** (2026-07-10): see the [Fix verification](#fix-verification--commit-7e183d4) section at the bottom. All HIGH findings and 4/5 MEDIUM are properly fixed; M3 is partial; L3/L4/L5 and three test gaps remain open. Host tests 16/16 (incl. 9 new), `idf.py build` clean.
+
 ---
 
 ## HIGH severity
@@ -132,3 +134,36 @@ Positive/negative gaps, in priority order:
 11. **Discovery truncation**: `ha_config_discovery` into a deliberately small buffer returns ≥ len and the caller contract (skip publish) is exercised.
 
 Untestable-on-host but worth firmware verification: H1 (`set/tz` routing), M2 (drain accounting), M3 (retained-delivery timing) — all live in mqtt_ha.c glue.
+
+---
+
+## Fix verification — commit `7e183d4`
+
+Verified by re-reading the diff, running the host suite (**16/16 pass**, including the 9 new `test_ha_config` cases), and a clean `idf.py build` (mqtt_ha.c is firmware-only, so the build is the compile check for most of these fixes).
+
+| Finding | Verdict | Notes |
+|---|---|---|
+| H1 set/tz misroute | ✅ Fixed | The content-checked `set/+` branch is now tried first, so every `set/<key>` (including 2-char keys) routes correctly; config/cmd fall through by length. Verified the config topic cannot match the set branch (`/conf` ≠ `/set/` at the prefix position). |
+| H2 cfg buffer overflow | ✅ Fixed | Shared `HA_CONFIG_STATE_MAX` (768 ≥ ~550 worst case), publish skipped + WARN on truncation, and the new worst-case test asserts against the same macro the firmware uses. |
+| H3 unescaped dev_name | ✅ Fixed | `jesc` exported as `ha_config_json_escape`, used by `publish_action_discovery`; both payloads now length-checked. Bonus: `str_is_clean` rejects `"`/`\`/control chars at input for CFG_STR/CFG_TNAME, and the state builder's escaping is unit-tested. |
+| M1 retained sets override config doc | ✅ Fixed | Applied sets are cleared with a retained empty publish; screen_bonus/locate correctly keep their own retention semantics. See "residual" below for the rejected-value branch. |
+| M2 drain accounting skew | ✅ Fixed | `publish_action_discovery` returns its count, added to `published`. |
+| M3 set/+ wait + data race | ⚠️ Partial | `s_set_count` is snapshotted once before iterating (fixes mid-loop mutation), but there is still **no wait** for the set/+ retained flood before `apply_sets`, and no memory barrier ordering the entry writes before the count increment. Mitigating factor: with M1's clearing, an unapplied retained set survives and self-heals next window, so the residual impact is a one-window HA snap-back. Low severity now; acceptable to ship. |
+| M4 setter errors swallowed | ✅ Fixed | Every setter checked, `"err":"nvs"` rejection, two new tests via `mock_nvs_fail_writes`. |
+| M5 rename never rediscovers | ✅ Fixed | 16-bit djb2 name fingerprint in `disc_name` forces rediscovery; written under the same drain-success gate as `disc_ver`. |
+| L1 SET_MAX at capacity | ✅ Fixed | 32 + WARN logs on both drop paths. |
+| L2 registry/slot bounds | ✅ Fixed | `_Static_assert(TIMER_EXTRA_SLOTS >= 4)` + runtime slot guard in `ha_config_set`. |
+| L3 rollover bonus-clear edges | ❌ Not addressed | `s_bonus_clear_pending` still plain RAM; `act` still publishes pre-reset `bonus_applied` at rollover. Plan-accepted behavior, but unacknowledged in the fix. |
+| L4 silent config-discovery skip | ❌ Not addressed | Truncation logging was added to *action* discovery only; `publish_config_discovery` still skips silently. |
+| L5 per-field ack unpublished | ❌ Not addressed | Still log-only. The M1 comment says rejected values are left retained "so the error is visible" — but it's visible only in device logs/broker inspection, not in HA. Fine if that's the documented intent; document it. |
+| L6 TRELOAD accepts anything | ✅ Fixed | Strict ON/OFF + tests. |
+| L7 Kconfig write-once | ⚠️ Partial | Documented in `docs/home_assistant.md` (good). `nvs_config_set_timer_defs` failure in `timer_defs_install` still ignored. |
+| L8 misc | ✅ Mostly fixed | esc buffers 128, `apply_sets` buffers static, `s_set_prefix_len >= 5` guard, docs tz claim now true. Number `mode` untouched (cosmetic, fine). |
+
+**Test gaps**: 1–7 delivered (worst-case size, state-JSON escaping, NVS-failure, TRELOAD, HHMM bounds, tz exercised in the worst-case test, parse_int junk). Still missing: #8 `timer_bonus_reconcile` guard tests, #9 `timer_defs_install` host coverage, #11 discovery-truncation contract.
+
+**Residuals worth one line each (new observations, both minor):**
+1. A rejected value left retained on `set/<key>` is now re-delivered, re-rejected, and re-logged **every window forever** (and occupies a `s_sets` slot each time) until someone clears it manually. Deliberate per the comment, but consider clearing rejects too once L5 (an ack topic) exists.
+2. Pathological edge: a payload >~1 KB published to `set/tz` gets chunked; the first chunk (offset 0) is dropped by the set branch, but follow-up chunks (offset > 0, topic_len 27) fall through to the length-matched **config** branch and can overwrite `s_config_buf` mid-document. Requires broker write access and an oversized set payload; net effect is a garbage config doc that fails parse. Closing it fully means content-matching the config/cmd branches too.
+
+**Verdict:** the branch is materially sound — all deployment-blocking findings are fixed and verified. Remaining open items (M3 wait, L3/L4/L5, test gaps 8/9/11, residuals above) are low severity and can ride a follow-up.

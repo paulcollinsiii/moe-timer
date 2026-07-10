@@ -214,6 +214,8 @@ void test_discovery_number_has_command_bounds_and_config_category(void) {
     TEST_ASSERT_NOT_NULL(strstr(buf, "value_json.weekday_min"));
     TEST_ASSERT_NOT_NULL(strstr(buf, "\"min\":1"));
     TEST_ASSERT_NOT_NULL(strstr(buf, "\"max\":1440"));
+    TEST_ASSERT_NOT_NULL(strstr(buf, "\"step\":1"));       /* round values must be valid in HA */
+    TEST_ASSERT_NOT_NULL(strstr(buf, "\"mode\":\"box\"")); /* numeric entry, not a slider */
     TEST_ASSERT_NOT_NULL(strstr(buf, "\"ent_cat\":\"config\""));
     TEST_ASSERT_NOT_NULL(strstr(buf, "\"retain\":true")); /* command retained for the sleeping device */
     TEST_ASSERT_NOT_NULL(strstr(buf, "\"ids\":[\"magtag-a1b2c3\"]"));
