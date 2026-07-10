@@ -10,6 +10,19 @@ CONFIG_IDF_TARGET="esp32s2"
 # Console over the ESP32-S2 native USB (the MagTag has no UART bridge chip).
 # Without this, logs go to UART0 pins and /dev/ttyACM0 carries no output.
 CONFIG_ESP_CONSOLE_USB_CDC=y
+# Route the ROM ets_printf path (panic backtraces, early-boot output) to
+# USB CDC too — without this a crash reboots silently and the monitor
+# shows nothing, making boot loops undiagnosable on this board.
+CONFIG_ESP_CONSOLE_USB_CDC_SUPPORT_ETS_PRINTF=y
+# Hold ~3 s after a panic so the backtrace flushes over USB CDC (which
+# re-enumerates on reboot and would otherwise drop it) before restarting.
+CONFIG_ESP_SYSTEM_PANIC_REBOOT_DELAY_SECONDS=3
+
+# Main task runs the network window (WiFi + SNTP + the MQTT/HA session +
+# cJSON) directly. The default 3584 B overflows once MQTT is added on top
+# of WiFi; give it headroom. (The window's large buffers are also static
+# in mqtt_ha.c, not on this stack.)
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=7168
 
 # 4 MB flash; app (~1.2 MB with LVGL + WiFi) needs the large 1.5 MB
 # single-app partition instead of the 1 MB default.
