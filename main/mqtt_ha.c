@@ -49,7 +49,9 @@ static bool s_locate_pending; /* set when a locate command applied; main.c consu
    delivers all retained set values right after subscribe; the event
    handler buffers (key,value) pairs and the window applies them, so NVS
    writes stay off the MQTT-client task. */
-#define SET_MAX 24
+/* 22 registry fields + screen_bonus + locate = 24 distinct keys; headroom
+   so a duplicate (retained + a fresh in-window edit) can't silently drop. */
+#define SET_MAX 32
 static struct {
     char key[24];
     char value[80];
@@ -100,12 +102,34 @@ static void mqtt_event_handler(void *arg, esp_event_base_t base, int32_t event_i
             s_pub_acks++;
             break;
         case MQTT_EVENT_DATA:
-            /* config and cmd are the only subscriptions; a chunked payload
+            /* config, cmd and set/+ are the subscriptions; a chunked payload
                (data_len < total_data_len) is copied by absolute offset. An
-               empty retained payload (topic cleared) is ignored here. */
+               empty retained payload (topic cleared) is ignored here.
+               Route by topic CONTENT, not length: magtag/<id>/set/tz is the
+               same length as magtag/<id>/config, so the content-checked set/+
+               branch must be tried first (else a tz edit is misrouted into
+               the bulk-config path and corrupts it). */
             if (ev->topic == NULL || ev->total_data_len <= 0)
                 break;
-            if (ev->topic_len == s_config_topic_len && ev->total_data_len < CONFIG_BUF_MAX) {
+            if (ev->topic_len > s_set_prefix_len && s_set_prefix_len >= 5 && ev->current_data_offset == 0 &&
+                strncmp(ev->topic, "magtag/", 7) == 0 && strncmp(ev->topic + s_set_prefix_len - 5, "/set/", 5) == 0) {
+                /* magtag/<id>/set/<key>: buffer the field key + value (small,
+                   single-chunk). */
+                if (s_set_count >= SET_MAX) {
+                    ESP_LOGW(TAG, "set buffer full (%d), edit dropped", SET_MAX);
+                } else {
+                    int klen = ev->topic_len - s_set_prefix_len; /* > 0 per the outer check */
+                    if (klen < (int)sizeof(s_sets[0].key) && ev->data_len < (int)sizeof(s_sets[0].value)) {
+                        memcpy(s_sets[s_set_count].key, ev->topic + s_set_prefix_len, klen);
+                        s_sets[s_set_count].key[klen] = '\0';
+                        memcpy(s_sets[s_set_count].value, ev->data, ev->data_len);
+                        s_sets[s_set_count].value[ev->data_len] = '\0';
+                        s_set_count++;
+                    } else {
+                        ESP_LOGW(TAG, "set key/value too long, edit dropped");
+                    }
+                }
+            } else if (ev->topic_len == s_config_topic_len && ev->total_data_len < CONFIG_BUF_MAX) {
                 memcpy(s_config_buf + ev->current_data_offset, ev->data, ev->data_len);
                 if (ev->current_data_offset + ev->data_len >= ev->total_data_len) {
                     s_config_buf[ev->total_data_len] = '\0';
@@ -116,21 +140,6 @@ static void mqtt_event_handler(void *arg, esp_event_base_t base, int32_t event_i
                 if (ev->current_data_offset + ev->data_len >= ev->total_data_len) {
                     s_cmd_buf[ev->total_data_len] = '\0';
                     s_cmd_received = true;
-                }
-            } else if (ev->topic_len > s_set_prefix_len && ev->current_data_offset == 0 &&
-                       strncmp(ev->topic, "magtag/", 7) == 0 &&
-                       strncmp(ev->topic + s_set_prefix_len - 5, "/set/", 5) == 0) {
-                /* magtag/<id>/set/<key>: buffer the field key + value (small,
-                   single-chunk). */
-                if (s_set_count < SET_MAX) {
-                    int klen = ev->topic_len - s_set_prefix_len; /* > 0 per the outer check */
-                    if (klen < (int)sizeof(s_sets[0].key) && ev->data_len < (int)sizeof(s_sets[0].value)) {
-                        memcpy(s_sets[s_set_count].key, ev->topic + s_set_prefix_len, klen);
-                        s_sets[s_set_count].key[klen] = '\0';
-                        memcpy(s_sets[s_set_count].value, ev->data, ev->data_len);
-                        s_sets[s_set_count].value[ev->data_len] = '\0';
-                        s_set_count++;
-                    }
                 }
             }
             break;
@@ -199,35 +208,51 @@ static int publish_config_discovery(esp_mqtt_client_handle_t client, const char 
    "Find my timer" switch. Discovery + state ride the magtag/<id>/act topic;
    commands come in on the shared set/+ subscription (screen_bonus, locate). */
 #define BONUS_MAX_MIN 240
-static void publish_action_discovery(esp_mqtt_client_handle_t client, const char *dev_name, const char *fw) {
+static int publish_action_discovery(esp_mqtt_client_handle_t client, const char *dev_name, const char *fw) {
     static char topic[128], payload[512];
     const char *id = device_id();
+    /* The device name is user-editable free text (HA "name" entity), so it
+       must be JSON-escaped before interpolation. */
+    char dn[128];
+    ha_config_json_escape(dn, sizeof(dn), dev_name);
+    int published = 0, n;
     /* number: Screen bonus (min) today */
     snprintf(topic, sizeof(topic), "homeassistant/number/%s_screen_bonus/config", id);
-    snprintf(payload, sizeof(payload),
-             "{\"name\":\"Screen bonus (min) today\",\"uniq_id\":\"%s_screen_bonus\","
-             "\"stat_t\":\"magtag/%s/act\",\"val_tpl\":\"{{ value_json.screen_bonus }}\","
-             "\"cmd_t\":\"magtag/%s/set/screen_bonus\",\"retain\":true,\"min\":0,\"max\":%d,\"step\":5,"
-             "\"unit_of_meas\":\"min\",\"ent_cat\":\"config\",\"dev\":{\"ids\":[\"%s\"],\"name\":\"%s\","
-             "\"mf\":\"Adafruit\",\"mdl\":\"MagTag 2.9\",\"sw\":\"%s\"}}",
-             id, id, id, BONUS_MAX_MIN, id, dev_name, fw);
-    publish(client, topic, payload, 1);
+    n = snprintf(payload, sizeof(payload),
+                 "{\"name\":\"Screen bonus (min) today\",\"uniq_id\":\"%s_screen_bonus\","
+                 "\"stat_t\":\"magtag/%s/act\",\"val_tpl\":\"{{ value_json.screen_bonus }}\","
+                 "\"cmd_t\":\"magtag/%s/set/screen_bonus\",\"retain\":true,\"min\":0,\"max\":%d,\"step\":5,"
+                 "\"unit_of_meas\":\"min\",\"ent_cat\":\"config\",\"dev\":{\"ids\":[\"%s\"],\"name\":\"%s\","
+                 "\"mf\":\"Adafruit\",\"mdl\":\"MagTag 2.9\",\"sw\":\"%s\"}}",
+                 id, id, id, BONUS_MAX_MIN, id, dn, fw);
+    if (n < (int)sizeof(payload))
+        published += publish(client, topic, payload, 1);
+    else
+        ESP_LOGW(TAG, "screen_bonus discovery truncated, skipped");
     /* switch: Find my timer */
     snprintf(topic, sizeof(topic), "homeassistant/switch/%s_locate/config", id);
-    snprintf(payload, sizeof(payload),
-             "{\"name\":\"Find my timer\",\"uniq_id\":\"%s_locate\",\"stat_t\":\"magtag/%s/act\","
-             "\"val_tpl\":\"{{ value_json.locate }}\",\"cmd_t\":\"magtag/%s/set/locate\",\"retain\":true,"
-             "\"pl_on\":\"ON\",\"pl_off\":\"OFF\",\"dev\":{\"ids\":[\"%s\"],\"name\":\"%s\","
-             "\"mf\":\"Adafruit\",\"mdl\":\"MagTag 2.9\",\"sw\":\"%s\"}}",
-             id, id, id, id, dev_name, fw);
-    publish(client, topic, payload, 1);
+    n = snprintf(payload, sizeof(payload),
+                 "{\"name\":\"Find my timer\",\"uniq_id\":\"%s_locate\",\"stat_t\":\"magtag/%s/act\","
+                 "\"val_tpl\":\"{{ value_json.locate }}\",\"cmd_t\":\"magtag/%s/set/locate\",\"retain\":true,"
+                 "\"pl_on\":\"ON\",\"pl_off\":\"OFF\",\"dev\":{\"ids\":[\"%s\"],\"name\":\"%s\","
+                 "\"mf\":\"Adafruit\",\"mdl\":\"MagTag 2.9\",\"sw\":\"%s\"}}",
+                 id, id, id, id, dn, fw);
+    if (n < (int)sizeof(payload))
+        published += publish(client, topic, payload, 1);
+    else
+        ESP_LOGW(TAG, "locate discovery truncated, skipped");
+    return published;
 }
 
-/* Apply the buffered editable-config sets + actions, republish cfg + act. */
+/* Apply the buffered editable-config sets + actions, republish cfg + act.
+   Buffers are static: this runs at the deepest point of the window on the
+   tight main-task stack, beneath the WiFi+MQTT frames (see publish_discovery).
+   Used serially on one task. */
 static int apply_sets(esp_mqtt_client_handle_t client) {
-    static char cfg[512];
-    char ack[96], topic[96], act[96];
-    for (int i = 0; i < s_set_count; i++) {
+    static char cfg[HA_CONFIG_STATE_MAX];
+    static char ack[96], topic[96], act[96];
+    int n = s_set_count; /* snapshot: the handler may still be appending */
+    for (int i = 0; i < n; i++) {
         const char *k = s_sets[i].key, *v = s_sets[i].value;
         if (strcmp(k, "screen_bonus") == 0) {
             long m = strtol(v, NULL, 10);
@@ -245,8 +270,18 @@ static int apply_sets(esp_mqtt_client_handle_t client) {
                 publish(client, topic, "OFF", 1);
             }
         } else {
-            ha_config_set(k, v, ack, sizeof(ack));
+            ha_cfg_result_t r = ha_config_set(k, v, ack, sizeof(ack));
             ESP_LOGI(TAG, "set %s: %s", k, ack);
+            /* Clear the retained set command once applied. HA drives the
+               control's state from the cfg topic (republished below), not
+               from this command topic, so clearing it is invisible to HA
+               but stops a stale set from re-overriding the bulk config
+               document every window. Leave rejected/unknown values retained
+               so the error is visible. */
+            if (r == HA_CFG_OK) {
+                snprintf(topic, sizeof(topic), "magtag/%s/set/%s", device_id(), k);
+                publish(client, topic, "", 1);
+            }
         }
     }
     if (s_bonus_clear_pending) {
@@ -260,9 +295,13 @@ static int apply_sets(esp_mqtt_client_handle_t client) {
     snprintf(act, sizeof(act), "{\"screen_bonus\":%ld,\"locate\":\"OFF\"}",
              (long)(g_rtc_state.slots[0].bonus_applied / 60));
     publish(client, topic, act, 1);
-    /* cfg state: current editable-config values */
+    /* cfg state: current editable-config values. Skip a truncated doc —
+       publishing invalid JSON would knock every editable control offline. */
     snprintf(topic, sizeof(topic), "magtag/%s/cfg", device_id());
-    ha_config_state_json(cfg, sizeof(cfg));
+    if (ha_config_state_json(cfg, sizeof(cfg)) >= (int)sizeof(cfg)) {
+        ESP_LOGW(TAG, "cfg state JSON truncated (%d B buffer), not published", (int)sizeof(cfg));
+        return 0;
+    }
     return publish(client, topic, cfg, 1);
 }
 
@@ -329,16 +368,23 @@ void mqtt_ha_window(const stats_snapshot_t *snap) {
     esp_mqtt_client_subscribe(client, cmd_topic, 1);
     esp_mqtt_client_subscribe(client, set_topic, 1);
 
-    /* Discovery: once per schema bump (covers new entities and renames) */
-    uint16_t disc_ver = 0;
+    /* Discovery: once per schema bump (covers new entities and renames), OR
+       when the editable device name changed — discovery carries dev.name, so
+       renaming from HA otherwise wouldn't update the device card until the
+       next schema bump. A 16-bit name fingerprint tracks that cheaply. */
+    char dev_name[64];
+    device_name(dev_name, sizeof(dev_name));
+    uint16_t name_hash = 5381;
+    for (const char *p = dev_name; *p; p++)
+        name_hash = (uint16_t)(name_hash * 33u + (unsigned char)*p);
+    uint16_t disc_ver = 0, disc_name = 0;
     hal_nvs_read_u16("disc_ver", &disc_ver);
-    bool fresh_discovery = (disc_ver != DISC_SCHEMA_VER);
+    hal_nvs_read_u16("disc_name", &disc_name);
+    bool fresh_discovery = (disc_ver != DISC_SCHEMA_VER) || (disc_name != name_hash);
     if (fresh_discovery) {
-        char dev_name[64];
-        device_name(dev_name, sizeof(dev_name));
         published += publish_discovery(client, dev_name, snap->fw);
         published += publish_config_discovery(client, dev_name, snap->fw);
-        publish_action_discovery(client, dev_name, snap->fw);
+        published += publish_action_discovery(client, dev_name, snap->fw);
     }
 
     snprintf(topic, sizeof(topic), "magtag/%s/stat", device_id());
@@ -364,6 +410,7 @@ void mqtt_ha_window(const stats_snapshot_t *snap) {
         s_summary.pending = false;
         if (fresh_discovery) {
             hal_nvs_write_u16("disc_ver", DISC_SCHEMA_VER);
+            hal_nvs_write_u16("disc_name", name_hash);
         }
         ESP_LOGI(TAG, "published %d messages", published);
     } else {

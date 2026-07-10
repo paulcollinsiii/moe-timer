@@ -94,6 +94,11 @@ confirmed value to `magtag/<id>/cfg` so the control reflects reality.
   edit takes effect on the device's next wake (~≤1 min or a button press);
   allocations / quiet hours / break settings apply live; timezone at the
   next boot.
+- **Timer defaults are seeded once.** On first boot the `MAGTAG_TIMER<n>_*`
+  menuconfig values are copied into NVS and become the editable source of
+  truth. After that, HA edits (or a bulk-config `timers` array) win, and
+  changing the menuconfig defaults no longer affects an already-provisioned
+  device — erase NVS (or re-flash with NVS erased) to reseed from Kconfig.
 - Commands are sent on retained `set/<key>` topics so the sleeping device
   receives edits made while it's asleep. Idempotent, so re-delivery is
   harmless.

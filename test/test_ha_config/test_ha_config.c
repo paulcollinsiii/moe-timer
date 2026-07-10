@@ -11,6 +11,8 @@
 #include "../../main/ha_config.c"
 // clang-format on
 
+static void seed_blob(void); /* defined with the Phase B tests below */
+
 void setUp(void) {
     mock_nvs_reset();
 }
@@ -74,6 +76,109 @@ void test_set_str_valid_and_too_long(void) {
 void test_set_unknown_key(void) {
     char ack[128];
     TEST_ASSERT_EQUAL(HA_CFG_UNKNOWN, ha_config_set("nonsense", "1", ack, sizeof(ack)));
+}
+
+/* ---- validation hardening (review H3/L6, parse_int, HHMM bounds) ---- */
+
+void test_set_str_rejects_quote_and_backslash(void) {
+    char ack[128];
+    /* a name containing " or \ would corrupt discovery/state JSON */
+    TEST_ASSERT_EQUAL(HA_CFG_REJECTED, ha_config_set("name", "bad\"name", ack, sizeof(ack)));
+    TEST_ASSERT_EQUAL(HA_CFG_REJECTED, ha_config_set("name", "back\\slash", ack, sizeof(ack)));
+    /* control characters likewise */
+    TEST_ASSERT_EQUAL(HA_CFG_REJECTED, ha_config_set("name", "line\nbreak", ack, sizeof(ack)));
+    /* a clean name with an apostrophe is fine */
+    TEST_ASSERT_EQUAL(HA_CFG_OK, ha_config_set("name", "Kids' Room", ack, sizeof(ack)));
+}
+
+void test_set_timer_name_rejects_quote(void) {
+    char ack[128];
+    TEST_ASSERT_EQUAL(HA_CFG_REJECTED, ha_config_set("timer1_name", "a\"b", ack, sizeof(ack)));
+}
+
+void test_set_treload_rejects_non_onoff(void) {
+    seed_blob();
+    char ack[128];
+    TEST_ASSERT_EQUAL(HA_CFG_REJECTED, ha_config_set("timer1_reload", "on", ack, sizeof(ack)));
+    TEST_ASSERT_EQUAL(HA_CFG_REJECTED, ha_config_set("timer1_reload", "true", ack, sizeof(ack)));
+    TEST_ASSERT_EQUAL(HA_CFG_REJECTED, ha_config_set("timer1_reload", "", ack, sizeof(ack)));
+    /* reload flag untouched by the rejected writes */
+    nvs_timer_defs_blob_t b;
+    nvs_config_get_timer_defs(&b);
+    TEST_ASSERT_EQUAL_UINT8(1, b.defs[0].reload);
+    TEST_ASSERT_EQUAL(HA_CFG_OK, ha_config_set("timer1_reload", "OFF", ack, sizeof(ack)));
+    nvs_config_get_timer_defs(&b);
+    TEST_ASSERT_EQUAL_UINT8(0, b.defs[0].reload);
+}
+
+void test_hhmm_boundaries(void) {
+    char ack[128];
+    TEST_ASSERT_EQUAL(HA_CFG_OK, ha_config_set("quiet_start", "2359", ack, sizeof(ack)));
+    TEST_ASSERT_EQUAL(HA_CFG_REJECTED, ha_config_set("quiet_start", "2400", ack, sizeof(ack)));
+    TEST_ASSERT_EQUAL(HA_CFG_REJECTED, ha_config_set("quiet_start", "0060", ack, sizeof(ack)));
+    TEST_ASSERT_EQUAL(HA_CFG_REJECTED, ha_config_set("quiet_start", "-1", ack, sizeof(ack)));
+}
+
+void test_parse_int_trailing_junk_rejected(void) {
+    char ack[128];
+    TEST_ASSERT_EQUAL(HA_CFG_REJECTED, ha_config_set("weekday_min", "45x", ack, sizeof(ack)));
+    TEST_ASSERT_EQUAL(HA_CFG_REJECTED, ha_config_set("weekday_min", " 45 ", ack, sizeof(ack)));
+    TEST_ASSERT_EQUAL(HA_CFG_REJECTED, ha_config_set("weekday_min", "", ack, sizeof(ack)));
+}
+
+/* ---- NVS write failure surfaces as a rejection (review M4) ---- */
+
+void test_set_nvs_failure_rejected(void) {
+    char ack[128];
+    mock_nvs_fail_writes(1);
+    TEST_ASSERT_EQUAL(HA_CFG_REJECTED, ha_config_set("weekday_min", "45", ack, sizeof(ack)));
+    TEST_ASSERT_NOT_NULL(strstr(ack, "\"err\":\"nvs\""));
+}
+
+void test_set_timer_nvs_failure_rejected(void) {
+    char ack[128];
+    mock_nvs_fail_writes(1);
+    TEST_ASSERT_EQUAL(HA_CFG_REJECTED, ha_config_set("timer1_min", "25", ack, sizeof(ack)));
+    TEST_ASSERT_NOT_NULL(strstr(ack, "\"err\":\"nvs\""));
+}
+
+/* ---- state JSON: escaping + worst-case size fits the firmware buffer ---- */
+
+void test_state_json_escapes_specials(void) {
+    /* config_apply (cJSON) can write a name with a quote even though the
+       set path rejects one — the state builder must still escape it. */
+    nvs_config_set_dev_name("a\"b\\c");
+    char buf[HA_CONFIG_STATE_MAX];
+    ha_config_state_json(buf, sizeof(buf));
+    TEST_ASSERT_NOT_NULL(strstr(buf, "\"name\":\"a\\\"b\\\\c\""));
+}
+
+void test_state_json_worst_case_fits_firmware_buffer(void) {
+    char ack[128];
+    /* max out every field so the JSON approaches its ceiling */
+    ha_config_set("weekday_min", "1440", ack, sizeof(ack));
+    ha_config_set("weekend_min", "1440", ack, sizeof(ack));
+    ha_config_set("holiday_min", "1440", ack, sizeof(ack));
+    ha_config_set("summer_min", "1440", ack, sizeof(ack));
+    ha_config_set("break_interval_min", "480", ack, sizeof(ack));
+    ha_config_set("break_duration_min", "120", ack, sizeof(ack));
+    ha_config_set("quiet_start", "2359", ack, sizeof(ack));
+    ha_config_set("quiet_end", "2359", ack, sizeof(ack));
+    ha_config_set("name", "Kitchen Countertop MagTag Timerr", ack, sizeof(ack)); /* 31 chars */
+    ha_config_set("tz", "America/Argentina/ComodRivadavia-3EDT", ack, sizeof(ack));
+    for (int n = 1; n <= 4; n++) {
+        char key[16];
+        snprintf(key, sizeof(key), "timer%d_name", n);
+        ha_config_set(key, "LongTimerName15", ack, sizeof(ack)); /* 15 chars */
+        snprintf(key, sizeof(key), "timer%d_min", n);
+        ha_config_set(key, "1440", ack, sizeof(ack));
+        snprintf(key, sizeof(key), "timer%d_reload", n);
+        ha_config_set(key, "ON", ack, sizeof(ack));
+    }
+    char buf[HA_CONFIG_STATE_MAX];
+    int ret = ha_config_state_json(buf, sizeof(buf));
+    TEST_ASSERT_TRUE(ret < HA_CONFIG_STATE_MAX); /* not truncated */
+    TEST_ASSERT_EQUAL_INT((int)strlen(buf), ret);
 }
 
 /* ---- ha_config_state_json ---- */
@@ -218,6 +323,15 @@ int main(void) {
     RUN_TEST(test_set_break_interval_zero_allowed);
     RUN_TEST(test_set_str_valid_and_too_long);
     RUN_TEST(test_set_unknown_key);
+    RUN_TEST(test_set_str_rejects_quote_and_backslash);
+    RUN_TEST(test_set_timer_name_rejects_quote);
+    RUN_TEST(test_set_treload_rejects_non_onoff);
+    RUN_TEST(test_hhmm_boundaries);
+    RUN_TEST(test_parse_int_trailing_junk_rejected);
+    RUN_TEST(test_set_nvs_failure_rejected);
+    RUN_TEST(test_set_timer_nvs_failure_rejected);
+    RUN_TEST(test_state_json_escapes_specials);
+    RUN_TEST(test_state_json_worst_case_fits_firmware_buffer);
     RUN_TEST(test_state_json_reports_current_values);
     RUN_TEST(test_discovery_number_has_command_bounds_and_config_category);
     RUN_TEST(test_discovery_text_has_mode);

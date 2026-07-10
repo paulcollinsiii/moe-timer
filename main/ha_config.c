@@ -21,7 +21,7 @@ static int jcat(char *buf, size_t len, int pos, const char *fmt, ...) {
 }
 
 /* Escape a string for a JSON value (quotes/backslashes; NULL -> ""). */
-static const char *jesc(char *tmp, size_t tmplen, const char *s) {
+const char *ha_config_json_escape(char *tmp, size_t tmplen, const char *s) {
     size_t o = 0;
     for (; s != NULL && *s != '\0' && o + 2 < tmplen; s++) {
         if (*s == '"' || *s == '\\')
@@ -31,6 +31,7 @@ static const char *jesc(char *tmp, size_t tmplen, const char *s) {
     tmp[o] = '\0';
     return tmp;
 }
+#define jesc ha_config_json_escape
 
 /* ---- field registry (Phase A: scalar settings) ---- */
 
@@ -61,6 +62,10 @@ static const char *jesc(char *tmp, size_t tmplen, const char *s) {
         .key = "timer" #n "_reload", .component = "switch", .name = "Timer " #n " reloadable", .kind = CFG_TRELOAD, \
         .slot = n                                                                                                   \
     }
+
+/* The registry hardcodes extra-timer slots 1..4; if TIMER_EXTRA_SLOTS ever
+   shrinks, defs[slot-1] in the state builder would read out of bounds. */
+_Static_assert(TIMER_EXTRA_SLOTS >= 4, "ha_config registry assumes >= 4 extra-timer slots");
 
 static const cfg_field_t FIELDS[] = {
     NUM_U16("weekday_min", "Weekday allocation", "min", 1, 1440, 5, nvs_config_set_weekday_min,
@@ -115,6 +120,18 @@ static bool parse_int(const char *s, long *out) {
     return *end == '\0';
 }
 
+/* Reject values that would corrupt the discovery/state JSON (unescaped
+   quote/backslash) or the MQTT/HA layer (control chars). Empty is allowed
+   here (an empty timer name disables the slot); NULL is not clean. */
+static bool str_is_clean(const char *s) {
+    if (s == NULL)
+        return false;
+    for (; *s != '\0'; s++)
+        if (*s == '"' || *s == '\\' || (unsigned char)*s < 0x20)
+            return false;
+    return true;
+}
+
 static ha_cfg_result_t reject(char *ack, size_t len, const char *key, const char *err) {
     snprintf(ack, len, "{\"key\":\"%s\",\"ok\":false,\"err\":\"%s\"}", key, err);
     return HA_CFG_REJECTED;
@@ -135,6 +152,11 @@ ha_cfg_result_t ha_config_set(const char *key, const char *value, char *ack, siz
         snprintf(ack, ack_len, "{\"key\":\"%s\",\"ok\":false,\"err\":\"unknown\"}", key ? key : "");
         return HA_CFG_UNKNOWN;
     }
+    /* Extra-timer slots index the blob by (slot-1); guard against a
+       registry that outgrew TIMER_EXTRA_SLOTS. */
+    if ((f->kind == CFG_TNAME || f->kind == CFG_TMIN || f->kind == CFG_TRELOAD) &&
+        (f->slot < 1 || f->slot > TIMER_EXTRA_SLOTS))
+        return reject(ack, ack_len, key, "slot");
     switch (f->kind) {
         case CFG_U16: {
             long v;
@@ -142,7 +164,8 @@ ha_cfg_result_t ha_config_set(const char *key, const char *value, char *ack, siz
                 return reject(ack, ack_len, key, "nan");
             if (v < f->lo || v > f->hi)
                 return reject(ack, ack_len, key, "range");
-            f->set_u16((uint16_t)v);
+            if (f->set_u16((uint16_t)v) != ESP_OK)
+                return reject(ack, ack_len, key, "nvs");
             break;
         }
         case CFG_HHMM: {
@@ -151,22 +174,29 @@ ha_cfg_result_t ha_config_set(const char *key, const char *value, char *ack, siz
                 return reject(ack, ack_len, key, "nan");
             if (!quiet_hhmm_valid((int)v))
                 return reject(ack, ack_len, key, "time");
-            f->set_u16((uint16_t)v);
+            if (f->set_u16((uint16_t)v) != ESP_OK)
+                return reject(ack, ack_len, key, "nvs");
             break;
         }
         case CFG_STR: {
             if (value == NULL || strlen(value) >= (size_t)f->hi)
                 return reject(ack, ack_len, key, "len");
-            f->set_str(value);
+            if (!str_is_clean(value))
+                return reject(ack, ack_len, key, "char");
+            if (f->set_str(value) != ESP_OK)
+                return reject(ack, ack_len, key, "nvs");
             break;
         }
         case CFG_TNAME: {
             nvs_timer_defs_blob_t b;
             if (value == NULL || strlen(value) >= sizeof(b.defs[0].name))
                 return reject(ack, ack_len, key, "len");
+            if (!str_is_clean(value))
+                return reject(ack, ack_len, key, "char");
             load_defs(&b);
             snprintf(b.defs[f->slot - 1].name, sizeof(b.defs[0].name), "%s", value);
-            nvs_config_set_timer_defs(&b);
+            if (nvs_config_set_timer_defs(&b) != ESP_OK)
+                return reject(ack, ack_len, key, "nvs");
             break;
         }
         case CFG_TMIN: {
@@ -178,14 +208,18 @@ ha_cfg_result_t ha_config_set(const char *key, const char *value, char *ack, siz
             nvs_timer_defs_blob_t b;
             load_defs(&b);
             b.defs[f->slot - 1].min = (int32_t)v;
-            nvs_config_set_timer_defs(&b);
+            if (nvs_config_set_timer_defs(&b) != ESP_OK)
+                return reject(ack, ack_len, key, "nvs");
             break;
         }
         case CFG_TRELOAD: {
+            if (value == NULL || (strcmp(value, "ON") != 0 && strcmp(value, "OFF") != 0))
+                return reject(ack, ack_len, key, "onoff");
             nvs_timer_defs_blob_t b;
             load_defs(&b);
-            b.defs[f->slot - 1].reload = (value != NULL && strcmp(value, "ON") == 0) ? 1 : 0;
-            nvs_config_set_timer_defs(&b);
+            b.defs[f->slot - 1].reload = (strcmp(value, "ON") == 0) ? 1 : 0;
+            if (nvs_config_set_timer_defs(&b) != ESP_OK)
+                return reject(ack, ack_len, key, "nvs");
             break;
         }
         default:
@@ -204,7 +238,7 @@ int ha_config_state_json(char *buf, size_t len) {
         const cfg_field_t *f = &FIELDS[i];
         if (i)
             pos = jcat(buf, len, pos, ",");
-        char esc[80];
+        char esc[128]; /* holds a fully-escaped tz (<=47) or device name */
         switch (f->kind) {
             case CFG_STR: {
                 char raw[64];
@@ -239,7 +273,7 @@ int ha_config_discovery_topic(char *buf, size_t len, const char *dev_id, const c
 
 int ha_config_discovery(char *buf, size_t len, const char *dev_id, const char *dev_name, const char *fw,
                         const cfg_field_t *f) {
-    char dname[64];
+    char dname[128]; /* escaped device name (<=63 raw) */
     int pos = 0;
     pos = jcat(buf, len, pos,
                "{\"name\":\"%s\",\"uniq_id\":\"%s_%s\",\"stat_t\":\"magtag/%s/cfg\","

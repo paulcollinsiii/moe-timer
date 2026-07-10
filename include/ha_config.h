@@ -39,6 +39,11 @@ typedef struct {
 
 typedef enum { HA_CFG_OK = 0, HA_CFG_REJECTED, HA_CFG_UNKNOWN } ha_cfg_result_t;
 
+/* Buffer size the firmware must give ha_config_state_json: the whole field
+   registry serialized (worst case ~640 B with maxed strings) plus headroom.
+   Callers must check the return value against this before publishing. */
+#define HA_CONFIG_STATE_MAX 768
+
 const cfg_field_t *ha_config_fields(int *count);
 /* Validate `value` (a string from MQTT) for `key` and persist via the
    field's nvs setter; writes an ack ({"key":...,"ok":bool[,"err":...]}). */
@@ -49,6 +54,11 @@ int ha_config_state_json(char *buf, size_t len);
 int ha_config_discovery_topic(char *buf, size_t len, const char *dev_id, const cfg_field_t *f);
 int ha_config_discovery(char *buf, size_t len, const char *dev_id, const char *dev_name, const char *fw,
                         const cfg_field_t *f);
+/* Escape `src` into `dst` for embedding as a JSON string value (quote and
+   backslash escaped, control chars -> space); returns `dst`. Shared so
+   callers that hand-build discovery JSON (mqtt_ha action entities) escape
+   the user-editable device name the same way. */
+const char *ha_config_json_escape(char *dst, size_t dstlen, const char *src);
 
 #ifdef __cplusplus
 }
