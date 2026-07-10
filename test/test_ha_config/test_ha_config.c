@@ -130,8 +130,87 @@ void test_discovery_topic(void) {
     TEST_ASSERT_EQUAL_STRING("homeassistant/number/magtag-a1b2c3_weekday_min/config", buf);
 }
 
+/* ---- Phase B: editable timer definitions (read-modify-write the blob) ---- */
+
+static void seed_blob(void) {
+    nvs_timer_defs_blob_t b;
+    memset(&b, 0, sizeof(b));
+    b.version = TIMER_DEFS_BLOB_VERSION;
+    snprintf(b.defs[0].name, sizeof(b.defs[0].name), "Piano");
+    b.defs[0].min = 15;
+    b.defs[0].reload = 1;
+    nvs_config_set_timer_defs(&b);
+}
+
+void test_set_timer_name_enables_slot(void) {
+    char ack[128];
+    TEST_ASSERT_EQUAL(HA_CFG_OK, ha_config_set("timer2_name", "Running", ack, sizeof(ack)));
+    nvs_timer_defs_blob_t b;
+    nvs_config_get_timer_defs(&b);
+    TEST_ASSERT_EQUAL_STRING("Running", b.defs[1].name);
+}
+
+void test_set_timer_name_empty_disables_slot(void) {
+    seed_blob();
+    char ack[128];
+    TEST_ASSERT_EQUAL(HA_CFG_OK, ha_config_set("timer1_name", "", ack, sizeof(ack)));
+    nvs_timer_defs_blob_t b;
+    nvs_config_get_timer_defs(&b);
+    TEST_ASSERT_EQUAL_STRING("", b.defs[0].name); /* disabled */
+}
+
+void test_set_timer_name_too_long_rejected(void) {
+    char ack[128];
+    TEST_ASSERT_EQUAL(HA_CFG_REJECTED, ha_config_set("timer1_name", "SixteenCharsPlus!", ack, sizeof(ack)));
+}
+
+void test_set_timer_min_and_reload(void) {
+    seed_blob();
+    char ack[128];
+    TEST_ASSERT_EQUAL(HA_CFG_OK, ha_config_set("timer1_min", "25", ack, sizeof(ack)));
+    TEST_ASSERT_EQUAL(HA_CFG_OK, ha_config_set("timer1_reload", "OFF", ack, sizeof(ack)));
+    nvs_timer_defs_blob_t b;
+    nvs_config_get_timer_defs(&b);
+    TEST_ASSERT_EQUAL_INT32(25, b.defs[0].min);
+    TEST_ASSERT_EQUAL_UINT8(0, b.defs[0].reload);
+    TEST_ASSERT_EQUAL_STRING("Piano", b.defs[0].name); /* name preserved (read-modify-write) */
+}
+
+void test_set_timer_min_out_of_range_rejected(void) {
+    char ack[128];
+    TEST_ASSERT_EQUAL(HA_CFG_REJECTED, ha_config_set("timer1_min", "9999", ack, sizeof(ack)));
+}
+
+void test_state_json_includes_timer_fields(void) {
+    seed_blob();
+    char buf[768];
+    ha_config_state_json(buf, sizeof(buf));
+    TEST_ASSERT_NOT_NULL(strstr(buf, "\"timer1_name\":\"Piano\""));
+    TEST_ASSERT_NOT_NULL(strstr(buf, "\"timer1_min\":15"));
+    TEST_ASSERT_NOT_NULL(strstr(buf, "\"timer1_reload\":\"ON\""));
+    TEST_ASSERT_NOT_NULL(strstr(buf, "\"timer2_name\":\"\"")); /* empty slot */
+}
+
+void test_discovery_timer_reload_is_switch(void) {
+    const cfg_field_t *f = field_by_key("timer1_reload");
+    TEST_ASSERT_NOT_NULL(f);
+    TEST_ASSERT_EQUAL_STRING("switch", f->component);
+    char buf[700];
+    ha_config_discovery(buf, sizeof(buf), "magtag-a1b2c3", "K", "fw", f);
+    TEST_ASSERT_NOT_NULL(strstr(buf, "\"pl_on\":\"ON\""));
+    TEST_ASSERT_NOT_NULL(strstr(buf, "\"cmd_t\":\"magtag/magtag-a1b2c3/set/timer1_reload\""));
+    TEST_ASSERT_NOT_NULL(strstr(buf, "value_json.timer1_reload"));
+}
+
 int main(void) {
     UNITY_BEGIN();
+    RUN_TEST(test_set_timer_name_enables_slot);
+    RUN_TEST(test_set_timer_name_empty_disables_slot);
+    RUN_TEST(test_set_timer_name_too_long_rejected);
+    RUN_TEST(test_set_timer_min_and_reload);
+    RUN_TEST(test_set_timer_min_out_of_range_rejected);
+    RUN_TEST(test_state_json_includes_timer_fields);
+    RUN_TEST(test_discovery_timer_reload_is_switch);
     RUN_TEST(test_set_u16_valid_persists);
     RUN_TEST(test_set_u16_out_of_range_rejected);
     RUN_TEST(test_set_u16_non_numeric_rejected);

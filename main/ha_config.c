@@ -48,6 +48,19 @@ static const char *jesc(char *tmp, size_t tmplen, const char *s) {
     }
 #define TEXT(k, nm, maxlen, set, get) \
     { .key = k, .component = "text", .name = nm, .kind = CFG_STR, .hi = maxlen, .set_str = set, .get_str = get }
+/* Extra-timer slot fields — read-modify-write the timer_defs blob by slot. */
+#define TIMER_NAME(n) \
+    { .key = "timer" #n "_name", .component = "text", .name = "Timer " #n " name", .kind = CFG_TNAME, .slot = n }
+#define TIMER_MIN(n)                                                                                    \
+    {                                                                                                   \
+        .key = "timer" #n "_min", .component = "number", .name = "Timer " #n " minutes", .unit = "min", \
+        .kind = CFG_TMIN, .lo = 1, .hi = 1440, .step = 5, .slot = n                                     \
+    }
+#define TIMER_RELOAD(n)                                                                                             \
+    {                                                                                                               \
+        .key = "timer" #n "_reload", .component = "switch", .name = "Timer " #n " reloadable", .kind = CFG_TRELOAD, \
+        .slot = n                                                                                                   \
+    }
 
 static const cfg_field_t FIELDS[] = {
     NUM_U16("weekday_min", "Weekday allocation", "min", 1, 1440, 5, nvs_config_set_weekday_min,
@@ -65,6 +78,18 @@ static const cfg_field_t FIELDS[] = {
             nvs_config_get_break_duration_min),
     TEXT("name", "Device name", 32, nvs_config_set_dev_name, nvs_config_get_dev_name),
     TEXT("tz", "Timezone", 48, nvs_config_set_tz, nvs_config_get_tz),
+    TIMER_NAME(1),
+    TIMER_MIN(1),
+    TIMER_RELOAD(1), /* extra-timer slots 1..4 */
+    TIMER_NAME(2),
+    TIMER_MIN(2),
+    TIMER_RELOAD(2),
+    TIMER_NAME(3),
+    TIMER_MIN(3),
+    TIMER_RELOAD(3),
+    TIMER_NAME(4),
+    TIMER_MIN(4),
+    TIMER_RELOAD(4),
 };
 
 const cfg_field_t *ha_config_fields(int *count) {
@@ -93,6 +118,15 @@ static bool parse_int(const char *s, long *out) {
 static ha_cfg_result_t reject(char *ack, size_t len, const char *key, const char *err) {
     snprintf(ack, len, "{\"key\":\"%s\",\"ok\":false,\"err\":\"%s\"}", key, err);
     return HA_CFG_REJECTED;
+}
+
+/* Load the timer-defs blob, or a fresh zeroed one (all slots disabled) if
+   none exists yet — so the first HA edit materializes a valid blob. */
+static void load_defs(nvs_timer_defs_blob_t *b) {
+    if (nvs_config_get_timer_defs(b) != ESP_OK) {
+        memset(b, 0, sizeof(*b));
+        b->version = TIMER_DEFS_BLOB_VERSION;
+    }
 }
 
 ha_cfg_result_t ha_config_set(const char *key, const char *value, char *ack, size_t ack_len) {
@@ -126,6 +160,34 @@ ha_cfg_result_t ha_config_set(const char *key, const char *value, char *ack, siz
             f->set_str(value);
             break;
         }
+        case CFG_TNAME: {
+            nvs_timer_defs_blob_t b;
+            if (value == NULL || strlen(value) >= sizeof(b.defs[0].name))
+                return reject(ack, ack_len, key, "len");
+            load_defs(&b);
+            snprintf(b.defs[f->slot - 1].name, sizeof(b.defs[0].name), "%s", value);
+            nvs_config_set_timer_defs(&b);
+            break;
+        }
+        case CFG_TMIN: {
+            long v;
+            if (!parse_int(value, &v))
+                return reject(ack, ack_len, key, "nan");
+            if (v < 1 || v > 1440)
+                return reject(ack, ack_len, key, "range");
+            nvs_timer_defs_blob_t b;
+            load_defs(&b);
+            b.defs[f->slot - 1].min = (int32_t)v;
+            nvs_config_set_timer_defs(&b);
+            break;
+        }
+        case CFG_TRELOAD: {
+            nvs_timer_defs_blob_t b;
+            load_defs(&b);
+            b.defs[f->slot - 1].reload = (value != NULL && strcmp(value, "ON") == 0) ? 1 : 0;
+            nvs_config_set_timer_defs(&b);
+            break;
+        }
         default:
             return reject(ack, ack_len, key, "unsupported");
     }
@@ -134,21 +196,38 @@ ha_cfg_result_t ha_config_set(const char *key, const char *value, char *ack, siz
 }
 
 int ha_config_state_json(char *buf, size_t len) {
+    nvs_timer_defs_blob_t defs;
+    load_defs(&defs);
     int pos = jcat(buf, len, 0, "{");
     int n = (int)(sizeof(FIELDS) / sizeof(FIELDS[0]));
     for (int i = 0; i < n; i++) {
         const cfg_field_t *f = &FIELDS[i];
         if (i)
             pos = jcat(buf, len, pos, ",");
-        if (f->kind == CFG_STR) {
-            char raw[64], esc[80];
-            raw[0] = '\0';
-            f->get_str(raw, sizeof(raw));
-            pos = jcat(buf, len, pos, "\"%s\":\"%s\"", f->key, jesc(esc, sizeof(esc), raw));
-        } else {
-            uint16_t v = 0;
-            f->get_u16(&v);
-            pos = jcat(buf, len, pos, "\"%s\":%u", f->key, (unsigned)v);
+        char esc[80];
+        switch (f->kind) {
+            case CFG_STR: {
+                char raw[64];
+                raw[0] = '\0';
+                f->get_str(raw, sizeof(raw));
+                pos = jcat(buf, len, pos, "\"%s\":\"%s\"", f->key, jesc(esc, sizeof(esc), raw));
+                break;
+            }
+            case CFG_TNAME:
+                pos = jcat(buf, len, pos, "\"%s\":\"%s\"", f->key, jesc(esc, sizeof(esc), defs.defs[f->slot - 1].name));
+                break;
+            case CFG_TMIN:
+                pos = jcat(buf, len, pos, "\"%s\":%ld", f->key, (long)defs.defs[f->slot - 1].min);
+                break;
+            case CFG_TRELOAD:
+                pos = jcat(buf, len, pos, "\"%s\":\"%s\"", f->key, defs.defs[f->slot - 1].reload ? "ON" : "OFF");
+                break;
+            default: { /* CFG_U16 / CFG_HHMM */
+                uint16_t v = 0;
+                f->get_u16(&v);
+                pos = jcat(buf, len, pos, "\"%s\":%u", f->key, (unsigned)v);
+                break;
+            }
         }
     }
     return jcat(buf, len, pos, "}");
