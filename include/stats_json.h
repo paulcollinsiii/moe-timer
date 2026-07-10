@@ -26,6 +26,9 @@ typedef struct {
     uint16_t completions[TIMER_EXTRA_SLOTS]; /* extra slots 1..N */
     bool charge_lock;
     const char *fw;
+    int32_t screen_bonus_applied_s; /* slot 0 bonus_applied — the act publish
+                                       must not read live timer state (the
+                                       MQTT window runs on the network task) */
 } stats_snapshot_t;
 
 int stats_json_stat(char *buf, size_t len, const stats_snapshot_t *s);

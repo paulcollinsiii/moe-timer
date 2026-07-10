@@ -70,6 +70,30 @@ bool mqtt_ha_locate_pending(void) {
     return p;
 }
 
+/* Timer effects parsed during the window are BUFFERED, never applied here:
+   the window runs on the network task, and only the orchestrator may mutate
+   timer state (it applies these after joining the task). */
+static int32_t s_bonus_target_s = -1; /* set/screen_bonus target; -1 = none */
+static int s_grant_slot = -1;         /* cmd grant; -1 = none */
+static int32_t s_grant_sec;
+
+bool mqtt_ha_take_bonus_target(int32_t *target_sec) {
+    if (s_bonus_target_s < 0)
+        return false;
+    *target_sec = s_bonus_target_s;
+    s_bonus_target_s = -1;
+    return true;
+}
+
+bool mqtt_ha_take_grant(int *slot, int32_t *sec) {
+    if (s_grant_slot < 0)
+        return false;
+    *slot = s_grant_slot;
+    *sec = s_grant_sec;
+    s_grant_slot = -1;
+    return true;
+}
+
 /* Pending daily summary (captured at rollover, published next window;
    plain RAM — an unsent summary after a crash is an acceptable loss). */
 static struct {
@@ -249,7 +273,7 @@ static int publish_action_discovery(esp_mqtt_client_handle_t client, const char 
    Buffers are static: this runs at the deepest point of the window on the
    tight main-task stack, beneath the WiFi+MQTT frames (see publish_discovery).
    Used serially on one task. */
-static int apply_sets(esp_mqtt_client_handle_t client) {
+static int apply_sets(esp_mqtt_client_handle_t client, const stats_snapshot_t *snap) {
     static char cfg[HA_CONFIG_STATE_MAX];
     static char ack[96], topic[96], act[96];
     int n = s_set_count; /* snapshot: the handler may still be appending */
@@ -261,8 +285,8 @@ static int apply_sets(esp_mqtt_client_handle_t client) {
                 m = 0;
             if (m > BONUS_MAX_MIN)
                 m = BONUS_MAX_MIN;
-            timer_bonus_reconcile(0, (int32_t)m * 60); /* idempotent */
-            ESP_LOGI(TAG, "screen bonus target %ld min", m);
+            s_bonus_target_s = (int32_t)m * 60; /* applied post-join (idempotent) */
+            ESP_LOGI(TAG, "screen bonus target %ld min (deferred)", m);
         } else if (strcmp(k, "locate") == 0) {
             if (strcmp(v, "ON") == 0) {
                 s_locate_pending = true;
@@ -291,10 +315,12 @@ static int apply_sets(esp_mqtt_client_handle_t client) {
         publish(client, topic, "0", 1);
         s_bonus_clear_pending = false;
     }
-    /* act state: confirmed bonus (applied minutes) + locate off (momentary) */
+    /* act state: confirmed bonus (applied minutes, from the orchestrator's
+       snapshot — live timer state is off-limits on this task) + locate off
+       (momentary). A target buffered THIS window confirms next window; the
+       HA number is optimistic, so it doesn't snap back meanwhile. */
     snprintf(topic, sizeof(topic), "magtag/%s/act", device_id());
-    snprintf(act, sizeof(act), "{\"screen_bonus\":%ld,\"locate\":\"OFF\"}",
-             (long)(g_rtc_state.slots[0].bonus_applied / 60));
+    snprintf(act, sizeof(act), "{\"screen_bonus\":%ld,\"locate\":\"OFF\"}", (long)(snap->screen_bonus_applied_s / 60));
     publish(client, topic, act, 1);
     /* cfg state: current editable-config values. Skip a truncated doc —
        publishing invalid JSON would knock every editable control offline. */
@@ -443,8 +469,10 @@ void mqtt_ha_window(const stats_snapshot_t *snap) {
         cmd_result_t cr = cmd_apply(s_cmd_buf, &act, ack, sizeof(ack));
         if (cr == CMD_GRANT || cr == CMD_LOCATE) {
             if (cr == CMD_GRANT) {
-                /* Pure state change; persisted at the next enter_deep_sleep */
-                timer_grant(act.slot, act.sec);
+                /* Buffered: the orchestrator applies it after joining this
+                   task; persisted at the next enter_deep_sleep. */
+                s_grant_slot = act.slot;
+                s_grant_sec = act.sec;
             } else {
                 s_locate_pending = true; /* main.c runs the alarm after the window */
             }
@@ -459,7 +487,7 @@ void mqtt_ha_window(const stats_snapshot_t *snap) {
 
     /* Apply any editable-config edits and (always) republish current values
        so HA's number/text controls reflect the confirmed state. */
-    apply_sets(client);
+    apply_sets(client, snap);
 
     /* Final drain so the acks + cleared-topic publishes survive disconnect */
     vTaskDelay(pdMS_TO_TICKS(400));

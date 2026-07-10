@@ -24,6 +24,12 @@ void mqtt_ha_window(const stats_snapshot_t *snap);
    the locate alarm after the window closes (audio/LEDs, WiFi down). */
 bool mqtt_ha_locate_pending(void);
 
+/* Timer effects parsed during the window, buffered for the orchestrator:
+   the window runs on the network task, which never mutates timer state.
+   Each returns true (once) and fills the out params when one is pending. */
+bool mqtt_ha_take_bonus_target(int32_t *target_sec); /* set/screen_bonus */
+bool mqtt_ha_take_grant(int *slot, int32_t *sec);    /* cmd grant */
+
 /* At day rollover, clear the retained "Screen bonus today" target next
    window so the bonus doesn't repeat on the new day. */
 void mqtt_ha_queue_bonus_clear(void);
