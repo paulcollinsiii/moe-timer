@@ -13,6 +13,7 @@ idf_component_register(
         "mqtt_ha.c"
         "config_apply.c"
         "config_validate.c"
+        "ha_config.c"
         "cmd_apply.c"
         "device_id.c"
         "light.c"

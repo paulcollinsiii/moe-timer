@@ -60,6 +60,7 @@ add_host_test(test_button_latch)
 add_host_test(test_wake_policy)
 add_host_test(test_stats_json)
 add_host_test(test_config_validate)
+add_host_test(test_ha_config)
 
 # ---- config_apply: compiles the vendored cJSON for host JSON parsing ----
 add_executable(test_config_apply test_config_apply/test_config_apply.c
