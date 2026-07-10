@@ -105,6 +105,14 @@ confirmed value to `magtag/<id>/cfg` so the control reflects reality.
 - Numbers render as **numeric entry boxes** (`mode: box`) with `step: 1`, so
   any minute value is accepted — HA's slider/step grid would otherwise
   reject round values like 30 or 45.
+- Numbers and switches are **optimistic**: because the device is asleep, the
+  `cfg` state topic only catches up a whole window later, so the control
+  shows your edit immediately and the device's next `cfg`/`act` republish
+  confirms (or corrects) it. Without this HA snaps the control back to the
+  stale retained value the instant you change it. (MQTT **Text** entities —
+  device name, timezone, timer names — have no optimistic mode, so those
+  briefly revert to the old value until the next window applies them; names
+  change rarely, so this is left as-is.)
 
 ### Ordering the controls
 

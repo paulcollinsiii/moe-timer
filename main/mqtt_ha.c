@@ -19,7 +19,7 @@
 static const char *TAG = "mqtt_ha";
 
 /* Bump when entities are added/renamed — discovery configs republish once. */
-#define DISC_SCHEMA_VER 4 /* v4: number step=1 grid fix + mode:box (was v3) */
+#define DISC_SCHEMA_VER 5 /* v5: optimistic number/switch (no snap-back on edit) */
 
 #define CONNECT_TIMEOUT_MS 5000
 #define PUBLISH_DRAIN_TIMEOUT_MS 3000
@@ -218,14 +218,14 @@ static int publish_action_discovery(esp_mqtt_client_handle_t client, const char 
     int published = 0, n;
     /* number: Screen bonus (min) today */
     snprintf(topic, sizeof(topic), "homeassistant/number/%s_screen_bonus/config", id);
-    n = snprintf(
-        payload, sizeof(payload),
-        "{\"name\":\"Screen bonus (min) today\",\"uniq_id\":\"%s_screen_bonus\","
-        "\"stat_t\":\"magtag/%s/act\",\"val_tpl\":\"{{ value_json.screen_bonus }}\","
-        "\"cmd_t\":\"magtag/%s/set/screen_bonus\",\"retain\":true,\"min\":0,\"max\":%d,\"step\":5,"
-        "\"mode\":\"box\",\"unit_of_meas\":\"min\",\"ent_cat\":\"config\",\"dev\":{\"ids\":[\"%s\"],\"name\":\"%s\","
-        "\"mf\":\"Adafruit\",\"mdl\":\"MagTag 2.9\",\"sw\":\"%s\"}}",
-        id, id, id, BONUS_MAX_MIN, id, dn, fw);
+    n = snprintf(payload, sizeof(payload),
+                 "{\"name\":\"Screen bonus (min) today\",\"uniq_id\":\"%s_screen_bonus\","
+                 "\"stat_t\":\"magtag/%s/act\",\"val_tpl\":\"{{ value_json.screen_bonus }}\","
+                 "\"cmd_t\":\"magtag/%s/set/screen_bonus\",\"retain\":true,\"min\":0,\"max\":%d,\"step\":5,"
+                 "\"mode\":\"box\",\"optimistic\":true,\"unit_of_meas\":\"min\",\"ent_cat\":\"config\","
+                 "\"dev\":{\"ids\":[\"%s\"],\"name\":\"%s\","
+                 "\"mf\":\"Adafruit\",\"mdl\":\"MagTag 2.9\",\"sw\":\"%s\"}}",
+                 id, id, id, BONUS_MAX_MIN, id, dn, fw);
     if (n < (int)sizeof(payload))
         published += publish(client, topic, payload, 1);
     else
@@ -235,7 +235,7 @@ static int publish_action_discovery(esp_mqtt_client_handle_t client, const char 
     n = snprintf(payload, sizeof(payload),
                  "{\"name\":\"Find my timer\",\"uniq_id\":\"%s_locate\",\"stat_t\":\"magtag/%s/act\","
                  "\"val_tpl\":\"{{ value_json.locate }}\",\"cmd_t\":\"magtag/%s/set/locate\",\"retain\":true,"
-                 "\"pl_on\":\"ON\",\"pl_off\":\"OFF\",\"dev\":{\"ids\":[\"%s\"],\"name\":\"%s\","
+                 "\"pl_on\":\"ON\",\"pl_off\":\"OFF\",\"optimistic\":true,\"dev\":{\"ids\":[\"%s\"],\"name\":\"%s\","
                  "\"mf\":\"Adafruit\",\"mdl\":\"MagTag 2.9\",\"sw\":\"%s\"}}",
                  id, id, id, id, dn, fw);
     if (n < (int)sizeof(payload))

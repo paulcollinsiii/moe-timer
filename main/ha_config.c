@@ -281,16 +281,23 @@ int ha_config_discovery(char *buf, size_t len, const char *dev_id, const char *d
                "{\"name\":\"%s\",\"uniq_id\":\"%s_%s\",\"stat_t\":\"magtag/%s/cfg\","
                "\"val_tpl\":\"{{ value_json.%s }}\",\"cmd_t\":\"magtag/%s/set/%s\",\"retain\":true",
                f->name, dev_id, f->key, dev_id, f->key, dev_id, f->key);
+    /* optimistic: the device is asleep, so the cfg state topic lags an edit
+       by a whole window. Without this, HA re-renders the control from the
+       stale retained state the instant you change it — the switch snaps back
+       and a revert to the old number sends nothing. Optimistic shows the
+       commanded value immediately; the device's cfg republish then confirms
+       (or corrects) it. */
     if (strcmp(f->component, "number") == 0) {
         /* mode:box -> numeric entry field, not a slider (sliders are painful
            for wide ranges like 1..1440). */
-        pos = jcat(buf, len, pos, ",\"min\":%d,\"max\":%d,\"step\":%d,\"mode\":\"box\"", f->lo, f->hi, f->step);
+        pos = jcat(buf, len, pos, ",\"min\":%d,\"max\":%d,\"step\":%d,\"mode\":\"box\",\"optimistic\":true", f->lo,
+                   f->hi, f->step);
         if (f->unit != NULL)
             pos = jcat(buf, len, pos, ",\"unit_of_meas\":\"%s\"", f->unit);
     } else if (strcmp(f->component, "text") == 0) {
         pos = jcat(buf, len, pos, ",\"mode\":\"text\"");
     } else if (strcmp(f->component, "switch") == 0) {
-        pos = jcat(buf, len, pos, ",\"pl_on\":\"ON\",\"pl_off\":\"OFF\"");
+        pos = jcat(buf, len, pos, ",\"pl_on\":\"ON\",\"pl_off\":\"OFF\",\"optimistic\":true");
     }
     pos = jcat(buf, len, pos, ",\"ent_cat\":\"config\"");
     pos = jcat(buf, len, pos,
