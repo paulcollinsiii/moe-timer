@@ -9,6 +9,7 @@
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
+#include "ha_config.h"
 #include "hal_nvs.h"
 #include "mqtt_client.h"
 #include "nvs_config.h"
@@ -17,7 +18,7 @@
 static const char *TAG = "mqtt_ha";
 
 /* Bump when entities are added/renamed — discovery configs republish once. */
-#define DISC_SCHEMA_VER 1
+#define DISC_SCHEMA_VER 2 /* v2: editable config entities (magtag/<id>/set/+) */
 
 #define CONNECT_TIMEOUT_MS 5000
 #define PUBLISH_DRAIN_TIMEOUT_MS 3000
@@ -42,6 +43,18 @@ static char s_cmd_buf[CMD_BUF_MAX];
 static volatile bool s_cmd_received;
 static int s_cmd_topic_len;
 static bool s_locate_pending; /* set when a locate command applied; main.c consumes */
+
+/* Editable-config sets (HA→device on magtag/<id>/set/<key>). The broker
+   delivers all retained set values right after subscribe; the event
+   handler buffers (key,value) pairs and the window applies them, so NVS
+   writes stay off the MQTT-client task. */
+#define SET_MAX 24
+static struct {
+    char key[24];
+    char value[80];
+} s_sets[SET_MAX];
+static volatile int s_set_count;
+static int s_set_prefix_len; /* strlen of "magtag/<id>/set/" */
 
 bool mqtt_ha_locate_pending(void) {
     bool p = s_locate_pending;
@@ -98,6 +111,21 @@ static void mqtt_event_handler(void *arg, esp_event_base_t base, int32_t event_i
                     s_cmd_buf[ev->total_data_len] = '\0';
                     s_cmd_received = true;
                 }
+            } else if (ev->topic_len > s_set_prefix_len && ev->current_data_offset == 0 &&
+                       strncmp(ev->topic, "magtag/", 7) == 0 &&
+                       strncmp(ev->topic + s_set_prefix_len - 5, "/set/", 5) == 0) {
+                /* magtag/<id>/set/<key>: buffer the field key + value (small,
+                   single-chunk). */
+                if (s_set_count < SET_MAX) {
+                    int klen = ev->topic_len - s_set_prefix_len; /* > 0 per the outer check */
+                    if (klen < (int)sizeof(s_sets[0].key) && ev->data_len < (int)sizeof(s_sets[0].value)) {
+                        memcpy(s_sets[s_set_count].key, ev->topic + s_set_prefix_len, klen);
+                        s_sets[s_set_count].key[klen] = '\0';
+                        memcpy(s_sets[s_set_count].value, ev->data, ev->data_len);
+                        s_sets[s_set_count].value[ev->data_len] = '\0';
+                        s_set_count++;
+                    }
+                }
             }
             break;
         default:
@@ -146,6 +174,35 @@ static int publish_discovery(esp_mqtt_client_handle_t client, const char *dev_na
     return published;
 }
 
+/* Editable-config entity discovery (number/text/switch with command topics). */
+static int publish_config_discovery(esp_mqtt_client_handle_t client, const char *dev_name, const char *fw) {
+    static char topic[128];
+    static char payload[512];
+    int count = 0, published = 0;
+    const cfg_field_t *fields = ha_config_fields(&count);
+    for (int i = 0; i < count; i++) {
+        ha_config_discovery_topic(topic, sizeof(topic), device_id(), &fields[i]);
+        int n = ha_config_discovery(payload, sizeof(payload), device_id(), dev_name, fw, &fields[i]);
+        if (n < (int)sizeof(payload))
+            published += publish(client, topic, payload, 1);
+    }
+    return published;
+}
+
+/* Apply the buffered editable-config sets and republish the cfg state. */
+static int apply_sets(esp_mqtt_client_handle_t client) {
+    static char cfg[512];
+    char ack[96];
+    for (int i = 0; i < s_set_count; i++) {
+        ha_config_set(s_sets[i].key, s_sets[i].value, ack, sizeof(ack));
+        ESP_LOGI(TAG, "set %s: %s", s_sets[i].key, ack);
+    }
+    char topic[96];
+    snprintf(topic, sizeof(topic), "magtag/%s/cfg", device_id());
+    ha_config_state_json(cfg, sizeof(cfg));
+    return publish(client, topic, cfg, 1); /* retained current values */
+}
+
 void mqtt_ha_window(const stats_snapshot_t *snap) {
     /* static: main-task stack is tight beneath WiFi+MQTT (see
        publish_discovery). These are used serially on the one task. */
@@ -191,15 +248,23 @@ void mqtt_ha_window(const stats_snapshot_t *snap) {
     char topic[96];
     static char payload[768];
 
-    /* Subscribe to the retained config + cmd topics first, so the broker's
-       delivery overlaps the stat publishes below (no separate wait). */
+    /* Subscribe to the retained config + cmd + set topics first, so the
+       broker's delivery overlaps the stat publishes below (no separate
+       wait). set/+ is a wildcard: one subscription for all editable fields. */
     s_config_received = false;
     s_cmd_received = false;
-    char config_topic[96], cmd_topic[96];
+    s_set_count = 0;
+    char config_topic[96], cmd_topic[96], set_topic[96];
     s_config_topic_len = snprintf(config_topic, sizeof(config_topic), "magtag/%s/config", device_id());
     s_cmd_topic_len = snprintf(cmd_topic, sizeof(cmd_topic), "magtag/%s/cmd", device_id());
+    s_set_prefix_len = snprintf(set_topic, sizeof(set_topic), "magtag/%s/set/", device_id());
+    if (s_set_prefix_len > 0 && s_set_prefix_len + 1 < (int)sizeof(set_topic)) {
+        set_topic[s_set_prefix_len] = '+'; /* single-level wildcard */
+        set_topic[s_set_prefix_len + 1] = '\0';
+    }
     esp_mqtt_client_subscribe(client, config_topic, 1);
     esp_mqtt_client_subscribe(client, cmd_topic, 1);
+    esp_mqtt_client_subscribe(client, set_topic, 1);
 
     /* Discovery: once per schema bump (covers new entities and renames) */
     uint16_t disc_ver = 0;
@@ -209,6 +274,7 @@ void mqtt_ha_window(const stats_snapshot_t *snap) {
         char dev_name[64];
         device_name(dev_name, sizeof(dev_name));
         published += publish_discovery(client, dev_name, snap->fw);
+        published += publish_config_discovery(client, dev_name, snap->fw);
     }
 
     snprintf(topic, sizeof(topic), "magtag/%s/stat", device_id());
@@ -278,6 +344,10 @@ void mqtt_ha_window(const stats_snapshot_t *snap) {
             ESP_LOGI(TAG, "command applied (result %d)", (int)cr);
         }
     }
+
+    /* Apply any editable-config edits and (always) republish current values
+       so HA's number/text controls reflect the confirmed state. */
+    apply_sets(client);
 
     /* Final drain so the acks + cleared-topic publishes survive disconnect */
     vTaskDelay(pdMS_TO_TICKS(400));
