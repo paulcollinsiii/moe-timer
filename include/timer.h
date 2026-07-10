@@ -141,6 +141,25 @@ void timer_grant(int slot, int32_t sec);
    granted time. bonus_applied resets at timer_reset (day rollover). */
 void timer_bonus_reconcile(int slot, int32_t target_sec);
 
+/* Outcome of reconciling a slot against an HA config edit that changed its
+   definition mid-run (timer_reconcile_def). */
+typedef enum {
+    TIMER_RECONCILE_NONE = 0, /* nothing state-affecting changed */
+    TIMER_RECONCILE_RESET,    /* renamed/disabled: slot reset to IDLE */
+    TIMER_RECONCILE_UPDATED,  /* duration delta applied in place */
+    TIMER_RECONCILE_EXPIRED,  /* shrink past elapsed: slot now EXPIRED */
+} timer_reconcile_t;
+
+/* Reconcile a RUNNING/PAUSED extra slot (1..N) whose definition changed
+   during a network window: rename/disable resets to IDLE (like reload);
+   a duration change delta-shifts allocation and expiry/remaining so time
+   already elapsed and HA grants are preserved — expiring the run when the
+   new duration is already used up. Slot 0 (Screen) and IDLE/EXPIRED slots
+   are never touched. was_running (nullable) reports the pre-call RUNNING
+   state so the caller can chirp/alert appropriately. */
+timer_reconcile_t timer_reconcile_def(int slot, const timer_def_t *old_def, const timer_def_t *new_def, time_t now,
+                                      bool *was_running);
+
 timer_state_t timer_get_state(void);
 void timer_start(time_t now, int32_t allocation_sec);
 void timer_pause(time_t now);
