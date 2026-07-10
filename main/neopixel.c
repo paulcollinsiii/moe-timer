@@ -7,6 +7,8 @@
 #include "driver/rmt_tx.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/queue.h"
+#include "freertos/semphr.h"
 #include "freertos/task.h"
 
 static const char *TAG = "neopixel";
@@ -127,7 +129,6 @@ static esp_err_t ws2812_encoder_create(uint32_t resolution_hz, rmt_encoder_handl
 
 static rmt_channel_handle_t s_rmt_chan = NULL;
 static rmt_encoder_handle_t s_encoder = NULL;
-static volatile bool s_stop_requested = false;
 static uint8_t s_pixels[NEOPIXEL_COUNT * 3]; /* GRB byte order: [G, R, B] per LED */
 
 /* Library configuration, injected from main (this module stays clock- and
@@ -135,12 +136,29 @@ static uint8_t s_pixels[NEOPIXEL_COUNT * 3]; /* GRB byte order: [G, R, B] per LE
 static bool (*s_quiet_cb)(void);
 static uint8_t s_status_brightness = 100; /* percent */
 
-/* Internal pulse task state. INVARIANT: exactly one task may drive the RMT
-   channel — concurrent flush_pixels from two tasks deadlocks
-   rmt_tx_wait_all_done(portMAX_DELAY) (found the hard way in bring-up).
-   The pulse task is owned here; callers only begin/end. */
-static volatile bool s_pulse_done = true;
-static uint8_t s_pulse_r, s_pulse_g, s_pulse_b;
+/* INVARIANT: exactly one task may drive the RMT channel — concurrent
+   flush_pixels from two tasks deadlocks rmt_tx_wait_all_done(portMAX_DELAY)
+   (found the hard way in bring-up). The LED task below is that one task; it
+   also owns the power gate. Everything else posts messages. */
+
+typedef enum {
+    NP_MSG_PIXEL = 0,  /* one pixel, status class (quiet hours + brightness) */
+    NP_MSG_PIXEL_HI,   /* one pixel, alert class */
+    NP_MSG_BINARY4,    /* 4-bit binary on all pixels, status class (idx = value) */
+    NP_MSG_PULSE,      /* begin the slow all-pixel pulse, alert class */
+    NP_MSG_PULSE_STOP, /* end the pulse: all pixels off, gate HIGH */
+    NP_MSG_CLEAR,      /* all pixels off, gate HIGH */
+    NP_MSG_STOP,       /* CLEAR + ack on s_stop_ack (sleep entry) */
+} np_msg_type_t;
+
+typedef struct {
+    uint8_t type; /* np_msg_type_t */
+    uint8_t idx;  /* pixel index, or the BINARY4 value */
+    uint8_t r, g, b;
+} np_msg_t;
+
+static QueueHandle_t s_queue;
+static SemaphoreHandle_t s_stop_ack;
 
 void neopixel_set_quiet_cb(bool (*is_quiet)(void)) {
     s_quiet_cb = is_quiet;
@@ -157,6 +175,8 @@ static bool status_muted(void) {
 static uint8_t scale_status(uint8_t ch) {
     return (uint8_t)((int)ch * s_status_brightness / 100);
 }
+
+static void led_task(void *arg);
 
 void neopixel_init(void) {
     /* Release the deep-sleep hold placed by enter_deep_sleep() so the pin
@@ -194,7 +214,21 @@ void neopixel_init(void) {
     }
     rmt_enable(s_rmt_chan);
     memset(s_pixels, 0, sizeof(s_pixels));
+
+    /* Single LED owner: queue + task. Depth 8 absorbs a full alert
+       sequence of posts without ever blocking a caller. */
+    s_queue = xQueueCreate(8, sizeof(np_msg_t));
+    s_stop_ack = xSemaphoreCreateBinary();
+    if (s_queue == NULL || s_stop_ack == NULL || xTaskCreate(led_task, "np_led", 2560, NULL, 5, NULL) != pdPASS) {
+        ESP_LOGE(TAG, "LED task/queue create failed - LEDs disabled");
+        if (s_queue != NULL) {
+            vQueueDelete(s_queue);
+            s_queue = NULL; /* posts become no-ops; gate stays HIGH */
+        }
+    }
 }
+
+/* ---- LED task (sole RMT + gate owner) ---- */
 
 static void flush_pixels(void) {
     if (!s_rmt_chan || !s_encoder)
@@ -213,83 +247,144 @@ static void set_all_scaled(uint8_t r, uint8_t g, uint8_t b, int step) {
     }
 }
 
-static void pulse_task(void *arg) {
-    (void)arg;
-    gpio_set_level(NEOPIXEL_POWER_GPIO, 0); /* power gate ON */
-    while (!s_stop_requested) {
-        for (int step = 0; step < 32 && !s_stop_requested; step++) {
-            set_all_scaled(s_pulse_r, s_pulse_g, s_pulse_b, step);
-            flush_pixels();
-            vTaskDelay(pdMS_TO_TICKS(30));
-        }
-        for (int step = 32; step >= 0 && !s_stop_requested; step--) {
-            set_all_scaled(s_pulse_r, s_pulse_g, s_pulse_b, step);
-            flush_pixels();
-            vTaskDelay(pdMS_TO_TICKS(30));
-        }
-    }
-    neopixel_stop(); /* the task's OWN final flush — single-threaded */
-    s_pulse_done = true;
-    vTaskDelete(NULL);
-}
-
-void neopixel_alert_pulse_begin(uint8_t r, uint8_t g, uint8_t b) {
-    if (!s_rmt_chan || !s_encoder || !s_pulse_done)
-        return; /* already pulsing */
-    s_pulse_r = r;
-    s_pulse_g = g;
-    s_pulse_b = b;
-    s_stop_requested = false;
-    s_pulse_done = false;
-    if (xTaskCreate(pulse_task, "np_pulse", 2048, NULL, 5, NULL) != pdPASS) {
-        s_pulse_done = true;
-    }
-}
-
-void neopixel_alert_pulse_end(void) {
-    s_stop_requested = true;
-    for (int i = 0; i < 40 && !s_pulse_done; i++) {
-        vTaskDelay(pdMS_TO_TICKS(50));
-    }
-    if (!s_pulse_done) {
-        ESP_LOGW(TAG, "pulse task did not finish; forcing LEDs off");
-    }
-    neopixel_stop(); /* idempotent gate-off; safe once the task is done */
-}
-
-void neopixel_highpri_pixel(int idx, uint8_t r, uint8_t g, uint8_t b) {
-    if (!s_rmt_chan || !s_encoder || idx < 0 || idx >= NEOPIXEL_COUNT)
-        return;
-    s_pixels[idx * 3 + 0] = g; /* GRB byte order */
-    s_pixels[idx * 3 + 1] = r;
-    s_pixels[idx * 3 + 2] = b;
-    gpio_set_level(NEOPIXEL_POWER_GPIO, 0); /* power gate ON */
-    flush_pixels();
-}
-
-void neopixel_status_pixel(int idx, uint8_t r, uint8_t g, uint8_t b) {
-    if (status_muted())
-        return;
-    neopixel_highpri_pixel(idx, scale_status(r), scale_status(g), scale_status(b));
-}
-
-void neopixel_status_binary4(uint8_t value, uint8_t r, uint8_t g, uint8_t b) {
-    if (status_muted() || !s_rmt_chan || !s_encoder)
-        return;
-    for (int i = 0; i < NEOPIXEL_COUNT; i++) {
-        /* pixel 0 (over button A) = bit3 ... pixel 3 = bit0 */
-        bool lit = (value >> (3 - i)) & 1;
-        s_pixels[i * 3 + 0] = lit ? scale_status(g) : 0;
-        s_pixels[i * 3 + 1] = lit ? scale_status(r) : 0;
-        s_pixels[i * 3 + 2] = lit ? scale_status(b) : 0;
-    }
-    gpio_set_level(NEOPIXEL_POWER_GPIO, 0); /* power gate ON */
-    flush_pixels();
-}
-
-void neopixel_stop(void) {
-    s_stop_requested = true;
+static void all_off_gate_high(void) {
     memset(s_pixels, 0, sizeof(s_pixels));
     flush_pixels();
     gpio_set_level(NEOPIXEL_POWER_GPIO, 1); /* power gate OFF */
+}
+
+/* Pulse mode, task-local: while active the pulse owns every pixel; static
+   pixel posts still update the frame but the next pulse step overwrites
+   them (a PULSE_STOP darkens everything — callers re-light after). */
+typedef struct {
+    bool active;
+    int step; /* 0..64 triangle: 0..32 up, 33..64 down */
+    uint8_t r, g, b;
+} pulse_state_t;
+
+static void led_task_apply(const np_msg_t *m, pulse_state_t *pulse) {
+    switch ((np_msg_type_t)m->type) {
+        case NP_MSG_PIXEL:
+            if (status_muted())
+                return;
+            s_pixels[m->idx * 3 + 0] = scale_status(m->g);
+            s_pixels[m->idx * 3 + 1] = scale_status(m->r);
+            s_pixels[m->idx * 3 + 2] = scale_status(m->b);
+            break;
+        case NP_MSG_PIXEL_HI:
+            s_pixels[m->idx * 3 + 0] = m->g; /* GRB byte order */
+            s_pixels[m->idx * 3 + 1] = m->r;
+            s_pixels[m->idx * 3 + 2] = m->b;
+            break;
+        case NP_MSG_BINARY4:
+            if (status_muted())
+                return;
+            for (int i = 0; i < NEOPIXEL_COUNT; i++) {
+                /* pixel 0 (over button A) = bit3 ... pixel 3 = bit0 */
+                bool lit = (m->idx >> (3 - i)) & 1;
+                s_pixels[i * 3 + 0] = lit ? scale_status(m->g) : 0;
+                s_pixels[i * 3 + 1] = lit ? scale_status(m->r) : 0;
+                s_pixels[i * 3 + 2] = lit ? scale_status(m->b) : 0;
+            }
+            break;
+        case NP_MSG_PULSE:
+            pulse->active = true;
+            pulse->step = 0;
+            pulse->r = m->r;
+            pulse->g = m->g;
+            pulse->b = m->b;
+            gpio_set_level(NEOPIXEL_POWER_GPIO, 0); /* gate ON */
+            return;                                 /* steps flush; nothing to paint yet */
+        case NP_MSG_PULSE_STOP:
+            if (pulse->active) {
+                pulse->active = false;
+                all_off_gate_high();
+            }
+            return;
+        case NP_MSG_CLEAR:
+        case NP_MSG_STOP:
+            pulse->active = false;
+            all_off_gate_high();
+            if (m->type == NP_MSG_STOP)
+                xSemaphoreGive(s_stop_ack); /* gate confirmed HIGH */
+            return;
+        default:
+            return;
+    }
+    if (!pulse->active) {                       /* pulse frames overwrite static paints anyway */
+        gpio_set_level(NEOPIXEL_POWER_GPIO, 0); /* gate ON */
+        flush_pixels();
+    }
+}
+
+static void led_task(void *arg) {
+    (void)arg;
+    pulse_state_t pulse = {0};
+    for (;;) {
+        np_msg_t msg;
+        /* Idle: block forever. Pulsing: 30 ms frame cadence between posts. */
+        TickType_t wait = pulse.active ? pdMS_TO_TICKS(30) : portMAX_DELAY;
+        if (xQueueReceive(s_queue, &msg, wait) == pdTRUE) {
+            led_task_apply(&msg, &pulse);
+        } else if (pulse.active) {
+            int level = (pulse.step <= 32) ? pulse.step : 64 - pulse.step;
+            set_all_scaled(pulse.r, pulse.g, pulse.b, level);
+            flush_pixels();
+            pulse.step = (pulse.step + 1) % 65;
+        }
+    }
+}
+
+static void post(np_msg_t msg, TickType_t timeout) {
+    if (s_queue == NULL)
+        return; /* task never came up: LEDs stay dark, gate stays HIGH */
+    if (xQueueSend(s_queue, &msg, timeout) != pdTRUE) {
+        ESP_LOGW(TAG, "LED queue full, dropping msg type %d", (int)msg.type);
+    }
+}
+
+/* ---- public posting API ---- */
+
+void neopixel_status_pixel(int idx, uint8_t r, uint8_t g, uint8_t b) {
+    if (idx < 0 || idx >= NEOPIXEL_COUNT)
+        return;
+    post((np_msg_t){.type = NP_MSG_PIXEL, .idx = (uint8_t)idx, .r = r, .g = g, .b = b}, 0);
+}
+
+void neopixel_highpri_pixel(int idx, uint8_t r, uint8_t g, uint8_t b) {
+    if (idx < 0 || idx >= NEOPIXEL_COUNT)
+        return;
+    post((np_msg_t){.type = NP_MSG_PIXEL_HI, .idx = (uint8_t)idx, .r = r, .g = g, .b = b}, 0);
+}
+
+void neopixel_status_binary4(uint8_t value, uint8_t r, uint8_t g, uint8_t b) {
+    post((np_msg_t){.type = NP_MSG_BINARY4, .idx = value, .r = r, .g = g, .b = b}, 0);
+}
+
+void neopixel_alert_pulse_begin(uint8_t r, uint8_t g, uint8_t b) {
+    post((np_msg_t){.type = NP_MSG_PULSE, .r = r, .g = g, .b = b}, pdMS_TO_TICKS(50));
+}
+
+void neopixel_alert_pulse_end(void) {
+    post((np_msg_t){.type = NP_MSG_PULSE_STOP}, pdMS_TO_TICKS(50));
+}
+
+void neopixel_stop(void) {
+    post((np_msg_t){.type = NP_MSG_CLEAR}, pdMS_TO_TICKS(50));
+}
+
+void neopixel_stop_sync(uint32_t timeout_ms) {
+    if (s_queue != NULL && s_stop_ack != NULL) {
+        while (xSemaphoreTake(s_stop_ack, 0) == pdTRUE) {
+        } /* drain stale acks */
+        post((np_msg_t){.type = NP_MSG_STOP}, pdMS_TO_TICKS(50));
+        if (xSemaphoreTake(s_stop_ack, pdMS_TO_TICKS(timeout_ms)) == pdTRUE) {
+            return; /* LED task confirmed: pixels dark, gate HIGH */
+        }
+        ESP_LOGW(TAG, "LED task did not ack STOP in %lu ms", (unsigned long)timeout_ms);
+    }
+    /* Wedged or never started: force the gate off WITHOUT an RMT transmit
+       (racing the LED task on the channel deadlocks; power-off darkens the
+       pixels regardless). Plain GPIO write — safe from any task. */
+    gpio_set_level(NEOPIXEL_POWER_GPIO, 1);
 }

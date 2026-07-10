@@ -135,8 +135,10 @@ static void enter_deep_sleep(void) {
     s_sleep_entry_time = (int64_t)time(NULL);
 
     /* No code path may sleep with the NeoPixel gate LOW — the hold below
-       would keep the LEDs powered all night. */
-    neopixel_stop();
+       would keep the LEDs powered all night. Ack'd stop: waits for the LED
+       task to confirm; on timeout the gate GPIO is forced HIGH without an
+       RMT transmit (safe from the failsafe's esp_timer context too). */
+    neopixel_stop_sync(500);
 
     /* Digital pads float in deep sleep; hold the power-control pins so the
        NeoPixel gate (21, HIGH = off) and amp enable (16, LOW = off) cannot
@@ -464,9 +466,8 @@ static bool maybe_start_break(time_t now) {
     display_state_t st = make_state(timer_tick(now), now);
     neopixel_show_timer_state(); /* blue during the refresh */
     display_full_refresh(&st);   /* inverted SCREEN BREAK layout */
-    run_break_alarm();
-    neopixel_stop();
-    return true;
+    run_break_alarm();           /* pulse end darkens the pixels */
+    return true;                 /* caller sleeps; stop_sync guards the gate */
 }
 
 /* Full expiry sequence: big TIME'S UP screen, beeps + red pulse, then back
@@ -628,9 +629,8 @@ static void maybe_wait_for_event(void) {
             neopixel_stop(); /* clear the binary-countdown pixels */
             time_t pnow = time(NULL);
             display_state_t st = make_state(timer_tick(pnow), pnow);
-            neopixel_show_timer_state(); /* amber during the refresh */
+            neopixel_show_timer_state(); /* amber through the refresh until sleep */
             display_full_refresh(&st);
-            neopixel_stop();
             return;
         }
         if (next_step < n_steps && rem <= (int64_t)STEPS[next_step]) {
@@ -822,9 +822,8 @@ static void handle_button_wake(void) {
         /* Includes EXPIRED: any button returns the display to the main
            layout (empty bar, TIME'S UP state) via a full refresh. */
         ESP_LOGI(TAG, "button %d: state %d -> %d, full refresh", (int)btn, (int)before, (int)timer_get_state());
-        neopixel_show_timer_state(); /* resulting state, shown during refresh */
+        neopixel_show_timer_state(); /* resulting state, lit until sleep */
         display_full_refresh(&st);   /* button wakes always full-refresh */
-        neopixel_stop();
     }
     maybe_wait_for_event();
     enter_deep_sleep();
