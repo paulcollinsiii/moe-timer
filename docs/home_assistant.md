@@ -102,6 +102,46 @@ confirmed value to `magtag/<id>/cfg` so the control reflects reality.
 - Commands are sent on retained `set/<key>` topics so the sleeping device
   receives edits made while it's asleep. Idempotent, so re-delivery is
   harmless.
+- Numbers render as **numeric entry boxes** (`mode: box`) with `step: 1`, so
+  any minute value is accepted — HA's slider/step grid would otherwise
+  reject round values like 30 or 45.
+
+### Ordering the controls
+
+The device page auto-sorts entities alphabetically by name within each
+category — the firmware can't set a display order (MQTT discovery has no
+ordering field). For a custom layout, add a **dashboard Entities card** and
+list them in the order you want; the entity IDs follow
+`number.<device>_<field>` / `text.<device>_<field>` (use the entity picker
+if unsure of the exact slug):
+
+```yaml
+type: entities
+title: Kitchen MagTag
+entities:
+  - entity: text.kitchen_magtag_device_name
+  - type: section
+    label: Daily limits
+  - entity: number.kitchen_magtag_weekday_allocation
+  - entity: number.kitchen_magtag_weekend_allocation
+  - entity: number.kitchen_magtag_holiday_allocation
+  - entity: number.kitchen_magtag_summer_allocation
+  - type: section
+    label: Quiet hours
+  - entity: number.kitchen_magtag_quiet_hours_start_hhmm
+  - entity: number.kitchen_magtag_quiet_hours_end_hhmm
+  - type: section
+    label: Breaks
+  - entity: number.kitchen_magtag_break_duration
+  - entity: number.kitchen_magtag_break_interval
+  - entity: number.kitchen_magtag_screen_bonus_min_today
+  - type: section
+    label: Extra timers
+  - entity: text.kitchen_magtag_timer_1_name
+  - entity: number.kitchen_magtag_timer_1_minutes
+  - entity: switch.kitchen_magtag_timer_1_reloadable
+  # ...timers 2-4
+```
 
 ### Bulk config document (holidays, scripted setup)
 
