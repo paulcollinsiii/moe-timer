@@ -1,6 +1,7 @@
 #include "mqtt_ha.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "cmd_apply.h"
@@ -18,7 +19,7 @@
 static const char *TAG = "mqtt_ha";
 
 /* Bump when entities are added/renamed — discovery configs republish once. */
-#define DISC_SCHEMA_VER 2 /* v2: editable config entities (magtag/<id>/set/+) */
+#define DISC_SCHEMA_VER 3 /* v3: + Screen-bonus number & Find-my-timer switch */
 
 #define CONNECT_TIMEOUT_MS 5000
 #define PUBLISH_DRAIN_TIMEOUT_MS 3000
@@ -54,7 +55,12 @@ static struct {
     char value[80];
 } s_sets[SET_MAX];
 static volatile int s_set_count;
-static int s_set_prefix_len; /* strlen of "magtag/<id>/set/" */
+static int s_set_prefix_len;       /* strlen of "magtag/<id>/set/" */
+static bool s_bonus_clear_pending; /* rollover: clear the retained bonus target next window */
+
+void mqtt_ha_queue_bonus_clear(void) {
+    s_bonus_clear_pending = true;
+}
 
 bool mqtt_ha_locate_pending(void) {
     bool p = s_locate_pending;
@@ -189,18 +195,75 @@ static int publish_config_discovery(esp_mqtt_client_handle_t client, const char 
     return published;
 }
 
-/* Apply the buffered editable-config sets and republish the cfg state. */
+/* Editable actions: a "Screen bonus (min) today" number (idempotent) and a
+   "Find my timer" switch. Discovery + state ride the magtag/<id>/act topic;
+   commands come in on the shared set/+ subscription (screen_bonus, locate). */
+#define BONUS_MAX_MIN 240
+static void publish_action_discovery(esp_mqtt_client_handle_t client, const char *dev_name, const char *fw) {
+    static char topic[128], payload[512];
+    const char *id = device_id();
+    /* number: Screen bonus (min) today */
+    snprintf(topic, sizeof(topic), "homeassistant/number/%s_screen_bonus/config", id);
+    snprintf(payload, sizeof(payload),
+             "{\"name\":\"Screen bonus (min) today\",\"uniq_id\":\"%s_screen_bonus\","
+             "\"stat_t\":\"magtag/%s/act\",\"val_tpl\":\"{{ value_json.screen_bonus }}\","
+             "\"cmd_t\":\"magtag/%s/set/screen_bonus\",\"retain\":true,\"min\":0,\"max\":%d,\"step\":5,"
+             "\"unit_of_meas\":\"min\",\"ent_cat\":\"config\",\"dev\":{\"ids\":[\"%s\"],\"name\":\"%s\","
+             "\"mf\":\"Adafruit\",\"mdl\":\"MagTag 2.9\",\"sw\":\"%s\"}}",
+             id, id, id, BONUS_MAX_MIN, id, dev_name, fw);
+    publish(client, topic, payload, 1);
+    /* switch: Find my timer */
+    snprintf(topic, sizeof(topic), "homeassistant/switch/%s_locate/config", id);
+    snprintf(payload, sizeof(payload),
+             "{\"name\":\"Find my timer\",\"uniq_id\":\"%s_locate\",\"stat_t\":\"magtag/%s/act\","
+             "\"val_tpl\":\"{{ value_json.locate }}\",\"cmd_t\":\"magtag/%s/set/locate\",\"retain\":true,"
+             "\"pl_on\":\"ON\",\"pl_off\":\"OFF\",\"dev\":{\"ids\":[\"%s\"],\"name\":\"%s\","
+             "\"mf\":\"Adafruit\",\"mdl\":\"MagTag 2.9\",\"sw\":\"%s\"}}",
+             id, id, id, id, dev_name, fw);
+    publish(client, topic, payload, 1);
+}
+
+/* Apply the buffered editable-config sets + actions, republish cfg + act. */
 static int apply_sets(esp_mqtt_client_handle_t client) {
     static char cfg[512];
-    char ack[96];
+    char ack[96], topic[96], act[96];
     for (int i = 0; i < s_set_count; i++) {
-        ha_config_set(s_sets[i].key, s_sets[i].value, ack, sizeof(ack));
-        ESP_LOGI(TAG, "set %s: %s", s_sets[i].key, ack);
+        const char *k = s_sets[i].key, *v = s_sets[i].value;
+        if (strcmp(k, "screen_bonus") == 0) {
+            long m = strtol(v, NULL, 10);
+            if (m < 0)
+                m = 0;
+            if (m > BONUS_MAX_MIN)
+                m = BONUS_MAX_MIN;
+            timer_bonus_reconcile(0, (int32_t)m * 60); /* idempotent */
+            ESP_LOGI(TAG, "screen bonus target %ld min", m);
+        } else if (strcmp(k, "locate") == 0) {
+            if (strcmp(v, "ON") == 0) {
+                s_locate_pending = true;
+                /* clear the retained switch command so it fires once */
+                snprintf(topic, sizeof(topic), "magtag/%s/set/locate", device_id());
+                publish(client, topic, "OFF", 1);
+            }
+        } else {
+            ha_config_set(k, v, ack, sizeof(ack));
+            ESP_LOGI(TAG, "set %s: %s", k, ack);
+        }
     }
-    char topic[96];
+    if (s_bonus_clear_pending) {
+        /* Rollover: clear the retained bonus target so it doesn't repeat */
+        snprintf(topic, sizeof(topic), "magtag/%s/set/screen_bonus", device_id());
+        publish(client, topic, "0", 1);
+        s_bonus_clear_pending = false;
+    }
+    /* act state: confirmed bonus (applied minutes) + locate off (momentary) */
+    snprintf(topic, sizeof(topic), "magtag/%s/act", device_id());
+    snprintf(act, sizeof(act), "{\"screen_bonus\":%ld,\"locate\":\"OFF\"}",
+             (long)(g_rtc_state.slots[0].bonus_applied / 60));
+    publish(client, topic, act, 1);
+    /* cfg state: current editable-config values */
     snprintf(topic, sizeof(topic), "magtag/%s/cfg", device_id());
     ha_config_state_json(cfg, sizeof(cfg));
-    return publish(client, topic, cfg, 1); /* retained current values */
+    return publish(client, topic, cfg, 1);
 }
 
 void mqtt_ha_window(const stats_snapshot_t *snap) {
@@ -275,6 +338,7 @@ void mqtt_ha_window(const stats_snapshot_t *snap) {
         device_name(dev_name, sizeof(dev_name));
         published += publish_discovery(client, dev_name, snap->fw);
         published += publish_config_discovery(client, dev_name, snap->fw);
+        publish_action_discovery(client, dev_name, snap->fw);
     }
 
     snprintf(topic, sizeof(topic), "magtag/%s/stat", device_id());

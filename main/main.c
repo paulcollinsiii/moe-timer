@@ -508,7 +508,8 @@ static void handle_day_rollover(time_t *now) {
        date has NOT actually changed, this pinpoints why (bad stored date
        vs. stepped clock). */
     ESP_LOGW(TAG, "Day rollover (last_date='%s', now=%lld)", g_rtc_state.last_date, (long long)*now);
-    queue_rollover_summary(); /* yesterday's stats, before any reset */
+    queue_rollover_summary();    /* yesterday's stats, before any reset */
+    mqtt_ha_queue_bonus_clear(); /* clear the retained HA bonus target this window */
     /* Fail-open: reset to IDLE with today's allocation even if sync fails */
     try_net_window();
     *now = time(NULL);

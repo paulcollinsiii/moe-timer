@@ -199,6 +199,17 @@ void timer_grant(int slot, int32_t sec) {
     }
 }
 
+void timer_bonus_reconcile(int slot, int32_t target_sec) {
+    if (slot < 0 || slot >= TIMER_SLOT_COUNT || target_sec < 0)
+        return;
+    timer_slot_state_t *sl = &g_rtc_state.slots[slot];
+    int32_t delta = target_sec - sl->bonus_applied;
+    if (delta <= 0)
+        return; /* target met or lowered — never reclaim granted time */
+    timer_grant(slot, delta);
+    sl->bonus_applied = target_sec;
+}
+
 int32_t timer_tick(time_t now) {
     timer_slot_state_t *sl = active();
     if (sl->state == TIMER_BREAK) {
@@ -373,6 +384,7 @@ void timer_make_snapshot(timer_snapshot_t *out) {
         os->break_expiry_wall = sl->break_expiry_wall;
         os->completions = sl->completions;
         os->bonus_sec = sl->bonus_sec;
+        os->bonus_applied = sl->bonus_applied;
     }
     memcpy(out->date, g_rtc_state.last_date, sizeof(out->date));
     out->checksum = timer_snapshot_checksum(out);
@@ -436,6 +448,7 @@ bool timer_restore_snapshot(const timer_snapshot_t *snap, time_t now) {
         sl->break_expiry_wall = ss->break_expiry_wall;
         sl->completions = ss->completions;
         sl->bonus_sec = ss->bonus_sec;
+        sl->bonus_applied = ss->bonus_applied;
         /* Expiry passed while powered off (snapshot saved before the EXPIRED
            transition landed): restore directly as EXPIRED so the next tick
            does not re-transition and re-fire the already-heard alert. The

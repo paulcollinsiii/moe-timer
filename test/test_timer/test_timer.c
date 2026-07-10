@@ -1039,15 +1039,64 @@ void test_snapshot_v4_round_trips_bonus(void) {
     timer_record_date(T0);
     timer_snapshot_t snap;
     timer_make_snapshot(&snap);
-    TEST_ASSERT_EQUAL_UINT8(4, snap.version);
+    TEST_ASSERT_EQUAL_UINT8(TIMER_SNAPSHOT_VERSION, snap.version);
 
     timer_reset();
     TEST_ASSERT_TRUE(timer_restore_snapshot(&snap, T0 + 100));
     TEST_ASSERT_EQUAL_INT32(600, g_rtc_state.slots[1].bonus_sec);
 }
 
+/* ---- HA idempotent "bonus minutes today" reconcile (Phase C) ---- */
+
+void test_bonus_reconcile_grants_only_the_delta(void) {
+    /* Target 15 min on an IDLE Screen: grants 900, banked as bonus */
+    timer_bonus_reconcile(0, 900);
+    TEST_ASSERT_EQUAL_INT32(900, g_rtc_state.slots[0].bonus_sec);
+    TEST_ASSERT_EQUAL_INT32(900, g_rtc_state.slots[0].bonus_applied);
+    /* Same target again: no-op (idempotent across wakes) */
+    timer_bonus_reconcile(0, 900);
+    TEST_ASSERT_EQUAL_INT32(900, g_rtc_state.slots[0].bonus_sec);
+    /* Raise target to 20 min: grant only the extra 5 min */
+    timer_bonus_reconcile(0, 1200);
+    TEST_ASSERT_EQUAL_INT32(1200, g_rtc_state.slots[0].bonus_sec);
+    TEST_ASSERT_EQUAL_INT32(1200, g_rtc_state.slots[0].bonus_applied);
+}
+
+void test_bonus_reconcile_lowering_target_does_not_reclaim(void) {
+    timer_bonus_reconcile(0, 900);
+    timer_bonus_reconcile(0, 300); /* can't take back granted time */
+    TEST_ASSERT_EQUAL_INT32(900, g_rtc_state.slots[0].bonus_applied);
+    TEST_ASSERT_EQUAL_INT32(900, g_rtc_state.slots[0].bonus_sec);
+}
+
+void test_bonus_applied_resets_at_rollover(void) {
+    timer_bonus_reconcile(0, 900);
+    timer_reset(); /* day rollover */
+    TEST_ASSERT_EQUAL_INT32(0, g_rtc_state.slots[0].bonus_applied);
+}
+
+void test_bonus_applied_survives_snapshot_v5(void) {
+    timer_bonus_reconcile(0, 900);
+    timer_start(T0, 3600); /* consumes bonus_sec into allocation */
+    timer_record_date(T0);
+    timer_snapshot_t snap;
+    timer_make_snapshot(&snap);
+    TEST_ASSERT_EQUAL_UINT8(5, snap.version);
+
+    timer_reset();
+    TEST_ASSERT_TRUE(timer_restore_snapshot(&snap, T0 + 100));
+    TEST_ASSERT_EQUAL_INT32(900, g_rtc_state.slots[0].bonus_applied);
+    /* After restore, re-reconciling the same target is a no-op */
+    timer_bonus_reconcile(0, 900);
+    TEST_ASSERT_EQUAL_INT32(4500, g_rtc_state.slots[0].allocation_sec); /* not re-granted */
+}
+
 int main(void) {
     UNITY_BEGIN();
+    RUN_TEST(test_bonus_reconcile_grants_only_the_delta);
+    RUN_TEST(test_bonus_reconcile_lowering_target_does_not_reclaim);
+    RUN_TEST(test_bonus_applied_resets_at_rollover);
+    RUN_TEST(test_bonus_applied_survives_snapshot_v5);
     RUN_TEST(test_reset_state_is_idle);
     RUN_TEST(test_reset_expiry_is_zero);
     RUN_TEST(test_reset_remaining_at_pause_is_zero);

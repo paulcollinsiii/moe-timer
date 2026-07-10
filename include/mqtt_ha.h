@@ -24,6 +24,10 @@ void mqtt_ha_window(const stats_snapshot_t *snap);
    the locate alarm after the window closes (audio/LEDs, WiFi down). */
 bool mqtt_ha_locate_pending(void);
 
+/* At day rollover, clear the retained "Screen bonus today" target next
+   window so the bonus doesn't repeat on the new day. */
+void mqtt_ha_queue_bonus_clear(void);
+
 #ifdef __cplusplus
 }
 #endif
