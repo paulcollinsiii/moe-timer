@@ -173,8 +173,40 @@ void test_discovery_completions_use_runtime_slot_names(void) {
     TEST_ASSERT_NOT_NULL(strstr(buf, "value_json.completions[0]"));
 }
 
+void test_discovery_diagnostic_category(void) {
+    char buf[600];
+    int count = 0;
+    const ha_entity_t *ents = stats_json_entities(&count);
+    const ha_entity_t *e = NULL;
+    for (int i = 0; i < count; i++)
+        if (strcmp(ents[i].key, "battery_mv") == 0)
+            e = &ents[i];
+    TEST_ASSERT_NOT_NULL(e);
+    stats_json_discovery(buf, sizeof(buf), "magtag-a1b2c3", "Kitchen", "fw", e);
+    TEST_ASSERT_NOT_NULL(strstr(buf, "\"ent_cat\":\"diagnostic\""));
+}
+
+void test_primary_entity_omits_category(void) {
+    char buf[600];
+    int count = 0;
+    const ha_entity_t *ents = stats_json_entities(&count); /* [0] = battery, primary */
+    stats_json_discovery(buf, sizeof(buf), "magtag-a1b2c3", "Kitchen", "fw", &ents[0]);
+    TEST_ASSERT_NULL(strstr(buf, "ent_cat"));
+}
+
+void test_allocation_renamed_today_limit(void) {
+    int count = 0;
+    const ha_entity_t *ents = stats_json_entities(&count);
+    for (int i = 0; i < count; i++)
+        if (strcmp(ents[i].key, "allocation") == 0)
+            TEST_ASSERT_EQUAL_STRING("Today's limit", ents[i].name);
+}
+
 int main(void) {
     UNITY_BEGIN();
+    RUN_TEST(test_discovery_diagnostic_category);
+    RUN_TEST(test_primary_entity_omits_category);
+    RUN_TEST(test_allocation_renamed_today_limit);
     RUN_TEST(test_stat_payload_exact);
     RUN_TEST(test_stat_payload_charge_lock_true);
     RUN_TEST(test_stat_payload_escapes_timer_name);

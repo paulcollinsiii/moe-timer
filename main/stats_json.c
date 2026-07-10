@@ -64,31 +64,35 @@ int stats_json_summary(char *buf, size_t len, const char *date, int32_t screen_u
    sensor never expires. Order matters only for [0] (battery) in tests. */
 #define STAT_EXPIRE_SEC 7500
 
+/* Fields: component, key, name, unit, dev_class, tpl, topic_suffix,
+   expire_after, binary, ent_cat. ent_cat "diagnostic" tucks noisy
+   read-onlys into HA's Diagnostic group; NULL = primary (top-level). */
+#define DIAG "diagnostic"
 static const ha_entity_t ENTITIES[] = {
-    {"sensor", "battery", "Battery", "%", "battery", "{{ value_json.batt_pct }}", "stat", STAT_EXPIRE_SEC, false},
+    {"sensor", "battery", "Battery", "%", "battery", "{{ value_json.batt_pct }}", "stat", STAT_EXPIRE_SEC, false, NULL},
     {"sensor", "battery_mv", "Battery voltage", "mV", "voltage", "{{ value_json.batt_mv }}", "stat", STAT_EXPIRE_SEC,
-     false},
-    {"sensor", "light", "Ambient light", "mV", NULL, "{{ value_json.light_mv }}", "stat", STAT_EXPIRE_SEC, false},
-    {"sensor", "state", "Timer state", NULL, NULL, "{{ value_json.state }}", "stat", STAT_EXPIRE_SEC, false},
+     false, DIAG},
+    {"sensor", "light", "Ambient light", "mV", NULL, "{{ value_json.light_mv }}", "stat", STAT_EXPIRE_SEC, false, DIAG},
+    {"sensor", "state", "Timer state", NULL, NULL, "{{ value_json.state }}", "stat", STAT_EXPIRE_SEC, false, NULL},
     {"sensor", "active_timer", "Active timer", NULL, NULL, "{{ value_json.active_timer }}", "stat", STAT_EXPIRE_SEC,
-     false},
+     false, DIAG},
     {"sensor", "remaining", "Time remaining", "min", "duration", "{{ (value_json.remaining_s / 60) | round(0) }}",
-     "stat", STAT_EXPIRE_SEC, false},
-    {"sensor", "allocation", "Allocation today", "min", "duration", "{{ (value_json.allocation_s / 60) | round(0) }}",
-     "stat", STAT_EXPIRE_SEC, false},
-    {"sensor", "day_type", "Day type", NULL, NULL, "{{ value_json.day_type }}", "stat", STAT_EXPIRE_SEC, false},
+     "stat", STAT_EXPIRE_SEC, false, NULL},
+    {"sensor", "allocation", "Today's limit", "min", "duration", "{{ (value_json.allocation_s / 60) | round(0) }}",
+     "stat", STAT_EXPIRE_SEC, false, DIAG},
+    {"sensor", "day_type", "Day type", NULL, NULL, "{{ value_json.day_type }}", "stat", STAT_EXPIRE_SEC, false, DIAG},
     {"binary_sensor", "charge_lock", "Charge lock", NULL, NULL, "{{ 'ON' if value_json.charge_lock else 'OFF' }}",
-     "stat", STAT_EXPIRE_SEC, true},
+     "stat", STAT_EXPIRE_SEC, true, NULL},
     {"sensor", "screen_used", "Screen time used today", "min", "duration",
-     "{{ (value_json.screen_used_s / 60) | round(0) }}", "summary", 0, false},
+     "{{ (value_json.screen_used_s / 60) | round(0) }}", "summary", 0, false, DIAG},
     {"sensor", "completions_1", "Timer 1 runs", NULL, NULL, "{{ value_json.completions[0] }}", "stat", STAT_EXPIRE_SEC,
-     false},
+     false, DIAG},
     {"sensor", "completions_2", "Timer 2 runs", NULL, NULL, "{{ value_json.completions[1] }}", "stat", STAT_EXPIRE_SEC,
-     false},
+     false, DIAG},
     {"sensor", "completions_3", "Timer 3 runs", NULL, NULL, "{{ value_json.completions[2] }}", "stat", STAT_EXPIRE_SEC,
-     false},
+     false, DIAG},
     {"sensor", "completions_4", "Timer 4 runs", NULL, NULL, "{{ value_json.completions[3] }}", "stat", STAT_EXPIRE_SEC,
-     false},
+     false, DIAG},
 };
 
 const ha_entity_t *stats_json_entities(int *count) {
@@ -113,6 +117,8 @@ int stats_json_discovery_named(char *buf, size_t len, const char *dev_id, const 
         pos = jcat(buf, len, pos, ",\"dev_cla\":\"%s\"", ent->dev_class);
     if (ent->binary)
         pos = jcat(buf, len, pos, ",\"pl_on\":\"ON\",\"pl_off\":\"OFF\"");
+    if (ent->ent_cat != NULL)
+        pos = jcat(buf, len, pos, ",\"ent_cat\":\"%s\"", ent->ent_cat);
     if (ent->expire_after > 0)
         pos = jcat(buf, len, pos, ",\"expire_after\":%d", ent->expire_after);
     pos = jcat(buf, len, pos,

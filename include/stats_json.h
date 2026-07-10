@@ -45,6 +45,7 @@ typedef struct {
     const char *topic_suffix; /* "stat" or "summary" */
     int expire_after;         /* seconds; 0 = omit (value persists) */
     bool binary;              /* adds pl_on/pl_off */
+    const char *ent_cat;      /* "diagnostic" / NULL = primary (top-level in HA) */
 } ha_entity_t;
 
 const ha_entity_t *stats_json_entities(int *count);
