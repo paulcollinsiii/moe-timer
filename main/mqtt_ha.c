@@ -117,8 +117,11 @@ static int publish(esp_mqtt_client_handle_t client, const char *topic, const cha
 }
 
 static int publish_discovery(esp_mqtt_client_handle_t client, const char *dev_name, const char *fw) {
-    char topic[128];
-    char payload[600];
+    /* static: this runs on the main task (3584 B stack) beneath the WiFi +
+       MQTT frames, and these buffers plus mqtt_ha_window's would overflow
+       it. Used serially on one task, so a single shared copy is safe. */
+    static char topic[128];
+    static char payload[600];
     int count = 0, published = 0;
     const ha_entity_t *ents = stats_json_entities(&count);
     for (int i = 0; i < count; i++) {
@@ -144,7 +147,9 @@ static int publish_discovery(esp_mqtt_client_handle_t client, const char *dev_na
 }
 
 void mqtt_ha_window(const stats_snapshot_t *snap) {
-    char uri[128], user[64], pass[64];
+    /* static: main-task stack is tight beneath WiFi+MQTT (see
+       publish_discovery). These are used serially on the one task. */
+    static char uri[128], user[64], pass[64];
     nvs_config_get_mqtt_uri(uri, sizeof(uri));
     if (uri[0] == '\0') {
         return; /* MQTT disabled */
@@ -238,7 +243,7 @@ void mqtt_ha_window(const stats_snapshot_t *snap) {
         cfg_wait += 100;
     }
 
-    char ack[256];
+    static char ack[256];
     if (s_config_received) {
         /* config_apply writes NVS; a changed timezone/timer def takes
            effect on the next boot/operation. */
