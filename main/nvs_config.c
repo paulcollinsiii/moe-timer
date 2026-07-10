@@ -254,18 +254,39 @@ esp_err_t nvs_config_load_timer_snapshot(timer_snapshot_t *out) {
 
 /* ---- init defaults ---- */
 
-uint16_t nvs_config_defaults_fingerprint(void) {
-    /* Mixes the version salt with the allocation values so ANY change to
-       the compile-time defaults (menuconfig) produces a different stamp
-       and triggers a reseed on the next boot. Never returns 0 (that would
-       be indistinguishable from blank NVS). */
-    uint32_t fp = NVS_DEFAULTS_VERSION;
-    fp = fp * 31u + NVS_DEFAULT_WEEKDAY_MIN;
-    fp = fp * 31u + NVS_DEFAULT_WEEKEND_MIN;
-    fp = fp * 31u + NVS_DEFAULT_HOLIDAY_MIN;
-    fp = fp * 31u + NVS_DEFAULT_SUMMER_MIN;
+static uint32_t fold_str(uint32_t fp, const char *s) {
+    for (; s != NULL && *s != '\0'; s++)
+        fp = fp * 31u + (unsigned char)*s;
+    return fp;
+}
+
+/* Pure, host-testable core of the fingerprint (the public function feeds it
+   the compile-time defaults). Every seeded default is mixed in — the
+   credential strings too, or setting a WiFi/MQTT default after the first
+   seed silently never takes (the key already exists as "" and
+   init-if-missing skips it). Never returns 0 (would collide with blank NVS). */
+static uint16_t fingerprint_compute(uint32_t version, uint16_t wd, uint16_t we, uint16_t ho, uint16_t su,
+                                    const char *ssid, const char *pass, const char *mqtt_uri, const char *mqtt_user,
+                                    const char *mqtt_pass) {
+    uint32_t fp = version;
+    fp = fp * 31u + wd;
+    fp = fp * 31u + we;
+    fp = fp * 31u + ho;
+    fp = fp * 31u + su;
+    fp = fold_str(fp, ssid);
+    fp = fold_str(fp, pass);
+    fp = fold_str(fp, mqtt_uri);
+    fp = fold_str(fp, mqtt_user);
+    fp = fold_str(fp, mqtt_pass);
     uint16_t out = (uint16_t)(fp ^ (fp >> 16));
     return (out == 0) ? 1 : out;
+}
+
+uint16_t nvs_config_defaults_fingerprint(void) {
+    return fingerprint_compute(NVS_DEFAULTS_VERSION, NVS_DEFAULT_WEEKDAY_MIN, NVS_DEFAULT_WEEKEND_MIN,
+                               NVS_DEFAULT_HOLIDAY_MIN, NVS_DEFAULT_SUMMER_MIN, NVS_DEFAULT_WIFI_SSID,
+                               NVS_DEFAULT_WIFI_PASS, NVS_DEFAULT_MQTT_URI, NVS_DEFAULT_MQTT_USER,
+                               NVS_DEFAULT_MQTT_PASS);
 }
 
 static esp_err_t reseed_all_defaults(void) {

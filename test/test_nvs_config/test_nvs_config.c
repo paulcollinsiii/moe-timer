@@ -180,6 +180,20 @@ void test_defaults_fingerprint_is_nonzero_and_stable(void) {
     TEST_ASSERT_EQUAL_UINT16(nvs_config_defaults_fingerprint(), nvs_config_defaults_fingerprint());
 }
 
+void test_fingerprint_folds_in_credentials(void) {
+    /* Regression: a changed WiFi/MQTT default must change the fingerprint,
+       so setting NVS_DEFAULT_MQTT_URI after the first seed actually reseeds
+       (the key already exists as "" and init-if-missing would skip it). */
+    uint16_t base = fingerprint_compute(3, 60, 120, 120, 120, "ssid", "pass", "", "", "");
+    uint16_t with_uri = fingerprint_compute(3, 60, 120, 120, 120, "ssid", "pass", "mqtt://ha:1883", "", "");
+    uint16_t other_ssid = fingerprint_compute(3, 60, 120, 120, 120, "other", "pass", "", "", "");
+    TEST_ASSERT_NOT_EQUAL(base, with_uri);
+    TEST_ASSERT_NOT_EQUAL(base, other_ssid);
+    /* deterministic */
+    TEST_ASSERT_EQUAL_UINT16(with_uri,
+                             fingerprint_compute(3, 60, 120, 120, 120, "ssid", "pass", "mqtt://ha:1883", "", ""));
+}
+
 void test_init_defaults_reseeds_on_fingerprint_change(void) {
     TEST_ASSERT_EQUAL(ESP_OK, nvs_config_init_defaults());
     /* Simulate values seeded by a build with different compile-time defaults */
@@ -428,6 +442,7 @@ int main(void) {
     RUN_TEST(test_get_weekday_min_missing_returns_default);
     RUN_TEST(test_init_defaults_writes_fingerprint_stamp);
     RUN_TEST(test_defaults_fingerprint_is_nonzero_and_stable);
+    RUN_TEST(test_fingerprint_folds_in_credentials);
     RUN_TEST(test_init_defaults_reseeds_on_fingerprint_change);
     RUN_TEST(test_init_defaults_missing_version_key_reseeds);
     RUN_TEST(test_init_defaults_same_version_preserves_values);

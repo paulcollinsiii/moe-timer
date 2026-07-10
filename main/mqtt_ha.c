@@ -152,10 +152,15 @@ void mqtt_ha_window(const stats_snapshot_t *snap) {
     static char uri[128], user[64], pass[64];
     nvs_config_get_mqtt_uri(uri, sizeof(uri));
     if (uri[0] == '\0') {
-        return; /* MQTT disabled */
+        /* Was silent — the #1 reason "nothing shows up in HA": the broker
+           URI was never configured (NVS_DEFAULT_MQTT_URI / MAGTAG_MQTT_URI
+           empty). Make it loud. */
+        ESP_LOGW(TAG, "MQTT disabled: no broker URI in NVS (set NVS_DEFAULT_MQTT_URI or MAGTAG_MQTT_URI)");
+        return;
     }
     nvs_config_get_mqtt_user(user, sizeof(user));
     nvs_config_get_mqtt_pass(pass, sizeof(pass));
+    ESP_LOGI(TAG, "MQTT window: connecting to %s", uri);
 
     s_eg = xEventGroupCreate();
     if (s_eg == NULL)
