@@ -810,6 +810,15 @@ static void watch_final_minute(void) {
     }
     neopixel_show_timer_state();
 
+    /* Break config read once — the loop below spins at 250 ms. Short
+       allocations can put break-due INSIDE this watch (e.g. 3 min screen
+       with a 2 min interval: due lands at exactly 60 s remaining); the
+       per-wake check in the handlers has already passed by then, so the
+       loop must keep checking or the break is silently swallowed by the
+       expiry. */
+    uint16_t break_interval_min = NVS_DEFAULT_BREAK_INTERVAL_MIN;
+    nvs_config_get_break_interval_min(&break_interval_min);
+
     /* Countdown: partial display steps at the quarter-minute marks (values
        pinned so the text reads exactly 00:01:00/45/30/15), and the last
        15 s on the pixels as a binary count (status class: light green,
@@ -832,6 +841,12 @@ static void watch_final_minute(void) {
             neopixel_show_timer_state(); /* amber through the refresh until sleep */
             display_full_refresh(&st);
             return;
+        }
+        if (break_interval_min != 0 && timer_break_due(time(NULL), (int32_t)break_interval_min * 60)) {
+            neopixel_stop(); /* clear the binary-countdown pixels */
+            if (maybe_start_break(time(NULL))) {
+                return; /* BREAK painted + alarm run; caller sleeps through it */
+            }
         }
         if (next_step < n_steps && rem <= (int64_t)STEPS[next_step]) {
             time_t step_now = time(NULL);

@@ -1340,6 +1340,22 @@ void test_current_date_tracks_record_date(void) {
     TEST_ASSERT_EQUAL_STRING("2026-01-05", timer_current_date());
 }
 
+/* Break-due can land INSIDE the final minute (short allocations, e.g.
+   3 min screen / 2 min interval): the event watch must keep checking
+   timer_break_due mid-watch or the break is silently swallowed by the
+   expiry. This pins the trigger condition the watch loop relies on. */
+void test_break_due_lands_inside_final_minute(void) {
+    timer_start(T0, 180);                              /* 3 min allocation, 2 min break interval */
+    TEST_ASSERT_FALSE(timer_break_due(T0 + 110, 120)); /* pre-watch wake: not yet */
+    TEST_ASSERT_TRUE(timer_break_due(T0 + 120, 120));  /* due at 60 s remaining */
+    timer_start_break(T0 + 120, 120);
+    TEST_ASSERT_EQUAL(TIMER_BREAK, timer_get_state());
+    /* The frozen remaining survives the break: back to PAUSED with 60 s. */
+    timer_tick(T0 + 240); /* break over */
+    TEST_ASSERT_EQUAL(TIMER_PAUSED, timer_get_state());
+    TEST_ASSERT_EQUAL_INT32(60, g_rtc_state.slots[0].remaining_at_pause);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_bonus_reconcile_grants_only_the_delta);
@@ -1470,5 +1486,6 @@ int main(void) {
     RUN_TEST(test_slot_accessors_read_state_alloc_completions);
     RUN_TEST(test_slot_accessors_out_of_range_are_benign);
     RUN_TEST(test_current_date_tracks_record_date);
+    RUN_TEST(test_break_due_lands_inside_final_minute);
     return UNITY_END();
 }
