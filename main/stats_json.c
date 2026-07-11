@@ -32,7 +32,7 @@ static const char *jesc(char *tmp, size_t tmplen, const char *s) {
 int stats_json_stat(char *buf, size_t len, const stats_snapshot_t *s) {
     /* Every string field is escaped (and NULL-flattened to "") — the pure
        boundary must never invoke UB on a bad/NULL field. */
-    char state[24], name[64], day[24], fw[32];
+    char state[24], name[64], day[24], fw[32], rst[24];
     int pos = 0;
     pos = jcat(buf, len, pos,
                "{\"batt_pct\":%d,\"batt_mv\":%d,\"light_mv\":%d,\"state\":\"%s\",\"active_timer\":\"%s\","
@@ -43,8 +43,8 @@ int stats_json_stat(char *buf, size_t len, const stats_snapshot_t *s) {
     for (int i = 0; i < TIMER_EXTRA_SLOTS; i++) {
         pos = jcat(buf, len, pos, i ? ",%u" : "%u", (unsigned)s->completions[i]);
     }
-    pos = jcat(buf, len, pos, "],\"charge_lock\":%s,\"fw\":\"%s\"}", s->charge_lock ? "true" : "false",
-               jesc(fw, sizeof(fw), s->fw));
+    pos = jcat(buf, len, pos, "],\"charge_lock\":%s,\"fw\":\"%s\",\"reset\":\"%s\"}", s->charge_lock ? "true" : "false",
+               jesc(fw, sizeof(fw), s->fw), jesc(rst, sizeof(rst), s->reset_reason));
     return pos;
 }
 
@@ -93,6 +93,10 @@ static const ha_entity_t ENTITIES[] = {
      false, DIAG},
     {"sensor", "completions_4", "Timer 4 runs", NULL, NULL, "{{ value_json.completions[3] }}", "stat", STAT_EXPIRE_SEC,
      false, DIAG},
+    /* Boot forensics: anything but DEEPSLEEP on a wake means the previous
+       wake died (BROWNOUT/PANIC/...) — the USB CDC console loses that
+       evidence, MQTT doesn't. Never expires. */
+    {"sensor", "last_reset", "Last reset", NULL, NULL, "{{ value_json.reset }}", "stat", 0, false, DIAG},
 };
 
 const ha_entity_t *stats_json_entities(int *count) {

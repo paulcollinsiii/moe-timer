@@ -219,7 +219,9 @@ void neopixel_init(void) {
        sequence of posts without ever blocking a caller. */
     s_queue = xQueueCreate(8, sizeof(np_msg_t));
     s_stop_ack = xSemaphoreCreateBinary();
-    if (s_queue == NULL || s_stop_ack == NULL || xTaskCreate(led_task, "np_led", 2560, NULL, 5, NULL) != pdPASS) {
+    /* 4096: the task runs RMT driver calls plus ESP_LOG formatting — 2.5 KB
+       was within canary distance of overflowing. */
+    if (s_queue == NULL || s_stop_ack == NULL || xTaskCreate(led_task, "np_led", 4096, NULL, 5, NULL) != pdPASS) {
         ESP_LOGE(TAG, "LED task/queue create failed - LEDs disabled");
         if (s_queue != NULL) {
             vQueueDelete(s_queue);

@@ -113,8 +113,13 @@ static bool try_restore_timer_snapshot(time_t now) {
 }
 
 static bool net_window_join(int timeout_ms, bool act_on_button_a); /* network window below */
+static const char *reset_reason_str(void);
 
 static void enter_deep_sleep(void) {
+    /* Late-wake forensics repeat: the boot-time log of this line is often
+       lost to USB CDC re-enumeration; by sleep entry the console has had
+       the whole wake to come up. */
+    ESP_LOGI(TAG, "this boot: reset %s", reset_reason_str());
     /* Never sleep with the network task alive: it holds WiFi and may be
        mid-publish. Normal paths finished the window already (no-op here);
        this covers cut-short paths. Bounded — on the failsafe path the
@@ -228,6 +233,35 @@ static const char *day_type_name(day_type_t dt) {
     }
 }
 
+/* Boot forensics: the USB CDC console drops output around sleep/reset
+   transitions, so a crash's evidence must ride channels that survive —
+   the stat payload (HA "Last reset" sensor) and a late-wake log line.
+   Anything but DEEPSLEEP on a wake means the previous wake died. */
+static const char *reset_reason_str(void) {
+    switch (esp_reset_reason()) {
+        case ESP_RST_DEEPSLEEP:
+            return "DEEPSLEEP";
+        case ESP_RST_POWERON:
+            return "POWERON";
+        case ESP_RST_BROWNOUT:
+            return "BROWNOUT";
+        case ESP_RST_PANIC:
+            return "PANIC";
+        case ESP_RST_INT_WDT:
+            return "INT_WDT";
+        case ESP_RST_TASK_WDT:
+            return "TASK_WDT";
+        case ESP_RST_WDT:
+            return "WDT";
+        case ESP_RST_SW:
+            return "SW";
+        case ESP_RST_EXT:
+            return "EXT";
+        default:
+            return "UNKNOWN";
+    }
+}
+
 /* Side-effect-free stat snapshot for the HA session (no timer_tick — a
    read here must never transition the state machine). */
 static void stats_collect(stats_snapshot_t *out) {
@@ -251,6 +285,7 @@ static void stats_collect(stats_snapshot_t *out) {
     out->charge_lock = s_charge_locked;
     out->fw = esp_app_get_description()->version;
     out->screen_bonus_applied_s = g_rtc_state.slots[0].bonus_applied;
+    out->reset_reason = reset_reason_str();
 }
 
 static void run_locate_alarm(void); /* defined with the awake-failsafe helpers */
@@ -318,6 +353,8 @@ static void net_window_task(void *arg) {
         }
         wifi_session_end();
     }
+    /* Stack sizing evidence (ESP-IDF watermark is in bytes) */
+    ESP_LOGI(TAG, "net task stack floor: %u B free", (unsigned)uxTaskGetStackHighWaterMark(NULL));
     xSemaphoreGive(s_net_window_done);
     vTaskDelete(NULL);
 }
@@ -359,7 +396,7 @@ static bool net_window_spawn(void) {
     /* status class: quiet hours + brightness handled inside the module */
     neopixel_status_pixel(NP_WIFI_PIXEL, 0, 0, 20); /* blue: window open */
 #endif
-    if (xTaskCreate(net_window_task, "net_win", 8192, NULL, 3, NULL) != pdPASS) {
+    if (xTaskCreate(net_window_task, "net_win", 10240, NULL, 3, NULL) != pdPASS) {
         ESP_LOGE(TAG, "network task create failed - skipping window");
 #if CONFIG_MAGTAG_SYNC_LED_FEEDBACK
         neopixel_status_pixel(NP_WIFI_PIXEL, 0, 0, 0);

@@ -19,7 +19,7 @@
 static const char *TAG = "mqtt_ha";
 
 /* Bump when entities are added/renamed — discovery configs republish once. */
-#define DISC_SCHEMA_VER 6 /* v6: switches back to non-optimistic (toggle UI, not lightning-bolt buttons) */
+#define DISC_SCHEMA_VER 7 /* v7: Last reset diagnostic sensor (boot forensics) */
 
 #define CONNECT_TIMEOUT_MS 5000
 #define PUBLISH_DRAIN_TIMEOUT_MS 3000
