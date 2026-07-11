@@ -134,6 +134,7 @@ static void enter_deep_sleep(void) {
        down regardless. No pause polling: this can run in esp_timer
        context. */
     net_window_join(15000, NULL);
+    net_window_log_last(); /* timing repeat: the boot-time line is often lost to CDC */
     save_timer_snapshot();
     /* EXT1 ANY_LOW is level-triggered: a still-held button would re-wake
        instantly and re-fire its action. Wait (bounded) for release. */
@@ -844,6 +845,12 @@ static void watch_final_minute(void) {
         }
         if (break_interval_min != 0 && timer_break_due(time(NULL), (int32_t)break_interval_min * 60)) {
             neopixel_stop(); /* clear the binary-countdown pixels */
+            /* The wake's own render (or a countdown step) can be <1 s old
+               here, and the driver's refresh-rate guard silently DROPS a
+               too-soon frame (field log: "refresh rejected: 0 s since
+               last") — the panel would show the stale countdown through
+               the whole break. Wait the guard out first. */
+            vTaskDelay(pdMS_TO_TICKS(1100));
             if (maybe_start_break(time(NULL))) {
                 return; /* BREAK painted + alarm run; caller sleeps through it */
             }
@@ -882,6 +889,16 @@ static void handle_timer_tick(void) {
                              IDLE_SYNC_INTERVAL_SEC)) {
         try_net_window();
         now = time(NULL);
+    }
+
+    /* Cold boot / external reset only: the rollover + sync above already
+       showed the WiFi pixel, but the grid wait + first paint below can
+       hold a blank panel for tens of seconds more with buttons still
+       wake-press-only — a dark, silent device reads as hung (field
+       report). Deep-sleep tick wakes stay dark: a dim blink every minute,
+       all day, isn't worth the battery. */
+    if (esp_reset_reason() != ESP_RST_DEEPSLEEP) {
+        neopixel_show_timer_state();
     }
 
     if (maybe_start_break(now)) {
