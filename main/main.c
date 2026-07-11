@@ -14,14 +14,12 @@
 #include "esp_system.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
-#include "freertos/queue.h"
-#include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "hal_nvs.h"
 #include "light.h"
 #include "mqtt_ha.h"
 #include "neopixel.h"
-#include "ntp.h"
+#include "net_window.h"
 #include "nvs_config.h"
 #include "nvs_defaults.h"
 #include "nvs_flash.h"
@@ -31,7 +29,6 @@
 #include "stats_json.h"
 #include "timer.h"
 #include "wake_policy.h"
-#include "wifi_session.h"
 
 static const char *TAG = "main";
 
@@ -71,8 +68,6 @@ static bool status_leds_quiet(void) {
     return quiet_hours_active(tm.tm_hour * 60 + tm.tm_min, quiet_hhmm_to_minutes(s_quiet_start_cfg),
                               quiet_hhmm_to_minutes(s_quiet_end_cfg));
 }
-
-static RTC_DATA_ATTR time_t s_last_ntp_sync;
 
 /* Held-through-sleep guard: EXT1 ANY_LOW is level-triggered, so a button
    still held when the release-wait in enter_deep_sleep() times out (3 s)
@@ -124,7 +119,6 @@ static bool try_restore_timer_snapshot(time_t now) {
     return true;
 }
 
-static bool net_window_join(int timeout_ms, bool act_on_button_a); /* network window below */
 static const char *reset_reason_str(void);
 
 static void enter_deep_sleep(void) {
@@ -138,7 +132,7 @@ static void enter_deep_sleep(void) {
        network task may BE the wedge, and deep sleep then powers the radio
        down regardless. No pause polling: this can run in esp_timer
        context. */
-    net_window_join(15000, false);
+    net_window_join(15000, NULL);
     save_timer_snapshot();
     /* EXT1 ANY_LOW is level-triggered: a still-held button would re-wake
        instantly and re-fire its action. Wait (bounded) for release. */
@@ -215,11 +209,9 @@ static void enter_deep_sleep(void) {
     esp_deep_sleep_start();
 }
 
-/* Status pixels: one for timer state, a different one for WiFi, so both
-   can be read at once. Swap the indices if the physical layout reads
-   better the other way around. */
+/* Status pixels: one for timer state here, a different one for WiFi
+   (pixel 3, owned by net_window.c) so both can be read at once. */
 #define NP_STATE_PIXEL 0
-#define NP_WIFI_PIXEL 3
 
 static const char *timer_state_str(timer_state_t st) {
     switch (st) {
@@ -326,21 +318,9 @@ static bool poll_pause_button(void);
 static bool poll_button_a_action(void);
 
 /* ---- network window (WiFi → NTP → snapshot rendezvous → MQTT) ----------
-   The window runs on its own task so an interactive wake can paint as soon
-   as NTP settles while MQTT keeps draining behind it. Ownership: the task
-   owns the radio and NOTHING else — it never mutates timer state, never
-   paints, never touches the LEDs. Results come back through the signals
-   below plus the mqtt_ha take-accessors, all consumed by the orchestrator. */
-
-#define NET_NTP_SETTLE_TIMEOUT_MS 35000 /* WiFi assoc (15 s) + SNTP (15 s) + margin */
-#define NET_JOIN_TIMEOUT_MS 90000       /* + MQTT (~10 s) + teardown; awake failsafe backstop */
-
-static SemaphoreHandle_t s_net_ntp_settled; /* (a) sync resolved — paint may go, MQTT still ahead */
-static SemaphoreHandle_t s_net_window_done; /* (b) radio down, results buffered */
-static QueueHandle_t s_net_snapshot_q;      /* orchestrator → task, one-deep, by value */
-static esp_err_t s_net_ntp_result;
-static int64_t s_net_clock_step; /* measured mono-vs-wall step; valid when the sync succeeded */
-static bool s_net_active;
+   Mechanics (task, completion signals, snapshot rendezvous) live in
+   net_window.c. main.c keeps the orchestration: pre-window def capture,
+   the stats hand-off, and the post-join reconcile/apply below. */
 
 /* Pre-window copy of every extra slot's definition, for the post-join
    reconcile: a config edit during the window may redefine any timer,
@@ -354,68 +334,10 @@ static struct {
     timer_def_t def;
 } s_prewindow_defs[TIMER_SLOT_COUNT];
 
-static void net_window_task(void *arg) {
-    (void)arg;
-    int64_t mono_before_us = esp_timer_get_time();
-    time_t wall_before = time(NULL);
-    esp_err_t ret = wifi_session_begin();
-    bool wifi_up = (ret == ESP_OK);
-    if (wifi_up) {
-        ret = ntp_sync_in_session();
-        if (ret == ESP_OK) {
-            /* Step measured against the monotonic clock, which NTP cannot
-               move — the orchestrator applies it via timer_shift_expiry. */
-            int64_t elapsed_sec = (esp_timer_get_time() - mono_before_us) / 1000000;
-            s_net_clock_step = (int64_t)time(NULL) - ((int64_t)wall_before + elapsed_sec);
-        }
-    }
-    s_net_ntp_result = ret;
-    xSemaphoreGive(s_net_ntp_settled);
-    if (wifi_up) {
-        stats_snapshot_t snap;
-        /* Rendezvous, which doubles as power serialization: the
-           orchestrator posts the snapshot only after the e-ink paint
-           finished, so panel refresh current and WiFi TX bursts (plus the
-           config NVS flash writes below) never coincide — the combination
-           browned out the rail in on-device testing. Stats are still
-           collected post clock-correction; exactly one post per window,
-           so this receive cannot starve. The radio just idles associated
-           while the panel refreshes. */
-        if (xQueueReceive(s_net_snapshot_q, &snap, portMAX_DELAY) == pdTRUE) {
-            mqtt_ha_window(&snap);
-        }
-        wifi_session_end();
-    }
-    /* Stack sizing evidence (ESP-IDF watermark is in bytes) */
-    ESP_LOGI(TAG, "net task stack floor: %u B free", (unsigned)uxTaskGetStackHighWaterMark(NULL));
-    xSemaphoreGive(s_net_window_done);
-    vTaskDelete(NULL);
-}
-
-/* Open a window: capture the pre-window def, light the wifi pixel, spawn
-   the task. false = fail-open, no window this wake (callers paint with the
-   uncorrected clock, exactly like a WiFi failure). */
-static bool net_window_spawn(void) {
-    if (s_net_active) {
-        ESP_LOGE(TAG, "network window already open");
-        return false;
-    }
-    if (s_net_ntp_settled == NULL) {
-        s_net_ntp_settled = xSemaphoreCreateBinary();
-        s_net_window_done = xSemaphoreCreateBinary();
-        s_net_snapshot_q = xQueueCreate(1, sizeof(stats_snapshot_t));
-    }
-    if (s_net_ntp_settled == NULL || s_net_window_done == NULL || s_net_snapshot_q == NULL) {
-        return false;
-    }
-    /* Drain leftovers from a window a forced sleep cut short */
-    xSemaphoreTake(s_net_ntp_settled, 0);
-    xSemaphoreTake(s_net_window_done, 0);
-    stats_snapshot_t stale;
-    xQueueReceive(s_net_snapshot_q, &stale, 0);
-    s_net_ntp_result = ESP_FAIL;
-    s_net_clock_step = 0;
-
+/* Capture the pre-window defs, then spawn: a config edit during the
+   window may redefine any timer, and the reconcile needs the pre-edit
+   view. */
+static bool open_net_window(void) {
     for (int i = 1; i < TIMER_SLOT_COUNT; i++) {
         const timer_def_t *def = timer_slot_def(i); /* NULL = disabled */
         s_prewindow_defs[i].valid = (def != NULL);
@@ -424,85 +346,23 @@ static bool net_window_spawn(void) {
             s_prewindow_defs[i].def = (timer_def_t){s_prewindow_defs[i].name, def->duration_sec, def->reloadable};
         }
     }
-
-#if CONFIG_MAGTAG_SYNC_LED_FEEDBACK
-    /* status class: quiet hours + brightness handled inside the module */
-    neopixel_status_pixel(NP_WIFI_PIXEL, 0, 0, 20); /* blue: window open */
-#endif
-    if (xTaskCreate(net_window_task, "net_win", 10240, NULL, 3, NULL) != pdPASS) {
-        ESP_LOGE(TAG, "network task create failed - skipping window");
-#if CONFIG_MAGTAG_SYNC_LED_FEEDBACK
-        neopixel_status_pixel(NP_WIFI_PIXEL, 0, 0, 0);
-#endif
-        return false;
-    }
-    s_net_active = true;
-    return true;
+    return net_window_spawn();
 }
 
-/* Wait (bounded) for NTP-settled; on success record the sync. The wifi
-   pixel turns green (ok) or red (fail) while MQTT keeps draining — off at
-   join. Returns true when the sync succeeded (s_net_clock_step valid). */
-static bool net_window_wait_ntp(void) {
-    if (!s_net_active)
-        return false;
-    if (xSemaphoreTake(s_net_ntp_settled, pdMS_TO_TICKS(NET_NTP_SETTLE_TIMEOUT_MS)) != pdTRUE) {
-        ESP_LOGW(TAG, "NTP settle wait timed out; painting with uncorrected clock");
-        return false; /* fail-open; the join records a late sync */
-    }
-    bool ok = (s_net_ntp_result == ESP_OK);
-    if (ok) {
-        s_last_ntp_sync = time(NULL);
-        timer_record_ntp_sync(s_last_ntp_sync);
-    } else {
-        ESP_LOGW(TAG, "NTP sync failed: %s", esp_err_to_name(s_net_ntp_result));
-    }
-#if CONFIG_MAGTAG_SYNC_LED_FEEDBACK
-    neopixel_status_pixel(NP_WIFI_PIXEL, ok ? 0 : 30, ok ? 20 : 0, 0);
-#endif
-    return ok;
-}
-
-/* Hand the stats snapshot to the network task. Called exactly once per
-   window, AFTER the wake's paint (the task blocks on this rendezvous
-   before opening the MQTT session, keeping display refresh current and
-   radio TX bursts apart). No-op when no window is open. */
-static void net_window_post_snapshot(void) {
-    if (!s_net_active)
+/* Collect and hand off the stats snapshot (no-op without a window). */
+static void post_stats_snapshot(void) {
+    if (!net_window_active())
         return;
     stats_snapshot_t snap;
     stats_collect(&snap);
-    xQueueSend(s_net_snapshot_q, &snap, 0); /* one-deep, drained at spawn: never full */
+    net_window_post_snapshot(&snap);
 }
 
-/* Join the window task. Button A stays live while the MQTT tail drains —
-   the screen is already painted and a dropped press would read as broken.
-   false = the task is wedged past timeout_ms: it stays marked active and
-   the awake failsafe is the backstop. */
-static bool net_window_join(int timeout_ms, bool act_on_button_a) {
-    if (!s_net_active)
-        return true;
-    int waited = 0;
-    while (xSemaphoreTake(s_net_window_done, pdMS_TO_TICKS(100)) != pdTRUE) {
-        if (act_on_button_a) {
-            poll_button_a_action(); /* never from the failsafe's esp_timer context */
-        }
-        waited += 100;
-        if (waited >= timeout_ms) {
-            ESP_LOGE(TAG, "network task did not finish in %d ms", timeout_ms);
-            return false;
-        }
-    }
-    s_net_active = false;
-#if CONFIG_MAGTAG_SYNC_LED_FEEDBACK
-    neopixel_status_pixel(NP_WIFI_PIXEL, 0, 0, 0);
-#endif
-    /* Sync landed after the paint's bounded wait gave up? Still record it. */
-    if (xSemaphoreTake(s_net_ntp_settled, 0) == pdTRUE && s_net_ntp_result == ESP_OK) {
-        s_last_ntp_sync = time(NULL);
-        timer_record_ntp_sync(s_last_ntp_sync);
-    }
-    return true;
+/* Join poll: Button A stays live while the MQTT tail drains — the screen
+   is already painted and a dropped press would read as broken. Never
+   passed from the failsafe's esp_timer context. */
+static void poll_button_a_cb(void) {
+    (void)poll_button_a_action();
 }
 
 /* Post-join reconcile: config edits during the window rewrote the NVS defs
@@ -534,7 +394,7 @@ static net_finish_t net_window_reconcile_defs(void) {
         if (timer_slot_def(slot) == NULL && timer_active_slot() == slot) {
             /* Slot disabled by the edit — same-wake analogue of the snapshot
                restore guard: never strand the selection on a dead slot. */
-            g_rtc_state.active_slot = 0;
+            timer_ensure_active_slot_enabled();
         }
         if (slot != active)
             continue; /* background slot: state fixed, seen at swap */
@@ -561,9 +421,9 @@ static net_finish_t net_window_reconcile_defs(void) {
    (single-threaded, on this task), reconcile redefined timers, run a
    pending locate alarm. Safe to call when no window is open. */
 static net_finish_t net_window_finish(void) {
-    if (!s_net_active)
+    if (!net_window_active())
         return NET_FINISH_IDLE; /* no window this wake: nothing arrived */
-    if (!net_window_join(NET_JOIN_TIMEOUT_MS, true))
+    if (!net_window_join(NET_JOIN_TIMEOUT_MS, poll_button_a_cb))
         return NET_FINISH_IDLE; /* wedged: no results to apply */
     /* The window may have applied HA config edits (allocations, holidays,
        school dates, quiet hours): drop the wake-scoped caches so every
@@ -593,12 +453,12 @@ static net_finish_t net_window_finish(void) {
    return reflects the SNTP result only — MQTT is best-effort and can
    never fail the sync that opened the window. */
 static esp_err_t try_net_window(void) {
-    if (!net_window_spawn())
+    if (!open_net_window())
         return ESP_FAIL;
     net_window_wait_ntp();
-    net_window_post_snapshot();
+    post_stats_snapshot();
     net_window_finish();
-    return s_net_ntp_result;
+    return net_window_ntp_result();
 }
 
 /* Traffic-light state feedback while the slow e-ink refresh runs:
@@ -646,7 +506,7 @@ static display_state_t make_state(int32_t remaining, time_t now) {
         .timer_state = ts,
         .day_type = dt,
         .wall_time = now,
-        .last_sync_time = s_last_ntp_sync,
+        .last_sync_time = timer_last_ntp_sync(),
         .battery_pct = (uint8_t)pct,
         .break_remaining_sec = timer_break_remaining(now),
         .break_duration_sec = (uint32_t)break_dur * 60,
@@ -1004,7 +864,7 @@ static void handle_timer_tick(void) {
     time_t now = time(NULL);
     handle_day_rollover(&now);
 
-    if (wake_policy_sync_due(timer_get_state(), timer_needs_ntp_sync(now), now, s_last_ntp_sync,
+    if (wake_policy_sync_due(timer_get_state(), timer_needs_ntp_sync(now), now, timer_last_ntp_sync(),
                              IDLE_SYNC_INTERVAL_SEC)) {
         try_net_window();
         now = time(NULL);
@@ -1111,8 +971,8 @@ static void handle_button_wake(void) {
                    Fail-open: on sync failure the timer keeps running on
                    the uncorrected clock — remaining time is still a
                    consistent duration; only the shown clock may be off. */
-                if (net_window_spawn() && net_window_wait_ntp()) {
-                    timer_shift_expiry(s_net_clock_step);
+                if (open_net_window() && net_window_wait_ntp()) {
+                    timer_shift_expiry(net_window_clock_step());
                 }
                 now = time(NULL);
             }
@@ -1140,7 +1000,7 @@ static void handle_button_wake(void) {
             break;
         case BTN_D:
             /* NTP-gated paint, same as BTN A: sync now, MQTT after paint */
-            if (net_window_spawn()) {
+            if (open_net_window()) {
                 net_window_wait_ntp();
             }
             now = time(NULL);
@@ -1158,9 +1018,9 @@ static void handle_button_wake(void) {
     buttons_take_pressed();
 
     if (maybe_start_break(now)) {
-        net_window_post_snapshot(); /* break screen painted: release MQTT */
-        net_window_finish();        /* drain + apply deferred before sleeping */
-        enter_deep_sleep();         /* e.g. resume with accrual already past the interval */
+        post_stats_snapshot(); /* break screen painted: release MQTT */
+        net_window_finish();   /* drain + apply deferred before sleeping */
+        enter_deep_sleep();    /* e.g. resume with accrual already past the interval */
     }
 
     int32_t remaining = timer_tick(now);
@@ -1186,7 +1046,7 @@ static void handle_button_wake(void) {
        Re-render only when something changed what the panel shows (a
        Button A action landed during the join, a config edit moved the
        timer, or the expiry passed while draining). */
-    net_window_post_snapshot();
+    post_stats_snapshot();
     timer_state_t painted = timer_get_state();
     net_finish_t nf = net_window_finish();
     if (nf != NET_FINISH_ALERTED && (nf == NET_FINISH_CHANGED || timer_get_state() != painted)) {

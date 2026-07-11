@@ -41,6 +41,11 @@ int timer_active_slot(void) {
     return g_rtc_state.active_slot;
 }
 
+void timer_ensure_active_slot_enabled(void) {
+    if (!slot_enabled(g_rtc_state.active_slot))
+        g_rtc_state.active_slot = 0;
+}
+
 int timer_slot_by_name(const char *name) {
     if (name == NULL || name[0] == '\0' || strcmp(name, "Screen") == 0)
         return 0;
@@ -412,6 +417,16 @@ void timer_record_ntp_sync(time_t now) {
     g_rtc_state.next_ntp_sync = (int64_t)now + NTP_SYNC_INTERVAL_SEC;
 }
 
+time_t timer_last_ntp_sync(void) {
+    /* Derived, not stored twice: next_ntp_sync is written only by
+       timer_record_ntp_sync, so subtracting the interval recovers the
+       recorded time exactly. 0 = never synced since RTC loss or day
+       rollover (timer_reset) — callers treat 0 as "unknown". */
+    if (g_rtc_state.next_ntp_sync == 0)
+        return 0;
+    return (time_t)(g_rtc_state.next_ntp_sync - NTP_SYNC_INTERVAL_SEC);
+}
+
 /* ---- crash-recovery snapshot ---- */
 
 /* Widest plausible expiry horizon (also bounds allocation): corrupt data
@@ -528,7 +543,6 @@ bool timer_restore_snapshot(const timer_snapshot_t *snap, time_t now) {
     /* The firmware may have been reflashed with this slot removed from
        menuconfig — never strand the device on a slot the buttons can no
        longer reach (its state stays restored; only the selection moves). */
-    if (!slot_enabled(g_rtc_state.active_slot))
-        g_rtc_state.active_slot = 0;
+    timer_ensure_active_slot_enabled();
     return true;
 }

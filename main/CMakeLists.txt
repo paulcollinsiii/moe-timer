@@ -8,6 +8,7 @@ idf_component_register(
         "display_screens.c"
         "display_layout.c"
         "ntp.c"
+        "net_window.c"
         "wifi_session.c"
         "stats_json.c"
         "mqtt_ha.c"

@@ -1279,6 +1279,42 @@ void test_reconcile_idle_and_expired_slots_are_none(void) {
     TEST_ASSERT_EQUAL(TIMER_EXPIRED, timer_get_state());
 }
 
+/* ------------------------------------------------------------------ */
+/* NTP bookkeeping: next_ntp_sync is the single RTC source; the last-  */
+/* sync time shown on screen is derived, not stored twice.             */
+/* ------------------------------------------------------------------ */
+
+void test_last_ntp_sync_zero_when_never_synced(void) {
+    TEST_ASSERT_EQUAL_INT64(0, (int64_t)timer_last_ntp_sync());
+}
+
+void test_last_ntp_sync_derived_from_record(void) {
+    timer_record_ntp_sync(T0 + 1234);
+    TEST_ASSERT_EQUAL_INT64((int64_t)(T0 + 1234), (int64_t)timer_last_ntp_sync());
+}
+
+void test_last_ntp_sync_cleared_by_reset(void) {
+    timer_record_ntp_sync(T0);
+    timer_reset();
+    TEST_ASSERT_EQUAL_INT64(0, (int64_t)timer_last_ntp_sync());
+}
+
+/* ------------------------------------------------------------------ */
+/* Active-slot guard: selection may never rest on a disabled slot      */
+/* ------------------------------------------------------------------ */
+
+void test_ensure_active_slot_keeps_enabled_slot(void) {
+    g_rtc_state.active_slot = 1; /* Piano — enabled in TEST_DEFS */
+    timer_ensure_active_slot_enabled();
+    TEST_ASSERT_EQUAL_INT(1, timer_active_slot());
+}
+
+void test_ensure_active_slot_reverts_when_disabled(void) {
+    g_rtc_state.active_slot = 2; /* hole in TEST_DEFS */
+    timer_ensure_active_slot_enabled();
+    TEST_ASSERT_EQUAL_INT(0, timer_active_slot());
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_bonus_reconcile_grants_only_the_delta);
@@ -1401,5 +1437,10 @@ int main(void) {
     RUN_TEST(test_reconcile_screen_slot_exempt);
     RUN_TEST(test_reconcile_non_active_paused_slot);
     RUN_TEST(test_reconcile_idle_and_expired_slots_are_none);
+    RUN_TEST(test_last_ntp_sync_zero_when_never_synced);
+    RUN_TEST(test_last_ntp_sync_derived_from_record);
+    RUN_TEST(test_last_ntp_sync_cleared_by_reset);
+    RUN_TEST(test_ensure_active_slot_keeps_enabled_slot);
+    RUN_TEST(test_ensure_active_slot_reverts_when_disabled);
     return UNITY_END();
 }
