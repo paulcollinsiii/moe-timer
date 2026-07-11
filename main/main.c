@@ -17,6 +17,7 @@
 #include "freertos/queue.h"
 #include "freertos/semphr.h"
 #include "freertos/task.h"
+#include "hal_nvs.h"
 #include "light.h"
 #include "mqtt_ha.h"
 #include "neopixel.h"
@@ -49,15 +50,26 @@ static const char *TAG = "main";
 #define IDLE_SYNC_INTERVAL_SEC (CONFIG_MAGTAG_IDLE_SYNC_INTERVAL_MIN * 60)
 
 /* Status pixels stay dark during configured quiet hours (alert pulses are
-   exempt — they accompany an audible, dismissable alarm). */
+   exempt — they accompany an audible, dismissable alarm). The window is
+   read from NVS once per wake — this callback fires from the LED task on
+   every pixel update; invalidated after a network window applies edits. */
+static bool s_quiet_cfg_loaded;
+static uint16_t s_quiet_start_cfg;
+static uint16_t s_quiet_end_cfg;
+
 static bool status_leds_quiet(void) {
     time_t now = time(NULL);
     struct tm tm;
     localtime_r(&now, &tm);
-    uint16_t qstart = NVS_DEFAULT_QUIET_START, qend = NVS_DEFAULT_QUIET_END;
-    nvs_config_get_quiet_start(&qstart);
-    nvs_config_get_quiet_end(&qend);
-    return quiet_hours_active(tm.tm_hour * 60 + tm.tm_min, quiet_hhmm_to_minutes(qstart), quiet_hhmm_to_minutes(qend));
+    if (!s_quiet_cfg_loaded) {
+        s_quiet_start_cfg = NVS_DEFAULT_QUIET_START;
+        s_quiet_end_cfg = NVS_DEFAULT_QUIET_END;
+        nvs_config_get_quiet_start(&s_quiet_start_cfg);
+        nvs_config_get_quiet_end(&s_quiet_end_cfg);
+        s_quiet_cfg_loaded = true;
+    }
+    return quiet_hours_active(tm.tm_hour * 60 + tm.tm_min, quiet_hhmm_to_minutes(s_quiet_start_cfg),
+                              quiet_hhmm_to_minutes(s_quiet_end_cfg));
 }
 
 static RTC_DATA_ATTR time_t s_last_ntp_sync;
@@ -162,6 +174,10 @@ static void enter_deep_sleep(void) {
     gpio_hold_en(GPIO_NUM_21);
     gpio_hold_en(GPIO_NUM_16);
     gpio_deep_sleep_hold_en();
+
+    /* Last NVS write (snapshot) is behind us on every path below; release
+       the wake-scoped handle. */
+    hal_nvs_close();
 
     /* Charge-locked: no button wake sources (a press could only burn a
        refresh the battery can't afford) and a fixed long interval instead
@@ -549,6 +565,11 @@ static net_finish_t net_window_finish(void) {
         return NET_FINISH_IDLE; /* no window this wake: nothing arrived */
     if (!net_window_join(NET_JOIN_TIMEOUT_MS, true))
         return NET_FINISH_IDLE; /* wedged: no results to apply */
+    /* The window may have applied HA config edits (allocations, holidays,
+       school dates, quiet hours): drop the wake-scoped caches so every
+       read below and after sees the edited values. */
+    schedule_cache_invalidate();
+    s_quiet_cfg_loaded = false;
     int32_t bonus_target;
     if (mqtt_ha_take_bonus_target(&bonus_target)) {
         timer_bonus_reconcile(0, bonus_target);
@@ -616,7 +637,7 @@ static display_state_t make_state(int32_t remaining, time_t now) {
     timer_state_t ts = timer_get_state();
     int mv = battery_read_mv();
     int pct = battery_percent_from_mv(mv);
-    ESP_LOGI(TAG, "battery: %d mV (%d%%)", mv, pct);
+    ESP_LOGD(TAG, "battery: %d mV (%d%%)", mv, pct);
     uint16_t break_dur = NVS_DEFAULT_BREAK_DURATION_MIN;
     nvs_config_get_break_duration_min(&break_dur);
     return (display_state_t){

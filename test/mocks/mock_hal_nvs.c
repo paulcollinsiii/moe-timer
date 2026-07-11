@@ -18,8 +18,43 @@ typedef struct {
 static Entry s_store[MAX_ENTRIES];
 static int s_fail_writes;
 
+/* Read-call accounting, kept separate from the store so misses count too. */
+typedef struct {
+    char key[MAX_KEY_LEN];
+    int reads;
+} ReadCount;
+
+static ReadCount s_read_counts[MAX_ENTRIES];
+
+static void count_read(const char *key) {
+    for (int i = 0; i < MAX_ENTRIES; i++) {
+        if (s_read_counts[i].reads > 0 && strcmp(s_read_counts[i].key, key) == 0) {
+            s_read_counts[i].reads++;
+            return;
+        }
+    }
+    for (int i = 0; i < MAX_ENTRIES; i++) {
+        if (s_read_counts[i].reads == 0) {
+            strncpy(s_read_counts[i].key, key, MAX_KEY_LEN - 1);
+            s_read_counts[i].key[MAX_KEY_LEN - 1] = '\0';
+            s_read_counts[i].reads = 1;
+            return;
+        }
+    }
+}
+
+int mock_nvs_read_count(const char *key) {
+    for (int i = 0; i < MAX_ENTRIES; i++) {
+        if (s_read_counts[i].reads > 0 && strcmp(s_read_counts[i].key, key) == 0) {
+            return s_read_counts[i].reads;
+        }
+    }
+    return 0;
+}
+
 void mock_nvs_reset(void) {
     memset(s_store, 0, sizeof(s_store));
+    memset(s_read_counts, 0, sizeof(s_read_counts));
     s_fail_writes = 0;
 }
 
@@ -63,6 +98,7 @@ static Entry *alloc_entry(const char *key) {
 }
 
 esp_err_t hal_nvs_read_u16(const char *key, uint16_t *out) {
+    count_read(key);
     const Entry *e = find_entry(key);
     if (!e || e->len != sizeof(uint16_t))
         return ESP_ERR_NVS_NOT_FOUND;
@@ -82,6 +118,7 @@ esp_err_t hal_nvs_write_u16(const char *key, uint16_t val) {
 }
 
 esp_err_t hal_nvs_read_str(const char *key, char *buf, size_t *len) {
+    count_read(key);
     const Entry *e = find_entry(key);
     if (!e)
         return ESP_ERR_NVS_NOT_FOUND;
@@ -111,6 +148,7 @@ esp_err_t hal_nvs_write_str(const char *key, const char *val) {
 }
 
 esp_err_t hal_nvs_read_blob(const char *key, void *buf, size_t *len) {
+    count_read(key);
     const Entry *e = find_entry(key);
     if (!e)
         return ESP_ERR_NVS_NOT_FOUND;
@@ -134,4 +172,8 @@ esp_err_t hal_nvs_write_blob(const char *key, const void *buf, size_t len) {
     memcpy(e->data, buf, len);
     e->len = len;
     return ESP_OK;
+}
+
+void hal_nvs_close(void) {
+    /* Real impl caches the NVS handle across a wake; nothing to do here. */
 }

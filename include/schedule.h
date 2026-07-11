@@ -17,6 +17,10 @@ extern "C" {
 
 day_type_t schedule_get_day_type(time_t now);
 uint32_t schedule_get_allocation_sec(day_type_t day_type);
+/* Drop the wake-scoped NVS cache (holiday blob, school dates, allocations).
+   Call after anything that edits schedule config mid-wake — in practice the
+   post-network-window apply. Reads reload lazily. */
+void schedule_cache_invalidate(void);
 bool schedule_is_holiday(const char *date_str, const char *blob, size_t blob_len);
 /* True when date_str (YYYY-MM-DD) falls outside the school year defined by
    NVS_DEFAULT_SCHOOL_START/END in nvs_defaults.h. */

@@ -8,6 +8,31 @@
 #include "hal_nvs.h"
 #include "nvs_defaults.h"
 
+/* Wake-scoped cache. The device deep-sleeps between wakes, so a boot IS a
+   wake: values read once stay valid for the whole awake window. The only
+   in-wake config mutation is an HA edit applied during the network window;
+   the orchestrator calls schedule_cache_invalidate() after the window so
+   later reads see the edit. Sized for the largest consumer (512 B holiday
+   blob) — trades a little .bss for one flash read per key per wake. */
+#define SCHED_DAY_TYPES 4
+
+static struct {
+    bool blob_loaded;
+    bool blob_in_nvs;
+    size_t blob_len;
+    char blob[512];
+    bool dates_loaded;
+    char summer_start[16];
+    char school_start[16];
+    char school_end[16];
+    bool alloc_loaded[SCHED_DAY_TYPES];
+    uint16_t alloc_min[SCHED_DAY_TYPES];
+} s_cache;
+
+void schedule_cache_invalidate(void) {
+    memset(&s_cache, 0, sizeof(s_cache));
+}
+
 bool schedule_is_holiday(const char *date_str, const char *blob, size_t blob_len) {
     size_t date_len = strlen(date_str);
     if (date_len != 10)
@@ -49,13 +74,15 @@ bool schedule_is_summer(const char *date_str) {
        between school years (dates before SUMMER_START belong to the
        previous school year, not summer), plus everything after this
        year's last day (until next year's calendar is loaded). */
-    char summer_start[16], school_start[16], school_end[16];
-    read_date_key("summer_start", NVS_DEFAULT_SUMMER_START, summer_start, sizeof(summer_start));
-    read_date_key("school_start", NVS_DEFAULT_SCHOOL_START, school_start, sizeof(school_start));
-    read_date_key("school_end", NVS_DEFAULT_SCHOOL_END, school_end, sizeof(school_end));
-    if (strcmp(date_str, school_end) > 0)
+    if (!s_cache.dates_loaded) {
+        read_date_key("summer_start", NVS_DEFAULT_SUMMER_START, s_cache.summer_start, sizeof(s_cache.summer_start));
+        read_date_key("school_start", NVS_DEFAULT_SCHOOL_START, s_cache.school_start, sizeof(s_cache.school_start));
+        read_date_key("school_end", NVS_DEFAULT_SCHOOL_END, s_cache.school_end, sizeof(s_cache.school_end));
+        s_cache.dates_loaded = true;
+    }
+    if (strcmp(date_str, s_cache.school_end) > 0)
         return true;
-    return strcmp(date_str, summer_start) >= 0 && strcmp(date_str, school_start) < 0;
+    return strcmp(date_str, s_cache.summer_start) >= 0 && strcmp(date_str, s_cache.school_start) < 0;
 }
 
 day_type_t schedule_get_day_type(time_t now) {
@@ -66,11 +93,13 @@ day_type_t schedule_get_day_type(time_t now) {
     snprintf(date_str, sizeof(date_str), "%04d-%02d-%02d", tm_local.tm_year + 1900, tm_local.tm_mon + 1,
              tm_local.tm_mday);
 
-    char blob[512];
-    size_t blob_len = sizeof(blob);
-    esp_err_t ret = hal_nvs_read_blob("holidays", blob, &blob_len);
-    const char *holiday_data = (ret == ESP_OK) ? blob : NVS_DEFAULT_HOLIDAYS;
-    size_t holiday_len = (ret == ESP_OK) ? blob_len : strlen(NVS_DEFAULT_HOLIDAYS);
+    if (!s_cache.blob_loaded) {
+        s_cache.blob_len = sizeof(s_cache.blob);
+        s_cache.blob_in_nvs = hal_nvs_read_blob("holidays", s_cache.blob, &s_cache.blob_len) == ESP_OK;
+        s_cache.blob_loaded = true;
+    }
+    const char *holiday_data = s_cache.blob_in_nvs ? s_cache.blob : NVS_DEFAULT_HOLIDAYS;
+    size_t holiday_len = s_cache.blob_in_nvs ? s_cache.blob_len : strlen(NVS_DEFAULT_HOLIDAYS);
     if (schedule_is_holiday(date_str, holiday_data, holiday_len)) {
         return DAY_HOLIDAY;
     }
@@ -90,28 +119,37 @@ day_type_t schedule_get_day_type(time_t now) {
 uint32_t schedule_get_allocation_sec(day_type_t day_type) {
     const char *key;
     uint16_t default_min;
+    unsigned idx;
 
     switch (day_type) {
         case DAY_WEEKEND:
             key = "weekend_min";
             default_min = NVS_DEFAULT_WEEKEND_MIN;
+            idx = DAY_WEEKEND;
             break;
         case DAY_HOLIDAY:
             key = "holiday_min";
             default_min = NVS_DEFAULT_HOLIDAY_MIN;
+            idx = DAY_HOLIDAY;
             break;
         case DAY_SUMMER:
             key = "summer_min";
             default_min = NVS_DEFAULT_SUMMER_MIN;
+            idx = DAY_SUMMER;
             break;
         case DAY_WEEKDAY:
         default:
             key = "weekday_min";
             default_min = NVS_DEFAULT_WEEKDAY_MIN;
+            idx = DAY_WEEKDAY;
             break;
     }
 
-    uint16_t minutes = default_min;
-    hal_nvs_read_u16(key, &minutes);
-    return (uint32_t)minutes * 60u;
+    if (!s_cache.alloc_loaded[idx]) {
+        uint16_t minutes = default_min;
+        hal_nvs_read_u16(key, &minutes);
+        s_cache.alloc_min[idx] = minutes;
+        s_cache.alloc_loaded[idx] = true;
+    }
+    return (uint32_t)s_cache.alloc_min[idx] * 60u;
 }
