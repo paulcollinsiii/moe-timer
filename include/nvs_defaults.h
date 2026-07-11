@@ -85,6 +85,29 @@
 #define NVS_DEFAULT_SCHOOL_START "2026-08-20" /* first day for students K-12 */
 #define NVS_DEFAULT_SCHOOL_END "2027-05-28"   /* last day; summer resumes next day */
 
+/* ---- seeded-defaults registry ------------------------------------------
+   One row per key that nvs_config_init_defaults() seeds. Drives all three
+   consumers from one list: the full reseed, the init-if-missing repair,
+   and the defaults fingerprint — adding a seeded key here is the whole
+   change. ROW ORDER IS LOAD-BEARING: the fingerprint folds rows in this
+   order, and a changed fingerprint reseeds every deployed device
+   (reverting HA-managed keys). The holidays blob is seeded separately and
+   deliberately NOT fingerprinted. */
+#include "nvs_keys.h"
+
+#define NVS_SEEDED_U16S(X)                          \
+    X(NVS_KEY_WEEKDAY_MIN, NVS_DEFAULT_WEEKDAY_MIN) \
+    X(NVS_KEY_WEEKEND_MIN, NVS_DEFAULT_WEEKEND_MIN) \
+    X(NVS_KEY_HOLIDAY_MIN, NVS_DEFAULT_HOLIDAY_MIN) \
+    X(NVS_KEY_SUMMER_MIN, NVS_DEFAULT_SUMMER_MIN)
+
+#define NVS_SEEDED_STRS(X)                      \
+    X(NVS_KEY_WIFI_SSID, NVS_DEFAULT_WIFI_SSID) \
+    X(NVS_KEY_WIFI_PASS, NVS_DEFAULT_WIFI_PASS) \
+    X(NVS_KEY_MQTT_URI, NVS_DEFAULT_MQTT_URI)   \
+    X(NVS_KEY_MQTT_USER, NVS_DEFAULT_MQTT_USER) \
+    X(NVS_KEY_MQTT_PASS, NVS_DEFAULT_MQTT_PASS)
+
 /* Weekday no-school days during the 2026-27 school year (weekends are
    their own category; summer break is the summer category). Newline-
    separated YYYY-MM-DD. */

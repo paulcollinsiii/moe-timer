@@ -14,6 +14,7 @@
 #include "hal_nvs.h"
 #include "mqtt_client.h"
 #include "nvs_config.h"
+#include "nvs_keys.h"
 #include "timer.h"
 
 static const char *TAG = "mqtt_ha";
@@ -427,8 +428,8 @@ void mqtt_ha_window(const stats_snapshot_t *snap) {
     for (const char *p = dev_name; *p; p++)
         name_hash = (uint16_t)(name_hash * 33u + (unsigned char)*p);
     uint16_t disc_ver = 0, disc_name = 0;
-    hal_nvs_read_u16("disc_ver", &disc_ver);
-    hal_nvs_read_u16("disc_name", &disc_name);
+    hal_nvs_read_u16(NVS_KEY_DISC_VER, &disc_ver);
+    hal_nvs_read_u16(NVS_KEY_DISC_NAME, &disc_name);
     bool fresh_discovery = (disc_ver != DISC_SCHEMA_VER) || (disc_name != name_hash);
     if (fresh_discovery) {
         published += publish_discovery(client, dev_name, snap->fw);
@@ -458,8 +459,8 @@ void mqtt_ha_window(const stats_snapshot_t *snap) {
     if (s_pub_acks >= published) {
         s_summary.pending = false;
         if (fresh_discovery) {
-            hal_nvs_write_u16("disc_ver", DISC_SCHEMA_VER);
-            hal_nvs_write_u16("disc_name", name_hash);
+            hal_nvs_write_u16(NVS_KEY_DISC_VER, DISC_SCHEMA_VER);
+            hal_nvs_write_u16(NVS_KEY_DISC_NAME, name_hash);
         }
         ESP_LOGI(TAG, "published %d messages", published);
     } else {

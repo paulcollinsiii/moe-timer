@@ -52,10 +52,10 @@ const char *ha_config_json_escape(char *tmp, size_t tmplen, const char *s) {
 /* Extra-timer slot fields — read-modify-write the timer_defs blob by slot. */
 #define TIMER_NAME(n) \
     { .key = "timer" #n "_name", .component = "text", .name = "Timer " #n " name", .kind = CFG_TNAME, .slot = n }
-#define TIMER_MIN(n)                                                                                    \
-    {                                                                                                   \
-        .key = "timer" #n "_min", .component = "number", .name = "Timer " #n " minutes", .unit = "min", \
-        .kind = CFG_TMIN, .lo = 1, .hi = 1440, .step = 1, .slot = n                                     \
+#define TIMER_MIN(n)                                                                                       \
+    {                                                                                                      \
+        .key = "timer" #n "_min", .component = "number", .name = "Timer " #n " minutes", .unit = "min",    \
+        .kind = CFG_TMIN, .lo = CFG_BOUND_TIMER_MIN_LO, .hi = CFG_BOUND_TIMER_MIN_HI, .step = 1, .slot = n \
     }
 #define TIMER_RELOAD(n)                                                                                             \
     {                                                                                                               \
@@ -70,21 +70,22 @@ _Static_assert(TIMER_EXTRA_SLOTS >= 4, "ha_config registry assumes >= 4 extra-ti
 static const cfg_field_t FIELDS[] = {
     /* step=1: HA validates entries against min+k*step, so a step of 5 with
        a min of 1 rejects round values (30, 45, 60). Keep it 1. */
-    NUM_U16("weekday_min", "Weekday allocation", "min", 1, 1440, 1, nvs_config_set_weekday_min,
-            nvs_config_get_weekday_min),
-    NUM_U16("weekend_min", "Weekend allocation", "min", 1, 1440, 1, nvs_config_set_weekend_min,
-            nvs_config_get_weekend_min),
-    NUM_U16("holiday_min", "Holiday allocation", "min", 1, 1440, 1, nvs_config_set_holiday_min,
-            nvs_config_get_holiday_min),
-    NUM_U16("summer_min", "Summer allocation", "min", 1, 1440, 1, nvs_config_set_summer_min, nvs_config_get_summer_min),
+    NUM_U16("weekday_min", "Weekday allocation", "min", CFG_BOUND_ALLOC_LO, CFG_BOUND_ALLOC_HI, 1,
+            nvs_config_set_weekday_min, nvs_config_get_weekday_min),
+    NUM_U16("weekend_min", "Weekend allocation", "min", CFG_BOUND_ALLOC_LO, CFG_BOUND_ALLOC_HI, 1,
+            nvs_config_set_weekend_min, nvs_config_get_weekend_min),
+    NUM_U16("holiday_min", "Holiday allocation", "min", CFG_BOUND_ALLOC_LO, CFG_BOUND_ALLOC_HI, 1,
+            nvs_config_set_holiday_min, nvs_config_get_holiday_min),
+    NUM_U16("summer_min", "Summer allocation", "min", CFG_BOUND_ALLOC_LO, CFG_BOUND_ALLOC_HI, 1,
+            nvs_config_set_summer_min, nvs_config_get_summer_min),
     NUM_HHMM("quiet_start", "Quiet hours start (HHMM)", nvs_config_set_quiet_start, nvs_config_get_quiet_start),
     NUM_HHMM("quiet_end", "Quiet hours end (HHMM)", nvs_config_set_quiet_end, nvs_config_get_quiet_end),
-    NUM_U16("break_interval_min", "Break interval", "min", 0, 480, 1, nvs_config_set_break_interval_min,
-            nvs_config_get_break_interval_min),
-    NUM_U16("break_duration_min", "Break duration", "min", 1, 120, 1, nvs_config_set_break_duration_min,
-            nvs_config_get_break_duration_min),
-    TEXT("name", "Device name", 32, nvs_config_set_dev_name, nvs_config_get_dev_name),
-    TEXT("tz", "Timezone", 48, nvs_config_set_tz, nvs_config_get_tz),
+    NUM_U16("break_interval_min", "Break interval", "min", CFG_BOUND_BREAK_INT_LO, CFG_BOUND_BREAK_INT_HI, 1,
+            nvs_config_set_break_interval_min, nvs_config_get_break_interval_min),
+    NUM_U16("break_duration_min", "Break duration", "min", CFG_BOUND_BREAK_DUR_LO, CFG_BOUND_BREAK_DUR_HI, 1,
+            nvs_config_set_break_duration_min, nvs_config_get_break_duration_min),
+    TEXT("name", "Device name", CFG_BOUND_NAME_MAX, nvs_config_set_dev_name, nvs_config_get_dev_name),
+    TEXT("tz", "Timezone", CFG_BOUND_TZ_MAX, nvs_config_set_tz, nvs_config_get_tz),
     TIMER_NAME(1),
     TIMER_MIN(1),
     TIMER_RELOAD(1), /* extra-timer slots 1..4 */
