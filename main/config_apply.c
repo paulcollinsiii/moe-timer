@@ -3,9 +3,9 @@
 
 #include <stdio.h>
 #include <string.h>
-#include <time.h>
 
 #include "cJSON.h"
+#include "config_validate.h" /* config_is_iso_date */
 #include "nvs_config.h"
 #include "quiet_hours.h" /* quiet_hhmm_valid */
 #include "timer.h"       /* TIMER_EXTRA_SLOTS */
@@ -22,37 +22,6 @@ static void err_add(err_acc_t *e, const char *field) {
                      e->count ? "," : "", field);
     if (n > 0)
         e->count++;
-}
-
-/* ---- validators ---- */
-
-static bool is_iso_date(const char *s) {
-    if (s == NULL || strlen(s) != 10)
-        return false;
-    for (int i = 0; i < 10; i++) {
-        if (i == 4 || i == 7) {
-            if (s[i] != '-')
-                return false;
-        } else if (s[i] < '0' || s[i] > '9') {
-            return false;
-        }
-    }
-    int year = (s[0] - '0') * 1000 + (s[1] - '0') * 100 + (s[2] - '0') * 10 + (s[3] - '0');
-    int month = (s[5] - '0') * 10 + (s[6] - '0');
-    int day = (s[8] - '0') * 10 + (s[9] - '0');
-    /* Calendar validity (month lengths, leap years) via a mktime round
-       trip: mktime normalizes an impossible date (Feb 31 -> Mar 3), so if
-       it changed any field the date was invalid. Noon dodges DST-gap
-       midnights; libc owns all the corner cases. */
-    struct tm tm = {0};
-    tm.tm_year = year - 1900;
-    tm.tm_mon = month - 1;
-    tm.tm_mday = day;
-    tm.tm_hour = 12;
-    tm.tm_isdst = -1;
-    if (mktime(&tm) == (time_t)-1)
-        return false;
-    return tm.tm_year == year - 1900 && tm.tm_mon == month - 1 && tm.tm_mday == day;
 }
 
 /* Apply a bounded integer field to a u16 setter; records the field name on
@@ -86,7 +55,7 @@ static void apply_date(const cJSON *root, const char *field, esp_err_t (*setter)
     const cJSON *item = cJSON_GetObjectItemCaseSensitive(root, field);
     if (item == NULL)
         return;
-    if (!cJSON_IsString(item) || !is_iso_date(item->valuestring)) {
+    if (!cJSON_IsString(item) || !config_is_iso_date(item->valuestring)) {
         err_add(e, field);
         return;
     }
@@ -120,7 +89,7 @@ static void apply_holidays(const cJSON *root, err_acc_t *e) {
     bool had_bad = false;
     const cJSON *item;
     cJSON_ArrayForEach(item, arr) {
-        if (!cJSON_IsString(item) || !is_iso_date(item->valuestring)) {
+        if (!cJSON_IsString(item) || !config_is_iso_date(item->valuestring)) {
             had_bad = true;
             continue;
         }

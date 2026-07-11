@@ -20,6 +20,7 @@ static stats_snapshot_t base_snapshot(void) {
         .completions = {0, 2, 0, 1},
         .charge_lock = false,
         .fw = "v1.4.0-test",
+        .reset_reason = "DEEPSLEEP",
     };
 }
 
@@ -33,9 +34,20 @@ void test_stat_payload_exact(void) {
         "{\"batt_pct\":87,\"batt_mv\":4012,\"light_mv\":420,\"state\":\"RUNNING\","
         "\"active_timer\":\"Screen\",\"remaining_s\":3400,\"allocation_s\":3600,"
         "\"day_type\":\"Weekday\",\"completions\":[0,2,0,1],\"charge_lock\":false,"
-        "\"fw\":\"v1.4.0-test\"}",
+        "\"fw\":\"v1.4.0-test\",\"reset\":\"DEEPSLEEP\"}",
         buf);
     TEST_ASSERT_EQUAL_INT((int)strlen(buf), n);
+}
+
+void test_stat_payload_reset_reason_flags_crash_wakes(void) {
+    /* Boot forensics over MQTT: the USB CDC console drops output around
+       sleep/reset transitions, so the reset reason rides the stat payload
+       — a BROWNOUT/PANIC value on a wake means the PREVIOUS wake died. */
+    char buf[512];
+    stats_snapshot_t s = base_snapshot();
+    s.reset_reason = "BROWNOUT";
+    stats_json_stat(buf, sizeof(buf), &s);
+    TEST_ASSERT_NOT_NULL(strstr(buf, "\"reset\":\"BROWNOUT\""));
 }
 
 void test_stat_payload_charge_lock_true(void) {
@@ -98,8 +110,23 @@ void test_discovery_entity_table_is_populated(void) {
     const ha_entity_t *ents = stats_json_entities(&count);
     TEST_ASSERT_NOT_NULL(ents);
     /* battery, battery_mv, light, state, active_timer, remaining,
-       allocation, day_type, charge_lock, screen_used + 4 completions */
-    TEST_ASSERT_EQUAL_INT(10 + TIMER_EXTRA_SLOTS, count);
+       allocation, day_type, charge_lock, screen_used, last_reset
+       + 4 completions */
+    TEST_ASSERT_EQUAL_INT(11 + TIMER_EXTRA_SLOTS, count);
+}
+
+void test_discovery_last_reset_diagnostic_sensor(void) {
+    int count = 0;
+    const ha_entity_t *ents = stats_json_entities(&count);
+    const ha_entity_t *reset = NULL;
+    for (int i = 0; i < count; i++) {
+        if (strcmp(ents[i].key, "last_reset") == 0)
+            reset = &ents[i];
+    }
+    TEST_ASSERT_NOT_NULL(reset);
+    TEST_ASSERT_EQUAL_STRING("diagnostic", reset->ent_cat);
+    TEST_ASSERT_NOT_NULL(strstr(reset->tpl, "value_json.reset"));
+    TEST_ASSERT_EQUAL_INT(0, reset->expire_after); /* evidence must not expire */
 }
 
 void test_discovery_topic(void) {
@@ -173,10 +200,44 @@ void test_discovery_completions_use_runtime_slot_names(void) {
     TEST_ASSERT_NOT_NULL(strstr(buf, "value_json.completions[0]"));
 }
 
+void test_discovery_diagnostic_category(void) {
+    char buf[600];
+    int count = 0;
+    const ha_entity_t *ents = stats_json_entities(&count);
+    const ha_entity_t *e = NULL;
+    for (int i = 0; i < count; i++)
+        if (strcmp(ents[i].key, "battery_mv") == 0)
+            e = &ents[i];
+    TEST_ASSERT_NOT_NULL(e);
+    stats_json_discovery(buf, sizeof(buf), "magtag-a1b2c3", "Kitchen", "fw", e);
+    TEST_ASSERT_NOT_NULL(strstr(buf, "\"ent_cat\":\"diagnostic\""));
+}
+
+void test_primary_entity_omits_category(void) {
+    char buf[600];
+    int count = 0;
+    const ha_entity_t *ents = stats_json_entities(&count); /* [0] = battery, primary */
+    stats_json_discovery(buf, sizeof(buf), "magtag-a1b2c3", "Kitchen", "fw", &ents[0]);
+    TEST_ASSERT_NULL(strstr(buf, "ent_cat"));
+}
+
+void test_allocation_renamed_today_limit(void) {
+    int count = 0;
+    const ha_entity_t *ents = stats_json_entities(&count);
+    for (int i = 0; i < count; i++)
+        if (strcmp(ents[i].key, "allocation") == 0)
+            TEST_ASSERT_EQUAL_STRING("Today's limit", ents[i].name);
+}
+
 int main(void) {
     UNITY_BEGIN();
+    RUN_TEST(test_discovery_diagnostic_category);
+    RUN_TEST(test_primary_entity_omits_category);
+    RUN_TEST(test_allocation_renamed_today_limit);
     RUN_TEST(test_stat_payload_exact);
     RUN_TEST(test_stat_payload_charge_lock_true);
+    RUN_TEST(test_stat_payload_reset_reason_flags_crash_wakes);
+    RUN_TEST(test_discovery_last_reset_diagnostic_sensor);
     RUN_TEST(test_stat_payload_escapes_timer_name);
     RUN_TEST(test_stat_payload_reports_needed_length_when_truncated);
     RUN_TEST(test_stat_payload_null_string_fields_are_safe);

@@ -199,6 +199,79 @@ void timer_grant(int slot, int32_t sec) {
     }
 }
 
+void timer_bonus_reconcile(int slot, int32_t target_sec) {
+    if (slot < 0 || slot >= TIMER_SLOT_COUNT || target_sec < 0)
+        return;
+    timer_slot_state_t *sl = &g_rtc_state.slots[slot];
+    int32_t delta = target_sec - sl->bonus_applied;
+    if (delta <= 0)
+        return; /* target met or lowered — never reclaim granted time */
+    timer_grant(slot, delta);
+    sl->bonus_applied = target_sec;
+}
+
+/* Mark a slot's run as reaching 00:00 (shared by tick and reconcile). */
+static void expire_slot(timer_slot_state_t *sl) {
+    sl->state = TIMER_EXPIRED;
+    if (sl->completions != UINT16_MAX)
+        sl->completions++; /* the run reached 00:00; saturate, never wrap */
+}
+
+timer_reconcile_t timer_reconcile_def(int slot, const timer_def_t *old_def, const timer_def_t *new_def, time_t now,
+                                      bool *was_running) {
+    if (was_running != NULL)
+        *was_running = false;
+    if (slot <= 0 || slot >= TIMER_SLOT_COUNT || old_def == NULL)
+        return TIMER_RECONCILE_NONE; /* Screen follows schedule.c — exempt */
+    timer_slot_state_t *sl = &g_rtc_state.slots[slot];
+    if (sl->state != TIMER_RUNNING && sl->state != TIMER_PAUSED)
+        return TIMER_RECONCILE_NONE; /* IDLE/EXPIRED pick up the new def at next start */
+    bool running = (sl->state == TIMER_RUNNING);
+    if (was_running != NULL)
+        *was_running = running;
+
+    bool disabled =
+        (new_def == NULL || new_def->name == NULL || new_def->name[0] == '\0' || new_def->duration_sec <= 0);
+    if (disabled || strcmp(old_def->name, new_def->name) != 0) {
+        /* A different (or deleted) timer lives here now — the old run is
+           meaningless. Reset like timer_reload: completions stay (today's
+           history), grants/bonus belong to the old timer and go. */
+        uint16_t completions = sl->completions;
+        memset(sl, 0, sizeof(*sl));
+        sl->state = TIMER_IDLE;
+        sl->completions = completions;
+        return TIMER_RECONCILE_RESET;
+    }
+
+    int32_t delta = new_def->duration_sec - old_def->duration_sec;
+    if (delta == 0)
+        return TIMER_RECONCILE_NONE; /* reload-flag-only edit: the defs table carries it */
+
+    /* Delta-shift: allocation and expiry/remaining move together, so time
+       already elapsed and HA grants are both preserved (and the snapshot
+       invariant remaining <= allocation keeps holding). run_started_wall is
+       the current run SEGMENT (reset on every resume) — never derive the
+       new expiry from it. */
+    sl->allocation_sec += delta;
+    if (sl->allocation_sec < 0)
+        sl->allocation_sec = 0;
+    if (running) {
+        sl->expiry_wall_time += delta;
+        if (sl->expiry_wall_time <= (int64_t)now) {
+            expire_slot(sl);
+            return TIMER_RECONCILE_EXPIRED;
+        }
+    } else {
+        sl->remaining_at_pause += delta;
+        if (sl->remaining_at_pause <= 0) {
+            sl->remaining_at_pause = 0;
+            expire_slot(sl);
+            return TIMER_RECONCILE_EXPIRED;
+        }
+    }
+    return TIMER_RECONCILE_UPDATED;
+}
+
 int32_t timer_tick(time_t now) {
     timer_slot_state_t *sl = active();
     if (sl->state == TIMER_BREAK) {
@@ -216,9 +289,7 @@ int32_t timer_tick(time_t now) {
     }
     int64_t remaining = sl->expiry_wall_time - (int64_t)now;
     if (remaining <= 0) {
-        sl->state = TIMER_EXPIRED;
-        if (sl->completions != UINT16_MAX)
-            sl->completions++; /* the run reached 00:00; saturate, never wrap */
+        expire_slot(sl);
         return (int32_t)remaining;
     }
     /* expiry_wall_time is NOT modified here */
@@ -373,6 +444,7 @@ void timer_make_snapshot(timer_snapshot_t *out) {
         os->break_expiry_wall = sl->break_expiry_wall;
         os->completions = sl->completions;
         os->bonus_sec = sl->bonus_sec;
+        os->bonus_applied = sl->bonus_applied;
     }
     memcpy(out->date, g_rtc_state.last_date, sizeof(out->date));
     out->checksum = timer_snapshot_checksum(out);
@@ -436,6 +508,7 @@ bool timer_restore_snapshot(const timer_snapshot_t *snap, time_t now) {
         sl->break_expiry_wall = ss->break_expiry_wall;
         sl->completions = ss->completions;
         sl->bonus_sec = ss->bonus_sec;
+        sl->bonus_applied = ss->bonus_applied;
         /* Expiry passed while powered off (snapshot saved before the EXPIRED
            transition landed): restore directly as EXPIRED so the next tick
            does not re-transition and re-fire the already-heard alert. The

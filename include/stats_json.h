@@ -26,6 +26,15 @@ typedef struct {
     uint16_t completions[TIMER_EXTRA_SLOTS]; /* extra slots 1..N */
     bool charge_lock;
     const char *fw;
+    int32_t screen_bonus_applied_s; /* slot 0 bonus_applied — the act publish
+                                       must not read live timer state (the
+                                       MQTT window runs on the network task) */
+    const char *reset_reason;       /* this boot's esp_reset_reason, e.g.
+                                       "DEEPSLEEP"; anything else on a wake
+                                       means the previous wake died — boot
+                                       forensics over MQTT, because the USB
+                                       CDC console drops output around
+                                       sleep/reset transitions */
 } stats_snapshot_t;
 
 int stats_json_stat(char *buf, size_t len, const stats_snapshot_t *s);
@@ -45,6 +54,7 @@ typedef struct {
     const char *topic_suffix; /* "stat" or "summary" */
     int expire_after;         /* seconds; 0 = omit (value persists) */
     bool binary;              /* adds pl_on/pl_off */
+    const char *ent_cat;      /* "diagnostic" / NULL = primary (top-level in HA) */
 } ha_entity_t;
 
 const ha_entity_t *stats_json_entities(int *count);

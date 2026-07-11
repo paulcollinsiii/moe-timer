@@ -59,6 +59,7 @@ typedef struct {
     int64_t break_expiry_wall; /* wall time the current break ends; 0 unless BREAK */
     uint16_t completions;      /* runs that reached expiry today */
     int32_t bonus_sec;         /* HA grant banked while IDLE; folded in at timer_start */
+    int32_t bonus_applied;     /* total HA "bonus today" reconciled (idempotent target tracking) */
 } timer_slot_state_t;
 
 typedef struct {
@@ -76,7 +77,7 @@ extern rtc_state_t g_rtc_state;
    day's entire allocation. Bump the version on any layout change — the
    XOR checksum (carried over from the MicroPython predecessor) then
    invalidates stale-layout blobs even if NVS hands them back intact. */
-#define TIMER_SNAPSHOT_VERSION 4 /* v4: + per-slot HA grant bonus */
+#define TIMER_SNAPSHOT_VERSION 5 /* v5: + per-slot HA daily-bonus applied tracking */
 
 typedef struct {
     uint8_t state; /* timer_state_t */
@@ -88,6 +89,7 @@ typedef struct {
     int64_t break_expiry_wall;
     uint16_t completions;
     int32_t bonus_sec;
+    int32_t bonus_applied;
 } timer_snapshot_slot_t;
 
 typedef struct {
@@ -133,6 +135,30 @@ bool timer_reload(void);
    PAUSED holding the grant (press A to use it). Works on any slot — no now
    needed (RUNNING extends the stored wall expiry; the rest store durations). */
 void timer_grant(int slot, int32_t sec);
+/* Idempotent "bonus seconds today" for a slot (HA number): grants only the
+   delta beyond what's already been applied today, so re-delivering the same
+   retained target every wake is a no-op. Lowering the target never reclaims
+   granted time. bonus_applied resets at timer_reset (day rollover). */
+void timer_bonus_reconcile(int slot, int32_t target_sec);
+
+/* Outcome of reconciling a slot against an HA config edit that changed its
+   definition mid-run (timer_reconcile_def). */
+typedef enum {
+    TIMER_RECONCILE_NONE = 0, /* nothing state-affecting changed */
+    TIMER_RECONCILE_RESET,    /* renamed/disabled: slot reset to IDLE */
+    TIMER_RECONCILE_UPDATED,  /* duration delta applied in place */
+    TIMER_RECONCILE_EXPIRED,  /* shrink past elapsed: slot now EXPIRED */
+} timer_reconcile_t;
+
+/* Reconcile a RUNNING/PAUSED extra slot (1..N) whose definition changed
+   during a network window: rename/disable resets to IDLE (like reload);
+   a duration change delta-shifts allocation and expiry/remaining so time
+   already elapsed and HA grants are preserved — expiring the run when the
+   new duration is already used up. Slot 0 (Screen) and IDLE/EXPIRED slots
+   are never touched. was_running (nullable) reports the pre-call RUNNING
+   state so the caller can chirp/alert appropriately. */
+timer_reconcile_t timer_reconcile_def(int slot, const timer_def_t *old_def, const timer_def_t *new_def, time_t now,
+                                      bool *was_running);
 
 timer_state_t timer_get_state(void);
 void timer_start(time_t now, int32_t allocation_sec);
