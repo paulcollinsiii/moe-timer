@@ -1,17 +1,0 @@
-I (348) spi_flash: detected chip: genericI (348) spi_flash: flI (690) wifi:wifi driver task: 3ffe6f70, prio:23, stack:6656, coI (1960) esp_netif_handlers: sta ip: 192.168.2.162, mask: 255.255.255.0, gw: 192.168.2.1
-I (1960) wifi_session: Got IP address
-I (2030) wifi:<ba-add>idx:1 (ifx:0, d8:b3:70:70:dc:8d), tid:5, ssn:6, winSize:64
-I (7960) ntp: SNTP sync complete
-I (7960) main: button 0: state 0 -> 1, full refresh
-I (9520) mqtt_ha: MQTT window: connecting to mqtt://mosquitto.kaffi.home
-I (9810) mqtt_ha: published 1 messages
-I (11310) mqtt_ha: screen bonus target 0 min (deferred)
-I (348) spi_flash: detected chip: genericI (348) spi_flash: flI (690) wifi:wifi driver task: 3ffe6f70, prio:23, stack:6656, coI (1890) esp_netif_handlers: sta ip: 192.168.2.162, mask: 255.255.255.0, gw: 192.168.2.1
-I (1890) wifi_session: Got IP address
-I (2270) wifi:<ba-add>idx:1 (ifx:0, d8:b3:70:70:dc:8d), tid:5, ssn:7, winSize:64
-I (4390) ntp: SNTP sync complete
-I (4390) main: button 0: state 2 -> 1, full refresh
-I (5960) mqtt_ha: MQTT window: connecting to mqtt://mosquitto.kaffi.home
-I (6330) mqtt_ha: published 1 messages
-I (348) spi_flash: detected chip: genericI (348) spi_flash: flI (11610) main: Final minute: staying awake (58 s remaining)
-I (73420) main: Alert dismissed by button
