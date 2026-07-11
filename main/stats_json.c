@@ -36,10 +36,17 @@ int stats_json_stat(char *buf, size_t len, const stats_snapshot_t *s) {
     int pos = 0;
     pos = jcat(buf, len, pos,
                "{\"batt_pct\":%d,\"batt_mv\":%d,\"light_mv\":%d,\"state\":\"%s\",\"active_timer\":\"%s\","
-               "\"remaining_s\":%ld,\"allocation_s\":%lu,\"day_type\":\"%s\",\"completions\":[",
+               "\"remaining_s\":[",
                s->batt_pct, s->batt_mv, s->light_mv, jesc(state, sizeof(state), s->state),
-               jesc(name, sizeof(name), s->active_timer), (long)s->remaining_s, (unsigned long)s->allocation_s,
-               jesc(day, sizeof(day), s->day_type));
+               jesc(name, sizeof(name), s->active_timer));
+    for (int i = 0; i < TIMER_SLOT_COUNT; i++) {
+        pos = jcat(buf, len, pos, i ? ",%ld" : "%ld", (long)s->remaining_s[i]);
+    }
+    pos = jcat(buf, len, pos, "],\"allocation_s\":[");
+    for (int i = 0; i < TIMER_SLOT_COUNT; i++) {
+        pos = jcat(buf, len, pos, i ? ",%lu" : "%lu", (unsigned long)s->allocation_s[i]);
+    }
+    pos = jcat(buf, len, pos, "],\"day_type\":\"%s\",\"completions\":[", jesc(day, sizeof(day), s->day_type));
     for (int i = 0; i < TIMER_EXTRA_SLOTS; i++) {
         pos = jcat(buf, len, pos, i ? ",%u" : "%u", (unsigned)s->completions[i]);
     }
@@ -76,15 +83,16 @@ static const ha_entity_t ENTITIES[] = {
     {"sensor", "state", "Timer state", NULL, NULL, "{{ value_json.state }}", "stat", STAT_EXPIRE_SEC, false, NULL},
     {"sensor", "active_timer", "Active timer", NULL, NULL, "{{ value_json.active_timer }}", "stat", STAT_EXPIRE_SEC,
      false, DIAG},
-    {"sensor", "remaining", "Time remaining", "min", "duration", "{{ (value_json.remaining_s / 60) | round(0) }}",
-     "stat", STAT_EXPIRE_SEC, false, NULL},
-    {"sensor", "allocation", "Today's limit", "min", "duration", "{{ (value_json.allocation_s / 60) | round(0) }}",
-     "stat", STAT_EXPIRE_SEC, false, DIAG},
+    /* Per-slot remaining/limit ([0] = Screen; extra slots below, runtime-
+       named like completions_N) so each timer keeps its own HA history.
+       "Used" is derivable: limit - remaining. */
+    {"sensor", "screen_remaining", "Screen time remaining", "min", "duration",
+     "{{ (value_json.remaining_s[0] / 60) | round(0) }}", "stat", STAT_EXPIRE_SEC, false, NULL},
+    {"sensor", "screen_limit", "Screen time limit", "min", "duration",
+     "{{ (value_json.allocation_s[0] / 60) | round(0) }}", "stat", STAT_EXPIRE_SEC, false, DIAG},
     {"sensor", "day_type", "Day type", NULL, NULL, "{{ value_json.day_type }}", "stat", STAT_EXPIRE_SEC, false, DIAG},
     {"binary_sensor", "charge_lock", "Charge lock", NULL, NULL, "{{ 'ON' if value_json.charge_lock else 'OFF' }}",
      "stat", STAT_EXPIRE_SEC, true, NULL},
-    {"sensor", "screen_used", "Screen time used today", "min", "duration",
-     "{{ (value_json.screen_used_s / 60) | round(0) }}", "summary", 0, false, DIAG},
     {"sensor", "completions_1", "Timer 1 runs", NULL, NULL, "{{ value_json.completions[0] }}", "stat", STAT_EXPIRE_SEC,
      false, DIAG},
     {"sensor", "completions_2", "Timer 2 runs", NULL, NULL, "{{ value_json.completions[1] }}", "stat", STAT_EXPIRE_SEC,
@@ -93,6 +101,22 @@ static const ha_entity_t ENTITIES[] = {
      false, DIAG},
     {"sensor", "completions_4", "Timer 4 runs", NULL, NULL, "{{ value_json.completions[3] }}", "stat", STAT_EXPIRE_SEC,
      false, DIAG},
+    {"sensor", "remaining_1", "Timer 1 remaining", "min", "duration",
+     "{{ (value_json.remaining_s[1] / 60) | round(0) }}", "stat", STAT_EXPIRE_SEC, false, DIAG},
+    {"sensor", "remaining_2", "Timer 2 remaining", "min", "duration",
+     "{{ (value_json.remaining_s[2] / 60) | round(0) }}", "stat", STAT_EXPIRE_SEC, false, DIAG},
+    {"sensor", "remaining_3", "Timer 3 remaining", "min", "duration",
+     "{{ (value_json.remaining_s[3] / 60) | round(0) }}", "stat", STAT_EXPIRE_SEC, false, DIAG},
+    {"sensor", "remaining_4", "Timer 4 remaining", "min", "duration",
+     "{{ (value_json.remaining_s[4] / 60) | round(0) }}", "stat", STAT_EXPIRE_SEC, false, DIAG},
+    {"sensor", "limit_1", "Timer 1 limit", "min", "duration", "{{ (value_json.allocation_s[1] / 60) | round(0) }}",
+     "stat", STAT_EXPIRE_SEC, false, DIAG},
+    {"sensor", "limit_2", "Timer 2 limit", "min", "duration", "{{ (value_json.allocation_s[2] / 60) | round(0) }}",
+     "stat", STAT_EXPIRE_SEC, false, DIAG},
+    {"sensor", "limit_3", "Timer 3 limit", "min", "duration", "{{ (value_json.allocation_s[3] / 60) | round(0) }}",
+     "stat", STAT_EXPIRE_SEC, false, DIAG},
+    {"sensor", "limit_4", "Timer 4 limit", "min", "duration", "{{ (value_json.allocation_s[4] / 60) | round(0) }}",
+     "stat", STAT_EXPIRE_SEC, false, DIAG},
     /* Boot forensics: anything but DEEPSLEEP on a wake means the previous
        wake died (BROWNOUT/PANIC/...) — the USB CDC console loses that
        evidence, MQTT doesn't. Never expires. */

@@ -276,9 +276,25 @@ static void stats_collect(stats_snapshot_t *out) {
     out->active_timer = (def != NULL) ? def->name : "Screen";
     day_type_t dt = schedule_get_day_type(now);
     out->day_type = day_type_name(dt);
-    uint32_t alloc = (def != NULL) ? (uint32_t)def->duration_sec : schedule_get_allocation_sec(dt);
-    out->allocation_s = alloc;
-    out->remaining_s = timer_slot_remaining(g_rtc_state.active_slot, now, (int32_t)alloc);
+    /* Per-slot remaining/limit ([0] = Screen): each timer keeps its own HA
+       series. A started slot's allocation includes HA grants; IDLE falls
+       back to the schedule/def value; disabled slots report 0/0. */
+    for (int i = 0; i < TIMER_SLOT_COUNT; i++) {
+        const timer_def_t *sd = timer_slot_def(i);
+        if (i > 0 && sd == NULL) {
+            out->remaining_s[i] = 0;
+            out->allocation_s[i] = 0;
+            continue;
+        }
+        int32_t alloc;
+        if (g_rtc_state.slots[i].state != TIMER_IDLE) {
+            alloc = g_rtc_state.slots[i].allocation_sec;
+        } else {
+            alloc = (i == 0) ? (int32_t)schedule_get_allocation_sec(dt) : sd->duration_sec;
+        }
+        out->allocation_s[i] = (uint32_t)alloc;
+        out->remaining_s[i] = timer_slot_remaining(i, now, alloc);
+    }
     for (int i = 0; i < TIMER_EXTRA_SLOTS; i++) {
         out->completions[i] = g_rtc_state.slots[1 + i].completions;
     }

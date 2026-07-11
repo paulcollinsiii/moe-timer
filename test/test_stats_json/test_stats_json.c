@@ -14,8 +14,8 @@ static stats_snapshot_t base_snapshot(void) {
         .light_mv = 420,
         .state = "RUNNING",
         .active_timer = "Screen",
-        .remaining_s = 3400,
-        .allocation_s = 3600,
+        .remaining_s = {3400, 840, 0, 300, 900},
+        .allocation_s = {3600, 900, 0, 600, 900},
         .day_type = "Weekday",
         .completions = {0, 2, 0, 1},
         .charge_lock = false,
@@ -30,9 +30,13 @@ void test_stat_payload_exact(void) {
     char buf[512];
     stats_snapshot_t s = base_snapshot();
     int n = stats_json_stat(buf, sizeof(buf), &s);
+    /* remaining_s/allocation_s are PER-SLOT arrays ([0] = Screen, [N] =
+       extra timer N) so HA tracks each timer's own history — the old
+       active-timer scalars mixed different timers into one series. */
     TEST_ASSERT_EQUAL_STRING(
         "{\"batt_pct\":87,\"batt_mv\":4012,\"light_mv\":420,\"state\":\"RUNNING\","
-        "\"active_timer\":\"Screen\",\"remaining_s\":3400,\"allocation_s\":3600,"
+        "\"active_timer\":\"Screen\",\"remaining_s\":[3400,840,0,300,900],"
+        "\"allocation_s\":[3600,900,0,600,900],"
         "\"day_type\":\"Weekday\",\"completions\":[0,2,0,1],\"charge_lock\":false,"
         "\"fw\":\"v1.4.0-test\",\"reset\":\"DEEPSLEEP\"}",
         buf);
@@ -109,10 +113,10 @@ void test_discovery_entity_table_is_populated(void) {
     int count = 0;
     const ha_entity_t *ents = stats_json_entities(&count);
     TEST_ASSERT_NOT_NULL(ents);
-    /* battery, battery_mv, light, state, active_timer, remaining,
-       allocation, day_type, charge_lock, screen_used, last_reset
-       + 4 completions */
-    TEST_ASSERT_EQUAL_INT(11 + TIMER_EXTRA_SLOTS, count);
+    /* battery, battery_mv, light, state, active_timer, day_type,
+       charge_lock, last_reset, screen_remaining, screen_limit
+       + per extra slot: completions, remaining, limit */
+    TEST_ASSERT_EQUAL_INT(10 + 3 * TIMER_EXTRA_SLOTS, count);
 }
 
 void test_discovery_last_reset_diagnostic_sensor(void) {
@@ -169,19 +173,54 @@ void test_discovery_binary_sensor_has_payload_states(void) {
     TEST_ASSERT_NOT_NULL(strstr(buf, "value_json.charge_lock"));
 }
 
-void test_discovery_summary_sensor_uses_summary_topic_no_expire(void) {
-    char buf[600];
+static const ha_entity_t *find_entity(const char *key) {
     int count = 0;
     const ha_entity_t *ents = stats_json_entities(&count);
-    const ha_entity_t *used = NULL;
     for (int i = 0; i < count; i++) {
-        if (strcmp(ents[i].key, "screen_used") == 0)
-            used = &ents[i];
+        if (strcmp(ents[i].key, key) == 0)
+            return &ents[i];
     }
-    TEST_ASSERT_NOT_NULL(used);
-    stats_json_discovery(buf, sizeof(buf), "magtag-a1b2c3", "Kitchen MagTag", "fw", used);
-    TEST_ASSERT_NOT_NULL(strstr(buf, "\"stat_t\":\"magtag/magtag-a1b2c3/summary\""));
-    TEST_ASSERT_NULL(strstr(buf, "expire_after")); /* daily value must persist */
+    return NULL;
+}
+
+void test_retired_active_scoped_entities_gone(void) {
+    /* The active-timer-scoped sensors mixed timers into one HA series;
+       screen_used is derivable from limit - remaining. All replaced by
+       the per-slot sensors below. */
+    TEST_ASSERT_NULL(find_entity("remaining"));
+    TEST_ASSERT_NULL(find_entity("allocation"));
+    TEST_ASSERT_NULL(find_entity("screen_used"));
+}
+
+void test_screen_remaining_and_limit_entities(void) {
+    char buf[600];
+    const ha_entity_t *rem = find_entity("screen_remaining");
+    TEST_ASSERT_NOT_NULL(rem);
+    TEST_ASSERT_NOT_NULL(strstr(rem->tpl, "value_json.remaining_s[0]"));
+    stats_json_discovery(buf, sizeof(buf), "magtag-a1b2c3", "Kitchen", "fw", rem);
+    TEST_ASSERT_NOT_NULL(strstr(buf, "\"name\":\"Screen time remaining\""));
+    TEST_ASSERT_NULL(strstr(buf, "ent_cat")); /* primary, like old Time remaining */
+
+    const ha_entity_t *lim = find_entity("screen_limit");
+    TEST_ASSERT_NOT_NULL(lim);
+    TEST_ASSERT_NOT_NULL(strstr(lim->tpl, "value_json.allocation_s[0]"));
+    TEST_ASSERT_EQUAL_STRING("Screen time limit", lim->name);
+    TEST_ASSERT_EQUAL_STRING("diagnostic", lim->ent_cat);
+}
+
+void test_per_slot_remaining_and_limit_entities(void) {
+    char buf[600];
+    const ha_entity_t *rem = find_entity("remaining_1");
+    TEST_ASSERT_NOT_NULL(rem);
+    TEST_ASSERT_NOT_NULL(strstr(rem->tpl, "value_json.remaining_s[1]"));
+    /* Runtime slot name overrides the table default, like completions_N */
+    stats_json_discovery_named(buf, sizeof(buf), "magtag-a1b2c3", "Kitchen", "fw", rem, "Piano remaining");
+    TEST_ASSERT_NOT_NULL(strstr(buf, "\"name\":\"Piano remaining\""));
+
+    const ha_entity_t *lim = find_entity("limit_4");
+    TEST_ASSERT_NOT_NULL(lim);
+    TEST_ASSERT_NOT_NULL(strstr(lim->tpl, "value_json.allocation_s[4]"));
+    TEST_ASSERT_EQUAL_STRING("diagnostic", lim->ent_cat);
 }
 
 void test_discovery_completions_use_runtime_slot_names(void) {
@@ -221,19 +260,13 @@ void test_primary_entity_omits_category(void) {
     TEST_ASSERT_NULL(strstr(buf, "ent_cat"));
 }
 
-void test_allocation_renamed_today_limit(void) {
-    int count = 0;
-    const ha_entity_t *ents = stats_json_entities(&count);
-    for (int i = 0; i < count; i++)
-        if (strcmp(ents[i].key, "allocation") == 0)
-            TEST_ASSERT_EQUAL_STRING("Today's limit", ents[i].name);
-}
-
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_discovery_diagnostic_category);
     RUN_TEST(test_primary_entity_omits_category);
-    RUN_TEST(test_allocation_renamed_today_limit);
+    RUN_TEST(test_retired_active_scoped_entities_gone);
+    RUN_TEST(test_screen_remaining_and_limit_entities);
+    RUN_TEST(test_per_slot_remaining_and_limit_entities);
     RUN_TEST(test_stat_payload_exact);
     RUN_TEST(test_stat_payload_charge_lock_true);
     RUN_TEST(test_stat_payload_reset_reason_flags_crash_wakes);
@@ -246,7 +279,6 @@ int main(void) {
     RUN_TEST(test_discovery_topic);
     RUN_TEST(test_discovery_battery_payload);
     RUN_TEST(test_discovery_binary_sensor_has_payload_states);
-    RUN_TEST(test_discovery_summary_sensor_uses_summary_topic_no_expire);
     RUN_TEST(test_discovery_completions_use_runtime_slot_names);
     return UNITY_END();
 }

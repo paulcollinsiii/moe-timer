@@ -20,8 +20,11 @@ typedef struct {
     int light_mv;
     const char *state;        /* "IDLE"/"RUNNING"/... */
     const char *active_timer; /* "Screen" or the extra timer's name */
-    int32_t remaining_s;
-    uint32_t allocation_s;
+    /* Per-slot ([0] = Screen, [N] = extra timer N): HA tracks each timer's
+       own history — active-timer scalars would mix timers into one series.
+       Disabled slots report 0/0. */
+    int32_t remaining_s[TIMER_SLOT_COUNT];
+    uint32_t allocation_s[TIMER_SLOT_COUNT];
     const char *day_type;
     uint16_t completions[TIMER_EXTRA_SLOTS]; /* extra slots 1..N */
     bool charge_lock;
