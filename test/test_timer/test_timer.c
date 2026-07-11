@@ -1315,6 +1315,31 @@ void test_ensure_active_slot_reverts_when_disabled(void) {
     TEST_ASSERT_EQUAL_INT(0, timer_active_slot());
 }
 
+/* ------------------------------------------------------------------ */
+/* Read-only slot accessors (used by the stats/summary builders)       */
+/* ------------------------------------------------------------------ */
+
+void test_slot_accessors_read_state_alloc_completions(void) {
+    timer_start(T0, 3600);
+    TEST_ASSERT_EQUAL(TIMER_RUNNING, timer_slot_state(0));
+    TEST_ASSERT_EQUAL_INT32(3600, timer_slot_allocation(0));
+    g_rtc_state.slots[1].completions = 3;
+    TEST_ASSERT_EQUAL_UINT16(3, timer_slot_completions(1));
+}
+
+void test_slot_accessors_out_of_range_are_benign(void) {
+    TEST_ASSERT_EQUAL(TIMER_IDLE, timer_slot_state(-1));
+    TEST_ASSERT_EQUAL(TIMER_IDLE, timer_slot_state(TIMER_SLOT_COUNT));
+    TEST_ASSERT_EQUAL_INT32(0, timer_slot_allocation(99));
+    TEST_ASSERT_EQUAL_UINT16(0, timer_slot_completions(99));
+}
+
+void test_current_date_tracks_record_date(void) {
+    TEST_ASSERT_EQUAL_STRING("", timer_current_date());
+    timer_record_date(T0); /* 2026-01-05 UTC */
+    TEST_ASSERT_EQUAL_STRING("2026-01-05", timer_current_date());
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_bonus_reconcile_grants_only_the_delta);
@@ -1442,5 +1467,8 @@ int main(void) {
     RUN_TEST(test_last_ntp_sync_cleared_by_reset);
     RUN_TEST(test_ensure_active_slot_keeps_enabled_slot);
     RUN_TEST(test_ensure_active_slot_reverts_when_disabled);
+    RUN_TEST(test_slot_accessors_read_state_alloc_completions);
+    RUN_TEST(test_slot_accessors_out_of_range_are_benign);
+    RUN_TEST(test_current_date_tracks_record_date);
     return UNITY_END();
 }

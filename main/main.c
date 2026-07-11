@@ -109,7 +109,7 @@ static void save_timer_snapshot(void) {
    again after the rollover's NTP sync (covers power-on, where the clock
    is invalid until corrected). */
 static bool try_restore_timer_snapshot(time_t now) {
-    if (g_rtc_state.last_date[0] != '\0')
+    if (timer_current_date()[0] != '\0')
         return false; /* RTC state intact — normal deep-sleep wake */
     timer_snapshot_t snap;
     if (nvs_config_load_timer_snapshot(&snap) != ESP_OK)
@@ -286,8 +286,8 @@ static void stats_collect(stats_snapshot_t *out) {
             continue;
         }
         int32_t alloc;
-        if (g_rtc_state.slots[i].state != TIMER_IDLE) {
-            alloc = g_rtc_state.slots[i].allocation_sec;
+        if (timer_slot_state(i) != TIMER_IDLE) {
+            alloc = timer_slot_allocation(i);
         } else {
             alloc = (i == 0) ? (int32_t)schedule_get_allocation_sec(dt) : sd->duration_sec;
         }
@@ -295,11 +295,11 @@ static void stats_collect(stats_snapshot_t *out) {
         out->remaining_s[i] = timer_slot_remaining(i, now, alloc);
     }
     for (int i = 0; i < TIMER_EXTRA_SLOTS; i++) {
-        out->completions[i] = g_rtc_state.slots[1 + i].completions;
+        out->completions[i] = timer_slot_completions(1 + i);
     }
     out->charge_lock = s_charge_locked;
     out->fw = esp_app_get_description()->version;
-    out->screen_bonus_applied_s = g_rtc_state.slots[0].bonus_applied;
+    out->screen_bonus_applied_s = timer_screen_bonus_applied();
     out->reset_reason = reset_reason_str();
 }
 
@@ -665,15 +665,15 @@ static void fire_expiry_alert(void) {
 /* Yesterday's usage numbers for HA, captured BEFORE the rollover resets
    the slots; published by the rollover's own network window. */
 static void queue_rollover_summary(void) {
-    if (g_rtc_state.last_date[0] == '\0') {
+    if (timer_current_date()[0] == '\0') {
         return; /* cold boot / restored-from-nothing: no day to report */
     }
     int32_t used = timer_screen_used_sec(time(NULL));
     uint16_t comp[TIMER_EXTRA_SLOTS];
     for (int i = 0; i < TIMER_EXTRA_SLOTS; i++) {
-        comp[i] = g_rtc_state.slots[1 + i].completions;
+        comp[i] = timer_slot_completions(1 + i);
     }
-    mqtt_ha_queue_summary(g_rtc_state.last_date, used, comp);
+    mqtt_ha_queue_summary(timer_current_date(), used, comp);
 }
 
 static void handle_day_rollover(time_t *now) {
@@ -682,7 +682,7 @@ static void handle_day_rollover(time_t *now) {
     /* last_date + wall time in the log: if a rollover ever fires when the
        date has NOT actually changed, this pinpoints why (bad stored date
        vs. stepped clock). */
-    ESP_LOGW(TAG, "Day rollover (last_date='%s', now=%lld)", g_rtc_state.last_date, (long long)*now);
+    ESP_LOGW(TAG, "Day rollover (last_date='%s', now=%lld)", timer_current_date(), (long long)*now);
     queue_rollover_summary();    /* yesterday's stats, before any reset */
     mqtt_ha_queue_bonus_clear(); /* clear the retained HA bonus target this window */
     /* Fail-open: reset to IDLE with today's allocation even if sync fails */
@@ -768,26 +768,27 @@ static void wait_for_render_grid(int max_wait_sec) {
     }
 }
 
-static void maybe_wait_for_event(void) {
-    if (timer_get_state() == TIMER_BREAK) {
-        int32_t brem = timer_break_remaining(time(NULL));
-        if (brem <= 0 || brem > SLEEP_PLAN_WATCH_SEC)
-            return;
-        ESP_LOGI(TAG, "Break ends in %ld s: staying awake", (long)brem);
-        neopixel_show_timer_state();
-        while (timer_break_remaining(time(NULL)) > 0) {
-            vTaskDelay(pdMS_TO_TICKS(250));
-        }
-        time_t now = time(NULL);
-        int32_t remaining = timer_tick(now); /* BREAK -> PAUSED */
-        audio_break_over_chime();
-        display_state_t st = make_state(remaining, now);
-        display_full_refresh(&st);
+/* BREAK tail: stay awake through the last seconds so the end (chime +
+   PAUSED repaint) lands within a tick of wall time. */
+static void watch_break_end(void) {
+    int32_t brem = timer_break_remaining(time(NULL));
+    if (brem <= 0 || brem > SLEEP_PLAN_WATCH_SEC)
         return;
+    ESP_LOGI(TAG, "Break ends in %ld s: staying awake", (long)brem);
+    neopixel_show_timer_state();
+    while (timer_break_remaining(time(NULL)) > 0) {
+        vTaskDelay(pdMS_TO_TICKS(250));
     }
+    time_t now = time(NULL);
+    int32_t remaining = timer_tick(now); /* BREAK -> PAUSED */
+    audio_break_over_chime();
+    display_state_t st = make_state(remaining, now);
+    display_full_refresh(&st);
+}
 
-    if (timer_get_state() != TIMER_RUNNING)
-        return;
+/* RUNNING tail: own the final minute — countdown partials, binary LEDs,
+   the pause poll, and the expiry alert at zero. */
+static void watch_final_minute(void) {
     time_t now = time(NULL);
     int64_t remaining = timer_expiry_wall() - (int64_t)now;
     if (remaining <= 0 || remaining > SLEEP_PLAN_WATCH_SEC)
@@ -846,6 +847,14 @@ static void maybe_wait_for_event(void) {
     }
     timer_tick(time(NULL)); /* RUNNING -> EXPIRED */
     fire_expiry_alert();
+}
+
+static void maybe_wait_for_event(void) {
+    if (timer_get_state() == TIMER_BREAK) {
+        watch_break_end();
+    } else if (timer_get_state() == TIMER_RUNNING) {
+        watch_final_minute();
+    }
 }
 
 /* ---- wake handlers ----------------------------------------------------- */

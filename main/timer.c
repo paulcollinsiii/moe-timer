@@ -161,6 +161,32 @@ uint16_t timer_completions(void) {
     return active()->completions;
 }
 
+timer_state_t timer_slot_state(int slot) {
+    if (slot < 0 || slot >= TIMER_SLOT_COUNT)
+        return TIMER_IDLE;
+    return g_rtc_state.slots[slot].state;
+}
+
+int32_t timer_slot_allocation(int slot) {
+    if (slot < 0 || slot >= TIMER_SLOT_COUNT)
+        return 0;
+    return g_rtc_state.slots[slot].allocation_sec;
+}
+
+uint16_t timer_slot_completions(int slot) {
+    if (slot < 0 || slot >= TIMER_SLOT_COUNT)
+        return 0;
+    return g_rtc_state.slots[slot].completions;
+}
+
+int32_t timer_screen_bonus_applied(void) {
+    return g_rtc_state.slots[0].bonus_applied;
+}
+
+const char *timer_current_date(void) {
+    return g_rtc_state.last_date; /* "" until timer_record_date / restore */
+}
+
 void timer_reset(void) {
     memset(&g_rtc_state, 0, sizeof(g_rtc_state));
     /* all slots IDLE (=0), active_slot 0 (Screen), counters cleared */

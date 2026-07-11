@@ -181,6 +181,13 @@ time_t timer_last_ntp_sync(void);
 void timer_ensure_active_slot_enabled(void);
 int64_t timer_expiry_wall(void);  /* active slot's expiry wall time (0 if unset) */
 uint16_t timer_completions(void); /* active slot's completed runs today */
+/* Read-only per-slot views (stats/summary builders): out-of-range slots
+   read as IDLE / 0. */
+timer_state_t timer_slot_state(int slot);
+int32_t timer_slot_allocation(int slot);
+uint16_t timer_slot_completions(int slot);
+int32_t timer_screen_bonus_applied(void); /* slot 0 HA bonus reconciled today */
+const char *timer_current_date(void);     /* "YYYY-MM-DD"; "" until first record */
 /* Display-facing remaining seconds for any slot, without ticking (no state
    change): RUNNING = expiry-now, PAUSED/BREAK = frozen remaining, IDLE =
    idle_fallback (caller's allocation), EXPIRED = 0; clamped >= 0. */
