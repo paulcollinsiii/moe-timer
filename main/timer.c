@@ -4,6 +4,7 @@
 #include <string.h>
 #include <time.h>
 
+#include "date_fmt.h"
 #include "hal_time.h"
 
 /* ---- RTC state ---- */
@@ -386,25 +387,20 @@ void timer_shift_expiry(int64_t delta_sec) {
     }
 }
 
-/* buf must hold 11 bytes ("YYYY-MM-DD\0"). Same format as schedule.c. */
-static void fill_date(char *buf, int year, int mon, int day) {
-    snprintf(buf, 11, "%04d-%02d-%02d", year, mon, day);
-}
-
 bool timer_is_new_day(time_t now) {
     if (g_rtc_state.last_date[0] == '\0')
         return true;
     struct tm tm_now;
     localtime_r(&now, &tm_now);
     char today[11];
-    fill_date(today, tm_now.tm_year + 1900, tm_now.tm_mon + 1, tm_now.tm_mday);
+    date_fmt_iso(today, sizeof(today), &tm_now);
     return (strcmp(today, g_rtc_state.last_date) != 0);
 }
 
 void timer_record_date(time_t now) {
     struct tm tm_now;
     localtime_r(&now, &tm_now);
-    fill_date(g_rtc_state.last_date, tm_now.tm_year + 1900, tm_now.tm_mon + 1, tm_now.tm_mday);
+    date_fmt_iso(g_rtc_state.last_date, sizeof(g_rtc_state.last_date), &tm_now);
 }
 
 bool timer_needs_ntp_sync(time_t now) {
@@ -506,7 +502,7 @@ bool timer_restore_snapshot(const timer_snapshot_t *snap, time_t now) {
     struct tm tm_now;
     localtime_r(&now, &tm_now);
     char today[11];
-    fill_date(today, tm_now.tm_year + 1900, tm_now.tm_mon + 1, tm_now.tm_mday);
+    date_fmt_iso(today, sizeof(today), &tm_now);
     if (strcmp(today, snap->date) != 0)
         return false;
 

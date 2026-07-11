@@ -5,6 +5,7 @@
 #include <string.h>
 #include <time.h>
 
+#include "date_fmt.h"
 #include "hal_nvs.h"
 #include "nvs_defaults.h"
 
@@ -90,8 +91,7 @@ day_type_t schedule_get_day_type(time_t now) {
     localtime_r(&now, &tm_local);
 
     char date_str[40];
-    snprintf(date_str, sizeof(date_str), "%04d-%02d-%02d", tm_local.tm_year + 1900, tm_local.tm_mon + 1,
-             tm_local.tm_mday);
+    date_fmt_iso(date_str, sizeof(date_str), &tm_local);
 
     if (!s_cache.blob_loaded) {
         s_cache.blob_len = sizeof(s_cache.blob);
