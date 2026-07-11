@@ -76,9 +76,11 @@ bool schedule_is_summer(const char *date_str) {
        previous school year, not summer), plus everything after this
        year's last day (until next year's calendar is loaded). */
     if (!s_cache.dates_loaded) {
-        read_date_key("summer_start", NVS_DEFAULT_SUMMER_START, s_cache.summer_start, sizeof(s_cache.summer_start));
-        read_date_key("school_start", NVS_DEFAULT_SCHOOL_START, s_cache.school_start, sizeof(s_cache.school_start));
-        read_date_key("school_end", NVS_DEFAULT_SCHOOL_END, s_cache.school_end, sizeof(s_cache.school_end));
+        read_date_key(NVS_KEY_SUMMER_START, NVS_DEFAULT_SUMMER_START, s_cache.summer_start,
+                      sizeof(s_cache.summer_start));
+        read_date_key(NVS_KEY_SCHOOL_START, NVS_DEFAULT_SCHOOL_START, s_cache.school_start,
+                      sizeof(s_cache.school_start));
+        read_date_key(NVS_KEY_SCHOOL_END, NVS_DEFAULT_SCHOOL_END, s_cache.school_end, sizeof(s_cache.school_end));
         s_cache.dates_loaded = true;
     }
     if (strcmp(date_str, s_cache.school_end) > 0)
@@ -95,7 +97,7 @@ day_type_t schedule_get_day_type(time_t now) {
 
     if (!s_cache.blob_loaded) {
         s_cache.blob_len = sizeof(s_cache.blob);
-        s_cache.blob_in_nvs = hal_nvs_read_blob("holidays", s_cache.blob, &s_cache.blob_len) == ESP_OK;
+        s_cache.blob_in_nvs = hal_nvs_read_blob(NVS_KEY_HOLIDAYS, s_cache.blob, &s_cache.blob_len) == ESP_OK;
         s_cache.blob_loaded = true;
     }
     const char *holiday_data = s_cache.blob_in_nvs ? s_cache.blob : NVS_DEFAULT_HOLIDAYS;
@@ -123,23 +125,23 @@ uint32_t schedule_get_allocation_sec(day_type_t day_type) {
 
     switch (day_type) {
         case DAY_WEEKEND:
-            key = "weekend_min";
+            key = NVS_KEY_WEEKEND_MIN;
             default_min = NVS_DEFAULT_WEEKEND_MIN;
             idx = DAY_WEEKEND;
             break;
         case DAY_HOLIDAY:
-            key = "holiday_min";
+            key = NVS_KEY_HOLIDAY_MIN;
             default_min = NVS_DEFAULT_HOLIDAY_MIN;
             idx = DAY_HOLIDAY;
             break;
         case DAY_SUMMER:
-            key = "summer_min";
+            key = NVS_KEY_SUMMER_MIN;
             default_min = NVS_DEFAULT_SUMMER_MIN;
             idx = DAY_SUMMER;
             break;
         case DAY_WEEKDAY:
         default:
-            key = "weekday_min";
+            key = NVS_KEY_WEEKDAY_MIN;
             default_min = NVS_DEFAULT_WEEKDAY_MIN;
             idx = DAY_WEEKDAY;
             break;

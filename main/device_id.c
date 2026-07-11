@@ -4,7 +4,7 @@
 #include <string.h>
 
 #include "esp_mac.h"
-#include "hal_nvs.h"
+#include "nvs_config.h"
 
 const char *device_id(void) {
     static char s_id[16];
@@ -17,8 +17,9 @@ const char *device_id(void) {
 }
 
 void device_name(char *buf, size_t len) {
-    size_t rlen = len;
-    if (hal_nvs_read_str("dev_name", buf, &rlen) != ESP_OK || buf[0] == '\0') {
+    /* Through the config module like every other reader of this key
+       (empty-default semantics: unset reads as ""). */
+    if (nvs_config_get_dev_name(buf, len) != ESP_OK || buf[0] == '\0') {
         snprintf(buf, len, "%s", device_id());
     }
 }

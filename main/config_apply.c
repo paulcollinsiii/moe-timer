@@ -135,7 +135,8 @@ static void apply_timers(const cJSON *root, err_acc_t *e) {
             err_add(e, "timers");
             return; /* whole array rejected — a half-written table is worse */
         }
-        if (min == NULL || !cJSON_IsNumber(min) || min->valuedouble < 1 || min->valuedouble > 1440) {
+        if (min == NULL || !cJSON_IsNumber(min) || min->valuedouble < CFG_BOUND_TIMER_MIN_LO ||
+            min->valuedouble > CFG_BOUND_TIMER_MIN_HI) {
             err_add(e, "timers");
             return;
         }
@@ -177,16 +178,18 @@ config_result_t config_apply(const char *json, char *ack, size_t ack_len) {
 
     err_acc_t e = {.errors = {0}, .count = 0};
 
-    apply_str(root, "name", 32, nvs_config_set_dev_name, &e);
-    apply_str(root, "tz", 48, nvs_config_set_tz, &e);
-    apply_u16(root, "weekday_min", 1, 1440, nvs_config_set_weekday_min, &e);
-    apply_u16(root, "weekend_min", 1, 1440, nvs_config_set_weekend_min, &e);
-    apply_u16(root, "holiday_min", 1, 1440, nvs_config_set_holiday_min, &e);
-    apply_u16(root, "summer_min", 1, 1440, nvs_config_set_summer_min, &e);
+    apply_str(root, "name", CFG_BOUND_NAME_MAX, nvs_config_set_dev_name, &e);
+    apply_str(root, "tz", CFG_BOUND_TZ_MAX, nvs_config_set_tz, &e);
+    apply_u16(root, "weekday_min", CFG_BOUND_ALLOC_LO, CFG_BOUND_ALLOC_HI, nvs_config_set_weekday_min, &e);
+    apply_u16(root, "weekend_min", CFG_BOUND_ALLOC_LO, CFG_BOUND_ALLOC_HI, nvs_config_set_weekend_min, &e);
+    apply_u16(root, "holiday_min", CFG_BOUND_ALLOC_LO, CFG_BOUND_ALLOC_HI, nvs_config_set_holiday_min, &e);
+    apply_u16(root, "summer_min", CFG_BOUND_ALLOC_LO, CFG_BOUND_ALLOC_HI, nvs_config_set_summer_min, &e);
     apply_hhmm(root, "quiet_start", nvs_config_set_quiet_start, &e);
     apply_hhmm(root, "quiet_end", nvs_config_set_quiet_end, &e);
-    apply_u16(root, "break_interval_min", 0, 480, nvs_config_set_break_interval_min, &e);
-    apply_u16(root, "break_duration_min", 1, 120, nvs_config_set_break_duration_min, &e);
+    apply_u16(root, "break_interval_min", CFG_BOUND_BREAK_INT_LO, CFG_BOUND_BREAK_INT_HI,
+              nvs_config_set_break_interval_min, &e);
+    apply_u16(root, "break_duration_min", CFG_BOUND_BREAK_DUR_LO, CFG_BOUND_BREAK_DUR_HI,
+              nvs_config_set_break_duration_min, &e);
     apply_date(root, "summer_start", nvs_config_set_summer_start, &e);
     apply_date(root, "school_start", nvs_config_set_school_start, &e);
     apply_date(root, "school_end", nvs_config_set_school_end, &e);
