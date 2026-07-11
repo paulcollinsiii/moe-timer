@@ -5,6 +5,7 @@
 #include "audio.h"
 #include "battery.h"
 #include "battery_policy.h"
+#include "button_actions.h"
 #include "buttons.h"
 #include "display.h"
 #include "driver/gpio.h"
@@ -732,20 +733,9 @@ static bool poll_pause_button(void) {
 static bool poll_button_a_action(void) {
     if ((buttons_take_pressed() & (1u << BTN_A)) == 0)
         return false;
-    time_t now = time(NULL);
     timer_state_t st = timer_get_state();
-    if (st == TIMER_RUNNING) {
-        timer_pause(now);
-    } else if (st == TIMER_IDLE) {
-        const timer_def_t *def = timer_active_def();
-        int32_t alloc =
-            (def != NULL) ? def->duration_sec : (int32_t)schedule_get_allocation_sec(schedule_get_day_type(now));
-        timer_start(now, alloc);
-    } else if (st == TIMER_PAUSED) {
-        timer_resume(now);
-    } else {
+    if (button_a_apply(time(NULL)) == BTN_A_NONE)
         return false;
-    }
     ESP_LOGI(TAG, "button A during join: state %d -> %d", (int)st, (int)timer_get_state());
     neopixel_show_timer_state();
     return true;
@@ -944,37 +934,34 @@ static void handle_button_wake(void) {
         case BTN_A:
             if (before == TIMER_BREAK) {
                 ESP_LOGI(TAG, "button A ignored during screen break");
-            } else if (before == TIMER_RUNNING) {
-                timer_pause(now);
-            } else if (before == TIMER_IDLE || before == TIMER_PAUSED) {
-                /* Start/resume immediately — waiting on NTP first confused
-                   users. Sync runs after; any clock step is applied to the
-                   expiry via timer_shift_expiry (measured against the
-                   monotonic clock, which NTP cannot step). */
-                if (before == TIMER_IDLE) {
-                    const timer_def_t *def = timer_active_def();
-                    int32_t alloc = (def != NULL) ? def->duration_sec
-                                                  : (int32_t)schedule_get_allocation_sec(schedule_get_day_type(now));
-                    timer_start(now, alloc);
-                } else {
-                    timer_resume(now);
-                }
-                /* Hold the pre-press colour briefly so the WHITE/AMBER ->
-                   GREEN transition is visible as an acknowledgement */
-                vTaskDelay(pdMS_TO_TICKS(250));
-                neopixel_show_timer_state();
+                break;
+            }
+            /* Start/resume immediately — waiting on NTP first confused
+               users. Sync runs after; any clock step is applied to the
+               expiry via timer_shift_expiry (measured against the
+               monotonic clock, which NTP cannot step). */
+            switch (button_a_apply(now)) {
+                case BTN_A_STARTED:
+                case BTN_A_RESUMED:
+                    /* Hold the pre-press colour briefly so the WHITE/AMBER ->
+                       GREEN transition is visible as an acknowledgement */
+                    vTaskDelay(pdMS_TO_TICKS(250));
+                    neopixel_show_timer_state();
 
-                /* NTP-gated paint: wait only for the sync (seconds) so the
-                   panel renders once, with the corrected clock and shifted
-                   expiry. The MQTT phase is released AFTER the paint (the
-                   snapshot post in the tail below) and joined before sleep.
-                   Fail-open: on sync failure the timer keeps running on
-                   the uncorrected clock — remaining time is still a
-                   consistent duration; only the shown clock may be off. */
-                if (open_net_window() && net_window_wait_ntp()) {
-                    timer_shift_expiry(net_window_clock_step());
-                }
-                now = time(NULL);
+                    /* NTP-gated paint: wait only for the sync (seconds) so the
+                       panel renders once, with the corrected clock and shifted
+                       expiry. The MQTT phase is released AFTER the paint (the
+                       snapshot post in the tail below) and joined before sleep.
+                       Fail-open: on sync failure the timer keeps running on
+                       the uncorrected clock — remaining time is still a
+                       consistent duration; only the shown clock may be off. */
+                    if (open_net_window() && net_window_wait_ntp()) {
+                        timer_shift_expiry(net_window_clock_step());
+                    }
+                    now = time(NULL);
+                    break;
+                default:
+                    break; /* PAUSED applied above; EXPIRED renders only */
             }
             break;
         case BTN_B:

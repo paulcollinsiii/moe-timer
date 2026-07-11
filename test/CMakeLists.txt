@@ -49,6 +49,7 @@ add_host_test(test_display_render
     EXTRA_LIBS lvgl_host m)
 
 add_host_test(test_timer)
+add_host_test(test_button_actions)
 add_host_test(test_schedule)
 add_host_test(test_nvs_config)
 add_host_test(test_display)

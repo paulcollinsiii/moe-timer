@@ -22,6 +22,7 @@ idf_component_register(
         "../lib/cJSON/cJSON.c"
         "schedule.c"
         "buttons.c"
+        "button_actions.c"
         "button_latch.c"
         "audio.c"
         "battery.c"
