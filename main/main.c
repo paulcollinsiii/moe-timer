@@ -909,9 +909,14 @@ static void handle_timer_tick(void) {
        when a sync was due, ~20 s before) the grid point; absorb the
        residue here. 25 s covers the sync lead without stalling
        event-watch wakes. Captured BEFORE the wait: a pause press during
-       it must register as a state change (full refresh). */
+       it must register as a state change (full refresh). Skipped on
+       power-on/reset: the panel is blank and holding it dark for up to
+       25 more seconds (field: 19 s) is worse than one off-minute render
+       — the next tick wake re-aligns. */
     timer_state_t before = timer_get_state();
-    wait_for_render_grid(25);
+    if (esp_reset_reason() == ESP_RST_DEEPSLEEP) {
+        wait_for_render_grid(25);
+    }
     now = time(NULL);
 
     int32_t remaining = timer_tick(now);
