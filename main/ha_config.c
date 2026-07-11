@@ -281,14 +281,14 @@ int ha_config_discovery(char *buf, size_t len, const char *dev_id, const char *d
                "{\"name\":\"%s\",\"uniq_id\":\"%s_%s\",\"stat_t\":\"magtag/%s/cfg\","
                "\"val_tpl\":\"{{ value_json.%s }}\",\"cmd_t\":\"magtag/%s/set/%s\",\"retain\":true",
                f->name, dev_id, f->key, dev_id, f->key, dev_id, f->key);
-    /* optimistic (numbers only): the device is asleep, so the cfg state
-       topic lags an edit by a whole window — without it, reverting a number
-       to the old value sends nothing (HA still believes the old value is
-       confirmed). Switches deliberately stay non-optimistic: HA renders
-       assumed-state switches as two lightning-bolt buttons instead of a
-       toggle, and the toggle UX wins; the trade-off is a visual snap-back
-       until the next window confirms (the retained command applies either
-       way — the flip is never lost, the control just settles late). */
+    /* optimistic: the device is asleep, so the cfg state topic lags an edit
+       by a whole window. Without this, HA re-renders the control from the
+       stale retained state the instant you change it — the switch snaps back
+       and a revert to the old number sends nothing. Optimistic shows the
+       commanded value immediately; the device's cfg republish then confirms
+       (or corrects) it. Cost on switches: HA renders assumed-state switches
+       as two lightning-bolt buttons instead of a toggle — the user chose
+       that over the snap-back (tried both on-device). */
     if (strcmp(f->component, "number") == 0) {
         /* mode:box -> numeric entry field, not a slider (sliders are painful
            for wide ranges like 1..1440). */
@@ -299,7 +299,7 @@ int ha_config_discovery(char *buf, size_t len, const char *dev_id, const char *d
     } else if (strcmp(f->component, "text") == 0) {
         pos = jcat(buf, len, pos, ",\"mode\":\"text\"");
     } else if (strcmp(f->component, "switch") == 0) {
-        pos = jcat(buf, len, pos, ",\"pl_on\":\"ON\",\"pl_off\":\"OFF\"");
+        pos = jcat(buf, len, pos, ",\"pl_on\":\"ON\",\"pl_off\":\"OFF\",\"optimistic\":true");
     }
     pos = jcat(buf, len, pos, ",\"ent_cat\":\"config\"");
     pos = jcat(buf, len, pos,

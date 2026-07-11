@@ -105,19 +105,17 @@ confirmed value to `magtag/<id>/cfg` so the control reflects reality.
 - Numbers render as **numeric entry boxes** (`mode: box`) with `step: 1`, so
   any minute value is accepted — HA's slider/step grid would otherwise
   reject round values like 30 or 45.
-- Numbers are **optimistic**: because the device is asleep, the `cfg` state
-  topic only catches up a whole window later, so the box shows your edit
-  immediately and the device's next `cfg` republish confirms (or corrects)
-  it. Without this, reverting a number to its old value sends nothing (HA
-  still believes the old value is confirmed).
-- Switches (per-timer *reloadable*, *Find my timer*) are deliberately
-  **non-optimistic**: HA renders optimistic (assumed-state) switches as two
-  lightning-bolt buttons instead of a toggle. With the toggle you'll see it
-  snap back visually right after flipping — that's cosmetic: the retained
-  command still applies on the device's next wake and the toggle settles to
-  the new value when `cfg`/`act` republishes. (MQTT **Text** entities —
-  device name, timezone, timer names — have no optimistic mode and behave
-  the same way; names change rarely, so this is left as-is.)
+- Numbers and switches are **optimistic**: because the device is asleep, the
+  `cfg`/`act` state topics only catch up a whole window later, so the
+  control shows your edit immediately and the device's next republish
+  confirms (or corrects) it. Without this HA snaps the control back to the
+  stale retained value the instant you change it. Trade-off on switches:
+  HA renders optimistic (assumed-state) switches as **two lightning-bolt
+  buttons** instead of a toggle — both variants were tried on-device and
+  the buttons beat the snap-back. (MQTT **Text** entities — device name,
+  timezone, timer names — have no optimistic mode, so those briefly revert
+  to the old value until the next window applies them; names change rarely,
+  so this is left as-is.)
 
 ### Ordering the controls
 
