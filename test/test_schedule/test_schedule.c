@@ -16,6 +16,7 @@
 
 void setUp(void) {
     mock_nvs_reset();
+    schedule_cache_invalidate(); /* statics persist across tests in one TU */
     /* Use UTC so timestamps map to predictable dates regardless of host TZ */
     setenv("TZ", "UTC0", 1);
     tzset();
@@ -225,6 +226,58 @@ void test_is_holiday_empty_blob(void) {
 }
 
 /* ------------------------------------------------------------------ */
+/* Wake-scoped caching: repeated calls in one wake read NVS once        */
+/* ------------------------------------------------------------------ */
+
+void test_day_type_reads_holiday_blob_once(void) {
+    for (int i = 0; i < 5; i++) {
+        schedule_get_day_type(hal_time_now());
+    }
+    TEST_ASSERT_EQUAL_INT(1, mock_nvs_read_count("holidays"));
+}
+
+void test_day_type_reads_school_dates_once(void) {
+    /* Mid-summer weekday so schedule_is_summer is consulted every call */
+    mock_time_set(1784073600); /* 2026-07-15 Wed */
+    for (int i = 0; i < 5; i++) {
+        TEST_ASSERT_EQUAL(DAY_SUMMER, schedule_get_day_type(hal_time_now()));
+    }
+    TEST_ASSERT_EQUAL_INT(1, mock_nvs_read_count("summer_start"));
+    TEST_ASSERT_EQUAL_INT(1, mock_nvs_read_count("school_start"));
+    TEST_ASSERT_EQUAL_INT(1, mock_nvs_read_count("school_end"));
+}
+
+void test_allocation_reads_key_once_per_day_type(void) {
+    for (int i = 0; i < 5; i++) {
+        TEST_ASSERT_EQUAL_UINT32(60u * 60u, schedule_get_allocation_sec(DAY_WEEKDAY));
+        TEST_ASSERT_EQUAL_UINT32(120u * 60u, schedule_get_allocation_sec(DAY_WEEKEND));
+    }
+    TEST_ASSERT_EQUAL_INT(1, mock_nvs_read_count("weekday_min"));
+    TEST_ASSERT_EQUAL_INT(1, mock_nvs_read_count("weekend_min"));
+}
+
+void test_invalidate_forces_reread(void) {
+    TEST_ASSERT_EQUAL_UINT32(60u * 60u, schedule_get_allocation_sec(DAY_WEEKDAY));
+    hal_nvs_write_u16("weekday_min", 45);
+    /* Cached: an NVS edit alone must not change the value mid-wake... */
+    TEST_ASSERT_EQUAL_UINT32(60u * 60u, schedule_get_allocation_sec(DAY_WEEKDAY));
+    /* ...until the orchestrator invalidates (post-network-window). */
+    schedule_cache_invalidate();
+    TEST_ASSERT_EQUAL_UINT32(45u * 60u, schedule_get_allocation_sec(DAY_WEEKDAY));
+    TEST_ASSERT_EQUAL_INT(2, mock_nvs_read_count("weekday_min"));
+}
+
+void test_invalidate_rereads_holiday_blob(void) {
+    mock_time_set(1767571200); /* 2026-01-05 Mon, not a holiday */
+    TEST_ASSERT_EQUAL(DAY_WEEKDAY, schedule_get_day_type(hal_time_now()));
+    const char *blob = "2026-01-05\n";
+    hal_nvs_write_blob("holidays", blob, strlen(blob));
+    TEST_ASSERT_EQUAL(DAY_WEEKDAY, schedule_get_day_type(hal_time_now()));
+    schedule_cache_invalidate();
+    TEST_ASSERT_EQUAL(DAY_HOLIDAY, schedule_get_day_type(hal_time_now()));
+}
+
+/* ------------------------------------------------------------------ */
 /* Runner                                                               */
 /* ------------------------------------------------------------------ */
 
@@ -258,5 +311,10 @@ int main(void) {
     RUN_TEST(test_is_holiday_unterminated_blob_respects_length);
     RUN_TEST(test_is_holiday_short_and_empty_lines_skipped);
     RUN_TEST(test_is_holiday_empty_blob);
+    RUN_TEST(test_day_type_reads_holiday_blob_once);
+    RUN_TEST(test_day_type_reads_school_dates_once);
+    RUN_TEST(test_allocation_reads_key_once_per_day_type);
+    RUN_TEST(test_invalidate_forces_reread);
+    RUN_TEST(test_invalidate_rereads_holiday_blob);
     return UNITY_END();
 }

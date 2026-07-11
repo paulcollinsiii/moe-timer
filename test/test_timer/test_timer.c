@@ -1279,6 +1279,83 @@ void test_reconcile_idle_and_expired_slots_are_none(void) {
     TEST_ASSERT_EQUAL(TIMER_EXPIRED, timer_get_state());
 }
 
+/* ------------------------------------------------------------------ */
+/* NTP bookkeeping: next_ntp_sync is the single RTC source; the last-  */
+/* sync time shown on screen is derived, not stored twice.             */
+/* ------------------------------------------------------------------ */
+
+void test_last_ntp_sync_zero_when_never_synced(void) {
+    TEST_ASSERT_EQUAL_INT64(0, (int64_t)timer_last_ntp_sync());
+}
+
+void test_last_ntp_sync_derived_from_record(void) {
+    timer_record_ntp_sync(T0 + 1234);
+    TEST_ASSERT_EQUAL_INT64((int64_t)(T0 + 1234), (int64_t)timer_last_ntp_sync());
+}
+
+void test_last_ntp_sync_cleared_by_reset(void) {
+    timer_record_ntp_sync(T0);
+    timer_reset();
+    TEST_ASSERT_EQUAL_INT64(0, (int64_t)timer_last_ntp_sync());
+}
+
+/* ------------------------------------------------------------------ */
+/* Active-slot guard: selection may never rest on a disabled slot      */
+/* ------------------------------------------------------------------ */
+
+void test_ensure_active_slot_keeps_enabled_slot(void) {
+    g_rtc_state.active_slot = 1; /* Piano — enabled in TEST_DEFS */
+    timer_ensure_active_slot_enabled();
+    TEST_ASSERT_EQUAL_INT(1, timer_active_slot());
+}
+
+void test_ensure_active_slot_reverts_when_disabled(void) {
+    g_rtc_state.active_slot = 2; /* hole in TEST_DEFS */
+    timer_ensure_active_slot_enabled();
+    TEST_ASSERT_EQUAL_INT(0, timer_active_slot());
+}
+
+/* ------------------------------------------------------------------ */
+/* Read-only slot accessors (used by the stats/summary builders)       */
+/* ------------------------------------------------------------------ */
+
+void test_slot_accessors_read_state_alloc_completions(void) {
+    timer_start(T0, 3600);
+    TEST_ASSERT_EQUAL(TIMER_RUNNING, timer_slot_state(0));
+    TEST_ASSERT_EQUAL_INT32(3600, timer_slot_allocation(0));
+    g_rtc_state.slots[1].completions = 3;
+    TEST_ASSERT_EQUAL_UINT16(3, timer_slot_completions(1));
+}
+
+void test_slot_accessors_out_of_range_are_benign(void) {
+    TEST_ASSERT_EQUAL(TIMER_IDLE, timer_slot_state(-1));
+    TEST_ASSERT_EQUAL(TIMER_IDLE, timer_slot_state(TIMER_SLOT_COUNT));
+    TEST_ASSERT_EQUAL_INT32(0, timer_slot_allocation(99));
+    TEST_ASSERT_EQUAL_UINT16(0, timer_slot_completions(99));
+}
+
+void test_current_date_tracks_record_date(void) {
+    TEST_ASSERT_EQUAL_STRING("", timer_current_date());
+    timer_record_date(T0); /* 2026-01-05 UTC */
+    TEST_ASSERT_EQUAL_STRING("2026-01-05", timer_current_date());
+}
+
+/* Break-due can land INSIDE the final minute (short allocations, e.g.
+   3 min screen / 2 min interval): the event watch must keep checking
+   timer_break_due mid-watch or the break is silently swallowed by the
+   expiry. This pins the trigger condition the watch loop relies on. */
+void test_break_due_lands_inside_final_minute(void) {
+    timer_start(T0, 180);                              /* 3 min allocation, 2 min break interval */
+    TEST_ASSERT_FALSE(timer_break_due(T0 + 110, 120)); /* pre-watch wake: not yet */
+    TEST_ASSERT_TRUE(timer_break_due(T0 + 120, 120));  /* due at 60 s remaining */
+    timer_start_break(T0 + 120, 120);
+    TEST_ASSERT_EQUAL(TIMER_BREAK, timer_get_state());
+    /* The frozen remaining survives the break: back to PAUSED with 60 s. */
+    timer_tick(T0 + 240); /* break over */
+    TEST_ASSERT_EQUAL(TIMER_PAUSED, timer_get_state());
+    TEST_ASSERT_EQUAL_INT32(60, g_rtc_state.slots[0].remaining_at_pause);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_bonus_reconcile_grants_only_the_delta);
@@ -1401,5 +1478,14 @@ int main(void) {
     RUN_TEST(test_reconcile_screen_slot_exempt);
     RUN_TEST(test_reconcile_non_active_paused_slot);
     RUN_TEST(test_reconcile_idle_and_expired_slots_are_none);
+    RUN_TEST(test_last_ntp_sync_zero_when_never_synced);
+    RUN_TEST(test_last_ntp_sync_derived_from_record);
+    RUN_TEST(test_last_ntp_sync_cleared_by_reset);
+    RUN_TEST(test_ensure_active_slot_keeps_enabled_slot);
+    RUN_TEST(test_ensure_active_slot_reverts_when_disabled);
+    RUN_TEST(test_slot_accessors_read_state_alloc_completions);
+    RUN_TEST(test_slot_accessors_out_of_range_are_benign);
+    RUN_TEST(test_current_date_tracks_record_date);
+    RUN_TEST(test_break_due_lands_inside_final_minute);
     return UNITY_END();
 }

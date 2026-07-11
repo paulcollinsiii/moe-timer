@@ -173,8 +173,21 @@ bool timer_is_new_day(time_t now);
 void timer_record_date(time_t now);
 bool timer_needs_ntp_sync(time_t now);
 void timer_record_ntp_sync(time_t now);
+/* Last recorded sync, derived from next_ntp_sync (single RTC source).
+   0 = none since RTC loss or day rollover. */
+time_t timer_last_ntp_sync(void);
+/* Revert selection to Screen (slot 0) when the active slot's definition
+   is disabled (snapshot restore, or a config edit mid-window). */
+void timer_ensure_active_slot_enabled(void);
 int64_t timer_expiry_wall(void);  /* active slot's expiry wall time (0 if unset) */
 uint16_t timer_completions(void); /* active slot's completed runs today */
+/* Read-only per-slot views (stats/summary builders): out-of-range slots
+   read as IDLE / 0. */
+timer_state_t timer_slot_state(int slot);
+int32_t timer_slot_allocation(int slot);
+uint16_t timer_slot_completions(int slot);
+int32_t timer_screen_bonus_applied(void); /* slot 0 HA bonus reconciled today */
+const char *timer_current_date(void);     /* "YYYY-MM-DD"; "" until first record */
 /* Display-facing remaining seconds for any slot, without ticking (no state
    change): RUNNING = expiry-now, PAUSED/BREAK = frozen remaining, IDLE =
    idle_fallback (caller's allocation), EXPIRED = 0; clamped >= 0. */

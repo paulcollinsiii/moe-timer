@@ -6,6 +6,7 @@
 #include "esp_adc/adc_cali_scheme.h"
 #include "esp_adc/adc_oneshot.h"
 #include "esp_log.h"
+#include "esp_timer.h"
 
 static const char *TAG = "battery";
 
@@ -13,9 +14,16 @@ static const char *TAG = "battery";
 #define BATT_ADC_CHANNEL ADC_CHANNEL_3 /* GPIO4 on ESP32-S2 */
 #define BATT_ADC_ATTEN ADC_ATTEN_DB_12
 #define BATT_SAMPLES 4
+/* Battery voltage moves on charge/discharge timescales, but a single wake
+   reads it several times (charge lock, display state, HA stats). Serve a
+   short-TTL cached value; long awake sessions (countdown, alarms) still
+   re-sample every few seconds so the charge lock stays honest. */
+#define BATT_CACHE_TTL_US (5 * 1000000LL)
 
 static adc_oneshot_unit_handle_t s_adc;
 static adc_cali_handle_t s_cali;
+static int s_cached_mv;
+static int64_t s_cached_at_us = -1;
 
 void battery_init(void) {
     adc_oneshot_unit_init_cfg_t unit_cfg = {.unit_id = BATT_ADC_UNIT};
@@ -52,6 +60,9 @@ void *battery_adc_unit(void) {
 int battery_read_mv(void) {
     if (!s_adc)
         return -1;
+    int64_t now_us = esp_timer_get_time();
+    if (s_cached_at_us >= 0 && now_us - s_cached_at_us < BATT_CACHE_TTL_US)
+        return s_cached_mv;
     int sum_mv = 0, samples = 0;
     for (int i = 0; i < BATT_SAMPLES; i++) {
         int raw;
@@ -67,7 +78,9 @@ int battery_read_mv(void) {
         samples++;
     }
     if (samples == 0)
-        return -1;
+        return -1; /* failures are not cached — retry on the next call */
     /* x2 for the on-board 100k/100k divider */
-    return (sum_mv / samples) * 2;
+    s_cached_mv = (sum_mv / samples) * 2;
+    s_cached_at_us = now_us;
+    return s_cached_mv;
 }

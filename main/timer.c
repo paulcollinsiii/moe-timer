@@ -4,6 +4,7 @@
 #include <string.h>
 #include <time.h>
 
+#include "date_fmt.h"
 #include "hal_time.h"
 
 /* ---- RTC state ---- */
@@ -39,6 +40,11 @@ static timer_slot_state_t *active(void) {
 
 int timer_active_slot(void) {
     return g_rtc_state.active_slot;
+}
+
+void timer_ensure_active_slot_enabled(void) {
+    if (!slot_enabled(g_rtc_state.active_slot))
+        g_rtc_state.active_slot = 0;
 }
 
 int timer_slot_by_name(const char *name) {
@@ -153,6 +159,32 @@ int32_t timer_screen_used_sec(time_t now) {
 
 uint16_t timer_completions(void) {
     return active()->completions;
+}
+
+timer_state_t timer_slot_state(int slot) {
+    if (slot < 0 || slot >= TIMER_SLOT_COUNT)
+        return TIMER_IDLE;
+    return g_rtc_state.slots[slot].state;
+}
+
+int32_t timer_slot_allocation(int slot) {
+    if (slot < 0 || slot >= TIMER_SLOT_COUNT)
+        return 0;
+    return g_rtc_state.slots[slot].allocation_sec;
+}
+
+uint16_t timer_slot_completions(int slot) {
+    if (slot < 0 || slot >= TIMER_SLOT_COUNT)
+        return 0;
+    return g_rtc_state.slots[slot].completions;
+}
+
+int32_t timer_screen_bonus_applied(void) {
+    return g_rtc_state.slots[0].bonus_applied;
+}
+
+const char *timer_current_date(void) {
+    return g_rtc_state.last_date; /* "" until timer_record_date / restore */
 }
 
 void timer_reset(void) {
@@ -381,25 +413,20 @@ void timer_shift_expiry(int64_t delta_sec) {
     }
 }
 
-/* buf must hold 11 bytes ("YYYY-MM-DD\0"). Same format as schedule.c. */
-static void fill_date(char *buf, int year, int mon, int day) {
-    snprintf(buf, 11, "%04d-%02d-%02d", year, mon, day);
-}
-
 bool timer_is_new_day(time_t now) {
     if (g_rtc_state.last_date[0] == '\0')
         return true;
     struct tm tm_now;
     localtime_r(&now, &tm_now);
     char today[11];
-    fill_date(today, tm_now.tm_year + 1900, tm_now.tm_mon + 1, tm_now.tm_mday);
+    date_fmt_iso(today, sizeof(today), &tm_now);
     return (strcmp(today, g_rtc_state.last_date) != 0);
 }
 
 void timer_record_date(time_t now) {
     struct tm tm_now;
     localtime_r(&now, &tm_now);
-    fill_date(g_rtc_state.last_date, tm_now.tm_year + 1900, tm_now.tm_mon + 1, tm_now.tm_mday);
+    date_fmt_iso(g_rtc_state.last_date, sizeof(g_rtc_state.last_date), &tm_now);
 }
 
 bool timer_needs_ntp_sync(time_t now) {
@@ -410,6 +437,16 @@ bool timer_needs_ntp_sync(time_t now) {
 
 void timer_record_ntp_sync(time_t now) {
     g_rtc_state.next_ntp_sync = (int64_t)now + NTP_SYNC_INTERVAL_SEC;
+}
+
+time_t timer_last_ntp_sync(void) {
+    /* Derived, not stored twice: next_ntp_sync is written only by
+       timer_record_ntp_sync, so subtracting the interval recovers the
+       recorded time exactly. 0 = never synced since RTC loss or day
+       rollover (timer_reset) — callers treat 0 as "unknown". */
+    if (g_rtc_state.next_ntp_sync == 0)
+        return 0;
+    return (time_t)(g_rtc_state.next_ntp_sync - NTP_SYNC_INTERVAL_SEC);
 }
 
 /* ---- crash-recovery snapshot ---- */
@@ -491,7 +528,7 @@ bool timer_restore_snapshot(const timer_snapshot_t *snap, time_t now) {
     struct tm tm_now;
     localtime_r(&now, &tm_now);
     char today[11];
-    fill_date(today, tm_now.tm_year + 1900, tm_now.tm_mon + 1, tm_now.tm_mday);
+    date_fmt_iso(today, sizeof(today), &tm_now);
     if (strcmp(today, snap->date) != 0)
         return false;
 
@@ -528,7 +565,6 @@ bool timer_restore_snapshot(const timer_snapshot_t *snap, time_t now) {
     /* The firmware may have been reflashed with this slot removed from
        menuconfig — never strand the device on a slot the buttons can no
        longer reach (its state stays restored; only the selection moves). */
-    if (!slot_enabled(g_rtc_state.active_slot))
-        g_rtc_state.active_slot = 0;
+    timer_ensure_active_slot_enabled();
     return true;
 }
