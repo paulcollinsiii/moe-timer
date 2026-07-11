@@ -34,6 +34,30 @@ VS Code will detect `.devcontainer/devcontainer.json` and prompt **"Reopen in Co
 
 ---
 
+## Pre-Commit Hooks
+
+Run once after cloning (inside the devcontainer):
+
+```bash
+pre-commit install
+pre-commit install --hook-type commit-msg
+```
+
+Both commands are required — the second activates the commit-msg stage for the Conventional Commits validator.
+
+**Commit message format** (enforced by hook):
+```
+<type>[(<scope>)][!]: <description>
+```
+Valid types: `feat`, `fix`, `docs`, `refactor`, `test`, `chore`, `perf`, `style`, `ci`, `build`, `revert`
+
+**C formatting**: `.c`/`.h` files must pass `clang-format --dry-run --Werror` (vendored `test/unity/` is excluded). To auto-fix:
+```bash
+clang-format -i <file.c>
+```
+
+---
+
 ## Building
 
 Activate the toolchain in each new terminal, then use `idf.py`:
@@ -125,7 +149,7 @@ The repo root is the ESP-IDF project.
 | `test/` | Host-side unit tests (CMake + ctest + vendored Unity) |
 | `docs/hardware_smoke_test.md` | On-device validation checklist |
 
-See [ProductOverview.md](ProductOverview.md) for the module breakdown and `docs/superpowers/specs/2026-07-03-display-rework-and-idf6-remediation-design.md` for the display-stack architecture (deltas from the original overview are tabled there).
+See [architecture.md](architecture.md) for the module map, hardware target, and subsystem design notes; [ProductOverview.md](ProductOverview.md) for the product-level breakdown; and `docs/superpowers/specs/2026-07-03-display-rework-and-idf6-remediation-design.md` for the display-stack architecture (deltas from the original overview are tabled there).
 
 ---
 
