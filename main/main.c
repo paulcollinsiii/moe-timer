@@ -112,7 +112,7 @@ static bool try_restore_timer_snapshot(time_t now) {
     return true;
 }
 
-static bool net_window_join(int timeout_ms, bool poll_pause); /* network window below */
+static bool net_window_join(int timeout_ms, bool act_on_button_a); /* network window below */
 
 static void enter_deep_sleep(void) {
     /* Never sleep with the network task alive: it holds WiFi and may be
@@ -256,6 +256,7 @@ static void stats_collect(stats_snapshot_t *out) {
 static void run_locate_alarm(void); /* defined with the awake-failsafe helpers */
 static void fire_expiry_alert(void);
 static bool poll_pause_button(void);
+static bool poll_button_a_action(void);
 
 /* ---- network window (WiFi → NTP → snapshot rendezvous → MQTT) ----------
    The window runs on its own task so an interactive wake can paint as soon
@@ -304,9 +305,14 @@ static void net_window_task(void *arg) {
     xSemaphoreGive(s_net_ntp_settled);
     if (wifi_up) {
         stats_snapshot_t snap;
-        /* Rendezvous: the orchestrator collects the snapshot AFTER the
-           clock correction (stats semantics unchanged) and posts exactly
-           one per window — this receive cannot starve. */
+        /* Rendezvous, which doubles as power serialization: the
+           orchestrator posts the snapshot only after the e-ink paint
+           finished, so panel refresh current and WiFi TX bursts (plus the
+           config NVS flash writes below) never coincide — the combination
+           browned out the rail in on-device testing. Stats are still
+           collected post clock-correction; exactly one post per window,
+           so this receive cannot starve. The radio just idles associated
+           while the panel refreshes. */
         if (xQueueReceive(s_net_snapshot_q, &snap, portMAX_DELAY) == pdTRUE) {
             mqtt_ha_window(&snap);
         }
@@ -388,8 +394,9 @@ static bool net_window_wait_ntp(void) {
 }
 
 /* Hand the stats snapshot to the network task. Called exactly once per
-   window, right after the NTP wait resolved (success, failure, or timeout)
-   — the task blocks on this rendezvous before opening the MQTT session. */
+   window, AFTER the wake's paint (the task blocks on this rendezvous
+   before opening the MQTT session, keeping display refresh current and
+   radio TX bursts apart). No-op when no window is open. */
 static void net_window_post_snapshot(void) {
     if (!s_net_active)
         return;
@@ -398,16 +405,17 @@ static void net_window_post_snapshot(void) {
     xQueueSend(s_net_snapshot_q, &snap, 0); /* one-deep, drained at spawn: never full */
 }
 
-/* Join the window task. Pause polling keeps Button A responsive while the
-   MQTT tail drains. false = the task is wedged past timeout_ms: it stays
-   marked active and the awake failsafe is the backstop. */
-static bool net_window_join(int timeout_ms, bool poll_pause) {
+/* Join the window task. Button A stays live while the MQTT tail drains —
+   the screen is already painted and a dropped press would read as broken.
+   false = the task is wedged past timeout_ms: it stays marked active and
+   the awake failsafe is the backstop. */
+static bool net_window_join(int timeout_ms, bool act_on_button_a) {
     if (!s_net_active)
         return true;
     int waited = 0;
     while (xSemaphoreTake(s_net_window_done, pdMS_TO_TICKS(100)) != pdTRUE) {
-        if (poll_pause) {
-            poll_pause_button(); /* never from the failsafe's esp_timer context */
+        if (act_on_button_a) {
+            poll_button_a_action(); /* never from the failsafe's esp_timer context */
         }
         waited += 100;
         if (waited >= timeout_ms) {
@@ -766,6 +774,36 @@ static bool poll_pause_button(void) {
     return true;
 }
 
+/* Latched Button A during the window join-wait: the screen has already
+   painted and the device looks done, so a dropped press reads as broken.
+   Mirrors the wake handler: RUNNING pauses, IDLE starts, PAUSED resumes,
+   BREAK/EXPIRED stay wake-press-only. The LED acks instantly; the repaint
+   rides the post-join changed-state re-render — the panel must stay quiet
+   while the MQTT tail is transmitting (brownout, see the snapshot
+   rendezvous). The clock was already synced this wake, so a start here
+   needs no expiry shift. */
+static bool poll_button_a_action(void) {
+    if ((buttons_take_pressed() & (1u << BTN_A)) == 0)
+        return false;
+    time_t now = time(NULL);
+    timer_state_t st = timer_get_state();
+    if (st == TIMER_RUNNING) {
+        timer_pause(now);
+    } else if (st == TIMER_IDLE) {
+        const timer_def_t *def = timer_active_def();
+        int32_t alloc =
+            (def != NULL) ? def->duration_sec : (int32_t)schedule_get_allocation_sec(schedule_get_day_type(now));
+        timer_start(now, alloc);
+    } else if (st == TIMER_PAUSED) {
+        timer_resume(now);
+    } else {
+        return false;
+    }
+    ESP_LOGI(TAG, "button A during join: state %d -> %d", (int)st, (int)timer_get_state());
+    neopixel_show_timer_state();
+    return true;
+}
+
 /* Absorb the wake residue so the render lands on the state's grid:
    RUNNING/BREAK on the countdown's round minute (the display truly reads
    1:11:00), clock-only states on the wall :00. Bounded — wakes that are
@@ -981,15 +1019,13 @@ static void handle_button_wake(void) {
 
                 /* NTP-gated paint: wait only for the sync (seconds) so the
                    panel renders once, with the corrected clock and shifted
-                   expiry — MQTT drains behind the paint, joined below. */
-                if (net_window_spawn()) {
-                    if (net_window_wait_ntp()) {
-                        timer_shift_expiry(s_net_clock_step);
-                    }
-                    /* Fail-open: on sync failure the timer keeps running on
-                       the uncorrected clock — remaining time is still a
-                       consistent duration; only the shown clock may be off. */
-                    net_window_post_snapshot();
+                   expiry. The MQTT phase is released AFTER the paint (the
+                   snapshot post in the tail below) and joined before sleep.
+                   Fail-open: on sync failure the timer keeps running on
+                   the uncorrected clock — remaining time is still a
+                   consistent duration; only the shown clock may be off. */
+                if (net_window_spawn() && net_window_wait_ntp()) {
+                    timer_shift_expiry(s_net_clock_step);
                 }
                 now = time(NULL);
             }
@@ -1016,10 +1052,9 @@ static void handle_button_wake(void) {
             }
             break;
         case BTN_D:
-            /* NTP-gated paint, same as BTN A: sync now, MQTT in the back */
+            /* NTP-gated paint, same as BTN A: sync now, MQTT after paint */
             if (net_window_spawn()) {
                 net_window_wait_ntp();
-                net_window_post_snapshot();
             }
             now = time(NULL);
             break;
@@ -1036,8 +1071,9 @@ static void handle_button_wake(void) {
     buttons_take_pressed();
 
     if (maybe_start_break(now)) {
-        net_window_finish(); /* drain MQTT + apply deferred before sleeping */
-        enter_deep_sleep();  /* e.g. resume with accrual already past the interval */
+        net_window_post_snapshot(); /* break screen painted: release MQTT */
+        net_window_finish();        /* drain + apply deferred before sleeping */
+        enter_deep_sleep();         /* e.g. resume with accrual already past the interval */
     }
 
     int32_t remaining = timer_tick(now);
@@ -1057,11 +1093,13 @@ static void handle_button_wake(void) {
         display_full_refresh(&st);   /* button wakes always full-refresh */
     }
 
-    /* The MQTT tail may still be draining behind the paint: join, apply
+    /* Paint done: release the MQTT phase (display refresh current and
+       radio TX bursts must never coincide — brownout), then join, apply
        the buffered network→timer effects, reconcile a redefined timer.
-       Re-render only when something changed what the panel shows (a pause
-       landed during the join, a config edit moved the timer, or the
-       expiry passed while draining). */
+       Re-render only when something changed what the panel shows (a
+       Button A action landed during the join, a config edit moved the
+       timer, or the expiry passed while draining). */
+    net_window_post_snapshot();
     timer_state_t painted = timer_get_state();
     net_finish_t nf = net_window_finish();
     if (nf != NET_FINISH_ALERTED && (nf == NET_FINISH_CHANGED || timer_get_state() != painted)) {
