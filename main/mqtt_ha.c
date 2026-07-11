@@ -19,7 +19,8 @@
 static const char *TAG = "mqtt_ha";
 
 /* Bump when entities are added/renamed — discovery configs republish once. */
-#define DISC_SCHEMA_VER 8 /* v8: switches optimistic again (user prefers two-button over snap-back) */
+#define DISC_SCHEMA_VER \
+    9 /* v9: per-slot remaining/limit sensors; active-scoped remaining/allocation + screen_used retired */
 
 #define CONNECT_TIMEOUT_MS 5000
 #define PUBLISH_DRAIN_TIMEOUT_MS 3000
@@ -194,13 +195,25 @@ static int publish_discovery(esp_mqtt_client_handle_t client, const char *dev_na
     for (int i = 0; i < count; i++) {
         const char *name_override = NULL;
         char named[48];
-        /* completions_N sensors carry the configured timer's name */
+        /* Per-slot sensors (completions_N / remaining_N / limit_N) carry
+           the configured timer's name; disabled slots get no entity. */
+        const char *suffix = NULL;
+        int slot = 0;
         if (strncmp(ents[i].key, "completions_", 12) == 0) {
-            int slot = ents[i].key[12] - '0';
+            slot = ents[i].key[12] - '0';
+            suffix = "runs";
+        } else if (strncmp(ents[i].key, "remaining_", 10) == 0) {
+            slot = ents[i].key[10] - '0';
+            suffix = "remaining";
+        } else if (strncmp(ents[i].key, "limit_", 6) == 0) {
+            slot = ents[i].key[6] - '0';
+            suffix = "limit";
+        }
+        if (suffix != NULL) {
             const timer_def_t *def = timer_slot_def(slot);
             if (def == NULL)
                 continue; /* slot disabled: no entity */
-            snprintf(named, sizeof(named), "%s runs", def->name);
+            snprintf(named, sizeof(named), "%s %s", def->name, suffix);
             name_override = named;
         }
         stats_json_discovery_topic(topic, sizeof(topic), device_id(), &ents[i]);
@@ -209,6 +222,13 @@ static int publish_discovery(esp_mqtt_client_handle_t client, const char *dev_na
         if (n < (int)sizeof(payload)) {
             published += publish(client, topic, payload, 1);
         }
+    }
+    /* Retire replaced entities (v9): clear their retained discovery configs
+       so HA drops them instead of showing them forever-unavailable. */
+    static const char *RETIRED[] = {"remaining", "allocation", "screen_used"};
+    for (size_t i = 0; i < sizeof(RETIRED) / sizeof(RETIRED[0]); i++) {
+        snprintf(topic, sizeof(topic), "homeassistant/sensor/%s_%s/config", device_id(), RETIRED[i]);
+        published += publish(client, topic, "", 1);
     }
     return published;
 }

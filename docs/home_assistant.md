@@ -39,15 +39,18 @@ magtag/<id>/cmd         retained  HA → device   one-shot command (phase 3)
 
 Everything appears under one device, grouped by HA `entity_category`:
 
-- **Primary** (top of the device page): Battery %, Timer state, Time
-  remaining, Charge-lock.
+- **Primary** (top of the device page): Battery %, Timer state, Screen
+  time remaining, Charge-lock.
 - **Configuration** (editable — see below): allocations, quiet hours,
   break settings, device name, timezone, the four timer slots, plus the
   Screen-bonus number and Find-my-timer switch.
 - **Diagnostic** (read-only detail): battery voltage, ambient light,
-  active timer, day type, per-timer completion counters, screen-time-used
-  today, and **"Today's limit"** — the computed allocation for today (the
-  read-only *result* of the editable allocation settings).
+  active timer, day type, last reset, **Screen time limit** (the computed
+  allocation for today — the read-only *result* of the editable allocation
+  settings), and per extra timer: `<Name> remaining` / `<Name> limit` /
+  `<Name> runs`. Remaining/limit are **per-slot** (not active-timer
+  scoped), so each timer keeps its own recorder history; screen time used
+  = limit − remaining (a template sensor if you want it as an entity).
 
 Recorder history on the read-only sensors IS the usage-stats feature —
 graph battery over weeks, screen minutes per day, practice completions.
