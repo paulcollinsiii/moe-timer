@@ -1248,6 +1248,25 @@ void test_reconcile_screen_slot_exempt(void) {
     TEST_ASSERT_EQUAL_INT64((int64_t)T0 + 3600, g_rtc_state.slots[0].expiry_wall_time);
 }
 
+void test_reconcile_non_active_paused_slot(void) {
+    /* Field corner case: Violin paused at 10 min remaining, user swaps back
+       to Screen, HA shrinks the def to 2 min. The reconcile must fix the
+       frozen remaining on the NON-ACTIVE slot too — resuming later must not
+       run the stale 10 minutes. */
+    timer_select_next(); /* Piano (slot 1) */
+    timer_start(T0, 900);
+    timer_pause(T0 + 60);        /* remaining 840 */
+    g_rtc_state.active_slot = 0; /* back on Screen; Piano stays PAUSED */
+    timer_def_t shrunk = {"Piano", 120, true};
+    TEST_ASSERT_EQUAL(TIMER_RECONCILE_UPDATED, timer_reconcile_def(1, &RECON_OLD, &shrunk, T0 + 100, NULL));
+    TEST_ASSERT_EQUAL(TIMER_PAUSED, g_rtc_state.slots[1].state);
+    TEST_ASSERT_EQUAL_INT32(60, g_rtc_state.slots[1].remaining_at_pause); /* 840 + (120-900) */
+    TEST_ASSERT_EQUAL_INT32(120, g_rtc_state.slots[1].allocation_sec);
+    /* the active Screen slot is untouched */
+    TEST_ASSERT_EQUAL_INT(0, timer_active_slot());
+    TEST_ASSERT_EQUAL(TIMER_IDLE, g_rtc_state.slots[0].state);
+}
+
 void test_reconcile_idle_and_expired_slots_are_none(void) {
     timer_select_next(); /* Piano, IDLE */
     timer_def_t renamed = {"Guitar", 600, true};
@@ -1380,6 +1399,7 @@ int main(void) {
     RUN_TEST(test_reconcile_reload_flag_only_is_none);
     RUN_TEST(test_reconcile_identical_def_is_none);
     RUN_TEST(test_reconcile_screen_slot_exempt);
+    RUN_TEST(test_reconcile_non_active_paused_slot);
     RUN_TEST(test_reconcile_idle_and_expired_slots_are_none);
     return UNITY_END();
 }

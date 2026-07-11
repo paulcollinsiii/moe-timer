@@ -310,16 +310,17 @@ static esp_err_t s_net_ntp_result;
 static int64_t s_net_clock_step; /* measured mono-vs-wall step; valid when the sync succeeded */
 static bool s_net_active;
 
-/* Pre-window copy of the active extra slot's definition, for the post-join
-   reconcile: a config edit during the window may redefine the timer that is
-   on screen. Deep copy — the def's name points into timer_defs' static
-   table, which the post-join re-install overwrites. */
+/* Pre-window copy of every extra slot's definition, for the post-join
+   reconcile: a config edit during the window may redefine any timer,
+   including a PAUSED non-active one whose frozen remaining would otherwise
+   go stale (field case: paused 10-min Violin shrunk to 2 min in HA kept
+   its 10 min). Deep copy — the def names point into timer_defs' static
+   table, which the post-join re-install overwrites. [0] unused (Screen). */
 static struct {
     bool valid;
-    int slot;
     char name[16]; /* matches nvs_timer_def_t.name */
     timer_def_t def;
-} s_prewindow_def;
+} s_prewindow_defs[TIMER_SLOT_COUNT];
 
 static void net_window_task(void *arg) {
     (void)arg;
@@ -383,13 +384,13 @@ static bool net_window_spawn(void) {
     s_net_ntp_result = ESP_FAIL;
     s_net_clock_step = 0;
 
-    s_prewindow_def.valid = false;
-    const timer_def_t *def = timer_active_def();
-    if (timer_active_slot() > 0 && def != NULL) {
-        s_prewindow_def.valid = true;
-        s_prewindow_def.slot = timer_active_slot();
-        snprintf(s_prewindow_def.name, sizeof(s_prewindow_def.name), "%s", def->name);
-        s_prewindow_def.def = (timer_def_t){s_prewindow_def.name, def->duration_sec, def->reloadable};
+    for (int i = 1; i < TIMER_SLOT_COUNT; i++) {
+        const timer_def_t *def = timer_slot_def(i); /* NULL = disabled */
+        s_prewindow_defs[i].valid = (def != NULL);
+        if (def != NULL) {
+            snprintf(s_prewindow_defs[i].name, sizeof(s_prewindow_defs[i].name), "%s", def->name);
+            s_prewindow_defs[i].def = (timer_def_t){s_prewindow_defs[i].name, def->duration_sec, def->reloadable};
+        }
     }
 
 #if CONFIG_MAGTAG_SYNC_LED_FEEDBACK
@@ -473,8 +474,11 @@ static bool net_window_join(int timeout_ms, bool act_on_button_a) {
 }
 
 /* Post-join reconcile: config edits during the window rewrote the NVS defs
-   blob only — re-install the in-memory table, then reconcile the active
-   extra slot if its definition changed mid-run. */
+   blob only — re-install the in-memory table, then reconcile EVERY extra
+   slot whose definition changed mid-run. Only the active slot drives sound
+   and display (chirp / expiry alert / re-render); non-active slots — which
+   can only be PAUSED, IDLE, or EXPIRED — are fixed silently and show their
+   corrected state when the user swaps to them. */
 typedef enum {
     NET_FINISH_IDLE = 0, /* nothing display-relevant happened */
     NET_FINISH_CHANGED,  /* timer state/remaining changed: re-render */
@@ -483,33 +487,42 @@ typedef enum {
 
 static net_finish_t net_window_reconcile_defs(void) {
     timer_defs_install(); /* re-read the (possibly edited) blob from NVS */
-    if (!s_prewindow_def.valid)
-        return NET_FINISH_IDLE;
-    s_prewindow_def.valid = false; /* one reconcile per window */
-    int slot = s_prewindow_def.slot;
-    bool was_running = false;
-    timer_reconcile_t rc =
-        timer_reconcile_def(slot, &s_prewindow_def.def, timer_slot_def(slot), time(NULL), &was_running);
-    if (rc == TIMER_RECONCILE_NONE)
-        return NET_FINISH_IDLE;
-    ESP_LOGW(TAG, "active timer redefined during window: reconcile=%d", (int)rc);
-    if (timer_slot_def(slot) == NULL && timer_active_slot() == slot) {
-        /* Slot disabled by the edit — same-wake analogue of the snapshot
-           restore guard: never strand the selection on a dead slot. */
-        g_rtc_state.active_slot = 0;
+    net_finish_t nf = NET_FINISH_IDLE;
+    int active = timer_active_slot();
+    for (int slot = 1; slot < TIMER_SLOT_COUNT; slot++) {
+        if (!s_prewindow_defs[slot].valid)
+            continue;                         /* was disabled pre-window: nothing running to fix */
+        s_prewindow_defs[slot].valid = false; /* one reconcile per window */
+        bool was_running = false;
+        timer_reconcile_t rc =
+            timer_reconcile_def(slot, &s_prewindow_defs[slot].def, timer_slot_def(slot), time(NULL), &was_running);
+        if (rc == TIMER_RECONCILE_NONE)
+            continue;
+        ESP_LOGW(TAG, "slot %d redefined during window: reconcile=%d", slot, (int)rc);
+        if (timer_slot_def(slot) == NULL && timer_active_slot() == slot) {
+            /* Slot disabled by the edit — same-wake analogue of the snapshot
+               restore guard: never strand the selection on a dead slot. */
+            g_rtc_state.active_slot = 0;
+        }
+        if (slot != active)
+            continue; /* background slot: state fixed, seen at swap */
+        switch (rc) {
+            case TIMER_RECONCILE_RESET:
+                if (was_running) {
+                    audio_break_over_chime(); /* single chirp: your timer changed */
+                }
+                nf = NET_FINISH_CHANGED;
+                break;
+            case TIMER_RECONCILE_EXPIRED:
+                fire_expiry_alert(); /* owns the display: TIME'S UP + alert + repaint */
+                nf = NET_FINISH_ALERTED;
+                break;
+            default:
+                nf = NET_FINISH_CHANGED; /* UPDATED: remaining moved */
+                break;
+        }
     }
-    switch (rc) {
-        case TIMER_RECONCILE_RESET:
-            if (was_running) {
-                audio_break_over_chime(); /* single chirp: your timer changed */
-            }
-            return NET_FINISH_CHANGED;
-        case TIMER_RECONCILE_EXPIRED:
-            fire_expiry_alert(); /* owns the display: TIME'S UP + alert + repaint */
-            return NET_FINISH_ALERTED;
-        default:
-            return NET_FINISH_CHANGED; /* UPDATED: remaining moved */
-    }
+    return nf;
 }
 
 /* Close out a window: join, apply the buffered network→timer effects
