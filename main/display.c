@@ -98,6 +98,16 @@ static void flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map)
         s_panel_slept = false;
     }
 
+    /* Two renders in one wake (countdown step → pause/break/alert) can
+       land inside the driver's minimum refresh interval, and the guard
+       silently DROPS the frame — the panel would keep the stale screen
+       (field-observed with the mid-watch break). Absorb the remainder
+       here so every accepted flush actually reaches glass. */
+    int32_t guard_wait = ssd1680_refresh_wait();
+    if (guard_wait > 0) {
+        vTaskDelay(pdMS_TO_TICKS(guard_wait * 1000 + 100)); /* +margin: guard is second-granular */
+    }
+
     /* Transpose landscape 296x128 -> panel portrait 128x296. */
     memset(s_panel_fb, 0, sizeof(s_panel_fb));
     for (int y = 0; y < DISP_VER; y++) {

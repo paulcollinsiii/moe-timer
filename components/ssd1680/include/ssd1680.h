@@ -56,7 +56,12 @@ bool ssd1680_partial_diff_ready(void);
 
 /* Pure guard logic (ssd1680_guard.c) — exposed for host tests. */
 bool ssd1680_refresh_allowed(int64_t now_sec, int64_t last_refresh_sec, int32_t min_interval_sec);
+int32_t ssd1680_refresh_wait_sec(int64_t now_sec, int64_t last_refresh_sec, int32_t min_interval_sec);
 int ssd1680_resolve_refresh_mode(int requested_mode, bool prev_frame_valid);
+
+/* Driver-level view of the guard: seconds until ssd1680_refresh would be
+   accepted (0 = now). Callers wait this out instead of losing a frame. */
+int32_t ssd1680_refresh_wait(void);
 
 #ifdef __cplusplus
 }

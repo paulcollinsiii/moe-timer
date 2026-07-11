@@ -156,7 +156,10 @@ static void enter_deep_sleep(void) {
 
     /* Digital pads float in deep sleep; hold the power-control pins so the
        NeoPixel gate (21, HIGH = off) and amp enable (16, LOW = off) cannot
-       drift on and drain the battery. Released in the *_init() on wake. */
+       drift on and drain the battery. neopixel_init() releases the gate
+       hold on every wake; the amp hold stays until the (lazy) audio_init
+       actually needs the pin — silent wakes leave it held. Re-holding an
+       already-held pin is a no-op. */
     gpio_hold_en(GPIO_NUM_21);
     gpio_hold_en(GPIO_NUM_16);
     gpio_deep_sleep_hold_en();
@@ -845,12 +848,9 @@ static void watch_final_minute(void) {
         }
         if (break_interval_min != 0 && timer_break_due(time(NULL), (int32_t)break_interval_min * 60)) {
             neopixel_stop(); /* clear the binary-countdown pixels */
-            /* The wake's own render (or a countdown step) can be <1 s old
-               here, and the driver's refresh-rate guard silently DROPS a
-               too-soon frame (field log: "refresh rejected: 0 s since
-               last") — the panel would show the stale countdown through
-               the whole break. Wait the guard out first. */
-            vTaskDelay(pdMS_TO_TICKS(1100));
+            /* Back-to-back renders are safe: display.c absorbs the
+               driver's refresh-rate guard interval instead of letting the
+               frame be dropped. */
             if (maybe_start_break(time(NULL))) {
                 return; /* BREAK painted + alarm run; caller sleeps through it */
             }
@@ -1188,8 +1188,8 @@ void app_main(void) {
 
     buttons_init();
     battery_init();
-    light_init();
-    audio_init();
+    /* audio + light init lazily on first use (most wakes need neither);
+       until then the amp pin stays under its deep-sleep hold (off). */
     display_init();
 
     /* Heap headroom check: the LED + network task stacks now ride

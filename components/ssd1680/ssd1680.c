@@ -222,6 +222,10 @@ bool ssd1680_partial_diff_ready(void) {
     return s_initialized && s_prev_frame_valid;
 }
 
+int32_t ssd1680_refresh_wait(void) {
+    return ssd1680_refresh_wait_sec((int64_t)time(NULL), s_last_refresh_sec, SSD1680_MIN_REFRESH_INTERVAL_SEC);
+}
+
 esp_err_t ssd1680_sleep(void) {
     if (!s_initialized)
         return ESP_ERR_INVALID_STATE;
