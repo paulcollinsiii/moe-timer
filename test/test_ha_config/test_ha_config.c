@@ -306,7 +306,13 @@ void test_discovery_timer_reload_is_switch(void) {
     char buf[700];
     ha_config_discovery(buf, sizeof(buf), "magtag-a1b2c3", "K", "fw", f);
     TEST_ASSERT_NOT_NULL(strstr(buf, "\"pl_on\":\"ON\""));
-    TEST_ASSERT_NOT_NULL(strstr(buf, "\"optimistic\":true"));
+    /* NOT optimistic: HA renders assumed-state (optimistic) switches as two
+       lightning-bolt buttons instead of a toggle. Toggle UX wins; the cost
+       is a visual snap-back until the next window confirms — the retained
+       command applies either way. Numbers stay optimistic (their box UI is
+       unaffected, and reverting to the old value would otherwise send
+       nothing). */
+    TEST_ASSERT_NULL(strstr(buf, "\"optimistic\""));
     TEST_ASSERT_NOT_NULL(strstr(buf, "\"cmd_t\":\"magtag/magtag-a1b2c3/set/timer1_reload\""));
     TEST_ASSERT_NOT_NULL(strstr(buf, "value_json.timer1_reload"));
 }

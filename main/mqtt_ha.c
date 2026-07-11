@@ -19,7 +19,7 @@
 static const char *TAG = "mqtt_ha";
 
 /* Bump when entities are added/renamed — discovery configs republish once. */
-#define DISC_SCHEMA_VER 5 /* v5: optimistic number/switch (no snap-back on edit) */
+#define DISC_SCHEMA_VER 6 /* v6: switches back to non-optimistic (toggle UI, not lightning-bolt buttons) */
 
 #define CONNECT_TIMEOUT_MS 5000
 #define PUBLISH_DRAIN_TIMEOUT_MS 3000
@@ -254,12 +254,14 @@ static int publish_action_discovery(esp_mqtt_client_handle_t client, const char 
         published += publish(client, topic, payload, 1);
     else
         ESP_LOGW(TAG, "screen_bonus discovery truncated, skipped");
-    /* switch: Find my timer */
+    /* switch: Find my timer. Non-optimistic like the reload switches (HA
+       renders optimistic switches as lightning-bolt buttons, not a toggle);
+       it's momentary anyway — act republishes locate OFF after the alarm. */
     snprintf(topic, sizeof(topic), "homeassistant/switch/%s_locate/config", id);
     n = snprintf(payload, sizeof(payload),
                  "{\"name\":\"Find my timer\",\"uniq_id\":\"%s_locate\",\"stat_t\":\"magtag/%s/act\","
                  "\"val_tpl\":\"{{ value_json.locate }}\",\"cmd_t\":\"magtag/%s/set/locate\",\"retain\":true,"
-                 "\"pl_on\":\"ON\",\"pl_off\":\"OFF\",\"optimistic\":true,\"dev\":{\"ids\":[\"%s\"],\"name\":\"%s\","
+                 "\"pl_on\":\"ON\",\"pl_off\":\"OFF\",\"dev\":{\"ids\":[\"%s\"],\"name\":\"%s\","
                  "\"mf\":\"Adafruit\",\"mdl\":\"MagTag 2.9\",\"sw\":\"%s\"}}",
                  id, id, id, id, dn, fw);
     if (n < (int)sizeof(payload))
