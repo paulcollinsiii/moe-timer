@@ -60,6 +60,8 @@ add_host_test(test_sleep_plan)
 add_host_test(test_button_latch)
 add_host_test(test_wake_policy)
 add_host_test(test_stats_json)
+add_host_test(test_mqtt_topics)
+add_host_test(test_mqtt_rx)
 add_host_test(test_config_validate)
 add_host_test(test_ha_config)
 
