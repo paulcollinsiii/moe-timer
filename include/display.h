@@ -6,6 +6,10 @@
 #include "schedule.h"
 #include "timer.h"
 
+/* Landscape panel geometry (shared by display.c and the screen builders). */
+#define DISP_HOR 296
+#define DISP_VER 128
+
 typedef struct {
     int32_t remaining_sec;
     uint32_t allocation_sec;

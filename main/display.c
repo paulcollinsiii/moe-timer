@@ -15,8 +15,6 @@
 
 static const char *TAG = "display";
 
-#define DISP_HOR 296
-#define DISP_VER 128
 #define FULL_REFRESH_EVERY_N 5
 
 /* MagTag EPD pinout (Adafruit schematic) */
@@ -36,6 +34,10 @@ static lv_display_t *s_disp;
 static bool s_initialized;
 static bool s_panel_slept; /* panel in deep sleep — must re-init before next flush */
 static ssd1680_refresh_mode_t s_pending_mode = SSD1680_REFRESH_FULL;
+/* Partial/full cadence counter (policy, distinct from the driver's
+   protection guard). Display-owned RTC state — the cadence survives deep
+   sleep without living in the timer module's rtc_state_t. */
+static RTC_DATA_ATTR uint8_t s_partial_count;
 
 /* Bring-up knobs: if the image is rotated 180 deg or mirrored on hardware,
    flip these (see docs/hardware_smoke_test.md step 2). */
@@ -167,9 +169,9 @@ void display_update(const display_state_t *st) {
     build_for_state(st);
     /* Policy: full refresh every Nth partial (anti-ghosting). The counter
        lives in RTC memory so the cadence survives deep sleep. */
-    g_rtc_state.partial_refresh_count++;
-    if (g_rtc_state.partial_refresh_count >= FULL_REFRESH_EVERY_N) {
-        g_rtc_state.partial_refresh_count = 0;
+    s_partial_count++;
+    if (s_partial_count >= FULL_REFRESH_EVERY_N) {
+        s_partial_count = 0;
         render(SSD1680_REFRESH_FULL);
     } else {
         render(SSD1680_REFRESH_PARTIAL);
@@ -180,7 +182,7 @@ void display_full_refresh(const display_state_t *st) {
     if (!s_initialized)
         display_init();
     build_for_state(st);
-    g_rtc_state.partial_refresh_count = 0;
+    s_partial_count = 0;
     render(SSD1680_REFRESH_FULL);
 }
 
@@ -188,7 +190,7 @@ void display_timesup(void) {
     if (!s_initialized)
         display_init();
     display_screens_build_timesup();
-    g_rtc_state.partial_refresh_count = 0;
+    s_partial_count = 0;
     render(SSD1680_REFRESH_FULL);
 }
 
@@ -196,7 +198,7 @@ void display_charge_me(void) {
     if (!s_initialized)
         display_init();
     display_screens_build_charge_me();
-    g_rtc_state.partial_refresh_count = 0;
+    s_partial_count = 0;
     render(SSD1680_REFRESH_FULL);
 }
 
@@ -204,6 +206,6 @@ void display_sync_failed(void) {
     if (!s_initialized)
         display_init();
     display_screens_build_sync_failed();
-    g_rtc_state.partial_refresh_count = 0;
+    s_partial_count = 0;
     render(SSD1680_REFRESH_FULL);
 }
