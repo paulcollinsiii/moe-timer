@@ -72,7 +72,6 @@ typedef struct {
     uint8_t       active_slot;        // Button C cycles enabled slots; rollover reverts to 0
     char          last_date[11];      // "YYYY-MM-DD"
     int64_t       next_ntp_sync;      // timestamp of next required sync
-    uint8_t       partial_refresh_count;
 } rtc_state_t;
 ```
 
@@ -80,7 +79,7 @@ typedef struct {
 
 Extra-timer definitions (name/duration/reloadable) come from `MAGTAG_TIMER<n>_*` menuconfig symbols and live in rodata — `timer_defs_install()` must run each boot before any `timer_*` call (host tests inject their own table via `timer_set_defs()`). The single-timer API (`timer_start/pause/tick/...`) always operates on the active slot.
 
-The ssd1680 component additionally keeps a `RTC_DATA_ATTR` last-refresh timestamp for its refresh-rate guard; `main.c` keeps `s_last_ntp_sync`.
+The ssd1680 component additionally keeps a `RTC_DATA_ATTR` last-refresh timestamp for its refresh-rate guard; display.c keeps its previous-frame buffer and partial/full cadence counter in RTC memory.
 
 ## Subsystem Design Notes
 

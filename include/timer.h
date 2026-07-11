@@ -67,7 +67,6 @@ typedef struct {
     uint8_t active_slot; /* 0 = Screen */
     char last_date[11];  /* "YYYY-MM-DD\0" */
     int64_t next_ntp_sync;
-    uint8_t partial_refresh_count;
 } rtc_state_t;
 
 extern rtc_state_t g_rtc_state;
