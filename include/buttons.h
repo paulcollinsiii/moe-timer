@@ -18,6 +18,8 @@ void buttons_init(void);
 void buttons_configure_wakeup(void);
 button_id_t buttons_get_wakeup_button(void);
 bool buttons_is_pressed(button_id_t btn);
+/* Level scan of all four buttons at once (bit n = button n held now). */
+uint8_t buttons_scan_held(void);
 /* Consume presses latched by the awake-window GPIO ISR (bit n = button n).
    Latched between buttons_init() and buttons_configure_wakeup(); level
    reads above stay the tool for "is it held right now". */

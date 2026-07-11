@@ -137,24 +137,14 @@ static void enter_deep_sleep(void) {
     save_timer_snapshot();
     /* EXT1 ANY_LOW is level-triggered: a still-held button would re-wake
        instantly and re-fire its action. Wait (bounded) for release. */
-    for (int i = 0; i < 30; i++) {
-        bool held = false;
-        for (int b = 0; b < 4; b++) {
-            held = held || buttons_is_pressed((button_id_t)b);
-        }
-        if (!held)
-            break;
+    for (int i = 0; i < 30 && buttons_scan_held() != 0; i++) {
         vTaskDelay(pdMS_TO_TICKS(100));
     }
 
     /* Snapshot still-held buttons for the continuation guard. Must read
        BEFORE buttons_configure_wakeup() switches the pads to the RTC mux
        (digital gpio_get_level is unreliable after that). */
-    s_held_mask_at_sleep = 0;
-    for (int b = 0; b < 4; b++) {
-        if (buttons_is_pressed((button_id_t)b))
-            s_held_mask_at_sleep |= (uint8_t)(1u << b);
-    }
+    s_held_mask_at_sleep = buttons_scan_held();
     s_sleep_entry_time = (int64_t)time(NULL);
 
     /* No code path may sleep with the NeoPixel gate LOW — the hold below
@@ -551,34 +541,44 @@ static void check_charge_lock(void) {
     enter_deep_sleep(); /* lock-aware: long interval, no button wake */
 }
 
-/* ---- expiry alert ---------------------------------------------------- */
+/* ---- audible alerts ---------------------------------------------------- */
+
+/* One loop for every audible alert (expiry, break start, locate): drain
+   the press latch so only presses AFTER the alarm dismiss it, pulse the
+   NeoPixels, run the audio pattern on its own short task, and poll for
+   dismissal — latched taps of any length count, the level scan catches a
+   button already held down through the drain. Alert-class, so it fires
+   during quiet hours. */
+typedef struct {
+    uint8_t r, g, b;        /* alert pulse colour */
+    void (*audio_fn)(void); /* blocking beep pattern, stop-flag aware */
+    int max_poll_iters;     /* 100 ms each; cap slightly past the audio */
+    const char *task_name;
+    const char *dismiss_log;
+} alert_pattern_t;
 
 static volatile bool s_audio_done;
+static const alert_pattern_t *s_alert_active; /* set before the task spawns */
 
-static void audio_alert_task(void *arg) {
+static void alert_audio_task(void *arg) {
     (void)arg;
-    audio_beep_sequence(); /* self-terminates after 5 cycles (~15 s) */
+    s_alert_active->audio_fn();
     s_audio_done = true;
     vTaskDelete(NULL);
 }
 
-static void run_expiry_alert(void) {
+/* Returns true when a button dismissed the alert (vs. audio running out). */
+static bool run_alert(const alert_pattern_t *p) {
+    s_alert_active = p;
     s_audio_done = false;
-    buttons_take_pressed();                /* drain: a press from BEFORE the alarm must not pre-dismiss it */
-    neopixel_alert_pulse_begin(248, 0, 0); /* red; task + teardown owned by the module */
-    xTaskCreate(audio_alert_task, "beep", 2048, NULL, 5, NULL);
-
-    /* Wait for dismissal — latched taps of any length count, the level
-       scan catches a button already held down through the drain; cap
-       slightly past the alarm (3 s per cycle). */
+    buttons_take_pressed();                       /* drain: a press from BEFORE the alarm must not pre-dismiss it */
+    neopixel_alert_pulse_begin(p->r, p->g, p->b); /* task + teardown owned by the module */
+    xTaskCreate(alert_audio_task, p->task_name, 2048, NULL, 5, NULL);
     bool dismissed = false;
-    for (int i = 0; i < CONFIG_MAGTAG_EXPIRY_ALARM_CYCLES * 30 + 10 && !s_audio_done && !dismissed; i++) {
-        dismissed = buttons_take_pressed() != 0;
-        for (int b = 0; b < 4 && !dismissed; b++) {
-            dismissed = buttons_is_pressed((button_id_t)b);
-        }
+    for (int i = 0; i < p->max_poll_iters && !s_audio_done && !dismissed; i++) {
+        dismissed = buttons_take_pressed() != 0 || buttons_scan_held() != 0;
         if (dismissed) {
-            ESP_LOGI(TAG, "Alert dismissed by button");
+            ESP_LOGI(TAG, "%s", p->dismiss_log);
             break;
         }
         vTaskDelay(pdMS_TO_TICKS(100));
@@ -586,42 +586,42 @@ static void run_expiry_alert(void) {
     audio_stop();
     neopixel_alert_pulse_end();
     vTaskDelay(pdMS_TO_TICKS(100)); /* let the audio task observe its stop flag and exit */
+    return dismissed;
 }
 
-/* ---- eye-rest break ---------------------------------------------------- */
+/* Expiry: red, self-terminates after the configured cycles (3 s each). */
+static const alert_pattern_t ALERT_EXPIRY = {
+    .r = 248,
+    .g = 0,
+    .b = 0,
+    .audio_fn = audio_beep_sequence,
+    .max_poll_iters = CONFIG_MAGTAG_EXPIRY_ALARM_CYCLES * 30 + 10,
+    .task_name = "beep",
+    .dismiss_log = "Alert dismissed by button",
+};
 
-static void break_alarm_task(void *arg) {
-    (void)arg;
-    audio_break_alarm(); /* ~6 s, stop-flag aware */
-    s_audio_done = true;
-    vTaskDelete(NULL);
-}
+/* Break start: cyan — matches the BREAK identity (~2.2 s per cycle). */
+static const alert_pattern_t ALERT_BREAK = {
+    .r = 0,
+    .g = 150,
+    .b = 220,
+    .audio_fn = audio_break_alarm,
+    .max_poll_iters = CONFIG_MAGTAG_BREAK_ALARM_CYCLES * 22 + 10,
+    .task_name = "brk_alarm",
+    .dismiss_log = "Break alarm silenced by button",
+};
 
-/* Break-start alarm: beeps + cyan pulse. Alert-class, so it fires during
-   quiet hours (like the expiry alert — it accompanies an audible alarm).
-   Any button silences it. */
-static void run_break_alarm(void) {
-    s_audio_done = false;
-    buttons_take_pressed();                  /* drain: only presses AFTER the alarm starts silence it */
-    neopixel_alert_pulse_begin(0, 150, 220); /* cyan — matches the BREAK identity */
-    xTaskCreate(break_alarm_task, "brk_alarm", 2048, NULL, 5, NULL);
-    /* Cap slightly past the alarm (~2.2 s per cycle) */
-    bool silenced = false;
-    for (int i = 0; i < CONFIG_MAGTAG_BREAK_ALARM_CYCLES * 22 + 10 && !s_audio_done && !silenced; i++) {
-        silenced = buttons_take_pressed() != 0;
-        for (int b = 0; b < 4 && !silenced; b++) {
-            silenced = buttons_is_pressed((button_id_t)b);
-        }
-        if (silenced) {
-            ESP_LOGI(TAG, "Break alarm silenced by button");
-            break;
-        }
-        vTaskDelay(pdMS_TO_TICKS(100));
-    }
-    audio_stop();
-    neopixel_alert_pulse_end();
-    vTaskDelay(pdMS_TO_TICKS(100)); /* let the alarm task observe the stop flag */
-}
+/* Locate: red, one beep sequence per run_alert call — looped by the
+   caller until dismissed or timed out. */
+static const alert_pattern_t ALERT_LOCATE = {
+    .r = 248,
+    .g = 0,
+    .b = 0,
+    .audio_fn = audio_beep_sequence,
+    .max_poll_iters = 40,
+    .task_name = "locate",
+    .dismiss_log = "Locate dismissed by button",
+};
 
 /* Returns true when a break was started (caller should go straight to
    sleep). Persists BREAK before the alarm, same rationale as the EXPIRED
@@ -640,7 +640,7 @@ static bool maybe_start_break(time_t now) {
     display_state_t st = make_state(timer_tick(now), now);
     neopixel_show_timer_state(); /* blue during the refresh */
     display_full_refresh(&st);   /* inverted SCREEN BREAK layout */
-    run_break_alarm();           /* pulse end darkens the pixels */
+    run_alert(&ALERT_BREAK);     /* pulse end darkens the pixels */
     return true;                 /* caller sleeps; stop_sync guards the gate */
 }
 
@@ -654,7 +654,7 @@ static void fire_expiry_alert(void) {
        restore the stale RUNNING snapshot and replay the final minute. */
     save_timer_snapshot();
     display_timesup();
-    run_expiry_alert();
+    run_alert(&ALERT_EXPIRY);
     time_t now = time(NULL);
     display_state_t st = make_state(timer_tick(now), now);
     display_full_refresh(&st);
@@ -1093,22 +1093,10 @@ static void extend_awake_failsafe(int seconds) {
 static void run_locate_alarm(void) {
     ESP_LOGI(TAG, "Locate: alarming until dismissed (<= %d s)", LOCATE_MAX_SEC);
     extend_awake_failsafe(LOCATE_MAX_SEC + 60);
-    buttons_take_pressed(); /* drop any stale latched press */
     int64_t start = (int64_t)time(NULL);
     bool dismissed = false;
     while (!dismissed && (int64_t)time(NULL) - start < LOCATE_MAX_SEC) {
-        s_audio_done = false;
-        neopixel_alert_pulse_begin(248, 0, 0); /* red, module owns teardown */
-        xTaskCreate(audio_alert_task, "locate", 2048, NULL, 5, NULL);
-        for (int i = 0; i < 40 && !s_audio_done && !dismissed; i++) {
-            if (buttons_take_pressed() != 0)
-                dismissed = true;
-            for (int b = 0; b < 4 && !dismissed; b++)
-                dismissed = buttons_is_pressed((button_id_t)b);
-            vTaskDelay(pdMS_TO_TICKS(100));
-        }
-        audio_stop();
-        neopixel_alert_pulse_end();
+        dismissed = run_alert(&ALERT_LOCATE);
     }
     neopixel_stop();
     ESP_LOGI(TAG, "Locate: %s", dismissed ? "dismissed" : "timed out");

@@ -167,3 +167,12 @@ bool buttons_is_pressed(button_id_t btn) {
         return false;
     return gpio_get_level(BTN_GPIOS[(int)btn]) == 0;
 }
+
+uint8_t buttons_scan_held(void) {
+    uint8_t mask = 0;
+    for (int b = 0; b < 4; b++) {
+        if (buttons_is_pressed((button_id_t)b))
+            mask |= (uint8_t)(1u << b);
+    }
+    return mask;
+}
