@@ -14,7 +14,12 @@ static const char *TAG = "light";
 
 static bool s_configured;
 
+/* Lazy: first light_read_mv() this wake configures the channel. Only the
+   HA stats snapshot reads the sensor, so wakes without a network window
+   skip the setup entirely. */
 void light_init(void) {
+    if (s_configured)
+        return;
     adc_oneshot_unit_handle_t adc = (adc_oneshot_unit_handle_t)battery_adc_unit();
     if (adc == NULL) {
         ESP_LOGW(TAG, "ADC unit unavailable (battery_init failed?)");
@@ -33,6 +38,7 @@ void light_init(void) {
 }
 
 int light_read_mv(void) {
+    light_init(); /* lazy — no-op once configured */
     adc_oneshot_unit_handle_t adc = (adc_oneshot_unit_handle_t)battery_adc_unit();
     if (!s_configured || adc == NULL)
         return -1;

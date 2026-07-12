@@ -134,6 +134,7 @@ static void enter_deep_sleep(void) {
        down regardless. No pause polling: this can run in esp_timer
        context. */
     net_window_join(15000, NULL);
+    net_window_log_last(); /* timing repeat: the boot-time line is often lost to CDC */
     save_timer_snapshot();
     /* EXT1 ANY_LOW is level-triggered: a still-held button would re-wake
        instantly and re-fire its action. Wait (bounded) for release. */
@@ -155,7 +156,10 @@ static void enter_deep_sleep(void) {
 
     /* Digital pads float in deep sleep; hold the power-control pins so the
        NeoPixel gate (21, HIGH = off) and amp enable (16, LOW = off) cannot
-       drift on and drain the battery. Released in the *_init() on wake. */
+       drift on and drain the battery. neopixel_init() releases the gate
+       hold on every wake; the amp hold stays until the (lazy) audio_init
+       actually needs the pin — silent wakes leave it held. Re-holding an
+       already-held pin is a no-op. */
     gpio_hold_en(GPIO_NUM_21);
     gpio_hold_en(GPIO_NUM_16);
     gpio_deep_sleep_hold_en();
@@ -844,6 +848,9 @@ static void watch_final_minute(void) {
         }
         if (break_interval_min != 0 && timer_break_due(time(NULL), (int32_t)break_interval_min * 60)) {
             neopixel_stop(); /* clear the binary-countdown pixels */
+            /* Back-to-back renders are safe: display.c absorbs the
+               driver's refresh-rate guard interval instead of letting the
+               frame be dropped. */
             if (maybe_start_break(time(NULL))) {
                 return; /* BREAK painted + alarm run; caller sleeps through it */
             }
@@ -884,6 +891,16 @@ static void handle_timer_tick(void) {
         now = time(NULL);
     }
 
+    /* Cold boot / external reset only: the rollover + sync above already
+       showed the WiFi pixel, but the grid wait + first paint below can
+       hold a blank panel for tens of seconds more with buttons still
+       wake-press-only — a dark, silent device reads as hung (field
+       report). Deep-sleep tick wakes stay dark: a dim blink every minute,
+       all day, isn't worth the battery. */
+    if (esp_reset_reason() != ESP_RST_DEEPSLEEP) {
+        neopixel_show_timer_state();
+    }
+
     if (maybe_start_break(now)) {
         enter_deep_sleep(); /* break just started; sleep through it */
     }
@@ -892,9 +909,14 @@ static void handle_timer_tick(void) {
        when a sync was due, ~20 s before) the grid point; absorb the
        residue here. 25 s covers the sync lead without stalling
        event-watch wakes. Captured BEFORE the wait: a pause press during
-       it must register as a state change (full refresh). */
+       it must register as a state change (full refresh). Skipped on
+       power-on/reset: the panel is blank and holding it dark for up to
+       25 more seconds (field: 19 s) is worse than one off-minute render
+       — the next tick wake re-aligns. */
     timer_state_t before = timer_get_state();
-    wait_for_render_grid(25);
+    if (esp_reset_reason() == ESP_RST_DEEPSLEEP) {
+        wait_for_render_grid(25);
+    }
     now = time(NULL);
 
     int32_t remaining = timer_tick(now);
@@ -1166,8 +1188,8 @@ void app_main(void) {
 
     buttons_init();
     battery_init();
-    light_init();
-    audio_init();
+    /* audio + light init lazily on first use (most wakes need neither);
+       until then the amp pin stays under its deep-sleep hold (off). */
     display_init();
 
     /* Heap headroom check: the LED + network task stacks now ride

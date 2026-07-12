@@ -18,8 +18,16 @@ static const char *TAG = "audio";
 #define LEDC_RESOLUTION LEDC_TIMER_10_BIT
 
 static volatile bool s_stop_requested = false;
+static bool s_initialized;
 
+/* Lazy: first beep_on() this wake initializes. Most wakes never make a
+   sound — configuring the amp pin + LEDC timer/channel for them was pure
+   awake-time overhead. Until then the deep-sleep hold keeps the amp pin
+   low (amp off), which is exactly the state init would set. */
 void audio_init(void) {
+    if (s_initialized)
+        return;
+    s_initialized = true;
     /* Release the deep-sleep hold placed by enter_deep_sleep() */
     gpio_hold_dis(AMP_ENABLE_GPIO);
     gpio_config_t amp_cfg = {
@@ -63,12 +71,15 @@ void audio_init(void) {
 }
 
 static void beep_on(void) {
+    audio_init(); /* lazy — no-op once initialized */
     gpio_set_level(AMP_ENABLE_GPIO, 1);
     ledc_set_duty(LEDC_MODE, LEDC_CHANNEL, 512);
     ledc_update_duty(LEDC_MODE, LEDC_CHANNEL);
 }
 
 static void beep_off(void) {
+    if (!s_initialized)
+        return; /* nothing to silence; amp pin still held low */
     ledc_set_duty(LEDC_MODE, LEDC_CHANNEL, 0);
     ledc_update_duty(LEDC_MODE, LEDC_CHANNEL);
     gpio_set_level(AMP_ENABLE_GPIO, 0);

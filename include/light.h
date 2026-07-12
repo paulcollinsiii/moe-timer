@@ -7,6 +7,7 @@
 extern "C" {
 #endif
 
+/* Optional — light_read_mv self-initializes on first use per wake. */
 void light_init(void);
 int light_read_mv(void); /* <=0 on failure */
 

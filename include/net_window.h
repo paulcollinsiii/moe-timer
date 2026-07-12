@@ -44,6 +44,10 @@ bool net_window_join(int timeout_ms, void (*poll_cb)(void));
 
 bool net_window_active(void);
 esp_err_t net_window_ntp_result(void);
+/* Repeat the last window's phase timing (no-op if none this boot) — called
+   at sleep entry, where the USB CDC console has had the whole wake to come
+   up (the boot-time line is often lost to re-enumeration). */
+void net_window_log_last(void);
 /* Measured mono-vs-wall clock step; valid when the sync succeeded. */
 int64_t net_window_clock_step(void);
 
