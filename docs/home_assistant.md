@@ -37,11 +37,23 @@ magtag/<id>/cmd         retained  HA → device   one-shot command (phase 3)
 
 ## Entities (auto-discovered)
 
-Battery %, battery voltage, ambient light, timer state, active timer, time
-remaining, today's allocation, day type, per-timer completion counters,
-charge-lock binary sensor, and screen-time-used-today (from the daily
-summary). Recorder history on these entities IS the usage-stats feature —
-graph battery over weeks, screen minutes per day, practice completions, etc.
+Everything appears under one device, grouped by HA `entity_category`:
+
+- **Primary** (top of the device page): Battery %, Timer state, Screen
+  time remaining, Charge-lock.
+- **Configuration** (editable — see below): allocations, quiet hours,
+  break settings, device name, timezone, the four timer slots, plus the
+  Screen-bonus number and Find-my-timer switch.
+- **Diagnostic** (read-only detail): battery voltage, ambient light,
+  active timer, day type, last reset, **Screen time limit** (the computed
+  allocation for today — the read-only *result* of the editable allocation
+  settings), and per extra timer: `<Name> remaining` / `<Name> limit` /
+  `<Name> runs`. Remaining/limit are **per-slot** (not active-timer
+  scoped), so each timer keeps its own recorder history; screen time used
+  = limit − remaining (a template sensor if you want it as an entity).
+
+Recorder history on the read-only sensors IS the usage-stats feature —
+graph battery over weeks, screen minutes per day, practice completions.
 
 Notes:
 - Stat-fed sensors carry `expire_after` a bit over 2× the idle sync
@@ -70,14 +82,90 @@ automation:
           message: "The screen timer battery is at 10% — charge it."
 ```
 
-## Config from Home Assistant
+## Editing config from the HA card (no setup)
 
-Publish a **retained** JSON document to `magtag/<id>/config`; the device
-applies it on its next window and republishes the applied version to
-`magtag/<id>/config_ack`. Every field is optional except `ver` — the
-device applies a document only when `ver` differs from the last one it
-applied, so a retained message is safe to leave on the topic. A rejected
-field is named in the ack's `errors` list but never blocks the others.
+The Configuration section of the device page holds native editable
+controls — **Number** for the allocations, quiet hours, break interval /
+duration; **Text** for the device name, timezone, and each timer's name;
+**Switch** for each timer's reloadable flag. Change one and the device
+applies it on its next window (Button D forces one), then republishes the
+confirmed value to `magtag/<id>/cfg` so the control reflects reality.
+
+- **Add / edit an extra timer:** the four slots are fixed (the firmware
+  ceiling). Set an empty slot's **Timer N name** (e.g. "Running") + minutes
+  + reloadable to enable it; clear the name to disable it. A timer-slot
+  edit takes effect on the device's next wake (~≤1 min or a button press);
+  allocations / quiet hours / break settings apply live; timezone at the
+  next boot.
+- **Timer defaults are seeded once.** On first boot the `MAGTAG_TIMER<n>_*`
+  menuconfig values are copied into NVS and become the editable source of
+  truth. After that, HA edits (or a bulk-config `timers` array) win, and
+  changing the menuconfig defaults no longer affects an already-provisioned
+  device — erase NVS (or re-flash with NVS erased) to reseed from Kconfig.
+- Commands are sent on retained `set/<key>` topics so the sleeping device
+  receives edits made while it's asleep. Idempotent, so re-delivery is
+  harmless.
+- Numbers render as **numeric entry boxes** (`mode: box`) with `step: 1`, so
+  any minute value is accepted — HA's slider/step grid would otherwise
+  reject round values like 30 or 45.
+- Numbers and switches are **optimistic**: because the device is asleep, the
+  `cfg`/`act` state topics only catch up a whole window later, so the
+  control shows your edit immediately and the device's next republish
+  confirms (or corrects) it. Without this HA snaps the control back to the
+  stale retained value the instant you change it. Trade-off on switches:
+  HA renders optimistic (assumed-state) switches as **two lightning-bolt
+  buttons** instead of a toggle — both variants were tried on-device and
+  the buttons beat the snap-back. (MQTT **Text** entities — device name,
+  timezone, timer names — have no optimistic mode, so those briefly revert
+  to the old value until the next window applies them; names change rarely,
+  so this is left as-is.)
+
+### Ordering the controls
+
+The device page auto-sorts entities alphabetically by name within each
+category — the firmware can't set a display order (MQTT discovery has no
+ordering field). For a custom layout, add a **dashboard Entities card** and
+list them in the order you want; the entity IDs follow
+`number.<device>_<field>` / `text.<device>_<field>` (use the entity picker
+if unsure of the exact slug):
+
+```yaml
+type: entities
+title: Kitchen MagTag
+entities:
+  - entity: text.kitchen_magtag_device_name
+  - type: section
+    label: Daily limits
+  - entity: number.kitchen_magtag_weekday_allocation
+  - entity: number.kitchen_magtag_weekend_allocation
+  - entity: number.kitchen_magtag_holiday_allocation
+  - entity: number.kitchen_magtag_summer_allocation
+  - type: section
+    label: Quiet hours
+  - entity: number.kitchen_magtag_quiet_hours_start_hhmm
+  - entity: number.kitchen_magtag_quiet_hours_end_hhmm
+  - type: section
+    label: Breaks
+  - entity: number.kitchen_magtag_break_duration
+  - entity: number.kitchen_magtag_break_interval
+  - entity: number.kitchen_magtag_screen_bonus_min_today
+  - type: section
+    label: Extra timers
+  - entity: text.kitchen_magtag_timer_1_name
+  - entity: number.kitchen_magtag_timer_1_minutes
+  - entity: switch.kitchen_magtag_timer_1_reloadable
+  # ...timers 2-4
+```
+
+### Bulk config document (holidays, scripted setup)
+
+For values that aren't a single control — chiefly the **holiday list** —
+publish a **retained** JSON document to `magtag/<id>/config`; the device
+applies it and republishes the applied version to
+`magtag/<id>/config_ack`. Every field is optional except `ver` — applied
+only when `ver` differs from the last one, so a retained message is safe
+to leave on the topic. A rejected field is named in the ack's `errors`
+list but never blocks the others.
 
 ```json
 {
@@ -104,31 +192,9 @@ field is named in the ack's `errors` list but never blocks the others.
   never disturbed mid-run).
 - `holidays` replaces the stored list (rolling ~45-date cap).
 
-### Driving it from helpers
-
-Create `input_number`/`input_text`/`input_boolean` helpers for the
-settings you want to expose, then one automation republishes the whole
-retained document (with a fresh `ver`) whenever any of them changes:
-
-```yaml
-automation:
-  - alias: "MagTag push config"
-    trigger:
-      - platform: state
-        entity_id:
-          - input_number.magtag_weekday_min
-          - input_text.magtag_tz
-          # ...one line per helper
-    action:
-      - service: mqtt.publish
-        data:
-          topic: "magtag/magtag-xxxxxx/config"
-          retain: true
-          payload: >
-            {"ver":"{{ now().timestamp() | int }}",
-             "tz":"{{ states('input_text.magtag_tz') }}",
-             "weekday_min":{{ states('input_number.magtag_weekday_min') | int }}}
-```
+The same fields are available here as on the native controls (`name`, `tz`,
+`weekday_min`, …, and a `timers` array), so scripted/bulk setup stays
+possible — but for day-to-day tweaks the Configuration controls are easier.
 
 ### Holidays from a calendar
 
@@ -138,47 +204,34 @@ and republishes the config with the extracted `holidays` array — so the
 family manages no-school days on a normal calendar UI, and the device
 picks them up automatically.
 
-## Commands
+## Actions (native controls)
 
-Publish a **retained** JSON command to `magtag/<id>/cmd`. Each command
-carries a unique `id`; the device applies it once (dedup on `id`), acks on
-`magtag/<id>/event`, and then clears the retained topic so it isn't
-re-applied. Applied within one sync window (Button D forces it).
+Two action controls live in the Configuration section — no scripts needed.
 
-### Grant extra time
+### Grant extra time — "Screen bonus (min) today"
 
-```json
-{"id": "1751990400", "grant": {"timer": "Screen", "min": 15}}
-```
+A **Number** (0–240). Set it to how many bonus minutes Screen should have
+*today*; the device grants the difference from what it's already given
+(idempotent — re-delivery every wake never double-grants), and it resets
+to 0 at the day rollover. Behaviour by state: IDLE banks the minutes and
+adds them when the timer next starts; RUNNING extends in place;
+PAUSED/BREAK add to the frozen remaining; **EXPIRED** (the usual "chores
+done, time already ran out" case) flips to PAUSED holding the minutes —
+the kid presses A to start it, and the expiry alarm does not re-fire.
 
-`timer` defaults to Screen if omitted; `min` is 1–240. Behaviour by state:
-IDLE banks the minutes and adds them when the timer next starts; RUNNING
-extends in place; PAUSED/BREAK add to the frozen remaining; **EXPIRED**
-(the usual "chores done, time already ran out" case) flips to PAUSED
-holding the granted minutes — the kid presses A to start it, and the
-expiry alarm does not re-fire.
+Because it's a *target for the day* rather than an increment: setting 15
+then 20 grants 20 total (not 35); lowering it never reclaims granted time.
 
-```yaml
-script:
-  magtag_grant_15:
-    sequence:
-      - service: mqtt.publish
-        data:
-          topic: "magtag/magtag-xxxxxx/cmd"
-          retain: true
-          payload: '{"id":"{{ now().timestamp() | int }}","grant":{"min":15}}'
-```
+### Locate — "Find my timer" switch
 
-### Locate ("help, I lost the timer")
+Toggle it **on**; on its next window the device beeps with a red pulse
+until a button is pressed or ~10 minutes pass, then the switch returns to
+off by itself. (Charge-locked devices don't open windows, so locate won't
+reach a dead device — check the charge-lock sensor first.)
 
-```json
-{"id": "1751990500", "locate": true}
-```
+### Raw command topic (power users / per-timer grants)
 
-On its next window the device beeps with a red pulse until a button is
-pressed or ~10 minutes pass. (Battery-charge-locked devices don't open
-windows, so locate won't reach a dead device — check the charge-lock
-sensor first.)
-
-A dashboard button per command (grant / locate), each publishing with
-`id: "{{ now().timestamp() | int }}"`, is the simplest HA surface.
+`magtag/<id>/cmd` still accepts a retained JSON command with a unique `id`
+(deduped, acked on `magtag/<id>/event`, then cleared) — e.g.
+`{"id":"...","grant":{"timer":"Piano","min":10}}` to grant a *specific*
+extra timer, which the native Screen-only control doesn't cover.

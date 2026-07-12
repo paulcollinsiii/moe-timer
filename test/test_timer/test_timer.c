@@ -1039,15 +1039,329 @@ void test_snapshot_v4_round_trips_bonus(void) {
     timer_record_date(T0);
     timer_snapshot_t snap;
     timer_make_snapshot(&snap);
-    TEST_ASSERT_EQUAL_UINT8(4, snap.version);
+    TEST_ASSERT_EQUAL_UINT8(TIMER_SNAPSHOT_VERSION, snap.version);
 
     timer_reset();
     TEST_ASSERT_TRUE(timer_restore_snapshot(&snap, T0 + 100));
     TEST_ASSERT_EQUAL_INT32(600, g_rtc_state.slots[1].bonus_sec);
 }
 
+/* ---- HA idempotent "bonus minutes today" reconcile (Phase C) ---- */
+
+void test_bonus_reconcile_grants_only_the_delta(void) {
+    /* Target 15 min on an IDLE Screen: grants 900, banked as bonus */
+    timer_bonus_reconcile(0, 900);
+    TEST_ASSERT_EQUAL_INT32(900, g_rtc_state.slots[0].bonus_sec);
+    TEST_ASSERT_EQUAL_INT32(900, g_rtc_state.slots[0].bonus_applied);
+    /* Same target again: no-op (idempotent across wakes) */
+    timer_bonus_reconcile(0, 900);
+    TEST_ASSERT_EQUAL_INT32(900, g_rtc_state.slots[0].bonus_sec);
+    /* Raise target to 20 min: grant only the extra 5 min */
+    timer_bonus_reconcile(0, 1200);
+    TEST_ASSERT_EQUAL_INT32(1200, g_rtc_state.slots[0].bonus_sec);
+    TEST_ASSERT_EQUAL_INT32(1200, g_rtc_state.slots[0].bonus_applied);
+}
+
+void test_bonus_reconcile_lowering_target_does_not_reclaim(void) {
+    timer_bonus_reconcile(0, 900);
+    timer_bonus_reconcile(0, 300); /* can't take back granted time */
+    TEST_ASSERT_EQUAL_INT32(900, g_rtc_state.slots[0].bonus_applied);
+    TEST_ASSERT_EQUAL_INT32(900, g_rtc_state.slots[0].bonus_sec);
+}
+
+void test_bonus_applied_resets_at_rollover(void) {
+    timer_bonus_reconcile(0, 900);
+    timer_reset(); /* day rollover */
+    TEST_ASSERT_EQUAL_INT32(0, g_rtc_state.slots[0].bonus_applied);
+}
+
+void test_bonus_applied_survives_snapshot_v5(void) {
+    timer_bonus_reconcile(0, 900);
+    timer_start(T0, 3600); /* consumes bonus_sec into allocation */
+    timer_record_date(T0);
+    timer_snapshot_t snap;
+    timer_make_snapshot(&snap);
+    TEST_ASSERT_EQUAL_UINT8(5, snap.version);
+
+    timer_reset();
+    TEST_ASSERT_TRUE(timer_restore_snapshot(&snap, T0 + 100));
+    TEST_ASSERT_EQUAL_INT32(900, g_rtc_state.slots[0].bonus_applied);
+    /* After restore, re-reconciling the same target is a no-op */
+    timer_bonus_reconcile(0, 900);
+    TEST_ASSERT_EQUAL_INT32(4500, g_rtc_state.slots[0].allocation_sec); /* not re-granted */
+}
+
+/* ---- HA config reconcile of a redefined running/paused timer ---- */
+
+/* The active-slot def as it was before the network window (Piano, 15 min,
+   reloadable — matches TEST_DEFS slot 1). */
+static const timer_def_t RECON_OLD = {"Piano", 900, true};
+
+void test_reconcile_rename_running_resets_with_was_running(void) {
+    timer_select_next(); /* Piano */
+    timer_start(T0, 900);
+    timer_def_t renamed = {"Guitar", 900, true};
+    bool was_running = false;
+    TEST_ASSERT_EQUAL(TIMER_RECONCILE_RESET, timer_reconcile_def(1, &RECON_OLD, &renamed, T0 + 100, &was_running));
+    TEST_ASSERT_TRUE(was_running);
+    TEST_ASSERT_EQUAL(TIMER_IDLE, timer_get_state());
+    TEST_ASSERT_EQUAL_INT64(0, g_rtc_state.slots[1].expiry_wall_time);
+    TEST_ASSERT_EQUAL_INT32(0, g_rtc_state.slots[1].remaining_at_pause);
+}
+
+void test_reconcile_rename_paused_resets_without_was_running(void) {
+    timer_select_next();
+    timer_start(T0, 900);
+    timer_pause(T0 + 100);
+    timer_def_t renamed = {"Guitar", 900, true};
+    bool was_running = true;
+    TEST_ASSERT_EQUAL(TIMER_RECONCILE_RESET, timer_reconcile_def(1, &RECON_OLD, &renamed, T0 + 200, &was_running));
+    TEST_ASSERT_FALSE(was_running);
+    TEST_ASSERT_EQUAL(TIMER_IDLE, timer_get_state());
+}
+
+void test_reconcile_rename_preserves_completions(void) {
+    timer_select_next();
+    g_rtc_state.slots[1].completions = 3;
+    timer_start(T0, 900);
+    timer_def_t renamed = {"Guitar", 900, true};
+    TEST_ASSERT_EQUAL(TIMER_RECONCILE_RESET, timer_reconcile_def(1, &RECON_OLD, &renamed, T0 + 100, NULL));
+    TEST_ASSERT_EQUAL_UINT16(3, timer_completions());
+}
+
+void test_reconcile_disable_resets_like_rename(void) {
+    timer_select_next();
+    timer_start(T0, 900);
+    timer_def_t disabled = {"", 0, false};
+    bool was_running = false;
+    TEST_ASSERT_EQUAL(TIMER_RECONCILE_RESET, timer_reconcile_def(1, &RECON_OLD, &disabled, T0 + 100, &was_running));
+    TEST_ASSERT_TRUE(was_running);
+    TEST_ASSERT_EQUAL(TIMER_IDLE, timer_get_state());
+}
+
+void test_reconcile_duration_grow_running_delta_shifts_expiry(void) {
+    timer_select_next();
+    timer_start(T0, 900); /* expiry T0+900 */
+    timer_def_t grown = {"Piano", 1200, true};
+    TEST_ASSERT_EQUAL(TIMER_RECONCILE_UPDATED, timer_reconcile_def(1, &RECON_OLD, &grown, T0 + 300, NULL));
+    TEST_ASSERT_EQUAL(TIMER_RUNNING, timer_get_state());
+    TEST_ASSERT_EQUAL_INT64((int64_t)T0 + 1200, g_rtc_state.slots[1].expiry_wall_time);
+    TEST_ASSERT_EQUAL_INT32(1200, g_rtc_state.slots[1].allocation_sec);
+    TEST_ASSERT_EQUAL_INT64((int64_t)T0, g_rtc_state.slots[1].run_started_wall);
+}
+
+void test_reconcile_duration_grow_after_pause_resume_history(void) {
+    /* run_started_wall marks the current SEGMENT (reset on resume) — a
+       naive run_started + new_duration would credit back the 300 s that
+       elapsed before the pause. Delta-shift must not. */
+    timer_select_next();
+    timer_start(T0, 900);    /* expiry T0+900 */
+    timer_pause(T0 + 300);   /* remaining 600 */
+    timer_resume(T0 + 1000); /* expiry T0+1600, run_started T0+1000 */
+    timer_def_t grown = {"Piano", 1200, true};
+    TEST_ASSERT_EQUAL(TIMER_RECONCILE_UPDATED, timer_reconcile_def(1, &RECON_OLD, &grown, T0 + 1100, NULL));
+    /* +300 delta on the real expiry — NOT T0+1000+1200 = T0+2200 */
+    TEST_ASSERT_EQUAL_INT64((int64_t)T0 + 1900, g_rtc_state.slots[1].expiry_wall_time);
+}
+
+void test_reconcile_duration_shrink_past_elapsed_expires(void) {
+    timer_select_next();
+    timer_start(T0, 900);
+    timer_def_t shrunk = {"Piano", 600, true};
+    bool was_running = false;
+    /* 700 s elapsed >= new 600 s duration: the run is over */
+    TEST_ASSERT_EQUAL(TIMER_RECONCILE_EXPIRED, timer_reconcile_def(1, &RECON_OLD, &shrunk, T0 + 700, &was_running));
+    TEST_ASSERT_TRUE(was_running);
+    TEST_ASSERT_EQUAL(TIMER_EXPIRED, timer_get_state());
+    TEST_ASSERT_EQUAL_UINT16(1, timer_completions()); /* reached 00:00 — counts */
+}
+
+void test_reconcile_duration_shrink_running_still_ahead_updates(void) {
+    timer_select_next();
+    timer_start(T0, 900);
+    timer_def_t shrunk = {"Piano", 600, true};
+    TEST_ASSERT_EQUAL(TIMER_RECONCILE_UPDATED, timer_reconcile_def(1, &RECON_OLD, &shrunk, T0 + 100, NULL));
+    TEST_ASSERT_EQUAL(TIMER_RUNNING, timer_get_state());
+    TEST_ASSERT_EQUAL_INT64((int64_t)T0 + 600, g_rtc_state.slots[1].expiry_wall_time);
+    TEST_ASSERT_EQUAL_INT32(600, g_rtc_state.slots[1].allocation_sec);
+}
+
+void test_reconcile_duration_grow_paused_extends_remaining(void) {
+    timer_select_next();
+    timer_start(T0, 900);
+    timer_pause(T0 + 300); /* remaining 600 */
+    timer_def_t grown = {"Piano", 1200, true};
+    TEST_ASSERT_EQUAL(TIMER_RECONCILE_UPDATED, timer_reconcile_def(1, &RECON_OLD, &grown, T0 + 400, NULL));
+    TEST_ASSERT_EQUAL(TIMER_PAUSED, timer_get_state());
+    TEST_ASSERT_EQUAL_INT32(900, g_rtc_state.slots[1].remaining_at_pause);
+    TEST_ASSERT_EQUAL_INT32(1200, g_rtc_state.slots[1].allocation_sec);
+}
+
+void test_reconcile_duration_shrink_paused_past_elapsed_expires(void) {
+    timer_select_next();
+    timer_start(T0, 900);
+    timer_pause(T0 + 300);                     /* elapsed 300, remaining 600 */
+    timer_def_t shrunk = {"Piano", 240, true}; /* 300 elapsed >= 240 */
+    bool was_running = true;
+    TEST_ASSERT_EQUAL(TIMER_RECONCILE_EXPIRED, timer_reconcile_def(1, &RECON_OLD, &shrunk, T0 + 400, &was_running));
+    TEST_ASSERT_FALSE(was_running);
+    TEST_ASSERT_EQUAL(TIMER_EXPIRED, timer_get_state());
+    TEST_ASSERT_EQUAL_INT32(0, g_rtc_state.slots[1].remaining_at_pause); /* clamped */
+    TEST_ASSERT_EQUAL_UINT16(1, timer_completions());
+}
+
+void test_reconcile_duration_shift_preserves_granted_time(void) {
+    /* An HA grant already extended allocation+expiry: the duration delta
+       must move both without erasing the grant. */
+    timer_select_next();
+    timer_start(T0, 900);
+    timer_grant(1, 300); /* allocation 1200, expiry T0+1200 */
+    timer_def_t shrunk = {"Piano", 600, true};
+    TEST_ASSERT_EQUAL(TIMER_RECONCILE_UPDATED, timer_reconcile_def(1, &RECON_OLD, &shrunk, T0 + 100, NULL));
+    TEST_ASSERT_EQUAL_INT64((int64_t)T0 + 900, g_rtc_state.slots[1].expiry_wall_time);
+    TEST_ASSERT_EQUAL_INT32(900, g_rtc_state.slots[1].allocation_sec); /* grant kept */
+}
+
+void test_reconcile_reload_flag_only_is_none(void) {
+    timer_select_next();
+    timer_start(T0, 900);
+    timer_def_t reload_off = {"Piano", 900, false};
+    TEST_ASSERT_EQUAL(TIMER_RECONCILE_NONE, timer_reconcile_def(1, &RECON_OLD, &reload_off, T0 + 100, NULL));
+    TEST_ASSERT_EQUAL(TIMER_RUNNING, timer_get_state());
+    TEST_ASSERT_EQUAL_INT64((int64_t)T0 + 900, g_rtc_state.slots[1].expiry_wall_time);
+}
+
+void test_reconcile_identical_def_is_none(void) {
+    timer_select_next();
+    timer_start(T0, 900);
+    timer_def_t same = {"Piano", 900, true};
+    TEST_ASSERT_EQUAL(TIMER_RECONCILE_NONE, timer_reconcile_def(1, &RECON_OLD, &same, T0 + 100, NULL));
+    TEST_ASSERT_EQUAL(TIMER_RUNNING, timer_get_state());
+}
+
+void test_reconcile_screen_slot_exempt(void) {
+    timer_start(T0, 3600); /* Screen running */
+    timer_def_t a = {"Screen", 3600, false};
+    timer_def_t b = {"Screen", 600, false};
+    TEST_ASSERT_EQUAL(TIMER_RECONCILE_NONE, timer_reconcile_def(0, &a, &b, T0 + 100, NULL));
+    TEST_ASSERT_EQUAL(TIMER_RUNNING, timer_get_state());
+    TEST_ASSERT_EQUAL_INT64((int64_t)T0 + 3600, g_rtc_state.slots[0].expiry_wall_time);
+}
+
+void test_reconcile_non_active_paused_slot(void) {
+    /* Field corner case: Violin paused at 10 min remaining, user swaps back
+       to Screen, HA shrinks the def to 2 min. The reconcile must fix the
+       frozen remaining on the NON-ACTIVE slot too — resuming later must not
+       run the stale 10 minutes. */
+    timer_select_next(); /* Piano (slot 1) */
+    timer_start(T0, 900);
+    timer_pause(T0 + 60);        /* remaining 840 */
+    g_rtc_state.active_slot = 0; /* back on Screen; Piano stays PAUSED */
+    timer_def_t shrunk = {"Piano", 120, true};
+    TEST_ASSERT_EQUAL(TIMER_RECONCILE_UPDATED, timer_reconcile_def(1, &RECON_OLD, &shrunk, T0 + 100, NULL));
+    TEST_ASSERT_EQUAL(TIMER_PAUSED, g_rtc_state.slots[1].state);
+    TEST_ASSERT_EQUAL_INT32(60, g_rtc_state.slots[1].remaining_at_pause); /* 840 + (120-900) */
+    TEST_ASSERT_EQUAL_INT32(120, g_rtc_state.slots[1].allocation_sec);
+    /* the active Screen slot is untouched */
+    TEST_ASSERT_EQUAL_INT(0, timer_active_slot());
+    TEST_ASSERT_EQUAL(TIMER_IDLE, g_rtc_state.slots[0].state);
+}
+
+void test_reconcile_idle_and_expired_slots_are_none(void) {
+    timer_select_next(); /* Piano, IDLE */
+    timer_def_t renamed = {"Guitar", 600, true};
+    TEST_ASSERT_EQUAL(TIMER_RECONCILE_NONE, timer_reconcile_def(1, &RECON_OLD, &renamed, T0, NULL));
+    TEST_ASSERT_EQUAL(TIMER_IDLE, timer_get_state());
+
+    timer_start(T0, 900);
+    timer_tick(T0 + 901); /* EXPIRED */
+    TEST_ASSERT_EQUAL(TIMER_RECONCILE_NONE, timer_reconcile_def(1, &RECON_OLD, &renamed, T0 + 902, NULL));
+    TEST_ASSERT_EQUAL(TIMER_EXPIRED, timer_get_state());
+}
+
+/* ------------------------------------------------------------------ */
+/* NTP bookkeeping: next_ntp_sync is the single RTC source; the last-  */
+/* sync time shown on screen is derived, not stored twice.             */
+/* ------------------------------------------------------------------ */
+
+void test_last_ntp_sync_zero_when_never_synced(void) {
+    TEST_ASSERT_EQUAL_INT64(0, (int64_t)timer_last_ntp_sync());
+}
+
+void test_last_ntp_sync_derived_from_record(void) {
+    timer_record_ntp_sync(T0 + 1234);
+    TEST_ASSERT_EQUAL_INT64((int64_t)(T0 + 1234), (int64_t)timer_last_ntp_sync());
+}
+
+void test_last_ntp_sync_cleared_by_reset(void) {
+    timer_record_ntp_sync(T0);
+    timer_reset();
+    TEST_ASSERT_EQUAL_INT64(0, (int64_t)timer_last_ntp_sync());
+}
+
+/* ------------------------------------------------------------------ */
+/* Active-slot guard: selection may never rest on a disabled slot      */
+/* ------------------------------------------------------------------ */
+
+void test_ensure_active_slot_keeps_enabled_slot(void) {
+    g_rtc_state.active_slot = 1; /* Piano — enabled in TEST_DEFS */
+    timer_ensure_active_slot_enabled();
+    TEST_ASSERT_EQUAL_INT(1, timer_active_slot());
+}
+
+void test_ensure_active_slot_reverts_when_disabled(void) {
+    g_rtc_state.active_slot = 2; /* hole in TEST_DEFS */
+    timer_ensure_active_slot_enabled();
+    TEST_ASSERT_EQUAL_INT(0, timer_active_slot());
+}
+
+/* ------------------------------------------------------------------ */
+/* Read-only slot accessors (used by the stats/summary builders)       */
+/* ------------------------------------------------------------------ */
+
+void test_slot_accessors_read_state_alloc_completions(void) {
+    timer_start(T0, 3600);
+    TEST_ASSERT_EQUAL(TIMER_RUNNING, timer_slot_state(0));
+    TEST_ASSERT_EQUAL_INT32(3600, timer_slot_allocation(0));
+    g_rtc_state.slots[1].completions = 3;
+    TEST_ASSERT_EQUAL_UINT16(3, timer_slot_completions(1));
+}
+
+void test_slot_accessors_out_of_range_are_benign(void) {
+    TEST_ASSERT_EQUAL(TIMER_IDLE, timer_slot_state(-1));
+    TEST_ASSERT_EQUAL(TIMER_IDLE, timer_slot_state(TIMER_SLOT_COUNT));
+    TEST_ASSERT_EQUAL_INT32(0, timer_slot_allocation(99));
+    TEST_ASSERT_EQUAL_UINT16(0, timer_slot_completions(99));
+}
+
+void test_current_date_tracks_record_date(void) {
+    TEST_ASSERT_EQUAL_STRING("", timer_current_date());
+    timer_record_date(T0); /* 2026-01-05 UTC */
+    TEST_ASSERT_EQUAL_STRING("2026-01-05", timer_current_date());
+}
+
+/* Break-due can land INSIDE the final minute (short allocations, e.g.
+   3 min screen / 2 min interval): the event watch must keep checking
+   timer_break_due mid-watch or the break is silently swallowed by the
+   expiry. This pins the trigger condition the watch loop relies on. */
+void test_break_due_lands_inside_final_minute(void) {
+    timer_start(T0, 180);                              /* 3 min allocation, 2 min break interval */
+    TEST_ASSERT_FALSE(timer_break_due(T0 + 110, 120)); /* pre-watch wake: not yet */
+    TEST_ASSERT_TRUE(timer_break_due(T0 + 120, 120));  /* due at 60 s remaining */
+    timer_start_break(T0 + 120, 120);
+    TEST_ASSERT_EQUAL(TIMER_BREAK, timer_get_state());
+    /* The frozen remaining survives the break: back to PAUSED with 60 s. */
+    timer_tick(T0 + 240); /* break over */
+    TEST_ASSERT_EQUAL(TIMER_PAUSED, timer_get_state());
+    TEST_ASSERT_EQUAL_INT32(60, g_rtc_state.slots[0].remaining_at_pause);
+}
+
 int main(void) {
     UNITY_BEGIN();
+    RUN_TEST(test_bonus_reconcile_grants_only_the_delta);
+    RUN_TEST(test_bonus_reconcile_lowering_target_does_not_reclaim);
+    RUN_TEST(test_bonus_applied_resets_at_rollover);
+    RUN_TEST(test_bonus_applied_survives_snapshot_v5);
     RUN_TEST(test_reset_state_is_idle);
     RUN_TEST(test_reset_expiry_is_zero);
     RUN_TEST(test_reset_remaining_at_pause_is_zero);
@@ -1148,5 +1462,30 @@ int main(void) {
     RUN_TEST(test_tick_with_clock_stepped_backwards_stays_running);
     RUN_TEST(test_completions_saturate_at_uint16_max);
     RUN_TEST(test_snapshot_restore_falls_back_when_active_slot_disabled);
+    RUN_TEST(test_reconcile_rename_running_resets_with_was_running);
+    RUN_TEST(test_reconcile_rename_paused_resets_without_was_running);
+    RUN_TEST(test_reconcile_rename_preserves_completions);
+    RUN_TEST(test_reconcile_disable_resets_like_rename);
+    RUN_TEST(test_reconcile_duration_grow_running_delta_shifts_expiry);
+    RUN_TEST(test_reconcile_duration_grow_after_pause_resume_history);
+    RUN_TEST(test_reconcile_duration_shrink_past_elapsed_expires);
+    RUN_TEST(test_reconcile_duration_shrink_running_still_ahead_updates);
+    RUN_TEST(test_reconcile_duration_grow_paused_extends_remaining);
+    RUN_TEST(test_reconcile_duration_shrink_paused_past_elapsed_expires);
+    RUN_TEST(test_reconcile_duration_shift_preserves_granted_time);
+    RUN_TEST(test_reconcile_reload_flag_only_is_none);
+    RUN_TEST(test_reconcile_identical_def_is_none);
+    RUN_TEST(test_reconcile_screen_slot_exempt);
+    RUN_TEST(test_reconcile_non_active_paused_slot);
+    RUN_TEST(test_reconcile_idle_and_expired_slots_are_none);
+    RUN_TEST(test_last_ntp_sync_zero_when_never_synced);
+    RUN_TEST(test_last_ntp_sync_derived_from_record);
+    RUN_TEST(test_last_ntp_sync_cleared_by_reset);
+    RUN_TEST(test_ensure_active_slot_keeps_enabled_slot);
+    RUN_TEST(test_ensure_active_slot_reverts_when_disabled);
+    RUN_TEST(test_slot_accessors_read_state_alloc_completions);
+    RUN_TEST(test_slot_accessors_out_of_range_are_benign);
+    RUN_TEST(test_current_date_tracks_record_date);
+    RUN_TEST(test_break_due_lands_inside_final_minute);
     return UNITY_END();
 }

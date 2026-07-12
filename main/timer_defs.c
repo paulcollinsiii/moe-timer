@@ -4,6 +4,7 @@
    add the MAGTAG_TIMER<n>_* block in Kconfig.projbuild, and one line to
    the Kconfig table below. */
 #include <stdio.h>
+#include <string.h>
 
 #include "nvs_config.h"
 #include "sdkconfig.h"
@@ -54,8 +55,19 @@ static timer_def_t s_nvs_defs[TIMER_SLOT_COUNT];
 void timer_defs_install(void) {
     nvs_timer_defs_blob_t blob;
     if (nvs_config_get_timer_defs(&blob) != ESP_OK) {
-        timer_set_defs(s_kconfig_defs, TIMER_SLOT_COUNT); /* no HA config yet */
-        return;
+        /* No HA-managed blob yet: materialize one from the Kconfig table so
+           HA shows the compile-time timers as editable (not empty) and the
+           blob becomes the single source of truth for later edits. */
+        memset(&blob, 0, sizeof(blob));
+        blob.version = TIMER_DEFS_BLOB_VERSION;
+        for (int i = 0; i < TIMER_EXTRA_SLOTS; i++) {
+            const timer_def_t *d = &s_kconfig_defs[i + 1];
+            if (d->name != NULL)
+                snprintf(blob.defs[i].name, sizeof(blob.defs[i].name), "%s", d->name);
+            blob.defs[i].min = d->duration_sec / 60;
+            blob.defs[i].reload = d->reloadable ? 1 : 0;
+        }
+        nvs_config_set_timer_defs(&blob);
     }
     s_nvs_defs[0] = (timer_def_t){"Screen", 0, false};
     for (int i = 0; i < TIMER_EXTRA_SLOTS; i++) {

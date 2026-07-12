@@ -8,11 +8,24 @@ extern "C" {
 #endif
 
 /* Must be called on every boot/wake before any other peripheral code.
-   Ensures GPIO 21 (power gate) is HIGH (off). */
+   Ensures GPIO 21 (power gate) is HIGH (off), then starts the LED task:
+   the single owner of the RMT channel AND the power gate. Every call
+   below posts a message to that task — two tasks flushing the channel
+   concurrently deadlock rmt_tx_wait_all_done (found the hard way in
+   bring-up), so nothing else may ever transmit. */
 void neopixel_init(void);
-/* Everything off, RMT flushed, GPIO 21 HIGH; idempotent. Never enter deep
-   sleep with the gate LOW. */
+
+/* Post: everything off, gate HIGH. Fire-and-forget — for mid-wake clears
+   (e.g. wiping the binary countdown before a state repaint). */
 void neopixel_stop(void);
+
+/* Blocking stop for sleep entry: posts a STOP and waits (up to timeout_ms)
+   for the LED task to confirm the pixels are dark and the gate is HIGH —
+   never sleep with it LOW, the deep-sleep hold would keep the LEDs powered
+   all night. On timeout (wedged task) the gate GPIO is forced HIGH
+   directly WITHOUT touching the RMT channel, so this is safe from any
+   context including the awake-failsafe's esp_timer task. */
+void neopixel_stop_sync(uint32_t timeout_ms);
 
 /* Library configuration, injected from main so the module stays clock- and
    Kconfig-agnostic. */
@@ -27,10 +40,9 @@ void neopixel_status_binary4(uint8_t value, uint8_t r, uint8_t g, uint8_t b);
 
 /* HIGHPRI class — ignores quiet hours (accompanies audible alarms). */
 void neopixel_highpri_pixel(int idx, uint8_t r, uint8_t g, uint8_t b);
-/* Slow pulse on all pixels via an internally-owned task. Exactly one task
-   may drive the RMT channel (two deadlock rmt_tx_wait_all_done), so the
-   task lives here: begin spawns it, end sets the stop flag, joins with a
-   2 s cap, and forces the LEDs off. */
+/* Slow pulse on all pixels, run inside the LED task. begin/end are posts:
+   end clears every pixel and drops the gate (callers re-light what they
+   need afterwards). */
 void neopixel_alert_pulse_begin(uint8_t r, uint8_t g, uint8_t b);
 void neopixel_alert_pulse_end(void);
 

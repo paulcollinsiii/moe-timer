@@ -14,6 +14,9 @@ esp_err_t hal_nvs_read_str(const char *key, char *buf, size_t *len);
 esp_err_t hal_nvs_write_str(const char *key, const char *val);
 esp_err_t hal_nvs_read_blob(const char *key, void *buf, size_t *len);
 esp_err_t hal_nvs_write_blob(const char *key, const void *buf, size_t len);
+/* Release the wake-scoped NVS handle (accessors reopen lazily). Called at
+   deep-sleep entry; every write above already committed. */
+void hal_nvs_close(void);
 
 #ifdef __cplusplus
 }

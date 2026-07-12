@@ -1,6 +1,7 @@
 #include "mqtt_ha.h"
 
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "cmd_apply.h"
@@ -9,18 +10,24 @@
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
+#include "ha_config.h"
 #include "hal_nvs.h"
 #include "mqtt_client.h"
+#include "mqtt_rx.h"
+#include "mqtt_topics.h"
 #include "nvs_config.h"
+#include "nvs_keys.h"
 #include "timer.h"
 
 static const char *TAG = "mqtt_ha";
 
 /* Bump when entities are added/renamed — discovery configs republish once. */
-#define DISC_SCHEMA_VER 1
+#define DISC_SCHEMA_VER \
+    9 /* v9: per-slot remaining/limit sensors; active-scoped remaining/allocation + screen_used retired */
 
 #define CONNECT_TIMEOUT_MS 5000
 #define PUBLISH_DRAIN_TIMEOUT_MS 3000
+#define RETAINED_RX_TIMEOUT_MS 1500 /* config/cmd usually land right after subscribe */
 
 static EventGroupHandle_t s_eg;
 #define EG_CONNECTED BIT0
@@ -28,25 +35,64 @@ static EventGroupHandle_t s_eg;
 
 static volatile int s_pub_acks;
 
-/* Retained config document collected during the window (HA→device). The
-   broker delivers it right after subscribe; we buffer it here and apply it
-   after the stat publishes. Sized for the documented config schema. */
 #define CONFIG_BUF_MAX 1024
-static char s_config_buf[CONFIG_BUF_MAX];
-static volatile bool s_config_received;
-static int s_config_topic_len; /* strlen of magtag/<id>/config, for matching */
-
-/* Retained command (HA→device), same collection pattern as config. */
 #define CMD_BUF_MAX 256
-static char s_cmd_buf[CMD_BUF_MAX];
-static volatile bool s_cmd_received;
-static int s_cmd_topic_len;
-static bool s_locate_pending; /* set when a locate command applied; main.c consumes */
+/* 22 registry fields + screen_bonus + locate = 24 distinct keys; headroom
+   so a duplicate (retained + a fresh in-window edit) can't silently drop. */
+#define SET_MAX 32
+
+/* Window-scoped buffers: allocated at window start, freed at teardown —
+   the radio is off (and none of this is needed) for the vast majority of
+   every wake, so these ~7 KB no longer sit in .bss permanently. The
+   pointer doubles as the "window open" flag for the event handler. */
+typedef struct {
+    char topic[128];
+    char payload[768]; /* stat/summary/discovery payloads (largest: 600-768) */
+    char ack[256];
+    char cfg_state[HA_CONFIG_STATE_MAX];
+    char config_buf[CONFIG_BUF_MAX]; /* retained config document (HA→device) */
+    char cmd_buf[CMD_BUF_MAX];       /* retained command document */
+    mqtt_set_kv_t sets[SET_MAX];     /* editable-config sets (set/<key>) */
+} window_mem_t;
+
+static window_mem_t *s_mem;
+static mqtt_rx_t s_rx; /* routing/reassembly context; buffers point into s_mem */
+
+static bool s_locate_pending;      /* set when a locate command applied; main.c consumes */
+static bool s_bonus_clear_pending; /* rollover: clear the retained bonus target next window */
+
+void mqtt_ha_queue_bonus_clear(void) {
+    s_bonus_clear_pending = true;
+}
 
 bool mqtt_ha_locate_pending(void) {
     bool p = s_locate_pending;
     s_locate_pending = false;
     return p;
+}
+
+/* Timer effects parsed during the window are BUFFERED, never applied here:
+   the window runs on the network task, and only the orchestrator may mutate
+   timer state (it applies these after joining the task). */
+static int32_t s_bonus_target_s = -1; /* set/screen_bonus target; -1 = none */
+static int s_grant_slot = -1;         /* cmd grant; -1 = none */
+static int32_t s_grant_sec;
+
+bool mqtt_ha_take_bonus_target(int32_t *target_sec) {
+    if (s_bonus_target_s < 0)
+        return false;
+    *target_sec = s_bonus_target_s;
+    s_bonus_target_s = -1;
+    return true;
+}
+
+bool mqtt_ha_take_grant(int *slot, int32_t *sec) {
+    if (s_grant_slot < 0)
+        return false;
+    *slot = s_grant_slot;
+    *sec = s_grant_sec;
+    s_grant_slot = -1;
+    return true;
 }
 
 /* Pending daily summary (captured at rollover, published next window;
@@ -81,23 +127,20 @@ static void mqtt_event_handler(void *arg, esp_event_base_t base, int32_t event_i
             s_pub_acks++;
             break;
         case MQTT_EVENT_DATA:
-            /* config and cmd are the only subscriptions; a chunked payload
-               (data_len < total_data_len) is copied by absolute offset. An
-               empty retained payload (topic cleared) is ignored here. */
-            if (ev->topic == NULL || ev->total_data_len <= 0)
+            /* Routing + chunk reassembly live in mqtt_rx.c (host-tested,
+               incl. the set/tz-vs-config same-length misroute case). */
+            if (s_mem == NULL)
                 break;
-            if (ev->topic_len == s_config_topic_len && ev->total_data_len < CONFIG_BUF_MAX) {
-                memcpy(s_config_buf + ev->current_data_offset, ev->data, ev->data_len);
-                if (ev->current_data_offset + ev->data_len >= ev->total_data_len) {
-                    s_config_buf[ev->total_data_len] = '\0';
-                    s_config_received = true;
-                }
-            } else if (ev->topic_len == s_cmd_topic_len && ev->total_data_len < CMD_BUF_MAX) {
-                memcpy(s_cmd_buf + ev->current_data_offset, ev->data, ev->data_len);
-                if (ev->current_data_offset + ev->data_len >= ev->total_data_len) {
-                    s_cmd_buf[ev->total_data_len] = '\0';
-                    s_cmd_received = true;
-                }
+            switch (mqtt_rx_on_data(&s_rx, ev->topic, ev->topic_len, ev->data, ev->data_len, ev->total_data_len,
+                                    ev->current_data_offset)) {
+                case MQTT_RX_SETS_FULL:
+                    ESP_LOGW(TAG, "set buffer full (%d), edit dropped", SET_MAX);
+                    break;
+                case MQTT_RX_SET_TOO_LONG:
+                    ESP_LOGW(TAG, "set key/value too long, edit dropped");
+                    break;
+                default:
+                    break;
             }
             break;
         default:
@@ -105,8 +148,9 @@ static void mqtt_event_handler(void *arg, esp_event_base_t base, int32_t event_i
     }
 }
 
-/* QoS-1 retained publish; returns 1 when enqueued (counts toward the
-   drain wait), 0 on failure. */
+/* QoS-1 publish; returns 1 when enqueued (counts toward the drain wait),
+   0 on failure. EVERY window publish goes through here so the final drain
+   can wait on the full ack count instead of a blind delay. */
 static int publish(esp_mqtt_client_handle_t client, const char *topic, const char *payload, int retain) {
     int msg_id = esp_mqtt_client_publish(client, topic, payload, 0, 1, retain);
     if (msg_id < 0) {
@@ -116,50 +160,326 @@ static int publish(esp_mqtt_client_handle_t client, const char *topic, const cha
     return 1;
 }
 
+/* Wait (bounded) for the QoS-1 acks so a disconnect can't drop messages. */
+static bool drain_acks(int published, int timeout_ms) {
+    int waited = 0;
+    while (s_pub_acks < published && waited < timeout_ms) {
+        vTaskDelay(pdMS_TO_TICKS(100));
+        waited += 100;
+    }
+    return s_pub_acks >= published;
+}
+
 static int publish_discovery(esp_mqtt_client_handle_t client, const char *dev_name, const char *fw) {
-    /* static: this runs on the main task (3584 B stack) beneath the WiFi +
-       MQTT frames, and these buffers plus mqtt_ha_window's would overflow
-       it. Used serially on one task, so a single shared copy is safe. */
-    static char topic[128];
-    static char payload[600];
+    char *topic = s_mem->topic;
+    char *payload = s_mem->payload;
     int count = 0, published = 0;
     const ha_entity_t *ents = stats_json_entities(&count);
     for (int i = 0; i < count; i++) {
         const char *name_override = NULL;
         char named[48];
-        /* completions_N sensors carry the configured timer's name */
+        /* Per-slot sensors (completions_N / remaining_N / limit_N) carry
+           the configured timer's name; disabled slots get no entity. */
+        const char *suffix = NULL;
+        int slot = 0;
         if (strncmp(ents[i].key, "completions_", 12) == 0) {
-            int slot = ents[i].key[12] - '0';
+            slot = ents[i].key[12] - '0';
+            suffix = "runs";
+        } else if (strncmp(ents[i].key, "remaining_", 10) == 0) {
+            slot = ents[i].key[10] - '0';
+            suffix = "remaining";
+        } else if (strncmp(ents[i].key, "limit_", 6) == 0) {
+            slot = ents[i].key[6] - '0';
+            suffix = "limit";
+        }
+        if (suffix != NULL) {
             const timer_def_t *def = timer_slot_def(slot);
             if (def == NULL)
                 continue; /* slot disabled: no entity */
-            snprintf(named, sizeof(named), "%s runs", def->name);
+            snprintf(named, sizeof(named), "%s %s", def->name, suffix);
             name_override = named;
         }
-        stats_json_discovery_topic(topic, sizeof(topic), device_id(), &ents[i]);
-        int n =
-            stats_json_discovery_named(payload, sizeof(payload), device_id(), dev_name, fw, &ents[i], name_override);
-        if (n < (int)sizeof(payload)) {
+        stats_json_discovery_topic(topic, sizeof(s_mem->topic), device_id(), &ents[i]);
+        int n = stats_json_discovery_named(payload, sizeof(s_mem->payload), device_id(), dev_name, fw, &ents[i],
+                                           name_override);
+        if (n < (int)sizeof(s_mem->payload)) {
             published += publish(client, topic, payload, 1);
+        }
+    }
+    /* Retire replaced entities (v9): clear their retained discovery configs
+       so HA drops them instead of showing them forever-unavailable. */
+    static const char *RETIRED[] = {"remaining", "allocation", "screen_used"};
+    for (size_t i = 0; i < sizeof(RETIRED) / sizeof(RETIRED[0]); i++) {
+        mqtt_disc_topic(topic, sizeof(s_mem->topic), "sensor", device_id(), RETIRED[i]);
+        published += publish(client, topic, "", 1);
+    }
+    return published;
+}
+
+/* Editable-config entity discovery (number/text/switch with command topics). */
+static int publish_config_discovery(esp_mqtt_client_handle_t client, const char *dev_name, const char *fw) {
+    char *topic = s_mem->topic;
+    char *payload = s_mem->payload;
+    int count = 0, published = 0;
+    const cfg_field_t *fields = ha_config_fields(&count);
+    for (int i = 0; i < count; i++) {
+        ha_config_discovery_topic(topic, sizeof(s_mem->topic), device_id(), &fields[i]);
+        int n = ha_config_discovery(payload, sizeof(s_mem->payload), device_id(), dev_name, fw, &fields[i]);
+        if (n < (int)sizeof(s_mem->payload))
+            published += publish(client, topic, payload, 1);
+    }
+    return published;
+}
+
+/* Editable actions: a "Screen bonus (min) today" number (idempotent) and a
+   "Find my timer" switch. Discovery + state ride the magtag/<id>/act topic;
+   commands come in on the shared set/+ subscription (screen_bonus, locate). */
+#define BONUS_MAX_MIN 240
+static int publish_action_discovery(esp_mqtt_client_handle_t client, const char *dev_name, const char *fw) {
+    char *topic = s_mem->topic;
+    char *payload = s_mem->payload;
+    const char *id = device_id();
+    /* The device name is user-editable free text (HA "name" entity), so it
+       must be JSON-escaped before interpolation. */
+    char dn[128];
+    ha_config_json_escape(dn, sizeof(dn), dev_name);
+    int published = 0, n;
+    /* number: Screen bonus (min) today */
+    mqtt_disc_topic(topic, sizeof(s_mem->topic), "number", id, "screen_bonus");
+    n = snprintf(payload, sizeof(s_mem->payload),
+                 "{\"name\":\"Screen bonus (min) today\",\"uniq_id\":\"%s_screen_bonus\","
+                 "\"stat_t\":\"magtag/%s/act\",\"val_tpl\":\"{{ value_json.screen_bonus }}\","
+                 "\"cmd_t\":\"magtag/%s/set/screen_bonus\",\"retain\":true,\"min\":0,\"max\":%d,\"step\":5,"
+                 "\"mode\":\"box\",\"optimistic\":true,\"unit_of_meas\":\"min\",\"ent_cat\":\"config\","
+                 "\"dev\":{\"ids\":[\"%s\"],\"name\":\"%s\","
+                 "\"mf\":\"Adafruit\",\"mdl\":\"MagTag 2.9\",\"sw\":\"%s\"}}",
+                 id, id, id, BONUS_MAX_MIN, id, dn, fw);
+    if (n < (int)sizeof(s_mem->payload))
+        published += publish(client, topic, payload, 1);
+    else
+        ESP_LOGW(TAG, "screen_bonus discovery truncated, skipped");
+    /* switch: Find my timer. Optimistic like the reload switches (see
+       ha_config_discovery — the user chose the two-button assumed-state
+       rendering over the snap-back). */
+    mqtt_disc_topic(topic, sizeof(s_mem->topic), "switch", id, "locate");
+    n = snprintf(payload, sizeof(s_mem->payload),
+                 "{\"name\":\"Find my timer\",\"uniq_id\":\"%s_locate\",\"stat_t\":\"magtag/%s/act\","
+                 "\"val_tpl\":\"{{ value_json.locate }}\",\"cmd_t\":\"magtag/%s/set/locate\",\"retain\":true,"
+                 "\"pl_on\":\"ON\",\"pl_off\":\"OFF\",\"optimistic\":true,\"dev\":{\"ids\":[\"%s\"],\"name\":\"%s\","
+                 "\"mf\":\"Adafruit\",\"mdl\":\"MagTag 2.9\",\"sw\":\"%s\"}}",
+                 id, id, id, id, dn, fw);
+    if (n < (int)sizeof(s_mem->payload))
+        published += publish(client, topic, payload, 1);
+    else
+        ESP_LOGW(TAG, "locate discovery truncated, skipped");
+    return published;
+}
+
+/* Apply the buffered editable-config sets + actions, republish cfg + act.
+   Returns the number of publishes enqueued (all counted for the drain). */
+static int apply_sets(esp_mqtt_client_handle_t client, const stats_snapshot_t *snap) {
+    char *topic = s_mem->topic;
+    char *ack = s_mem->ack;
+    int published = 0;
+    int n = s_rx.set_count; /* snapshot: the handler may still be appending */
+    for (int i = 0; i < n; i++) {
+        const char *k = s_mem->sets[i].key, *v = s_mem->sets[i].value;
+        if (strcmp(k, "screen_bonus") == 0) {
+            long m = strtol(v, NULL, 10);
+            if (m < 0)
+                m = 0;
+            if (m > BONUS_MAX_MIN)
+                m = BONUS_MAX_MIN;
+            s_bonus_target_s = (int32_t)m * 60; /* applied post-join (idempotent) */
+            ESP_LOGI(TAG, "screen bonus target %ld min (deferred)", m);
+        } else if (strcmp(k, "locate") == 0) {
+            if (strcmp(v, "ON") == 0) {
+                s_locate_pending = true;
+                /* clear the retained switch command so it fires once */
+                mqtt_topic(topic, sizeof(s_mem->topic), device_id(), "set/locate");
+                published += publish(client, topic, "OFF", 1);
+            }
+        } else {
+            ha_cfg_result_t r = ha_config_set(k, v, ack, sizeof(s_mem->ack));
+            ESP_LOGI(TAG, "set %s: %s", k, ack);
+            /* Clear the retained set command once applied. HA drives the
+               control's state from the cfg topic (republished below), not
+               from this command topic, so clearing it is invisible to HA
+               but stops a stale set from re-overriding the bulk config
+               document every window. Leave rejected/unknown values retained
+               so the error is visible. */
+            if (r == HA_CFG_OK) {
+                char suffix[32];
+                snprintf(suffix, sizeof(suffix), "set/%s", k);
+                mqtt_topic(topic, sizeof(s_mem->topic), device_id(), suffix);
+                published += publish(client, topic, "", 1);
+            }
+        }
+    }
+    if (s_bonus_clear_pending) {
+        /* Rollover: clear the retained bonus target so it doesn't repeat */
+        mqtt_topic(topic, sizeof(s_mem->topic), device_id(), "set/screen_bonus");
+        published += publish(client, topic, "0", 1);
+        s_bonus_clear_pending = false;
+    }
+    /* act state: confirmed bonus (applied minutes, from the orchestrator's
+       snapshot — live timer state is off-limits on this task) + locate off
+       (momentary). A target buffered THIS window confirms next window; the
+       HA number is optimistic, so it doesn't snap back meanwhile. */
+    char act[96];
+    mqtt_topic(topic, sizeof(s_mem->topic), device_id(), "act");
+    snprintf(act, sizeof(act), "{\"screen_bonus\":%ld,\"locate\":\"OFF\"}", (long)(snap->screen_bonus_applied_s / 60));
+    published += publish(client, topic, act, 1);
+    /* cfg state: current editable-config values. Skip a truncated doc —
+       publishing invalid JSON would knock every editable control offline. */
+    mqtt_topic(topic, sizeof(s_mem->topic), device_id(), "cfg");
+    if (ha_config_state_json(s_mem->cfg_state, sizeof(s_mem->cfg_state)) >= (int)sizeof(s_mem->cfg_state)) {
+        ESP_LOGW(TAG, "cfg state JSON truncated (%d B buffer), not published", (int)sizeof(s_mem->cfg_state));
+        return published;
+    }
+    published += publish(client, topic, s_mem->cfg_state, 1);
+    return published;
+}
+
+/* Build the incoming-topic strings, point the rx context at the window
+   buffers, and subscribe. set/+ is a wildcard: one subscription covers
+   every editable field. Subscribing FIRST lets the broker's retained
+   delivery overlap the stat publishes (no separate wait). */
+static void subscribe_incoming(esp_mqtt_client_handle_t client) {
+    char config_topic[96], cmd_topic[96], set_topic[96];
+    s_rx = (mqtt_rx_t){
+        .config_buf = s_mem->config_buf,
+        .config_cap = CONFIG_BUF_MAX,
+        .config_topic_len = mqtt_topic(config_topic, sizeof(config_topic), device_id(), "config"),
+        .cmd_buf = s_mem->cmd_buf,
+        .cmd_cap = CMD_BUF_MAX,
+        .cmd_topic_len = mqtt_topic(cmd_topic, sizeof(cmd_topic), device_id(), "cmd"),
+        .sets = s_mem->sets,
+        .sets_cap = SET_MAX,
+        .set_prefix_len = mqtt_topic(set_topic, sizeof(set_topic), device_id(), "set/"),
+    };
+    if (s_rx.set_prefix_len > 0 && s_rx.set_prefix_len + 1 < (int)sizeof(set_topic)) {
+        set_topic[s_rx.set_prefix_len] = '+'; /* single-level wildcard */
+        set_topic[s_rx.set_prefix_len + 1] = '\0';
+    }
+    esp_mqtt_client_subscribe(client, config_topic, 1);
+    esp_mqtt_client_subscribe(client, cmd_topic, 1);
+    esp_mqtt_client_subscribe(client, set_topic, 1);
+}
+
+/* Discovery gate + stat + summary. Returns publishes enqueued;
+ *fresh_discovery / *name_hash feed the post-drain stamp write. */
+static int publish_states(esp_mqtt_client_handle_t client, const stats_snapshot_t *snap, bool *fresh_discovery,
+                          uint16_t *name_hash_out) {
+    int published = 0;
+    /* Discovery: once per schema bump (covers new entities and renames), OR
+       when the editable device name changed — discovery carries dev.name, so
+       renaming from HA otherwise wouldn't update the device card until the
+       next schema bump. A 16-bit name fingerprint tracks that cheaply. */
+    char dev_name[64];
+    device_name(dev_name, sizeof(dev_name));
+    uint16_t name_hash = 5381;
+    for (const char *p = dev_name; *p; p++)
+        name_hash = (uint16_t)(name_hash * 33u + (unsigned char)*p);
+    uint16_t disc_ver = 0, disc_name = 0;
+    hal_nvs_read_u16(NVS_KEY_DISC_VER, &disc_ver);
+    hal_nvs_read_u16(NVS_KEY_DISC_NAME, &disc_name);
+    *fresh_discovery = (disc_ver != DISC_SCHEMA_VER) || (disc_name != name_hash);
+    *name_hash_out = name_hash;
+    if (*fresh_discovery) {
+        published += publish_discovery(client, dev_name, snap->fw);
+        published += publish_config_discovery(client, dev_name, snap->fw);
+        published += publish_action_discovery(client, dev_name, snap->fw);
+    }
+
+    mqtt_topic(s_mem->topic, sizeof(s_mem->topic), device_id(), "stat");
+    if (stats_json_stat(s_mem->payload, sizeof(s_mem->payload), snap) < (int)sizeof(s_mem->payload)) {
+        published += publish(client, s_mem->topic, s_mem->payload, 1);
+    }
+
+    if (s_summary.pending) {
+        mqtt_topic(s_mem->topic, sizeof(s_mem->topic), device_id(), "summary");
+        if (stats_json_summary(s_mem->payload, sizeof(s_mem->payload), s_summary.date, s_summary.used_s,
+                               s_summary.completions) < (int)sizeof(s_mem->payload)) {
+            published += publish(client, s_mem->topic, s_mem->payload, 1);
         }
     }
     return published;
 }
 
+/* Wait for the retained config/cmd, then apply: bulk config document,
+   command (grant/locate — buffered for the orchestrator), editable sets.
+   Returns publishes enqueued (acks, event, retained clears, act + cfg). */
+static int apply_incoming(esp_mqtt_client_handle_t client, const stats_snapshot_t *snap) {
+    int published = 0;
+    /* Retained config + cmd arrive right after subscribe; give them a
+       moment past the publish drain to land. */
+    int cfg_wait = 0;
+    while (!(s_rx.config_done && s_rx.cmd_done) && cfg_wait < RETAINED_RX_TIMEOUT_MS) {
+        vTaskDelay(pdMS_TO_TICKS(100));
+        cfg_wait += 100;
+    }
+
+    if (s_rx.config_done) {
+        /* config_apply writes NVS; a changed timezone/timer def takes
+           effect on the next boot/operation. */
+        config_result_t r = config_apply(s_mem->config_buf, s_mem->ack, sizeof(s_mem->ack));
+        if (r != CONFIG_SKIPPED) {
+            mqtt_topic(s_mem->topic, sizeof(s_mem->topic), device_id(), "config_ack");
+            published += publish(client, s_mem->topic, s_mem->ack, 1); /* retained ack */
+            ESP_LOGI(TAG, "config applied (result %d)", (int)r);
+        }
+    }
+
+    if (s_rx.cmd_done) {
+        cmd_action_t act;
+        cmd_result_t cr = cmd_apply(s_mem->cmd_buf, &act, s_mem->ack, sizeof(s_mem->ack));
+        if (cr == CMD_GRANT || cr == CMD_LOCATE) {
+            if (cr == CMD_GRANT) {
+                /* Buffered: the orchestrator applies it after joining this
+                   task; persisted at the next enter_deep_sleep. */
+                s_grant_slot = act.slot;
+                s_grant_sec = act.sec;
+            } else {
+                s_locate_pending = true; /* main.c runs the alarm after the window */
+            }
+            mqtt_topic(s_mem->topic, sizeof(s_mem->topic), device_id(), "event");
+            published += publish(client, s_mem->topic, s_mem->ack, 0); /* event ack, not retained */
+            /* Clear the retained command so it isn't re-delivered/re-applied */
+            mqtt_topic(s_mem->topic, sizeof(s_mem->topic), device_id(), "cmd");
+            published += publish(client, s_mem->topic, "", 1);
+            ESP_LOGI(TAG, "command applied (result %d)", (int)cr);
+        }
+    }
+
+    /* Apply any editable-config edits and (always) republish current values
+       so HA's number/text controls reflect the confirmed state. */
+    published += apply_sets(client, snap);
+    return published;
+}
+
 void mqtt_ha_window(const stats_snapshot_t *snap) {
-    /* static: main-task stack is tight beneath WiFi+MQTT (see
-       publish_discovery). These are used serially on the one task. */
-    static char uri[128], user[64], pass[64];
+    char uri[128], user[64], pass[64];
     nvs_config_get_mqtt_uri(uri, sizeof(uri));
     if (uri[0] == '\0') {
-        return; /* MQTT disabled */
+        /* Was silent — the #1 reason "nothing shows up in HA": the broker
+           URI was never configured (NVS_DEFAULT_MQTT_URI / MAGTAG_MQTT_URI
+           empty). Make it loud. */
+        ESP_LOGW(TAG, "MQTT disabled: no broker URI in NVS (set NVS_DEFAULT_MQTT_URI or MAGTAG_MQTT_URI)");
+        return;
     }
     nvs_config_get_mqtt_user(user, sizeof(user));
     nvs_config_get_mqtt_pass(pass, sizeof(pass));
+    ESP_LOGI(TAG, "MQTT window: connecting to %s", uri);
 
+    s_mem = calloc(1, sizeof(*s_mem));
+    if (s_mem == NULL) {
+        ESP_LOGE(TAG, "window buffer alloc failed (%u B)", (unsigned)sizeof(*s_mem));
+        return;
+    }
     s_eg = xEventGroupCreate();
     if (s_eg == NULL)
-        return;
+        goto out_mem;
     s_pub_acks = 0;
 
     esp_mqtt_client_config_t cfg = {
@@ -182,100 +502,32 @@ void mqtt_ha_window(const stats_snapshot_t *snap) {
         goto out_started;
     }
 
-    int published = 0;
-    char topic[96];
-    static char payload[768];
+    subscribe_incoming(client);
 
-    /* Subscribe to the retained config + cmd topics first, so the broker's
-       delivery overlaps the stat publishes below (no separate wait). */
-    s_config_received = false;
-    s_cmd_received = false;
-    char config_topic[96], cmd_topic[96];
-    s_config_topic_len = snprintf(config_topic, sizeof(config_topic), "magtag/%s/config", device_id());
-    s_cmd_topic_len = snprintf(cmd_topic, sizeof(cmd_topic), "magtag/%s/cmd", device_id());
-    esp_mqtt_client_subscribe(client, config_topic, 1);
-    esp_mqtt_client_subscribe(client, cmd_topic, 1);
+    bool fresh_discovery = false;
+    uint16_t name_hash = 0;
+    int published = publish_states(client, snap, &fresh_discovery, &name_hash);
 
-    /* Discovery: once per schema bump (covers new entities and renames) */
-    uint16_t disc_ver = 0;
-    hal_nvs_read_u16("disc_ver", &disc_ver);
-    bool fresh_discovery = (disc_ver != DISC_SCHEMA_VER);
-    if (fresh_discovery) {
-        char dev_name[64];
-        device_name(dev_name, sizeof(dev_name));
-        published += publish_discovery(client, dev_name, snap->fw);
-    }
-
-    snprintf(topic, sizeof(topic), "magtag/%s/stat", device_id());
-    if (stats_json_stat(payload, sizeof(payload), snap) < (int)sizeof(payload)) {
-        published += publish(client, topic, payload, 1);
-    }
-
-    if (s_summary.pending) {
-        snprintf(topic, sizeof(topic), "magtag/%s/summary", device_id());
-        if (stats_json_summary(payload, sizeof(payload), s_summary.date, s_summary.used_s, s_summary.completions) <
-            (int)sizeof(payload)) {
-            published += publish(client, topic, payload, 1);
-        }
-    }
-
-    /* Drain: wait for QoS-1 acks so the disconnect doesn't drop them */
-    int waited = 0;
-    while (s_pub_acks < published && waited < PUBLISH_DRAIN_TIMEOUT_MS) {
-        vTaskDelay(pdMS_TO_TICKS(100));
-        waited += 100;
-    }
-    if (s_pub_acks >= published) {
+    /* Drain: wait for the QoS-1 acks so the disconnect doesn't drop them */
+    if (drain_acks(published, PUBLISH_DRAIN_TIMEOUT_MS)) {
         s_summary.pending = false;
         if (fresh_discovery) {
-            hal_nvs_write_u16("disc_ver", DISC_SCHEMA_VER);
+            hal_nvs_write_u16(NVS_KEY_DISC_VER, DISC_SCHEMA_VER);
+            hal_nvs_write_u16(NVS_KEY_DISC_NAME, name_hash);
         }
         ESP_LOGI(TAG, "published %d messages", published);
     } else {
         ESP_LOGW(TAG, "publish drain incomplete (%d/%d)", s_pub_acks, published);
     }
 
-    /* Retained config + cmd arrive right after subscribe; give them a
-       moment past the publish drain to land. */
-    int cfg_wait = 0;
-    while (!(s_config_received && s_cmd_received) && cfg_wait < 1500) {
-        vTaskDelay(pdMS_TO_TICKS(100));
-        cfg_wait += 100;
-    }
+    published += apply_incoming(client, snap);
 
-    static char ack[256];
-    if (s_config_received) {
-        /* config_apply writes NVS; a changed timezone/timer def takes
-           effect on the next boot/operation. */
-        config_result_t r = config_apply(s_config_buf, ack, sizeof(ack));
-        if (r != CONFIG_SKIPPED) {
-            snprintf(topic, sizeof(topic), "magtag/%s/config_ack", device_id());
-            esp_mqtt_client_publish(client, topic, ack, 0, 1, 1); /* retained ack */
-            ESP_LOGI(TAG, "config applied (result %d)", (int)r);
-        }
+    /* Final drain: the acks, event, retained clears, and act/cfg states
+       must survive the disconnect too (was a blind 400 ms delay — QoS-1
+       messages could drop on a slow broker). */
+    if (!drain_acks(published, PUBLISH_DRAIN_TIMEOUT_MS)) {
+        ESP_LOGW(TAG, "final drain incomplete (%d/%d)", s_pub_acks, published);
     }
-
-    if (s_cmd_received) {
-        cmd_action_t act;
-        cmd_result_t cr = cmd_apply(s_cmd_buf, &act, ack, sizeof(ack));
-        if (cr == CMD_GRANT || cr == CMD_LOCATE) {
-            if (cr == CMD_GRANT) {
-                /* Pure state change; persisted at the next enter_deep_sleep */
-                timer_grant(act.slot, act.sec);
-            } else {
-                s_locate_pending = true; /* main.c runs the alarm after the window */
-            }
-            snprintf(topic, sizeof(topic), "magtag/%s/event", device_id());
-            esp_mqtt_client_publish(client, topic, ack, 0, 1, 0); /* event ack, not retained */
-            /* Clear the retained command so it isn't re-delivered/re-applied */
-            snprintf(topic, sizeof(topic), "magtag/%s/cmd", device_id());
-            esp_mqtt_client_publish(client, topic, "", 0, 1, 1);
-            ESP_LOGI(TAG, "command applied (result %d)", (int)cr);
-        }
-    }
-
-    /* Final drain so the acks + cleared-topic publishes survive disconnect */
-    vTaskDelay(pdMS_TO_TICKS(400));
 
 out_started:
     esp_mqtt_client_stop(client);
@@ -284,4 +536,7 @@ out_client:
 out_eg:
     vEventGroupDelete(s_eg);
     s_eg = NULL;
+out_mem:
+    free(s_mem);
+    s_mem = NULL;
 }

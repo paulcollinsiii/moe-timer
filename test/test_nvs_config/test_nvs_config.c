@@ -180,6 +180,40 @@ void test_defaults_fingerprint_is_nonzero_and_stable(void) {
     TEST_ASSERT_EQUAL_UINT16(nvs_config_defaults_fingerprint(), nvs_config_defaults_fingerprint());
 }
 
+/* Reference re-implementation of the fingerprint fold, used for property
+   tests with arbitrary inputs. The pinned characterization test below
+   proves the production registry-driven fold matches this algorithm on
+   the real compile-time defaults. */
+static uint16_t ref_fingerprint(uint32_t version, uint16_t wd, uint16_t we, uint16_t ho, uint16_t su, const char *ssid,
+                                const char *pass, const char *uri, const char *user, const char *mpass) {
+    uint32_t fp = version;
+    fp = fp * 31u + wd;
+    fp = fp * 31u + we;
+    fp = fp * 31u + ho;
+    fp = fp * 31u + su;
+    const char *strs[] = {ssid, pass, uri, user, mpass};
+    for (size_t i = 0; i < sizeof(strs) / sizeof(strs[0]); i++) {
+        for (const char *s = strs[i]; s != NULL && *s != '\0'; s++) {
+            fp = fp * 31u + (unsigned char)*s;
+        }
+    }
+    uint16_t out = (uint16_t)(fp ^ (fp >> 16));
+    return (out == 0) ? 1 : out;
+}
+
+void test_fingerprint_folds_in_credentials(void) {
+    /* Regression: a changed WiFi/MQTT default must change the fingerprint,
+       so setting NVS_DEFAULT_MQTT_URI after the first seed actually reseeds
+       (the key already exists as "" and init-if-missing would skip it). */
+    uint16_t base = ref_fingerprint(3, 60, 120, 120, 120, "ssid", "pass", "", "", "");
+    uint16_t with_uri = ref_fingerprint(3, 60, 120, 120, 120, "ssid", "pass", "mqtt://ha:1883", "", "");
+    uint16_t other_ssid = ref_fingerprint(3, 60, 120, 120, 120, "other", "pass", "", "", "");
+    TEST_ASSERT_NOT_EQUAL(base, with_uri);
+    TEST_ASSERT_NOT_EQUAL(base, other_ssid);
+    /* deterministic */
+    TEST_ASSERT_EQUAL_UINT16(with_uri, ref_fingerprint(3, 60, 120, 120, 120, "ssid", "pass", "mqtt://ha:1883", "", ""));
+}
+
 void test_init_defaults_reseeds_on_fingerprint_change(void) {
     TEST_ASSERT_EQUAL(ESP_OK, nvs_config_init_defaults());
     /* Simulate values seeded by a build with different compile-time defaults */
@@ -409,8 +443,22 @@ void test_timer_snapshot_rejects_wrong_version(void) {
     TEST_ASSERT_EQUAL(ESP_ERR_INVALID_VERSION, nvs_config_load_timer_snapshot(&out));
 }
 
+/* Characterization guard: the fingerprint fold ORDER and algorithm are
+   load-bearing — a changed value on a deployed device triggers a full
+   reseed that reverts every HA-managed key. This re-implements the
+   historical fold inline; any registry refactor must keep producing an
+   identical value. (Holidays are deliberately NOT folded.) */
+void test_defaults_fingerprint_algorithm_pinned(void) {
+    uint16_t expect =
+        ref_fingerprint(NVS_DEFAULTS_VERSION, NVS_DEFAULT_WEEKDAY_MIN, NVS_DEFAULT_WEEKEND_MIN, NVS_DEFAULT_HOLIDAY_MIN,
+                        NVS_DEFAULT_SUMMER_MIN, NVS_DEFAULT_WIFI_SSID, NVS_DEFAULT_WIFI_PASS, NVS_DEFAULT_MQTT_URI,
+                        NVS_DEFAULT_MQTT_USER, NVS_DEFAULT_MQTT_PASS);
+    TEST_ASSERT_EQUAL_UINT16(expect, nvs_config_defaults_fingerprint());
+}
+
 int main(void) {
     UNITY_BEGIN();
+    RUN_TEST(test_defaults_fingerprint_algorithm_pinned);
     RUN_TEST(test_init_defaults_writes_weekday_min);
     RUN_TEST(test_init_defaults_writes_weekend_min);
     RUN_TEST(test_init_defaults_writes_holiday_min);
@@ -428,6 +476,7 @@ int main(void) {
     RUN_TEST(test_get_weekday_min_missing_returns_default);
     RUN_TEST(test_init_defaults_writes_fingerprint_stamp);
     RUN_TEST(test_defaults_fingerprint_is_nonzero_and_stable);
+    RUN_TEST(test_fingerprint_folds_in_credentials);
     RUN_TEST(test_init_defaults_reseeds_on_fingerprint_change);
     RUN_TEST(test_init_defaults_missing_version_key_reseeds);
     RUN_TEST(test_init_defaults_same_version_preserves_values);

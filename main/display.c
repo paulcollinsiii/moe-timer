@@ -15,8 +15,6 @@
 
 static const char *TAG = "display";
 
-#define DISP_HOR 296
-#define DISP_VER 128
 #define FULL_REFRESH_EVERY_N 5
 
 /* MagTag EPD pinout (Adafruit schematic) */
@@ -36,6 +34,10 @@ static lv_display_t *s_disp;
 static bool s_initialized;
 static bool s_panel_slept; /* panel in deep sleep — must re-init before next flush */
 static ssd1680_refresh_mode_t s_pending_mode = SSD1680_REFRESH_FULL;
+/* Partial/full cadence counter (policy, distinct from the driver's
+   protection guard). Display-owned RTC state — the cadence survives deep
+   sleep without living in the timer module's rtc_state_t. */
+static RTC_DATA_ATTR uint8_t s_partial_count;
 
 /* Bring-up knobs: if the image is rotated 180 deg or mirrored on hardware,
    flip these (see docs/hardware_smoke_test.md step 2). */
@@ -96,6 +98,16 @@ static void flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map)
         s_panel_slept = false;
     }
 
+    /* Two renders in one wake (countdown step → pause/break/alert) can
+       land inside the driver's minimum refresh interval, and the guard
+       silently DROPS the frame — the panel would keep the stale screen
+       (field-observed with the mid-watch break). Absorb the remainder
+       here so every accepted flush actually reaches glass. */
+    int32_t guard_wait = ssd1680_refresh_wait();
+    if (guard_wait > 0) {
+        vTaskDelay(pdMS_TO_TICKS(guard_wait * 1000 + 100)); /* +margin: guard is second-granular */
+    }
+
     /* Transpose landscape 296x128 -> panel portrait 128x296. */
     memset(s_panel_fb, 0, sizeof(s_panel_fb));
     for (int y = 0; y < DISP_VER; y++) {
@@ -114,13 +126,13 @@ static void flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map)
        inside the text bands, pass 2 restores the true frame, so those
        pixels are driven both ways. Skipped when nothing in the bands
        changed or when previous-frame state is invalid (driver would
-       promote to full anyway). The 1.1 s delay satisfies the driver's 1 s
-       refresh-rate guard. */
+       promote to full anyway). The intermediate pass doesn't re-arm the
+       refresh-rate guard (both passes are one render), so pass 2 starts
+       the moment BUSY releases — no fixed inter-pass delay. */
     if (s_pending_mode == SSD1680_REFRESH_PARTIAL && ssd1680_partial_diff_ready() && s_prev_fb_valid) {
         memcpy(s_panel_clean, s_panel_fb, sizeof(s_panel_clean));
-        if (invert_clean_bands(s_panel_clean) > 0 && ssd1680_write_framebuffer(s_panel_clean) == ESP_OK &&
-            ssd1680_refresh(SSD1680_REFRESH_PARTIAL) == ESP_OK) {
-            vTaskDelay(pdMS_TO_TICKS(1100));
+        if (invert_clean_bands(s_panel_clean) > 0 && ssd1680_write_framebuffer(s_panel_clean) == ESP_OK) {
+            ssd1680_refresh_intermediate(SSD1680_REFRESH_PARTIAL);
         }
     }
 
@@ -167,9 +179,9 @@ void display_update(const display_state_t *st) {
     build_for_state(st);
     /* Policy: full refresh every Nth partial (anti-ghosting). The counter
        lives in RTC memory so the cadence survives deep sleep. */
-    g_rtc_state.partial_refresh_count++;
-    if (g_rtc_state.partial_refresh_count >= FULL_REFRESH_EVERY_N) {
-        g_rtc_state.partial_refresh_count = 0;
+    s_partial_count++;
+    if (s_partial_count >= FULL_REFRESH_EVERY_N) {
+        s_partial_count = 0;
         render(SSD1680_REFRESH_FULL);
     } else {
         render(SSD1680_REFRESH_PARTIAL);
@@ -180,7 +192,7 @@ void display_full_refresh(const display_state_t *st) {
     if (!s_initialized)
         display_init();
     build_for_state(st);
-    g_rtc_state.partial_refresh_count = 0;
+    s_partial_count = 0;
     render(SSD1680_REFRESH_FULL);
 }
 
@@ -188,7 +200,7 @@ void display_timesup(void) {
     if (!s_initialized)
         display_init();
     display_screens_build_timesup();
-    g_rtc_state.partial_refresh_count = 0;
+    s_partial_count = 0;
     render(SSD1680_REFRESH_FULL);
 }
 
@@ -196,7 +208,7 @@ void display_charge_me(void) {
     if (!s_initialized)
         display_init();
     display_screens_build_charge_me();
-    g_rtc_state.partial_refresh_count = 0;
+    s_partial_count = 0;
     render(SSD1680_REFRESH_FULL);
 }
 
@@ -204,6 +216,6 @@ void display_sync_failed(void) {
     if (!s_initialized)
         display_init();
     display_screens_build_sync_failed();
-    g_rtc_state.partial_refresh_count = 0;
+    s_partial_count = 0;
     render(SSD1680_REFRESH_FULL);
 }

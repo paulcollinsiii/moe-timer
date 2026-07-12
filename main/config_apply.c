@@ -3,9 +3,9 @@
 
 #include <stdio.h>
 #include <string.h>
-#include <time.h>
 
 #include "cJSON.h"
+#include "config_validate.h" /* config_is_iso_date */
 #include "nvs_config.h"
 #include "quiet_hours.h" /* quiet_hhmm_valid */
 #include "timer.h"       /* TIMER_EXTRA_SLOTS */
@@ -22,37 +22,6 @@ static void err_add(err_acc_t *e, const char *field) {
                      e->count ? "," : "", field);
     if (n > 0)
         e->count++;
-}
-
-/* ---- validators ---- */
-
-static bool is_iso_date(const char *s) {
-    if (s == NULL || strlen(s) != 10)
-        return false;
-    for (int i = 0; i < 10; i++) {
-        if (i == 4 || i == 7) {
-            if (s[i] != '-')
-                return false;
-        } else if (s[i] < '0' || s[i] > '9') {
-            return false;
-        }
-    }
-    int year = (s[0] - '0') * 1000 + (s[1] - '0') * 100 + (s[2] - '0') * 10 + (s[3] - '0');
-    int month = (s[5] - '0') * 10 + (s[6] - '0');
-    int day = (s[8] - '0') * 10 + (s[9] - '0');
-    /* Calendar validity (month lengths, leap years) via a mktime round
-       trip: mktime normalizes an impossible date (Feb 31 -> Mar 3), so if
-       it changed any field the date was invalid. Noon dodges DST-gap
-       midnights; libc owns all the corner cases. */
-    struct tm tm = {0};
-    tm.tm_year = year - 1900;
-    tm.tm_mon = month - 1;
-    tm.tm_mday = day;
-    tm.tm_hour = 12;
-    tm.tm_isdst = -1;
-    if (mktime(&tm) == (time_t)-1)
-        return false;
-    return tm.tm_year == year - 1900 && tm.tm_mon == month - 1 && tm.tm_mday == day;
 }
 
 /* Apply a bounded integer field to a u16 setter; records the field name on
@@ -86,7 +55,7 @@ static void apply_date(const cJSON *root, const char *field, esp_err_t (*setter)
     const cJSON *item = cJSON_GetObjectItemCaseSensitive(root, field);
     if (item == NULL)
         return;
-    if (!cJSON_IsString(item) || !is_iso_date(item->valuestring)) {
+    if (!cJSON_IsString(item) || !config_is_iso_date(item->valuestring)) {
         err_add(e, field);
         return;
     }
@@ -120,7 +89,7 @@ static void apply_holidays(const cJSON *root, err_acc_t *e) {
     bool had_bad = false;
     const cJSON *item;
     cJSON_ArrayForEach(item, arr) {
-        if (!cJSON_IsString(item) || !is_iso_date(item->valuestring)) {
+        if (!cJSON_IsString(item) || !config_is_iso_date(item->valuestring)) {
             had_bad = true;
             continue;
         }
@@ -166,7 +135,8 @@ static void apply_timers(const cJSON *root, err_acc_t *e) {
             err_add(e, "timers");
             return; /* whole array rejected — a half-written table is worse */
         }
-        if (min == NULL || !cJSON_IsNumber(min) || min->valuedouble < 1 || min->valuedouble > 1440) {
+        if (min == NULL || !cJSON_IsNumber(min) || min->valuedouble < CFG_BOUND_TIMER_MIN_LO ||
+            min->valuedouble > CFG_BOUND_TIMER_MIN_HI) {
             err_add(e, "timers");
             return;
         }
@@ -208,16 +178,18 @@ config_result_t config_apply(const char *json, char *ack, size_t ack_len) {
 
     err_acc_t e = {.errors = {0}, .count = 0};
 
-    apply_str(root, "name", 32, nvs_config_set_dev_name, &e);
-    apply_str(root, "tz", 48, nvs_config_set_tz, &e);
-    apply_u16(root, "weekday_min", 1, 1440, nvs_config_set_weekday_min, &e);
-    apply_u16(root, "weekend_min", 1, 1440, nvs_config_set_weekend_min, &e);
-    apply_u16(root, "holiday_min", 1, 1440, nvs_config_set_holiday_min, &e);
-    apply_u16(root, "summer_min", 1, 1440, nvs_config_set_summer_min, &e);
+    apply_str(root, "name", CFG_BOUND_NAME_MAX, nvs_config_set_dev_name, &e);
+    apply_str(root, "tz", CFG_BOUND_TZ_MAX, nvs_config_set_tz, &e);
+    apply_u16(root, "weekday_min", CFG_BOUND_ALLOC_LO, CFG_BOUND_ALLOC_HI, nvs_config_set_weekday_min, &e);
+    apply_u16(root, "weekend_min", CFG_BOUND_ALLOC_LO, CFG_BOUND_ALLOC_HI, nvs_config_set_weekend_min, &e);
+    apply_u16(root, "holiday_min", CFG_BOUND_ALLOC_LO, CFG_BOUND_ALLOC_HI, nvs_config_set_holiday_min, &e);
+    apply_u16(root, "summer_min", CFG_BOUND_ALLOC_LO, CFG_BOUND_ALLOC_HI, nvs_config_set_summer_min, &e);
     apply_hhmm(root, "quiet_start", nvs_config_set_quiet_start, &e);
     apply_hhmm(root, "quiet_end", nvs_config_set_quiet_end, &e);
-    apply_u16(root, "break_interval_min", 0, 480, nvs_config_set_break_interval_min, &e);
-    apply_u16(root, "break_duration_min", 1, 120, nvs_config_set_break_duration_min, &e);
+    apply_u16(root, "break_interval_min", CFG_BOUND_BREAK_INT_LO, CFG_BOUND_BREAK_INT_HI,
+              nvs_config_set_break_interval_min, &e);
+    apply_u16(root, "break_duration_min", CFG_BOUND_BREAK_DUR_LO, CFG_BOUND_BREAK_DUR_HI,
+              nvs_config_set_break_duration_min, &e);
     apply_date(root, "summer_start", nvs_config_set_summer_start, &e);
     apply_date(root, "school_start", nvs_config_set_school_start, &e);
     apply_date(root, "school_end", nvs_config_set_school_end, &e);

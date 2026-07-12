@@ -5,6 +5,7 @@
 #include "audio.h"
 #include "battery.h"
 #include "battery_policy.h"
+#include "button_actions.h"
 #include "buttons.h"
 #include "display.h"
 #include "driver/gpio.h"
@@ -15,10 +16,11 @@
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "hal_nvs.h"
 #include "light.h"
 #include "mqtt_ha.h"
 #include "neopixel.h"
-#include "ntp.h"
+#include "net_window.h"
 #include "nvs_config.h"
 #include "nvs_defaults.h"
 #include "nvs_flash.h"
@@ -28,7 +30,6 @@
 #include "stats_json.h"
 #include "timer.h"
 #include "wake_policy.h"
-#include "wifi_session.h"
 
 static const char *TAG = "main";
 
@@ -47,18 +48,27 @@ static const char *TAG = "main";
 #define IDLE_SYNC_INTERVAL_SEC (CONFIG_MAGTAG_IDLE_SYNC_INTERVAL_MIN * 60)
 
 /* Status pixels stay dark during configured quiet hours (alert pulses are
-   exempt — they accompany an audible, dismissable alarm). */
+   exempt — they accompany an audible, dismissable alarm). The window is
+   read from NVS once per wake — this callback fires from the LED task on
+   every pixel update; invalidated after a network window applies edits. */
+static bool s_quiet_cfg_loaded;
+static uint16_t s_quiet_start_cfg;
+static uint16_t s_quiet_end_cfg;
+
 static bool status_leds_quiet(void) {
     time_t now = time(NULL);
     struct tm tm;
     localtime_r(&now, &tm);
-    uint16_t qstart = NVS_DEFAULT_QUIET_START, qend = NVS_DEFAULT_QUIET_END;
-    nvs_config_get_quiet_start(&qstart);
-    nvs_config_get_quiet_end(&qend);
-    return quiet_hours_active(tm.tm_hour * 60 + tm.tm_min, quiet_hhmm_to_minutes(qstart), quiet_hhmm_to_minutes(qend));
+    if (!s_quiet_cfg_loaded) {
+        s_quiet_start_cfg = NVS_DEFAULT_QUIET_START;
+        s_quiet_end_cfg = NVS_DEFAULT_QUIET_END;
+        nvs_config_get_quiet_start(&s_quiet_start_cfg);
+        nvs_config_get_quiet_end(&s_quiet_end_cfg);
+        s_quiet_cfg_loaded = true;
+    }
+    return quiet_hours_active(tm.tm_hour * 60 + tm.tm_min, quiet_hhmm_to_minutes(s_quiet_start_cfg),
+                              quiet_hhmm_to_minutes(s_quiet_end_cfg));
 }
-
-static RTC_DATA_ATTR time_t s_last_ntp_sync;
 
 /* Held-through-sleep guard: EXT1 ANY_LOW is level-triggered, so a button
    still held when the release-wait in enter_deep_sleep() times out (3 s)
@@ -99,7 +109,7 @@ static void save_timer_snapshot(void) {
    again after the rollover's NTP sync (covers power-on, where the clock
    is invalid until corrected). */
 static bool try_restore_timer_snapshot(time_t now) {
-    if (g_rtc_state.last_date[0] != '\0')
+    if (timer_current_date()[0] != '\0')
         return false; /* RTC state intact — normal deep-sleep wake */
     timer_snapshot_t snap;
     if (nvs_config_load_timer_snapshot(&snap) != ESP_OK)
@@ -110,40 +120,53 @@ static bool try_restore_timer_snapshot(time_t now) {
     return true;
 }
 
+static const char *reset_reason_str(void);
+
 static void enter_deep_sleep(void) {
+    /* Late-wake forensics repeat: the boot-time log of this line is often
+       lost to USB CDC re-enumeration; by sleep entry the console has had
+       the whole wake to come up. */
+    ESP_LOGI(TAG, "this boot: reset %s", reset_reason_str());
+    /* Never sleep with the network task alive: it holds WiFi and may be
+       mid-publish. Normal paths finished the window already (no-op here);
+       this covers cut-short paths. Bounded — on the failsafe path the
+       network task may BE the wedge, and deep sleep then powers the radio
+       down regardless. No pause polling: this can run in esp_timer
+       context. */
+    net_window_join(15000, NULL);
+    net_window_log_last(); /* timing repeat: the boot-time line is often lost to CDC */
     save_timer_snapshot();
     /* EXT1 ANY_LOW is level-triggered: a still-held button would re-wake
        instantly and re-fire its action. Wait (bounded) for release. */
-    for (int i = 0; i < 30; i++) {
-        bool held = false;
-        for (int b = 0; b < 4; b++) {
-            held = held || buttons_is_pressed((button_id_t)b);
-        }
-        if (!held)
-            break;
+    for (int i = 0; i < 30 && buttons_scan_held() != 0; i++) {
         vTaskDelay(pdMS_TO_TICKS(100));
     }
 
     /* Snapshot still-held buttons for the continuation guard. Must read
        BEFORE buttons_configure_wakeup() switches the pads to the RTC mux
        (digital gpio_get_level is unreliable after that). */
-    s_held_mask_at_sleep = 0;
-    for (int b = 0; b < 4; b++) {
-        if (buttons_is_pressed((button_id_t)b))
-            s_held_mask_at_sleep |= (uint8_t)(1u << b);
-    }
+    s_held_mask_at_sleep = buttons_scan_held();
     s_sleep_entry_time = (int64_t)time(NULL);
 
     /* No code path may sleep with the NeoPixel gate LOW — the hold below
-       would keep the LEDs powered all night. */
-    neopixel_stop();
+       would keep the LEDs powered all night. Ack'd stop: waits for the LED
+       task to confirm; on timeout the gate GPIO is forced HIGH without an
+       RMT transmit (safe from the failsafe's esp_timer context too). */
+    neopixel_stop_sync(500);
 
     /* Digital pads float in deep sleep; hold the power-control pins so the
        NeoPixel gate (21, HIGH = off) and amp enable (16, LOW = off) cannot
-       drift on and drain the battery. Released in the *_init() on wake. */
+       drift on and drain the battery. neopixel_init() releases the gate
+       hold on every wake; the amp hold stays until the (lazy) audio_init
+       actually needs the pin — silent wakes leave it held. Re-holding an
+       already-held pin is a no-op. */
     gpio_hold_en(GPIO_NUM_21);
     gpio_hold_en(GPIO_NUM_16);
     gpio_deep_sleep_hold_en();
+
+    /* Last NVS write (snapshot) is behind us on every path below; release
+       the wake-scoped handle. */
+    hal_nvs_close();
 
     /* Charge-locked: no button wake sources (a press could only burn a
        refresh the battery can't afford) and a fixed long interval instead
@@ -181,11 +204,9 @@ static void enter_deep_sleep(void) {
     esp_deep_sleep_start();
 }
 
-/* Status pixels: one for timer state, a different one for WiFi, so both
-   can be read at once. Swap the indices if the physical layout reads
-   better the other way around. */
+/* Status pixels: one for timer state here, a different one for WiFi
+   (pixel 3, owned by net_window.c) so both can be read at once. */
 #define NP_STATE_PIXEL 0
-#define NP_WIFI_PIXEL 3
 
 static const char *timer_state_str(timer_state_t st) {
     switch (st) {
@@ -215,6 +236,35 @@ static const char *day_type_name(day_type_t dt) {
     }
 }
 
+/* Boot forensics: the USB CDC console drops output around sleep/reset
+   transitions, so a crash's evidence must ride channels that survive —
+   the stat payload (HA "Last reset" sensor) and a late-wake log line.
+   Anything but DEEPSLEEP on a wake means the previous wake died. */
+static const char *reset_reason_str(void) {
+    switch (esp_reset_reason()) {
+        case ESP_RST_DEEPSLEEP:
+            return "DEEPSLEEP";
+        case ESP_RST_POWERON:
+            return "POWERON";
+        case ESP_RST_BROWNOUT:
+            return "BROWNOUT";
+        case ESP_RST_PANIC:
+            return "PANIC";
+        case ESP_RST_INT_WDT:
+            return "INT_WDT";
+        case ESP_RST_TASK_WDT:
+            return "TASK_WDT";
+        case ESP_RST_WDT:
+            return "WDT";
+        case ESP_RST_SW:
+            return "SW";
+        case ESP_RST_EXT:
+            return "EXT";
+        default:
+            return "UNKNOWN";
+    }
+}
+
 /* Side-effect-free stat snapshot for the HA session (no timer_tick — a
    read here must never transition the state machine). */
 static void stats_collect(stats_snapshot_t *out) {
@@ -229,61 +279,181 @@ static void stats_collect(stats_snapshot_t *out) {
     out->active_timer = (def != NULL) ? def->name : "Screen";
     day_type_t dt = schedule_get_day_type(now);
     out->day_type = day_type_name(dt);
-    uint32_t alloc = (def != NULL) ? (uint32_t)def->duration_sec : schedule_get_allocation_sec(dt);
-    out->allocation_s = alloc;
-    out->remaining_s = timer_slot_remaining(g_rtc_state.active_slot, now, (int32_t)alloc);
+    /* Per-slot remaining/limit ([0] = Screen): each timer keeps its own HA
+       series. A started slot's allocation includes HA grants; IDLE falls
+       back to the schedule/def value; disabled slots report 0/0. */
+    for (int i = 0; i < TIMER_SLOT_COUNT; i++) {
+        const timer_def_t *sd = timer_slot_def(i);
+        if (i > 0 && sd == NULL) {
+            out->remaining_s[i] = 0;
+            out->allocation_s[i] = 0;
+            continue;
+        }
+        int32_t alloc;
+        if (timer_slot_state(i) != TIMER_IDLE) {
+            alloc = timer_slot_allocation(i);
+        } else {
+            alloc = (i == 0) ? (int32_t)schedule_get_allocation_sec(dt) : sd->duration_sec;
+        }
+        out->allocation_s[i] = (uint32_t)alloc;
+        out->remaining_s[i] = timer_slot_remaining(i, now, alloc);
+    }
     for (int i = 0; i < TIMER_EXTRA_SLOTS; i++) {
-        out->completions[i] = g_rtc_state.slots[1 + i].completions;
+        out->completions[i] = timer_slot_completions(1 + i);
     }
     out->charge_lock = s_charge_locked;
     out->fw = esp_app_get_description()->version;
+    out->screen_bonus_applied_s = timer_screen_bonus_applied();
+    out->reset_reason = reset_reason_str();
 }
 
 static void run_locate_alarm(void); /* defined with the awake-failsafe helpers */
+static void fire_expiry_alert(void);
+static bool poll_pause_button(void);
+static bool poll_button_a_action(void);
 
-/* One radio window: WiFi up, SNTP correction, HA MQTT session, WiFi down.
-   The return reflects the SNTP result only — MQTT is best-effort and can
+/* ---- network window (WiFi → NTP → snapshot rendezvous → MQTT) ----------
+   Mechanics (task, completion signals, snapshot rendezvous) live in
+   net_window.c. main.c keeps the orchestration: pre-window def capture,
+   the stats hand-off, and the post-join reconcile/apply below. */
+
+/* Pre-window copy of every extra slot's definition, for the post-join
+   reconcile: a config edit during the window may redefine any timer,
+   including a PAUSED non-active one whose frozen remaining would otherwise
+   go stale (field case: paused 10-min Violin shrunk to 2 min in HA kept
+   its 10 min). Deep copy — the def names point into timer_defs' static
+   table, which the post-join re-install overwrites. [0] unused (Screen). */
+static struct {
+    bool valid;
+    char name[16]; /* matches nvs_timer_def_t.name */
+    timer_def_t def;
+} s_prewindow_defs[TIMER_SLOT_COUNT];
+
+/* Capture the pre-window defs, then spawn: a config edit during the
+   window may redefine any timer, and the reconcile needs the pre-edit
+   view. */
+static bool open_net_window(void) {
+    for (int i = 1; i < TIMER_SLOT_COUNT; i++) {
+        const timer_def_t *def = timer_slot_def(i); /* NULL = disabled */
+        s_prewindow_defs[i].valid = (def != NULL);
+        if (def != NULL) {
+            snprintf(s_prewindow_defs[i].name, sizeof(s_prewindow_defs[i].name), "%s", def->name);
+            s_prewindow_defs[i].def = (timer_def_t){s_prewindow_defs[i].name, def->duration_sec, def->reloadable};
+        }
+    }
+    return net_window_spawn();
+}
+
+/* Collect and hand off the stats snapshot (no-op without a window). */
+static void post_stats_snapshot(void) {
+    if (!net_window_active())
+        return;
+    stats_snapshot_t snap;
+    stats_collect(&snap);
+    net_window_post_snapshot(&snap);
+}
+
+/* Join poll: Button A stays live while the MQTT tail drains — the screen
+   is already painted and a dropped press would read as broken. Never
+   passed from the failsafe's esp_timer context. */
+static void poll_button_a_cb(void) {
+    (void)poll_button_a_action();
+}
+
+/* Post-join reconcile: config edits during the window rewrote the NVS defs
+   blob only — re-install the in-memory table, then reconcile EVERY extra
+   slot whose definition changed mid-run. Only the active slot drives sound
+   and display (chirp / expiry alert / re-render); non-active slots — which
+   can only be PAUSED, IDLE, or EXPIRED — are fixed silently and show their
+   corrected state when the user swaps to them. */
+typedef enum {
+    NET_FINISH_IDLE = 0, /* nothing display-relevant happened */
+    NET_FINISH_CHANGED,  /* timer state/remaining changed: re-render */
+    NET_FINISH_ALERTED,  /* fire_expiry_alert ran: display fully handled */
+} net_finish_t;
+
+static net_finish_t net_window_reconcile_defs(void) {
+    timer_defs_install(); /* re-read the (possibly edited) blob from NVS */
+    net_finish_t nf = NET_FINISH_IDLE;
+    int active = timer_active_slot();
+    for (int slot = 1; slot < TIMER_SLOT_COUNT; slot++) {
+        if (!s_prewindow_defs[slot].valid)
+            continue;                         /* was disabled pre-window: nothing running to fix */
+        s_prewindow_defs[slot].valid = false; /* one reconcile per window */
+        bool was_running = false;
+        timer_reconcile_t rc =
+            timer_reconcile_def(slot, &s_prewindow_defs[slot].def, timer_slot_def(slot), time(NULL), &was_running);
+        if (rc == TIMER_RECONCILE_NONE)
+            continue;
+        ESP_LOGW(TAG, "slot %d redefined during window: reconcile=%d", slot, (int)rc);
+        if (timer_slot_def(slot) == NULL && timer_active_slot() == slot) {
+            /* Slot disabled by the edit — same-wake analogue of the snapshot
+               restore guard: never strand the selection on a dead slot. */
+            timer_ensure_active_slot_enabled();
+        }
+        if (slot != active)
+            continue; /* background slot: state fixed, seen at swap */
+        switch (rc) {
+            case TIMER_RECONCILE_RESET:
+                if (was_running) {
+                    audio_break_over_chime(); /* single chirp: your timer changed */
+                }
+                nf = NET_FINISH_CHANGED;
+                break;
+            case TIMER_RECONCILE_EXPIRED:
+                fire_expiry_alert(); /* owns the display: TIME'S UP + alert + repaint */
+                nf = NET_FINISH_ALERTED;
+                break;
+            default:
+                nf = NET_FINISH_CHANGED; /* UPDATED: remaining moved */
+                break;
+        }
+    }
+    return nf;
+}
+
+/* Close out a window: join, apply the buffered network→timer effects
+   (single-threaded, on this task), reconcile redefined timers, run a
+   pending locate alarm. Safe to call when no window is open. */
+static net_finish_t net_window_finish(void) {
+    if (!net_window_active())
+        return NET_FINISH_IDLE; /* no window this wake: nothing arrived */
+    if (!net_window_join(NET_JOIN_TIMEOUT_MS, poll_button_a_cb))
+        return NET_FINISH_IDLE; /* wedged: no results to apply */
+    /* The window may have applied HA config edits (allocations, holidays,
+       school dates, quiet hours): drop the wake-scoped caches so every
+       read below and after sees the edited values. */
+    schedule_cache_invalidate();
+    s_quiet_cfg_loaded = false;
+    int32_t bonus_target;
+    if (mqtt_ha_take_bonus_target(&bonus_target)) {
+        timer_bonus_reconcile(0, bonus_target);
+    }
+    int grant_slot;
+    int32_t grant_sec;
+    if (mqtt_ha_take_grant(&grant_slot, &grant_sec)) {
+        timer_grant(grant_slot, grant_sec);
+    }
+    net_finish_t nf = net_window_reconcile_defs();
+    /* Locate last, after the radio is down (audio/LEDs, and it extends
+       the awake failsafe). */
+    if (mqtt_ha_locate_pending()) {
+        run_locate_alarm();
+    }
+    return nf;
+}
+
+/* One blocking radio window, for the unattended paths (timer tick, day
+   rollover, final-minute sync): spawn → sync → stats → join → apply. The
+   return reflects the SNTP result only — MQTT is best-effort and can
    never fail the sync that opened the window. */
 static esp_err_t try_net_window(void) {
-#if CONFIG_MAGTAG_SYNC_LED_FEEDBACK
-    /* status class: quiet hours + brightness handled inside the module */
-    neopixel_status_pixel(NP_WIFI_PIXEL, 0, 0, 20); /* blue: window open */
-#endif
-    esp_err_t ret = wifi_session_begin();
-    if (ret == ESP_OK) {
-        ret = ntp_sync_in_session();
-        if (ret == ESP_OK) {
-            s_last_ntp_sync = time(NULL);
-            timer_record_ntp_sync(s_last_ntp_sync);
-        }
-        /* Stats ride the same window, after the clock correction */
-        stats_snapshot_t snap;
-        stats_collect(&snap);
-        mqtt_ha_window(&snap);
-        wifi_session_end();
-        /* Locate command applied this window? Alarm now, after the radio
-           is down (audio/LEDs, and it extends the awake failsafe). */
-        if (mqtt_ha_locate_pending()) {
-            run_locate_alarm();
-        }
-    }
-    if (ret != ESP_OK) {
-        ESP_LOGW(TAG, "NTP sync failed: %s", esp_err_to_name(ret));
-#if CONFIG_MAGTAG_SYNC_LED_FEEDBACK
-        for (int i = 0; i < 3; i++) {
-            neopixel_status_pixel(NP_WIFI_PIXEL, 30, 0, 0);
-            vTaskDelay(pdMS_TO_TICKS(150));
-            neopixel_status_pixel(NP_WIFI_PIXEL, 0, 0, 0);
-            vTaskDelay(pdMS_TO_TICKS(150));
-        }
-#endif
-    }
-#if CONFIG_MAGTAG_SYNC_LED_FEEDBACK
-    /* Clear only the WiFi pixel — the state pixel stays lit through the
-       e-ink refresh; enter_deep_sleep() guarantees the gate goes HIGH. */
-    neopixel_status_pixel(NP_WIFI_PIXEL, 0, 0, 0);
-#endif
-    return ret;
+    if (!open_net_window())
+        return ESP_FAIL;
+    net_window_wait_ntp();
+    post_stats_snapshot();
+    net_window_finish();
+    return net_window_ntp_result();
 }
 
 /* Traffic-light state feedback while the slow e-ink refresh runs:
@@ -322,7 +492,7 @@ static display_state_t make_state(int32_t remaining, time_t now) {
     timer_state_t ts = timer_get_state();
     int mv = battery_read_mv();
     int pct = battery_percent_from_mv(mv);
-    ESP_LOGI(TAG, "battery: %d mV (%d%%)", mv, pct);
+    ESP_LOGD(TAG, "battery: %d mV (%d%%)", mv, pct);
     uint16_t break_dur = NVS_DEFAULT_BREAK_DURATION_MIN;
     nvs_config_get_break_duration_min(&break_dur);
     return (display_state_t){
@@ -331,7 +501,7 @@ static display_state_t make_state(int32_t remaining, time_t now) {
         .timer_state = ts,
         .day_type = dt,
         .wall_time = now,
-        .last_sync_time = s_last_ntp_sync,
+        .last_sync_time = timer_last_ntp_sync(),
         .battery_pct = (uint8_t)pct,
         .break_remaining_sec = timer_break_remaining(now),
         .break_duration_sec = (uint32_t)break_dur * 60,
@@ -375,34 +545,44 @@ static void check_charge_lock(void) {
     enter_deep_sleep(); /* lock-aware: long interval, no button wake */
 }
 
-/* ---- expiry alert ---------------------------------------------------- */
+/* ---- audible alerts ---------------------------------------------------- */
+
+/* One loop for every audible alert (expiry, break start, locate): drain
+   the press latch so only presses AFTER the alarm dismiss it, pulse the
+   NeoPixels, run the audio pattern on its own short task, and poll for
+   dismissal — latched taps of any length count, the level scan catches a
+   button already held down through the drain. Alert-class, so it fires
+   during quiet hours. */
+typedef struct {
+    uint8_t r, g, b;        /* alert pulse colour */
+    void (*audio_fn)(void); /* blocking beep pattern, stop-flag aware */
+    int max_poll_iters;     /* 100 ms each; cap slightly past the audio */
+    const char *task_name;
+    const char *dismiss_log;
+} alert_pattern_t;
 
 static volatile bool s_audio_done;
+static const alert_pattern_t *s_alert_active; /* set before the task spawns */
 
-static void audio_alert_task(void *arg) {
+static void alert_audio_task(void *arg) {
     (void)arg;
-    audio_beep_sequence(); /* self-terminates after 5 cycles (~15 s) */
+    s_alert_active->audio_fn();
     s_audio_done = true;
     vTaskDelete(NULL);
 }
 
-static void run_expiry_alert(void) {
+/* Returns true when a button dismissed the alert (vs. audio running out). */
+static bool run_alert(const alert_pattern_t *p) {
+    s_alert_active = p;
     s_audio_done = false;
-    buttons_take_pressed();                /* drain: a press from BEFORE the alarm must not pre-dismiss it */
-    neopixel_alert_pulse_begin(248, 0, 0); /* red; task + teardown owned by the module */
-    xTaskCreate(audio_alert_task, "beep", 2048, NULL, 5, NULL);
-
-    /* Wait for dismissal — latched taps of any length count, the level
-       scan catches a button already held down through the drain; cap
-       slightly past the alarm (3 s per cycle). */
+    buttons_take_pressed();                       /* drain: a press from BEFORE the alarm must not pre-dismiss it */
+    neopixel_alert_pulse_begin(p->r, p->g, p->b); /* task + teardown owned by the module */
+    xTaskCreate(alert_audio_task, p->task_name, 2048, NULL, 5, NULL);
     bool dismissed = false;
-    for (int i = 0; i < CONFIG_MAGTAG_EXPIRY_ALARM_CYCLES * 30 + 10 && !s_audio_done && !dismissed; i++) {
-        dismissed = buttons_take_pressed() != 0;
-        for (int b = 0; b < 4 && !dismissed; b++) {
-            dismissed = buttons_is_pressed((button_id_t)b);
-        }
+    for (int i = 0; i < p->max_poll_iters && !s_audio_done && !dismissed; i++) {
+        dismissed = buttons_take_pressed() != 0 || buttons_scan_held() != 0;
         if (dismissed) {
-            ESP_LOGI(TAG, "Alert dismissed by button");
+            ESP_LOGI(TAG, "%s", p->dismiss_log);
             break;
         }
         vTaskDelay(pdMS_TO_TICKS(100));
@@ -410,42 +590,42 @@ static void run_expiry_alert(void) {
     audio_stop();
     neopixel_alert_pulse_end();
     vTaskDelay(pdMS_TO_TICKS(100)); /* let the audio task observe its stop flag and exit */
+    return dismissed;
 }
 
-/* ---- eye-rest break ---------------------------------------------------- */
+/* Expiry: red, self-terminates after the configured cycles (3 s each). */
+static const alert_pattern_t ALERT_EXPIRY = {
+    .r = 248,
+    .g = 0,
+    .b = 0,
+    .audio_fn = audio_beep_sequence,
+    .max_poll_iters = CONFIG_MAGTAG_EXPIRY_ALARM_CYCLES * 30 + 10,
+    .task_name = "beep",
+    .dismiss_log = "Alert dismissed by button",
+};
 
-static void break_alarm_task(void *arg) {
-    (void)arg;
-    audio_break_alarm(); /* ~6 s, stop-flag aware */
-    s_audio_done = true;
-    vTaskDelete(NULL);
-}
+/* Break start: cyan — matches the BREAK identity (~2.2 s per cycle). */
+static const alert_pattern_t ALERT_BREAK = {
+    .r = 0,
+    .g = 150,
+    .b = 220,
+    .audio_fn = audio_break_alarm,
+    .max_poll_iters = CONFIG_MAGTAG_BREAK_ALARM_CYCLES * 22 + 10,
+    .task_name = "brk_alarm",
+    .dismiss_log = "Break alarm silenced by button",
+};
 
-/* Break-start alarm: beeps + cyan pulse. Alert-class, so it fires during
-   quiet hours (like the expiry alert — it accompanies an audible alarm).
-   Any button silences it. */
-static void run_break_alarm(void) {
-    s_audio_done = false;
-    buttons_take_pressed();                  /* drain: only presses AFTER the alarm starts silence it */
-    neopixel_alert_pulse_begin(0, 150, 220); /* cyan — matches the BREAK identity */
-    xTaskCreate(break_alarm_task, "brk_alarm", 2048, NULL, 5, NULL);
-    /* Cap slightly past the alarm (~2.2 s per cycle) */
-    bool silenced = false;
-    for (int i = 0; i < CONFIG_MAGTAG_BREAK_ALARM_CYCLES * 22 + 10 && !s_audio_done && !silenced; i++) {
-        silenced = buttons_take_pressed() != 0;
-        for (int b = 0; b < 4 && !silenced; b++) {
-            silenced = buttons_is_pressed((button_id_t)b);
-        }
-        if (silenced) {
-            ESP_LOGI(TAG, "Break alarm silenced by button");
-            break;
-        }
-        vTaskDelay(pdMS_TO_TICKS(100));
-    }
-    audio_stop();
-    neopixel_alert_pulse_end();
-    vTaskDelay(pdMS_TO_TICKS(100)); /* let the alarm task observe the stop flag */
-}
+/* Locate: red, one beep sequence per run_alert call — looped by the
+   caller until dismissed or timed out. */
+static const alert_pattern_t ALERT_LOCATE = {
+    .r = 248,
+    .g = 0,
+    .b = 0,
+    .audio_fn = audio_beep_sequence,
+    .max_poll_iters = 40,
+    .task_name = "locate",
+    .dismiss_log = "Locate dismissed by button",
+};
 
 /* Returns true when a break was started (caller should go straight to
    sleep). Persists BREAK before the alarm, same rationale as the EXPIRED
@@ -464,9 +644,8 @@ static bool maybe_start_break(time_t now) {
     display_state_t st = make_state(timer_tick(now), now);
     neopixel_show_timer_state(); /* blue during the refresh */
     display_full_refresh(&st);   /* inverted SCREEN BREAK layout */
-    run_break_alarm();
-    neopixel_stop();
-    return true;
+    run_alert(&ALERT_BREAK);     /* pulse end darkens the pixels */
+    return true;                 /* caller sleeps; stop_sync guards the gate */
 }
 
 /* Full expiry sequence: big TIME'S UP screen, beeps + red pulse, then back
@@ -479,7 +658,7 @@ static void fire_expiry_alert(void) {
        restore the stale RUNNING snapshot and replay the final minute. */
     save_timer_snapshot();
     display_timesup();
-    run_expiry_alert();
+    run_alert(&ALERT_EXPIRY);
     time_t now = time(NULL);
     display_state_t st = make_state(timer_tick(now), now);
     display_full_refresh(&st);
@@ -490,15 +669,15 @@ static void fire_expiry_alert(void) {
 /* Yesterday's usage numbers for HA, captured BEFORE the rollover resets
    the slots; published by the rollover's own network window. */
 static void queue_rollover_summary(void) {
-    if (g_rtc_state.last_date[0] == '\0') {
+    if (timer_current_date()[0] == '\0') {
         return; /* cold boot / restored-from-nothing: no day to report */
     }
     int32_t used = timer_screen_used_sec(time(NULL));
     uint16_t comp[TIMER_EXTRA_SLOTS];
     for (int i = 0; i < TIMER_EXTRA_SLOTS; i++) {
-        comp[i] = g_rtc_state.slots[1 + i].completions;
+        comp[i] = timer_slot_completions(1 + i);
     }
-    mqtt_ha_queue_summary(g_rtc_state.last_date, used, comp);
+    mqtt_ha_queue_summary(timer_current_date(), used, comp);
 }
 
 static void handle_day_rollover(time_t *now) {
@@ -507,8 +686,9 @@ static void handle_day_rollover(time_t *now) {
     /* last_date + wall time in the log: if a rollover ever fires when the
        date has NOT actually changed, this pinpoints why (bad stored date
        vs. stepped clock). */
-    ESP_LOGW(TAG, "Day rollover (last_date='%s', now=%lld)", g_rtc_state.last_date, (long long)*now);
-    queue_rollover_summary(); /* yesterday's stats, before any reset */
+    ESP_LOGW(TAG, "Day rollover (last_date='%s', now=%lld)", timer_current_date(), (long long)*now);
+    queue_rollover_summary();    /* yesterday's stats, before any reset */
+    mqtt_ha_queue_bonus_clear(); /* clear the retained HA bonus target this window */
     /* Fail-open: reset to IDLE with today's allocation even if sync fails */
     try_net_window();
     *now = time(NULL);
@@ -546,6 +726,25 @@ static bool poll_pause_button(void) {
     return true;
 }
 
+/* Latched Button A during the window join-wait: the screen has already
+   painted and the device looks done, so a dropped press reads as broken.
+   Mirrors the wake handler: RUNNING pauses, IDLE starts, PAUSED resumes,
+   BREAK/EXPIRED stay wake-press-only. The LED acks instantly; the repaint
+   rides the post-join changed-state re-render — the panel must stay quiet
+   while the MQTT tail is transmitting (brownout, see the snapshot
+   rendezvous). The clock was already synced this wake, so a start here
+   needs no expiry shift. */
+static bool poll_button_a_action(void) {
+    if ((buttons_take_pressed() & (1u << BTN_A)) == 0)
+        return false;
+    timer_state_t st = timer_get_state();
+    if (button_a_apply(time(NULL)) == BTN_A_NONE)
+        return false;
+    ESP_LOGI(TAG, "button A during join: state %d -> %d", (int)st, (int)timer_get_state());
+    neopixel_show_timer_state();
+    return true;
+}
+
 /* Absorb the wake residue so the render lands on the state's grid:
    RUNNING/BREAK on the countdown's round minute (the display truly reads
    1:11:00), clock-only states on the wall :00. Bounded — wakes that are
@@ -573,26 +772,27 @@ static void wait_for_render_grid(int max_wait_sec) {
     }
 }
 
-static void maybe_wait_for_event(void) {
-    if (timer_get_state() == TIMER_BREAK) {
-        int32_t brem = timer_break_remaining(time(NULL));
-        if (brem <= 0 || brem > SLEEP_PLAN_WATCH_SEC)
-            return;
-        ESP_LOGI(TAG, "Break ends in %ld s: staying awake", (long)brem);
-        neopixel_show_timer_state();
-        while (timer_break_remaining(time(NULL)) > 0) {
-            vTaskDelay(pdMS_TO_TICKS(250));
-        }
-        time_t now = time(NULL);
-        int32_t remaining = timer_tick(now); /* BREAK -> PAUSED */
-        audio_break_over_chime();
-        display_state_t st = make_state(remaining, now);
-        display_full_refresh(&st);
+/* BREAK tail: stay awake through the last seconds so the end (chime +
+   PAUSED repaint) lands within a tick of wall time. */
+static void watch_break_end(void) {
+    int32_t brem = timer_break_remaining(time(NULL));
+    if (brem <= 0 || brem > SLEEP_PLAN_WATCH_SEC)
         return;
+    ESP_LOGI(TAG, "Break ends in %ld s: staying awake", (long)brem);
+    neopixel_show_timer_state();
+    while (timer_break_remaining(time(NULL)) > 0) {
+        vTaskDelay(pdMS_TO_TICKS(250));
     }
+    time_t now = time(NULL);
+    int32_t remaining = timer_tick(now); /* BREAK -> PAUSED */
+    audio_break_over_chime();
+    display_state_t st = make_state(remaining, now);
+    display_full_refresh(&st);
+}
 
-    if (timer_get_state() != TIMER_RUNNING)
-        return;
+/* RUNNING tail: own the final minute — countdown partials, binary LEDs,
+   the pause poll, and the expiry alert at zero. */
+static void watch_final_minute(void) {
     time_t now = time(NULL);
     int64_t remaining = timer_expiry_wall() - (int64_t)now;
     if (remaining <= 0 || remaining > SLEEP_PLAN_WATCH_SEC)
@@ -605,8 +805,23 @@ static void maybe_wait_for_event(void) {
        itself (~5-9 s) would blow past the expiry. */
     if (timer_needs_ntp_sync(now) && remaining > 15) {
         try_net_window();
+        /* The window's reconcile may have reset/expired the timer (config
+           edit); the alert (if any) already fired — don't watch a countdown
+           that no longer exists, and never double-fire the alert below. */
+        if (timer_get_state() != TIMER_RUNNING) {
+            return;
+        }
     }
     neopixel_show_timer_state();
+
+    /* Break config read once — the loop below spins at 250 ms. Short
+       allocations can put break-due INSIDE this watch (e.g. 3 min screen
+       with a 2 min interval: due lands at exactly 60 s remaining); the
+       per-wake check in the handlers has already passed by then, so the
+       loop must keep checking or the break is silently swallowed by the
+       expiry. */
+    uint16_t break_interval_min = NVS_DEFAULT_BREAK_INTERVAL_MIN;
+    nvs_config_get_break_interval_min(&break_interval_min);
 
     /* Countdown: partial display steps at the quarter-minute marks (values
        pinned so the text reads exactly 00:01:00/45/30/15), and the last
@@ -627,10 +842,18 @@ static void maybe_wait_for_event(void) {
             neopixel_stop(); /* clear the binary-countdown pixels */
             time_t pnow = time(NULL);
             display_state_t st = make_state(timer_tick(pnow), pnow);
-            neopixel_show_timer_state(); /* amber during the refresh */
+            neopixel_show_timer_state(); /* amber through the refresh until sleep */
             display_full_refresh(&st);
-            neopixel_stop();
             return;
+        }
+        if (break_interval_min != 0 && timer_break_due(time(NULL), (int32_t)break_interval_min * 60)) {
+            neopixel_stop(); /* clear the binary-countdown pixels */
+            /* Back-to-back renders are safe: display.c absorbs the
+               driver's refresh-rate guard interval instead of letting the
+               frame be dropped. */
+            if (maybe_start_break(time(NULL))) {
+                return; /* BREAK painted + alarm run; caller sleeps through it */
+            }
         }
         if (next_step < n_steps && rem <= (int64_t)STEPS[next_step]) {
             time_t step_now = time(NULL);
@@ -648,16 +871,34 @@ static void maybe_wait_for_event(void) {
     fire_expiry_alert();
 }
 
+static void maybe_wait_for_event(void) {
+    if (timer_get_state() == TIMER_BREAK) {
+        watch_break_end();
+    } else if (timer_get_state() == TIMER_RUNNING) {
+        watch_final_minute();
+    }
+}
+
 /* ---- wake handlers ----------------------------------------------------- */
 
 static void handle_timer_tick(void) {
     time_t now = time(NULL);
     handle_day_rollover(&now);
 
-    if (wake_policy_sync_due(timer_get_state(), timer_needs_ntp_sync(now), now, s_last_ntp_sync,
+    if (wake_policy_sync_due(timer_get_state(), timer_needs_ntp_sync(now), now, timer_last_ntp_sync(),
                              IDLE_SYNC_INTERVAL_SEC)) {
         try_net_window();
         now = time(NULL);
+    }
+
+    /* Cold boot / external reset only: the rollover + sync above already
+       showed the WiFi pixel, but the grid wait + first paint below can
+       hold a blank panel for tens of seconds more with buttons still
+       wake-press-only — a dark, silent device reads as hung (field
+       report). Deep-sleep tick wakes stay dark: a dim blink every minute,
+       all day, isn't worth the battery. */
+    if (esp_reset_reason() != ESP_RST_DEEPSLEEP) {
+        neopixel_show_timer_state();
     }
 
     if (maybe_start_break(now)) {
@@ -668,9 +909,14 @@ static void handle_timer_tick(void) {
        when a sync was due, ~20 s before) the grid point; absorb the
        residue here. 25 s covers the sync lead without stalling
        event-watch wakes. Captured BEFORE the wait: a pause press during
-       it must register as a state change (full refresh). */
+       it must register as a state change (full refresh). Skipped on
+       power-on/reset: the panel is blank and holding it dark for up to
+       25 more seconds (field: 19 s) is worse than one off-minute render
+       — the next tick wake re-aligns. */
     timer_state_t before = timer_get_state();
-    wait_for_render_grid(25);
+    if (esp_reset_reason() == ESP_RST_DEEPSLEEP) {
+        wait_for_render_grid(25);
+    }
     now = time(NULL);
 
     int32_t remaining = timer_tick(now);
@@ -734,37 +980,34 @@ static void handle_button_wake(void) {
         case BTN_A:
             if (before == TIMER_BREAK) {
                 ESP_LOGI(TAG, "button A ignored during screen break");
-            } else if (before == TIMER_RUNNING) {
-                timer_pause(now);
-            } else if (before == TIMER_IDLE || before == TIMER_PAUSED) {
-                /* Start/resume immediately — waiting on NTP first confused
-                   users. Sync runs after; any clock step is applied to the
-                   expiry via timer_shift_expiry (measured against the
-                   monotonic clock, which NTP cannot step). */
-                if (before == TIMER_IDLE) {
-                    const timer_def_t *def = timer_active_def();
-                    int32_t alloc = (def != NULL) ? def->duration_sec
-                                                  : (int32_t)schedule_get_allocation_sec(schedule_get_day_type(now));
-                    timer_start(now, alloc);
-                } else {
-                    timer_resume(now);
-                }
-                /* Hold the pre-press colour briefly so the WHITE/AMBER ->
-                   GREEN transition is visible as an acknowledgement */
-                vTaskDelay(pdMS_TO_TICKS(250));
-                neopixel_show_timer_state();
+                break;
+            }
+            /* Start/resume immediately — waiting on NTP first confused
+               users. Sync runs after; any clock step is applied to the
+               expiry via timer_shift_expiry (measured against the
+               monotonic clock, which NTP cannot step). */
+            switch (button_a_apply(now)) {
+                case BTN_A_STARTED:
+                case BTN_A_RESUMED:
+                    /* Hold the pre-press colour briefly so the WHITE/AMBER ->
+                       GREEN transition is visible as an acknowledgement */
+                    vTaskDelay(pdMS_TO_TICKS(250));
+                    neopixel_show_timer_state();
 
-                int64_t mono_before_us = esp_timer_get_time();
-                time_t wall_before = time(NULL);
-                if (try_net_window() == ESP_OK) {
-                    int64_t elapsed_sec = (esp_timer_get_time() - mono_before_us) / 1000000;
-                    int64_t step = (int64_t)time(NULL) - ((int64_t)wall_before + elapsed_sec);
-                    timer_shift_expiry(step);
-                }
-                /* Fail-open: on sync failure the timer keeps running on the
-                   uncorrected clock — remaining time is still a consistent
-                   duration; only the displayed clock may be off. */
-                now = time(NULL);
+                    /* NTP-gated paint: wait only for the sync (seconds) so the
+                       panel renders once, with the corrected clock and shifted
+                       expiry. The MQTT phase is released AFTER the paint (the
+                       snapshot post in the tail below) and joined before sleep.
+                       Fail-open: on sync failure the timer keeps running on
+                       the uncorrected clock — remaining time is still a
+                       consistent duration; only the shown clock may be off. */
+                    if (open_net_window() && net_window_wait_ntp()) {
+                        timer_shift_expiry(net_window_clock_step());
+                    }
+                    now = time(NULL);
+                    break;
+                default:
+                    break; /* PAUSED applied above; EXPIRED renders only */
             }
             break;
         case BTN_B:
@@ -789,7 +1032,10 @@ static void handle_button_wake(void) {
             }
             break;
         case BTN_D:
-            try_net_window();
+            /* NTP-gated paint, same as BTN A: sync now, MQTT after paint */
+            if (open_net_window()) {
+                net_window_wait_ntp();
+            }
             now = time(NULL);
             break;
         case BTN_NONE:
@@ -805,7 +1051,9 @@ static void handle_button_wake(void) {
     buttons_take_pressed();
 
     if (maybe_start_break(now)) {
-        enter_deep_sleep(); /* e.g. resume with accrual already past the interval */
+        post_stats_snapshot(); /* break screen painted: release MQTT */
+        net_window_finish();   /* drain + apply deferred before sleeping */
+        enter_deep_sleep();    /* e.g. resume with accrual already past the interval */
     }
 
     int32_t remaining = timer_tick(now);
@@ -821,9 +1069,29 @@ static void handle_button_wake(void) {
         /* Includes EXPIRED: any button returns the display to the main
            layout (empty bar, TIME'S UP state) via a full refresh. */
         ESP_LOGI(TAG, "button %d: state %d -> %d, full refresh", (int)btn, (int)before, (int)timer_get_state());
-        neopixel_show_timer_state(); /* resulting state, shown during refresh */
+        neopixel_show_timer_state(); /* resulting state, lit until sleep */
         display_full_refresh(&st);   /* button wakes always full-refresh */
-        neopixel_stop();
+    }
+
+    /* Paint done: release the MQTT phase (display refresh current and
+       radio TX bursts must never coincide — brownout), then join, apply
+       the buffered network→timer effects, reconcile a redefined timer.
+       Re-render only when something changed what the panel shows (a
+       Button A action landed during the join, a config edit moved the
+       timer, or the expiry passed while draining). */
+    post_stats_snapshot();
+    timer_state_t painted = timer_get_state();
+    net_finish_t nf = net_window_finish();
+    if (nf != NET_FINISH_ALERTED && (nf == NET_FINISH_CHANGED || timer_get_state() != painted)) {
+        time_t rnow = time(NULL);
+        int32_t rrem = timer_tick(rnow);
+        if (wake_policy_render(painted, timer_get_state(), true) == WAKE_RENDER_EXPIRY_ALERT) {
+            fire_expiry_alert();
+        } else {
+            display_state_t rst = make_state(rrem, rnow);
+            neopixel_show_timer_state();
+            display_full_refresh(&rst);
+        }
     }
     maybe_wait_for_event();
     enter_deep_sleep();
@@ -871,22 +1139,10 @@ static void extend_awake_failsafe(int seconds) {
 static void run_locate_alarm(void) {
     ESP_LOGI(TAG, "Locate: alarming until dismissed (<= %d s)", LOCATE_MAX_SEC);
     extend_awake_failsafe(LOCATE_MAX_SEC + 60);
-    buttons_take_pressed(); /* drop any stale latched press */
     int64_t start = (int64_t)time(NULL);
     bool dismissed = false;
     while (!dismissed && (int64_t)time(NULL) - start < LOCATE_MAX_SEC) {
-        s_audio_done = false;
-        neopixel_alert_pulse_begin(248, 0, 0); /* red, module owns teardown */
-        xTaskCreate(audio_alert_task, "locate", 2048, NULL, 5, NULL);
-        for (int i = 0; i < 40 && !s_audio_done && !dismissed; i++) {
-            if (buttons_take_pressed() != 0)
-                dismissed = true;
-            for (int b = 0; b < 4 && !dismissed; b++)
-                dismissed = buttons_is_pressed((button_id_t)b);
-            vTaskDelay(pdMS_TO_TICKS(100));
-        }
-        audio_stop();
-        neopixel_alert_pulse_end();
+        dismissed = run_alert(&ALERT_LOCATE);
     }
     neopixel_stop();
     ESP_LOGI(TAG, "Locate: %s", dismissed ? "dismissed" : "timed out");
@@ -932,9 +1188,15 @@ void app_main(void) {
 
     buttons_init();
     battery_init();
-    light_init();
-    audio_init();
+    /* audio + light init lazily on first use (most wakes need neither);
+       until then the amp pin stays under its deep-sleep hold (off). */
     display_init();
+
+    /* Heap headroom check: the LED + network task stacks now ride
+       alongside WiFi and the LVGL framebuffer — regressions show up here
+       long before an alloc fails in the field. */
+    ESP_LOGI(TAG, "free heap after init: %lu B (min ever %lu B)", (unsigned long)esp_get_free_heap_size(),
+             (unsigned long)esp_get_minimum_free_heap_size());
 
     uint32_t causes = esp_sleep_get_wakeup_causes();
     /* Reset reason distinguishes a real cold boot from an external reset

@@ -12,6 +12,16 @@ bool ssd1680_refresh_allowed(int64_t now_sec, int64_t last_refresh_sec, int32_t 
     return (now_sec - last_refresh_sec) >= min_interval_sec;
 }
 
+/* Seconds until a refresh is allowed (0 = go now). Lets the caller absorb
+   the remaining interval instead of having a frame silently rejected —
+   two renders in one wake (countdown step → pause/break/alert) can land
+   inside the minimum interval. */
+int32_t ssd1680_refresh_wait_sec(int64_t now_sec, int64_t last_refresh_sec, int32_t min_interval_sec) {
+    if (ssd1680_refresh_allowed(now_sec, last_refresh_sec, min_interval_sec))
+        return 0;
+    return (int32_t)(min_interval_sec - (now_sec - last_refresh_sec));
+}
+
 /* A partial refresh diffs against the controller's previous-frame RAM.
    After panel power loss that RAM is garbage, so partial must promote to
    full until a refresh has written it. Modes: 0 = FULL, 1 = PARTIAL. */
