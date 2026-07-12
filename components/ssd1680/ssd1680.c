@@ -18,6 +18,7 @@
 #include "esp_check.h"
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
 #include "freertos/task.h"
 
 static const char *TAG = "ssd1680";
@@ -55,9 +56,40 @@ static RTC_DATA_ATTR int64_t s_last_refresh_sec;
    diff against it corrupts the screen (seen in hardware bring-up). */
 static RTC_DATA_ATTR bool s_prev_frame_valid;
 
+/* BUSY-release signal: the NEGEDGE ISR gives, busy_wait blocks on it —
+   the wait ends when the panel finishes instead of at the next poll
+   tick. NULL when the ISR could not be set up; busy_wait then falls
+   back to the 10 ms poll. */
+static SemaphoreHandle_t s_busy_sem;
+
+static void IRAM_ATTR busy_isr(void *arg) {
+    (void)arg;
+    BaseType_t hp = pdFALSE;
+    xSemaphoreGiveFromISR(s_busy_sem, &hp);
+    if (hp)
+        portYIELD_FROM_ISR();
+}
+
 static esp_err_t busy_wait(void) {
+    if (!gpio_get_level(s_pins.pin_busy)) /* BUSY is active-high */
+        return ESP_OK;
+    if (s_busy_sem != NULL) {
+        /* Drain a stale give, re-check the level (the edge may have landed
+           between the check above and here — the give then waits in the
+           semaphore, harmlessly drained next time), then block. */
+        xSemaphoreTake(s_busy_sem, 0);
+        if (!gpio_get_level(s_pins.pin_busy))
+            return ESP_OK;
+        if (xSemaphoreTake(s_busy_sem, pdMS_TO_TICKS(BUSY_TIMEOUT_MS)) == pdTRUE)
+            return ESP_OK;
+        if (!gpio_get_level(s_pins.pin_busy))
+            return ESP_OK; /* released, edge missed (e.g. ISR detached) */
+        ESP_LOGE(TAG, "BUSY stuck high for %d ms - panel dead or disconnected", BUSY_TIMEOUT_MS);
+        return ESP_ERR_TIMEOUT;
+    }
+    /* Poll fallback (no ISR service) */
     int waited = 0;
-    while (gpio_get_level(s_pins.pin_busy)) { /* BUSY is active-high */
+    while (gpio_get_level(s_pins.pin_busy)) {
         if (waited >= BUSY_TIMEOUT_MS) {
             ESP_LOGE(TAG, "BUSY stuck high for %d ms - panel dead or disconnected", waited);
             return ESP_ERR_TIMEOUT;
@@ -105,8 +137,28 @@ esp_err_t ssd1680_init(const ssd1680_pins_t *pins) {
     gpio_config_t in_cfg = {
         .pin_bit_mask = (1ULL << pins->pin_busy),
         .mode = GPIO_MODE_INPUT,
+        .intr_type = GPIO_INTR_NEGEDGE, /* BUSY release edge feeds busy_wait */
     };
     ESP_RETURN_ON_ERROR(gpio_config(&in_cfg), TAG, "gpio busy");
+
+    /* BUSY-release ISR (best-effort: on any failure busy_wait polls).
+       The ISR service is shared — buttons_init usually installed it
+       already, so INVALID_STATE is the expected "fine" answer. */
+    if (s_busy_sem == NULL) {
+        s_busy_sem = xSemaphoreCreateBinary();
+        if (s_busy_sem != NULL) {
+            esp_err_t ret = gpio_install_isr_service(0);
+            if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) {
+                ESP_LOGW(TAG, "isr service unavailable (%s): BUSY wait falls back to polling", esp_err_to_name(ret));
+                vSemaphoreDelete(s_busy_sem);
+                s_busy_sem = NULL;
+            } else if (gpio_isr_handler_add(pins->pin_busy, busy_isr, NULL) != ESP_OK) {
+                ESP_LOGW(TAG, "BUSY isr add failed: falling back to polling");
+                vSemaphoreDelete(s_busy_sem);
+                s_busy_sem = NULL;
+            }
+        }
+    }
 
     if (!s_spi) {
         spi_bus_config_t bus = {
@@ -181,7 +233,7 @@ esp_err_t ssd1680_write_framebuffer(const uint8_t *fb) {
     return write_ram(CMD_WRITE_RAM_BW, fb);
 }
 
-esp_err_t ssd1680_refresh(ssd1680_refresh_mode_t mode) {
+static esp_err_t refresh_impl(ssd1680_refresh_mode_t mode, bool rearm_guard) {
     if (!s_initialized)
         return ESP_ERR_INVALID_STATE;
     int64_t now = (int64_t)time(NULL);
@@ -214,8 +266,17 @@ esp_err_t ssd1680_refresh(ssd1680_refresh_mode_t mode) {
     ESP_RETURN_ON_ERROR(write_ram(CMD_WRITE_RAM_RED, s_fb_cache), TAG, "prev frame");
     s_prev_frame_valid = true;
 
-    s_last_refresh_sec = now;
+    if (rearm_guard)
+        s_last_refresh_sec = now;
     return ESP_OK;
+}
+
+esp_err_t ssd1680_refresh(ssd1680_refresh_mode_t mode) {
+    return refresh_impl(mode, true);
+}
+
+esp_err_t ssd1680_refresh_intermediate(ssd1680_refresh_mode_t mode) {
+    return refresh_impl(mode, false);
 }
 
 bool ssd1680_partial_diff_ready(void) {

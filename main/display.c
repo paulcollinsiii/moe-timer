@@ -126,13 +126,13 @@ static void flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map)
        inside the text bands, pass 2 restores the true frame, so those
        pixels are driven both ways. Skipped when nothing in the bands
        changed or when previous-frame state is invalid (driver would
-       promote to full anyway). The 1.1 s delay satisfies the driver's 1 s
-       refresh-rate guard. */
+       promote to full anyway). The intermediate pass doesn't re-arm the
+       refresh-rate guard (both passes are one render), so pass 2 starts
+       the moment BUSY releases — no fixed inter-pass delay. */
     if (s_pending_mode == SSD1680_REFRESH_PARTIAL && ssd1680_partial_diff_ready() && s_prev_fb_valid) {
         memcpy(s_panel_clean, s_panel_fb, sizeof(s_panel_clean));
-        if (invert_clean_bands(s_panel_clean) > 0 && ssd1680_write_framebuffer(s_panel_clean) == ESP_OK &&
-            ssd1680_refresh(SSD1680_REFRESH_PARTIAL) == ESP_OK) {
-            vTaskDelay(pdMS_TO_TICKS(1100));
+        if (invert_clean_bands(s_panel_clean) > 0 && ssd1680_write_framebuffer(s_panel_clean) == ESP_OK) {
+            ssd1680_refresh_intermediate(SSD1680_REFRESH_PARTIAL);
         }
     }
 

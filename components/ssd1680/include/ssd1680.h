@@ -47,6 +47,13 @@ esp_err_t ssd1680_write_framebuffer(const uint8_t *fb);
    SSD1680_MIN_REFRESH_INTERVAL_SEC with ESP_ERR_INVALID_STATE. */
 esp_err_t ssd1680_refresh(ssd1680_refresh_mode_t mode);
 
+/* Intermediate pass of a multi-pass render (the ghost-cleaning inverse):
+   checked against the guard like any refresh but does NOT re-arm it —
+   the passes are one logical render, and the final pass would otherwise
+   need a fixed inter-pass delay (was 1.1 s on every partial wake). The
+   guard's runaway protection still applies to the render as a whole. */
+esp_err_t ssd1680_refresh_intermediate(ssd1680_refresh_mode_t mode);
+
 /* Panel deep-sleep mode 1 (RAM retained). Call after every refresh. */
 esp_err_t ssd1680_sleep(void);
 
