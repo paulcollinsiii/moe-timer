@@ -16,17 +16,31 @@ void test_render_expiry_transition_fires_alert(void) {
 void test_render_already_expired_never_refires_alert(void) {
     /* Button press on an expired timer (incl. swap landing on one):
        return to the main layout, no second alarm. */
-    TEST_ASSERT_EQUAL(WAKE_RENDER_FULL, wake_policy_render(TIMER_EXPIRED, TIMER_EXPIRED, true));
+    TEST_ASSERT_EQUAL(WAKE_RENDER_PARTIAL, wake_policy_render(TIMER_EXPIRED, TIMER_EXPIRED, true));
     TEST_ASSERT_EQUAL(WAKE_RENDER_PARTIAL, wake_policy_render(TIMER_EXPIRED, TIMER_EXPIRED, false));
 }
 
-void test_render_state_change_promotes_to_full(void) {
+void test_render_tick_state_change_promotes_to_full(void) {
     TEST_ASSERT_EQUAL(WAKE_RENDER_FULL, wake_policy_render(TIMER_BREAK, TIMER_PAUSED, false));
-    TEST_ASSERT_EQUAL(WAKE_RENDER_FULL, wake_policy_render(TIMER_IDLE, TIMER_RUNNING, true));
+    TEST_ASSERT_EQUAL(WAKE_RENDER_FULL, wake_policy_render(TIMER_IDLE, TIMER_RUNNING, false));
 }
 
-void test_render_button_wake_always_full(void) {
-    TEST_ASSERT_EQUAL(WAKE_RENDER_FULL, wake_policy_render(TIMER_RUNNING, TIMER_RUNNING, true));
+void test_render_button_wake_is_partial_within_main_layout(void) {
+    /* Same-layout button transitions ride the partial cadence (the
+       every-Nth-full counter and the driver's prev-frame promotion
+       still force fulls when needed). */
+    TEST_ASSERT_EQUAL(WAKE_RENDER_PARTIAL, wake_policy_render(TIMER_RUNNING, TIMER_RUNNING, true));
+    TEST_ASSERT_EQUAL(WAKE_RENDER_PARTIAL, wake_policy_render(TIMER_IDLE, TIMER_IDLE, true));
+    TEST_ASSERT_EQUAL(WAKE_RENDER_PARTIAL, wake_policy_render(TIMER_IDLE, TIMER_RUNNING, true));
+    TEST_ASSERT_EQUAL(WAKE_RENDER_PARTIAL, wake_policy_render(TIMER_RUNNING, TIMER_PAUSED, true));
+    TEST_ASSERT_EQUAL(WAKE_RENDER_PARTIAL, wake_policy_render(TIMER_PAUSED, TIMER_RUNNING, true));
+}
+
+void test_render_button_wake_across_break_layout_is_full(void) {
+    /* The break screen is a full-screen inversion of the main layout;
+       a partial diff across that boundary would ghost the whole panel. */
+    TEST_ASSERT_EQUAL(WAKE_RENDER_FULL, wake_policy_render(TIMER_RUNNING, TIMER_BREAK, true));
+    TEST_ASSERT_EQUAL(WAKE_RENDER_FULL, wake_policy_render(TIMER_BREAK, TIMER_PAUSED, true));
 }
 
 void test_render_steady_timer_tick_is_partial(void) {
@@ -94,8 +108,9 @@ int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_render_expiry_transition_fires_alert);
     RUN_TEST(test_render_already_expired_never_refires_alert);
-    RUN_TEST(test_render_state_change_promotes_to_full);
-    RUN_TEST(test_render_button_wake_always_full);
+    RUN_TEST(test_render_tick_state_change_promotes_to_full);
+    RUN_TEST(test_render_button_wake_is_partial_within_main_layout);
+    RUN_TEST(test_render_button_wake_across_break_layout_is_full);
     RUN_TEST(test_render_steady_timer_tick_is_partial);
     RUN_TEST(test_snap_absorbs_positive_jitter);
     RUN_TEST(test_snap_absorbs_negative_jitter);
