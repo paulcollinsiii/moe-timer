@@ -1063,14 +1063,23 @@ static void handle_button_wake(void) {
         audio_break_over_chime(); /* break over — ready to resume */
     }
 
-    if (wake_policy_render(before, timer_get_state(), true) == WAKE_RENDER_EXPIRY_ALERT) {
+    /* Button D is the user-facing "refresh everything" button — it always
+       gets a real full refresh regardless of the render policy. */
+    bool force_full = (btn == BTN_D);
+    wake_render_t bwr = wake_policy_render(before, timer_get_state(), true);
+    if (bwr == WAKE_RENDER_EXPIRY_ALERT) {
         fire_expiry_alert(); /* alert owns the NeoPixels (red pulse) */
     } else {
         /* Includes EXPIRED: any button returns the display to the main
-           layout (empty bar, TIME'S UP state) via a full refresh. */
-        ESP_LOGI(TAG, "button %d: state %d -> %d, full refresh", (int)btn, (int)before, (int)timer_get_state());
+           layout (empty bar, TIME'S UP state). */
+        ESP_LOGI(TAG, "button %d: state %d -> %d, %s refresh", (int)btn, (int)before, (int)timer_get_state(),
+                 (force_full || bwr == WAKE_RENDER_FULL) ? "full" : "partial");
         neopixel_show_timer_state(); /* resulting state, lit until sleep */
-        display_full_refresh(&st);   /* button wakes always full-refresh */
+        if (force_full || bwr == WAKE_RENDER_FULL) {
+            display_full_refresh(&st);
+        } else {
+            display_update(&st); /* partial cadence: every Nth is promoted */
+        }
     }
 
     /* Paint done: release the MQTT phase (display refresh current and
@@ -1085,12 +1094,17 @@ static void handle_button_wake(void) {
     if (nf != NET_FINISH_ALERTED && (nf == NET_FINISH_CHANGED || timer_get_state() != painted)) {
         time_t rnow = time(NULL);
         int32_t rrem = timer_tick(rnow);
-        if (wake_policy_render(painted, timer_get_state(), true) == WAKE_RENDER_EXPIRY_ALERT) {
+        wake_render_t rwr = wake_policy_render(painted, timer_get_state(), true);
+        if (rwr == WAKE_RENDER_EXPIRY_ALERT) {
             fire_expiry_alert();
         } else {
             display_state_t rst = make_state(rrem, rnow);
             neopixel_show_timer_state();
-            display_full_refresh(&rst);
+            if (force_full || rwr == WAKE_RENDER_FULL) {
+                display_full_refresh(&rst);
+            } else {
+                display_update(&rst);
+            }
         }
     }
     maybe_wait_for_event();
