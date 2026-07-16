@@ -45,8 +45,10 @@ Everything appears under one device, grouped by HA `entity_category`:
   bed time (HHMM number; 0 disables, otherwise 1800–2359 — the device
   rejects daytime values), break settings, alert-tone selects (Expiry /
   Break / Bed time tone, incl. "Custom WAV" from the assets partition),
-  device name, timezone, the four timer slots, plus the Screen-bonus
-  number and Find-my-timer switch.
+  Alert volume (0–200 %; 100 = clean reference level, above that adds
+  clipping gain for real loudness, 0 mutes), device name, timezone, the
+  four timer slots, plus the Screen-bonus number and Find-my-timer
+  switch.
 - **Diagnostic** (read-only detail): battery voltage, ambient light,
   active timer, day type, last reset, **Screen time limit** (the computed
   allocation for today — the read-only *result* of the editable allocation

@@ -50,6 +50,11 @@ int tones_option_count(void);
    negative sentinel) collapses to fallback. */
 int tones_clamp_id(int idx, int fallback);
 
+/* Volume ceiling (percent). 100 = the tuned reference amplitude; above
+   that the renderer applies digital gain and clips at the DAC rails,
+   trading sine purity for real loudness on the small speaker. */
+#define TONES_VOLUME_MAX 200
+
 typedef struct {
     const tone_def_t *def;
     uint32_t sample_rate;
@@ -58,9 +63,14 @@ typedef struct {
     uint32_t note_samples; /* length of the current note */
     uint32_t phase;        /* one period == 1 << 24 */
     uint32_t phase_inc;
+    uint16_t peak; /* peak deviation target; may exceed the rails (clipped) */
 } tone_player_t;
 
 void tones_player_init(tone_player_t *p, int id, uint32_t sample_rate);
+
+/* Volume in percent, clamped to [0, TONES_VOLUME_MAX]; init defaults to
+   100. 0 renders silence (timing preserved). */
+void tones_player_set_volume(tone_player_t *p, int volume_pct);
 
 /* Fill out with up to n samples; returns the count written (0 = tone
    finished). Rests and silence emit 128. */

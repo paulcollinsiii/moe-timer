@@ -313,6 +313,44 @@ void test_discovery_select_lists_options(void) {
     TEST_ASSERT_NOT_NULL(strstr(buf, "\"cmd_t\":\"magtag/magtag-a1b2c3/set/tone_bed\""));
 }
 
+/* ---- alert volume (CFG_U16, percent with boost range) ---- */
+
+void test_set_alert_volume_valid_persists(void) {
+    char ack[128];
+    TEST_ASSERT_EQUAL(HA_CFG_OK, ha_config_set("alert_volume", "80", ack, sizeof(ack)));
+    uint16_t v = 0;
+    nvs_config_get_alert_volume(&v);
+    TEST_ASSERT_EQUAL_UINT16(80, v);
+    /* 0 = mute and the boost ceiling are both legal */
+    TEST_ASSERT_EQUAL(HA_CFG_OK, ha_config_set("alert_volume", "0", ack, sizeof(ack)));
+    TEST_ASSERT_EQUAL(HA_CFG_OK, ha_config_set("alert_volume", "200", ack, sizeof(ack)));
+}
+
+void test_set_alert_volume_out_of_range_rejected(void) {
+    char ack[128];
+    TEST_ASSERT_EQUAL(HA_CFG_REJECTED, ha_config_set("alert_volume", "201", ack, sizeof(ack)));
+    TEST_ASSERT_EQUAL(HA_CFG_REJECTED, ha_config_set("alert_volume", "-1", ack, sizeof(ack)));
+    uint16_t v = 0;
+    nvs_config_get_alert_volume(&v);
+    TEST_ASSERT_EQUAL_UINT16(NVS_DEFAULT_ALERT_VOLUME, v); /* unchanged */
+}
+
+void test_alert_volume_discovery_and_state(void) {
+    const cfg_field_t *f = field_by_key("alert_volume");
+    TEST_ASSERT_NOT_NULL(f);
+    TEST_ASSERT_EQUAL_STRING("number", f->component);
+    char buf[700];
+    ha_config_discovery(buf, sizeof(buf), "magtag-a1b2c3", "K", "fw", f);
+    TEST_ASSERT_NOT_NULL(strstr(buf, "\"min\":0"));
+    TEST_ASSERT_NOT_NULL(strstr(buf, "\"max\":200"));
+    TEST_ASSERT_NOT_NULL(strstr(buf, "\"unit_of_meas\":\"%\""));
+    char state[HA_CONFIG_STATE_MAX];
+    ha_config_state_json(state, sizeof(state));
+    char expect[48];
+    snprintf(expect, sizeof(expect), "\"alert_volume\":%u", (unsigned)NVS_DEFAULT_ALERT_VOLUME);
+    TEST_ASSERT_NOT_NULL(strstr(state, expect));
+}
+
 /* ---- Phase B: editable timer definitions (read-modify-write the blob) ---- */
 
 static void seed_blob(void) {
@@ -425,5 +463,8 @@ int main(void) {
     RUN_TEST(test_state_json_emits_tone_option_strings);
     RUN_TEST(test_state_json_clamps_out_of_range_tone_index);
     RUN_TEST(test_discovery_select_lists_options);
+    RUN_TEST(test_set_alert_volume_valid_persists);
+    RUN_TEST(test_set_alert_volume_out_of_range_rejected);
+    RUN_TEST(test_alert_volume_discovery_and_state);
     return UNITY_END();
 }

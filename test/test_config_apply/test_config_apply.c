@@ -208,6 +208,18 @@ void test_tone_enum_unknown_or_nonstring_rejected(void) {
     TEST_ASSERT_NOT_NULL(strstr(ack, "tone_bed"));
 }
 
+void test_alert_volume_applied_and_range_enforced(void) {
+    char ack[256];
+    apply("{\"ver\":\"1\",\"alert_volume\":150}", ack, sizeof(ack));
+    uint16_t v;
+    nvs_config_get_alert_volume(&v);
+    TEST_ASSERT_EQUAL_UINT16(150, v);
+    apply("{\"ver\":\"2\",\"alert_volume\":999}", ack, sizeof(ack));
+    nvs_config_get_alert_volume(&v);
+    TEST_ASSERT_EQUAL_UINT16(150, v); /* out of range: value kept */
+    TEST_ASSERT_NOT_NULL(strstr(ack, "alert_volume"));
+}
+
 void test_short_timers_array_disables_trailing_slots(void) {
     char ack[256];
     apply("{\"ver\":\"1\",\"timers\":[{\"name\":\"Piano\",\"min\":15}]}", ack, sizeof(ack));
@@ -341,6 +353,7 @@ int main(void) {
     RUN_TEST(test_bedtime_applies_evening_and_zero_rejects_daytime);
     RUN_TEST(test_tone_enum_applied_by_option_string);
     RUN_TEST(test_tone_enum_unknown_or_nonstring_rejected);
+    RUN_TEST(test_alert_volume_applied_and_range_enforced);
     RUN_TEST(test_short_timers_array_disables_trailing_slots);
     RUN_TEST(test_timers_wrong_type_rejected);
     RUN_TEST(test_holidays_non_string_element_rejected_keeps_good);

@@ -118,6 +118,9 @@ static const cfg_field_t FIELDS[] = {
     TONE_SELECT("tone_expiry", "Expiry tone", nvs_config_set_tone_expiry, nvs_config_get_tone_expiry),
     TONE_SELECT("tone_break", "Break tone", nvs_config_set_tone_break, nvs_config_get_tone_break),
     TONE_SELECT("tone_bed", "Bed time tone", nvs_config_set_tone_bed, nvs_config_get_tone_bed),
+    /* >100% applies clipping gain in the renderer — louder, harsher. */
+    NUM_U16("alert_volume", "Alert volume", "%", 0, TONES_VOLUME_MAX, 1, nvs_config_set_alert_volume,
+            nvs_config_get_alert_volume),
 };
 
 const cfg_field_t *ha_config_fields(int *count) {
