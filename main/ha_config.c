@@ -6,6 +6,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "bedtime.h"
 #include "config_validate.h"
 #include "nvs_config.h"
 #include "quiet_hours.h"
@@ -48,6 +49,14 @@ const char *ha_config_json_escape(char *tmp, size_t tmplen, const char *s) {
         .key = k, .component = "number", .name = nm, .kind = CFG_HHMM, .lo = 0, .hi = 2359, .step = 1, .set_u16 = set, \
         .get_u16 = get                                                                                                 \
     }
+/* HHMM with a field-specific validity rule (advertised bounds stay
+   0-2359; the device is the gatekeeper and the cfg republish corrects
+   an optimistic HA edit that was rejected). */
+#define NUM_HHMM_V(k, nm, set, get, val)                                                                               \
+    {                                                                                                                  \
+        .key = k, .component = "number", .name = nm, .kind = CFG_HHMM, .lo = 0, .hi = 2359, .step = 1, .set_u16 = set, \
+        .get_u16 = get, .validate = val                                                                                \
+    }
 #define TEXT(k, nm, maxlen, set, get) \
     { .key = k, .component = "text", .name = nm, .kind = CFG_STR, .hi = maxlen, .set_str = set, .get_str = get }
 /* Extra-timer slot fields — read-modify-write the timer_defs blob by slot. */
@@ -87,6 +96,7 @@ static const cfg_field_t FIELDS[] = {
             nvs_config_set_summer_min, nvs_config_get_summer_min),
     NUM_HHMM("quiet_start", "Quiet hours start (HHMM)", nvs_config_set_quiet_start, nvs_config_get_quiet_start),
     NUM_HHMM("quiet_end", "Quiet hours end (HHMM)", nvs_config_set_quiet_end, nvs_config_get_quiet_end),
+    NUM_HHMM_V("bedtime", "Bed time (HHMM, 0=off)", nvs_config_set_bedtime, nvs_config_get_bedtime, bedtime_hhmm_valid),
     NUM_U16("break_interval_min", "Break interval", "min", CFG_BOUND_BREAK_INT_LO, CFG_BOUND_BREAK_INT_HI, 1,
             nvs_config_set_break_interval_min, nvs_config_get_break_interval_min),
     NUM_U16("break_duration_min", "Break duration", "min", CFG_BOUND_BREAK_DUR_LO, CFG_BOUND_BREAK_DUR_HI, 1,
@@ -185,7 +195,7 @@ ha_cfg_result_t ha_config_set(const char *key, const char *value, char *ack, siz
             long v;
             if (!parse_int(value, &v))
                 return reject(ack, ack_len, key, "nan");
-            if (!quiet_hhmm_valid((int)v))
+            if (f->validate != NULL ? !f->validate((int)v) : !quiet_hhmm_valid((int)v))
                 return reject(ack, ack_len, key, "time");
             if (f->set_u16((uint16_t)v) != ESP_OK)
                 return reject(ack, ack_len, key, "nvs");

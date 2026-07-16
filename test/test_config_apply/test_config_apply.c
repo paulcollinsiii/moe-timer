@@ -9,6 +9,7 @@
 #include "mock_hal_nvs.c"
 #include "../../main/nvs_config.c"
 #include "../../main/quiet_hours.c"
+#include "../../main/bedtime.c"
 #include "../../main/config_validate.c"
 #include "../../main/tones.c"
 #include "../../main/config_apply.c"
@@ -169,6 +170,21 @@ void test_legal_edge_values_applied(void) {
     TEST_ASSERT_NOT_NULL(strstr(ack, "\"ok\":true"));
 }
 
+void test_bedtime_applies_evening_and_zero_rejects_daytime(void) {
+    char ack[256];
+    uint16_t v;
+    apply("{\"ver\":\"1\",\"bedtime\":2130}", ack, sizeof(ack));
+    nvs_config_get_bedtime(&v);
+    TEST_ASSERT_EQUAL_UINT16(2130, v);
+    apply("{\"ver\":\"2\",\"bedtime\":0}", ack, sizeof(ack));
+    nvs_config_get_bedtime(&v);
+    TEST_ASSERT_EQUAL_UINT16(0, v); /* disabled */
+    apply("{\"ver\":\"3\",\"bedtime\":900}", ack, sizeof(ack));
+    nvs_config_get_bedtime(&v);
+    TEST_ASSERT_EQUAL_UINT16(0, v); /* daytime rejected, value kept */
+    TEST_ASSERT_NOT_NULL(strstr(ack, "bedtime"));
+}
+
 void test_tone_enum_applied_by_option_string(void) {
     char ack[256];
     apply("{\"ver\":\"1\",\"tone_expiry\":\"Gran Vals\",\"tone_bed\":\"Classic beep\"}", ack, sizeof(ack));
@@ -322,6 +338,7 @@ int main(void) {
     RUN_TEST(test_numeric_ver_accepted);
     RUN_TEST(test_quiet_hhmm_out_of_range_minute_rejected);
     RUN_TEST(test_legal_edge_values_applied);
+    RUN_TEST(test_bedtime_applies_evening_and_zero_rejects_daytime);
     RUN_TEST(test_tone_enum_applied_by_option_string);
     RUN_TEST(test_tone_enum_unknown_or_nonstring_rejected);
     RUN_TEST(test_short_timers_array_disables_trailing_slots);

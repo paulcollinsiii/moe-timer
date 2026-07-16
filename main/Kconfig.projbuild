@@ -235,4 +235,18 @@ menu "MagTag Timer"
             Local time the status NeoPixels come back. 800 = 8:00 AM. A
             window with start > end wraps midnight.
 
+    config MAGTAG_BEDTIME_HHMM
+        int "Bed time (HHMM, 24h; 0 disables)"
+        default 2200
+        range 0 2359
+        help
+            From this local evening time until day rollover (midnight)
+            the device shows a non-dismissable Bed Time screen, disables
+            button wakes, and sleeps in ~2 h chunks waking only for NTP
+            sync and the rollover check. 0 disables the feature. Values
+            other than 0 must be 1800-2359 — anything else is treated as
+            the 2200 default at load (a daytime bedtime would lock the
+            device out for the whole day). Also editable from Home
+            Assistant, which is the only remote fix path while locked.
+
 endmenu

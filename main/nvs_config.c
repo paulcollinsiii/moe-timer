@@ -172,6 +172,13 @@ esp_err_t nvs_config_set_break_duration_min(uint16_t min) {
     return hal_nvs_write_u16(NVS_KEY_BREAK_DUR, min);
 }
 
+esp_err_t nvs_config_get_bedtime(uint16_t *out) {
+    return get_u16_with_default(NVS_KEY_BEDTIME, out, NVS_DEFAULT_BEDTIME);
+}
+esp_err_t nvs_config_set_bedtime(uint16_t hhmm) {
+    return hal_nvs_write_u16(NVS_KEY_BEDTIME, hhmm);
+}
+
 esp_err_t nvs_config_get_tone_expiry(uint16_t *out) {
     return get_u16_with_default(NVS_KEY_TONE_EXPIRY, out, NVS_DEFAULT_TONE_EXPIRY);
 }

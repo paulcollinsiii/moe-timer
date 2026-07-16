@@ -4,6 +4,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "bedtime.h" /* bedtime_hhmm_valid */
 #include "cJSON.h"
 #include "config_validate.h" /* config_is_iso_date */
 #include "nvs_config.h"
@@ -39,13 +40,14 @@ static void apply_u16(const cJSON *root, const char *field, int lo, int hi, esp_
     setter((uint16_t)item->valueint);
 }
 
-/* HHMM time-of-day field: real-time validity (hour<=23, minute<=59), not
-   a plain numeric range. Absent field = no-op. */
-static void apply_hhmm(const cJSON *root, const char *field, esp_err_t (*setter)(uint16_t), err_acc_t *e) {
+/* HHMM time-of-day field: real-time validity (hour<=23, minute<=59) via
+   the field's `valid` rule, not a plain numeric range. Absent = no-op. */
+static void apply_hhmm(const cJSON *root, const char *field, bool (*valid)(int), esp_err_t (*setter)(uint16_t),
+                       err_acc_t *e) {
     const cJSON *item = cJSON_GetObjectItemCaseSensitive(root, field);
     if (item == NULL)
         return;
-    if (!cJSON_IsNumber(item) || !quiet_hhmm_valid(item->valueint)) {
+    if (!cJSON_IsNumber(item) || !valid(item->valueint)) {
         err_add(e, field);
         return;
     }
@@ -203,8 +205,9 @@ config_result_t config_apply(const char *json, char *ack, size_t ack_len) {
     apply_u16(root, "weekend_min", CFG_BOUND_ALLOC_LO, CFG_BOUND_ALLOC_HI, nvs_config_set_weekend_min, &e);
     apply_u16(root, "holiday_min", CFG_BOUND_ALLOC_LO, CFG_BOUND_ALLOC_HI, nvs_config_set_holiday_min, &e);
     apply_u16(root, "summer_min", CFG_BOUND_ALLOC_LO, CFG_BOUND_ALLOC_HI, nvs_config_set_summer_min, &e);
-    apply_hhmm(root, "quiet_start", nvs_config_set_quiet_start, &e);
-    apply_hhmm(root, "quiet_end", nvs_config_set_quiet_end, &e);
+    apply_hhmm(root, "quiet_start", quiet_hhmm_valid, nvs_config_set_quiet_start, &e);
+    apply_hhmm(root, "quiet_end", quiet_hhmm_valid, nvs_config_set_quiet_end, &e);
+    apply_hhmm(root, "bedtime", bedtime_hhmm_valid, nvs_config_set_bedtime, &e);
     apply_u16(root, "break_interval_min", CFG_BOUND_BREAK_INT_LO, CFG_BOUND_BREAK_INT_HI,
               nvs_config_set_break_interval_min, &e);
     apply_u16(root, "break_duration_min", CFG_BOUND_BREAK_DUR_LO, CFG_BOUND_BREAK_DUR_HI,

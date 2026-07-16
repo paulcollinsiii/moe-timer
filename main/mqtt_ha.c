@@ -22,7 +22,7 @@
 static const char *TAG = "mqtt_ha";
 
 /* Bump when entities are added/renamed — discovery configs republish once. */
-#define DISC_SCHEMA_VER 10 /* v10: alert-tone select entities (expiry/break/bed) */
+#define DISC_SCHEMA_VER 11 /* v11: bedtime number entity */
 
 #define CONNECT_TIMEOUT_MS 5000
 #define PUBLISH_DRAIN_TIMEOUT_MS 3000

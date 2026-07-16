@@ -28,6 +28,7 @@
 #define NVS_KEY_CMD_ID "cmd_id"
 #define NVS_KEY_TIMER_DEFS "timer_defs"
 #define NVS_KEY_TIMER_SNAP "timer_snap"
+#define NVS_KEY_BEDTIME "bedtime"
 #define NVS_KEY_TONE_EXPIRY "tone_expiry"
 #define NVS_KEY_TONE_BREAK "tone_break"
 #define NVS_KEY_TONE_BED "tone_bed"

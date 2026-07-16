@@ -38,6 +38,7 @@ typedef struct {
     esp_err_t (*get_str)(char *, size_t);
     const char *const *options; /* CFG_ENUM: option strings */
     int n_options;
+    bool (*validate)(int); /* CFG_HHMM: overrides quiet_hhmm_valid */
 } cfg_field_t;
 
 typedef enum { HA_CFG_OK = 0, HA_CFG_REJECTED, HA_CFG_UNKNOWN } ha_cfg_result_t;

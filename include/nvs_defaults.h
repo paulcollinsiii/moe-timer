@@ -78,6 +78,12 @@
 #define NVS_DEFAULT_BREAK_INTERVAL_MIN 30
 #define NVS_DEFAULT_BREAK_DURATION_MIN 15
 #endif
+/* Bed Time lockout (0 = disabled, else 1800-2359; see bedtime.h). */
+#ifdef CONFIG_MAGTAG_BEDTIME_HHMM
+#define NVS_DEFAULT_BEDTIME CONFIG_MAGTAG_BEDTIME_HHMM
+#else
+#define NVS_DEFAULT_BEDTIME 2200
+#endif
 
 /* Alert tone selections (tone_id_t indices; HA select entities). No
    menuconfig for these — an enum index is opaque there; HA is the knob. */
