@@ -34,6 +34,7 @@ idf_component_register(
         "battery_policy.c"
         "neopixel.c"
         "quiet_hours.c"
+        "bedtime.c"
         "sleep_plan.c"
         "hal_time.c"
         "hal_nvs.c"
