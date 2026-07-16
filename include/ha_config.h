@@ -21,11 +21,12 @@ typedef enum {
     CFG_TNAME,   /* extra-timer name (text)   */
     CFG_TMIN,    /* extra-timer minutes (number) */
     CFG_TRELOAD, /* extra-timer reloadable (switch) */
+    CFG_ENUM,    /* option string stored as u16 index (select) */
 } cfg_kind_t;
 
 typedef struct {
     const char *key;       /* "weekday_min", "timer1_name", ... */
-    const char *component; /* "number" / "text" / "switch" */
+    const char *component; /* "number" / "text" / "switch" / "select" */
     const char *name;      /* HA display name */
     const char *unit;      /* number unit; NULL to omit */
     cfg_kind_t kind;
@@ -35,14 +36,17 @@ typedef struct {
     esp_err_t (*get_u16)(uint16_t *);
     esp_err_t (*set_str)(const char *);
     esp_err_t (*get_str)(char *, size_t);
+    const char *const *options; /* CFG_ENUM: option strings */
+    int n_options;
 } cfg_field_t;
 
 typedef enum { HA_CFG_OK = 0, HA_CFG_REJECTED, HA_CFG_UNKNOWN } ha_cfg_result_t;
 
 /* Buffer size the firmware must give ha_config_state_json: the whole field
-   registry serialized (worst case ~640 B with maxed strings) plus headroom.
-   Callers must check the return value against this before publishing. */
-#define HA_CONFIG_STATE_MAX 768
+   registry serialized (worst case ~750 B with maxed strings and the tone
+   option strings) plus headroom. Callers must check the return value
+   against this before publishing. */
+#define HA_CONFIG_STATE_MAX 1024
 
 const cfg_field_t *ha_config_fields(int *count);
 /* Validate `value` (a string from MQTT) for `key` and persist via the

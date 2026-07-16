@@ -50,6 +50,13 @@ esp_err_t nvs_config_get_break_interval_min(uint16_t *out);
 esp_err_t nvs_config_set_break_interval_min(uint16_t min);
 esp_err_t nvs_config_get_break_duration_min(uint16_t *out);
 esp_err_t nvs_config_set_break_duration_min(uint16_t min);
+/* Alert tone selections: tone_id_t indices (audio.c clamps on read). */
+esp_err_t nvs_config_get_tone_expiry(uint16_t *out);
+esp_err_t nvs_config_set_tone_expiry(uint16_t id);
+esp_err_t nvs_config_get_tone_break(uint16_t *out);
+esp_err_t nvs_config_set_tone_break(uint16_t id);
+esp_err_t nvs_config_get_tone_bed(uint16_t *out);
+esp_err_t nvs_config_set_tone_bed(uint16_t id);
 esp_err_t nvs_config_get_summer_start(char *buf, size_t len);
 esp_err_t nvs_config_set_summer_start(const char *date);
 esp_err_t nvs_config_get_school_start(char *buf, size_t len);

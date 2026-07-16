@@ -9,6 +9,7 @@
 #include "config_validate.h"
 #include "nvs_config.h"
 #include "quiet_hours.h"
+#include "tones.h"
 
 /* snprintf-append with truncation tracking; buffer stays NUL-terminated. */
 static int jcat(char *buf, size_t len, int pos, const char *fmt, ...) {
@@ -62,6 +63,12 @@ const char *ha_config_json_escape(char *tmp, size_t tmplen, const char *s) {
         .key = "timer" #n "_reload", .component = "switch", .name = "Timer " #n " reloadable", .kind = CFG_TRELOAD, \
         .slot = n                                                                                                   \
     }
+/* Alert-tone selects: option string in HA, stored as its u16 index. */
+#define TONE_SELECT(k, nm, set, get)                                                                   \
+    {                                                                                                  \
+        .key = k, .component = "select", .name = nm, .kind = CFG_ENUM, .set_u16 = set, .get_u16 = get, \
+        .options = tones_names, .n_options = TONE_COUNT                                                \
+    }
 
 /* The registry hardcodes extra-timer slots 1..4; if TIMER_EXTRA_SLOTS ever
    shrinks, defs[slot-1] in the state builder would read out of bounds. */
@@ -98,6 +105,9 @@ static const cfg_field_t FIELDS[] = {
     TIMER_NAME(4),
     TIMER_MIN(4),
     TIMER_RELOAD(4),
+    TONE_SELECT("tone_expiry", "Expiry tone", nvs_config_set_tone_expiry, nvs_config_get_tone_expiry),
+    TONE_SELECT("tone_break", "Break tone", nvs_config_set_tone_break, nvs_config_get_tone_break),
+    TONE_SELECT("tone_bed", "Bed time tone", nvs_config_set_tone_bed, nvs_config_get_tone_bed),
 };
 
 const cfg_field_t *ha_config_fields(int *count) {
@@ -225,6 +235,20 @@ ha_cfg_result_t ha_config_set(const char *key, const char *value, char *ack, siz
                 return reject(ack, ack_len, key, "nvs");
             break;
         }
+        case CFG_ENUM: {
+            int idx = -1;
+            for (int i = 0; value != NULL && i < f->n_options; i++) {
+                if (strcmp(value, f->options[i]) == 0) {
+                    idx = i;
+                    break;
+                }
+            }
+            if (idx < 0)
+                return reject(ack, ack_len, key, "option");
+            if (f->set_u16((uint16_t)idx) != ESP_OK)
+                return reject(ack, ack_len, key, "nvs");
+            break;
+        }
         default:
             return reject(ack, ack_len, key, "unsupported");
     }
@@ -259,6 +283,16 @@ int ha_config_state_json(char *buf, size_t len) {
             case CFG_TRELOAD:
                 pos = jcat(buf, len, pos, "\"%s\":\"%s\"", f->key, defs.defs[f->slot - 1].reload ? "ON" : "OFF");
                 break;
+            case CFG_ENUM: {
+                /* HA select state must be one of the options — clamp a
+                   stored index from a different firmware to option 0. */
+                uint16_t v = 0;
+                f->get_u16(&v);
+                if (v >= (uint16_t)f->n_options)
+                    v = 0;
+                pos = jcat(buf, len, pos, "\"%s\":\"%s\"", f->key, f->options[v]);
+                break;
+            }
             default: { /* CFG_U16 / CFG_HHMM */
                 uint16_t v = 0;
                 f->get_u16(&v);
@@ -301,6 +335,11 @@ int ha_config_discovery(char *buf, size_t len, const char *dev_id, const char *d
         pos = jcat(buf, len, pos, ",\"mode\":\"text\"");
     } else if (strcmp(f->component, "switch") == 0) {
         pos = jcat(buf, len, pos, ",\"pl_on\":\"ON\",\"pl_off\":\"OFF\",\"optimistic\":true");
+    } else if (strcmp(f->component, "select") == 0) {
+        pos = jcat(buf, len, pos, ",\"options\":[");
+        for (int i = 0; i < f->n_options; i++)
+            pos = jcat(buf, len, pos, "%s\"%s\"", i ? "," : "", f->options[i]);
+        pos = jcat(buf, len, pos, "],\"optimistic\":true");
     }
     pos = jcat(buf, len, pos, ",\"ent_cat\":\"config\"");
     pos = jcat(buf, len, pos,

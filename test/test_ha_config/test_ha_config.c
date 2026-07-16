@@ -8,6 +8,7 @@
 #include "../../main/nvs_config.c"
 #include "../../main/quiet_hours.c"
 #include "../../main/config_validate.c"
+#include "../../main/tones.c"
 #include "../../main/ha_config.c"
 // clang-format on
 
@@ -238,6 +239,55 @@ void test_discovery_topic(void) {
     TEST_ASSERT_EQUAL_STRING("homeassistant/number/magtag-a1b2c3_weekday_min/config", buf);
 }
 
+/* ---- alert-tone selects (CFG_ENUM) ---- */
+
+void test_set_tone_select_valid_option_persists(void) {
+    char ack[128];
+    TEST_ASSERT_EQUAL(HA_CFG_OK, ha_config_set("tone_expiry", "Gran Vals", ack, sizeof(ack)));
+    uint16_t v = 0;
+    nvs_config_get_tone_expiry(&v);
+    TEST_ASSERT_EQUAL_UINT16(TONE_GRANVALS, v);
+    TEST_ASSERT_NOT_NULL(strstr(ack, "\"ok\":true"));
+}
+
+void test_set_tone_select_rejects_unknown_and_wrong_case(void) {
+    char ack[128];
+    TEST_ASSERT_EQUAL(HA_CFG_REJECTED, ha_config_set("tone_break", "Kazoo", ack, sizeof(ack)));
+    TEST_ASSERT_EQUAL(HA_CFG_REJECTED, ha_config_set("tone_break", "gran vals", ack, sizeof(ack)));
+    uint16_t v = 0;
+    nvs_config_get_tone_break(&v);
+    TEST_ASSERT_EQUAL_UINT16(NVS_DEFAULT_TONE_BREAK, v); /* unchanged */
+    TEST_ASSERT_NOT_NULL(strstr(ack, "option"));
+}
+
+void test_state_json_emits_tone_option_strings(void) {
+    char buf[HA_CONFIG_STATE_MAX];
+    ha_config_state_json(buf, sizeof(buf)); /* defaults */
+    TEST_ASSERT_NOT_NULL(strstr(buf, "\"tone_expiry\":\"Marimba arpeggio\""));
+    TEST_ASSERT_NOT_NULL(strstr(buf, "\"tone_break\":\"Gentle chime\""));
+    TEST_ASSERT_NOT_NULL(strstr(buf, "\"tone_bed\":\"Gran Vals\""));
+}
+
+void test_state_json_clamps_out_of_range_tone_index(void) {
+    nvs_config_set_tone_expiry(999); /* e.g. stored by a future firmware */
+    char buf[HA_CONFIG_STATE_MAX];
+    ha_config_state_json(buf, sizeof(buf));
+    TEST_ASSERT_NOT_NULL(strstr(buf, "\"tone_expiry\":\"Classic beep\""));
+}
+
+void test_discovery_select_lists_options(void) {
+    const cfg_field_t *f = field_by_key("tone_bed");
+    TEST_ASSERT_NOT_NULL(f);
+    TEST_ASSERT_EQUAL_STRING("select", f->component);
+    char buf[700];
+    ha_config_discovery(buf, sizeof(buf), "magtag-a1b2c3", "K", "fw", f);
+    TEST_ASSERT_NOT_NULL(strstr(buf,
+                                "\"options\":[\"Classic beep\",\"Ding-ding\",\"Gentle chime\","
+                                "\"Marimba arpeggio\",\"Gran Vals\",\"Custom WAV\"]"));
+    TEST_ASSERT_NOT_NULL(strstr(buf, "\"optimistic\":true"));
+    TEST_ASSERT_NOT_NULL(strstr(buf, "\"cmd_t\":\"magtag/magtag-a1b2c3/set/tone_bed\""));
+}
+
 /* ---- Phase B: editable timer definitions (read-modify-write the blob) ---- */
 
 static void seed_blob(void) {
@@ -343,5 +393,10 @@ int main(void) {
     RUN_TEST(test_discovery_number_has_command_bounds_and_config_category);
     RUN_TEST(test_discovery_text_has_mode);
     RUN_TEST(test_discovery_topic);
+    RUN_TEST(test_set_tone_select_valid_option_persists);
+    RUN_TEST(test_set_tone_select_rejects_unknown_and_wrong_case);
+    RUN_TEST(test_state_json_emits_tone_option_strings);
+    RUN_TEST(test_state_json_clamps_out_of_range_tone_index);
+    RUN_TEST(test_discovery_select_lists_options);
     return UNITY_END();
 }
