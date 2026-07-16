@@ -250,3 +250,15 @@ void display_screens_build_charge_me(void) {
     lv_obj_t *scr = fresh_screen(false);
     make_label(scr, "Charge Me!", &lv_font_montserrat_48, LV_ALIGN_CENTER, 0, 0);
 }
+
+/* Bed Time lock: inverted like the break screen (night-appropriate and
+   unmistakably "not in service"); stays until day rollover. */
+void display_screens_build_bedtime(void) {
+    lv_obj_t *scr = fresh_screen(true);
+    make_label(scr, "Bed Time", &lv_font_montserrat_48, LV_ALIGN_TOP_MID, 0, 6);
+    /* One instruction split over two centered 16 pt lines — the single
+       line would overrun the 296 px panel. */
+    make_label(scr, "Brush teeth,", &lv_font_montserrat_16, LV_ALIGN_CENTER, 0, -4);
+    make_label(scr, "Get water bottles.", &lv_font_montserrat_16, LV_ALIGN_CENTER, 0, 16);
+    make_label(scr, "Goodnight!", &lv_font_montserrat_28, LV_ALIGN_BOTTOM_MID, 0, -6);
+}

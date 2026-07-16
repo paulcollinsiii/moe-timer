@@ -170,6 +170,12 @@ void test_sync_failed_screen(void) {
     assert_matches_golden("sync_failed");
 }
 
+void test_bedtime_screen(void) {
+    /* Bed Time lock: inverted, non-dismissable until day rollover */
+    display_screens_build_bedtime();
+    assert_matches_golden("bedtime");
+}
+
 int main(void) {
     lv_init();
     lv_tick_set_cb(tick_cb);
@@ -188,5 +194,6 @@ int main(void) {
     RUN_TEST(test_charge_me_screen);
     RUN_TEST(test_timesup_screen);
     RUN_TEST(test_sync_failed_screen);
+    RUN_TEST(test_bedtime_screen);
     return UNITY_END();
 }
