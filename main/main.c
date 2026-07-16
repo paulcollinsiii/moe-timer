@@ -577,7 +577,8 @@ static bool run_alert(const alert_pattern_t *p) {
     s_audio_done = false;
     buttons_take_pressed();                       /* drain: a press from BEFORE the alarm must not pre-dismiss it */
     neopixel_alert_pulse_begin(p->r, p->g, p->b); /* task + teardown owned by the module */
-    xTaskCreate(alert_audio_task, p->task_name, 2048, NULL, 5, NULL);
+    xTaskCreate(alert_audio_task, p->task_name, 3072, NULL, 5,
+                NULL); /* DAC write path is deeper than the old LEDC one */
     bool dismissed = false;
     for (int i = 0; i < p->max_poll_iters && !s_audio_done && !dismissed; i++) {
         dismissed = buttons_take_pressed() != 0 || buttons_scan_held() != 0;

@@ -79,6 +79,13 @@
 #define NVS_DEFAULT_BREAK_DURATION_MIN 15
 #endif
 
+/* Alert tone selections (tone_id_t indices; HA select entities). No
+   menuconfig for these — an enum index is opaque there; HA is the knob. */
+#include "tones.h"
+#define NVS_DEFAULT_TONE_EXPIRY TONE_MARIMBA
+#define NVS_DEFAULT_TONE_BREAK TONE_CHIME
+#define NVS_DEFAULT_TONE_BED TONE_GRANVALS
+
 /* Dublin City Schools (Grizzell MS) 2026-27 school year.
    Source: dublinschools.net 2026-27 school calendar. Update yearly. */
 #define NVS_DEFAULT_SUMMER_START "2026-05-29" /* ~day after the 2025-26 last day */
