@@ -10,6 +10,7 @@
 #include "../../main/nvs_config.c"
 #include "../../main/quiet_hours.c"
 #include "../../main/config_validate.c"
+#include "../../main/tones.c"
 #include "../../main/config_apply.c"
 // clang-format on
 
@@ -168,6 +169,29 @@ void test_legal_edge_values_applied(void) {
     TEST_ASSERT_NOT_NULL(strstr(ack, "\"ok\":true"));
 }
 
+void test_tone_enum_applied_by_option_string(void) {
+    char ack[256];
+    apply("{\"ver\":\"1\",\"tone_expiry\":\"Gran Vals\",\"tone_bed\":\"Classic beep\"}", ack, sizeof(ack));
+    uint16_t v;
+    nvs_config_get_tone_expiry(&v);
+    TEST_ASSERT_EQUAL_UINT16(TONE_GRANVALS, v);
+    nvs_config_get_tone_bed(&v);
+    TEST_ASSERT_EQUAL_UINT16(TONE_CLASSIC, v);
+    TEST_ASSERT_NOT_NULL(strstr(ack, "\"ok\":true"));
+}
+
+void test_tone_enum_unknown_or_nonstring_rejected(void) {
+    char ack[256];
+    apply("{\"ver\":\"1\",\"tone_break\":\"Kazoo\",\"tone_bed\":3}", ack, sizeof(ack));
+    uint16_t v;
+    nvs_config_get_tone_break(&v);
+    TEST_ASSERT_EQUAL_UINT16(NVS_DEFAULT_TONE_BREAK, v); /* unchanged */
+    nvs_config_get_tone_bed(&v);
+    TEST_ASSERT_EQUAL_UINT16(NVS_DEFAULT_TONE_BED, v);
+    TEST_ASSERT_NOT_NULL(strstr(ack, "tone_break"));
+    TEST_ASSERT_NOT_NULL(strstr(ack, "tone_bed"));
+}
+
 void test_short_timers_array_disables_trailing_slots(void) {
     char ack[256];
     apply("{\"ver\":\"1\",\"timers\":[{\"name\":\"Piano\",\"min\":15}]}", ack, sizeof(ack));
@@ -298,6 +322,8 @@ int main(void) {
     RUN_TEST(test_numeric_ver_accepted);
     RUN_TEST(test_quiet_hhmm_out_of_range_minute_rejected);
     RUN_TEST(test_legal_edge_values_applied);
+    RUN_TEST(test_tone_enum_applied_by_option_string);
+    RUN_TEST(test_tone_enum_unknown_or_nonstring_rejected);
     RUN_TEST(test_short_timers_array_disables_trailing_slots);
     RUN_TEST(test_timers_wrong_type_rejected);
     RUN_TEST(test_holidays_non_string_element_rejected_keeps_good);

@@ -9,6 +9,7 @@
 #include "nvs_config.h"
 #include "quiet_hours.h" /* quiet_hhmm_valid */
 #include "timer.h"       /* TIMER_EXTRA_SLOTS */
+#include "tones.h"       /* tones_names for the tone selects */
 
 /* ---- error accumulator: builds the ack "errors" list ---- */
 
@@ -60,6 +61,24 @@ static void apply_date(const cJSON *root, const char *field, esp_err_t (*setter)
         return;
     }
     setter(item->valuestring);
+}
+
+/* Enum-as-option-string field (mirrors the HA select): the string must
+   match one of `options` exactly; stored as its index. Absent = no-op. */
+static void apply_enum(const cJSON *root, const char *field, const char *const *options, int n_options,
+                       esp_err_t (*setter)(uint16_t), err_acc_t *e) {
+    const cJSON *item = cJSON_GetObjectItemCaseSensitive(root, field);
+    if (item == NULL)
+        return;
+    if (cJSON_IsString(item)) {
+        for (int i = 0; i < n_options; i++) {
+            if (strcmp(item->valuestring, options[i]) == 0) {
+                setter((uint16_t)i);
+                return;
+            }
+        }
+    }
+    err_add(e, field);
 }
 
 static void apply_str(const cJSON *root, const char *field, size_t maxlen, esp_err_t (*setter)(const char *),
@@ -190,6 +209,9 @@ config_result_t config_apply(const char *json, char *ack, size_t ack_len) {
               nvs_config_set_break_interval_min, &e);
     apply_u16(root, "break_duration_min", CFG_BOUND_BREAK_DUR_LO, CFG_BOUND_BREAK_DUR_HI,
               nvs_config_set_break_duration_min, &e);
+    apply_enum(root, "tone_expiry", tones_names, TONE_COUNT, nvs_config_set_tone_expiry, &e);
+    apply_enum(root, "tone_break", tones_names, TONE_COUNT, nvs_config_set_tone_break, &e);
+    apply_enum(root, "tone_bed", tones_names, TONE_COUNT, nvs_config_set_tone_bed, &e);
     apply_date(root, "summer_start", nvs_config_set_summer_start, &e);
     apply_date(root, "school_start", nvs_config_set_school_start, &e);
     apply_date(root, "school_end", nvs_config_set_school_end, &e);
