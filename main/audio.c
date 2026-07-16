@@ -189,13 +189,7 @@ static bool play_wav(int volume_pct) {
     return true;
 }
 
-void audio_play_tone(int tone_id, int cycles) {
-    /* HA-configurable volume, one NVS read per alert (not per cycle). */
-    uint16_t volume = NVS_DEFAULT_ALERT_VOLUME;
-    (void)nvs_config_get_alert_volume(&volume);
-    if (volume > TONES_VOLUME_MAX)
-        volume = TONES_VOLUME_MAX; /* stored by a future/older firmware */
-
+static void play_tone_at(int tone_id, int cycles, int volume) {
     s_stop_requested = false;
     audio_init();
     gpio_set_level(AMP_ENABLE_GPIO, 1);
@@ -215,6 +209,15 @@ void audio_play_tone(int tone_id, int cycles) {
     dac_drain();
     gpio_set_level(AMP_ENABLE_GPIO, 0);
     dac_teardown();
+}
+
+void audio_play_tone(int tone_id, int cycles) {
+    /* HA-configurable volume, one NVS read per alert (not per cycle). */
+    uint16_t volume = NVS_DEFAULT_ALERT_VOLUME;
+    (void)nvs_config_get_alert_volume(&volume);
+    if (volume > TONES_VOLUME_MAX)
+        volume = TONES_VOLUME_MAX; /* stored by a future/older firmware */
+    play_tone_at(tone_id, cycles, volume);
 }
 
 /* Per-alert tone from NVS (HA select); clamp shields against a stored
@@ -241,6 +244,12 @@ void audio_break_over_chime(void) {
     /* "Your timer changed" chirp: fixed Ding-ding so it stays distinct
        from whatever the configurable alarms are set to. */
     audio_play_tone(TONE_DING, 1);
+}
+
+void audio_locate_alarm(void) {
+    /* Find-my-timer: the point is to be FOUND — classic square-ish beeps
+       at the volume ceiling, ignoring the configured volume (even mute). */
+    play_tone_at(TONE_CLASSIC, CONFIG_MAGTAG_EXPIRY_ALARM_CYCLES, TONES_VOLUME_MAX);
 }
 
 void audio_stop(void) {

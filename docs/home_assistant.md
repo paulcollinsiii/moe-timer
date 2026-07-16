@@ -231,7 +231,9 @@ then 20 grants 20 total (not 35); lowering it never reclaims granted time.
 
 Toggle it **on**; on its next window the device beeps with a red pulse
 until a button is pressed or ~10 minutes pass, then the switch returns to
-off by itself. (Charge-locked devices don't open windows, so locate won't
+off by itself. Locate always uses the classic square-wave beeps at
+maximum volume — it ignores the configured alert tone and Alert volume
+(including mute), because its whole job is being found. (Charge-locked devices don't open windows, so locate won't
 reach a dead device — check the charge-lock sensor first.)
 
 ### Raw command topic (power users / per-timer grants)

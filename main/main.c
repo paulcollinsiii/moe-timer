@@ -636,12 +636,13 @@ static const alert_pattern_t ALERT_BREAK = {
 };
 
 /* Locate: red, one beep sequence per run_alert call — looped by the
-   caller until dismissed or timed out. */
+   caller until dismissed or timed out. Classic beeps at max volume
+   regardless of the configured tone/volume: it exists to be found. */
 static const alert_pattern_t ALERT_LOCATE = {
     .r = 248,
     .g = 0,
     .b = 0,
-    .audio_fn = audio_beep_sequence,
+    .audio_fn = audio_locate_alarm,
     .max_poll_iters = 40,
     .task_name = "locate",
     .dismiss_log = "Locate dismissed by button",
