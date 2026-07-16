@@ -27,11 +27,14 @@ idf_component_register(
         "button_actions.c"
         "button_latch.c"
         "audio.c"
+        "tones.c"
+        "wav_header.c"
         "battery.c"
         "battery_soc.c"
         "battery_policy.c"
         "neopixel.c"
         "quiet_hours.c"
+        "bedtime.c"
         "sleep_plan.c"
         "hal_time.c"
         "hal_nvs.c"
@@ -46,8 +49,9 @@ idf_component_register(
         esp_event
         esp_timer
         esp_driver_gpio
-        esp_driver_ledc
+        esp_driver_dac
         esp_driver_rmt
+        esp_partition
         esp_adc
         log
         esp-tls

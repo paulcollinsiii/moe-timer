@@ -4,7 +4,16 @@
 wake_render_t wake_policy_render(timer_state_t before, timer_state_t after, bool button_wake) {
     if (after == TIMER_EXPIRED && before != TIMER_EXPIRED)
         return WAKE_RENDER_EXPIRY_ALERT;
-    if (button_wake || after != before)
+    if (button_wake) {
+        /* Buttons ride the partial cadence for snappy feedback, except
+           across the break screen: that layout is a full-screen inversion
+           of the main one, and a partial diff across it would ghost the
+           whole panel. */
+        if ((before == TIMER_BREAK) != (after == TIMER_BREAK))
+            return WAKE_RENDER_FULL;
+        return WAKE_RENDER_PARTIAL;
+    }
+    if (after != before)
         return WAKE_RENDER_FULL;
     return WAKE_RENDER_PARTIAL;
 }

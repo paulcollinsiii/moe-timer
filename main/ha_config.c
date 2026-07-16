@@ -6,9 +6,11 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "bedtime.h"
 #include "config_validate.h"
 #include "nvs_config.h"
 #include "quiet_hours.h"
+#include "tones.h"
 
 /* snprintf-append with truncation tracking; buffer stays NUL-terminated. */
 static int jcat(char *buf, size_t len, int pos, const char *fmt, ...) {
@@ -47,6 +49,14 @@ const char *ha_config_json_escape(char *tmp, size_t tmplen, const char *s) {
         .key = k, .component = "number", .name = nm, .kind = CFG_HHMM, .lo = 0, .hi = 2359, .step = 1, .set_u16 = set, \
         .get_u16 = get                                                                                                 \
     }
+/* HHMM with a field-specific validity rule (advertised bounds stay
+   0-2359; the device is the gatekeeper and the cfg republish corrects
+   an optimistic HA edit that was rejected). */
+#define NUM_HHMM_V(k, nm, set, get, val)                                                                               \
+    {                                                                                                                  \
+        .key = k, .component = "number", .name = nm, .kind = CFG_HHMM, .lo = 0, .hi = 2359, .step = 1, .set_u16 = set, \
+        .get_u16 = get, .validate = val                                                                                \
+    }
 #define TEXT(k, nm, maxlen, set, get) \
     { .key = k, .component = "text", .name = nm, .kind = CFG_STR, .hi = maxlen, .set_str = set, .get_str = get }
 /* Extra-timer slot fields — read-modify-write the timer_defs blob by slot. */
@@ -61,6 +71,12 @@ const char *ha_config_json_escape(char *tmp, size_t tmplen, const char *s) {
     {                                                                                                               \
         .key = "timer" #n "_reload", .component = "switch", .name = "Timer " #n " reloadable", .kind = CFG_TRELOAD, \
         .slot = n                                                                                                   \
+    }
+/* Alert-tone selects: option string in HA, stored as its u16 index. */
+#define TONE_SELECT(k, nm, set, get)                                                                   \
+    {                                                                                                  \
+        .key = k, .component = "select", .name = nm, .kind = CFG_ENUM, .set_u16 = set, .get_u16 = get, \
+        .options = tones_names, .n_options = TONE_COUNT                                                \
     }
 
 /* The registry hardcodes extra-timer slots 1..4; if TIMER_EXTRA_SLOTS ever
@@ -80,6 +96,7 @@ static const cfg_field_t FIELDS[] = {
             nvs_config_set_summer_min, nvs_config_get_summer_min),
     NUM_HHMM("quiet_start", "Quiet hours start (HHMM)", nvs_config_set_quiet_start, nvs_config_get_quiet_start),
     NUM_HHMM("quiet_end", "Quiet hours end (HHMM)", nvs_config_set_quiet_end, nvs_config_get_quiet_end),
+    NUM_HHMM_V("bedtime", "Bed time (HHMM, 0=off)", nvs_config_set_bedtime, nvs_config_get_bedtime, bedtime_hhmm_valid),
     NUM_U16("break_interval_min", "Break interval", "min", CFG_BOUND_BREAK_INT_LO, CFG_BOUND_BREAK_INT_HI, 1,
             nvs_config_set_break_interval_min, nvs_config_get_break_interval_min),
     NUM_U16("break_duration_min", "Break duration", "min", CFG_BOUND_BREAK_DUR_LO, CFG_BOUND_BREAK_DUR_HI, 1,
@@ -98,6 +115,12 @@ static const cfg_field_t FIELDS[] = {
     TIMER_NAME(4),
     TIMER_MIN(4),
     TIMER_RELOAD(4),
+    TONE_SELECT("tone_expiry", "Expiry tone", nvs_config_set_tone_expiry, nvs_config_get_tone_expiry),
+    TONE_SELECT("tone_break", "Break tone", nvs_config_set_tone_break, nvs_config_get_tone_break),
+    TONE_SELECT("tone_bed", "Bed time tone", nvs_config_set_tone_bed, nvs_config_get_tone_bed),
+    /* >100% applies clipping gain in the renderer — louder, harsher. */
+    NUM_U16("alert_volume", "Alert volume", "%", 0, TONES_VOLUME_MAX, 1, nvs_config_set_alert_volume,
+            nvs_config_get_alert_volume),
 };
 
 const cfg_field_t *ha_config_fields(int *count) {
@@ -175,7 +198,7 @@ ha_cfg_result_t ha_config_set(const char *key, const char *value, char *ack, siz
             long v;
             if (!parse_int(value, &v))
                 return reject(ack, ack_len, key, "nan");
-            if (!quiet_hhmm_valid((int)v))
+            if (f->validate != NULL ? !f->validate((int)v) : !quiet_hhmm_valid((int)v))
                 return reject(ack, ack_len, key, "time");
             if (f->set_u16((uint16_t)v) != ESP_OK)
                 return reject(ack, ack_len, key, "nvs");
@@ -225,6 +248,20 @@ ha_cfg_result_t ha_config_set(const char *key, const char *value, char *ack, siz
                 return reject(ack, ack_len, key, "nvs");
             break;
         }
+        case CFG_ENUM: {
+            int idx = -1;
+            for (int i = 0; value != NULL && i < f->n_options; i++) {
+                if (strcmp(value, f->options[i]) == 0) {
+                    idx = i;
+                    break;
+                }
+            }
+            if (idx < 0)
+                return reject(ack, ack_len, key, "option");
+            if (f->set_u16((uint16_t)idx) != ESP_OK)
+                return reject(ack, ack_len, key, "nvs");
+            break;
+        }
         default:
             return reject(ack, ack_len, key, "unsupported");
     }
@@ -259,6 +296,16 @@ int ha_config_state_json(char *buf, size_t len) {
             case CFG_TRELOAD:
                 pos = jcat(buf, len, pos, "\"%s\":\"%s\"", f->key, defs.defs[f->slot - 1].reload ? "ON" : "OFF");
                 break;
+            case CFG_ENUM: {
+                /* HA select state must be one of the options — clamp a
+                   stored index from a different firmware to option 0. */
+                uint16_t v = 0;
+                f->get_u16(&v);
+                if (v >= (uint16_t)f->n_options)
+                    v = 0;
+                pos = jcat(buf, len, pos, "\"%s\":\"%s\"", f->key, f->options[v]);
+                break;
+            }
             default: { /* CFG_U16 / CFG_HHMM */
                 uint16_t v = 0;
                 f->get_u16(&v);
@@ -301,6 +348,11 @@ int ha_config_discovery(char *buf, size_t len, const char *dev_id, const char *d
         pos = jcat(buf, len, pos, ",\"mode\":\"text\"");
     } else if (strcmp(f->component, "switch") == 0) {
         pos = jcat(buf, len, pos, ",\"pl_on\":\"ON\",\"pl_off\":\"OFF\",\"optimistic\":true");
+    } else if (strcmp(f->component, "select") == 0) {
+        pos = jcat(buf, len, pos, ",\"options\":[");
+        for (int i = 0; i < f->n_options; i++)
+            pos = jcat(buf, len, pos, "%s\"%s\"", i ? "," : "", f->options[i]);
+        pos = jcat(buf, len, pos, "],\"optimistic\":true");
     }
     pos = jcat(buf, len, pos, ",\"ent_cat\":\"config\"");
     pos = jcat(buf, len, pos,

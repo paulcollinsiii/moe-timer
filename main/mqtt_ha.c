@@ -22,8 +22,7 @@
 static const char *TAG = "mqtt_ha";
 
 /* Bump when entities are added/renamed — discovery configs republish once. */
-#define DISC_SCHEMA_VER \
-    9 /* v9: per-slot remaining/limit sensors; active-scoped remaining/allocation + screen_used retired */
+#define DISC_SCHEMA_VER 12 /* v12: alert-volume number entity */
 
 #define CONNECT_TIMEOUT_MS 5000
 #define PUBLISH_DRAIN_TIMEOUT_MS 3000
@@ -37,7 +36,7 @@ static volatile int s_pub_acks;
 
 #define CONFIG_BUF_MAX 1024
 #define CMD_BUF_MAX 256
-/* 22 registry fields + screen_bonus + locate = 24 distinct keys; headroom
+/* 25 registry fields + screen_bonus + locate = 27 distinct keys; headroom
    so a duplicate (retained + a fresh in-window edit) can't silently drop. */
 #define SET_MAX 32
 

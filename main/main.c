@@ -5,6 +5,7 @@
 #include "audio.h"
 #include "battery.h"
 #include "battery_policy.h"
+#include "bedtime.h"
 #include "button_actions.h"
 #include "buttons.h"
 #include "display.h"
@@ -85,6 +86,15 @@ static RTC_DATA_ATTR int64_t s_sleep_entry_time;
 static RTC_DATA_ATTR bool s_charge_locked;
 static bool s_charge_lock_released; /* recovery wake: repaint over Charge Me! */
 #define CHARGE_LOCK_SLEEP_SEC 600
+
+/* Bed Time lock (config HHMM .. day rollover): Bed Time screen painted
+   once, buttons stay dark, and the device sleeps ~2 h chunks waking only
+   for NTP + the rollover check. RTC-only on purpose: the gate recomputes
+   from wall-clock time on every boot, so a hard reset cannot unlock the
+   night - it merely replays the engage (paint + alert) once. */
+static RTC_DATA_ATTR bool s_bedtime_locked;
+static bool s_bedtime_released; /* morning/config release: repaint over Bed Time */
+#define BEDTIME_SLEEP_SEC 7200
 
 /* Persist the timer to NVS so a panic/reset (which wipes RTC memory)
    cannot refund the day's allocation. Write only on change — snapshot
@@ -174,6 +184,15 @@ static void enter_deep_sleep(void) {
     if (s_charge_locked) {
         esp_sleep_enable_timer_wakeup((uint64_t)CHARGE_LOCK_SLEEP_SEC * 1000000ULL);
         ESP_LOGI(TAG, "Entering deep sleep (charge lock, %d s)", CHARGE_LOCK_SLEEP_SEC);
+        esp_deep_sleep_start();
+    }
+
+    /* Bed-time locked (charge lock above wins by ordering): buttons stay
+       dark until day rollover; fixed ~2 h wakes only re-sync the clock
+       and re-check the gate. */
+    if (s_bedtime_locked) {
+        esp_sleep_enable_timer_wakeup((uint64_t)BEDTIME_SLEEP_SEC * 1000000ULL);
+        ESP_LOGI(TAG, "Entering deep sleep (bed time, %d s)", BEDTIME_SLEEP_SEC);
         esp_deep_sleep_start();
     }
 
@@ -577,7 +596,8 @@ static bool run_alert(const alert_pattern_t *p) {
     s_audio_done = false;
     buttons_take_pressed();                       /* drain: a press from BEFORE the alarm must not pre-dismiss it */
     neopixel_alert_pulse_begin(p->r, p->g, p->b); /* task + teardown owned by the module */
-    xTaskCreate(alert_audio_task, p->task_name, 2048, NULL, 5, NULL);
+    xTaskCreate(alert_audio_task, p->task_name, 3072, NULL, 5,
+                NULL); /* DAC write path is deeper than the old LEDC one */
     bool dismissed = false;
     for (int i = 0; i < p->max_poll_iters && !s_audio_done && !dismissed; i++) {
         dismissed = buttons_take_pressed() != 0 || buttons_scan_held() != 0;
@@ -616,16 +636,108 @@ static const alert_pattern_t ALERT_BREAK = {
 };
 
 /* Locate: red, one beep sequence per run_alert call — looped by the
-   caller until dismissed or timed out. */
+   caller until dismissed or timed out. Classic beeps at max volume
+   regardless of the configured tone/volume: it exists to be found. */
 static const alert_pattern_t ALERT_LOCATE = {
     .r = 248,
     .g = 0,
     .b = 0,
-    .audio_fn = audio_beep_sequence,
+    .audio_fn = audio_locate_alarm,
     .max_poll_iters = 40,
     .task_name = "locate",
     .dismiss_log = "Locate dismissed by button",
 };
+
+/* Bed time: purple, break-alarm length; only fires when the crossing
+   interrupts a RUNNING timer or an in-progress BREAK. A button press
+   silences the audio - the lock itself has nothing to dismiss (buttons
+   are not wake sources afterwards). */
+static const alert_pattern_t ALERT_BEDTIME = {
+    .r = 120,
+    .g = 0,
+    .b = 200,
+    .audio_fn = audio_bedtime_alarm,
+    .max_poll_iters = CONFIG_MAGTAG_BREAK_ALARM_CYCLES * 50 + 10,
+    .task_name = "bed_alarm",
+    .dismiss_log = "Bed time alarm silenced by button",
+};
+
+/* ---- bed time ----------------------------------------------------------- */
+
+static int minutes_of_day(time_t t) {
+    struct tm tm;
+    localtime_r(&t, &tm);
+    return tm.tm_hour * 60 + tm.tm_min;
+}
+
+/* Wake-scoped config cache (quiet-hours pattern); reset after a net
+   window so an HA edit applies within the same wake. An invalid stored
+   value falls back to the compile-time default rather than daytime-
+   locking the device. */
+static bool s_bedtime_cfg_loaded;
+static uint16_t s_bedtime_cfg;
+
+static int bedtime_cfg_minutes(void) {
+    if (!s_bedtime_cfg_loaded) {
+        s_bedtime_cfg = NVS_DEFAULT_BEDTIME;
+        nvs_config_get_bedtime(&s_bedtime_cfg);
+        s_bedtime_cfg_loaded = true;
+    }
+    int m = bedtime_minutes((int)s_bedtime_cfg);
+    if (m < 0 && s_bedtime_cfg != 0) {
+        m = bedtime_minutes(NVS_DEFAULT_BEDTIME);
+    }
+    return m;
+}
+
+/* Lock onto the Bed Time screen and sleep - does not return. The timer
+   is paused, never expired: day rollover resets the slots overnight, so
+   expiring would only skew the daily-summary stats. */
+static void bedtime_engage(time_t now, bool alert) {
+    s_bedtime_locked = true;
+    ESP_LOGW(TAG, "Bed time engaged (state %d%s)", (int)timer_get_state(), alert ? ", alerting" : "");
+    if (timer_get_state() == TIMER_RUNNING) {
+        timer_pause(now);
+    }
+    save_timer_snapshot();
+    display_bedtime(); /* one full refresh; later wakes leave the panel alone */
+    if (alert) {
+        run_alert(&ALERT_BEDTIME);
+    }
+    /* Best-effort HA stat before the long no-button sleeps begin. */
+    try_net_window();
+    enter_deep_sleep(); /* lock-aware: ~2 h interval, no button wake */
+}
+
+/* Gate, modeled on check_charge_lock: called from both wake handlers
+   right after day rollover (rollover-first ordering is what clears the
+   lock on the new day). May not return. */
+static void check_bedtime(time_t now) {
+    if (!bedtime_active(minutes_of_day(now), bedtime_cfg_minutes())) {
+        if (s_bedtime_locked) {
+            s_bedtime_locked = false;
+            s_bedtime_released = true; /* repaint over the Bed Time screen */
+            ESP_LOGW(TAG, "Bed time released");
+        }
+        return;
+    }
+    if (!s_bedtime_locked) {
+        bedtime_engage(now, bedtime_should_alert(timer_get_state())); /* no return */
+    }
+    /* Locked re-wake (~2 h cadence): NTP + HA config pickup only, no
+       repaint (e-ink retains). Re-check after the window - a bedtime
+       edit landing here is the only remote fix path while buttons are
+       dead, and it must not wait another 2 h. */
+    try_net_window();
+    s_bedtime_cfg_loaded = false;
+    if (!bedtime_active(minutes_of_day(time(NULL)), bedtime_cfg_minutes())) {
+        s_bedtime_locked = false;
+        s_bedtime_released = true;
+        ESP_LOGW(TAG, "Bed time released (config edit or clock step)");
+        return; /* fall through to the normal wake, which repaints */
+    }
+    enter_deep_sleep();
+}
 
 /* Returns true when a break was started (caller should go straight to
    sleep). Persists BREAK before the alarm, same rationale as the EXPIRED
@@ -638,6 +750,14 @@ static bool maybe_start_break(time_t now) {
         return false;
     if (!timer_break_due(now, (int32_t)interval_min * 60))
         return false;
+    /* A break that would still be running at bedtime is pointless - the
+       device would lock mid-break. Skip it and go straight to Bed Time,
+       audibly (this is the one alerting path that starts before the
+       threshold itself is reached). */
+    if (bedtime_break_would_cross(minutes_of_day(now), (int)duration_min, bedtime_cfg_minutes())) {
+        ESP_LOGW(TAG, "Screen break due but would cross bed time");
+        bedtime_engage(now, true); /* no return */
+    }
     ESP_LOGI(TAG, "Screen break due (accum %ld s)", (long)timer_run_accum(now));
     timer_start_break(now, (int32_t)duration_min * 60);
     save_timer_snapshot();
@@ -884,6 +1004,8 @@ static void maybe_wait_for_event(void) {
 static void handle_timer_tick(void) {
     time_t now = time(NULL);
     handle_day_rollover(&now);
+    check_bedtime(now); /* may not return; before the sync block so a
+                           locked re-wake runs exactly one net window */
 
     if (wake_policy_sync_due(timer_get_state(), timer_needs_ntp_sync(now), now, timer_last_ntp_sync(),
                              IDLE_SYNC_INTERVAL_SEC)) {
@@ -938,8 +1060,8 @@ static void handle_timer_tick(void) {
     }
 
     wake_render_t wr = wake_policy_render(before, timer_get_state(), false);
-    if (s_charge_lock_released && wr == WAKE_RENDER_PARTIAL) {
-        wr = WAKE_RENDER_FULL; /* the panel still shows Charge Me! — repaint fully */
+    if ((s_charge_lock_released || s_bedtime_released) && wr == WAKE_RENDER_PARTIAL) {
+        wr = WAKE_RENDER_FULL; /* the panel still shows a lock screen — repaint fully */
     }
     switch (wr) {
         case WAKE_RENDER_EXPIRY_ALERT:
@@ -974,6 +1096,10 @@ static void handle_button_wake(void) {
 
     time_t now = time(NULL);
     handle_day_rollover(&now);
+    /* IDLE overnight: the threshold crossing may first be observed on a
+       button press (idle wakes are up to an hour apart). The press is
+       swallowed and the transition is silent per the alert rules. */
+    check_bedtime(now); /* may not return */
     timer_state_t before = timer_get_state();
 
     switch (btn) {
@@ -1063,14 +1189,23 @@ static void handle_button_wake(void) {
         audio_break_over_chime(); /* break over — ready to resume */
     }
 
-    if (wake_policy_render(before, timer_get_state(), true) == WAKE_RENDER_EXPIRY_ALERT) {
+    /* Button D is the user-facing "refresh everything" button — it always
+       gets a real full refresh regardless of the render policy. */
+    bool force_full = (btn == BTN_D);
+    wake_render_t bwr = wake_policy_render(before, timer_get_state(), true);
+    if (bwr == WAKE_RENDER_EXPIRY_ALERT) {
         fire_expiry_alert(); /* alert owns the NeoPixels (red pulse) */
     } else {
         /* Includes EXPIRED: any button returns the display to the main
-           layout (empty bar, TIME'S UP state) via a full refresh. */
-        ESP_LOGI(TAG, "button %d: state %d -> %d, full refresh", (int)btn, (int)before, (int)timer_get_state());
+           layout (empty bar, TIME'S UP state). */
+        ESP_LOGI(TAG, "button %d: state %d -> %d, %s refresh", (int)btn, (int)before, (int)timer_get_state(),
+                 (force_full || bwr == WAKE_RENDER_FULL) ? "full" : "partial");
         neopixel_show_timer_state(); /* resulting state, lit until sleep */
-        display_full_refresh(&st);   /* button wakes always full-refresh */
+        if (force_full || bwr == WAKE_RENDER_FULL) {
+            display_full_refresh(&st);
+        } else {
+            display_update(&st); /* partial cadence: every Nth is promoted */
+        }
     }
 
     /* Paint done: release the MQTT phase (display refresh current and
@@ -1085,12 +1220,17 @@ static void handle_button_wake(void) {
     if (nf != NET_FINISH_ALERTED && (nf == NET_FINISH_CHANGED || timer_get_state() != painted)) {
         time_t rnow = time(NULL);
         int32_t rrem = timer_tick(rnow);
-        if (wake_policy_render(painted, timer_get_state(), true) == WAKE_RENDER_EXPIRY_ALERT) {
+        wake_render_t rwr = wake_policy_render(painted, timer_get_state(), true);
+        if (rwr == WAKE_RENDER_EXPIRY_ALERT) {
             fire_expiry_alert();
         } else {
             display_state_t rst = make_state(rrem, rnow);
             neopixel_show_timer_state();
-            display_full_refresh(&rst);
+            if (force_full || rwr == WAKE_RENDER_FULL) {
+                display_full_refresh(&rst);
+            } else {
+                display_update(&rst);
+            }
         }
     }
     maybe_wait_for_event();

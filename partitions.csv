@@ -1,0 +1,17 @@
+# MagTag timer partition table (4 MB flash).
+#
+# nvs / phy_init / first-app offsets are identical to the stock
+# partitions_singleapp_large.csv this project used before, so reflashing
+# over an in-service device preserves its NVS (WiFi/MQTT creds, config).
+# ota_0 sits at the old factory offset; with otadata erased the bootloader
+# boots ota_0, so behavior is unchanged until OTA plumbing ever lands.
+# assets is a raw data partition (custom type 0x40) holding the optional
+# user-supplied alert WAV — see tools/flash_assets.sh.
+#
+# Name,     Type, SubType, Offset,   Size
+nvs,        data, nvs,     0x9000,   0x6000
+phy_init,   data, phy,     0xf000,   0x1000
+ota_0,      app,  ota_0,   0x10000,  0x180000
+ota_1,      app,  ota_1,   0x190000, 0x180000
+otadata,    data, ota,     0x310000, 0x2000
+assets,     data, 0x40,    0x312000, 0xEE000

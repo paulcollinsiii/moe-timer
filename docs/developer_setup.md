@@ -102,6 +102,21 @@ Console-over-native-USB caveats (inherent, not bugs):
 
 See [hardware_smoke_test.md](hardware_smoke_test.md) for the on-device validation checklist.
 
+### Custom alert WAV (assets partition)
+
+The partition table reserves a raw 952 KB `assets` partition for an optional
+alert sound, selectable in Home Assistant as the "Custom WAV" tone. The file
+must be 16-bit mono PCM WAV at 8–22.05 kHz (952 KB ≈ 30 s at 16 kHz):
+
+```bash
+source ~/esp/esp-idf/export.sh
+tools/flash_assets.sh -p /dev/ttyACM0 path/to/tone.wav   # write
+tools/flash_assets.sh -p /dev/ttyACM0 --erase            # wipe (falls back to chime)
+```
+
+An empty or invalid partition is harmless — the firmware plays the Gentle
+chime instead.
+
 ---
 
 ## USB Device Access

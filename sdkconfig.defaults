@@ -24,10 +24,19 @@ CONFIG_ESP_SYSTEM_PANIC_REBOOT_DELAY_SECONDS=3
 # in mqtt_ha.c, not on this stack.)
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=7168
 
-# 4 MB flash; app (~1.2 MB with LVGL + WiFi) needs the large 1.5 MB
-# single-app partition instead of the 1 MB default.
+# 4 MB flash; custom table: two 1.5 MB OTA app slots (OTA plumbing is
+# future work — empty otadata boots ota_0, which sits at the old factory
+# offset) + a raw 952 KB "assets" partition for the alert WAV. nvs/phy
+# offsets match the previous SINGLE_APP_LARGE layout so reflashing keeps
+# device config.
 CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
-CONFIG_PARTITION_TABLE_SINGLE_APP_LARGE=y
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+
+# MagTag 2025 revision carries 2 MB PSRAM; auto-detect, and keep booting
+# on older PSRAM-less boards instead of aborting.
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_IGNORE_NOTFOUND=y
 
 # Button B manual reset enabled (parent-testing build). Set =n for a
 # production build where only day rollover refills the allocation.
@@ -62,6 +71,7 @@ CONFIG_MAGTAG_STATUS_LED_BRIGHTNESS=100
 # Larger font for the inverted break-screen footer (12 pt renders poorly
 # white-on-black on e-ink)
 CONFIG_LV_FONT_MONTSERRAT_16=y
+CONFIG_LV_FONT_MONTSERRAT_18=y
 
 # LVGL: 1-bit rendering for the e-paper panel
 CONFIG_LV_COLOR_DEPTH_1=y

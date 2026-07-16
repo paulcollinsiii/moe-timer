@@ -78,6 +78,28 @@
 #define NVS_DEFAULT_BREAK_INTERVAL_MIN 30
 #define NVS_DEFAULT_BREAK_DURATION_MIN 15
 #endif
+/* Bed Time lockout (0 = disabled, else 1800-2359; see bedtime.h). */
+#ifdef CONFIG_MAGTAG_BEDTIME_HHMM
+#define NVS_DEFAULT_BEDTIME CONFIG_MAGTAG_BEDTIME_HHMM
+#else
+#define NVS_DEFAULT_BEDTIME 2200
+#endif
+
+/* Alert tone selections (tone_id_t indices; HA select entities). No
+   menuconfig for these — an enum index is opaque there; HA is the knob. */
+#include "tones.h"
+#define NVS_DEFAULT_TONE_EXPIRY TONE_MARIMBA
+#define NVS_DEFAULT_TONE_BREAK TONE_CHIME
+#define NVS_DEFAULT_TONE_BED TONE_GRANVALS
+
+/* Alert volume percent (0-TONES_VOLUME_MAX; >100 = clipping boost). The
+   default is the loud end — the DAC sine at reference level is much
+   quieter than the old LEDC square wave was; HA is the turn-it-down knob. */
+#ifdef CONFIG_MAGTAG_ALERT_VOLUME_PCT
+#define NVS_DEFAULT_ALERT_VOLUME CONFIG_MAGTAG_ALERT_VOLUME_PCT
+#else
+#define NVS_DEFAULT_ALERT_VOLUME 200
+#endif
 
 /* Dublin City Schools (Grizzell MS) 2026-27 school year.
    Source: dublinschools.net 2026-27 school calendar. Update yearly. */

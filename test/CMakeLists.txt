@@ -56,6 +56,7 @@ add_host_test(test_display)
 add_host_test(test_ssd1680)
 add_host_test(test_battery)
 add_host_test(test_quiet_hours)
+add_host_test(test_bedtime)
 add_host_test(test_sleep_plan)
 add_host_test(test_button_latch)
 add_host_test(test_wake_policy)
@@ -63,7 +64,9 @@ add_host_test(test_stats_json)
 add_host_test(test_mqtt_topics)
 add_host_test(test_mqtt_rx)
 add_host_test(test_config_validate)
-add_host_test(test_ha_config)
+add_host_test(test_ha_config EXTRA_LIBS m) # m: tones.c sine LUT
+add_host_test(test_tones EXTRA_LIBS m)
+add_host_test(test_wav_header)
 
 # ---- suites that parse JSON compile the vendored cJSON for the host ----
 add_host_test(test_config_apply

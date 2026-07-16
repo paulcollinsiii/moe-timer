@@ -157,6 +157,28 @@ void test_get_weekday_min_missing_returns_default(void) {
     TEST_ASSERT_EQUAL_UINT16(NVS_DEFAULT_WEEKDAY_MIN, val);
 }
 
+void test_get_tones_missing_return_defaults_and_roundtrip(void) {
+    uint16_t val = 999;
+    nvs_config_get_tone_expiry(&val);
+    TEST_ASSERT_EQUAL_UINT16(NVS_DEFAULT_TONE_EXPIRY, val);
+    nvs_config_get_tone_break(&val);
+    TEST_ASSERT_EQUAL_UINT16(NVS_DEFAULT_TONE_BREAK, val);
+    nvs_config_get_tone_bed(&val);
+    TEST_ASSERT_EQUAL_UINT16(NVS_DEFAULT_TONE_BED, val);
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_set_tone_bed(TONE_CLASSIC));
+    nvs_config_get_tone_bed(&val);
+    TEST_ASSERT_EQUAL_UINT16(TONE_CLASSIC, val);
+}
+
+void test_alert_volume_missing_returns_default_and_roundtrip(void) {
+    uint16_t val = 0;
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_alert_volume(&val));
+    TEST_ASSERT_EQUAL_UINT16(NVS_DEFAULT_ALERT_VOLUME, val);
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_set_alert_volume(75));
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_alert_volume(&val));
+    TEST_ASSERT_EQUAL_UINT16(75, val);
+}
+
 /* ------------------------------------------------------------------ */
 /* Runner                                                               */
 /* ------------------------------------------------------------------ */
@@ -474,6 +496,8 @@ int main(void) {
     RUN_TEST(test_wifi_ssid_max_length);
     RUN_TEST(test_holidays_blob_round_trip);
     RUN_TEST(test_get_weekday_min_missing_returns_default);
+    RUN_TEST(test_get_tones_missing_return_defaults_and_roundtrip);
+    RUN_TEST(test_alert_volume_missing_returns_default_and_roundtrip);
     RUN_TEST(test_init_defaults_writes_fingerprint_stamp);
     RUN_TEST(test_defaults_fingerprint_is_nonzero_and_stable);
     RUN_TEST(test_fingerprint_folds_in_credentials);

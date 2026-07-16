@@ -3,6 +3,7 @@
 .worktrees/
 sdkconfig
 sdkconfig.old
+sdkconfig.bak
 build/
 managed_components/
 dependencies.lock

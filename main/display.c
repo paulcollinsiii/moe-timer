@@ -48,16 +48,22 @@ static uint32_t tick_ms(void) {
     return (uint32_t)(esp_timer_get_time() / 1000);
 }
 
-/* Landscape row bands holding per-wake text (header date/time/sync,
-   remaining-time text). Partial refreshes drive them inverse->true — a
-   localized flash — so the text does not accumulate ghosting between the
-   every-5th-wake full refreshes. Byte-aligned outward, so bands may clean
-   up to 7 extra rows on each edge. */
+/* Landscape row bands holding per-wake content. Partial refreshes drive
+   them inverse->true — a localized flash — so the content does not
+   accumulate ghosting between the every-5th-wake full refreshes. Extents
+   are the exact widget geometry from display_screens.c (align y + font
+   line_height / bar height); byte alignment then widens each edge outward
+   by up to 7 rows — that slop is the packed-framebuffer format, not
+   margin. Bands must not share a framebuffer byte (y/8): a shared byte
+   would be inverted twice and cancel out. */
 static const struct {
-    int y0, y1;
+    int y0, y1; /* inclusive landscape rows */
 } CLEAN_BANDS[] = {
-    {0, 22},  /* header row */
-    {54, 96}, /* remaining-time text */
+    {3, 17},   /* header: date/time + last sync (12 pt at y=3) */
+    {26, 49},  /* progress bar (y=26, h=24) + Charge Me!!! badge */
+    {58, 87},  /* remaining time (28 pt at y=58) + battery % (12 pt at y=66) */
+    {95, 125}, /* mode/state row (12 pt, bottom -18) + button row (bottom -2);
+                  one band — their byte ranges would otherwise overlap */
 };
 
 /* Invert band bytes only where fb differs from the previous frame; returns
@@ -216,6 +222,14 @@ void display_sync_failed(void) {
     if (!s_initialized)
         display_init();
     display_screens_build_sync_failed();
+    s_partial_count = 0;
+    render(SSD1680_REFRESH_FULL);
+}
+
+void display_bedtime(void) {
+    if (!s_initialized)
+        display_init();
+    display_screens_build_bedtime();
     s_partial_count = 0;
     render(SSD1680_REFRESH_FULL);
 }
