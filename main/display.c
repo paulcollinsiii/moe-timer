@@ -225,3 +225,11 @@ void display_sync_failed(void) {
     s_partial_count = 0;
     render(SSD1680_REFRESH_FULL);
 }
+
+void display_bedtime(void) {
+    if (!s_initialized)
+        display_init();
+    display_screens_build_bedtime();
+    s_partial_count = 0;
+    render(SSD1680_REFRESH_FULL);
+}

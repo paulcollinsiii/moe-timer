@@ -15,6 +15,7 @@ void display_screens_build_break(const display_state_t *st);
 void display_screens_build_timesup(void);
 void display_screens_build_sync_failed(void);
 void display_screens_build_charge_me(void);
+void display_screens_build_bedtime(void);
 
 #ifdef __cplusplus
 }

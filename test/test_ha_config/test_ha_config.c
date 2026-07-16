@@ -7,6 +7,7 @@
 #include "mock_hal_nvs.c"
 #include "../../main/nvs_config.c"
 #include "../../main/quiet_hours.c"
+#include "../../main/bedtime.c"
 #include "../../main/config_validate.c"
 #include "../../main/tones.c"
 #include "../../main/ha_config.c"
@@ -239,6 +240,30 @@ void test_discovery_topic(void) {
     TEST_ASSERT_EQUAL_STRING("homeassistant/number/magtag-a1b2c3_weekday_min/config", buf);
 }
 
+/* ---- bedtime: field-specific HHMM validity (0 or 1800-2359) ---- */
+
+void test_set_bedtime_accepts_evening_and_zero(void) {
+    char ack[128];
+    uint16_t v;
+    TEST_ASSERT_EQUAL(HA_CFG_OK, ha_config_set("bedtime", "1800", ack, sizeof(ack)));
+    TEST_ASSERT_EQUAL(HA_CFG_OK, ha_config_set("bedtime", "2359", ack, sizeof(ack)));
+    TEST_ASSERT_EQUAL(HA_CFG_OK, ha_config_set("bedtime", "0", ack, sizeof(ack)));
+    nvs_config_get_bedtime(&v);
+    TEST_ASSERT_EQUAL_UINT16(0, v); /* disabled sticks */
+}
+
+void test_set_bedtime_rejects_daytime(void) {
+    char ack[128];
+    TEST_ASSERT_EQUAL(HA_CFG_REJECTED, ha_config_set("bedtime", "1759", ack, sizeof(ack)));
+    TEST_ASSERT_EQUAL(HA_CFG_REJECTED, ha_config_set("bedtime", "900", ack, sizeof(ack)));
+    TEST_ASSERT_EQUAL(HA_CFG_REJECTED, ha_config_set("bedtime", "2400", ack, sizeof(ack)));
+    uint16_t v;
+    nvs_config_get_bedtime(&v);
+    TEST_ASSERT_EQUAL_UINT16(NVS_DEFAULT_BEDTIME, v); /* unchanged */
+    /* quiet fields keep their looser any-clock-time rule */
+    TEST_ASSERT_EQUAL(HA_CFG_OK, ha_config_set("quiet_start", "900", ack, sizeof(ack)));
+}
+
 /* ---- alert-tone selects (CFG_ENUM) ---- */
 
 void test_set_tone_select_valid_option_persists(void) {
@@ -393,6 +418,8 @@ int main(void) {
     RUN_TEST(test_discovery_number_has_command_bounds_and_config_category);
     RUN_TEST(test_discovery_text_has_mode);
     RUN_TEST(test_discovery_topic);
+    RUN_TEST(test_set_bedtime_accepts_evening_and_zero);
+    RUN_TEST(test_set_bedtime_rejects_daytime);
     RUN_TEST(test_set_tone_select_valid_option_persists);
     RUN_TEST(test_set_tone_select_rejects_unknown_and_wrong_case);
     RUN_TEST(test_state_json_emits_tone_option_strings);

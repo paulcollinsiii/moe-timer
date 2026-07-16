@@ -50,6 +50,9 @@ esp_err_t nvs_config_get_break_interval_min(uint16_t *out);
 esp_err_t nvs_config_set_break_interval_min(uint16_t min);
 esp_err_t nvs_config_get_break_duration_min(uint16_t *out);
 esp_err_t nvs_config_set_break_duration_min(uint16_t min);
+/* Bed Time HHMM (0 = disabled; loader validates via bedtime_hhmm_valid). */
+esp_err_t nvs_config_get_bedtime(uint16_t *out);
+esp_err_t nvs_config_set_bedtime(uint16_t hhmm);
 /* Alert tone selections: tone_id_t indices (audio.c clamps on read). */
 esp_err_t nvs_config_get_tone_expiry(uint16_t *out);
 esp_err_t nvs_config_set_tone_expiry(uint16_t id);
