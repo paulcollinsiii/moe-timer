@@ -151,6 +151,89 @@ void test_note_frequency_via_zero_crossings(void) {
     TEST_ASSERT_TRUE_MESSAGE(measured > freq * 0.98 && measured < freq * 1.02, "frequency off by more than 2%");
 }
 
+/* ---- volume ---- */
+
+/* Render a whole tone at a given volume; returns total samples. */
+static size_t render_all_vol(int id, int volume_pct, uint8_t *buf, size_t cap) {
+    tone_player_t p;
+    tones_player_init(&p, id, RATE);
+    tones_player_set_volume(&p, volume_pct);
+    size_t total = 0;
+    size_t got;
+    while ((got = tones_render(&p, buf + total, cap - total)) > 0) {
+        total += got;
+        TEST_ASSERT_TRUE_MESSAGE(total <= cap, "tone longer than test cap");
+    }
+    return total;
+}
+
+static void peak_deviation(const uint8_t *buf, size_t n, int *up, int *down) {
+    *up = 0;
+    *down = 0;
+    for (size_t i = 0; i < n; i++) {
+        int d = (int)buf[i] - 128;
+        if (d > *up)
+            *up = d;
+        if (-d > *down)
+            *down = -d;
+    }
+}
+
+void test_volume_zero_is_silent(void) {
+    size_t got = render_all_vol(TONE_CLASSIC, 0, s_buf, sizeof(s_buf));
+    TEST_ASSERT_TRUE(got > 0); /* still renders (timing unchanged), just silent */
+    for (size_t i = 0; i < got; i++) {
+        TEST_ASSERT_EQUAL_UINT8(128, s_buf[i]);
+    }
+}
+
+void test_volume_100_matches_default_amplitude(void) {
+    size_t got = render_all_vol(TONE_CLASSIC, 100, s_buf, sizeof(s_buf));
+    int up, down;
+    peak_deviation(s_buf, got, &up, &down);
+    /* 100% = the legacy TONE_AMPLITUDE peak (same output as no set call) */
+    TEST_ASSERT_INT_WITHIN(2, TONE_AMPLITUDE, up);
+    TEST_ASSERT_INT_WITHIN(2, TONE_AMPLITUDE, down);
+}
+
+void test_volume_50_halves_peak(void) {
+    size_t got = render_all_vol(TONE_CLASSIC, 50, s_buf, sizeof(s_buf));
+    int up, down;
+    peak_deviation(s_buf, got, &up, &down);
+    TEST_ASSERT_INT_WITHIN(2, TONE_AMPLITUDE / 2, up);
+    TEST_ASSERT_INT_WITHIN(2, TONE_AMPLITUDE / 2, down);
+}
+
+void test_volume_200_clips_at_full_scale(void) {
+    size_t got = render_all_vol(TONE_CLASSIC, TONES_VOLUME_MAX, s_buf, sizeof(s_buf));
+    int up, down;
+    peak_deviation(s_buf, got, &up, &down);
+    /* Boost drives into the rails, never past them. */
+    TEST_ASSERT_EQUAL_INT(127, up);
+    TEST_ASSERT_EQUAL_INT(127, down);
+    /* And actually clips: a sustained plateau at the rails, not one point
+       per period. 1 kHz for 200 ms = 200 periods; a clean full-scale sine
+       touches each rail ~once per period, clipping holds it there. */
+    size_t at_top = 0;
+    for (size_t i = 0; i < got; i++) {
+        if (s_buf[i] == 255)
+            at_top++;
+    }
+    TEST_ASSERT_TRUE_MESSAGE(at_top > 1000, "no clipping plateau at 200%");
+}
+
+void test_volume_out_of_range_clamped(void) {
+    /* > max behaves as max; negative behaves as mute */
+    size_t got = render_all_vol(TONE_DING, 999, s_buf, sizeof(s_buf));
+    int up, down;
+    peak_deviation(s_buf, got, &up, &down);
+    TEST_ASSERT_EQUAL_INT(127, up);
+    got = render_all_vol(TONE_DING, -5, s_buf, sizeof(s_buf));
+    for (size_t i = 0; i < got; i++) {
+        TEST_ASSERT_EQUAL_UINT8(128, s_buf[i]);
+    }
+}
+
 void test_render_after_finish_stays_finished(void) {
     tone_player_t p;
     tones_player_init(&p, TONE_DING, RATE);
@@ -171,5 +254,10 @@ int main(void) {
     RUN_TEST(test_envelope_bounds_and_click_free_edges);
     RUN_TEST(test_note_frequency_via_zero_crossings);
     RUN_TEST(test_render_after_finish_stays_finished);
+    RUN_TEST(test_volume_zero_is_silent);
+    RUN_TEST(test_volume_100_matches_default_amplitude);
+    RUN_TEST(test_volume_50_halves_peak);
+    RUN_TEST(test_volume_200_clips_at_full_scale);
+    RUN_TEST(test_volume_out_of_range_clamped);
     return UNITY_END();
 }

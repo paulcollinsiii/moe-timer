@@ -32,6 +32,7 @@
 #define NVS_KEY_TONE_EXPIRY "tone_expiry"
 #define NVS_KEY_TONE_BREAK "tone_break"
 #define NVS_KEY_TONE_BED "tone_bed"
+#define NVS_KEY_ALERT_VOL "alert_vol"
 #define NVS_KEY_DEFAULTS_VER "defaults_ver"
 #define NVS_KEY_DISC_VER "disc_ver"
 #define NVS_KEY_DISC_NAME "disc_name"

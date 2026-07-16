@@ -5,8 +5,9 @@
 #include <math.h>
 #include <string.h>
 
-/* Peak deviation from the 8-bit DAC midpoint. Kept below full scale so
-   the little speaker stays gentle and the envelope math cannot clip. */
+/* Peak deviation from the 8-bit DAC midpoint at 100% volume. Kept below
+   full scale so the reference level stays gentle; volumes above 100%
+   scale past the rails and the renderer clips (louder, square-ish). */
 #define TONE_AMPLITUDE 100
 
 /* ---- note tables ------------------------------------------------------ */
@@ -108,8 +109,17 @@ void tones_player_init(tone_player_t *p, int id, uint32_t sample_rate) {
     const tone_def_t *def = tones_get(id);
     p->sample_rate = sample_rate;
     p->def = (def && def->notes) ? def : NULL; /* TONE_CUSTOM/invalid: empty */
+    p->peak = TONE_AMPLITUDE;                  /* 100% */
     if (p->def)
         load_note(p);
+}
+
+void tones_player_set_volume(tone_player_t *p, int volume_pct) {
+    if (volume_pct < 0)
+        volume_pct = 0;
+    if (volume_pct > TONES_VOLUME_MAX)
+        volume_pct = TONES_VOLUME_MAX;
+    p->peak = (uint16_t)(TONE_AMPLITUDE * volume_pct / 100);
 }
 
 /* Linear attack, linear decay, both per note; min() of the two ramps and
@@ -153,8 +163,13 @@ size_t tones_render(tone_player_t *p, uint8_t *out, size_t n) {
             out[written] = 128;
         } else {
             int32_t s = s_sine[p->phase >> 16];
-            int32_t scale = (int32_t)((envelope_q15(p) * TONE_AMPLITUDE) >> 15);
-            out[written] = (uint8_t)(128 + (s * scale) / 127);
+            int32_t scale = (int32_t)((envelope_q15(p) * p->peak) >> 15);
+            int32_t v = (s * scale) / 127; /* peak > 127 drives into the rails */
+            if (v > 127)
+                v = 127;
+            else if (v < -127)
+                v = -127;
+            out[written] = (uint8_t)(128 + v);
             p->phase = (p->phase + p->phase_inc) & 0xFFFFFFu;
         }
         p->sample_pos++;

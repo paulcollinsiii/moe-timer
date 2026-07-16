@@ -92,6 +92,15 @@
 #define NVS_DEFAULT_TONE_BREAK TONE_CHIME
 #define NVS_DEFAULT_TONE_BED TONE_GRANVALS
 
+/* Alert volume percent (0-TONES_VOLUME_MAX; >100 = clipping boost). The
+   default is the loud end — the DAC sine at reference level is much
+   quieter than the old LEDC square wave was; HA is the turn-it-down knob. */
+#ifdef CONFIG_MAGTAG_ALERT_VOLUME_PCT
+#define NVS_DEFAULT_ALERT_VOLUME CONFIG_MAGTAG_ALERT_VOLUME_PCT
+#else
+#define NVS_DEFAULT_ALERT_VOLUME 200
+#endif
+
 /* Dublin City Schools (Grizzell MS) 2026-27 school year.
    Source: dublinschools.net 2026-27 school calendar. Update yearly. */
 #define NVS_DEFAULT_SUMMER_START "2026-05-29" /* ~day after the 2025-26 last day */

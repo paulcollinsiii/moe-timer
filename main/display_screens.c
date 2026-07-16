@@ -255,10 +255,10 @@ void display_screens_build_charge_me(void) {
    unmistakably "not in service"); stays until day rollover. */
 void display_screens_build_bedtime(void) {
     lv_obj_t *scr = fresh_screen(true);
-    make_label(scr, "Bed Time", &lv_font_montserrat_48, LV_ALIGN_TOP_MID, 0, 6);
-    /* One instruction split over two centered 16 pt lines — the single
-       line would overrun the 296 px panel. */
-    make_label(scr, "Brush teeth,", &lv_font_montserrat_16, LV_ALIGN_CENTER, 0, -4);
-    make_label(scr, "Get water bottles.", &lv_font_montserrat_16, LV_ALIGN_CENTER, 0, 16);
-    make_label(scr, "Goodnight!", &lv_font_montserrat_28, LV_ALIGN_BOTTOM_MID, 0, -6);
+    make_label(scr, "Bed Time", &lv_font_montserrat_48, LV_ALIGN_TOP_MID, 0, 2);
+    /* Single centered line, 18 pt: 16 pt strokes shredded into fragments
+       by the inverted 1 bpp render (no bold Montserrat exists in LVGL),
+       and 20 pt overruns the 296 px panel. */
+    make_label(scr, "Brush teeth | Get water bottles", &lv_font_montserrat_18, LV_ALIGN_CENTER, 0, 4);
+    make_label(scr, "Goodnight!", &lv_font_montserrat_28, LV_ALIGN_BOTTOM_MID, 0, -2);
 }

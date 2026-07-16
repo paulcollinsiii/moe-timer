@@ -45,8 +45,10 @@ Everything appears under one device, grouped by HA `entity_category`:
   bed time (HHMM number; 0 disables, otherwise 1800–2359 — the device
   rejects daytime values), break settings, alert-tone selects (Expiry /
   Break / Bed time tone, incl. "Custom WAV" from the assets partition),
-  device name, timezone, the four timer slots, plus the Screen-bonus
-  number and Find-my-timer switch.
+  Alert volume (0–200 %; 100 = clean reference level, above that adds
+  clipping gain for real loudness, 0 mutes), device name, timezone, the
+  four timer slots, plus the Screen-bonus number and Find-my-timer
+  switch.
 - **Diagnostic** (read-only detail): battery voltage, ambient light,
   active timer, day type, last reset, **Screen time limit** (the computed
   allocation for today — the read-only *result* of the editable allocation
@@ -229,7 +231,9 @@ then 20 grants 20 total (not 35); lowering it never reclaims granted time.
 
 Toggle it **on**; on its next window the device beeps with a red pulse
 until a button is pressed or ~10 minutes pass, then the switch returns to
-off by itself. (Charge-locked devices don't open windows, so locate won't
+off by itself. Locate always uses the classic square-wave beeps at
+maximum volume — it ignores the configured alert tone and Alert volume
+(including mute), because its whole job is being found. (Charge-locked devices don't open windows, so locate won't
 reach a dead device — check the charge-lock sensor first.)
 
 ### Raw command topic (power users / per-timer grants)

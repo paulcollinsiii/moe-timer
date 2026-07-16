@@ -129,11 +129,12 @@ static void dac_drain(void) {
     }
 }
 
-static void play_synth(int tone_id) {
+static void play_synth(int tone_id, int volume_pct) {
     if (!dac_ensure(SYNTH_RATE_HZ))
         return;
     tone_player_t player;
     tones_player_init(&player, tone_id, SYNTH_RATE_HZ);
+    tones_player_set_volume(&player, volume_pct);
     size_t n;
     while (!s_stop_requested && (n = tones_render(&player, s_pcm, sizeof(s_pcm))) > 0) {
         dac_push(s_pcm, n);
@@ -143,7 +144,7 @@ static void play_synth(int tone_id) {
 /* Stream the assets-partition WAV: header-validate, then read 16-bit LE
    chunks and downmix to the DAC's unsigned 8 bits. Returns false when
    there is no playable WAV (caller falls back to a synth tone). */
-static bool play_wav(void) {
+static bool play_wav(int volume_pct) {
     const esp_partition_t *part = esp_partition_find_first(ESP_PARTITION_TYPE_DATA, ASSETS_SUBTYPE, "assets");
     if (part == NULL) {
         ESP_LOGW(TAG, "no assets partition");
@@ -175,7 +176,12 @@ static bool play_wav(void) {
             break;
         for (uint32_t i = 0; i < n / 2; i++) {
             int16_t s = (int16_t)((uint16_t)s_raw[2 * i] | ((uint16_t)s_raw[2 * i + 1] << 8));
-            s_pcm[i] = (uint8_t)((s >> 8) + 128);
+            int32_t v = ((int32_t)s * volume_pct) / 100; /* >100% clips */
+            if (v > INT16_MAX)
+                v = INT16_MAX;
+            else if (v < INT16_MIN)
+                v = INT16_MIN;
+            s_pcm[i] = (uint8_t)(v / 256 + 128);
         }
         dac_push(s_pcm, n / 2);
         pos += n;
@@ -183,17 +189,17 @@ static bool play_wav(void) {
     return true;
 }
 
-void audio_play_tone(int tone_id, int cycles) {
+static void play_tone_at(int tone_id, int cycles, int volume) {
     s_stop_requested = false;
     audio_init();
     gpio_set_level(AMP_ENABLE_GPIO, 1);
     for (int cycle = 0; cycle < cycles && !s_stop_requested; cycle++) {
         if (tone_id == TONE_CUSTOM) {
-            if (!play_wav()) {
-                play_synth(TONE_CHIME); /* audible fallback beats silence */
+            if (!play_wav(volume)) {
+                play_synth(TONE_CHIME, volume); /* audible fallback beats silence */
             }
         } else {
-            play_synth(tone_id);
+            play_synth(tone_id, volume);
         }
         if (!s_stop_requested && cycle + 1 < cycles) {
             dac_drain();
@@ -203,6 +209,15 @@ void audio_play_tone(int tone_id, int cycles) {
     dac_drain();
     gpio_set_level(AMP_ENABLE_GPIO, 0);
     dac_teardown();
+}
+
+void audio_play_tone(int tone_id, int cycles) {
+    /* HA-configurable volume, one NVS read per alert (not per cycle). */
+    uint16_t volume = NVS_DEFAULT_ALERT_VOLUME;
+    (void)nvs_config_get_alert_volume(&volume);
+    if (volume > TONES_VOLUME_MAX)
+        volume = TONES_VOLUME_MAX; /* stored by a future/older firmware */
+    play_tone_at(tone_id, cycles, volume);
 }
 
 /* Per-alert tone from NVS (HA select); clamp shields against a stored
@@ -229,6 +244,12 @@ void audio_break_over_chime(void) {
     /* "Your timer changed" chirp: fixed Ding-ding so it stays distinct
        from whatever the configurable alarms are set to. */
     audio_play_tone(TONE_DING, 1);
+}
+
+void audio_locate_alarm(void) {
+    /* Find-my-timer: the point is to be FOUND — classic square-ish beeps
+       at the volume ceiling, ignoring the configured volume (even mute). */
+    play_tone_at(TONE_CLASSIC, CONFIG_MAGTAG_EXPIRY_ALARM_CYCLES, TONES_VOLUME_MAX);
 }
 
 void audio_stop(void) {

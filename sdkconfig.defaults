@@ -71,6 +71,7 @@ CONFIG_MAGTAG_STATUS_LED_BRIGHTNESS=100
 # Larger font for the inverted break-screen footer (12 pt renders poorly
 # white-on-black on e-ink)
 CONFIG_LV_FONT_MONTSERRAT_16=y
+CONFIG_LV_FONT_MONTSERRAT_18=y
 
 # LVGL: 1-bit rendering for the e-paper panel
 CONFIG_LV_COLOR_DEPTH_1=y

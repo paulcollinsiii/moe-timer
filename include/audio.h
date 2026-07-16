@@ -17,6 +17,7 @@ void audio_beep_sequence(void);    /* timer expiry alarm */
 void audio_break_alarm(void);      /* screen-break alarm */
 void audio_bedtime_alarm(void);    /* bed-time alarm */
 void audio_break_over_chime(void); /* short fixed chirp, fire-and-forget */
+void audio_locate_alarm(void);     /* find-my-timer: classic beeps, max volume */
 void audio_stop(void);
 
 #ifdef __cplusplus
