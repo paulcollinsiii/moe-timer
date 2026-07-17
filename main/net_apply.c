@@ -16,6 +16,7 @@
 #include "esp_log.h"
 #else
 #define ESP_LOGW(tag, ...) ((void)(tag))
+#define ESP_LOGI(tag, ...) ((void)(tag))
 #endif
 
 static const char *TAG = "net_apply";
@@ -120,6 +121,7 @@ net_finish_t net_apply_finish(void) {
         if (net_window_ntp_result() == ESP_OK) {
             int64_t step = net_window_take_clock_step();
             if (step != 0) {
+                ESP_LOGI(TAG, "late NTP sync: shifting expiry by %lld s", (long long)step);
                 timer_shift_expiry(step);
             }
         }
