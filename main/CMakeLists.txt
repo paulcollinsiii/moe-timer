@@ -1,6 +1,7 @@
 idf_component_register(
     SRCS
         "main.c"
+        "alerts.c"
         "timer.c"
         "timer_defs.c"
         "wake_policy.c"

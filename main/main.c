@@ -2,6 +2,7 @@
 #include <string.h>
 #include <time.h>
 
+#include "alerts.h"
 #include "audio.h"
 #include "battery.h"
 #include "battery_policy.h"
@@ -327,7 +328,7 @@ static void stats_collect(stats_snapshot_t *out) {
     out->reset_reason = reset_reason_str();
 }
 
-static void run_locate_alarm(void); /* defined with the awake-failsafe helpers */
+static void extend_awake_failsafe(int seconds); /* defined with the failsafe */
 static void fire_expiry_alert(void);
 static bool poll_pause_button(void);
 static bool poll_button_a_action(void);
@@ -458,7 +459,7 @@ static net_finish_t net_window_finish(void) {
     /* Locate last, after the radio is down (audio/LEDs, and it extends
        the awake failsafe). */
     if (mqtt_ha_locate_pending()) {
-        run_locate_alarm();
+        alert_run_locate(extend_awake_failsafe);
     }
     return nf;
 }
@@ -565,104 +566,6 @@ static void check_charge_lock(void) {
     enter_deep_sleep(); /* lock-aware: long interval, no button wake */
 }
 
-/* ---- audible alerts ---------------------------------------------------- */
-
-/* One loop for every audible alert (expiry, break start, locate): drain
-   the press latch so only presses AFTER the alarm dismiss it, pulse the
-   NeoPixels, run the audio pattern on its own short task, and poll for
-   dismissal — latched taps of any length count, the level scan catches a
-   button already held down through the drain. Alert-class, so it fires
-   during quiet hours. */
-typedef struct {
-    uint8_t r, g, b;        /* alert pulse colour */
-    void (*audio_fn)(void); /* blocking beep pattern, stop-flag aware */
-    int max_poll_iters;     /* 100 ms each; cap slightly past the audio */
-    const char *task_name;
-    const char *dismiss_log;
-} alert_pattern_t;
-
-static volatile bool s_audio_done;
-static const alert_pattern_t *s_alert_active; /* set before the task spawns */
-
-static void alert_audio_task(void *arg) {
-    (void)arg;
-    s_alert_active->audio_fn();
-    s_audio_done = true;
-    vTaskDelete(NULL);
-}
-
-/* Returns true when a button dismissed the alert (vs. audio running out). */
-static bool run_alert(const alert_pattern_t *p) {
-    s_alert_active = p;
-    s_audio_done = false;
-    buttons_take_pressed();                       /* drain: a press from BEFORE the alarm must not pre-dismiss it */
-    neopixel_alert_pulse_begin(p->r, p->g, p->b); /* task + teardown owned by the module */
-    xTaskCreate(alert_audio_task, p->task_name, 3072, NULL, 5,
-                NULL); /* DAC write path is deeper than the old LEDC one */
-    bool dismissed = false;
-    for (int i = 0; i < p->max_poll_iters && !s_audio_done && !dismissed; i++) {
-        dismissed = buttons_take_pressed() != 0 || buttons_scan_held() != 0;
-        if (dismissed) {
-            ESP_LOGI(TAG, "%s", p->dismiss_log);
-            break;
-        }
-        vTaskDelay(pdMS_TO_TICKS(100));
-    }
-    audio_stop();
-    neopixel_alert_pulse_end();
-    vTaskDelay(pdMS_TO_TICKS(100)); /* let the audio task observe its stop flag and exit */
-    return dismissed;
-}
-
-/* Expiry: red, self-terminates after the configured cycles (3 s each). */
-static const alert_pattern_t ALERT_EXPIRY = {
-    .r = 248,
-    .g = 0,
-    .b = 0,
-    .audio_fn = audio_beep_sequence,
-    .max_poll_iters = CONFIG_MAGTAG_EXPIRY_ALARM_CYCLES * 30 + 10,
-    .task_name = "beep",
-    .dismiss_log = "Alert dismissed by button",
-};
-
-/* Break start: cyan — matches the BREAK identity (~2.2 s per cycle). */
-static const alert_pattern_t ALERT_BREAK = {
-    .r = 0,
-    .g = 150,
-    .b = 220,
-    .audio_fn = audio_break_alarm,
-    .max_poll_iters = CONFIG_MAGTAG_BREAK_ALARM_CYCLES * 22 + 10,
-    .task_name = "brk_alarm",
-    .dismiss_log = "Break alarm silenced by button",
-};
-
-/* Locate: red, one beep sequence per run_alert call — looped by the
-   caller until dismissed or timed out. Classic beeps at max volume
-   regardless of the configured tone/volume: it exists to be found. */
-static const alert_pattern_t ALERT_LOCATE = {
-    .r = 248,
-    .g = 0,
-    .b = 0,
-    .audio_fn = audio_locate_alarm,
-    .max_poll_iters = 40,
-    .task_name = "locate",
-    .dismiss_log = "Locate dismissed by button",
-};
-
-/* Bed time: purple, break-alarm length; only fires when the crossing
-   interrupts a RUNNING timer or an in-progress BREAK. A button press
-   silences the audio - the lock itself has nothing to dismiss (buttons
-   are not wake sources afterwards). */
-static const alert_pattern_t ALERT_BEDTIME = {
-    .r = 120,
-    .g = 0,
-    .b = 200,
-    .audio_fn = audio_bedtime_alarm,
-    .max_poll_iters = CONFIG_MAGTAG_BREAK_ALARM_CYCLES * 50 + 10,
-    .task_name = "bed_alarm",
-    .dismiss_log = "Bed time alarm silenced by button",
-};
-
 /* ---- bed time ----------------------------------------------------------- */
 
 static int minutes_of_day(time_t t) {
@@ -703,7 +606,7 @@ static void bedtime_engage(time_t now, bool alert) {
     save_timer_snapshot();
     display_bedtime(); /* one full refresh; later wakes leave the panel alone */
     if (alert) {
-        run_alert(&ALERT_BEDTIME);
+        alert_run(ALERT_BEDTIME);
     }
     /* Best-effort HA stat before the long no-button sleeps begin. */
     try_net_window();
@@ -765,7 +668,7 @@ static bool maybe_start_break(time_t now) {
     display_state_t st = make_state(timer_tick(now), now);
     neopixel_show_timer_state(); /* blue during the refresh */
     display_full_refresh(&st);   /* inverted SCREEN BREAK layout */
-    run_alert(&ALERT_BREAK);     /* pulse end darkens the pixels */
+    alert_run(ALERT_BREAK);      /* pulse end darkens the pixels */
     return true;                 /* caller sleeps; stop_sync guards the gate */
 }
 
@@ -779,7 +682,7 @@ static void fire_expiry_alert(void) {
        restore the stale RUNNING snapshot and replay the final minute. */
     save_timer_snapshot();
     display_timesup();
-    run_alert(&ALERT_EXPIRY);
+    alert_run(ALERT_EXPIRY);
     time_t now = time(NULL);
     display_state_t st = make_state(timer_tick(now), now);
     display_full_refresh(&st);
@@ -1323,23 +1226,6 @@ static void extend_awake_failsafe(int seconds) {
         esp_timer_stop(s_failsafe_timer);
         esp_timer_start_once(s_failsafe_timer, (uint64_t)seconds * 1000000ULL);
     }
-}
-
-/* "Help, I lost the timer": HA locate command → beep + red pulse on the
-   next window until a button press or ~10 min. Runs after WiFi is down
-   (audio/LEDs need the radio quiet and the amp gate settled). */
-#define LOCATE_MAX_SEC 600
-
-static void run_locate_alarm(void) {
-    ESP_LOGI(TAG, "Locate: alarming until dismissed (<= %d s)", LOCATE_MAX_SEC);
-    extend_awake_failsafe(LOCATE_MAX_SEC + 60);
-    int64_t start = (int64_t)time(NULL);
-    bool dismissed = false;
-    while (!dismissed && (int64_t)time(NULL) - start < LOCATE_MAX_SEC) {
-        dismissed = run_alert(&ALERT_LOCATE);
-    }
-    neopixel_stop();
-    ESP_LOGI(TAG, "Locate: %s", dismissed ? "dismissed" : "timed out");
 }
 
 void app_main(void) {
