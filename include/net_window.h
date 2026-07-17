@@ -2,7 +2,9 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#ifndef NATIVE
 #include "esp_err.h"
+#endif
 #include "stats_json.h"
 
 #ifdef __cplusplus
@@ -48,8 +50,11 @@ esp_err_t net_window_ntp_result(void);
    at sleep entry, where the USB CDC console has had the whole wake to come
    up (the boot-time line is often lost to re-enumeration). */
 void net_window_log_last(void);
-/* Measured mono-vs-wall clock step; valid when the sync succeeded. */
-int64_t net_window_clock_step(void);
+/* Take (consume-once) the measured mono-vs-wall clock step; valid when
+   the sync succeeded. Subsequent calls return 0 until the next window
+   measures a new step — the orchestrator applies it to the expiry exactly
+   once, whether the sync settled before the paint or during the tail. */
+int64_t net_window_take_clock_step(void);
 
 #ifdef __cplusplus
 }

@@ -23,6 +23,7 @@
 #include "light.h"
 #include "mqtt_ha.h"
 #include "neopixel.h"
+#include "net_apply.h"
 #include "net_window.h"
 #include "nvs_config.h"
 #include "nvs_defaults.h"
@@ -57,6 +58,13 @@ static const char *TAG = "main";
 static bool s_quiet_cfg_loaded;
 static uint16_t s_quiet_start_cfg;
 static uint16_t s_quiet_end_cfg;
+
+/* Bed time follows the same wake-scoped cache pattern; both caches are
+   dropped by config_caches_invalidate() after a network window so an HA
+   edit applies within the same wake. An invalid stored value falls back
+   to the compile-time default rather than daytime-locking the device. */
+static bool s_bedtime_cfg_loaded;
+static uint16_t s_bedtime_cfg;
 
 static bool status_leds_quiet(void) {
     time_t now = time(NULL);
@@ -334,36 +342,9 @@ static bool poll_pause_button(void);
 static bool poll_button_a_action(void);
 
 /* ---- network window (WiFi → NTP → snapshot rendezvous → MQTT) ----------
-   Mechanics (task, completion signals, snapshot rendezvous) live in
-   net_window.c. main.c keeps the orchestration: pre-window def capture,
-   the stats hand-off, and the post-join reconcile/apply below. */
-
-/* Pre-window copy of every extra slot's definition, for the post-join
-   reconcile: a config edit during the window may redefine any timer,
-   including a PAUSED non-active one whose frozen remaining would otherwise
-   go stale (field case: paused 10-min Violin shrunk to 2 min in HA kept
-   its 10 min). Deep copy — the def names point into timer_defs' static
-   table, which the post-join re-install overwrites. [0] unused (Screen). */
-static struct {
-    bool valid;
-    char name[16]; /* matches nvs_timer_def_t.name */
-    timer_def_t def;
-} s_prewindow_defs[TIMER_SLOT_COUNT];
-
-/* Capture the pre-window defs, then spawn: a config edit during the
-   window may redefine any timer, and the reconcile needs the pre-edit
-   view. */
-static bool open_net_window(void) {
-    for (int i = 1; i < TIMER_SLOT_COUNT; i++) {
-        const timer_def_t *def = timer_slot_def(i); /* NULL = disabled */
-        s_prewindow_defs[i].valid = (def != NULL);
-        if (def != NULL) {
-            snprintf(s_prewindow_defs[i].name, sizeof(s_prewindow_defs[i].name), "%s", def->name);
-            s_prewindow_defs[i].def = (timer_def_t){s_prewindow_defs[i].name, def->duration_sec, def->reloadable};
-        }
-    }
-    return net_window_spawn();
-}
+   Mechanics (task, completion signals) live in net_window.c; the
+   orchestration (pre-window def capture, post-join reconcile/apply) in
+   net_apply.c. main.c only supplies the device effects below. */
 
 /* Collect and hand off the stats snapshot (no-op without a window). */
 static void post_stats_snapshot(void) {
@@ -381,101 +362,27 @@ static void poll_button_a_cb(void) {
     (void)poll_button_a_action();
 }
 
-/* Post-join reconcile: config edits during the window rewrote the NVS defs
-   blob only — re-install the in-memory table, then reconcile EVERY extra
-   slot whose definition changed mid-run. Only the active slot drives sound
-   and display (chirp / expiry alert / re-render); non-active slots — which
-   can only be PAUSED, IDLE, or EXPIRED — are fixed silently and show their
-   corrected state when the user swaps to them. */
-typedef enum {
-    NET_FINISH_IDLE = 0, /* nothing display-relevant happened */
-    NET_FINISH_CHANGED,  /* timer state/remaining changed: re-render */
-    NET_FINISH_ALERTED,  /* fire_expiry_alert ran: display fully handled */
-} net_finish_t;
-
-static net_finish_t net_window_reconcile_defs(void) {
-    timer_defs_install(); /* re-read the (possibly edited) blob from NVS */
-    net_finish_t nf = NET_FINISH_IDLE;
-    int active = timer_active_slot();
-    for (int slot = 1; slot < TIMER_SLOT_COUNT; slot++) {
-        if (!s_prewindow_defs[slot].valid)
-            continue;                         /* was disabled pre-window: nothing running to fix */
-        s_prewindow_defs[slot].valid = false; /* one reconcile per window */
-        bool was_running = false;
-        timer_reconcile_t rc =
-            timer_reconcile_def(slot, &s_prewindow_defs[slot].def, timer_slot_def(slot), time(NULL), &was_running);
-        if (rc == TIMER_RECONCILE_NONE)
-            continue;
-        ESP_LOGW(TAG, "slot %d redefined during window: reconcile=%d", slot, (int)rc);
-        if (timer_slot_def(slot) == NULL && timer_active_slot() == slot) {
-            /* Slot disabled by the edit — same-wake analogue of the snapshot
-               restore guard: never strand the selection on a dead slot. */
-            timer_ensure_active_slot_enabled();
-        }
-        if (slot != active)
-            continue; /* background slot: state fixed, seen at swap */
-        switch (rc) {
-            case TIMER_RECONCILE_RESET:
-                if (was_running) {
-                    audio_break_over_chime(); /* single chirp: your timer changed */
-                }
-                nf = NET_FINISH_CHANGED;
-                break;
-            case TIMER_RECONCILE_EXPIRED:
-                fire_expiry_alert(); /* owns the display: TIME'S UP + alert + repaint */
-                nf = NET_FINISH_ALERTED;
-                break;
-            default:
-                nf = NET_FINISH_CHANGED; /* UPDATED: remaining moved */
-                break;
-        }
-    }
-    return nf;
-}
-
-/* Close out a window: join, apply the buffered network→timer effects
-   (single-threaded, on this task), reconcile redefined timers, run a
-   pending locate alarm. Safe to call when no window is open. */
-static net_finish_t net_window_finish(void) {
-    if (!net_window_active())
-        return NET_FINISH_IDLE; /* no window this wake: nothing arrived */
-    if (!net_window_join(NET_JOIN_TIMEOUT_MS, poll_button_a_cb))
-        return NET_FINISH_IDLE; /* wedged: no results to apply */
-    /* The window may have applied HA config edits (allocations, holidays,
-       school dates, quiet hours): drop the wake-scoped caches so every
-       read below and after sees the edited values. */
+/* The window may have applied HA config edits (allocations, holidays,
+   school dates, quiet hours, bedtime): drop the wake-scoped caches so
+   every read after the finish sees the edited values. */
+static void config_caches_invalidate(void) {
     schedule_cache_invalidate();
     s_quiet_cfg_loaded = false;
-    int32_t bonus_target;
-    if (mqtt_ha_take_bonus_target(&bonus_target)) {
-        timer_bonus_reconcile(0, bonus_target);
-    }
-    int grant_slot;
-    int32_t grant_sec;
-    if (mqtt_ha_take_grant(&grant_slot, &grant_sec)) {
-        timer_adjust(grant_slot, grant_sec);
-    }
-    net_finish_t nf = net_window_reconcile_defs();
-    /* Locate last, after the radio is down (audio/LEDs, and it extends
-       the awake failsafe). */
-    if (mqtt_ha_locate_pending()) {
-        alert_run_locate(extend_awake_failsafe);
-    }
-    return nf;
+    s_bedtime_cfg_loaded = false;
 }
 
-/* One blocking radio window, for the unattended paths (timer tick, day
-   rollover, final-minute sync): spawn → sync → stats → join → apply. The
-   return reflects the SNTP result only — MQTT is best-effort and can
-   never fail the sync that opened the window. */
-static esp_err_t try_net_window(void) {
-    if (!open_net_window())
-        return ESP_FAIL;
-    net_window_wait_ntp();
-    post_stats_snapshot();
-    net_window_finish();
-    return net_window_ntp_result();
+static void run_locate_alarm(void) {
+    alert_run_locate(extend_awake_failsafe);
 }
+
+static const net_apply_ops_t NET_APPLY_OPS = {
+    .join_poll = poll_button_a_cb,
+    .on_config_applied = config_caches_invalidate,
+    .on_active_reset_chirp = audio_break_over_chime,
+    .on_active_expired_alert = fire_expiry_alert,
+    .post_stats = post_stats_snapshot,
+    .on_locate = run_locate_alarm,
+};
 
 /* Traffic-light state feedback while the slow e-ink refresh runs:
    RUNNING = green, PAUSED = amber, EXPIRED = red, BREAK = cyan,
@@ -561,7 +468,7 @@ static void check_charge_lock(void) {
         display_charge_me(); /* one full refresh; later wakes leave the panel alone */
         /* Best-effort HA notification (charge_lock: true) — the last stat
            before the long battery-recheck sleeps begin. */
-        try_net_window();
+        net_apply_try_window();
     }
     enter_deep_sleep(); /* lock-aware: long interval, no button wake */
 }
@@ -573,13 +480,6 @@ static int minutes_of_day(time_t t) {
     localtime_r(&t, &tm);
     return tm.tm_hour * 60 + tm.tm_min;
 }
-
-/* Wake-scoped config cache (quiet-hours pattern); reset after a net
-   window so an HA edit applies within the same wake. An invalid stored
-   value falls back to the compile-time default rather than daytime-
-   locking the device. */
-static bool s_bedtime_cfg_loaded;
-static uint16_t s_bedtime_cfg;
 
 static int bedtime_cfg_minutes(void) {
     if (!s_bedtime_cfg_loaded) {
@@ -609,7 +509,7 @@ static void bedtime_engage(time_t now, bool alert) {
         alert_run(ALERT_BEDTIME);
     }
     /* Best-effort HA stat before the long no-button sleeps begin. */
-    try_net_window();
+    net_apply_try_window();
     enter_deep_sleep(); /* lock-aware: ~2 h interval, no button wake */
 }
 
@@ -632,8 +532,7 @@ static void check_bedtime(time_t now) {
        repaint (e-ink retains). Re-check after the window - a bedtime
        edit landing here is the only remote fix path while buttons are
        dead, and it must not wait another 2 h. */
-    try_net_window();
-    s_bedtime_cfg_loaded = false;
+    net_apply_try_window(); /* finish drops the bedtime cache with the rest */
     if (!bedtime_active(minutes_of_day(time(NULL)), bedtime_cfg_minutes())) {
         s_bedtime_locked = false;
         s_bedtime_released = true;
@@ -714,7 +613,7 @@ static void handle_day_rollover(time_t *now) {
     queue_rollover_summary();    /* yesterday's stats, before any reset */
     mqtt_ha_queue_bonus_clear(); /* clear the retained HA bonus target this window */
     /* Fail-open: reset to IDLE with today's allocation even if sync fails */
-    try_net_window();
+    net_apply_try_window();
     *now = time(NULL);
     /* Power cycling must not refund the allocation: with the clock now
        corrected, a same-day NVS snapshot beats a reset. Only a genuine
@@ -829,7 +728,7 @@ static void watch_final_minute(void) {
        moment the alert fires. Skip when recently synced or when the sync
        itself (~5-9 s) would blow past the expiry. */
     if (timer_needs_ntp_sync(now) && remaining > 15) {
-        try_net_window();
+        net_apply_try_window();
         /* The window's reconcile may have reset/expired the timer (config
            edit); the alert (if any) already fired — don't watch a countdown
            that no longer exists, and never double-fire the alert below. */
@@ -940,9 +839,14 @@ static bool dispatch_button_action(button_id_t btn, time_t *now, timer_state_t *
                        sleep. Fail-open: on sync failure the timer keeps
                        running on the uncorrected clock — remaining time is
                        still a consistent duration; only the shown clock may
-                       be off. */
-                    if (allow_net_window && open_net_window() && net_window_wait_ntp()) {
-                        timer_shift_expiry(net_window_clock_step());
+                       be off. If the sync settles late (during the MQTT
+                       tail), the finish applies the step instead. */
+                    if (allow_net_window && net_apply_open()) {
+                        if (net_window_wait_ntp()) {
+                            timer_shift_expiry(net_window_take_clock_step());
+                        } else {
+                            net_apply_note_start_unsynced();
+                        }
                     }
                     *now = time(NULL);
                     return true;
@@ -1016,7 +920,7 @@ static void finish_action_and_render(button_id_t btn, timer_state_t before, time
        timer, or the expiry passed while draining). */
     post_stats_snapshot();
     timer_state_t painted = timer_get_state();
-    net_finish_t nf = net_window_finish();
+    net_finish_t nf = net_apply_finish();
     if (nf != NET_FINISH_ALERTED && (nf == NET_FINISH_CHANGED || timer_get_state() != painted)) {
         time_t rnow = time(NULL);
         int32_t rrem = timer_tick(rnow);
@@ -1044,7 +948,7 @@ static void handle_timer_tick(void) {
     bool synced_this_wake = false;
     if (wake_policy_sync_due(timer_get_state(), timer_needs_ntp_sync(now), now, timer_last_ntp_sync(),
                              IDLE_SYNC_INTERVAL_SEC)) {
-        try_net_window();
+        net_apply_try_window();
         now = time(NULL);
         synced_this_wake = true;
     }
@@ -1124,7 +1028,7 @@ static void handle_timer_tick(void) {
             neopixel_show_timer_state();
             if (maybe_start_break(now)) {
                 post_stats_snapshot(); /* break screen painted: release MQTT */
-                net_window_finish();   /* drain + apply deferred before sleeping */
+                net_apply_finish();    /* drain + apply deferred before sleeping */
                 enter_deep_sleep();
             }
             finish_action_and_render((button_id_t)pick, painted, now);
@@ -1166,7 +1070,7 @@ static void handle_button_wake(void) {
             break;
         case BTN_D:
             /* NTP-gated paint, same as BTN A: sync now, MQTT after paint */
-            if (open_net_window()) {
+            if (net_apply_open()) {
                 net_window_wait_ntp();
             }
             now = time(NULL);
@@ -1185,7 +1089,7 @@ static void handle_button_wake(void) {
 
     if (maybe_start_break(now)) {
         post_stats_snapshot(); /* break screen painted: release MQTT */
-        net_window_finish();   /* drain + apply deferred before sleeping */
+        net_apply_finish();    /* drain + apply deferred before sleeping */
         enter_deep_sleep();    /* e.g. resume with accrual already past the interval */
     }
 
@@ -1266,6 +1170,7 @@ void app_main(void) {
        handlers (whose rollover check would otherwise reset the timer). */
     try_restore_timer_snapshot(time(NULL));
 
+    net_apply_init(&NET_APPLY_OPS);
     buttons_init();
     battery_init();
     /* audio + light init lazily on first use (most wakes need neither);
