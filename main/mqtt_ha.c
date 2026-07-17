@@ -22,7 +22,7 @@
 static const char *TAG = "mqtt_ha";
 
 /* Bump when entities are added/renamed — discovery configs republish once. */
-#define DISC_SCHEMA_VER 12 /* v12: alert-volume number entity */
+#define DISC_SCHEMA_VER 13 /* v13: screen_bonus becomes signed Screen adjust */
 
 #define CONNECT_TIMEOUT_MS 5000
 #define PUBLISH_DRAIN_TIMEOUT_MS 3000
@@ -73,15 +73,18 @@ bool mqtt_ha_locate_pending(void) {
 /* Timer effects parsed during the window are BUFFERED, never applied here:
    the window runs on the network task, and only the orchestrator may mutate
    timer state (it applies these after joining the task). */
-static int32_t s_bonus_target_s = -1; /* set/screen_bonus target; -1 = none */
-static int s_grant_slot = -1;         /* cmd grant; -1 = none */
+static bool s_bonus_target_pending; /* set/screen_bonus target buffered
+                                       (the value is signed, so no
+                                       in-band none sentinel) */
+static int32_t s_bonus_target_s;
+static int s_grant_slot = -1; /* cmd grant; -1 = none */
 static int32_t s_grant_sec;
 
 bool mqtt_ha_take_bonus_target(int32_t *target_sec) {
-    if (s_bonus_target_s < 0)
+    if (!s_bonus_target_pending)
         return false;
     *target_sec = s_bonus_target_s;
-    s_bonus_target_s = -1;
+    s_bonus_target_pending = false;
     return true;
 }
 
@@ -230,9 +233,10 @@ static int publish_config_discovery(esp_mqtt_client_handle_t client, const char 
     return published;
 }
 
-/* Editable actions: a "Screen bonus (min) today" number (idempotent) and a
-   "Find my timer" switch. Discovery + state ride the magtag/<id>/act topic;
-   commands come in on the shared set/+ subscription (screen_bonus, locate). */
+/* Editable actions: a signed "Screen adjust (min) today" number (idempotent
+   target — negative takes time back, e.g. chores not done) and a "Find my
+   timer" switch. Discovery + state ride the magtag/<id>/act topic; commands
+   come in on the shared set/+ subscription (screen_bonus, locate). */
 #define BONUS_MAX_MIN 240
 static int publish_action_discovery(esp_mqtt_client_handle_t client, const char *dev_name, const char *fw) {
     char *topic = s_mem->topic;
@@ -243,16 +247,16 @@ static int publish_action_discovery(esp_mqtt_client_handle_t client, const char 
     char dn[128];
     ha_config_json_escape(dn, sizeof(dn), dev_name);
     int published = 0, n;
-    /* number: Screen bonus (min) today */
+    /* number: Screen adjust (min) today (signed; key stays screen_bonus) */
     mqtt_disc_topic(topic, sizeof(s_mem->topic), "number", id, "screen_bonus");
     n = snprintf(payload, sizeof(s_mem->payload),
-                 "{\"name\":\"Screen bonus (min) today\",\"uniq_id\":\"%s_screen_bonus\","
+                 "{\"name\":\"Screen adjust (min) today\",\"uniq_id\":\"%s_screen_bonus\","
                  "\"stat_t\":\"magtag/%s/act\",\"val_tpl\":\"{{ value_json.screen_bonus }}\","
-                 "\"cmd_t\":\"magtag/%s/set/screen_bonus\",\"retain\":true,\"min\":0,\"max\":%d,\"step\":5,"
+                 "\"cmd_t\":\"magtag/%s/set/screen_bonus\",\"retain\":true,\"min\":-%d,\"max\":%d,\"step\":5,"
                  "\"mode\":\"box\",\"optimistic\":true,\"unit_of_meas\":\"min\",\"ent_cat\":\"config\","
                  "\"dev\":{\"ids\":[\"%s\"],\"name\":\"%s\","
                  "\"mf\":\"Adafruit\",\"mdl\":\"MagTag 2.9\",\"sw\":\"%s\"}}",
-                 id, id, id, BONUS_MAX_MIN, id, dn, fw);
+                 id, id, id, BONUS_MAX_MIN, BONUS_MAX_MIN, id, dn, fw);
     if (n < (int)sizeof(s_mem->payload))
         published += publish(client, topic, payload, 1);
     else
@@ -285,12 +289,13 @@ static int apply_sets(esp_mqtt_client_handle_t client, const stats_snapshot_t *s
         const char *k = s_mem->sets[i].key, *v = s_mem->sets[i].value;
         if (strcmp(k, "screen_bonus") == 0) {
             long m = strtol(v, NULL, 10);
-            if (m < 0)
-                m = 0;
+            if (m < -BONUS_MAX_MIN)
+                m = -BONUS_MAX_MIN;
             if (m > BONUS_MAX_MIN)
                 m = BONUS_MAX_MIN;
             s_bonus_target_s = (int32_t)m * 60; /* applied post-join (idempotent) */
-            ESP_LOGI(TAG, "screen bonus target %ld min (deferred)", m);
+            s_bonus_target_pending = true;
+            ESP_LOGI(TAG, "screen adjust target %ld min (deferred)", m);
         } else if (strcmp(k, "locate") == 0) {
             if (strcmp(v, "ON") == 0) {
                 s_locate_pending = true;

@@ -194,7 +194,9 @@ void timer_reset(void) {
 
 void timer_start(time_t now, int32_t allocation_sec) {
     timer_slot_state_t *sl = active();
-    allocation_sec += sl->bonus_sec; /* fold in any HA grant banked while IDLE */
+    allocation_sec += sl->bonus_sec; /* fold in any HA adjustment banked while IDLE */
+    if (allocation_sec < 0)
+        allocation_sec = 0; /* banked deduction beyond the allocation: start empty */
     sl->bonus_sec = 0;
     sl->state = TIMER_RUNNING;
     sl->allocation_sec = allocation_sec;
@@ -203,21 +205,39 @@ void timer_start(time_t now, int32_t allocation_sec) {
     sl->run_started_wall = (int64_t)now;
 }
 
-void timer_grant(int slot, int32_t sec) {
-    if (slot < 0 || slot >= TIMER_SLOT_COUNT || sec <= 0)
+static void expire_slot(timer_slot_state_t *sl);
+
+void timer_adjust(int slot, int32_t sec) {
+    if (slot < 0 || slot >= TIMER_SLOT_COUNT || sec == 0)
         return;
     timer_slot_state_t *sl = &g_rtc_state.slots[slot];
     switch (sl->state) {
         case TIMER_RUNNING:
+            /* A deduction past zero expires on the next tick — the normal
+               expiry path, alert included. */
             sl->expiry_wall_time += sec;
             sl->allocation_sec += sec;
+            if (sl->allocation_sec < 0)
+                sl->allocation_sec = 0;
             break;
         case TIMER_PAUSED:
         case TIMER_BREAK:
             sl->remaining_at_pause += sec;
             sl->allocation_sec += sec;
+            if (sl->allocation_sec < 0)
+                sl->allocation_sec = 0;
+            if (sl->remaining_at_pause <= 0) {
+                sl->remaining_at_pause = 0;
+                /* Emptied PAUSED expires (same contract as
+                   timer_reconcile_def). A BREAK stays intact — the frozen
+                   time is just zero; the post-break resume expires it. */
+                if (sl->state == TIMER_PAUSED)
+                    expire_slot(sl);
+            }
             break;
         case TIMER_EXPIRED:
+            if (sec < 0)
+                break; /* nothing left to reclaim */
             /* Chores-done grant after time ran out: hold it PAUSED so the
                kid presses A to start — never auto-run, and the expiry
                alert (already heard) must not re-fire. */
@@ -232,13 +252,13 @@ void timer_grant(int slot, int32_t sec) {
 }
 
 void timer_bonus_reconcile(int slot, int32_t target_sec) {
-    if (slot < 0 || slot >= TIMER_SLOT_COUNT || target_sec < 0)
+    if (slot < 0 || slot >= TIMER_SLOT_COUNT)
         return;
     timer_slot_state_t *sl = &g_rtc_state.slots[slot];
     int32_t delta = target_sec - sl->bonus_applied;
-    if (delta <= 0)
-        return; /* target met or lowered — never reclaim granted time */
-    timer_grant(slot, delta);
+    if (delta == 0)
+        return; /* target met — idempotent across wakes and replays */
+    timer_adjust(slot, delta);
     sl->bonus_applied = target_sec;
 }
 
@@ -505,7 +525,8 @@ static bool snapshot_valid(const timer_snapshot_t *snap, time_t now) {
             return false;
         if (sl->remaining_at_pause < 0 || sl->remaining_at_pause > sl->allocation_sec)
             return false;
-        if (sl->bonus_sec < 0 || sl->bonus_sec > SNAPSHOT_MAX_HORIZON_SEC)
+        /* Signed since the adjust feature: a banked deduction is negative */
+        if (sl->bonus_sec < -SNAPSHOT_MAX_HORIZON_SEC || sl->bonus_sec > SNAPSHOT_MAX_HORIZON_SEC)
             return false;
         if (sl->state == TIMER_RUNNING) {
             int64_t delta = sl->expiry_wall_time - (int64_t)now;

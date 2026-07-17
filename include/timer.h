@@ -129,15 +129,21 @@ bool timer_reload_allowed(bool parent_testing);
 /* Return the active slot to IDLE at full duration, keeping its completion
    counter. Refused (false) while RUNNING. */
 bool timer_reload(void);
-/* Grant extra seconds to a slot (HA command). IDLE banks a bonus realized
-   at the next start; RUNNING/PAUSED/BREAK extend in place; EXPIRED becomes
-   PAUSED holding the grant (press A to use it). Works on any slot — no now
-   needed (RUNNING extends the stored wall expiry; the rest store durations). */
-void timer_grant(int slot, int32_t sec);
-/* Idempotent "bonus seconds today" for a slot (HA number): grants only the
-   delta beyond what's already been applied today, so re-delivering the same
-   retained target every wake is a no-op. Lowering the target never reclaims
-   granted time. bonus_applied resets at timer_reset (day rollover). */
+/* Adjust a slot by signed seconds (HA command): positive grants extra
+   time, negative takes it back ("chores not done"). IDLE banks the
+   adjustment, realized at the next start (clamped at an empty start);
+   RUNNING/PAUSED/BREAK adjust in place — a deduction that empties a
+   PAUSED timer expires it (same contract as timer_reconcile_def), an
+   emptied RUNNING timer expires on its next tick, a BREAK keeps its
+   frozen zero until the post-break resume. EXPIRED: a grant becomes
+   PAUSED holding it (press A to use it); a deduction is a no-op. Works
+   on any slot — no now needed (RUNNING adjusts the stored wall expiry;
+   the rest store durations). */
+void timer_adjust(int slot, int32_t sec);
+/* Idempotent signed "adjustment seconds today" for a slot (HA number):
+   applies only the delta beyond what's already been applied today, in
+   either direction, so re-delivering the same retained target every wake
+   is a no-op. bonus_applied resets at timer_reset (day rollover). */
 void timer_bonus_reconcile(int slot, int32_t target_sec);
 
 /* Outcome of reconciling a slot against an HA config edit that changed its

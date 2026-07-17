@@ -451,7 +451,7 @@ static net_finish_t net_window_finish(void) {
     int grant_slot;
     int32_t grant_sec;
     if (mqtt_ha_take_grant(&grant_slot, &grant_sec)) {
-        timer_grant(grant_slot, grant_sec);
+        timer_adjust(grant_slot, grant_sec);
     }
     net_finish_t nf = net_window_reconcile_defs();
     /* Locate last, after the radio is down (audio/LEDs, and it extends
