@@ -677,22 +677,18 @@ static bool poll_button_a_action(void) {
    (the caller then renders PAUSED, off-grid but honest). */
 static void wait_for_render_grid(int max_wait_sec) {
     time_t now = time(NULL);
-    int to;
-    if (timer_get_state() == TIMER_RUNNING) {
-        to = (int)((timer_expiry_wall() - (int64_t)now) % 60);
-    } else if (timer_get_state() == TIMER_BREAK) {
-        to = timer_break_remaining(now) % 60;
-    } else {
-        to = 60 - (int)(now % 60);
-        if (to == 60)
-            to = 0; /* already on the wall boundary */
+    timer_state_t st = timer_get_state();
+    int32_t event_remaining = 0;
+    if (st == TIMER_RUNNING) {
+        event_remaining = (int32_t)(timer_expiry_wall() - (int64_t)now);
+    } else if (st == TIMER_BREAK) {
+        event_remaining = timer_break_remaining(now);
     }
-    if (to > 0 && to <= max_wait_sec) {
-        for (int i = 0; i < to * 10; i++) {
-            if (poll_pause_button())
-                return;
-            vTaskDelay(pdMS_TO_TICKS(100));
-        }
+    int32_t to = wake_policy_grid_wait_sec(st, event_remaining, (int)(now % 60), max_wait_sec);
+    for (int32_t i = 0; i < to * 10; i++) {
+        if (poll_pause_button())
+            return;
+        vTaskDelay(pdMS_TO_TICKS(100));
     }
 }
 
@@ -747,17 +743,12 @@ static void watch_final_minute(void) {
     uint16_t break_interval_min = NVS_DEFAULT_BREAK_INTERVAL_MIN;
     nvs_config_get_break_interval_min(&break_interval_min);
 
-    /* Countdown: partial display steps at the quarter-minute marks (values
-       pinned so the text reads exactly 00:01:00/45/30/15), and the last
-       15 s on the pixels as a binary count (status class: light green,
-       brightness-scaled, muted by quiet hours). */
-    static const int32_t STEPS[] = {60, 45, 30, 15};
-    const int n_steps = (int)(sizeof(STEPS) / sizeof(STEPS[0]));
-    int next_step = 0;
+    /* Countdown: partial display steps at the quarter-minute marks (the
+       step schedule lives in wake_policy — a late wake skips passed
+       marks), and the last 15 s on the pixels as a binary count (status
+       class: light green, brightness-scaled, muted by quiet hours). */
     int64_t rem = timer_expiry_wall() - (int64_t)time(NULL);
-    while (next_step < n_steps && (int64_t)STEPS[next_step] > rem) {
-        next_step++; /* woke late (e.g. slow sync): skip already-passed steps */
-    }
+    int next_step = wake_policy_first_countdown_step((int32_t)rem);
     int32_t leds_shown = -1;
     while ((rem = timer_expiry_wall() - (int64_t)time(NULL)) > 0) {
         /* The event watch owns the whole final minute — without this poll
@@ -779,9 +770,9 @@ static void watch_final_minute(void) {
                 return; /* BREAK painted + alarm run; caller sleeps through it */
             }
         }
-        if (next_step < n_steps && rem <= (int64_t)STEPS[next_step]) {
+        if (next_step < WAKE_COUNTDOWN_STEPS && rem <= (int64_t)wake_policy_countdown_step(next_step)) {
             time_t step_now = time(NULL);
-            display_state_t st = make_state(STEPS[next_step], step_now);
+            display_state_t st = make_state(wake_policy_countdown_step(next_step), step_now);
             display_update(&st); /* partial; ~2-3 s, well under the 15 s spacing */
             next_step++;
         }
@@ -939,11 +930,26 @@ static void finish_action_and_render(button_id_t btn, timer_state_t before, time
     }
 }
 
+/* Shared post-action tail: if the action pushed the accrual past the
+   break interval (e.g. a resume landing after it), paint the break and
+   sleep through it; otherwise render the action's result and drain the
+   window. */
+static void finish_or_break(button_id_t btn, timer_state_t before, time_t now) {
+    if (maybe_start_break(now)) {
+        post_stats_snapshot(); /* break screen painted: release MQTT */
+        net_apply_finish();    /* drain + apply deferred before sleeping */
+        enter_deep_sleep();
+    }
+    finish_action_and_render(btn, before, now);
+}
+
 static void handle_timer_tick(void) {
     time_t now = time(NULL);
     handle_day_rollover(&now);
     check_bedtime(now); /* may not return; before the sync block so a
-                           locked re-wake runs exactly one net window */
+                           locked re-wake runs exactly one net window
+                           (the rare release-by-edit fall-through repaints
+                           and may add this wake's regular sync) */
 
     bool synced_this_wake = false;
     if (wake_policy_sync_due(timer_get_state(), timer_needs_ntp_sync(now), now, timer_last_ntp_sync(),
@@ -1026,12 +1032,7 @@ static void handle_timer_tick(void) {
         timer_state_t painted = timer_get_state();
         if (dispatch_button_action((button_id_t)pick, &now, &painted, !synced_this_wake)) {
             neopixel_show_timer_state();
-            if (maybe_start_break(now)) {
-                post_stats_snapshot(); /* break screen painted: release MQTT */
-                net_apply_finish();    /* drain + apply deferred before sleeping */
-                enter_deep_sleep();
-            }
-            finish_action_and_render((button_id_t)pick, painted, now);
+            finish_or_break((button_id_t)pick, painted, now);
         }
     }
     maybe_wait_for_event();
@@ -1087,13 +1088,7 @@ static void handle_button_wake(void) {
        where a stale A edge would instantly re-pause. */
     buttons_take_pressed();
 
-    if (maybe_start_break(now)) {
-        post_stats_snapshot(); /* break screen painted: release MQTT */
-        net_apply_finish();    /* drain + apply deferred before sleeping */
-        enter_deep_sleep();    /* e.g. resume with accrual already past the interval */
-    }
-
-    finish_action_and_render(btn, before, now);
+    finish_or_break(btn, before, now); /* e.g. resume with accrual already past the interval */
     maybe_wait_for_event();
     enter_deep_sleep();
 }
