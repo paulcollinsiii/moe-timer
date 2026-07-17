@@ -104,6 +104,72 @@ void test_sync_never_synced_is_always_due_in_clock_states(void) {
     TEST_ASSERT_TRUE(wake_policy_sync_due(TIMER_IDLE, false, 42, 0, IDLE_IVL));
 }
 
+/* ---- render-grid residue: how long to wait so the render lands on the
+   state's minute grid (countdown grid for RUNNING/BREAK, wall grid
+   otherwise); 0 = render where we are ---- */
+
+void test_grid_wait_running_waits_countdown_residue(void) {
+    /* 185 s to expiry: 5 s absorbs the residue, the render reads 3:00 */
+    TEST_ASSERT_EQUAL_INT32(5, wake_policy_grid_wait_sec(TIMER_RUNNING, 185, 12, 25));
+}
+
+void test_grid_wait_running_on_grid_needs_no_wait(void) {
+    TEST_ASSERT_EQUAL_INT32(0, wake_policy_grid_wait_sec(TIMER_RUNNING, 180, 12, 25));
+}
+
+void test_grid_wait_running_residue_beyond_max_renders_in_place(void) {
+    /* 150 s to expiry: 30 s residue > 25 s cap — off-grid but honest */
+    TEST_ASSERT_EQUAL_INT32(0, wake_policy_grid_wait_sec(TIMER_RUNNING, 150, 12, 25));
+}
+
+void test_grid_wait_expiry_already_passed_is_zero(void) {
+    TEST_ASSERT_EQUAL_INT32(0, wake_policy_grid_wait_sec(TIMER_RUNNING, -30, 12, 25));
+}
+
+void test_grid_wait_break_uses_break_grid(void) {
+    TEST_ASSERT_EQUAL_INT32(5, wake_policy_grid_wait_sec(TIMER_BREAK, 65, 40, 25));
+}
+
+void test_grid_wait_clock_states_use_wall_grid(void) {
+    TEST_ASSERT_EQUAL_INT32(5, wake_policy_grid_wait_sec(TIMER_IDLE, 0, 55, 25));
+    TEST_ASSERT_EQUAL_INT32(5, wake_policy_grid_wait_sec(TIMER_PAUSED, 0, 55, 25));
+}
+
+void test_grid_wait_on_wall_boundary_is_zero(void) {
+    TEST_ASSERT_EQUAL_INT32(0, wake_policy_grid_wait_sec(TIMER_IDLE, 0, 0, 25));
+}
+
+void test_grid_wait_wall_residue_beyond_max_is_zero(void) {
+    TEST_ASSERT_EQUAL_INT32(0, wake_policy_grid_wait_sec(TIMER_IDLE, 0, 30, 25));
+}
+
+/* ---- final-minute countdown steps (60/45/30/15 partial renders) ---- */
+
+void test_countdown_step_values_are_quarter_minute(void) {
+    TEST_ASSERT_EQUAL_INT32(60, wake_policy_countdown_step(0));
+    TEST_ASSERT_EQUAL_INT32(45, wake_policy_countdown_step(1));
+    TEST_ASSERT_EQUAL_INT32(30, wake_policy_countdown_step(2));
+    TEST_ASSERT_EQUAL_INT32(15, wake_policy_countdown_step(3));
+    TEST_ASSERT_EQUAL_INT32(0, wake_policy_countdown_step(4));
+    TEST_ASSERT_EQUAL_INT32(0, wake_policy_countdown_step(-1));
+}
+
+void test_first_countdown_step_from_full_watch(void) {
+    TEST_ASSERT_EQUAL_INT(0, wake_policy_first_countdown_step(65));
+}
+
+void test_first_countdown_step_skips_passed_marks_on_late_wake(void) {
+    /* Woke late (slow sync): the 60 s mark already passed */
+    TEST_ASSERT_EQUAL_INT(1, wake_policy_first_countdown_step(50));
+    TEST_ASSERT_EQUAL_INT(3, wake_policy_first_countdown_step(15));
+}
+
+void test_first_countdown_step_none_left_inside_led_window(void) {
+    /* Under 15 s only the LED binary countdown remains */
+    TEST_ASSERT_EQUAL_INT(WAKE_COUNTDOWN_STEPS, wake_policy_first_countdown_step(14));
+    TEST_ASSERT_EQUAL_INT(WAKE_COUNTDOWN_STEPS, wake_policy_first_countdown_step(0));
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_render_expiry_transition_fires_alert);
@@ -121,5 +187,17 @@ int main(void) {
     RUN_TEST(test_sync_break_never_syncs);
     RUN_TEST(test_sync_clock_states_use_idle_cadence);
     RUN_TEST(test_sync_never_synced_is_always_due_in_clock_states);
+    RUN_TEST(test_grid_wait_running_waits_countdown_residue);
+    RUN_TEST(test_grid_wait_running_on_grid_needs_no_wait);
+    RUN_TEST(test_grid_wait_running_residue_beyond_max_renders_in_place);
+    RUN_TEST(test_grid_wait_expiry_already_passed_is_zero);
+    RUN_TEST(test_grid_wait_break_uses_break_grid);
+    RUN_TEST(test_grid_wait_clock_states_use_wall_grid);
+    RUN_TEST(test_grid_wait_on_wall_boundary_is_zero);
+    RUN_TEST(test_grid_wait_wall_residue_beyond_max_is_zero);
+    RUN_TEST(test_countdown_step_values_are_quarter_minute);
+    RUN_TEST(test_first_countdown_step_from_full_watch);
+    RUN_TEST(test_first_countdown_step_skips_passed_marks_on_late_wake);
+    RUN_TEST(test_first_countdown_step_none_left_inside_led_window);
     return UNITY_END();
 }

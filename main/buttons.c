@@ -66,6 +66,13 @@ uint8_t buttons_take_pressed(void) {
     return mask;
 }
 
+uint8_t buttons_take_pressed_mask(uint8_t mask) {
+    portENTER_CRITICAL(&s_latch_mux);
+    uint8_t taken = button_latch_take_masked(mask);
+    portEXIT_CRITICAL(&s_latch_mux);
+    return taken;
+}
+
 void buttons_init(void) {
     for (int i = 0; i < 4; i++) {
         /* ext1_wakeup_prepare() enables pad HOLD on all EXT1 pins when the

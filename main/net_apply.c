@@ -1,0 +1,158 @@
+/* Orchestrator side of a network window, moved from main.c: pre-window
+   def capture, the stats hand-off, and the post-join reconcile/apply.
+   Runs entirely on the calling (main) task — the network task never
+   mutates timer state. */
+#include "net_apply.h"
+
+#include <stdio.h>
+
+#include "hal_time.h"
+#include "mqtt_ha.h"
+#include "net_window.h"
+#include "nvs_config.h"
+#include "timer.h"
+
+#ifndef NATIVE
+#include "esp_log.h"
+#else
+#define ESP_LOGW(tag, ...) ((void)(tag))
+#define ESP_LOGI(tag, ...) ((void)(tag))
+#endif
+
+static const char *TAG = "net_apply";
+
+static net_apply_ops_t s_ops;
+
+/* C3 guard: a start/resume painted before the sync settled. If the sync
+   lands during the MQTT tail, the finish applies the clock step then. */
+static bool s_shift_pending;
+
+/* Pre-window copy of every extra slot's definition, for the post-join
+   reconcile: a config edit during the window may redefine any timer,
+   including a PAUSED non-active one whose frozen remaining would otherwise
+   go stale (field case: paused 10-min Violin shrunk to 2 min in HA kept
+   its 10 min). Deep copy — the def names point into timer_defs' static
+   table, which the post-join re-install overwrites. [0] unused (Screen). */
+static struct {
+    bool valid;
+    char name[sizeof(((nvs_timer_def_t *)0)->name)];
+    timer_def_t def;
+} s_prewindow_defs[TIMER_SLOT_COUNT];
+
+void net_apply_init(const net_apply_ops_t *ops) {
+    s_ops = *ops;
+}
+
+bool net_apply_open(void) {
+    for (int i = 1; i < TIMER_SLOT_COUNT; i++) {
+        const timer_def_t *def = timer_slot_def(i); /* NULL = disabled */
+        s_prewindow_defs[i].valid = (def != NULL);
+        if (def != NULL) {
+            snprintf(s_prewindow_defs[i].name, sizeof(s_prewindow_defs[i].name), "%s", def->name);
+            s_prewindow_defs[i].def = (timer_def_t){s_prewindow_defs[i].name, def->duration_sec, def->reloadable};
+        }
+    }
+    s_shift_pending = false;
+    return net_window_spawn();
+}
+
+void net_apply_note_start_unsynced(void) {
+    s_shift_pending = true;
+}
+
+/* Post-join reconcile: config edits during the window rewrote the NVS defs
+   blob only — re-install the in-memory table, then reconcile EVERY extra
+   slot whose definition changed mid-run. Only the active slot drives sound
+   and display (chirp / expiry alert / re-render); non-active slots — which
+   can only be PAUSED, IDLE, or EXPIRED — are fixed silently and show their
+   corrected state when the user swaps to them. */
+static net_finish_t reconcile_defs(void) {
+    timer_defs_install(); /* re-read the (possibly edited) blob from NVS */
+    net_finish_t nf = NET_FINISH_IDLE;
+    int active_slot = timer_active_slot();
+    for (int slot = 1; slot < TIMER_SLOT_COUNT; slot++) {
+        if (!s_prewindow_defs[slot].valid)
+            continue;                         /* was disabled pre-window: nothing running to fix */
+        s_prewindow_defs[slot].valid = false; /* one reconcile per window */
+        bool was_running = false;
+        timer_reconcile_t rc =
+            timer_reconcile_def(slot, &s_prewindow_defs[slot].def, timer_slot_def(slot), hal_time_now(), &was_running);
+        if (rc == TIMER_RECONCILE_NONE)
+            continue;
+        ESP_LOGW(TAG, "slot %d redefined during window: reconcile=%d", slot, (int)rc);
+        if (timer_slot_def(slot) == NULL && timer_active_slot() == slot) {
+            /* Slot disabled by the edit — same-wake analogue of the snapshot
+               restore guard: never strand the selection on a dead slot. */
+            timer_ensure_active_slot_enabled();
+        }
+        if (slot != active_slot)
+            continue; /* background slot: state fixed, seen at swap */
+        switch (rc) {
+            case TIMER_RECONCILE_RESET:
+                if (was_running) {
+                    s_ops.on_active_reset_chirp(); /* single chirp: your timer changed */
+                }
+                nf = NET_FINISH_CHANGED;
+                break;
+            case TIMER_RECONCILE_EXPIRED:
+                s_ops.on_active_expired_alert(); /* owns the display: TIME'S UP + alert + repaint */
+                nf = NET_FINISH_ALERTED;
+                break;
+            default:
+                nf = NET_FINISH_CHANGED; /* UPDATED: remaining moved */
+                break;
+        }
+    }
+    return nf;
+}
+
+net_finish_t net_apply_finish(void) {
+    if (!net_window_active())
+        return NET_FINISH_IDLE; /* no window this wake: nothing arrived */
+    if (!net_window_join(NET_JOIN_TIMEOUT_MS, s_ops.join_poll))
+        return NET_FINISH_IDLE; /* wedged: no results to apply */
+    /* C3: the sync settled after the paint's bounded wait gave up, but a
+       timer was started this wake against the uncorrected clock — apply
+       the measured step now, before anything below reads the expiry. The
+       step is consume-once, so this can never double-apply with the
+       wait-succeeded path in the wake handler. */
+    if (s_shift_pending) {
+        s_shift_pending = false;
+        if (net_window_ntp_result() == ESP_OK) {
+            int64_t step = net_window_take_clock_step();
+            if (step != 0) {
+                ESP_LOGI(TAG, "late NTP sync: shifting expiry by %lld s", (long long)step);
+                timer_shift_expiry(step);
+            }
+        }
+    }
+    /* The window may have applied HA config edits (allocations, holidays,
+       school dates, quiet hours, bedtime): drop the wake-scoped caches so
+       every read below and after sees the edited values. */
+    s_ops.on_config_applied();
+    int32_t bonus_target;
+    if (mqtt_ha_take_bonus_target(&bonus_target)) {
+        timer_bonus_reconcile(0, bonus_target);
+    }
+    int grant_slot;
+    int32_t grant_sec;
+    if (mqtt_ha_take_grant(&grant_slot, &grant_sec)) {
+        timer_adjust(grant_slot, grant_sec);
+    }
+    net_finish_t nf = reconcile_defs();
+    /* Locate last, after the radio is down (audio/LEDs, and it extends
+       the awake failsafe). */
+    if (mqtt_ha_locate_pending()) {
+        s_ops.on_locate();
+    }
+    return nf;
+}
+
+esp_err_t net_apply_try_window(void) {
+    if (!net_apply_open())
+        return ESP_FAIL;
+    net_window_wait_ntp();
+    s_ops.post_stats();
+    net_apply_finish();
+    return net_window_ntp_result();
+}
