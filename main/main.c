@@ -7,6 +7,7 @@
 #include "battery_policy.h"
 #include "bedtime.h"
 #include "button_actions.h"
+#include "button_latch.h"
 #include "buttons.h"
 #include "display.h"
 #include "driver/gpio.h"
@@ -1001,16 +1002,147 @@ static void maybe_wait_for_event(void) {
 
 /* ---- wake handlers ----------------------------------------------------- */
 
+/* Apply one button action (A/B/C — D is wake-only). Shared by the EXT1
+   wake handler and the tick-wake latch drain so both honour the same
+   state guards. Refreshes *before on a Button C selection change so
+   landing on an already-EXPIRED slot does not re-fire the expiry alert.
+   allow_net_window gates the NTP window on a start/resume: a wake that
+   already ran a window skips the redundant second one (clock corrected,
+   buffered HA effects already applied). Returns true when the press
+   changed timer state (the caller must render). */
+static bool dispatch_button_action(button_id_t btn, time_t *now, timer_state_t *before, bool allow_net_window) {
+    switch (btn) {
+        case BTN_A:
+            if (*before == TIMER_BREAK) {
+                ESP_LOGI(TAG, "button A ignored during screen break");
+                return false;
+            }
+            /* Start/resume immediately — waiting on NTP first confused
+               users. Sync runs after; any clock step is applied to the
+               expiry via timer_shift_expiry (measured against the
+               monotonic clock, which NTP cannot step). */
+            switch (button_a_apply(*now)) {
+                case BTN_A_STARTED:
+                case BTN_A_RESUMED:
+                    /* Hold the pre-press colour briefly so the WHITE/AMBER ->
+                       GREEN transition is visible as an acknowledgement */
+                    vTaskDelay(pdMS_TO_TICKS(250));
+                    neopixel_show_timer_state();
+
+                    /* NTP-gated paint: wait only for the sync (seconds) so the
+                       panel renders once, with the corrected clock and shifted
+                       expiry. The MQTT phase is released AFTER the paint (the
+                       snapshot post in the finish tail) and joined before
+                       sleep. Fail-open: on sync failure the timer keeps
+                       running on the uncorrected clock — remaining time is
+                       still a consistent duration; only the shown clock may
+                       be off. */
+                    if (allow_net_window && open_net_window() && net_window_wait_ntp()) {
+                        timer_shift_expiry(net_window_clock_step());
+                    }
+                    *now = time(NULL);
+                    return true;
+                case BTN_A_PAUSED:
+                    return true;
+                default:
+                    return false; /* EXPIRED: renders only (wake path) */
+            }
+        case BTN_B:
+            /* Reset the selected timer to full: reloadable extras without
+               ParentTesting, anything else with it — never while RUNNING
+               (B is dropped from the wake mask then, same as C; this guard
+               covers presses that ride in on another wake). */
+            if (!timer_reload_allowed(PARENT_TESTING) || !timer_reload()) {
+                ESP_LOGI(TAG, "Button B reset unavailable (state %d)", (int)*before);
+                return false;
+            }
+            return true;
+        case BTN_C:
+            /* Swap timer type; refused while RUNNING (pause first) or in a
+               Screen Break (enforced). Landing on an already-EXPIRED timer
+               is a selection change, not a transition — refresh the
+               baseline so the expiry alert does not re-fire below. */
+            if (timer_select_next()) {
+                ESP_LOGI(TAG, "button C: selected slot %d", timer_active_slot());
+                *before = timer_get_state();
+                return true;
+            }
+            ESP_LOGI(TAG, "button C swap unavailable (state %d)", (int)*before);
+            return false;
+        default:
+            return false;
+    }
+}
+
+/* Post-action tail shared by the wake handler and the tick-wake drain:
+   render the resulting state, release the MQTT phase, join the window,
+   and re-render when the join changed what the panel shows. */
+static void finish_action_and_render(button_id_t btn, timer_state_t before, time_t now) {
+    int32_t remaining = timer_tick(now);
+    display_state_t st = make_state(remaining, now);
+
+    if (before == TIMER_BREAK && timer_get_state() == TIMER_PAUSED) {
+        audio_break_over_chime(); /* break over — ready to resume */
+    }
+
+    /* Button D is the user-facing "refresh everything" button — it always
+       gets a real full refresh regardless of the render policy. */
+    bool force_full = (btn == BTN_D);
+    wake_render_t bwr = wake_policy_render(before, timer_get_state(), true);
+    if (bwr == WAKE_RENDER_EXPIRY_ALERT) {
+        fire_expiry_alert(); /* alert owns the NeoPixels (red pulse) */
+    } else {
+        /* Includes EXPIRED: any button returns the display to the main
+           layout (empty bar, TIME'S UP state). */
+        ESP_LOGI(TAG, "button %d: state %d -> %d, %s refresh", (int)btn, (int)before, (int)timer_get_state(),
+                 (force_full || bwr == WAKE_RENDER_FULL) ? "full" : "partial");
+        neopixel_show_timer_state(); /* resulting state, lit until sleep */
+        if (force_full || bwr == WAKE_RENDER_FULL) {
+            display_full_refresh(&st);
+        } else {
+            display_update(&st); /* partial cadence: every Nth is promoted */
+        }
+    }
+
+    /* Paint done: release the MQTT phase (display refresh current and
+       radio TX bursts must never coincide — brownout), then join, apply
+       the buffered network→timer effects, reconcile a redefined timer.
+       Re-render only when something changed what the panel shows (a
+       Button A action landed during the join, a config edit moved the
+       timer, or the expiry passed while draining). */
+    post_stats_snapshot();
+    timer_state_t painted = timer_get_state();
+    net_finish_t nf = net_window_finish();
+    if (nf != NET_FINISH_ALERTED && (nf == NET_FINISH_CHANGED || timer_get_state() != painted)) {
+        time_t rnow = time(NULL);
+        int32_t rrem = timer_tick(rnow);
+        wake_render_t rwr = wake_policy_render(painted, timer_get_state(), true);
+        if (rwr == WAKE_RENDER_EXPIRY_ALERT) {
+            fire_expiry_alert();
+        } else {
+            display_state_t rst = make_state(rrem, rnow);
+            neopixel_show_timer_state();
+            if (force_full || rwr == WAKE_RENDER_FULL) {
+                display_full_refresh(&rst);
+            } else {
+                display_update(&rst);
+            }
+        }
+    }
+}
+
 static void handle_timer_tick(void) {
     time_t now = time(NULL);
     handle_day_rollover(&now);
     check_bedtime(now); /* may not return; before the sync block so a
                            locked re-wake runs exactly one net window */
 
+    bool synced_this_wake = false;
     if (wake_policy_sync_due(timer_get_state(), timer_needs_ntp_sync(now), now, timer_last_ntp_sync(),
                              IDLE_SYNC_INTERVAL_SEC)) {
         try_net_window();
         now = time(NULL);
+        synced_this_wake = true;
     }
 
     /* Cold boot / external reset only: the rollover + sync above already
@@ -1074,6 +1206,26 @@ static void handle_timer_tick(void) {
             display_update(&st); /* partial; policy promotes every 5th to full */
             break;
     }
+
+    /* A press that landed while this wake was awake (sync, grid wait,
+       e-ink flush) is in the latch — act on it now or it evaporates at
+       deep sleep (losing the start/pause race against the minute render).
+       Same guards as a wake press via the shared dispatch; D stays
+       wake-press-only. Must run BEFORE maybe_wait_for_event: the
+       final-minute watch discards pre-watch latched presses at entry. */
+    int pick = button_latch_pick(buttons_take_pressed(), (1u << BTN_A) | (1u << BTN_B) | (1u << BTN_C));
+    if (pick >= 0) {
+        timer_state_t painted = timer_get_state();
+        if (dispatch_button_action((button_id_t)pick, &now, &painted, !synced_this_wake)) {
+            neopixel_show_timer_state();
+            if (maybe_start_break(now)) {
+                post_stats_snapshot(); /* break screen painted: release MQTT */
+                net_window_finish();   /* drain + apply deferred before sleeping */
+                enter_deep_sleep();
+            }
+            finish_action_and_render((button_id_t)pick, painted, now);
+        }
+    }
     maybe_wait_for_event();
     enter_deep_sleep();
 }
@@ -1104,58 +1256,9 @@ static void handle_button_wake(void) {
 
     switch (btn) {
         case BTN_A:
-            if (before == TIMER_BREAK) {
-                ESP_LOGI(TAG, "button A ignored during screen break");
-                break;
-            }
-            /* Start/resume immediately — waiting on NTP first confused
-               users. Sync runs after; any clock step is applied to the
-               expiry via timer_shift_expiry (measured against the
-               monotonic clock, which NTP cannot step). */
-            switch (button_a_apply(now)) {
-                case BTN_A_STARTED:
-                case BTN_A_RESUMED:
-                    /* Hold the pre-press colour briefly so the WHITE/AMBER ->
-                       GREEN transition is visible as an acknowledgement */
-                    vTaskDelay(pdMS_TO_TICKS(250));
-                    neopixel_show_timer_state();
-
-                    /* NTP-gated paint: wait only for the sync (seconds) so the
-                       panel renders once, with the corrected clock and shifted
-                       expiry. The MQTT phase is released AFTER the paint (the
-                       snapshot post in the tail below) and joined before sleep.
-                       Fail-open: on sync failure the timer keeps running on
-                       the uncorrected clock — remaining time is still a
-                       consistent duration; only the shown clock may be off. */
-                    if (open_net_window() && net_window_wait_ntp()) {
-                        timer_shift_expiry(net_window_clock_step());
-                    }
-                    now = time(NULL);
-                    break;
-                default:
-                    break; /* PAUSED applied above; EXPIRED renders only */
-            }
-            break;
         case BTN_B:
-            /* Reset the selected timer to full: reloadable extras without
-               ParentTesting, anything else with it — never while RUNNING
-               (B is dropped from the wake mask then, same as C; this guard
-               covers presses that ride in on another wake). */
-            if (!timer_reload_allowed(PARENT_TESTING) || !timer_reload()) {
-                ESP_LOGI(TAG, "Button B reset unavailable (state %d)", (int)before);
-            }
-            break;
         case BTN_C:
-            /* Swap timer type; refused while RUNNING (pause first) or in a
-               Screen Break (enforced). Landing on an already-EXPIRED timer
-               is a selection change, not a transition — refresh the
-               baseline so the expiry alert does not re-fire below. */
-            if (timer_select_next()) {
-                ESP_LOGI(TAG, "button C: selected slot %d", timer_active_slot());
-                before = timer_get_state();
-            } else {
-                ESP_LOGI(TAG, "button C swap unavailable (state %d)", (int)before);
-            }
+            dispatch_button_action(btn, &now, &before, true);
             break;
         case BTN_D:
             /* NTP-gated paint, same as BTN A: sync now, MQTT after paint */
@@ -1182,57 +1285,7 @@ static void handle_button_wake(void) {
         enter_deep_sleep();    /* e.g. resume with accrual already past the interval */
     }
 
-    int32_t remaining = timer_tick(now);
-    display_state_t st = make_state(remaining, now);
-
-    if (before == TIMER_BREAK && timer_get_state() == TIMER_PAUSED) {
-        audio_break_over_chime(); /* break over — ready to resume */
-    }
-
-    /* Button D is the user-facing "refresh everything" button — it always
-       gets a real full refresh regardless of the render policy. */
-    bool force_full = (btn == BTN_D);
-    wake_render_t bwr = wake_policy_render(before, timer_get_state(), true);
-    if (bwr == WAKE_RENDER_EXPIRY_ALERT) {
-        fire_expiry_alert(); /* alert owns the NeoPixels (red pulse) */
-    } else {
-        /* Includes EXPIRED: any button returns the display to the main
-           layout (empty bar, TIME'S UP state). */
-        ESP_LOGI(TAG, "button %d: state %d -> %d, %s refresh", (int)btn, (int)before, (int)timer_get_state(),
-                 (force_full || bwr == WAKE_RENDER_FULL) ? "full" : "partial");
-        neopixel_show_timer_state(); /* resulting state, lit until sleep */
-        if (force_full || bwr == WAKE_RENDER_FULL) {
-            display_full_refresh(&st);
-        } else {
-            display_update(&st); /* partial cadence: every Nth is promoted */
-        }
-    }
-
-    /* Paint done: release the MQTT phase (display refresh current and
-       radio TX bursts must never coincide — brownout), then join, apply
-       the buffered network→timer effects, reconcile a redefined timer.
-       Re-render only when something changed what the panel shows (a
-       Button A action landed during the join, a config edit moved the
-       timer, or the expiry passed while draining). */
-    post_stats_snapshot();
-    timer_state_t painted = timer_get_state();
-    net_finish_t nf = net_window_finish();
-    if (nf != NET_FINISH_ALERTED && (nf == NET_FINISH_CHANGED || timer_get_state() != painted)) {
-        time_t rnow = time(NULL);
-        int32_t rrem = timer_tick(rnow);
-        wake_render_t rwr = wake_policy_render(painted, timer_get_state(), true);
-        if (rwr == WAKE_RENDER_EXPIRY_ALERT) {
-            fire_expiry_alert();
-        } else {
-            display_state_t rst = make_state(rrem, rnow);
-            neopixel_show_timer_state();
-            if (force_full || rwr == WAKE_RENDER_FULL) {
-                display_full_refresh(&rst);
-            } else {
-                display_update(&rst);
-            }
-        }
-    }
+    finish_action_and_render(btn, before, now);
     maybe_wait_for_event();
     enter_deep_sleep();
 }

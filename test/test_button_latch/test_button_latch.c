@@ -80,6 +80,33 @@ void test_reset_clears_mask_and_debounce_history(void) {
     TEST_ASSERT_EQUAL_UINT8(1u << 0, button_latch_take());
 }
 
+void test_pick_empty_mask_returns_none(void) {
+    TEST_ASSERT_EQUAL_INT(-1, button_latch_pick(0, 0x0F));
+}
+
+void test_pick_single_button_returns_it(void) {
+    TEST_ASSERT_EQUAL_INT(1, button_latch_pick(1u << 1, 0x0F));
+}
+
+void test_pick_priority_a_over_all(void) {
+    TEST_ASSERT_EQUAL_INT(0, button_latch_pick(0x0F, 0x0F));
+}
+
+void test_pick_priority_c_over_b_and_d(void) {
+    TEST_ASSERT_EQUAL_INT(2, button_latch_pick((1u << 1) | (1u << 2) | (1u << 3), 0x0F));
+}
+
+void test_pick_priority_b_over_d(void) {
+    TEST_ASSERT_EQUAL_INT(1, button_latch_pick((1u << 1) | (1u << 3), 0x0F));
+}
+
+void test_pick_respects_allowed_mask(void) {
+    /* A latched but not allowed: fall through to the best allowed */
+    TEST_ASSERT_EQUAL_INT(2, button_latch_pick((1u << 0) | (1u << 2), 1u << 2));
+    /* Only disallowed buttons latched: none */
+    TEST_ASSERT_EQUAL_INT(-1, button_latch_pick(1u << 3, (1u << 0) | (1u << 1) | (1u << 2)));
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_take_returns_zero_when_nothing_latched);
@@ -91,5 +118,11 @@ int main(void) {
     RUN_TEST(test_debounce_window_anchors_on_accepted_edge_only);
     RUN_TEST(test_out_of_range_button_ignored);
     RUN_TEST(test_reset_clears_mask_and_debounce_history);
+    RUN_TEST(test_pick_empty_mask_returns_none);
+    RUN_TEST(test_pick_single_button_returns_it);
+    RUN_TEST(test_pick_priority_a_over_all);
+    RUN_TEST(test_pick_priority_c_over_b_and_d);
+    RUN_TEST(test_pick_priority_b_over_d);
+    RUN_TEST(test_pick_respects_allowed_mask);
     return UNITY_END();
 }

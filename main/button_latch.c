@@ -28,3 +28,15 @@ uint8_t button_latch_take(void) {
     s_mask = 0;
     return taken;
 }
+
+int button_latch_pick(uint8_t mask, uint8_t allowed_mask) {
+    /* A (0) first — start/pause is the time-sensitive action; then C (2)
+       select, B (1) reset, D (3) sync. */
+    static const int priority[BUTTON_LATCH_COUNT] = {0, 2, 1, 3};
+    mask &= allowed_mask;
+    for (int i = 0; i < BUTTON_LATCH_COUNT; i++) {
+        if (mask & (1u << priority[i]))
+            return priority[i];
+    }
+    return -1;
+}

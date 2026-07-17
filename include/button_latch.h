@@ -23,6 +23,9 @@ void button_latch_reset(void);
 void button_latch_record(int btn, int64_t t_us);
 /* Return the latched press bitmask (bit n = button n) and clear it. */
 uint8_t button_latch_take(void);
+/* Pick the single button to act on from a taken mask, restricted to
+   allowed_mask; priority A > C > B > D. Returns -1 when none allowed. */
+int button_latch_pick(uint8_t mask, uint8_t allowed_mask);
 
 #ifdef __cplusplus
 }
