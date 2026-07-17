@@ -3,6 +3,7 @@
 #include <time.h>
 
 #include "alerts.h"
+#include "app_state.h"
 #include "audio.h"
 #include "battery.h"
 #include "battery_policy.h"
@@ -237,34 +238,6 @@ static void enter_deep_sleep(void) {
    (pixel 3, owned by net_window.c) so both can be read at once. */
 #define NP_STATE_PIXEL 0
 
-static const char *timer_state_str(timer_state_t st) {
-    switch (st) {
-        case TIMER_RUNNING:
-            return "RUNNING";
-        case TIMER_PAUSED:
-            return "PAUSED";
-        case TIMER_EXPIRED:
-            return "EXPIRED";
-        case TIMER_BREAK:
-            return "BREAK";
-        default:
-            return "IDLE";
-    }
-}
-
-static const char *day_type_name(day_type_t dt) {
-    switch (dt) {
-        case DAY_WEEKEND:
-            return "Weekend";
-        case DAY_HOLIDAY:
-            return "Holiday";
-        case DAY_SUMMER:
-            return "Summer";
-        default:
-            return "Weekday";
-    }
-}
-
 /* Boot forensics: the USB CDC console drops output around sleep/reset
    transitions, so a crash's evidence must ride channels that survive —
    the stat payload (HA "Last reset" sensor) and a late-wake log line.
@@ -295,45 +268,18 @@ static const char *reset_reason_str(void) {
 }
 
 /* Side-effect-free stat snapshot for the HA session (no timer_tick — a
-   read here must never transition the state machine). */
+   read here must never transition the state machine). Assembly rules
+   live in app_state.c (host-tested); only the device reads are here. */
 static void stats_collect(stats_snapshot_t *out) {
-    memset(out, 0, sizeof(*out));
-    time_t now = time(NULL);
-    out->batt_mv = battery_read_mv();
-    out->batt_pct = battery_percent_from_mv(out->batt_mv);
-    out->light_mv = light_read_mv();
-    timer_state_t st = timer_get_state();
-    out->state = timer_state_str(st);
-    const timer_def_t *def = timer_active_def();
-    out->active_timer = (def != NULL) ? def->name : "Screen";
-    day_type_t dt = schedule_get_day_type(now);
-    out->day_type = day_type_name(dt);
-    /* Per-slot remaining/limit ([0] = Screen): each timer keeps its own HA
-       series. A started slot's allocation includes HA grants; IDLE falls
-       back to the schedule/def value; disabled slots report 0/0. */
-    for (int i = 0; i < TIMER_SLOT_COUNT; i++) {
-        const timer_def_t *sd = timer_slot_def(i);
-        if (i > 0 && sd == NULL) {
-            out->remaining_s[i] = 0;
-            out->allocation_s[i] = 0;
-            continue;
-        }
-        int32_t alloc;
-        if (timer_slot_state(i) != TIMER_IDLE) {
-            alloc = timer_slot_allocation(i);
-        } else {
-            alloc = (i == 0) ? (int32_t)schedule_get_allocation_sec(dt) : sd->duration_sec;
-        }
-        out->allocation_s[i] = (uint32_t)alloc;
-        out->remaining_s[i] = timer_slot_remaining(i, now, alloc);
-    }
-    for (int i = 0; i < TIMER_EXTRA_SLOTS; i++) {
-        out->completions[i] = timer_slot_completions(1 + i);
-    }
-    out->charge_lock = s_charge_locked;
-    out->fw = esp_app_get_description()->version;
-    out->screen_bonus_applied_s = timer_screen_bonus_applied();
-    out->reset_reason = reset_reason_str();
+    app_state_in_t in = {
+        .batt_mv = battery_read_mv(),
+        .light_mv = light_read_mv(),
+        .charge_locked = s_charge_locked,
+        .parent_testing = PARENT_TESTING,
+        .fw_version = esp_app_get_description()->version,
+        .reset_reason = reset_reason_str(),
+    };
+    app_state_stats(&in, time(NULL), out);
 }
 
 static void extend_awake_failsafe(int seconds); /* defined with the failsafe */
@@ -407,39 +353,17 @@ static void neopixel_show_timer_state(void) {
     }
 }
 
+/* Render state via app_state.c (assembly rules host-tested); only the
+   battery ADC read is device-side. Light/fw/reset are stats-only and
+   deliberately not read here — no ADC work per paint. */
 static display_state_t make_state(int32_t remaining, time_t now) {
-    day_type_t dt = schedule_get_day_type(now);
-    /* Extra timers have a fixed configured duration; Screen (slot 0)
-       follows the day schedule. */
-    const timer_def_t *def = timer_active_def();
-    uint32_t alloc = (def != NULL) ? (uint32_t)def->duration_sec : schedule_get_allocation_sec(dt);
-    /* IDLE shows today's full allocation (full bar), not 0 (ProductOverview) */
-    if (timer_get_state() == TIMER_IDLE) {
-        remaining = (int32_t)alloc;
-    }
-    timer_state_t ts = timer_get_state();
     int mv = battery_read_mv();
-    int pct = battery_percent_from_mv(mv);
-    ESP_LOGD(TAG, "battery: %d mV (%d%%)", mv, pct);
-    uint16_t break_dur = NVS_DEFAULT_BREAK_DURATION_MIN;
-    nvs_config_get_break_duration_min(&break_dur);
-    return (display_state_t){
-        .remaining_sec = remaining,
-        .allocation_sec = alloc,
-        .timer_state = ts,
-        .day_type = dt,
-        .wall_time = now,
-        .last_sync_time = timer_last_ntp_sync(),
-        .battery_pct = (uint8_t)pct,
-        .break_remaining_sec = timer_break_remaining(now),
-        .break_duration_sec = (uint32_t)break_dur * 60,
-        .timer_name = (def != NULL) ? def->name : NULL,
-        .charge_warn = battery_policy_evaluate(pct, false) != BATT_OK,
-        .completions = timer_completions(),
-        .reloadable = (def != NULL) && def->reloadable,
-        .swap_available = timer_swap_allowed(),
-        .reload_available = timer_reload_allowed(PARENT_TESTING),
+    ESP_LOGD(TAG, "battery: %d mV (%d%%)", mv, battery_percent_from_mv(mv));
+    app_state_in_t in = {
+        .batt_mv = mv,
+        .parent_testing = PARENT_TESTING,
     };
+    return app_state_display(&in, remaining, now);
 }
 
 /* ---- battery charge lock ---------------------------------------------- */

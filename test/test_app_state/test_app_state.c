@@ -1,0 +1,183 @@
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
+#include <unity.h>
+
+/* Single-TU: the state-assembly rules over the real timer, schedule and
+   nvs_config modules (mock HAL underneath); ADC/app-descriptor reads are
+   injected through app_state_in_t. */
+// clang-format off
+#include "mock_hal_time.c"
+#include "mock_hal_nvs.c"
+#include "../../main/timer.c"
+#include "../../main/schedule.c"
+#include "../../main/nvs_config.c"
+#include "../../main/battery_soc.c"
+#include "../../main/battery_policy.c"
+#include "../../main/app_state.c"
+// clang-format on
+
+/* Base timestamp: 2026-01-05 00:00:00 UTC (Monday) */
+#define T0 ((time_t)1767571200)
+
+/* Slot 2 left disabled to prove the 0/0 stats rule. */
+static const timer_def_t TEST_DEFS[TIMER_SLOT_COUNT] = {
+    {"Screen", 0, false}, {"Piano", 900, true}, {"", 0, false}, {"Meditation", 600, false}, {"", 0, false},
+};
+
+static const app_state_in_t IN_HEALTHY = {
+    .batt_mv = 4100, /* well above the warn band */
+    .light_mv = 321,
+    .charge_locked = false,
+    .parent_testing = false,
+    .fw_version = "1.2.3",
+    .reset_reason = "DEEPSLEEP",
+};
+
+static const app_state_in_t IN_LOW_BATT = {
+    .batt_mv = 3200, /* deep in the warn band */
+    .light_mv = 0,
+    .charge_locked = true,
+    .parent_testing = false,
+    .fw_version = "1.2.3",
+    .reset_reason = "PANIC",
+};
+
+void setUp(void) {
+    mock_nvs_reset();
+    schedule_cache_invalidate();
+    setenv("TZ", "UTC0", 1);
+    tzset();
+    hal_nvs_write_u16("weekday_min", 60);
+    hal_nvs_write_u16("weekend_min", 120);
+    timer_set_defs(TEST_DEFS, TIMER_SLOT_COUNT);
+    timer_reset();
+    mock_time_set(T0);
+}
+
+void tearDown(void) {}
+
+static void select_slot(int slot) {
+    while (timer_active_slot() != slot) {
+        TEST_ASSERT_TRUE(timer_select_next());
+    }
+}
+
+/* ---- display state ------------------------------------------------------ */
+
+void test_display_idle_shows_full_allocation(void) {
+    /* Monday: weekday 60 min. The 0 passed as remaining must be replaced
+       by the full allocation so the IDLE bar renders full. */
+    display_state_t st = app_state_display(&IN_HEALTHY, 0, T0);
+    TEST_ASSERT_EQUAL_INT32(3600, st.remaining_sec);
+    TEST_ASSERT_EQUAL_UINT32(3600, st.allocation_sec);
+    TEST_ASSERT_EQUAL(TIMER_IDLE, st.timer_state);
+    TEST_ASSERT_NULL(st.timer_name); /* Screen renders no mode line */
+}
+
+void test_display_running_passes_remaining_through(void) {
+    timer_start(T0, 3600);
+    display_state_t st = app_state_display(&IN_HEALTHY, 1234, T0 + 100);
+    TEST_ASSERT_EQUAL_INT32(1234, st.remaining_sec);
+    TEST_ASSERT_EQUAL(TIMER_RUNNING, st.timer_state);
+}
+
+void test_display_extra_timer_uses_def_duration_and_name(void) {
+    select_slot(1);
+    display_state_t st = app_state_display(&IN_HEALTHY, 0, T0);
+    TEST_ASSERT_EQUAL_UINT32(900, st.allocation_sec);
+    TEST_ASSERT_EQUAL_STRING("Piano", st.timer_name);
+    TEST_ASSERT_TRUE(st.reloadable);
+}
+
+void test_display_charge_warn_tracks_battery_band(void) {
+    TEST_ASSERT_FALSE(app_state_display(&IN_HEALTHY, 0, T0).charge_warn);
+    TEST_ASSERT_TRUE(app_state_display(&IN_LOW_BATT, 0, T0).charge_warn);
+}
+
+void test_display_break_duration_from_nvs(void) {
+    hal_nvs_write_u16("break_dur", 20);
+    display_state_t st = app_state_display(&IN_HEALTHY, 0, T0);
+    TEST_ASSERT_EQUAL_UINT32(20 * 60, st.break_duration_sec);
+}
+
+void test_display_swap_blocked_while_running(void) {
+    TEST_ASSERT_TRUE(app_state_display(&IN_HEALTHY, 0, T0).swap_available);
+    timer_start(T0, 3600);
+    TEST_ASSERT_FALSE(app_state_display(&IN_HEALTHY, 0, T0).swap_available);
+}
+
+void test_display_reload_follows_parent_testing_gate(void) {
+    /* Screen (not reloadable) only resets under ParentTesting */
+    TEST_ASSERT_FALSE(app_state_display(&IN_HEALTHY, 0, T0).reload_available);
+    app_state_in_t parent = IN_HEALTHY;
+    parent.parent_testing = true;
+    TEST_ASSERT_TRUE(app_state_display(&parent, 0, T0).reload_available);
+}
+
+/* ---- stats snapshot ----------------------------------------------------- */
+
+void test_stats_disabled_slot_reports_zero_zero(void) {
+    stats_snapshot_t s;
+    app_state_stats(&IN_HEALTHY, T0, &s);
+    TEST_ASSERT_EQUAL_INT32(0, s.remaining_s[2]);
+    TEST_ASSERT_EQUAL_UINT32(0, s.allocation_s[2]);
+}
+
+void test_stats_idle_screen_falls_back_to_schedule(void) {
+    stats_snapshot_t s;
+    app_state_stats(&IN_HEALTHY, T0, &s);
+    TEST_ASSERT_EQUAL_UINT32(3600, s.allocation_s[0]);
+    TEST_ASSERT_EQUAL_INT32(3600, s.remaining_s[0]);
+    TEST_ASSERT_EQUAL_STRING("Screen", s.active_timer);
+    TEST_ASSERT_EQUAL_STRING("IDLE", s.state);
+    TEST_ASSERT_EQUAL_STRING("Weekday", s.day_type);
+}
+
+void test_stats_started_slot_allocation_includes_grant(void) {
+    timer_start(T0, 3600);
+    timer_adjust(0, 300); /* HA grant mid-run */
+    stats_snapshot_t s;
+    app_state_stats(&IN_HEALTHY, T0 + 600, &s);
+    TEST_ASSERT_EQUAL_UINT32(3900, s.allocation_s[0]);
+    TEST_ASSERT_EQUAL_INT32(3300, s.remaining_s[0]);
+    TEST_ASSERT_EQUAL_STRING("RUNNING", s.state);
+}
+
+void test_stats_completions_map_extra_slots(void) {
+    select_slot(1);
+    timer_start(T0, 900);
+    timer_tick(T0 + 901); /* expire: Piano completion #1 */
+    stats_snapshot_t s;
+    app_state_stats(&IN_HEALTHY, T0 + 902, &s);
+    TEST_ASSERT_EQUAL_UINT16(1, s.completions[0]); /* [0] = slot 1 */
+    TEST_ASSERT_EQUAL_UINT16(0, s.completions[2]);
+    TEST_ASSERT_EQUAL_STRING("Piano", s.active_timer);
+}
+
+void test_stats_injected_device_fields_pass_through(void) {
+    stats_snapshot_t s;
+    app_state_stats(&IN_LOW_BATT, T0, &s);
+    TEST_ASSERT_EQUAL_INT(3200, s.batt_mv);
+    TEST_ASSERT_TRUE(s.charge_lock);
+    TEST_ASSERT_EQUAL_STRING("1.2.3", s.fw);
+    TEST_ASSERT_EQUAL_STRING("PANIC", s.reset_reason);
+    TEST_ASSERT_EQUAL_INT(0, s.light_mv);
+}
+
+int main(void) {
+    UNITY_BEGIN();
+    RUN_TEST(test_display_idle_shows_full_allocation);
+    RUN_TEST(test_display_running_passes_remaining_through);
+    RUN_TEST(test_display_extra_timer_uses_def_duration_and_name);
+    RUN_TEST(test_display_charge_warn_tracks_battery_band);
+    RUN_TEST(test_display_break_duration_from_nvs);
+    RUN_TEST(test_display_swap_blocked_while_running);
+    RUN_TEST(test_display_reload_follows_parent_testing_gate);
+    RUN_TEST(test_stats_disabled_slot_reports_zero_zero);
+    RUN_TEST(test_stats_idle_screen_falls_back_to_schedule);
+    RUN_TEST(test_stats_started_slot_allocation_includes_grant);
+    RUN_TEST(test_stats_completions_map_extra_slots);
+    RUN_TEST(test_stats_injected_device_fields_pass_through);
+    return UNITY_END();
+}
