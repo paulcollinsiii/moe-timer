@@ -977,7 +977,7 @@ void test_screen_used_sec_is_slot_zero_only(void) {
 
 void test_grant_idle_banks_bonus_realized_at_start(void) {
     /* Screen idle: a grant banks bonus, consumed when the timer starts */
-    timer_grant(0, 900);
+    timer_adjust(0, 900);
     TEST_ASSERT_EQUAL(TIMER_IDLE, timer_get_state()); /* still idle */
     TEST_ASSERT_EQUAL_INT32(900, g_rtc_state.slots[0].bonus_sec);
     timer_start(T0, 3600); /* base alloc 3600 + 900 bonus */
@@ -988,7 +988,7 @@ void test_grant_idle_banks_bonus_realized_at_start(void) {
 
 void test_grant_running_extends_expiry_and_allocation(void) {
     timer_start(T0, 3600);
-    timer_grant(0, 600);
+    timer_adjust(0, 600);
     TEST_ASSERT_EQUAL_INT64((int64_t)T0 + 4200, g_rtc_state.slots[0].expiry_wall_time);
     TEST_ASSERT_EQUAL_INT32(4200, g_rtc_state.slots[0].allocation_sec);
     TEST_ASSERT_EQUAL_INT32(4200, timer_tick(T0));
@@ -997,7 +997,7 @@ void test_grant_running_extends_expiry_and_allocation(void) {
 void test_grant_paused_extends_remaining(void) {
     timer_start(T0, 3600);
     timer_pause(T0 + 1000); /* 2600 left */
-    timer_grant(0, 400);
+    timer_adjust(0, 400);
     TEST_ASSERT_EQUAL_INT32(3000, g_rtc_state.slots[0].remaining_at_pause);
     TEST_ASSERT_EQUAL_INT32(4000, g_rtc_state.slots[0].allocation_sec);
 }
@@ -1007,7 +1007,7 @@ void test_grant_expired_becomes_paused_holding_grant(void) {
        press A to use it (never auto-RUNNING, alert never re-fires). */
     timer_start(T0, 100);
     timer_tick(T0 + 200); /* EXPIRED */
-    timer_grant(0, 900);
+    timer_adjust(0, 900);
     TEST_ASSERT_EQUAL(TIMER_PAUSED, timer_get_state());
     TEST_ASSERT_EQUAL_INT32(900, g_rtc_state.slots[0].remaining_at_pause);
     timer_resume(T0 + 300);
@@ -1016,7 +1016,7 @@ void test_grant_expired_becomes_paused_holding_grant(void) {
 
 void test_grant_targets_named_non_active_slot(void) {
     /* Active = Screen; grant Piano (slot 1) while it sits idle */
-    timer_grant(1, 600);
+    timer_adjust(1, 600);
     TEST_ASSERT_EQUAL_INT(0, timer_active_slot()); /* selection unchanged */
     TEST_ASSERT_EQUAL_INT32(600, g_rtc_state.slots[1].bonus_sec);
     TEST_ASSERT_EQUAL_INT32(0, g_rtc_state.slots[0].bonus_sec); /* Screen untouched */
@@ -1028,13 +1028,13 @@ void test_grant_targets_named_non_active_slot(void) {
 void test_grant_break_extends_frozen_screen_time(void) {
     timer_start(T0, 3600);
     timer_start_break(T0 + 1800, 900); /* 1800 screen-time frozen */
-    timer_grant(0, 300);
+    timer_adjust(0, 300);
     TEST_ASSERT_EQUAL(TIMER_BREAK, timer_get_state()); /* break intact */
     TEST_ASSERT_EQUAL_INT32(2100, g_rtc_state.slots[0].remaining_at_pause);
 }
 
 void test_snapshot_v4_round_trips_bonus(void) {
-    timer_grant(1, 600); /* Piano idle bonus */
+    timer_adjust(1, 600); /* Piano idle bonus */
     timer_start(T0, 3600);
     timer_record_date(T0);
     timer_snapshot_t snap;
@@ -1062,11 +1062,116 @@ void test_bonus_reconcile_grants_only_the_delta(void) {
     TEST_ASSERT_EQUAL_INT32(1200, g_rtc_state.slots[0].bonus_applied);
 }
 
-void test_bonus_reconcile_lowering_target_does_not_reclaim(void) {
+void test_bonus_reconcile_lowering_target_reclaims_delta(void) {
     timer_bonus_reconcile(0, 900);
-    timer_bonus_reconcile(0, 300); /* can't take back granted time */
-    TEST_ASSERT_EQUAL_INT32(900, g_rtc_state.slots[0].bonus_applied);
-    TEST_ASSERT_EQUAL_INT32(900, g_rtc_state.slots[0].bonus_sec);
+    timer_bonus_reconcile(0, 300); /* chores not done: take back 10 min */
+    TEST_ASSERT_EQUAL_INT32(300, g_rtc_state.slots[0].bonus_applied);
+    TEST_ASSERT_EQUAL_INT32(300, g_rtc_state.slots[0].bonus_sec);
+}
+
+void test_bonus_reconcile_negative_target_applies_delta_once(void) {
+    /* +15 in the morning, -5 in the afternoon: the -20 delta lands
+       exactly once; retained-message replays are no-ops. */
+    timer_start(T0, 3600);
+    timer_bonus_reconcile(0, 900); /* +15 min */
+    TEST_ASSERT_EQUAL_INT32(4500, g_rtc_state.slots[0].allocation_sec);
+    timer_bonus_reconcile(0, -300); /* down to -5 min */
+    TEST_ASSERT_EQUAL_INT64((int64_t)T0 + 3300, g_rtc_state.slots[0].expiry_wall_time);
+    TEST_ASSERT_EQUAL_INT32(3300, g_rtc_state.slots[0].allocation_sec);
+    TEST_ASSERT_EQUAL_INT32(-300, g_rtc_state.slots[0].bonus_applied);
+    timer_bonus_reconcile(0, -300); /* replay */
+    TEST_ASSERT_EQUAL_INT32(3300, g_rtc_state.slots[0].allocation_sec);
+}
+
+void test_bonus_reconcile_stale_replay_across_rollover_is_noop(void) {
+    /* Rollover ordering: the stale retained target reconciles BEFORE the
+       day reset (delta 0), the broker is cleared to "0", and next window
+       "0" meets bonus_applied 0 — nothing re-applies. */
+    timer_bonus_reconcile(0, -300);
+    TEST_ASSERT_EQUAL_INT32(-300, g_rtc_state.slots[0].bonus_sec);
+    timer_bonus_reconcile(0, -300); /* stale replay, pre-reset */
+    TEST_ASSERT_EQUAL_INT32(-300, g_rtc_state.slots[0].bonus_sec);
+    timer_reset();               /* day rollover */
+    timer_bonus_reconcile(0, 0); /* cleared broker value */
+    TEST_ASSERT_EQUAL_INT32(0, g_rtc_state.slots[0].bonus_sec);
+    TEST_ASSERT_EQUAL_INT32(0, g_rtc_state.slots[0].bonus_applied);
+}
+
+/* ---- signed timer_adjust: negative = time lost ---- */
+
+void test_adjust_running_deducts_expiry_and_allocation(void) {
+    timer_start(T0, 3600);
+    timer_adjust(0, -600);
+    TEST_ASSERT_EQUAL_INT64((int64_t)T0 + 3000, g_rtc_state.slots[0].expiry_wall_time);
+    TEST_ASSERT_EQUAL_INT32(3000, g_rtc_state.slots[0].allocation_sec);
+    TEST_ASSERT_EQUAL_INT32(3000, timer_tick(T0));
+}
+
+void test_adjust_running_past_zero_expires_on_next_tick(void) {
+    timer_start(T0, 600);
+    timer_adjust(0, -900);                               /* deduction exceeds remaining */
+    TEST_ASSERT_EQUAL(TIMER_RUNNING, timer_get_state()); /* until the tick */
+    timer_tick(T0 + 1);
+    TEST_ASSERT_EQUAL(TIMER_EXPIRED, timer_get_state());
+}
+
+void test_adjust_paused_past_zero_expires(void) {
+    /* Same contract as timer_reconcile_def: a deduction that empties a
+       paused timer expires it (honest TIME'S UP, not a 0:00 pause). */
+    timer_start(T0, 3600);
+    timer_pause(T0 + 1000); /* 2600 left */
+    timer_adjust(0, -3000);
+    TEST_ASSERT_EQUAL(TIMER_EXPIRED, timer_get_state());
+    TEST_ASSERT_EQUAL_INT32(0, g_rtc_state.slots[0].remaining_at_pause);
+}
+
+void test_adjust_paused_partial_deduction_stays_paused(void) {
+    timer_start(T0, 3600);
+    timer_pause(T0 + 1000); /* 2600 left */
+    timer_adjust(0, -600);
+    TEST_ASSERT_EQUAL(TIMER_PAUSED, timer_get_state());
+    TEST_ASSERT_EQUAL_INT32(2000, g_rtc_state.slots[0].remaining_at_pause);
+    TEST_ASSERT_EQUAL_INT32(3000, g_rtc_state.slots[0].allocation_sec);
+}
+
+void test_adjust_break_clamps_frozen_remaining(void) {
+    /* BREAK stays intact — the deduction lands on the frozen screen
+       time; an emptied timer expires on the post-break resume tick. */
+    timer_start(T0, 3600);
+    timer_start_break(T0 + 1800, 900); /* 1800 frozen */
+    timer_adjust(0, -2500);
+    TEST_ASSERT_EQUAL(TIMER_BREAK, timer_get_state());
+    TEST_ASSERT_EQUAL_INT32(0, g_rtc_state.slots[0].remaining_at_pause);
+}
+
+void test_adjust_expired_negative_is_noop(void) {
+    timer_start(T0, 100);
+    timer_tick(T0 + 200); /* EXPIRED */
+    timer_adjust(0, -600);
+    TEST_ASSERT_EQUAL(TIMER_EXPIRED, timer_get_state());
+    TEST_ASSERT_EQUAL_INT32(100, g_rtc_state.slots[0].allocation_sec);
+}
+
+void test_adjust_idle_banks_negative_start_clamps_at_zero(void) {
+    timer_adjust(0, -7200); /* deduction beyond the whole allocation */
+    TEST_ASSERT_EQUAL_INT32(-7200, g_rtc_state.slots[0].bonus_sec);
+    timer_start(T0, 3600); /* 3600 - 7200 clamps to 0 */
+    TEST_ASSERT_EQUAL_INT32(0, g_rtc_state.slots[0].allocation_sec);
+    timer_tick(T0 + 1);
+    TEST_ASSERT_EQUAL(TIMER_EXPIRED, timer_get_state());
+}
+
+void test_snapshot_round_trips_negative_bonus(void) {
+    timer_adjust(1, -600); /* Piano idle: banked deduction */
+    timer_bonus_reconcile(0, -300);
+    timer_record_date(T0);
+    timer_snapshot_t snap;
+    timer_make_snapshot(&snap);
+
+    timer_reset();
+    TEST_ASSERT_TRUE(timer_restore_snapshot(&snap, T0 + 100));
+    TEST_ASSERT_EQUAL_INT32(-600, g_rtc_state.slots[1].bonus_sec);
+    TEST_ASSERT_EQUAL_INT32(-300, g_rtc_state.slots[0].bonus_applied);
 }
 
 void test_bonus_applied_resets_at_rollover(void) {
@@ -1215,7 +1320,7 @@ void test_reconcile_duration_shift_preserves_granted_time(void) {
        must move both without erasing the grant. */
     timer_select_next();
     timer_start(T0, 900);
-    timer_grant(1, 300); /* allocation 1200, expiry T0+1200 */
+    timer_adjust(1, 300); /* allocation 1200, expiry T0+1200 */
     timer_def_t shrunk = {"Piano", 600, true};
     TEST_ASSERT_EQUAL(TIMER_RECONCILE_UPDATED, timer_reconcile_def(1, &RECON_OLD, &shrunk, T0 + 100, NULL));
     TEST_ASSERT_EQUAL_INT64((int64_t)T0 + 900, g_rtc_state.slots[1].expiry_wall_time);
@@ -1359,7 +1464,17 @@ void test_break_due_lands_inside_final_minute(void) {
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_bonus_reconcile_grants_only_the_delta);
-    RUN_TEST(test_bonus_reconcile_lowering_target_does_not_reclaim);
+    RUN_TEST(test_bonus_reconcile_lowering_target_reclaims_delta);
+    RUN_TEST(test_bonus_reconcile_negative_target_applies_delta_once);
+    RUN_TEST(test_bonus_reconcile_stale_replay_across_rollover_is_noop);
+    RUN_TEST(test_adjust_running_deducts_expiry_and_allocation);
+    RUN_TEST(test_adjust_running_past_zero_expires_on_next_tick);
+    RUN_TEST(test_adjust_paused_past_zero_expires);
+    RUN_TEST(test_adjust_paused_partial_deduction_stays_paused);
+    RUN_TEST(test_adjust_break_clamps_frozen_remaining);
+    RUN_TEST(test_adjust_expired_negative_is_noop);
+    RUN_TEST(test_adjust_idle_banks_negative_start_clamps_at_zero);
+    RUN_TEST(test_snapshot_round_trips_negative_bonus);
     RUN_TEST(test_bonus_applied_resets_at_rollover);
     RUN_TEST(test_bonus_applied_survives_snapshot_v5);
     RUN_TEST(test_reset_state_is_idle);
