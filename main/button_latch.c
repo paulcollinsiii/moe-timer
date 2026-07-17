@@ -29,6 +29,12 @@ uint8_t button_latch_take(void) {
     return taken;
 }
 
+uint8_t button_latch_take_masked(uint8_t mask) {
+    uint8_t taken = s_mask & mask;
+    s_mask &= (uint8_t)~mask;
+    return taken;
+}
+
 int button_latch_pick(uint8_t mask, uint8_t allowed_mask) {
     /* A (0) first — start/pause is the time-sensitive action; then C (2)
        select, B (1) reset, D (3) sync. */

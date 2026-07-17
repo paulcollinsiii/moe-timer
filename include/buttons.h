@@ -24,6 +24,9 @@ uint8_t buttons_scan_held(void);
    Latched between buttons_init() and buttons_configure_wakeup(); level
    reads above stay the tool for "is it held right now". */
 uint8_t buttons_take_pressed(void);
+/* Consume only the latched presses in `mask`, leaving the rest latched
+   for a later checkpoint (e.g. the tick-wake drain). */
+uint8_t buttons_take_pressed_mask(uint8_t mask);
 
 #ifdef __cplusplus
 }

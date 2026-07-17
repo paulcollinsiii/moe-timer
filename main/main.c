@@ -834,11 +834,12 @@ static void handle_day_rollover(time_t *now) {
    press while RUNNING pauses immediately (the one action that must not
    be lost — pause is time-sensitive). The GPIO ISR latches the edge the
    moment it lands (even inside an e-ink flush or NTP sync); this consumes
-   the latch, so no press is ever lost to a blind spot. Latched B/C/D
-   presses in the same take are dropped by design (wake-press-only
-   semantics). Returns true when it paused. */
+   the latch, so no press is ever lost to a blind spot. Masked take: only
+   the A bit is consumed — latched B/C presses stay in the latch for the
+   tick-wake drain (a poll during the grid wait must not eat them).
+   Returns true when it paused. */
 static bool poll_pause_button(void) {
-    bool a_pressed = (buttons_take_pressed() & (1u << BTN_A)) != 0;
+    bool a_pressed = buttons_take_pressed_mask(1u << BTN_A) != 0;
     if (timer_get_state() != TIMER_RUNNING || !a_pressed)
         return false;
     time_t now = time(NULL);
@@ -856,7 +857,7 @@ static bool poll_pause_button(void) {
    rendezvous). The clock was already synced this wake, so a start here
    needs no expiry shift. */
 static bool poll_button_a_action(void) {
-    if ((buttons_take_pressed() & (1u << BTN_A)) == 0)
+    if (buttons_take_pressed_mask(1u << BTN_A) == 0)
         return false;
     timer_state_t st = timer_get_state();
     if (button_a_apply(time(NULL)) == BTN_A_NONE)

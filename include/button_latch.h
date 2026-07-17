@@ -23,6 +23,10 @@ void button_latch_reset(void);
 void button_latch_record(int btn, int64_t t_us);
 /* Return the latched press bitmask (bit n = button n) and clear it. */
 uint8_t button_latch_take(void);
+/* Take only the buttons in `mask`, leaving other latched presses for a
+   later consumer — an awake poll interested in one button must not eat
+   presses a later checkpoint (e.g. the tick-wake drain) will act on. */
+uint8_t button_latch_take_masked(uint8_t mask);
 /* Pick the single button to act on from a taken mask, restricted to
    allowed_mask; priority A > C > B > D. Returns -1 when none allowed. */
 int button_latch_pick(uint8_t mask, uint8_t allowed_mask);

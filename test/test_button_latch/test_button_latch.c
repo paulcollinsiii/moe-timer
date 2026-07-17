@@ -80,6 +80,46 @@ void test_reset_clears_mask_and_debounce_history(void) {
     TEST_ASSERT_EQUAL_UINT8(1u << 0, button_latch_take());
 }
 
+void test_take_masked_returns_only_requested_bits(void) {
+    button_latch_record(0, T0_US);
+    button_latch_record(2, T0_US + 1000);
+    TEST_ASSERT_EQUAL_UINT8(1u << 0, button_latch_take_masked(1u << 0));
+}
+
+void test_take_masked_leaves_other_bits_latched(void) {
+    /* The C1 field case: A-poll during the grid wait must not eat a
+       latched C press meant for the tick-wake drain. */
+    button_latch_record(0, T0_US);
+    button_latch_record(2, T0_US + 1000);
+    button_latch_take_masked(1u << 0);
+    TEST_ASSERT_EQUAL_UINT8(1u << 2, button_latch_take());
+}
+
+void test_take_masked_consumed_bit_stays_consumed(void) {
+    button_latch_record(0, T0_US);
+    button_latch_take_masked(1u << 0);
+    TEST_ASSERT_EQUAL_UINT8(0, button_latch_take_masked(1u << 0));
+}
+
+void test_take_masked_empty_mask_is_noop(void) {
+    button_latch_record(1, T0_US);
+    TEST_ASSERT_EQUAL_UINT8(0, button_latch_take_masked(0));
+    TEST_ASSERT_EQUAL_UINT8(1u << 1, button_latch_take());
+}
+
+void test_take_masked_requested_but_unlatched_returns_zero(void) {
+    button_latch_record(3, T0_US);
+    TEST_ASSERT_EQUAL_UINT8(0, button_latch_take_masked(1u << 0));
+    TEST_ASSERT_EQUAL_UINT8(1u << 3, button_latch_take());
+}
+
+void test_take_masked_full_mask_equals_take(void) {
+    button_latch_record(0, T0_US);
+    button_latch_record(3, T0_US + 1000);
+    TEST_ASSERT_EQUAL_UINT8((1u << 0) | (1u << 3), button_latch_take_masked(0x0F));
+    TEST_ASSERT_EQUAL_UINT8(0, button_latch_take());
+}
+
 void test_pick_empty_mask_returns_none(void) {
     TEST_ASSERT_EQUAL_INT(-1, button_latch_pick(0, 0x0F));
 }
@@ -118,6 +158,12 @@ int main(void) {
     RUN_TEST(test_debounce_window_anchors_on_accepted_edge_only);
     RUN_TEST(test_out_of_range_button_ignored);
     RUN_TEST(test_reset_clears_mask_and_debounce_history);
+    RUN_TEST(test_take_masked_returns_only_requested_bits);
+    RUN_TEST(test_take_masked_leaves_other_bits_latched);
+    RUN_TEST(test_take_masked_consumed_bit_stays_consumed);
+    RUN_TEST(test_take_masked_empty_mask_is_noop);
+    RUN_TEST(test_take_masked_requested_but_unlatched_returns_zero);
+    RUN_TEST(test_take_masked_full_mask_equals_take);
     RUN_TEST(test_pick_empty_mask_returns_none);
     RUN_TEST(test_pick_single_button_returns_it);
     RUN_TEST(test_pick_priority_a_over_all);
