@@ -21,6 +21,7 @@ Module map, hardware target, persistent-state layout, and subsystem design notes
 | `main/main.c` | `app_main`: dispatch on `esp_sleep_get_wakeup_causes()` bitmap to button or timer-tick handler; wake sequencing, event watch loops, sleep entry, lock gates |
 | `main/alerts.c` | Audible alert engine (expiry/break/bedtime/locate): press-latch drain, NeoPixel pulse, audio task lifecycle + join, dismissal polling |
 | `main/net_apply.c` | Orchestrator side of a network window: pre-window def capture, post-join apply (clock-step shift, bonus, grant, def reconcile, locate) — host-tested via injected device effects |
+| `main/app_state.c` | Display-state + stats-snapshot assembly (IDLE full bar, per-slot allocation fallbacks, warn badge, button availability) — host-tested; device reads injected |
 | `main/timer.c/h` | Slot-based state machine (IDLE/RUNNING/PAUSED/EXPIRED/BREAK; slot 0 = Screen, slots 1..4 = extra timers); expiry calc; completion counters; RTC memory persistence |
 | `main/timer_defs.c` | Extra-timer definition table from `MAGTAG_TIMER<n>_*` Kconfig symbols; installed via `timer_defs_install()` each boot |
 | `main/display.c/h` | Flush to ssd1680 (I1 format); partial/full refresh policy; panel sleep handling |
