@@ -451,7 +451,7 @@ static void check_bedtime(time_t now) {
         return;
     }
     if (!s_bedtime_locked) {
-        bedtime_engage(now, bedtime_should_alert(timer_get_state())); /* no return */
+        bedtime_engage(now, bedtime_should_alert(timer_get_state(), timer_break_active())); /* no return */
     }
     /* Locked re-wake (~2 h cadence): NTP + HA config pickup only, no
        repaint (e-ink retains). Re-check after the window - a bedtime

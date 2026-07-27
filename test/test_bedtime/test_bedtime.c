@@ -72,11 +72,22 @@ void test_break_crossing_boundaries(void) {
 /* ---- alert matrix ---- */
 
 void test_alert_only_for_running_and_break(void) {
-    TEST_ASSERT_TRUE(bedtime_should_alert(TIMER_RUNNING));
-    TEST_ASSERT_TRUE(bedtime_should_alert(TIMER_BREAK));
-    TEST_ASSERT_FALSE(bedtime_should_alert(TIMER_IDLE));
-    TEST_ASSERT_FALSE(bedtime_should_alert(TIMER_PAUSED));
-    TEST_ASSERT_FALSE(bedtime_should_alert(TIMER_EXPIRED));
+    TEST_ASSERT_TRUE(bedtime_should_alert(TIMER_RUNNING, false));
+    TEST_ASSERT_TRUE(bedtime_should_alert(TIMER_BREAK, false));
+    TEST_ASSERT_FALSE(bedtime_should_alert(TIMER_IDLE, false));
+    TEST_ASSERT_FALSE(bedtime_should_alert(TIMER_PAUSED, false));
+    TEST_ASSERT_FALSE(bedtime_should_alert(TIMER_EXPIRED, false));
+}
+
+void test_alert_for_a_background_break(void) {
+    /* A break now runs on slot 0 behind whatever timer is selected, so
+       the ACTIVE state no longer tells the whole story: bed time landing
+       mid-break still interrupted something. */
+    TEST_ASSERT_TRUE(bedtime_should_alert(TIMER_PAUSED, true));
+    TEST_ASSERT_TRUE(bedtime_should_alert(TIMER_IDLE, true));
+    TEST_ASSERT_TRUE(bedtime_should_alert(TIMER_EXPIRED, true));
+    /* Screen selected during its own break: both signals agree */
+    TEST_ASSERT_TRUE(bedtime_should_alert(TIMER_BREAK, true));
 }
 
 int main(void) {
@@ -89,5 +100,6 @@ int main(void) {
     RUN_TEST(test_disabled_is_never_active);
     RUN_TEST(test_break_crossing_boundaries);
     RUN_TEST(test_alert_only_for_running_and_break);
+    RUN_TEST(test_alert_for_a_background_break);
     return UNITY_END();
 }
