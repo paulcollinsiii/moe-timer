@@ -3,9 +3,20 @@
 #include <time.h>
 #include <unity.h>
 
-/* Single-TU compilation */
-#include "../../main/timer.c"
+/* Single-TU compilation. button_actions.c (+ its schedule dependency) rides
+   along so the state matrix can assert the real Button A outcome per row
+   instead of re-deriving it here. */
+// clang-format off
 #include "mock_hal_time.c"
+#include "mock_hal_nvs.c"
+#include "../../main/timer.c"
+#include "../../main/schedule.c"
+#include "../../main/button_actions.c"
+// clang-format on
+
+/* SLEEP_PLAN_WATCH_SEC / BREAK_CHIME_GRACE_SEC — the chime grace is derived
+   from the watch window, so the test pins the real constant, not a copy. */
+#include "sleep_plan.h"
 
 /* Base timestamp: 2026-01-05 00:00:00 UTC (Monday) */
 #define T0 ((time_t)1767571200)
@@ -18,12 +29,57 @@ static const timer_def_t TEST_DEFS[TIMER_SLOT_COUNT] = {
 };
 
 void setUp(void) {
+    mock_nvs_reset();
+    schedule_cache_invalidate();
+    setenv("TZ", "UTC0", 1);
+    tzset();
+    hal_nvs_write_u16("weekday_min", 60); /* Screen allocation for button_a_apply */
     timer_set_defs(TEST_DEFS, TIMER_SLOT_COUNT);
     timer_reset();
     mock_time_set(T0);
 }
 
-void tearDown(void) {}
+/* Structural invariants I1-I5 of the non-blocking-break state model
+   (docs/planning/20260727.breaktime.plan.md):
+
+     I1  BREAK only ever appears on slot 0
+     I2  at most one slot is RUNNING at any time
+     I3  a RUNNING slot is always the active slot
+     I4  break_expiry_wall != 0 iff slot 0 is BREAK
+     I5  slot 0 BREAK => slot 0 holds the FROZEN screen time: the remaining
+         lives in remaining_at_pause and no wall expiry is armed, so no
+         other slot's run can consume it
+
+   Called from tearDown, which Unity runs after EVERY test in this suite —
+   the pre-existing tests included. A regression anywhere in timer.c that
+   leaves an illegal state behind trips here, not three releases later. */
+static void assert_state_legal(void) {
+    int running = 0;
+    for (int i = 0; i < TIMER_SLOT_COUNT; i++) {
+        const timer_slot_state_t *sl = &g_rtc_state.slots[i];
+        if (i > 0) {
+            TEST_ASSERT_TRUE_MESSAGE(sl->state != TIMER_BREAK, "I1: BREAK on an extra slot");
+            TEST_ASSERT_EQUAL_INT64_MESSAGE(0, sl->break_expiry_wall, "I4: break expiry on an extra slot");
+        }
+        if (sl->state == TIMER_RUNNING) {
+            running++;
+            TEST_ASSERT_EQUAL_INT_MESSAGE(i, timer_active_slot(), "I3: RUNNING slot is not the active slot");
+        }
+    }
+    TEST_ASSERT_TRUE_MESSAGE(running <= 1, "I2: more than one RUNNING slot");
+
+    const timer_slot_state_t *s0 = &g_rtc_state.slots[0];
+    TEST_ASSERT_EQUAL_INT_MESSAGE((int)(s0->state == TIMER_BREAK), (int)(s0->break_expiry_wall != 0),
+                                  "I4: break_expiry_wall != 0 must mean slot 0 is BREAK, and vice versa");
+    if (s0->state == TIMER_BREAK) {
+        TEST_ASSERT_EQUAL_INT64_MESSAGE(0, s0->expiry_wall_time, "I5: a break must not leave the screen expiry armed");
+        TEST_ASSERT_TRUE_MESSAGE(s0->remaining_at_pause >= 0, "I5: frozen screen time went negative");
+    }
+}
+
+void tearDown(void) {
+    assert_state_legal();
+}
 
 void test_reset_state_is_idle(void) {
     TEST_ASSERT_EQUAL(TIMER_IDLE, timer_get_state());
@@ -513,11 +569,14 @@ void test_select_next_refused_while_running(void) {
     TEST_ASSERT_EQUAL(TIMER_RUNNING, timer_get_state());
 }
 
-void test_select_next_refused_during_break(void) {
+void test_select_next_allowed_during_break(void) {
+    /* v1.4: the break enforces the SCREEN timer, not the whole device —
+       Button C stays live so the kid can go and run Piano. */
     timer_start(T0, 3600);
     timer_start_break(T0 + 1800, 900);
-    TEST_ASSERT_FALSE(timer_select_next());
-    TEST_ASSERT_EQUAL_INT(0, timer_active_slot());
+    TEST_ASSERT_TRUE(timer_select_next());
+    TEST_ASSERT_EQUAL_INT(1, timer_active_slot());
+    TEST_ASSERT_EQUAL(TIMER_BREAK, timer_slot_state(0)); /* break unaffected */
 }
 
 void test_select_next_allowed_when_paused_or_expired(void) {
@@ -565,7 +624,7 @@ void test_swap_allowed_tracks_state_and_extras(void) {
     TEST_ASSERT_TRUE(timer_swap_allowed()); /* PAUSED */
     timer_resume(T0 + 200);
     timer_start_break(T0 + 300, 900);
-    TEST_ASSERT_FALSE(timer_swap_allowed()); /* BREAK (enforced) */
+    TEST_ASSERT_TRUE(timer_swap_allowed()); /* BREAK no longer blocks the swap */
     timer_reset();
     timer_start(T0, 100);
     timer_tick(T0 + 200); /* -> EXPIRED */
@@ -1461,6 +1520,385 @@ void test_break_due_lands_inside_final_minute(void) {
     TEST_ASSERT_EQUAL_INT32(60, g_rtc_state.slots[0].remaining_at_pause);
 }
 
+/* ==================================================================== */
+/* Non-blocking Screen Break: slot 0 may hold TIMER_BREAK while ANY     */
+/* slot is active. The combination space is wide, so the contract is a  */
+/* table — a new row in the code needs a new row here.                  */
+/* ==================================================================== */
+
+/* Slot-0 setup for a matrix row. */
+typedef enum {
+    S0_IDLE = 0,
+    S0_RUNNING,    /* Screen counting down */
+    S0_BREAK,      /* break armed: starts T0+600, ends T0+1500 */
+    S0_POST_BREAK, /* that break already ended -> Screen PAUSED */
+} s0_setup_t;
+
+/* Wall time every matrix assertion is made at: inside the break window
+   (T0+600 .. T0+1500) and after the extra slot's own setup. */
+#define M_NOW (T0 + 800)
+
+typedef struct {
+    const char *name;
+    s0_setup_t s0;
+    int active_slot;             /* 0 = Screen, 1 = Piano */
+    timer_state_t active_state;  /* state the ACTIVE slot is left in */
+    bool swap_allowed;           /* timer_swap_allowed() */
+    bool break_active;           /* timer_break_active() */
+    bool break_remaining_gt0;    /* timer_break_remaining(M_NOW) > 0 */
+    btn_a_action_t btn_a;        /* button_a_apply(M_NOW) */
+    timer_state_t state_after_a; /* active slot afterwards */
+    bool chime_at_break_end;     /* == !timer_any_extra_running(); the snap
+                                    back to Screen rides the same predicate */
+} matrix_case_t;
+
+static const matrix_case_t STATE_MATRIX[] = {
+    /* --- break running (slot 0 == BREAK) --- */
+    {"break, Screen selected", S0_BREAK, 0, TIMER_BREAK, true, true, true, BTN_A_NONE, TIMER_BREAK, true},
+    {"break, extra IDLE", S0_BREAK, 1, TIMER_IDLE, true, true, true, BTN_A_STARTED, TIMER_RUNNING, true},
+    {"break, extra RUNNING", S0_BREAK, 1, TIMER_RUNNING, false, true, true, BTN_A_PAUSED, TIMER_PAUSED, false},
+    {"break, extra PAUSED", S0_BREAK, 1, TIMER_PAUSED, true, true, true, BTN_A_RESUMED, TIMER_RUNNING, true},
+    {"break, extra EXPIRED", S0_BREAK, 1, TIMER_EXPIRED, true, true, true, BTN_A_NONE, TIMER_EXPIRED, true},
+    /* --- no break running --- */
+    {"post-break Screen PAUSED, extra RUNNING", S0_POST_BREAK, 1, TIMER_RUNNING, false, false, false, BTN_A_PAUSED,
+     TIMER_PAUSED, false},
+    {"Screen RUNNING", S0_RUNNING, 0, TIMER_RUNNING, false, false, false, BTN_A_PAUSED, TIMER_PAUSED, true},
+    {"Screen IDLE, extra IDLE", S0_IDLE, 1, TIMER_IDLE, true, false, false, BTN_A_STARTED, TIMER_RUNNING, true},
+};
+
+/* Put the ACTIVE slot into `st` (extra slots only — slot 0's state comes
+   from the s0 column). */
+static void matrix_set_active_state(timer_state_t st) {
+    switch (st) {
+        case TIMER_RUNNING:
+            timer_start(T0 + 700, 900);
+            break;
+        case TIMER_PAUSED:
+            timer_start(T0 + 700, 900);
+            timer_pause(T0 + 750);
+            break;
+        case TIMER_EXPIRED:
+            timer_start(T0 + 700, 10);
+            timer_tick(T0 + 790);
+            break;
+        default: /* IDLE: fresh slot */
+            break;
+    }
+}
+
+static void matrix_setup(const matrix_case_t *c) {
+    timer_reset();
+    switch (c->s0) {
+        case S0_RUNNING:
+            timer_start(T0, 3600);
+            break;
+        case S0_BREAK:
+            timer_start(T0, 3600);
+            timer_start_break(T0 + 600, 900); /* frozen 3000 s; ends T0+1500 */
+            break;
+        case S0_POST_BREAK:
+            timer_start(T0, 3600);
+            timer_start_break(T0 + 600, 900);
+            TEST_ASSERT_TRUE(timer_break_tick(T0 + 1500, NULL));
+            break;
+        default:
+            break;
+    }
+    if (c->active_slot != 0) {
+        TEST_ASSERT_TRUE_MESSAGE(timer_select_next(), c->name);
+        TEST_ASSERT_EQUAL_INT_MESSAGE(c->active_slot, timer_active_slot(), c->name);
+        matrix_set_active_state(c->active_state);
+    }
+    TEST_ASSERT_EQUAL_MESSAGE(c->active_state, timer_get_state(), c->name);
+}
+
+void test_state_matrix(void) {
+    for (size_t i = 0; i < sizeof(STATE_MATRIX) / sizeof(STATE_MATRIX[0]); i++) {
+        const matrix_case_t *c = &STATE_MATRIX[i];
+        matrix_setup(c);
+
+        TEST_ASSERT_EQUAL_INT_MESSAGE((int)c->swap_allowed, (int)timer_swap_allowed(), c->name);
+        TEST_ASSERT_EQUAL_INT_MESSAGE((int)c->break_active, (int)timer_break_active(), c->name);
+        TEST_ASSERT_EQUAL_INT_MESSAGE((int)c->break_remaining_gt0, (int)(timer_break_remaining(M_NOW) > 0), c->name);
+        /* The chime (and the snap back to Screen it comes with) is
+           suppressed exactly when an extra slot is RUNNING. */
+        TEST_ASSERT_EQUAL_INT_MESSAGE((int)c->chime_at_break_end, (int)!timer_any_extra_running(), c->name);
+
+        TEST_ASSERT_EQUAL_MESSAGE(c->btn_a, button_a_apply(M_NOW), c->name);
+        TEST_ASSERT_EQUAL_MESSAGE(c->state_after_a, timer_get_state(), c->name);
+        assert_state_legal();
+    }
+}
+
+/* ---- selection while a break runs ---- */
+
+void test_select_next_off_slot_zero_and_back_preserves_break(void) {
+    timer_start(T0, 3600);
+    timer_start_break(T0 + 600, 900);
+    TEST_ASSERT_TRUE(timer_select_next()); /* -> Piano */
+    TEST_ASSERT_EQUAL(TIMER_IDLE, timer_get_state());
+    TEST_ASSERT_TRUE(timer_break_active());
+    TEST_ASSERT_EQUAL_INT32(700, timer_break_remaining(T0 + 800));
+    TEST_ASSERT_TRUE(timer_select_next()); /* -> Meditation (slot 2 disabled) */
+    TEST_ASSERT_TRUE(timer_select_next()); /* -> Violin */
+    TEST_ASSERT_TRUE(timer_select_next()); /* -> Screen */
+    TEST_ASSERT_EQUAL_INT(0, timer_active_slot());
+    TEST_ASSERT_EQUAL(TIMER_BREAK, timer_get_state()); /* still the break screen */
+    TEST_ASSERT_EQUAL_INT32(3000, g_rtc_state.slots[0].remaining_at_pause);
+}
+
+void test_select_screen_returns_from_non_running_extra(void) {
+    timer_start(T0, 3600);
+    timer_start_break(T0 + 600, 900);
+    TEST_ASSERT_TRUE(timer_select_next()); /* Piano, IDLE */
+    TEST_ASSERT_TRUE(timer_select_screen());
+    TEST_ASSERT_EQUAL_INT(0, timer_active_slot());
+    /* PAUSED and EXPIRED snap back too */
+    TEST_ASSERT_TRUE(timer_select_next());
+    timer_start(T0 + 700, 900);
+    timer_pause(T0 + 750);
+    TEST_ASSERT_TRUE(timer_select_screen());
+    TEST_ASSERT_EQUAL_INT(0, timer_active_slot());
+    TEST_ASSERT_TRUE(timer_select_next());
+    timer_start(T0 + 800, 10);
+    timer_tick(T0 + 900); /* EXPIRED */
+    TEST_ASSERT_TRUE(timer_select_screen());
+    TEST_ASSERT_EQUAL_INT(0, timer_active_slot());
+}
+
+void test_select_screen_refused_while_extra_running(void) {
+    /* Stealing the selection out from under a running timer would be
+       hostile — the kid gets back to Screen with Button C. */
+    timer_start(T0, 3600);
+    timer_start_break(T0 + 600, 900);
+    TEST_ASSERT_TRUE(timer_select_next());
+    timer_start(T0 + 700, 900);
+    TEST_ASSERT_FALSE(timer_select_screen());
+    TEST_ASSERT_EQUAL_INT(1, timer_active_slot());
+}
+
+void test_select_screen_already_on_screen_is_a_noop(void) {
+    timer_start(T0, 3600); /* Screen RUNNING, already selected */
+    TEST_ASSERT_TRUE(timer_select_screen());
+    TEST_ASSERT_EQUAL_INT(0, timer_active_slot());
+    TEST_ASSERT_EQUAL(TIMER_RUNNING, timer_get_state());
+}
+
+/* ---- I5: an extra slot's whole life cycle never touches the break ---- */
+
+void test_extra_slot_lifecycle_leaves_break_untouched(void) {
+    timer_start(T0, 3600);
+    timer_start_break(T0 + 600, 900); /* frozen 3000, ends T0+1500 */
+    TEST_ASSERT_TRUE(timer_select_next());
+
+    timer_start(T0 + 700, 500); /* expires T0+1200 */
+    TEST_ASSERT_EQUAL_INT64((int64_t)T0 + 1500, g_rtc_state.slots[0].break_expiry_wall);
+    TEST_ASSERT_EQUAL_INT32(3000, g_rtc_state.slots[0].remaining_at_pause);
+
+    timer_tick(T0 + 800);
+    timer_pause(T0 + 850);  /* 350 left */
+    timer_resume(T0 + 900); /* expires T0+1250 */
+    timer_tick(T0 + 1100);  /* still inside the run */
+    TEST_ASSERT_EQUAL(TIMER_RUNNING, timer_get_state());
+    timer_tick(T0 + 1300); /* past T0+1250 -> EXPIRED, all while the break runs */
+    TEST_ASSERT_EQUAL(TIMER_EXPIRED, timer_get_state());
+
+    /* Slot 0 is exactly where the break left it */
+    TEST_ASSERT_EQUAL(TIMER_BREAK, timer_slot_state(0));
+    TEST_ASSERT_EQUAL_INT64((int64_t)T0 + 1500, g_rtc_state.slots[0].break_expiry_wall);
+    TEST_ASSERT_EQUAL_INT32(3000, g_rtc_state.slots[0].remaining_at_pause);
+    TEST_ASSERT_EQUAL_INT32(200, timer_break_remaining(T0 + 1300));
+}
+
+/* ---- timer_break_tick: the edge, once, with lateness ---- */
+
+void test_break_tick_fires_once_at_the_transition(void) {
+    timer_start(T0, 3600);
+    timer_start_break(T0 + 600, 900); /* ends T0+1500 */
+    int32_t overdue = -1;
+    TEST_ASSERT_FALSE(timer_break_tick(T0 + 1499, &overdue));
+    TEST_ASSERT_EQUAL_INT32(0, overdue); /* not fired: no lateness reported */
+    TEST_ASSERT_EQUAL(TIMER_BREAK, timer_slot_state(0));
+
+    TEST_ASSERT_TRUE(timer_break_tick(T0 + 1500, &overdue));
+    TEST_ASSERT_EQUAL_INT32(0, overdue);
+    TEST_ASSERT_EQUAL(TIMER_PAUSED, timer_slot_state(0));
+    TEST_ASSERT_EQUAL_INT64(0, g_rtc_state.slots[0].break_expiry_wall);
+    TEST_ASSERT_EQUAL_INT32(3000, g_rtc_state.slots[0].remaining_at_pause); /* screen time survives */
+
+    /* Every later call is a no-op — the chime has exactly one edge */
+    TEST_ASSERT_FALSE(timer_break_tick(T0 + 1501, &overdue));
+    TEST_ASSERT_FALSE(timer_break_tick(T0 + 9999, NULL));
+}
+
+void test_break_tick_reports_lateness_for_the_chime_grace(void) {
+    /* The chime is an "it just happened" signal: main.c fires it only when
+       overdue_sec <= BREAK_CHIME_GRACE_SEC, so a charge/bed-time lock or a
+       power cycle spanning the end lands silently. */
+    const int32_t cases[] = {0, 60, BREAK_CHIME_GRACE_SEC - 1, BREAK_CHIME_GRACE_SEC + 1};
+    const bool within_grace[] = {true, true, true, false};
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        timer_reset();
+        timer_start(T0, 3600);
+        timer_start_break(T0 + 600, 900); /* ends T0+1500 */
+        int32_t overdue = -1;
+        TEST_ASSERT_TRUE(timer_break_tick(T0 + 1500 + cases[i], &overdue));
+        TEST_ASSERT_EQUAL_INT32(cases[i], overdue);
+        TEST_ASSERT_EQUAL_INT((int)within_grace[i], (int)(overdue <= BREAK_CHIME_GRACE_SEC));
+    }
+}
+
+void test_break_tick_is_false_without_a_break(void) {
+    int32_t overdue = -1;
+    TEST_ASSERT_FALSE(timer_break_tick(T0, &overdue)); /* IDLE */
+    TEST_ASSERT_EQUAL_INT32(0, overdue);
+    timer_start(T0, 3600);
+    TEST_ASSERT_FALSE(timer_break_tick(T0 + 100, NULL)); /* RUNNING */
+}
+
+void test_break_tick_leaves_the_active_extra_alone(void) {
+    timer_start(T0, 3600);
+    timer_start_break(T0 + 600, 900);
+    TEST_ASSERT_TRUE(timer_select_next());
+    timer_start(T0 + 700, 1200); /* Piano runs past the break end */
+    TEST_ASSERT_TRUE(timer_break_tick(T0 + 1500, NULL));
+    TEST_ASSERT_EQUAL_INT(1, timer_active_slot());
+    TEST_ASSERT_EQUAL(TIMER_RUNNING, timer_get_state());
+    TEST_ASSERT_EQUAL_INT64((int64_t)T0 + 1900, g_rtc_state.slots[1].expiry_wall_time);
+    TEST_ASSERT_EQUAL(TIMER_PAUSED, timer_slot_state(0));
+}
+
+void test_tick_on_an_extra_slot_still_ends_an_elapsed_break(void) {
+    /* Defensive delegation: no path may strand a break, even one nobody
+       is looking at. */
+    timer_start(T0, 3600);
+    timer_start_break(T0 + 600, 900);
+    TEST_ASSERT_TRUE(timer_select_next());
+    timer_start(T0 + 700, 1200);
+    timer_tick(T0 + 1600); /* ticking Piano ends Screen's break */
+    TEST_ASSERT_EQUAL(TIMER_PAUSED, timer_slot_state(0));
+    TEST_ASSERT_EQUAL_INT64(0, g_rtc_state.slots[0].break_expiry_wall);
+    TEST_ASSERT_EQUAL(TIMER_RUNNING, timer_get_state()); /* Piano keeps going */
+}
+
+/* ---- clock steps move both pending wall times ---- */
+
+void test_shift_expiry_moves_extra_expiry_and_background_break(void) {
+    timer_start(T0, 3600);
+    timer_start_break(T0 + 600, 900); /* break ends T0+1500 */
+    TEST_ASSERT_TRUE(timer_select_next());
+    timer_start(T0 + 700, 1200); /* Piano expires T0+1900 */
+    timer_shift_expiry(120);
+    TEST_ASSERT_EQUAL_INT64((int64_t)T0 + 1900 + 120, g_rtc_state.slots[1].expiry_wall_time);
+    TEST_ASSERT_EQUAL_INT64((int64_t)T0 + 700 + 120, g_rtc_state.slots[1].run_started_wall);
+    TEST_ASSERT_EQUAL_INT64((int64_t)T0 + 1500 + 120, g_rtc_state.slots[0].break_expiry_wall);
+}
+
+void test_shift_expiry_never_double_shifts_slot_zero(void) {
+    /* Slot 0 active and in BREAK: the break expiry must move exactly once
+       (it is neither RUNNING nor a second slot). */
+    timer_start(T0, 3600);
+    timer_start_break(T0 + 600, 900);
+    timer_shift_expiry(60);
+    TEST_ASSERT_EQUAL_INT64((int64_t)T0 + 1500 + 60, g_rtc_state.slots[0].break_expiry_wall);
+    TEST_ASSERT_EQUAL_INT64(0, g_rtc_state.slots[0].expiry_wall_time);
+}
+
+/* ---- helpers driving suppression + the swap hint ---- */
+
+void test_any_extra_running_ignores_slot_zero(void) {
+    TEST_ASSERT_FALSE(timer_any_extra_running());
+    timer_start(T0, 3600); /* Screen RUNNING */
+    TEST_ASSERT_FALSE(timer_any_extra_running());
+    timer_start_break(T0 + 600, 900);
+    TEST_ASSERT_TRUE(timer_select_next());
+    TEST_ASSERT_FALSE(timer_any_extra_running()); /* Piano idle */
+    timer_start(T0 + 700, 900);
+    TEST_ASSERT_TRUE(timer_any_extra_running());
+    timer_pause(T0 + 800);
+    TEST_ASSERT_FALSE(timer_any_extra_running());
+}
+
+void test_next_slot_walks_enabled_slots_and_skips_holes(void) {
+    TEST_ASSERT_EQUAL_INT(1, timer_next_slot()); /* Screen -> Piano */
+    TEST_ASSERT_TRUE(timer_select_next());
+    TEST_ASSERT_EQUAL_INT(3, timer_next_slot()); /* Piano -> Meditation (2 disabled) */
+    TEST_ASSERT_TRUE(timer_select_next());
+    TEST_ASSERT_EQUAL_INT(4, timer_next_slot());
+    TEST_ASSERT_TRUE(timer_select_next());
+    TEST_ASSERT_EQUAL_INT(0, timer_next_slot()); /* Violin wraps to Screen */
+}
+
+void test_next_slot_is_minus_one_without_extras(void) {
+    timer_set_defs(DEFS_NO_EXTRAS, TIMER_SLOT_COUNT);
+    TEST_ASSERT_EQUAL_INT(-1, timer_next_slot());
+}
+
+void test_next_slot_unaffected_by_a_running_refusal(void) {
+    /* next_slot answers "which one", not "may I" — the refusal is
+       timer_swap_allowed's job (display draws the hint from both). */
+    timer_start(T0, 3600);
+    TEST_ASSERT_FALSE(timer_swap_allowed());
+    TEST_ASSERT_EQUAL_INT(1, timer_next_slot());
+}
+
+/* ---- snapshot: a break behind a running extra survives a power cycle ---- */
+
+void test_snapshot_round_trips_background_break_with_running_extra(void) {
+    timer_start(T0, 3600);
+    timer_start_break(T0 + 600, 900); /* ends T0+1500, 3000 frozen */
+    TEST_ASSERT_TRUE(timer_select_next());
+    timer_start(T0 + 700, 1200); /* Piano expires T0+1900 */
+    timer_record_date(T0);
+    timer_snapshot_t snap;
+    timer_make_snapshot(&snap);
+
+    timer_reset();
+    TEST_ASSERT_TRUE(timer_restore_snapshot(&snap, T0 + 1000));
+    TEST_ASSERT_EQUAL_INT(1, timer_active_slot());
+    TEST_ASSERT_EQUAL(TIMER_RUNNING, timer_get_state());
+    TEST_ASSERT_EQUAL(TIMER_BREAK, timer_slot_state(0));
+    TEST_ASSERT_TRUE(timer_break_active());
+    TEST_ASSERT_EQUAL_INT32(500, timer_break_remaining(T0 + 1000));
+    TEST_ASSERT_EQUAL_INT32(3000, g_rtc_state.slots[0].remaining_at_pause);
+}
+
+void test_snapshot_break_ended_while_powered_off_restores_paused_non_active(void) {
+    /* Same silent conversion as the active case — the chime never replays
+       after a power cycle. */
+    timer_start(T0, 3600);
+    timer_start_break(T0 + 600, 900);
+    TEST_ASSERT_TRUE(timer_select_next());
+    timer_start(T0 + 700, 3600);
+    timer_record_date(T0);
+    timer_snapshot_t snap;
+    timer_make_snapshot(&snap);
+
+    timer_reset();
+    TEST_ASSERT_TRUE(timer_restore_snapshot(&snap, T0 + 2000)); /* past T0+1500 */
+    TEST_ASSERT_EQUAL(TIMER_PAUSED, timer_slot_state(0));
+    TEST_ASSERT_EQUAL_INT64(0, g_rtc_state.slots[0].break_expiry_wall);
+    TEST_ASSERT_FALSE(timer_break_active());
+    TEST_ASSERT_EQUAL_INT(1, timer_active_slot());
+    TEST_ASSERT_EQUAL(TIMER_RUNNING, timer_get_state());
+}
+
+void test_snapshot_rejects_a_break_on_an_extra_slot(void) {
+    /* I1 is a storage invariant too: corruption that slips past the
+       checksum must not resurrect a break on the wrong slot. */
+    timer_start(T0, 3600);
+    timer_record_date(T0);
+    timer_snapshot_t snap;
+    timer_make_snapshot(&snap);
+    snap.slots[1].state = TIMER_BREAK;
+    snap.slots[1].break_expiry_wall = (int64_t)T0 + 900;
+    snap.checksum = timer_snapshot_checksum(&snap);
+
+    timer_reset();
+    TEST_ASSERT_FALSE(timer_restore_snapshot(&snap, T0 + 100));
+    TEST_ASSERT_EQUAL(TIMER_IDLE, timer_get_state());
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_bonus_reconcile_grants_only_the_delta);
@@ -1532,7 +1970,7 @@ int main(void) {
     RUN_TEST(test_default_active_slot_is_zero);
     RUN_TEST(test_select_next_cycles_enabled_slots_skipping_disabled);
     RUN_TEST(test_select_next_refused_while_running);
-    RUN_TEST(test_select_next_refused_during_break);
+    RUN_TEST(test_select_next_allowed_during_break);
     RUN_TEST(test_select_next_allowed_when_paused_or_expired);
     RUN_TEST(test_select_next_noop_without_extras);
     RUN_TEST(test_slot_def_accessor);
@@ -1602,5 +2040,26 @@ int main(void) {
     RUN_TEST(test_slot_accessors_out_of_range_are_benign);
     RUN_TEST(test_current_date_tracks_record_date);
     RUN_TEST(test_break_due_lands_inside_final_minute);
+    /* ---- non-blocking Screen Break ---- */
+    RUN_TEST(test_state_matrix);
+    RUN_TEST(test_select_next_off_slot_zero_and_back_preserves_break);
+    RUN_TEST(test_select_screen_returns_from_non_running_extra);
+    RUN_TEST(test_select_screen_refused_while_extra_running);
+    RUN_TEST(test_select_screen_already_on_screen_is_a_noop);
+    RUN_TEST(test_extra_slot_lifecycle_leaves_break_untouched);
+    RUN_TEST(test_break_tick_fires_once_at_the_transition);
+    RUN_TEST(test_break_tick_reports_lateness_for_the_chime_grace);
+    RUN_TEST(test_break_tick_is_false_without_a_break);
+    RUN_TEST(test_break_tick_leaves_the_active_extra_alone);
+    RUN_TEST(test_tick_on_an_extra_slot_still_ends_an_elapsed_break);
+    RUN_TEST(test_shift_expiry_moves_extra_expiry_and_background_break);
+    RUN_TEST(test_shift_expiry_never_double_shifts_slot_zero);
+    RUN_TEST(test_any_extra_running_ignores_slot_zero);
+    RUN_TEST(test_next_slot_walks_enabled_slots_and_skips_holes);
+    RUN_TEST(test_next_slot_is_minus_one_without_extras);
+    RUN_TEST(test_next_slot_unaffected_by_a_running_refusal);
+    RUN_TEST(test_snapshot_round_trips_background_break_with_running_extra);
+    RUN_TEST(test_snapshot_break_ended_while_powered_off_restores_paused_non_active);
+    RUN_TEST(test_snapshot_rejects_a_break_on_an_extra_slot);
     return UNITY_END();
 }

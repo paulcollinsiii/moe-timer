@@ -17,6 +17,17 @@ extern "C" {
    planner-landed wake at ~70 s always qualifies). */
 #define SLEEP_PLAN_WATCH_SEC (SLEEP_PLAN_EVENT_LEAD_SEC + 5)
 
+/* How late a break end may be OBSERVED and still chime. Derived, not
+   chosen: the watch window already means "close enough to the event that
+   the firmware owns it", so the rule reads as "chime only if we were
+   inside the watch window for it". Every path that should chime observes
+   the transition inside the awake watch (~1 s) or on the next tick wake
+   (60 s max); the paths that deliberately stop doing timer work — charge
+   lock (600 s naps), bed-time lock (7200 s), power cycle — land far
+   outside it and go silent, matching what the snapshot restore already
+   does with an elapsed break. */
+#define BREAK_CHIME_GRACE_SEC SLEEP_PLAN_WATCH_SEC
+
 typedef struct {
     timer_state_t state;
     int sec_into_minute;         /* time(NULL) % 60, 0..59 */

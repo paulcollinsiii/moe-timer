@@ -31,9 +31,23 @@ typedef enum {
 
 /* Multi-timer slots (v1.3): slot 0 is the daily Screen timer (allocation
    from schedule.c, eye-rest breaks); slots 1..TIMER_EXTRA_SLOTS are plain
-   user-configured countdowns (Piano, Meditation, ...). Only the ACTIVE
-   slot can ever be RUNNING or BREAK — swapping requires a pause first —
-   so the single-timer API below always operates on the active slot.
+   user-configured countdowns (Piano, Meditation, ...).
+
+   State-model invariant (v1.4, non-blocking breaks):
+     - only the ACTIVE slot can ever be RUNNING — swapping requires a
+       pause first, so the single-timer API below operates on the active
+       slot;
+     - TIMER_BREAK lives on slot 0 ONLY, and may be held there while ANY
+       slot is active. A Screen Break enforces the SCREEN timer (no early
+       resume, screen time frozen, absolute wall-clock end) without
+       freezing the device: Button C stays live and the selected extra
+       timer starts/pauses/expires normally behind the break.
+
+   Every break helper therefore reads slot 0 explicitly, never the active
+   slot. Callers that need the break-end EDGE (chime, snap back to Screen)
+   must call timer_break_tick() BEFORE timer_tick(): timer_tick() also
+   ends an elapsed break, but silently, so no path can strand one.
+
    To add capacity: bump TIMER_EXTRA_SLOTS, add the matching Kconfig block
    and X-macro line in main/timer_defs.c. */
 #define TIMER_EXTRA_SLOTS 4
@@ -114,13 +128,26 @@ const timer_def_t *timer_slot_def(int slot);
 int timer_slot_by_name(const char *name);
 int timer_extra_count(void); /* enabled extra slots */
 /* True when a Button C swap would succeed: extras exist and the active
-   slot is not RUNNING/BREAK. Also gates C as an EXT1 wake source — a
-   press that can only be refused must not wake the device and burn a
-   full refresh. */
+   slot is not RUNNING. A background Screen Break does NOT refuse — going
+   and running Piano is exactly what the break time is for. Also gates C
+   as an EXT1 wake source (rebuilt at every sleep entry) — a press that
+   can only be refused must not wake the device and burn a full refresh. */
 bool timer_swap_allowed(void);
 /* Cycle to the next enabled slot (0 -> 1 -> ... -> 0). Refused (false)
-   while the active slot is RUNNING or BREAK, or when no extras exist. */
+   while the active slot is RUNNING, or when no extras exist. */
 bool timer_select_next(void);
+/* The slot Button C would land on (next enabled slot, wrapping through
+   0 = Screen); -1 when no other slot is enabled. Answers "which one",
+   not "may I" — pair with timer_swap_allowed() for the latter. */
+int timer_next_slot(void);
+/* Put the selection back on slot 0 (Screen). Refused (false) only while
+   the active extra slot is RUNNING — stealing the selection mid-run
+   would be hostile. Already on Screen: true, no change. */
+bool timer_select_screen(void);
+/* Any extra slot (1..N) RUNNING? Suppresses the break-over chime and the
+   snap back to Screen, and tells the sleep planner the break end needs no
+   dedicated wake. */
+bool timer_any_extra_running(void);
 /* True when a Button B press would reset the active slot: never while
    RUNNING; otherwise when the slot is reloadable or parent_testing is
    compiled in. Also gates B as an EXT1 wake source (same rationale as
@@ -201,11 +228,21 @@ int32_t timer_slot_remaining(int slot, time_t now, int32_t idle_fallback);
 int32_t timer_screen_used_sec(time_t now);
 
 /* Eye-rest break: accrued RUNNING seconds trigger an enforced break.
-   Screen-only — timer_break_due is always false on extra slots. */
+   Screen-only in both directions — timer_break_due is always false on
+   extra slots, and everything below reads/writes SLOT 0 regardless of
+   which slot is currently selected. */
 int32_t timer_run_accum(time_t now);                      /* accum incl. current run segment */
 bool timer_break_due(time_t now, int32_t interval_sec);   /* RUNNING && accum >= interval */
-void timer_start_break(time_t now, int32_t duration_sec); /* RUNNING->BREAK; freezes remaining */
-int32_t timer_break_remaining(time_t now);                /* BREAK: seconds left, else 0 */
+void timer_start_break(time_t now, int32_t duration_sec); /* slot 0 RUNNING->BREAK; freezes remaining */
+bool timer_break_active(void);                            /* slot 0 == TIMER_BREAK */
+int32_t timer_break_remaining(time_t now);                /* slot 0 BREAK: seconds left, else 0 */
+/* End an elapsed break: slot 0 BREAK -> PAUSED (screen time still
+   frozen), break_expiry_wall cleared. Returns true on the EDGE only —
+   the second call, and every call before the end, returns false, so the
+   chime has exactly one owner. *overdue_sec (nullable) reports how late
+   the transition was observed; 0 unless the call returned true. The
+   caller chimes only within BREAK_CHIME_GRACE_SEC (sleep_plan.h). */
+bool timer_break_tick(time_t now, int32_t *overdue_sec);
 
 /* Crash recovery: capture g_rtc_state into a snapshot / restore it when the
    snapshot validates (version, checksum, plausibility) AND its date is
