@@ -1,9 +1,17 @@
 /* Pure wake-orchestration decisions — no ESP dependencies; host-tested. */
 #include "wake_policy.h"
 
-wake_render_t wake_policy_render(timer_state_t before, timer_state_t after, bool button_wake) {
+wake_render_t wake_policy_render(timer_state_t before, timer_state_t after, bool button_wake, bool break_ended) {
     if (after == TIMER_EXPIRED && before != TIMER_EXPIRED)
-        return WAKE_RENDER_EXPIRY_ALERT;
+        return WAKE_RENDER_EXPIRY_ALERT; /* TIME'S UP outranks a repaint */
+    if (break_ended) {
+        /* A break can end behind another selected timer, changing the
+           panel without changing that timer's state: the inverted BREAK
+           chip vanishes, and when the end chimed the selection has also
+           snapped back to Screen — a different layout entirely. Either
+           way a partial diff would ghost. */
+        return WAKE_RENDER_FULL;
+    }
     if (button_wake) {
         /* Buttons ride the partial cadence for snappy feedback, except
            across the break screen: that layout is a full-screen inversion

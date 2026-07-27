@@ -10,7 +10,9 @@
    - RUNNING wakes SLEEP_PLAN_SYNC_LEAD_SEC early when an NTP sync will be
      due, so the sync finishes before the grid render
    - RUNNING/BREAK wakes land ~SLEEP_PLAN_EVENT_LEAD_SEC before their event
-     (expiry / break end) so the awake-side watch loop takes over. */
+     (expiry / break end) so the awake-side watch loop takes over
+   - a Screen Break running BEHIND another selected timer is a secondary
+     event with the same lead, so its chime lands on time too */
 #include "sleep_plan.h"
 
 int32_t sleep_plan_seconds(const sleep_plan_in_t *in) {
@@ -37,6 +39,15 @@ int32_t sleep_plan_seconds(const sleep_plan_in_t *in) {
         sleep_sec = 60 - in->sec_into_minute;
         if (sleep_sec < SLEEP_PLAN_MIN_SEC)
             sleep_sec += 60;
+    }
+
+    /* Secondary event: a break running on slot 0 behind the selected
+       timer, whose end will chime. Same lead as the primary — the awake
+       watch takes over from there. Only ever pulls the wake IN. */
+    if (in->break_remaining_sec > 0) {
+        int32_t to_break_wake = in->break_remaining_sec - SLEEP_PLAN_EVENT_LEAD_SEC;
+        if (to_break_wake < sleep_sec)
+            sleep_sec = to_break_wake;
     }
 
     if (sleep_sec < SLEEP_PLAN_MIN_SEC)

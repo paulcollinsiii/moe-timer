@@ -21,8 +21,11 @@ typedef enum {
 
 /* Decide the render/alert action for a wake, given the state before the
    wake's action ran and after. An already-EXPIRED timer never re-fires
-   the alert (e.g. a swap landing on an expired slot). */
-wake_render_t wake_policy_render(timer_state_t before, timer_state_t after, bool button_wake);
+   the alert (e.g. a swap landing on an expired slot).
+   break_ended = a background Screen Break ended on this wake: the panel
+   changed (chip gone, possibly a snap back to Screen) even when before ==
+   after, so force a full refresh. The expiry alert still outranks it. */
+wake_render_t wake_policy_render(timer_state_t before, timer_state_t after, bool button_wake, bool break_ended);
 
 /* Absorb +-2 s of wake/render jitter so an on-grid countdown renders as a
    round minute (1:10:59 never shows). Values at/below watch_threshold_sec

@@ -220,6 +220,7 @@ static void enter_deep_sleep(void) {
         .sec_into_minute = (int)(plan_now % 60),
         .event_remaining_sec = 0,
         .sync_due_by_next_wake = false,
+        .break_remaining_sec = 0,
     };
     if (plan_in.state == TIMER_RUNNING) {
         plan_in.event_remaining_sec = (int32_t)(timer_expiry_wall() - (int64_t)plan_now);
@@ -811,7 +812,7 @@ static void finish_action_and_render(button_id_t btn, timer_state_t before, time
     /* Button D is the user-facing "refresh everything" button — it always
        gets a real full refresh regardless of the render policy. */
     bool force_full = (btn == BTN_D);
-    wake_render_t bwr = wake_policy_render(before, timer_get_state(), true);
+    wake_render_t bwr = wake_policy_render(before, timer_get_state(), true, false);
     if (bwr == WAKE_RENDER_EXPIRY_ALERT) {
         fire_expiry_alert(); /* alert owns the NeoPixels (red pulse) */
     } else {
@@ -839,7 +840,7 @@ static void finish_action_and_render(button_id_t btn, timer_state_t before, time
     if (nf != NET_FINISH_ALERTED && (nf == NET_FINISH_CHANGED || timer_get_state() != painted)) {
         time_t rnow = time(NULL);
         int32_t rrem = timer_tick(rnow);
-        wake_render_t rwr = wake_policy_render(painted, timer_get_state(), true);
+        wake_render_t rwr = wake_policy_render(painted, timer_get_state(), true, false);
         if (rwr == WAKE_RENDER_EXPIRY_ALERT) {
             fire_expiry_alert();
         } else {
@@ -929,7 +930,7 @@ static void handle_timer_tick(void) {
         audio_break_over_chime(); /* break over — ready to resume */
     }
 
-    wake_render_t wr = wake_policy_render(before, timer_get_state(), false);
+    wake_render_t wr = wake_policy_render(before, timer_get_state(), false, false);
     if ((s_charge_lock_released || s_bedtime_released) && wr == WAKE_RENDER_PARTIAL) {
         wr = WAKE_RENDER_FULL; /* the panel still shows a lock screen — repaint fully */
     }

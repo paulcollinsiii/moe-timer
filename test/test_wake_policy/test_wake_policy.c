@@ -9,43 +9,68 @@ void tearDown(void) {}
 /* ---- render decision ---- */
 
 void test_render_expiry_transition_fires_alert(void) {
-    TEST_ASSERT_EQUAL(WAKE_RENDER_EXPIRY_ALERT, wake_policy_render(TIMER_RUNNING, TIMER_EXPIRED, false));
-    TEST_ASSERT_EQUAL(WAKE_RENDER_EXPIRY_ALERT, wake_policy_render(TIMER_RUNNING, TIMER_EXPIRED, true));
+    TEST_ASSERT_EQUAL(WAKE_RENDER_EXPIRY_ALERT, wake_policy_render(TIMER_RUNNING, TIMER_EXPIRED, false, false));
+    TEST_ASSERT_EQUAL(WAKE_RENDER_EXPIRY_ALERT, wake_policy_render(TIMER_RUNNING, TIMER_EXPIRED, true, false));
 }
 
 void test_render_already_expired_never_refires_alert(void) {
     /* Button press on an expired timer (incl. swap landing on one):
        return to the main layout, no second alarm. */
-    TEST_ASSERT_EQUAL(WAKE_RENDER_PARTIAL, wake_policy_render(TIMER_EXPIRED, TIMER_EXPIRED, true));
-    TEST_ASSERT_EQUAL(WAKE_RENDER_PARTIAL, wake_policy_render(TIMER_EXPIRED, TIMER_EXPIRED, false));
+    TEST_ASSERT_EQUAL(WAKE_RENDER_PARTIAL, wake_policy_render(TIMER_EXPIRED, TIMER_EXPIRED, true, false));
+    TEST_ASSERT_EQUAL(WAKE_RENDER_PARTIAL, wake_policy_render(TIMER_EXPIRED, TIMER_EXPIRED, false, false));
 }
 
 void test_render_tick_state_change_promotes_to_full(void) {
-    TEST_ASSERT_EQUAL(WAKE_RENDER_FULL, wake_policy_render(TIMER_BREAK, TIMER_PAUSED, false));
-    TEST_ASSERT_EQUAL(WAKE_RENDER_FULL, wake_policy_render(TIMER_IDLE, TIMER_RUNNING, false));
+    TEST_ASSERT_EQUAL(WAKE_RENDER_FULL, wake_policy_render(TIMER_BREAK, TIMER_PAUSED, false, false));
+    TEST_ASSERT_EQUAL(WAKE_RENDER_FULL, wake_policy_render(TIMER_IDLE, TIMER_RUNNING, false, false));
 }
 
 void test_render_button_wake_is_partial_within_main_layout(void) {
     /* Same-layout button transitions ride the partial cadence (the
        every-Nth-full counter and the driver's prev-frame promotion
        still force fulls when needed). */
-    TEST_ASSERT_EQUAL(WAKE_RENDER_PARTIAL, wake_policy_render(TIMER_RUNNING, TIMER_RUNNING, true));
-    TEST_ASSERT_EQUAL(WAKE_RENDER_PARTIAL, wake_policy_render(TIMER_IDLE, TIMER_IDLE, true));
-    TEST_ASSERT_EQUAL(WAKE_RENDER_PARTIAL, wake_policy_render(TIMER_IDLE, TIMER_RUNNING, true));
-    TEST_ASSERT_EQUAL(WAKE_RENDER_PARTIAL, wake_policy_render(TIMER_RUNNING, TIMER_PAUSED, true));
-    TEST_ASSERT_EQUAL(WAKE_RENDER_PARTIAL, wake_policy_render(TIMER_PAUSED, TIMER_RUNNING, true));
+    TEST_ASSERT_EQUAL(WAKE_RENDER_PARTIAL, wake_policy_render(TIMER_RUNNING, TIMER_RUNNING, true, false));
+    TEST_ASSERT_EQUAL(WAKE_RENDER_PARTIAL, wake_policy_render(TIMER_IDLE, TIMER_IDLE, true, false));
+    TEST_ASSERT_EQUAL(WAKE_RENDER_PARTIAL, wake_policy_render(TIMER_IDLE, TIMER_RUNNING, true, false));
+    TEST_ASSERT_EQUAL(WAKE_RENDER_PARTIAL, wake_policy_render(TIMER_RUNNING, TIMER_PAUSED, true, false));
+    TEST_ASSERT_EQUAL(WAKE_RENDER_PARTIAL, wake_policy_render(TIMER_PAUSED, TIMER_RUNNING, true, false));
 }
 
 void test_render_button_wake_across_break_layout_is_full(void) {
     /* The break screen is a full-screen inversion of the main layout;
        a partial diff across that boundary would ghost the whole panel. */
-    TEST_ASSERT_EQUAL(WAKE_RENDER_FULL, wake_policy_render(TIMER_RUNNING, TIMER_BREAK, true));
-    TEST_ASSERT_EQUAL(WAKE_RENDER_FULL, wake_policy_render(TIMER_BREAK, TIMER_PAUSED, true));
+    TEST_ASSERT_EQUAL(WAKE_RENDER_FULL, wake_policy_render(TIMER_RUNNING, TIMER_BREAK, true, false));
+    TEST_ASSERT_EQUAL(WAKE_RENDER_FULL, wake_policy_render(TIMER_BREAK, TIMER_PAUSED, true, false));
 }
 
 void test_render_steady_timer_tick_is_partial(void) {
-    TEST_ASSERT_EQUAL(WAKE_RENDER_PARTIAL, wake_policy_render(TIMER_RUNNING, TIMER_RUNNING, false));
-    TEST_ASSERT_EQUAL(WAKE_RENDER_PARTIAL, wake_policy_render(TIMER_IDLE, TIMER_IDLE, false));
+    TEST_ASSERT_EQUAL(WAKE_RENDER_PARTIAL, wake_policy_render(TIMER_RUNNING, TIMER_RUNNING, false, false));
+    TEST_ASSERT_EQUAL(WAKE_RENDER_PARTIAL, wake_policy_render(TIMER_IDLE, TIMER_IDLE, false, false));
+}
+
+/* ---- break_ended: the wake that drops the BREAK chip ---- */
+
+void test_render_break_ended_promotes_partial_to_full(void) {
+    /* A break can now run behind another timer, so its end changes the
+       panel without changing the ACTIVE slot's state: the inverted
+       "BREAK m:ss" chip vanishes, and the chime case also snaps the
+       selection back to Screen — a different timer's layout entirely.
+       A partial diff across either would ghost. */
+    TEST_ASSERT_EQUAL(WAKE_RENDER_FULL, wake_policy_render(TIMER_PAUSED, TIMER_PAUSED, false, true));
+    TEST_ASSERT_EQUAL(WAKE_RENDER_FULL, wake_policy_render(TIMER_RUNNING, TIMER_RUNNING, false, true));
+    TEST_ASSERT_EQUAL(WAKE_RENDER_FULL, wake_policy_render(TIMER_IDLE, TIMER_IDLE, true, true));
+}
+
+void test_render_break_ended_does_not_outrank_the_expiry_alert(void) {
+    /* An extra timer expiring on the same wake still owns the alert —
+       TIME'S UP is louder than a repaint. */
+    TEST_ASSERT_EQUAL(WAKE_RENDER_EXPIRY_ALERT, wake_policy_render(TIMER_RUNNING, TIMER_EXPIRED, false, true));
+    TEST_ASSERT_EQUAL(WAKE_RENDER_EXPIRY_ALERT, wake_policy_render(TIMER_RUNNING, TIMER_EXPIRED, true, true));
+}
+
+void test_render_without_break_ended_is_unchanged(void) {
+    TEST_ASSERT_EQUAL(WAKE_RENDER_PARTIAL, wake_policy_render(TIMER_PAUSED, TIMER_PAUSED, false, false));
+    TEST_ASSERT_EQUAL(WAKE_RENDER_PARTIAL, wake_policy_render(TIMER_IDLE, TIMER_IDLE, true, false));
 }
 
 /* ---- round-minute snap ---- */
@@ -178,6 +203,9 @@ int main(void) {
     RUN_TEST(test_render_button_wake_is_partial_within_main_layout);
     RUN_TEST(test_render_button_wake_across_break_layout_is_full);
     RUN_TEST(test_render_steady_timer_tick_is_partial);
+    RUN_TEST(test_render_break_ended_promotes_partial_to_full);
+    RUN_TEST(test_render_break_ended_does_not_outrank_the_expiry_alert);
+    RUN_TEST(test_render_without_break_ended_is_unchanged);
     RUN_TEST(test_snap_absorbs_positive_jitter);
     RUN_TEST(test_snap_absorbs_negative_jitter);
     RUN_TEST(test_snap_leaves_honest_offgrid_values);
