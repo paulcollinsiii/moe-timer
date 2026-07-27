@@ -67,6 +67,10 @@ display_btn_label_t display_button_a_label(timer_state_t state);
 int display_battery_icon_level(int pct);
 uint16_t display_bar_fill_px(int32_t remaining_sec, uint32_t allocation_sec);
 void display_format_remaining(char *buf, size_t len, int32_t remaining_sec);
+/* Coarse duration, "1:30" (h:mm, truncated). Used for the frozen screen
+   time on the break screen, where the value cannot change for the whole
+   break and the row has three 16 pt items to fit. Clamps at zero. */
+void display_format_hm(char *buf, size_t len, int32_t sec);
 /* Header chip while a break runs behind another timer: "BREAK 12:34".
    Always M:SS, never H:MM:SS — break durations are bounded (minutes) and
    the chip has no width to spare. Clamps at zero. */

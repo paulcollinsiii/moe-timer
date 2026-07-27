@@ -242,6 +242,29 @@ void test_break_chip_clamps_at_zero(void) {
     TEST_ASSERT_EQUAL_STRING("BREAK 0:00", buf);
 }
 
+/* ---- display_format_hm: the frozen screen time on the break screen.
+   Seconds are dropped on purpose — the screen timer is frozen for the
+   whole break, so they would never change, and the bottom row has to fit
+   three 16 pt items. ---- */
+
+void test_format_hm_drops_the_seconds(void) {
+    char buf[16];
+    display_format_hm(buf, sizeof(buf), 5400); /* 1 h 30 min */
+    TEST_ASSERT_EQUAL_STRING("1:30", buf);
+    display_format_hm(buf, sizeof(buf), 5459); /* truncates, never rounds up */
+    TEST_ASSERT_EQUAL_STRING("1:30", buf);
+    display_format_hm(buf, sizeof(buf), 600);
+    TEST_ASSERT_EQUAL_STRING("0:10", buf);
+}
+
+void test_format_hm_clamps_at_zero(void) {
+    char buf[16];
+    display_format_hm(buf, sizeof(buf), 0);
+    TEST_ASSERT_EQUAL_STRING("0:00", buf);
+    display_format_hm(buf, sizeof(buf), -90);
+    TEST_ASSERT_EQUAL_STRING("0:00", buf);
+}
+
 /* ---- display_format_swap_hint: Button C's label on the break screen ---- */
 
 void test_swap_hint_truncates_to_the_width_budget(void) {
@@ -282,6 +305,8 @@ int main(void) {
     RUN_TEST(test_break_chip_is_minutes_and_seconds);
     RUN_TEST(test_break_chip_stays_in_minutes_past_an_hour);
     RUN_TEST(test_break_chip_clamps_at_zero);
+    RUN_TEST(test_format_hm_drops_the_seconds);
+    RUN_TEST(test_format_hm_clamps_at_zero);
     RUN_TEST(test_swap_hint_truncates_to_the_width_budget);
     RUN_TEST(test_swap_hint_passes_short_names_through);
     RUN_TEST(test_swap_hint_handles_no_name);

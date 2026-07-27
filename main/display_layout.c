@@ -82,6 +82,12 @@ void display_format_mode_line(char *buf, size_t len, const char *name, uint16_t 
     }
 }
 
+void display_format_hm(char *buf, size_t len, int32_t sec) {
+    if (sec < 0)
+        sec = 0;
+    snprintf(buf, len, "%ld:%02ld", (long)(sec / 3600), (long)((sec / 60) % 60));
+}
+
 void display_format_break_chip(char *buf, size_t len, int32_t break_remaining_sec) {
     if (break_remaining_sec < 0)
         break_remaining_sec = 0;
