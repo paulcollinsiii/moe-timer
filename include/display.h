@@ -18,9 +18,20 @@ typedef struct {
     time_t wall_time;
     time_t last_sync_time;
     uint8_t battery_pct; /* 0-100 */
-    /* Eye-rest break (valid when timer_state == TIMER_BREAK) */
+    /* Eye-rest break. A break runs on slot 0 whichever timer is selected,
+       so these are valid whenever one is running — not only when
+       timer_state == TIMER_BREAK (which means "Screen is selected AND on
+       a break", i.e. the break screen is what gets drawn). */
     int32_t break_remaining_sec;
     uint32_t break_duration_sec;
+    /* Break running BEHIND another selected timer: the main layout's
+       header carries an inverted "BREAK m:ss" chip where Last sync
+       normally sits. False when the break screen itself will be drawn. */
+    bool break_banner;
+    /* Break screen only: the timer Button C would select, for the swap
+       hint. NULL = no extra timers configured — the break screen then
+       falls back to its centred "Timer paused" footer. */
+    const char *swap_next_name;
     /* Extra timers (v1.3): NULL/"" name = Screen (day-type mode line) */
     const char *timer_name;
     uint16_t completions;
@@ -56,6 +67,16 @@ display_btn_label_t display_button_a_label(timer_state_t state);
 int display_battery_icon_level(int pct);
 uint16_t display_bar_fill_px(int32_t remaining_sec, uint32_t allocation_sec);
 void display_format_remaining(char *buf, size_t len, int32_t remaining_sec);
+/* Header chip while a break runs behind another timer: "BREAK 12:34".
+   Always M:SS, never H:MM:SS — break durations are bounded (minutes) and
+   the chip has no width to spare. Clamps at zero. */
+void display_format_break_chip(char *buf, size_t len, int32_t break_remaining_sec);
+/* Button C hint on the break screen: the next timer's name, truncated to
+   the bottom row's width budget. NULL/"" writes an empty string. The
+   swap symbol is prepended by display_screens.c (this file stays LVGL-
+   free). */
+#define DISPLAY_SWAP_HINT_MAX 8
+void display_format_swap_hint(char *buf, size_t len, const char *name);
 /* Mode line for an extra timer: "Meditation - 10 min", or with the day's
    completed-run counter ("Meditation (x2) - 10 min") when reloadable.
    Screen (slot 0) keeps the day-type line rendered by display.c. */

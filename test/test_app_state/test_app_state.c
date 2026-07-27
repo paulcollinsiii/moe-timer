@@ -115,6 +115,71 @@ void test_display_reload_follows_parent_testing_gate(void) {
     TEST_ASSERT_TRUE(app_state_display(&parent, 0, T0).reload_available);
 }
 
+/* ---- background Screen Break --------------------------------------------
+   The break lives on slot 0 and keeps running while another timer is
+   selected, so the render state must carry it across the swap. */
+
+/* Screen runs from T0, break starts T0+600 and ends T0+1500. */
+static void arm_break(void) {
+    timer_start(T0, 3600);
+    timer_start_break(T0 + 600, 900);
+}
+
+void test_display_break_remaining_survives_the_swap_to_an_extra(void) {
+    arm_break();
+    TEST_ASSERT_TRUE(timer_select_next()); /* -> Piano */
+    display_state_t st = app_state_display(&IN_HEALTHY, 900, T0 + 800);
+    TEST_ASSERT_EQUAL_INT32(700, st.break_remaining_sec);
+    TEST_ASSERT_EQUAL(TIMER_IDLE, st.timer_state); /* Piano's own state */
+    TEST_ASSERT_EQUAL_STRING("Piano", st.timer_name);
+}
+
+void test_display_break_banner_only_when_screen_is_not_selected(void) {
+    /* Screen selected: the break SCREEN is drawn, so no chip (it would be
+       drawing the same fact twice, in a layout that has no header). */
+    arm_break();
+    TEST_ASSERT_FALSE(app_state_display(&IN_HEALTHY, 0, T0 + 800).break_banner);
+    TEST_ASSERT_TRUE(timer_select_next()); /* -> Piano: main layout + chip */
+    TEST_ASSERT_TRUE(app_state_display(&IN_HEALTHY, 0, T0 + 800).break_banner);
+}
+
+void test_display_break_banner_false_without_a_break(void) {
+    TEST_ASSERT_TRUE(timer_select_next()); /* Piano, no break anywhere */
+    display_state_t st = app_state_display(&IN_HEALTHY, 0, T0);
+    TEST_ASSERT_FALSE(st.break_banner);
+    TEST_ASSERT_EQUAL_INT32(0, st.break_remaining_sec);
+}
+
+void test_display_break_banner_drops_when_the_break_ends(void) {
+    arm_break();
+    TEST_ASSERT_TRUE(timer_select_next());
+    TEST_ASSERT_TRUE(timer_break_tick(T0 + 1500, NULL));
+    display_state_t st = app_state_display(&IN_HEALTHY, 0, T0 + 1500);
+    TEST_ASSERT_FALSE(st.break_banner);
+    TEST_ASSERT_EQUAL_INT32(0, st.break_remaining_sec);
+}
+
+void test_display_swap_next_name_is_the_slot_c_would_pick(void) {
+    /* Screen selected: C lands on Piano (slot 1) */
+    TEST_ASSERT_EQUAL_STRING("Piano", app_state_display(&IN_HEALTHY, 0, T0).swap_next_name);
+    TEST_ASSERT_TRUE(timer_select_next()); /* -> Piano; next is Meditation (2 disabled) */
+    TEST_ASSERT_EQUAL_STRING("Meditation", app_state_display(&IN_HEALTHY, 0, T0).swap_next_name);
+}
+
+void test_display_swap_next_name_null_without_extras(void) {
+    static const timer_def_t NO_EXTRAS[TIMER_SLOT_COUNT] = {
+        {"Screen", 0, false}, {"", 0, false}, {"", 0, false}, {"", 0, false}, {"", 0, false},
+    };
+    timer_set_defs(NO_EXTRAS, TIMER_SLOT_COUNT);
+    TEST_ASSERT_NULL(app_state_display(&IN_HEALTHY, 0, T0).swap_next_name);
+}
+
+void test_display_swap_available_during_a_break(void) {
+    /* The chip's companion: C is live during a break (the whole point). */
+    arm_break();
+    TEST_ASSERT_TRUE(app_state_display(&IN_HEALTHY, 0, T0 + 800).swap_available);
+}
+
 /* ---- stats snapshot ----------------------------------------------------- */
 
 void test_stats_disabled_slot_reports_zero_zero(void) {
@@ -174,6 +239,13 @@ int main(void) {
     RUN_TEST(test_display_break_duration_from_nvs);
     RUN_TEST(test_display_swap_blocked_while_running);
     RUN_TEST(test_display_reload_follows_parent_testing_gate);
+    RUN_TEST(test_display_break_remaining_survives_the_swap_to_an_extra);
+    RUN_TEST(test_display_break_banner_only_when_screen_is_not_selected);
+    RUN_TEST(test_display_break_banner_false_without_a_break);
+    RUN_TEST(test_display_break_banner_drops_when_the_break_ends);
+    RUN_TEST(test_display_swap_next_name_is_the_slot_c_would_pick);
+    RUN_TEST(test_display_swap_next_name_null_without_extras);
+    RUN_TEST(test_display_swap_available_during_a_break);
     RUN_TEST(test_stats_disabled_slot_reports_zero_zero);
     RUN_TEST(test_stats_idle_screen_falls_back_to_schedule);
     RUN_TEST(test_stats_started_slot_allocation_includes_grant);

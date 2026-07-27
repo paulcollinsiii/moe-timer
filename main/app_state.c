@@ -53,6 +53,15 @@ display_state_t app_state_display(const app_state_in_t *in, int32_t remaining, t
     int pct = battery_percent_from_mv(in->batt_mv);
     uint16_t break_dur = NVS_DEFAULT_BREAK_DURATION_MIN;
     nvs_config_get_break_duration_min(&break_dur);
+    /* The break lives on slot 0 and keeps running behind whatever timer
+       is selected. With Screen selected the break SCREEN is drawn, so the
+       chip would say the same thing twice; everywhere else it is the only
+       cue the break is still counting down. */
+    bool banner = timer_break_active() && timer_active_slot() != 0;
+    /* Swap hint (break screen): slot 0 has no def, so a wrap back to
+       Screen reads as "no name" — which is right, the hint only renders
+       while Screen is the selected slot. */
+    const timer_def_t *next_def = timer_slot_def(timer_next_slot());
     return (display_state_t){
         .remaining_sec = remaining,
         .allocation_sec = alloc,
@@ -63,6 +72,8 @@ display_state_t app_state_display(const app_state_in_t *in, int32_t remaining, t
         .battery_pct = (uint8_t)pct,
         .break_remaining_sec = timer_break_remaining(now),
         .break_duration_sec = (uint32_t)break_dur * 60,
+        .break_banner = banner,
+        .swap_next_name = (next_def != NULL) ? next_def->name : NULL,
         .timer_name = (def != NULL) ? def->name : NULL,
         .charge_warn = battery_policy_evaluate(pct, false) != BATT_OK,
         .completions = timer_completions(),
