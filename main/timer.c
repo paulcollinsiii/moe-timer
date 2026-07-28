@@ -509,6 +509,14 @@ void timer_shift_expiry(int64_t delta_sec) {
     if (s0->state == TIMER_BREAK && s0->break_expiry_wall != 0) {
         s0->break_expiry_wall += delta_sec;
     }
+    /* A latched (transitioned but not yet drained) break end is a stored
+       wall time too. main.c can land a clock step in exactly that gap —
+       finish_action_and_render ticks, net_apply_finish applies the step,
+       then the drain runs — and an unshifted latch would read a forward
+       step as lateness and silence a chime that is not actually late. */
+    if (s_break_ended_latched) {
+        s_break_ended_wall += delta_sec;
+    }
 }
 
 bool timer_is_new_day(time_t now) {

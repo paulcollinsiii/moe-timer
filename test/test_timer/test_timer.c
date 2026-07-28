@@ -66,9 +66,19 @@ void setUp(void) {
 
 /* The I5 witness (declared above setUp) holds the frozen screen time seen
    last time slot 0 was observed holding THIS break — keyed on
-   break_expiry_wall, so a fresh break starts a fresh witness. A
-   deliberate slot-0 timer_adjust during a break legitimately moves the
-   value; such tests simply do not observe twice within one break. */
+   break_expiry_wall, so a fresh break starts a fresh witness.
+
+   KNOWN LIMITATION — read this before "fixing" a failure it reports.
+   The witness cannot tell an extra slot's run consuming Screen's time
+   (the real I5 violation) from an HA grant deliberately moving it:
+   timer_adjust(0, n) during a break legitimately changes
+   remaining_at_pause. No current test observes twice within one break
+   across such an adjust, so none trips. If you add one — a grant during
+   a break, say — the witness will report "I5: frozen screen time
+   changed" and it will be a FALSE POSITIVE. Re-baseline it by calling
+   assert_state_legal() immediately after the adjust and before the next
+   observation, or set s_i5_valid = false; do not weaken the check, which
+   is what actually catches the failure mode I5 exists for. */
 static void assert_state_legal(void) {
     int running = 0;
     for (int i = 0; i < TIMER_SLOT_COUNT; i++) {
@@ -1892,6 +1902,41 @@ void test_shift_expiry_moves_extra_expiry_and_background_break(void) {
     TEST_ASSERT_EQUAL_INT64((int64_t)T0 + 1500 + 120, g_rtc_state.slots[0].break_expiry_wall);
 }
 
+void test_shift_expiry_moves_a_latched_break_end(void) {
+    /* The latch stores a WALL time, so it steps with an NTP correction
+       like every other stored wall time. main.c really can land a clock
+       step between the transition and the drain (finish_action_and_render
+       ticks, then net_apply_finish applies the step, then drains); an
+       unshifted latch would read a forward step as lateness and silence a
+       chime that is not actually late. */
+    timer_start(T0, 3600);
+    timer_start_break(T0 + 600, 900); /* ends T0+1500 */
+    timer_break_tick(T0 + 1500);      /* latched, on time */
+    timer_shift_expiry(300);          /* NTP steps the clock 5 min forward */
+
+    int32_t overdue = -1;
+    TEST_ASSERT_TRUE(timer_break_take_ended(T0 + 1500 + 300, &overdue));
+    TEST_ASSERT_EQUAL_INT32(0, overdue); /* still on time on the corrected clock */
+    TEST_ASSERT_TRUE(wake_policy_break_chime(false, overdue));
+}
+
+void test_shift_expiry_moves_a_latched_break_end_backwards(void) {
+    timer_start(T0, 3600);
+    timer_start_break(T0 + 600, 900);
+    timer_break_tick(T0 + 1500);
+    timer_shift_expiry(-120);
+    int32_t overdue = -1;
+    TEST_ASSERT_TRUE(timer_break_take_ended(T0 + 1500 - 120, &overdue));
+    TEST_ASSERT_EQUAL_INT32(0, overdue);
+}
+
+void test_shift_expiry_leaves_an_undrained_latch_alone(void) {
+    /* Nothing latched: the shift must not manufacture one. */
+    timer_start(T0, 3600);
+    timer_shift_expiry(300);
+    TEST_ASSERT_FALSE(timer_break_take_ended(T0 + 300, NULL));
+}
+
 void test_shift_expiry_never_double_shifts_slot_zero(void) {
     /* Slot 0 active and in BREAK: the break expiry must move exactly once
        (it is neither RUNNING nor a second slot). */
@@ -2154,6 +2199,9 @@ int main(void) {
     RUN_TEST(test_snapshot_restore_of_an_elapsed_break_never_latches);
     RUN_TEST(test_tick_on_an_extra_slot_still_ends_an_elapsed_break);
     RUN_TEST(test_shift_expiry_moves_extra_expiry_and_background_break);
+    RUN_TEST(test_shift_expiry_moves_a_latched_break_end);
+    RUN_TEST(test_shift_expiry_moves_a_latched_break_end_backwards);
+    RUN_TEST(test_shift_expiry_leaves_an_undrained_latch_alone);
     RUN_TEST(test_shift_expiry_never_double_shifts_slot_zero);
     RUN_TEST(test_any_extra_running_ignores_slot_zero);
     RUN_TEST(test_next_slot_walks_enabled_slots_and_skips_holes);

@@ -317,17 +317,25 @@ static bool poll_button_a_action(void);
    refresh. A plain static: the next wake is a fresh boot. */
 static bool s_break_ended;
 
-/* The single owner of the break-end edge. Drains the latch timer.c sets
-   when an elapsed break flips slot 0 to PAUSED, and decides — in one
-   place — whether it chimes and snaps back to Screen.
+/* The single owner of the break-end edge: surfaces an elapsed break and
+   decides — in one place — whether it chimes and snaps back to Screen.
 
-   Because the edge is LATCHED rather than returned, this no longer has to
-   run before any particular timer_tick: ticks set the latch, this drains
-   it, and ordering stops mattering. `maybe_wait_for_event()` guarantees a
-   drain on every path that does timer work. Returns true when THIS call
-   drained an edge. */
+   Ticks THEN drains. Both halves are idempotent (the tick does nothing
+   unless slot 0 is BREAK and its wall end has passed; the drain returns
+   false unless something is latched), so this is safe to call anywhere
+   and needs nothing to have run before it. Draining alone would not do:
+   the latch only exists once something has ticked, so a caller that
+   drained without ticking would miss a break that elapsed while the
+   device was busy — including the awake watch's own wait loop, which
+   exits on wall time without ticking anything.
+
+   Because the edge is a LATCH rather than a return value, a tick that
+   happens elsewhere still cannot lose it; `maybe_wait_for_event()`
+   guarantees a final drain on every path that does timer work. Returns
+   true when THIS call drained an edge. */
 static bool handle_break_end(void) {
     time_t now = time(NULL);
+    timer_break_tick(now);
     int32_t overdue = 0;
     if (!timer_break_take_ended(now, &overdue)) {
         return false;
@@ -946,8 +954,12 @@ static void finish_action_and_render(button_id_t btn, timer_state_t before, time
     net_finish_t nf = net_apply_finish();
     if (nf != NET_FINISH_ALERTED && (nf == NET_FINISH_CHANGED || timer_get_state() != painted)) {
         time_t rnow = time(NULL);
+        /* Drain BEFORE the tick that feeds the render: the window can
+           span the break end, and a drain that snaps the selection back
+           to Screen must be reflected in the remaining below — otherwise
+           the Screen layout renders the previous timer's number. */
+        handle_break_end();
         int32_t rrem = timer_tick(rnow);
-        handle_break_end(); /* the window can span the break end; latch drained here */
         /* selection_changed is false: `painted` already reflects the
            post-swap slot, and an expiry that landed DURING the window is
            a real transition that must still alert. */
