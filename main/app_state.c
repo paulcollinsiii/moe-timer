@@ -113,6 +113,7 @@ void app_state_stats(const app_state_in_t *in, time_t now, stats_snapshot_t *out
         out->completions[i] = timer_slot_completions(1 + i);
     }
     out->charge_lock = in->charge_locked;
+    out->break_remaining_s = timer_break_remaining(now); /* slot 0; 0 = no break */
     out->fw = in->fw_version;
     out->screen_bonus_applied_s = timer_screen_bonus_applied();
     out->reset_reason = in->reset_reason;

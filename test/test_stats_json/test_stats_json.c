@@ -21,6 +21,7 @@ static stats_snapshot_t base_snapshot(void) {
         .charge_lock = false,
         .fw = "v1.4.0-test",
         .reset_reason = "DEEPSLEEP",
+        .break_remaining_s = 0,
     };
 }
 
@@ -38,9 +39,19 @@ void test_stat_payload_exact(void) {
         "\"active_timer\":\"Screen\",\"remaining_s\":[3400,840,0,300,900],"
         "\"allocation_s\":[3600,900,0,600,900],"
         "\"day_type\":\"Weekday\",\"completions\":[0,2,0,1],\"charge_lock\":false,"
-        "\"fw\":\"v1.4.0-test\",\"reset\":\"DEEPSLEEP\"}",
+        "\"break_s\":0,\"fw\":\"v1.4.0-test\",\"reset\":\"DEEPSLEEP\"}",
         buf);
     TEST_ASSERT_EQUAL_INT((int)strlen(buf), n);
+}
+
+void test_stat_payload_reports_a_running_break(void) {
+    /* A Screen Break can run behind any selected timer, so HA cannot
+       infer it from "state" any more — it needs its own field. */
+    char buf[512];
+    stats_snapshot_t s = base_snapshot();
+    s.break_remaining_s = 754;
+    stats_json_stat(buf, sizeof(buf), &s);
+    TEST_ASSERT_NOT_NULL(strstr(buf, "\"break_s\":754"));
 }
 
 void test_stat_payload_reset_reason_flags_crash_wakes(void) {
@@ -114,9 +125,10 @@ void test_discovery_entity_table_is_populated(void) {
     const ha_entity_t *ents = stats_json_entities(&count);
     TEST_ASSERT_NOT_NULL(ents);
     /* battery, battery_mv, light, state, active_timer, day_type,
-       charge_lock, last_reset, screen_remaining, screen_limit
+       charge_lock, last_reset, screen_remaining, screen_limit,
+       screen_break, break_remaining
        + per extra slot: completions, remaining, limit */
-    TEST_ASSERT_EQUAL_INT(10 + 3 * TIMER_EXTRA_SLOTS, count);
+    TEST_ASSERT_EQUAL_INT(12 + 3 * TIMER_EXTRA_SLOTS, count);
 }
 
 void test_discovery_last_reset_diagnostic_sensor(void) {
@@ -239,6 +251,46 @@ void test_discovery_completions_use_runtime_slot_names(void) {
     TEST_ASSERT_NOT_NULL(strstr(buf, "value_json.completions[0]"));
 }
 
+void test_discovery_screen_break_entities(void) {
+    char buf[600];
+    /* Primary binary sensor: "is a break on right now" is a top-level
+       fact about the device, not a diagnostic. */
+    const ha_entity_t *brk = find_entity("screen_break");
+    TEST_ASSERT_NOT_NULL(brk);
+    TEST_ASSERT_EQUAL_STRING("binary_sensor", brk->component);
+    TEST_ASSERT_EQUAL_STRING("Screen break", brk->name);
+    TEST_ASSERT_NULL(brk->ent_cat);
+    TEST_ASSERT_NOT_NULL(strstr(brk->tpl, "value_json.break_s"));
+    stats_json_discovery(buf, sizeof(buf), "magtag-a1b2c3", "Kitchen", "fw", brk);
+    TEST_ASSERT_NOT_NULL(strstr(buf, "\"pl_on\":\"ON\""));
+    TEST_ASSERT_NOT_NULL(strstr(buf, "\"pl_off\":\"OFF\""));
+
+    /* Diagnostic countdown alongside it */
+    const ha_entity_t *rem = find_entity("break_remaining");
+    TEST_ASSERT_NOT_NULL(rem);
+    TEST_ASSERT_EQUAL_STRING("sensor", rem->component);
+    TEST_ASSERT_EQUAL_STRING("Screen break remaining", rem->name);
+    TEST_ASSERT_EQUAL_STRING("min", rem->unit);
+    TEST_ASSERT_EQUAL_STRING("duration", rem->dev_class);
+    TEST_ASSERT_EQUAL_STRING("diagnostic", rem->ent_cat);
+    TEST_ASSERT_NOT_NULL(strstr(rem->tpl, "value_json.break_s"));
+}
+
+void test_break_entities_are_not_mistaken_for_per_slot_sensors(void) {
+    /* mqtt_ha.c matches per-slot keys by prefix ("remaining_", "limit_",
+       "completions_") to attach the runtime timer name. "break_remaining"
+       must not collide with that, or discovery would look up a slot and
+       skip the entity entirely. */
+    const ha_entity_t *rem = find_entity("break_remaining");
+    TEST_ASSERT_NOT_NULL(rem);
+    TEST_ASSERT_TRUE(strncmp(rem->key, "remaining_", 10) != 0);
+    TEST_ASSERT_TRUE(strncmp(rem->key, "limit_", 6) != 0);
+    TEST_ASSERT_TRUE(strncmp(rem->key, "completions_", 12) != 0);
+    const ha_entity_t *brk = find_entity("screen_break");
+    TEST_ASSERT_NOT_NULL(brk);
+    TEST_ASSERT_TRUE(strncmp(brk->key, "remaining_", 10) != 0);
+}
+
 void test_discovery_diagnostic_category(void) {
     char buf[600];
     int count = 0;
@@ -280,5 +332,8 @@ int main(void) {
     RUN_TEST(test_discovery_battery_payload);
     RUN_TEST(test_discovery_binary_sensor_has_payload_states);
     RUN_TEST(test_discovery_completions_use_runtime_slot_names);
+    RUN_TEST(test_stat_payload_reports_a_running_break);
+    RUN_TEST(test_discovery_screen_break_entities);
+    RUN_TEST(test_break_entities_are_not_mistaken_for_per_slot_sensors);
     return UNITY_END();
 }

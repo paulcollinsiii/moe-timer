@@ -22,7 +22,7 @@
 static const char *TAG = "mqtt_ha";
 
 /* Bump when entities are added/renamed — discovery configs republish once. */
-#define DISC_SCHEMA_VER 13 /* v13: screen_bonus becomes signed Screen adjust */
+#define DISC_SCHEMA_VER 14 /* v14: + screen_break / break_remaining entities */
 
 #define CONNECT_TIMEOUT_MS 5000
 #define PUBLISH_DRAIN_TIMEOUT_MS 3000
