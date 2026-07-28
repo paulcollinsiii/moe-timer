@@ -12,6 +12,7 @@
 #include "../../main/timer.c"
 #include "../../main/schedule.c"
 #include "../../main/button_actions.c"
+#include "../../main/wake_policy.c"
 // clang-format on
 
 /* SLEEP_PLAN_WATCH_SEC / BREAK_CHIME_GRACE_SEC — the chime grace is derived
@@ -28,6 +29,11 @@ static const timer_def_t TEST_DEFS[TIMER_SLOT_COUNT] = {
     {"Meditation", 600, true}, {"Violin", 900, false},
 };
 
+/* I5 witness state — see assert_state_legal below. */
+static bool s_i5_valid;
+static int64_t s_i5_break_end;
+static int32_t s_i5_frozen;
+
 void setUp(void) {
     mock_nvs_reset();
     schedule_cache_invalidate();
@@ -37,6 +43,7 @@ void setUp(void) {
     timer_set_defs(TEST_DEFS, TIMER_SLOT_COUNT);
     timer_reset();
     mock_time_set(T0);
+    s_i5_valid = false;
 }
 
 /* Structural invariants I1-I5 of the non-blocking-break state model
@@ -46,13 +53,22 @@ void setUp(void) {
      I2  at most one slot is RUNNING at any time
      I3  a RUNNING slot is always the active slot
      I4  break_expiry_wall != 0 iff slot 0 is BREAK
-     I5  slot 0 BREAK => slot 0 holds the FROZEN screen time: the remaining
-         lives in remaining_at_pause and no wall expiry is armed, so no
-         other slot's run can consume it
+     I5  slot 0 BREAK => slot 0 holds the FROZEN screen time: no wall
+         expiry is armed (the mechanism), and the frozen value does not
+         drift while the break's identity is unchanged (the content —
+         see the witness below)
 
    Called from tearDown, which Unity runs after EVERY test in this suite —
    the pre-existing tests included. A regression anywhere in timer.c that
-   leaves an illegal state behind trips here, not three releases later. */
+   leaves an illegal state behind trips here, not three releases later.
+   Call it explicitly mid-test too: the I5 witness only has teeth when it
+   gets more than one observation. */
+
+/* The I5 witness (declared above setUp) holds the frozen screen time seen
+   last time slot 0 was observed holding THIS break — keyed on
+   break_expiry_wall, so a fresh break starts a fresh witness. A
+   deliberate slot-0 timer_adjust during a break legitimately moves the
+   value; such tests simply do not observe twice within one break. */
 static void assert_state_legal(void) {
     int running = 0;
     for (int i = 0; i < TIMER_SLOT_COUNT; i++) {
@@ -72,8 +88,20 @@ static void assert_state_legal(void) {
     TEST_ASSERT_EQUAL_INT_MESSAGE((int)(s0->state == TIMER_BREAK), (int)(s0->break_expiry_wall != 0),
                                   "I4: break_expiry_wall != 0 must mean slot 0 is BREAK, and vice versa");
     if (s0->state == TIMER_BREAK) {
+        /* The mechanism: nothing is counting the screen timer down. */
         TEST_ASSERT_EQUAL_INT64_MESSAGE(0, s0->expiry_wall_time, "I5: a break must not leave the screen expiry armed");
-        TEST_ASSERT_TRUE_MESSAGE(s0->remaining_at_pause >= 0, "I5: frozen screen time went negative");
+        /* The content: within one break, the frozen value must not drift.
+           This is what catches an extra slot's run consuming Screen's
+           time — the failure mode the invariant exists for. */
+        if (s_i5_valid && s_i5_break_end == s0->break_expiry_wall) {
+            TEST_ASSERT_EQUAL_INT32_MESSAGE(s_i5_frozen, s0->remaining_at_pause,
+                                            "I5: frozen screen time changed while the break was running");
+        }
+        s_i5_valid = true;
+        s_i5_break_end = s0->break_expiry_wall;
+        s_i5_frozen = s0->remaining_at_pause;
+    } else {
+        s_i5_valid = false; /* no break: nothing to hold frozen */
     }
 }
 
@@ -1538,6 +1566,9 @@ typedef enum {
    (T0+600 .. T0+1500) and after the extra slot's own setup. */
 #define M_NOW (T0 + 800)
 
+/* "Would the break-over chime fire?" — n/a on rows with no break. */
+typedef enum { CHIME_NA = 0, CHIME_YES, CHIME_NO } chime_expect_t;
+
 typedef struct {
     const char *name;
     s0_setup_t s0;
@@ -1548,22 +1579,24 @@ typedef struct {
     bool break_remaining_gt0;    /* timer_break_remaining(M_NOW) > 0 */
     btn_a_action_t btn_a;        /* button_a_apply(M_NOW) */
     timer_state_t state_after_a; /* active slot afterwards */
-    bool chime_at_break_end;     /* == !timer_any_extra_running(); the snap
-                                    back to Screen rides the same predicate */
+    /* Composition of the state fact (timer_any_extra_running) with the
+       pure policy (wake_policy_break_chime, tested on its own in
+       test_wake_policy). The snap back to Screen rides the same answer. */
+    chime_expect_t chime_at_break_end;
 } matrix_case_t;
 
 static const matrix_case_t STATE_MATRIX[] = {
     /* --- break running (slot 0 == BREAK) --- */
-    {"break, Screen selected", S0_BREAK, 0, TIMER_BREAK, true, true, true, BTN_A_NONE, TIMER_BREAK, true},
-    {"break, extra IDLE", S0_BREAK, 1, TIMER_IDLE, true, true, true, BTN_A_STARTED, TIMER_RUNNING, true},
-    {"break, extra RUNNING", S0_BREAK, 1, TIMER_RUNNING, false, true, true, BTN_A_PAUSED, TIMER_PAUSED, false},
-    {"break, extra PAUSED", S0_BREAK, 1, TIMER_PAUSED, true, true, true, BTN_A_RESUMED, TIMER_RUNNING, true},
-    {"break, extra EXPIRED", S0_BREAK, 1, TIMER_EXPIRED, true, true, true, BTN_A_NONE, TIMER_EXPIRED, true},
-    /* --- no break running --- */
+    {"break, Screen selected", S0_BREAK, 0, TIMER_BREAK, true, true, true, BTN_A_NONE, TIMER_BREAK, CHIME_YES},
+    {"break, extra IDLE", S0_BREAK, 1, TIMER_IDLE, true, true, true, BTN_A_STARTED, TIMER_RUNNING, CHIME_YES},
+    {"break, extra RUNNING", S0_BREAK, 1, TIMER_RUNNING, false, true, true, BTN_A_PAUSED, TIMER_PAUSED, CHIME_NO},
+    {"break, extra PAUSED", S0_BREAK, 1, TIMER_PAUSED, true, true, true, BTN_A_RESUMED, TIMER_RUNNING, CHIME_YES},
+    {"break, extra EXPIRED", S0_BREAK, 1, TIMER_EXPIRED, true, true, true, BTN_A_NONE, TIMER_EXPIRED, CHIME_YES},
+    /* --- no break running: the chime column does not apply --- */
     {"post-break Screen PAUSED, extra RUNNING", S0_POST_BREAK, 1, TIMER_RUNNING, false, false, false, BTN_A_PAUSED,
-     TIMER_PAUSED, false},
-    {"Screen RUNNING", S0_RUNNING, 0, TIMER_RUNNING, false, false, false, BTN_A_PAUSED, TIMER_PAUSED, true},
-    {"Screen IDLE, extra IDLE", S0_IDLE, 1, TIMER_IDLE, true, false, false, BTN_A_STARTED, TIMER_RUNNING, true},
+     TIMER_PAUSED, CHIME_NA},
+    {"Screen RUNNING", S0_RUNNING, 0, TIMER_RUNNING, false, false, false, BTN_A_PAUSED, TIMER_PAUSED, CHIME_NA},
+    {"Screen IDLE, extra IDLE", S0_IDLE, 1, TIMER_IDLE, true, false, false, BTN_A_STARTED, TIMER_RUNNING, CHIME_NA},
 };
 
 /* Put the ACTIVE slot into `st` (extra slots only — slot 0's state comes
@@ -1597,9 +1630,13 @@ static void matrix_setup(const matrix_case_t *c) {
             timer_start_break(T0 + 600, 900); /* frozen 3000 s; ends T0+1500 */
             break;
         case S0_POST_BREAK:
+            /* An EARLIER break, already over before the extra slot below
+               starts at T0+700 — the fixture has to be temporally
+               coherent even though every call takes `now` explicitly. */
             timer_start(T0, 3600);
-            timer_start_break(T0 + 600, 900);
-            TEST_ASSERT_TRUE(timer_break_tick(T0 + 1500, NULL));
+            timer_start_break(T0 + 100, 300); /* ends T0+400 */
+            timer_break_tick(T0 + 400);
+            TEST_ASSERT_TRUE(timer_break_take_ended(T0 + 400, NULL));
             break;
         default:
             break;
@@ -1620,9 +1657,13 @@ void test_state_matrix(void) {
         TEST_ASSERT_EQUAL_INT_MESSAGE((int)c->swap_allowed, (int)timer_swap_allowed(), c->name);
         TEST_ASSERT_EQUAL_INT_MESSAGE((int)c->break_active, (int)timer_break_active(), c->name);
         TEST_ASSERT_EQUAL_INT_MESSAGE((int)c->break_remaining_gt0, (int)(timer_break_remaining(M_NOW) > 0), c->name);
-        /* The chime (and the snap back to Screen it comes with) is
-           suppressed exactly when an extra slot is RUNNING. */
-        TEST_ASSERT_EQUAL_INT_MESSAGE((int)c->chime_at_break_end, (int)!timer_any_extra_running(), c->name);
+        if (c->chime_at_break_end != CHIME_NA) {
+            /* Composition: the state fact feeds the pure policy. Timely
+               observation (overdue 0) isolates the suppression rule; the
+               grace window is exercised in test_wake_policy. */
+            chime_expect_t got = wake_policy_break_chime(timer_any_extra_running(), 0) ? CHIME_YES : CHIME_NO;
+            TEST_ASSERT_EQUAL_INT_MESSAGE((int)c->chime_at_break_end, (int)got, c->name);
+        }
 
         TEST_ASSERT_EQUAL_MESSAGE(c->btn_a, button_a_apply(M_NOW), c->name);
         TEST_ASSERT_EQUAL_MESSAGE(c->state_after_a, timer_get_state(), c->name);
@@ -1691,16 +1732,26 @@ void test_extra_slot_lifecycle_leaves_break_untouched(void) {
     timer_start_break(T0 + 600, 900); /* frozen 3000, ends T0+1500 */
     TEST_ASSERT_TRUE(timer_select_next());
 
+    /* assert_state_legal() after every mutation: the I5 witness compares
+       slot 0's frozen screen time against the previous observation, so an
+       extra slot's run consuming it fails here rather than silently. */
+    assert_state_legal();
     timer_start(T0 + 700, 500); /* expires T0+1200 */
+    assert_state_legal();
     TEST_ASSERT_EQUAL_INT64((int64_t)T0 + 1500, g_rtc_state.slots[0].break_expiry_wall);
     TEST_ASSERT_EQUAL_INT32(3000, g_rtc_state.slots[0].remaining_at_pause);
 
     timer_tick(T0 + 800);
-    timer_pause(T0 + 850);  /* 350 left */
+    assert_state_legal();
+    timer_pause(T0 + 850); /* 350 left */
+    assert_state_legal();
     timer_resume(T0 + 900); /* expires T0+1250 */
-    timer_tick(T0 + 1100);  /* still inside the run */
+    assert_state_legal();
+    timer_tick(T0 + 1100); /* still inside the run */
+    assert_state_legal();
     TEST_ASSERT_EQUAL(TIMER_RUNNING, timer_get_state());
     timer_tick(T0 + 1300); /* past T0+1250 -> EXPIRED, all while the break runs */
+    assert_state_legal();
     TEST_ASSERT_EQUAL(TIMER_EXPIRED, timer_get_state());
 
     /* Slot 0 is exactly where the break left it */
@@ -1710,50 +1761,71 @@ void test_extra_slot_lifecycle_leaves_break_untouched(void) {
     TEST_ASSERT_EQUAL_INT32(200, timer_break_remaining(T0 + 1300));
 }
 
-/* ---- timer_break_tick: the edge, once, with lateness ---- */
+/* ---- the break-end edge is a LATCH, not a return value ----
+   timer_tick() ends an elapsed break internally, so an edge reported only
+   as a return value could be consumed by any tick and silently lost (it
+   was: the expiry alert's tick swallowed the chime). Latching removes the
+   ordering obligation — whoever drains last still sees it. */
 
-void test_break_tick_fires_once_at_the_transition(void) {
+void test_break_end_latches_at_the_transition(void) {
     timer_start(T0, 3600);
     timer_start_break(T0 + 600, 900); /* ends T0+1500 */
-    int32_t overdue = -1;
-    TEST_ASSERT_FALSE(timer_break_tick(T0 + 1499, &overdue));
-    TEST_ASSERT_EQUAL_INT32(0, overdue); /* not fired: no lateness reported */
-    TEST_ASSERT_EQUAL(TIMER_BREAK, timer_slot_state(0));
 
-    TEST_ASSERT_TRUE(timer_break_tick(T0 + 1500, &overdue));
-    TEST_ASSERT_EQUAL_INT32(0, overdue);
+    timer_break_tick(T0 + 1499);
+    TEST_ASSERT_EQUAL(TIMER_BREAK, timer_slot_state(0));
+    TEST_ASSERT_FALSE(timer_break_take_ended(T0 + 1499, NULL)); /* nothing latched yet */
+
+    timer_break_tick(T0 + 1500);
     TEST_ASSERT_EQUAL(TIMER_PAUSED, timer_slot_state(0));
     TEST_ASSERT_EQUAL_INT64(0, g_rtc_state.slots[0].break_expiry_wall);
     TEST_ASSERT_EQUAL_INT32(3000, g_rtc_state.slots[0].remaining_at_pause); /* screen time survives */
 
-    /* Every later call is a no-op — the chime has exactly one edge */
-    TEST_ASSERT_FALSE(timer_break_tick(T0 + 1501, &overdue));
-    TEST_ASSERT_FALSE(timer_break_tick(T0 + 9999, NULL));
-}
-
-void test_break_tick_reports_lateness_for_the_chime_grace(void) {
-    /* The chime is an "it just happened" signal: main.c fires it only when
-       overdue_sec <= BREAK_CHIME_GRACE_SEC, so a charge/bed-time lock or a
-       power cycle spanning the end lands silently. */
-    const int32_t cases[] = {0, 60, BREAK_CHIME_GRACE_SEC - 1, BREAK_CHIME_GRACE_SEC + 1};
-    const bool within_grace[] = {true, true, true, false};
-    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
-        timer_reset();
-        timer_start(T0, 3600);
-        timer_start_break(T0 + 600, 900); /* ends T0+1500 */
-        int32_t overdue = -1;
-        TEST_ASSERT_TRUE(timer_break_tick(T0 + 1500 + cases[i], &overdue));
-        TEST_ASSERT_EQUAL_INT32(cases[i], overdue);
-        TEST_ASSERT_EQUAL_INT((int)within_grace[i], (int)(overdue <= BREAK_CHIME_GRACE_SEC));
-    }
-}
-
-void test_break_tick_is_false_without_a_break(void) {
     int32_t overdue = -1;
-    TEST_ASSERT_FALSE(timer_break_tick(T0, &overdue)); /* IDLE */
+    TEST_ASSERT_TRUE(timer_break_take_ended(T0 + 1500, &overdue));
     TEST_ASSERT_EQUAL_INT32(0, overdue);
+    /* Consumed: exactly one owner gets the edge */
+    TEST_ASSERT_FALSE(timer_break_take_ended(T0 + 1501, &overdue));
+    TEST_ASSERT_EQUAL_INT32(0, overdue);
+}
+
+void test_break_end_latch_survives_an_intervening_tick(void) {
+    /* The regression this design exists for: a timer_tick between the
+       transition and the drain must NOT eat the edge. */
     timer_start(T0, 3600);
-    TEST_ASSERT_FALSE(timer_break_tick(T0 + 100, NULL)); /* RUNNING */
+    timer_start_break(T0 + 600, 900);
+    TEST_ASSERT_TRUE(timer_select_next());
+    timer_start(T0 + 700, 1200); /* Piano runs past the break end */
+
+    timer_tick(T0 + 1600); /* ends the break internally... */
+    TEST_ASSERT_EQUAL(TIMER_PAUSED, timer_slot_state(0));
+    timer_tick(T0 + 1650); /* ...and more ticks must not clear the latch */
+    timer_tick(T0 + 1700);
+
+    int32_t overdue = -1;
+    TEST_ASSERT_TRUE(timer_break_take_ended(T0 + 1700, &overdue));
+    TEST_ASSERT_EQUAL_INT32(200, overdue);               /* measured from the WALL end, T0+1500 */
+    TEST_ASSERT_EQUAL(TIMER_RUNNING, timer_get_state()); /* Piano untouched */
+}
+
+void test_break_end_overdue_is_measured_at_drain_time(void) {
+    /* Lateness is "how late are we telling the user", not "how late was
+       the tick" — the expiry alert can hold the CPU for ~15 s between the
+       two, and the grace window must judge the moment the chime would
+       actually sound. */
+    timer_start(T0, 3600);
+    timer_start_break(T0 + 600, 900); /* ends T0+1500 */
+    timer_break_tick(T0 + 1500);      /* observed on time... */
+    int32_t overdue = -1;
+    TEST_ASSERT_TRUE(timer_break_take_ended(T0 + 1530, &overdue)); /* ...drained 30 s later */
+    TEST_ASSERT_EQUAL_INT32(30, overdue);
+}
+
+void test_break_tick_does_nothing_without_a_break(void) {
+    timer_break_tick(T0); /* IDLE */
+    TEST_ASSERT_FALSE(timer_break_take_ended(T0, NULL));
+    timer_start(T0, 3600);
+    timer_break_tick(T0 + 100); /* RUNNING */
+    TEST_ASSERT_FALSE(timer_break_take_ended(T0 + 100, NULL));
 }
 
 void test_break_tick_leaves_the_active_extra_alone(void) {
@@ -1761,7 +1833,8 @@ void test_break_tick_leaves_the_active_extra_alone(void) {
     timer_start_break(T0 + 600, 900);
     TEST_ASSERT_TRUE(timer_select_next());
     timer_start(T0 + 700, 1200); /* Piano runs past the break end */
-    TEST_ASSERT_TRUE(timer_break_tick(T0 + 1500, NULL));
+    timer_break_tick(T0 + 1500);
+    TEST_ASSERT_TRUE(timer_break_take_ended(T0 + 1500, NULL));
     TEST_ASSERT_EQUAL_INT(1, timer_active_slot());
     TEST_ASSERT_EQUAL(TIMER_RUNNING, timer_get_state());
     TEST_ASSERT_EQUAL_INT64((int64_t)T0 + 1900, g_rtc_state.slots[1].expiry_wall_time);
@@ -1779,6 +1852,31 @@ void test_tick_on_an_extra_slot_still_ends_an_elapsed_break(void) {
     TEST_ASSERT_EQUAL(TIMER_PAUSED, timer_slot_state(0));
     TEST_ASSERT_EQUAL_INT64(0, g_rtc_state.slots[0].break_expiry_wall);
     TEST_ASSERT_EQUAL(TIMER_RUNNING, timer_get_state()); /* Piano keeps going */
+    TEST_ASSERT_TRUE(timer_break_take_ended(T0 + 1600, NULL));
+}
+
+void test_day_rollover_clears_a_pending_break_end_latch(void) {
+    /* A latch that outlived its day would chime into the next morning. */
+    timer_start(T0, 3600);
+    timer_start_break(T0 + 600, 900);
+    timer_break_tick(T0 + 1500);
+    timer_reset();
+    TEST_ASSERT_FALSE(timer_break_take_ended(T0 + 1500, NULL));
+}
+
+void test_snapshot_restore_of_an_elapsed_break_never_latches(void) {
+    /* The power-cycle path converts BREAK->PAUSED silently by design; it
+       must not manufacture a chime on the next boot. */
+    timer_start(T0, 3600);
+    timer_start_break(T0 + 600, 900);
+    timer_record_date(T0);
+    timer_snapshot_t snap;
+    timer_make_snapshot(&snap);
+
+    timer_reset();
+    TEST_ASSERT_TRUE(timer_restore_snapshot(&snap, T0 + 2000)); /* past T0+1500 */
+    TEST_ASSERT_EQUAL(TIMER_PAUSED, timer_slot_state(0));
+    TEST_ASSERT_FALSE(timer_break_take_ended(T0 + 2000, NULL));
 }
 
 /* ---- clock steps move both pending wall times ---- */
@@ -2047,10 +2145,13 @@ int main(void) {
     RUN_TEST(test_select_screen_refused_while_extra_running);
     RUN_TEST(test_select_screen_already_on_screen_is_a_noop);
     RUN_TEST(test_extra_slot_lifecycle_leaves_break_untouched);
-    RUN_TEST(test_break_tick_fires_once_at_the_transition);
-    RUN_TEST(test_break_tick_reports_lateness_for_the_chime_grace);
-    RUN_TEST(test_break_tick_is_false_without_a_break);
+    RUN_TEST(test_break_end_latches_at_the_transition);
+    RUN_TEST(test_break_end_latch_survives_an_intervening_tick);
+    RUN_TEST(test_break_end_overdue_is_measured_at_drain_time);
+    RUN_TEST(test_break_tick_does_nothing_without_a_break);
     RUN_TEST(test_break_tick_leaves_the_active_extra_alone);
+    RUN_TEST(test_day_rollover_clears_a_pending_break_end_latch);
+    RUN_TEST(test_snapshot_restore_of_an_elapsed_break_never_latches);
     RUN_TEST(test_tick_on_an_extra_slot_still_ends_an_elapsed_break);
     RUN_TEST(test_shift_expiry_moves_extra_expiry_and_background_break);
     RUN_TEST(test_shift_expiry_never_double_shifts_slot_zero);

@@ -237,12 +237,24 @@ void timer_start_break(time_t now, int32_t duration_sec); /* slot 0 RUNNING->BRE
 bool timer_break_active(void);                            /* slot 0 == TIMER_BREAK */
 int32_t timer_break_remaining(time_t now);                /* slot 0 BREAK: seconds left, else 0 */
 /* End an elapsed break: slot 0 BREAK -> PAUSED (screen time still
-   frozen), break_expiry_wall cleared. Returns true on the EDGE only —
-   the second call, and every call before the end, returns false, so the
-   chime has exactly one owner. *overdue_sec (nullable) reports how late
-   the transition was observed; 0 unless the call returned true. The
-   caller chimes only within BREAK_CHIME_GRACE_SEC (sleep_plan.h). */
-bool timer_break_tick(time_t now, int32_t *overdue_sec);
+   frozen), break_expiry_wall cleared.
+
+   The transition is LATCHED, not returned. timer_tick() calls this
+   internally so no path can strand a break — which means any tick could
+   otherwise consume the edge and silently lose the chime (it did: the
+   expiry alert's tick swallowed it). Latching removes the ordering
+   obligation entirely: tick whenever you like, drain whenever you like. */
+void timer_break_tick(time_t now);
+
+/* Consume the latched break-end transition. Returns true exactly once
+   per transition — the single owner of the chime + snap-back decision.
+   *overdue_sec (nullable) is how late THIS call is relative to the
+   break's WALL end, i.e. how late the user is being told, not how late
+   the tick was; 0 when nothing was latched. Feed it to
+   wake_policy_break_chime(). Cleared by timer_reset (day rollover); a
+   snapshot restore of an already-elapsed break never latches, since that
+   path is silent by design. */
+bool timer_break_take_ended(time_t now, int32_t *overdue_sec);
 
 /* Crash recovery: capture g_rtc_state into a snapshot / restore it when the
    snapshot validates (version, checksum, plausibility) AND its date is

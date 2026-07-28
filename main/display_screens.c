@@ -108,10 +108,12 @@ static void build_main_header(lv_obj_t *scr, const display_state_t *st) {
            Last-sync slot (the least load-bearing thing in the header) and
            echoes the break screen's inversion, so "the break is still on"
            reads at a glance. 16 pt: 12 pt white-on-black is illegible on
-           this panel. Stays inside rows 3..23 = the header CLEAN_BAND's
-           framebuffer bytes 0..2 (see display.c) — pinned by a render
-           test, because a taller chip would share byte 3 with the
-           progress-bar band and the two inversions would cancel. */
+           this panel. Measured extent is rows 3..20, cols 182..291 —
+           inside the header CLEAN_BAND's framebuffer bytes 0..2, which
+           run to row 23 (see display.c). A chip reaching row 24 would
+           share byte 3 with the progress-bar band and the ghost-cleaning
+           double partial would invert it twice and cancel; the render
+           test asserts rows 24..25 stay blank. */
         display_format_break_chip(buf, sizeof(buf), st->break_remaining_sec);
         lv_obj_t *chip = make_label(scr, buf, &lv_font_montserrat_16, LV_ALIGN_TOP_RIGHT, -4, 3);
         lv_obj_set_style_text_color(chip, lv_color_white(), 0);

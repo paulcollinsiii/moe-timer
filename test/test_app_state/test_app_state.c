@@ -153,7 +153,8 @@ void test_display_break_banner_false_without_a_break(void) {
 void test_display_break_banner_drops_when_the_break_ends(void) {
     arm_break();
     TEST_ASSERT_TRUE(timer_select_next());
-    TEST_ASSERT_TRUE(timer_break_tick(T0 + 1500, NULL));
+    timer_break_tick(T0 + 1500);
+    TEST_ASSERT_TRUE(timer_break_take_ended(T0 + 1500, NULL));
     display_state_t st = app_state_display(&IN_HEALTHY, 0, T0 + 1500);
     TEST_ASSERT_FALSE(st.break_banner);
     TEST_ASSERT_EQUAL_INT32(0, st.break_remaining_sec);

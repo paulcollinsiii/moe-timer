@@ -19,6 +19,12 @@ rtc_state_t g_rtc_state;
 static const timer_def_t *s_defs;
 static int s_defs_count;
 
+/* Break-end latch (see timer.h). Deliberately NOT RTC-persistent: it is
+   drained within the wake that set it, and a transition that reached
+   deep sleep undrained is by definition too late to chime about. */
+static bool s_break_ended_latched;
+static int64_t s_break_ended_wall;
+
 void timer_set_defs(const timer_def_t *defs, int count) {
     s_defs = defs;
     s_defs_count = (defs == NULL) ? 0 : count;
@@ -221,6 +227,8 @@ const char *timer_current_date(void) {
 void timer_reset(void) {
     memset(&g_rtc_state, 0, sizeof(g_rtc_state));
     /* all slots IDLE (=0), active_slot 0 (Screen), counters cleared */
+    s_break_ended_latched = false; /* never chime yesterday's break */
+    s_break_ended_wall = 0;
 }
 
 void timer_start(time_t now, int32_t allocation_sec) {
@@ -360,7 +368,7 @@ int32_t timer_tick(time_t now) {
        too — no path (a tick while Piano is active, a wake that skipped the
        edge handler) may strand one. Silent by design: callers that need
        the edge call timer_break_tick() first. */
-    timer_break_tick(now, NULL);
+    timer_break_tick(now);
 
     timer_slot_state_t *sl = active();
     if (sl->state == TIMER_BREAK) {
@@ -458,17 +466,28 @@ int32_t timer_break_remaining(time_t now) {
     return (remaining > 0) ? (int32_t)remaining : 0;
 }
 
-bool timer_break_tick(time_t now, int32_t *overdue_sec) {
-    if (overdue_sec != NULL)
-        *overdue_sec = 0;
+void timer_break_tick(time_t now) {
     timer_slot_state_t *sl = screen_slot();
     if (sl->state != TIMER_BREAK || (int64_t)now < sl->break_expiry_wall)
-        return false;
-    if (overdue_sec != NULL)
-        *overdue_sec = (int32_t)((int64_t)now - sl->break_expiry_wall);
+        return;
+    /* Latch the WALL end, not the lateness: the drain computes how late
+       IT is, which is what the grace window actually judges. */
+    s_break_ended_wall = sl->break_expiry_wall;
+    s_break_ended_latched = true;
     sl->state = TIMER_PAUSED; /* break over — wait for manual resume */
     sl->break_expiry_wall = 0;
-    return true; /* the edge, exactly once: the state no longer qualifies */
+}
+
+bool timer_break_take_ended(time_t now, int32_t *overdue_sec) {
+    if (overdue_sec != NULL)
+        *overdue_sec = 0;
+    if (!s_break_ended_latched)
+        return false;
+    if (overdue_sec != NULL)
+        *overdue_sec = (int32_t)((int64_t)now - s_break_ended_wall);
+    s_break_ended_latched = false;
+    s_break_ended_wall = 0;
+    return true;
 }
 
 void timer_shift_expiry(int64_t delta_sec) {

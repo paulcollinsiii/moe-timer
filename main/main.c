@@ -185,6 +185,16 @@ static void enter_deep_sleep(void) {
     gpio_hold_en(GPIO_NUM_16);
     gpio_deep_sleep_hold_en();
 
+    /* Safety net: a latched break end that nothing drained is lost here.
+       maybe_wait_for_event() drains on every path that does timer work,
+       so this should be unreachable — log it rather than chime, since
+       this also runs from the failsafe's esp_timer context where audio
+       is not safe. A line here means a new code path skipped the drain. */
+    int32_t undrained = 0;
+    if (timer_break_take_ended(time(NULL), &undrained)) {
+        ESP_LOGW(TAG, "break end reached sleep undrained (%ld s late)", (long)undrained);
+    }
+
     /* Last NVS write (snapshot) is behind us on every path below; release
        the wake-scoped handle. */
     hal_nvs_close();
@@ -307,27 +317,25 @@ static bool poll_button_a_action(void);
    refresh. A plain static: the next wake is a fresh boot. */
 static bool s_break_ended;
 
-/* The single owner of the break-end edge. Ends an elapsed break on slot 0
-   and decides, in one place, whether it chimes and snaps back to Screen.
+/* The single owner of the break-end edge. Drains the latch timer.c sets
+   when an elapsed break flips slot 0 to PAUSED, and decides — in one
+   place — whether it chimes and snaps back to Screen.
 
-   Idempotent: timer_break_tick fires only on the transition, so this is
-   safe to call from every point where a break could have elapsed (top of
-   each wake handler, either side of a long awake stretch, the awake
-   watch). Returns true when THIS call observed the edge. */
+   Because the edge is LATCHED rather than returned, this no longer has to
+   run before any particular timer_tick: ticks set the latch, this drains
+   it, and ordering stops mattering. `maybe_wait_for_event()` guarantees a
+   drain on every path that does timer work. Returns true when THIS call
+   drained an edge. */
 static bool handle_break_end(void) {
+    time_t now = time(NULL);
     int32_t overdue = 0;
-    if (!timer_break_tick(time(NULL), &overdue)) {
+    if (!timer_break_take_ended(now, &overdue)) {
         return false;
     }
     s_break_ended = true;
 
-    /* Silent when an extra timer is RUNNING (the kid is mid-activity and
-       will get that timer's own alert), and silent when the transition is
-       first observed long after its wall time — a charge lock, a bed-time
-       lock or a power cycle can span it, and the chime is an "it just
-       happened" signal, not a replay. */
     bool extra_running = timer_any_extra_running();
-    if (extra_running || overdue > BREAK_CHIME_GRACE_SEC) {
+    if (!wake_policy_break_chime(extra_running, overdue)) {
         ESP_LOGI(TAG, "Break ended silently (%s, %ld s late)", extra_running ? "timer running" : "observed late",
                  (long)overdue);
         return true;
@@ -792,22 +800,40 @@ static void maybe_wait_for_event(void) {
     } else {
         watch_break_end(); /* a no-op unless a break ends inside the window */
     }
+
+    /* GUARANTEED DRAIN. Everything above can end the break as a side
+       effect of a timer_tick — most sharply the expiry alert, which holds
+       the CPU for ~15 s and can straddle the break's wall end. The latch
+       means those ticks no longer lose the edge; this is the one point
+       both wake handlers reach after all timer work and before sleep, so
+       draining here is what makes "every tick is safe" true rather than a
+       promise each new call site has to keep. */
+    if (handle_break_end()) {
+        time_t now = time(NULL);
+        display_state_t st = make_state(timer_tick(now), now);
+        display_full_refresh(&st);
+    }
 }
 
 /* ---- wake handlers ----------------------------------------------------- */
 
 /* Apply one button action (A/B/C — D is wake-only). Shared by the EXT1
    wake handler and the tick-wake latch drain so both honour the same
-   state guards. Refreshes *before on a Button C selection change so
-   landing on an already-EXPIRED slot does not re-fire the expiry alert.
+   state guards. `before` is by VALUE on purpose: it is the state that was
+   PAINTED, and wake_policy_render's break-screen boundary check is the
+   only thing standing between a swap during a break and a ghosted panel.
+   A Button C swap is reported via *selection_changed instead, which is
+   what suppresses the expiry alert when the swap lands on an EXPIRED slot.
    allow_net_window gates the NTP window on a start/resume: a wake that
    already ran a window skips the redundant second one (clock corrected,
    buffered HA effects already applied). Returns true when the press
    changed timer state (the caller must render). */
-static bool dispatch_button_action(button_id_t btn, time_t *now, timer_state_t *before, bool allow_net_window) {
+static bool dispatch_button_action(button_id_t btn, time_t *now, timer_state_t before, bool allow_net_window,
+                                   bool *selection_changed) {
+    *selection_changed = false;
     switch (btn) {
         case BTN_A:
-            if (*before == TIMER_BREAK) {
+            if (before == TIMER_BREAK) {
                 ESP_LOGI(TAG, "button A ignored during screen break");
                 return false;
             }
@@ -852,23 +878,27 @@ static bool dispatch_button_action(button_id_t btn, time_t *now, timer_state_t *
                (B is dropped from the wake mask then, same as C; this guard
                covers presses that ride in on another wake). */
             if (!timer_reload_allowed(PARENT_TESTING) || !timer_reload()) {
-                ESP_LOGI(TAG, "Button B reset unavailable (state %d)", (int)*before);
+                ESP_LOGI(TAG, "Button B reset unavailable (state %d)", (int)before);
                 return false;
             }
             return true;
         case BTN_C:
             /* Swap timer type; refused only while RUNNING (pause first).
                A Screen Break deliberately does NOT refuse — going and
-               running Piano is what the break time is for. Landing on an
-               already-EXPIRED timer is a selection change, not a
-               transition — refresh the baseline so the expiry alert does
-               not re-fire below. */
+               running Piano is what the break time is for.
+
+               Report the swap instead of rewriting `before`: landing on
+               an already-EXPIRED timer must not re-fire its alert, but
+               `before` is also the only record of WHICH LAYOUT was
+               painted, and both directions of a swap during a break cross
+               the full-screen inversion. Overwriting it made those
+               renders partial, which ghosts the panel. */
             if (timer_select_next()) {
                 ESP_LOGI(TAG, "button C: selected slot %d", timer_active_slot());
-                *before = timer_get_state();
+                *selection_changed = true;
                 return true;
             }
-            ESP_LOGI(TAG, "button C swap unavailable (state %d)", (int)*before);
+            ESP_LOGI(TAG, "button C swap unavailable (state %d)", (int)before);
             return false;
         default:
             return false;
@@ -878,11 +908,10 @@ static bool dispatch_button_action(button_id_t btn, time_t *now, timer_state_t *
 /* Post-action tail shared by the wake handler and the tick-wake drain:
    render the resulting state, release the MQTT phase, join the window,
    and re-render when the join changed what the panel shows. */
-static void finish_action_and_render(button_id_t btn, timer_state_t before, time_t now) {
+static void finish_action_and_render(button_id_t btn, timer_state_t before, time_t now, bool selection_changed) {
     /* A break can elapse mid-wake (a slow sync, a long press sequence).
-       Must run BEFORE timer_tick, which would end it silently and swallow
-       the chime; idempotent, so the usual case where the top of the wake
-       handler already consumed the edge costs nothing. */
+       Order-independent now that the edge is latched — this drains early
+       so the chime accompanies THIS paint rather than the one after. */
     handle_break_end();
     int32_t remaining = timer_tick(now);
     display_state_t st = make_state(remaining, now);
@@ -890,7 +919,7 @@ static void finish_action_and_render(button_id_t btn, timer_state_t before, time
     /* Button D is the user-facing "refresh everything" button — it always
        gets a real full refresh regardless of the render policy. */
     bool force_full = (btn == BTN_D);
-    wake_render_t bwr = wake_policy_render(before, timer_get_state(), true, s_break_ended);
+    wake_render_t bwr = wake_policy_render(before, timer_get_state(), true, s_break_ended, selection_changed);
     if (bwr == WAKE_RENDER_EXPIRY_ALERT) {
         fire_expiry_alert(); /* alert owns the NeoPixels (red pulse) */
     } else {
@@ -918,7 +947,11 @@ static void finish_action_and_render(button_id_t btn, timer_state_t before, time
     if (nf != NET_FINISH_ALERTED && (nf == NET_FINISH_CHANGED || timer_get_state() != painted)) {
         time_t rnow = time(NULL);
         int32_t rrem = timer_tick(rnow);
-        wake_render_t rwr = wake_policy_render(painted, timer_get_state(), true, s_break_ended);
+        handle_break_end(); /* the window can span the break end; latch drained here */
+        /* selection_changed is false: `painted` already reflects the
+           post-swap slot, and an expiry that landed DURING the window is
+           a real transition that must still alert. */
+        wake_render_t rwr = wake_policy_render(painted, timer_get_state(), true, s_break_ended, false);
         if (rwr == WAKE_RENDER_EXPIRY_ALERT) {
             fire_expiry_alert();
         } else {
@@ -937,13 +970,13 @@ static void finish_action_and_render(button_id_t btn, timer_state_t before, time
    break interval (e.g. a resume landing after it), paint the break and
    sleep through it; otherwise render the action's result and drain the
    window. */
-static void finish_or_break(button_id_t btn, timer_state_t before, time_t now) {
+static void finish_or_break(button_id_t btn, timer_state_t before, time_t now, bool selection_changed) {
     if (maybe_start_break(now)) {
         post_stats_snapshot(); /* break screen painted: release MQTT */
         net_apply_finish();    /* drain + apply deferred before sleeping */
         enter_deep_sleep();
     }
-    finish_action_and_render(btn, before, now);
+    finish_action_and_render(btn, before, now, selection_changed);
 }
 
 static void handle_timer_tick(void) {
@@ -995,9 +1028,9 @@ static void handle_timer_tick(void) {
     }
     now = time(NULL);
 
-    /* The grid wait above can span the break end; same rule as
-       finish_action_and_render — claim the edge before timer_tick ends it
-       silently. */
+    /* The grid wait above can span the break end; drain before the paint
+       so the chime lands with it (the latch means a later drain would
+       still work, just a paint too late). */
     handle_break_end();
     int32_t remaining = timer_tick(now);
 
@@ -1015,7 +1048,7 @@ static void handle_timer_tick(void) {
         st.break_remaining_sec = wake_policy_snap_minute(st.break_remaining_sec, SLEEP_PLAN_WATCH_SEC);
     }
 
-    wake_render_t wr = wake_policy_render(before, timer_get_state(), false, s_break_ended);
+    wake_render_t wr = wake_policy_render(before, timer_get_state(), false, s_break_ended, false);
     if ((s_charge_lock_released || s_bedtime_released) && wr == WAKE_RENDER_PARTIAL) {
         wr = WAKE_RENDER_FULL; /* the panel still shows a lock screen — repaint fully */
     }
@@ -1040,9 +1073,10 @@ static void handle_timer_tick(void) {
     int pick = button_latch_pick(buttons_take_pressed(), (1u << BTN_A) | (1u << BTN_B) | (1u << BTN_C));
     if (pick >= 0) {
         timer_state_t painted = timer_get_state();
-        if (dispatch_button_action((button_id_t)pick, &now, &painted, !synced_this_wake)) {
+        bool swapped = false;
+        if (dispatch_button_action((button_id_t)pick, &now, painted, !synced_this_wake, &swapped)) {
             neopixel_show_timer_state();
-            finish_or_break((button_id_t)pick, painted, now);
+            finish_or_break((button_id_t)pick, painted, now, swapped);
         }
     }
     maybe_wait_for_event();
@@ -1076,12 +1110,13 @@ static void handle_button_wake(void) {
        s_break_ended promotion rather than confusing the state diff. */
     handle_break_end();
     timer_state_t before = timer_get_state();
+    bool swapped = false;
 
     switch (btn) {
         case BTN_A:
         case BTN_B:
         case BTN_C:
-            dispatch_button_action(btn, &now, &before, true);
+            dispatch_button_action(btn, &now, before, true, &swapped);
             break;
         case BTN_D:
             /* NTP-gated paint, same as BTN A: sync now, MQTT after paint */
@@ -1102,7 +1137,7 @@ static void handle_button_wake(void) {
        where a stale A edge would instantly re-pause. */
     buttons_take_pressed();
 
-    finish_or_break(btn, before, now); /* e.g. resume with accrual already past the interval */
+    finish_or_break(btn, before, now, swapped); /* e.g. resume with accrual already past the interval */
     maybe_wait_for_event();
     enter_deep_sleep();
 }

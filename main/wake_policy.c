@@ -1,8 +1,19 @@
 /* Pure wake-orchestration decisions — no ESP dependencies; host-tested. */
 #include "wake_policy.h"
 
-wake_render_t wake_policy_render(timer_state_t before, timer_state_t after, bool button_wake, bool break_ended) {
-    if (after == TIMER_EXPIRED && before != TIMER_EXPIRED)
+#include "sleep_plan.h" /* BREAK_CHIME_GRACE_SEC */
+
+bool wake_policy_break_chime(bool extra_running, int32_t overdue_sec) {
+    if (extra_running)
+        return false; /* that timer's own alert is the one that matters */
+    return overdue_sec <= BREAK_CHIME_GRACE_SEC;
+}
+
+wake_render_t wake_policy_render(timer_state_t before, timer_state_t after, bool button_wake, bool break_ended,
+                                 bool selection_changed) {
+    /* A swap onto an already-expired slot is a selection change, not a
+       transition — the alarm was heard when that timer actually ran. */
+    if (after == TIMER_EXPIRED && before != TIMER_EXPIRED && !selection_changed)
         return WAKE_RENDER_EXPIRY_ALERT; /* TIME'S UP outranks a repaint */
     if (break_ended) {
         /* A break can end behind another selected timer, changing the
