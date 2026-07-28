@@ -19,6 +19,12 @@ rtc_state_t g_rtc_state;
 static const timer_def_t *s_defs;
 static int s_defs_count;
 
+/* Break-end latch (see timer.h). Deliberately NOT RTC-persistent: it is
+   drained within the wake that set it, and a transition that reached
+   deep sleep undrained is by definition too late to chime about. */
+static bool s_break_ended_latched;
+static int64_t s_break_ended_wall;
+
 void timer_set_defs(const timer_def_t *defs, int count) {
     s_defs = defs;
     s_defs_count = (defs == NULL) ? 0 : count;
@@ -36,6 +42,12 @@ static bool slot_enabled(int slot) {
 
 static timer_slot_state_t *active(void) {
     return &g_rtc_state.slots[g_rtc_state.active_slot];
+}
+
+/* The Screen slot. A break lives here whichever slot is selected, so
+   every break helper goes through this, never active(). */
+static timer_slot_state_t *screen_slot(void) {
+    return &g_rtc_state.slots[0];
 }
 
 int timer_active_slot(void) {
@@ -80,23 +92,48 @@ int timer_extra_count(void) {
 }
 
 bool timer_swap_allowed(void) {
-    timer_state_t st = active()->state;
-    if (st == TIMER_RUNNING || st == TIMER_BREAK)
-        return false; /* pause first; BREAK is enforced */
+    /* A background Screen Break does NOT refuse: the break enforces the
+       screen timer, not the whole device — running Piano during it is the
+       point. Only a RUNNING slot must be paused first. */
+    if (active()->state == TIMER_RUNNING)
+        return false;
     return timer_extra_count() > 0;
+}
+
+int timer_next_slot(void) {
+    for (int i = 1; i < TIMER_SLOT_COUNT; i++) {
+        int cand = (g_rtc_state.active_slot + i) % TIMER_SLOT_COUNT;
+        if (slot_enabled(cand))
+            return cand;
+    }
+    return -1; /* no other enabled slot */
 }
 
 bool timer_select_next(void) {
     if (!timer_swap_allowed())
         return false;
+    int cand = timer_next_slot();
+    if (cand < 0)
+        return false;
+    g_rtc_state.active_slot = (uint8_t)cand;
+    return true;
+}
+
+bool timer_select_screen(void) {
+    if (g_rtc_state.active_slot == 0)
+        return true; /* already there */
+    if (active()->state == TIMER_RUNNING)
+        return false; /* never steal the selection mid-run */
+    g_rtc_state.active_slot = 0;
+    return true;
+}
+
+bool timer_any_extra_running(void) {
     for (int i = 1; i < TIMER_SLOT_COUNT; i++) {
-        int cand = (g_rtc_state.active_slot + i) % TIMER_SLOT_COUNT;
-        if (slot_enabled(cand)) {
-            g_rtc_state.active_slot = (uint8_t)cand;
+        if (g_rtc_state.slots[i].state == TIMER_RUNNING)
             return true;
-        }
     }
-    return false; /* no other enabled slot */
+    return false;
 }
 
 bool timer_reload_allowed(bool parent_testing) {
@@ -190,6 +227,8 @@ const char *timer_current_date(void) {
 void timer_reset(void) {
     memset(&g_rtc_state, 0, sizeof(g_rtc_state));
     /* all slots IDLE (=0), active_slot 0 (Screen), counters cleared */
+    s_break_ended_latched = false; /* never chime yesterday's break */
+    s_break_ended_wall = 0;
 }
 
 void timer_start(time_t now, int32_t allocation_sec) {
@@ -325,12 +364,14 @@ timer_reconcile_t timer_reconcile_def(int slot, const timer_def_t *old_def, cons
 }
 
 int32_t timer_tick(time_t now) {
+    /* A break runs on slot 0 whichever slot is selected, so end it here
+       too — no path (a tick while Piano is active, a wake that skipped the
+       edge handler) may strand one. Silent by design: callers that need
+       the edge call timer_break_tick() first. */
+    timer_break_tick(now);
+
     timer_slot_state_t *sl = active();
     if (sl->state == TIMER_BREAK) {
-        if ((int64_t)now >= sl->break_expiry_wall) {
-            sl->state = TIMER_PAUSED; /* break over — wait for manual resume */
-            sl->break_expiry_wall = 0;
-        }
         return sl->remaining_at_pause; /* screen-time stays frozen */
     }
     if (sl->state == TIMER_PAUSED) {
@@ -399,7 +440,9 @@ bool timer_break_due(time_t now, int32_t interval_sec) {
 }
 
 void timer_start_break(time_t now, int32_t duration_sec) {
-    timer_slot_state_t *sl = active();
+    /* Slot 0 explicitly: eye-rest breaks belong to the Screen timer, and
+       only a RUNNING screen timer can be interrupted by one. */
+    timer_slot_state_t *sl = screen_slot();
     if (sl->state != TIMER_RUNNING)
         return;
     int64_t remaining = sl->expiry_wall_time - (int64_t)now;
@@ -411,25 +454,68 @@ void timer_start_break(time_t now, int32_t duration_sec) {
     sl->state = TIMER_BREAK;
 }
 
+bool timer_break_active(void) {
+    return screen_slot()->state == TIMER_BREAK;
+}
+
 int32_t timer_break_remaining(time_t now) {
-    timer_slot_state_t *sl = active();
+    timer_slot_state_t *sl = screen_slot();
     if (sl->state != TIMER_BREAK)
         return 0;
     int64_t remaining = sl->break_expiry_wall - (int64_t)now;
     return (remaining > 0) ? (int32_t)remaining : 0;
 }
 
+void timer_break_tick(time_t now) {
+    timer_slot_state_t *sl = screen_slot();
+    if (sl->state != TIMER_BREAK || (int64_t)now < sl->break_expiry_wall)
+        return;
+    /* Latch the WALL end, not the lateness: the drain computes how late
+       IT is, which is what the grace window actually judges. */
+    s_break_ended_wall = sl->break_expiry_wall;
+    s_break_ended_latched = true;
+    sl->state = TIMER_PAUSED; /* break over — wait for manual resume */
+    sl->break_expiry_wall = 0;
+}
+
+bool timer_break_take_ended(time_t now, int32_t *overdue_sec) {
+    if (overdue_sec != NULL)
+        *overdue_sec = 0;
+    if (!s_break_ended_latched)
+        return false;
+    if (overdue_sec != NULL)
+        *overdue_sec = (int32_t)((int64_t)now - s_break_ended_wall);
+    s_break_ended_latched = false;
+    s_break_ended_wall = 0;
+    return true;
+}
+
 void timer_shift_expiry(int64_t delta_sec) {
     /* An NTP sync may step time(NULL); every stored WALL time must step by
        the same amount so stored durations are preserved. PAUSED stores a
-       duration — no shift. Only the active slot can be RUNNING/BREAK. */
+       duration — no shift.
+
+       Two wall times can be pending at once (a background break on slot 0
+       behind a RUNNING extra), so both are handled. No double-shift when
+       slot 0 is the active slot: a slot is never RUNNING and BREAK at the
+       same time, so at most one branch matches it. */
     timer_slot_state_t *sl = active();
     if (sl->state == TIMER_RUNNING && sl->expiry_wall_time != 0) {
         sl->expiry_wall_time += delta_sec;
         if (sl->run_started_wall != 0)
             sl->run_started_wall += delta_sec;
-    } else if (sl->state == TIMER_BREAK && sl->break_expiry_wall != 0) {
-        sl->break_expiry_wall += delta_sec;
+    }
+    timer_slot_state_t *s0 = screen_slot();
+    if (s0->state == TIMER_BREAK && s0->break_expiry_wall != 0) {
+        s0->break_expiry_wall += delta_sec;
+    }
+    /* A latched (transitioned but not yet drained) break end is a stored
+       wall time too. main.c can land a clock step in exactly that gap —
+       finish_action_and_render ticks, net_apply_finish applies the step,
+       then the drain runs — and an unshifted latch would read a forward
+       step as lateness and silence a chime that is not actually late. */
+    if (s_break_ended_latched) {
+        s_break_ended_wall += delta_sec;
     }
 }
 
@@ -520,6 +606,10 @@ static bool snapshot_valid(const timer_snapshot_t *snap, time_t now) {
     for (int i = 0; i < TIMER_SLOT_COUNT; i++) {
         const timer_snapshot_slot_t *sl = &snap->slots[i];
         if (sl->state > TIMER_BREAK)
+            return false;
+        /* BREAK belongs to slot 0 alone (see timer.h): corruption that
+           slips past the checksum must not resurrect one elsewhere. */
+        if (i > 0 && (sl->state == TIMER_BREAK || sl->break_expiry_wall != 0))
             return false;
         if (sl->allocation_sec < 0 || sl->allocation_sec > SNAPSHOT_MAX_HORIZON_SEC)
             return false;

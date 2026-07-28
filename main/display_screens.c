@@ -103,6 +103,26 @@ static void build_main_header(lv_obj_t *scr, const display_state_t *st) {
     /* At 12 pt the ':' hugs the preceding digit — open it up slightly */
     lv_obj_set_style_text_letter_space(hdr, 1, 0);
 
+    if (st->break_banner) {
+        /* A Screen Break is running behind this timer. The chip takes the
+           Last-sync slot (the least load-bearing thing in the header) and
+           echoes the break screen's inversion, so "the break is still on"
+           reads at a glance. 16 pt: 12 pt white-on-black is illegible on
+           this panel. Measured extent is rows 3..20, cols 182..291 —
+           inside the header CLEAN_BAND's framebuffer bytes 0..2, which
+           run to row 23 (see display.c). A chip reaching row 24 would
+           share byte 3 with the progress-bar band and the ghost-cleaning
+           double partial would invert it twice and cancel; the render
+           test asserts rows 24..25 stay blank. */
+        display_format_break_chip(buf, sizeof(buf), st->break_remaining_sec);
+        lv_obj_t *chip = make_label(scr, buf, &lv_font_montserrat_16, LV_ALIGN_TOP_RIGHT, -4, 3);
+        lv_obj_set_style_text_color(chip, lv_color_white(), 0);
+        lv_obj_set_style_bg_color(chip, lv_color_black(), 0);
+        lv_obj_set_style_bg_opa(chip, LV_OPA_COVER, 0);
+        lv_obj_set_style_pad_hor(chip, 4, 0);
+        return;
+    }
+
     if (st->last_sync_time > 0) {
         struct tm ts;
         localtime_r(&st->last_sync_time, &ts);
@@ -218,11 +238,34 @@ void display_screens_build_break(const display_state_t *st) {
     make_label(scr, buf, &lv_font_montserrat_48, LV_ALIGN_TOP_MID, 0, 62);
 
     char rem_buf[16];
-    display_format_remaining(rem_buf, sizeof(rem_buf), st->remaining_sec);
-    snprintf(buf, sizeof(buf), "Timer paused - %s left", rem_buf);
+
     /* 12 pt renders illegibly white-on-black on e-ink (thin strokes eaten
-       by the inversion) — 16 pt keeps the footer readable. */
-    make_label(scr, buf, &lv_font_montserrat_16, LV_ALIGN_BOTTOM_MID, 0, -4);
+       by the inversion), so the whole bottom row is 16 pt — which is also
+       why the swap hint's name is truncated to a fixed budget. */
+    if (st->swap_next_name == NULL) {
+        /* No extra timers configured: nothing to swap to, so keep the
+           original centred footer and no button row. */
+        display_format_remaining(rem_buf, sizeof(rem_buf), st->remaining_sec);
+        snprintf(buf, sizeof(buf), "Timer paused - %s left", rem_buf);
+        make_label(scr, buf, &lv_font_montserrat_16, LV_ALIGN_BOTTOM_MID, 0, -4);
+        return;
+    }
+
+    /* Left: the frozen screen time (h:mm — it cannot change during the
+       break, and the row has three items to fit). */
+    display_format_hm(rem_buf, sizeof(rem_buf), st->remaining_sec);
+    snprintf(buf, sizeof(buf), "Screen %s", rem_buf);
+    make_label(scr, buf, &lv_font_montserrat_16, LV_ALIGN_BOTTOM_LEFT, 4, -2);
+
+    /* Over button C: the swap affordance. Button A stays deliberately
+       unlabelled — the break is still enforced for the Screen timer. */
+    char hint[DISPLAY_SWAP_HINT_MAX + 1];
+    display_format_swap_hint(hint, sizeof(hint), st->swap_next_name);
+    snprintf(buf, sizeof(buf), "%s %s", LV_SYMBOL_RIGHT, hint);
+    make_label(scr, buf, &lv_font_montserrat_16, LV_ALIGN_BOTTOM_MID, BTN_MID_OFS(2), -2);
+
+    /* Over button D: the same refresh symbol as the main layout. */
+    make_label(scr, LV_SYMBOL_REFRESH, &lv_font_montserrat_16, LV_ALIGN_BOTTOM_MID, BTN_MID_OFS(3), -2);
 }
 
 void display_screens_build_timesup(void) {

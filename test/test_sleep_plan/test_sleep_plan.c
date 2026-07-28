@@ -12,6 +12,21 @@ static int32_t plan(timer_state_t st, int sec, int32_t event_rem, bool sync_due)
         .sec_into_minute = sec,
         .event_remaining_sec = event_rem,
         .sync_due_by_next_wake = sync_due,
+        .break_remaining_sec = 0,
+    };
+    return sleep_plan_seconds(&in);
+}
+
+/* Same, with the optional secondary event: a background break running
+   behind another state (main.c populates it only when the break end will
+   actually chime). */
+static int32_t plan_brk(timer_state_t st, int sec, int32_t event_rem, int32_t break_rem) {
+    sleep_plan_in_t in = {
+        .state = st,
+        .sec_into_minute = sec,
+        .event_remaining_sec = event_rem,
+        .sync_due_by_next_wake = false,
+        .break_remaining_sec = break_rem,
     };
     return sleep_plan_seconds(&in);
 }
@@ -81,8 +96,62 @@ void test_break_aligns_to_break_grid_no_sync_lead(void) {
     TEST_ASSERT_EQUAL_INT32(60, plan(TIMER_BREAK, 17, 900, false)); /* on-grid */
 }
 
+/* ---- secondary event: a Screen Break running behind another state ----
+   Slot 0 can hold a break while an extra timer is selected, so a wake may
+   have TWO future events. main.c fills break_remaining_sec only when the
+   break end will chime (nothing RUNNING); a suppressed end needs no wake
+   and lands at whatever the next tick wake is. */
+
+void test_break_secondary_pulls_the_wake_in(void) {
+    /* Piano PAUSED (wall grid: 43 s) but the break ends in 100 s: wake at
+       100-70=30 so the awake watch owns the chime. */
+    TEST_ASSERT_EQUAL_INT32(30, plan_brk(TIMER_PAUSED, 17, 0, 100));
+    /* IDLE too — the state does not matter, the break end does */
+    TEST_ASSERT_EQUAL_INT32(30, plan_brk(TIMER_IDLE, 17, 0, 100));
+}
+
+void test_break_secondary_ignored_when_later_than_the_primary(void) {
+    /* Break end 10 min out: the ordinary wall-grid wake is sooner */
+    TEST_ASSERT_EQUAL_INT32(43, plan_brk(TIMER_PAUSED, 17, 0, 600));
+}
+
+void test_break_secondary_ignored_when_zero(void) {
+    /* No break (or a suppressed one): today's plan, unchanged */
+    TEST_ASSERT_EQUAL_INT32(43, plan_brk(TIMER_PAUSED, 17, 0, 0));
+    TEST_ASSERT_EQUAL_INT32(43, plan_brk(TIMER_IDLE, 17, 0, -5));
+}
+
+void test_break_secondary_never_naps_below_the_minimum(void) {
+    /* Break end already inside the lead: clamp, never 0 or negative */
+    TEST_ASSERT_EQUAL_INT32(SLEEP_PLAN_MIN_SEC, plan_brk(TIMER_PAUSED, 17, 0, 72));
+    TEST_ASSERT_EQUAL_INT32(SLEEP_PLAN_MIN_SEC, plan_brk(TIMER_PAUSED, 17, 0, 1));
+}
+
+void test_break_secondary_can_beat_a_running_expiry(void) {
+    /* Screen paused behind... no: RUNNING extra with a chiming break is
+       impossible (a RUNNING extra suppresses the chime), but the planner
+       must still take the sooner of the two if main.c ever passes both. */
+    TEST_ASSERT_EQUAL_INT32(20, plan_brk(TIMER_RUNNING, 0, 300, 90));
+    TEST_ASSERT_EQUAL_INT32(30, plan_brk(TIMER_RUNNING, 0, 100, 600));
+}
+
+void test_break_as_primary_state_is_unchanged(void) {
+    /* Screen selected during its own break: BREAK is the state and the
+       break end is the PRIMARY event — the secondary field stays 0 and
+       today's cases must not move. */
+    TEST_ASSERT_EQUAL_INT32(20, plan(TIMER_BREAK, 17, 500, false));
+    TEST_ASSERT_EQUAL_INT32(30, plan(TIMER_BREAK, 17, 100, false));
+    TEST_ASSERT_EQUAL_INT32(60, plan(TIMER_BREAK, 17, 900, false));
+}
+
 int main(void) {
     UNITY_BEGIN();
+    RUN_TEST(test_break_secondary_pulls_the_wake_in);
+    RUN_TEST(test_break_secondary_ignored_when_later_than_the_primary);
+    RUN_TEST(test_break_secondary_ignored_when_zero);
+    RUN_TEST(test_break_secondary_never_naps_below_the_minimum);
+    RUN_TEST(test_break_secondary_can_beat_a_running_expiry);
+    RUN_TEST(test_break_as_primary_state_is_unchanged);
     RUN_TEST(test_clock_states_align_to_minute_boundary);
     RUN_TEST(test_boundary_too_close_takes_following_minute);
     RUN_TEST(test_running_aligns_to_countdown_grid);

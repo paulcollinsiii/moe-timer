@@ -97,9 +97,10 @@ menu "MagTag Timer"
             Display name of extra countdown timer 1 (e.g. "Piano"). Keep it
             short (~12 chars) — it renders at 12 pt next to the completion
             counter and duration. Empty disables the slot. Extra timers are
-            plain countdowns: no eye-rest breaks, same alerts and NTP
-            behaviour as the Screen timer. Button C cycles between enabled
-            timers (blocked while one is RUNNING or in a Screen Break).
+            plain countdowns: no eye-rest breaks of their own, same alerts
+            and NTP behaviour as the Screen timer, and usable during a
+            Screen Break. Button C cycles between enabled timers (blocked
+            only while one is RUNNING).
 
     config MAGTAG_TIMER1_MIN
         int "Extra timer 1 duration (minutes)"

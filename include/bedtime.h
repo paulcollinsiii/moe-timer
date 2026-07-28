@@ -29,7 +29,10 @@ bool bedtime_active(int now_min, int bed_min);
 bool bedtime_break_would_cross(int now_min, int dur_min, int bed_min);
 
 /* Audible alert only when the crossing interrupts someone: a RUNNING
-   timer or an in-progress BREAK. Idle/paused/expired engage silently. */
-bool bedtime_should_alert(timer_state_t state);
+   timer, or a Screen Break in progress. Idle/paused/expired engage
+   silently. break_active comes from timer_break_active() (slot 0) — a
+   break runs behind whatever timer is selected, so the active state
+   alone would miss it. */
+bool bedtime_should_alert(timer_state_t state, bool break_active);
 
 #endif /* BEDTIME_H */

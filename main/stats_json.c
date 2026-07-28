@@ -50,8 +50,9 @@ int stats_json_stat(char *buf, size_t len, const stats_snapshot_t *s) {
     for (int i = 0; i < TIMER_EXTRA_SLOTS; i++) {
         pos = jcat(buf, len, pos, i ? ",%u" : "%u", (unsigned)s->completions[i]);
     }
-    pos = jcat(buf, len, pos, "],\"charge_lock\":%s,\"fw\":\"%s\",\"reset\":\"%s\"}", s->charge_lock ? "true" : "false",
-               jesc(fw, sizeof(fw), s->fw), jesc(rst, sizeof(rst), s->reset_reason));
+    pos = jcat(buf, len, pos, "],\"charge_lock\":%s,\"break_s\":%ld,\"fw\":\"%s\",\"reset\":\"%s\"}",
+               s->charge_lock ? "true" : "false", (long)s->break_remaining_s, jesc(fw, sizeof(fw), s->fw),
+               jesc(rst, sizeof(rst), s->reset_reason));
     return pos;
 }
 
@@ -93,6 +94,15 @@ static const ha_entity_t ENTITIES[] = {
     {"sensor", "day_type", "Day type", NULL, NULL, "{{ value_json.day_type }}", "stat", STAT_EXPIRE_SEC, false, DIAG},
     {"binary_sensor", "charge_lock", "Charge lock", NULL, NULL, "{{ 'ON' if value_json.charge_lock else 'OFF' }}",
      "stat", STAT_EXPIRE_SEC, true, NULL},
+    /* Screen Break: a break runs behind whatever timer is selected, so
+       the "state" sensor reports BREAK only when Screen happens to be
+       selected — these two are the honest signal. Keys deliberately do
+       NOT start with remaining_/limit_/completions_, which mqtt_ha.c
+       matches by prefix to attach a runtime slot name. */
+    {"binary_sensor", "screen_break", "Screen break", NULL, NULL, "{{ 'ON' if value_json.break_s > 0 else 'OFF' }}",
+     "stat", STAT_EXPIRE_SEC, true, NULL},
+    {"sensor", "break_remaining", "Screen break remaining", "min", "duration",
+     "{{ (value_json.break_s / 60) | round(0) }}", "stat", STAT_EXPIRE_SEC, false, DIAG},
     {"sensor", "completions_1", "Timer 1 runs", NULL, NULL, "{{ value_json.completions[0] }}", "stat", STAT_EXPIRE_SEC,
      false, DIAG},
     {"sensor", "completions_2", "Timer 2 runs", NULL, NULL, "{{ value_json.completions[1] }}", "stat", STAT_EXPIRE_SEC,

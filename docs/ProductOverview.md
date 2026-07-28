@@ -138,24 +138,44 @@ States: `IDLE` → `RUNNING` → `PAUSED` → `EXPIRED`, plus `BREAK` (eye rest)
 - `RUNNING`: `expiry_wall_time` set. Device deep sleeps between 55-second refresh wakes.
 - `PAUSED`: `remaining_at_pause` saved in RTC memory; `expiry_wall_time` cleared. Deep sleep continues.
 - `EXPIRED`: `remaining = 0`. Alert sequence runs on wake; device skips deep sleep until alert done or dismissed.
-- `BREAK`: enforced eye-rest pause (see 5a). Screen time frozen like PAUSED; break end is an absolute wall time.
+- `BREAK`: enforced eye-rest pause (see 5a). Screen time frozen like PAUSED; break end is an absolute wall time. Lives on the **Screen slot only**, and may be held there while a different timer is selected.
 
 ### 5a · Eye Rest (Screen Break)
 
 Every `CONFIG_MAGTAG_BREAK_INTERVAL_MIN` minutes (default 30, 0 disables) of
-**accumulated RUNNING time** — pauses don't reset the accrual — the timer
-auto-transitions to `BREAK` for `CONFIG_MAGTAG_BREAK_DURATION_MIN` minutes
-(default 15):
+**accumulated RUNNING time** — pauses don't reset the accrual — the Screen
+timer auto-transitions to `BREAK` for `CONFIG_MAGTAG_BREAK_DURATION_MIN`
+minutes (default 15).
+
+The break enforces the **Screen timer**, not the whole device (v1.4). Screen
+time stays frozen, there is no early resume, and the end is an absolute wall
+time — but the other timers stay fully usable, which is the point of a break:
+a kid on a 15 min eye rest can go and run Piano or Violin.
 
 - Entry: screen-time frozen (like pause), accrual reset, short break alarm
   (2 beeps × 3, any button silences), display flips to the **inverted**
-  SCREEN BREAK layout with its own countdown + draining bar.
-- During: Button A is ignored (no early resume); B (parent mode) and D work.
-- End: double-beep chime, display returns to the normal layout in `PAUSED`;
-  Button A resumes the screen timer. Break end within ~1 s of wall time
-  (final-minute stay-awake, same mechanism as expiry).
-- Break state and accrual persist in the NVS snapshot (v2): a power cycle
-  mid-break resumes the break with the same absolute end time.
+  SCREEN BREAK layout with its own countdown + draining bar, plus a swap
+  hint over Button C.
+- During, with Screen selected: Button A is ignored (no early resume); B
+  (parent mode), C and D work.
+- During, with an extra timer selected: the normal layout for that timer,
+  with an inverted `BREAK m:ss` chip in the header where `Last sync`
+  normally sits. That timer starts, pauses, expires and alerts as usual.
+- End: double-beep chime, and the selection snaps back to Screen in
+  `PAUSED`; Button A resumes the screen timer. Break end within ~1 s of wall
+  time (stay-awake watch, same mechanism as expiry).
+- **The chime is suppressed when any extra timer is RUNNING** at the moment
+  the break ends — the kid is mid-activity and will get that timer's own
+  alert. The selection is then left alone too (stealing it mid-run would be
+  hostile); the chip simply disappears and Button C gets you back to Screen.
+  `EXPIRED` counts as not-running, so a finished Piano still snaps back.
+- **A late-observed end never chimes and never snaps.** If the transition is
+  first seen more than 75 s after its wall time — a charge lock, a bed-time
+  lock or a power cycle spanning it — it lands silently. The chime is an "it
+  just happened" signal, not a replay.
+- Break state and accrual persist in the NVS snapshot: a power cycle
+  mid-break resumes the break with the same absolute end time, even when a
+  different timer was selected and running.
 
 Pressing Start from PAUSED re-NTP-syncs and sets `expiry_wall_time = now + remaining_at_pause`.
 
@@ -167,21 +187,21 @@ All state is persisted in **RTC slow memory** (survives deep sleep) with an NVS 
 |--------|------|--------|
 | A | 15 | Start (IDLE/PAUSED → RUNNING, immediate; NTP sync after) / Pause (RUNNING → PAUSED) |
 | B | 14 | Reset the **selected** timer to IDLE at full duration — never while RUNNING (pause first): for a reloadable extra timer always, otherwise only when `CONFIG_MAGTAG_PARENT_TESTING=y` |
-| C | 12 | Swap timer type (Screen → extra 1 → … → Screen); refused while RUNNING or in a Screen Break |
+| C | 12 | Swap timer type (Screen → extra 1 → … → Screen); refused while RUNNING (a Screen Break does **not** refuse — see 5a) |
 | D | 11 | Force NTP re-sync + full display refresh |
 
-Wake sources: A and D always; B and C only when their press would succeed, since the EXT1 mask is rebuilt at every sleep entry and a press that could only be refused must not burn battery or a panel refresh. B: the selected timer is reloadable or `CONFIG_MAGTAG_PARENT_TESTING=y`, and never while RUNNING (pause first). C: extra timers configured AND the active timer not RUNNING/in a Screen Break. Buttons are debounced in software (10 ms).
+Wake sources: A and D always; B and C only when their press would succeed, since the EXT1 mask is rebuilt at every sleep entry and a press that could only be refused must not burn battery or a panel refresh. B: the selected timer is reloadable or `CONFIG_MAGTAG_PARENT_TESTING=y`, and never while RUNNING (pause first). C: extra timers configured AND the active timer not RUNNING — a Screen Break leaves C live, so the mask keeps it as a wake source throughout. Buttons are debounced in software (10 ms).
 
 ### 6a · Extra timers (v1.3)
 
 Up to four additional countdown timers (menuconfig: `MAGTAG_TIMER<n>_NAME/_MIN/_RELOADABLE`; an empty name disables the slot) for things like Piano practice or Meditation. They are plain countdowns sharing the Screen timer's alerts, NeoPixel sequences, NTP cadence, and RTC + NVS-snapshot persistence, but:
 
-- No eye-rest breaks (Screen-only).
+- No eye-rest breaks of their own (accrual is Screen-only) — but they stay usable **during** a Screen Break, which is what the break time is for (see 5a). Because accrual is Screen-only, a break can never start while an extra timer is selected.
 - Fixed configured duration instead of the day-schedule allocation.
 - **Reloadable** timers reset to full via Button B on the same day, no ParentTesting needed. The mode line then counts the day's completed runs (reached 00:00): `Meditation (x2) - 10 min`. A mid-run reset does not count; non-reloadable timers never show a counter — once expired they stay depleted until rollover.
 - Day rollover resets every timer, clears the counters, and reverts the selection to Screen.
 
-Only the selected timer can be RUNNING — swapping requires a pause, so pause/expiry state of a deselected timer is frozen until you swap back.
+Only the selected timer can be RUNNING — swapping requires a pause, so pause/expiry state of a deselected timer is frozen until you swap back. The one state that is *not* tied to the selection is `BREAK`: it belongs to the Screen slot and keeps counting down whichever timer you are looking at.
 
 ### 7 · Display Layout (296×128 px)
 
@@ -197,6 +217,38 @@ Only the selected timer can be RUNNING — swapping requires a pause, so pause/e
 │     ⏸        Reset                  ⟳            │  ← button labels (A B _ D)
 └──────────────────────────────────────────────────┘
 ```
+
+While a Screen Break runs behind another selected timer, the header's
+`Last sync` is replaced by an inverted **BREAK** chip (16 pt, rows 3–21 —
+inside the header's clean band, so no other widget moves):
+
+```
+┌──────────────────────────────────────────────────┐
+│  Sat May 16  12:34 PM        ██ BREAK 12:34 ██   │  ← chip instead of Last sync
+│  ████████████████████░░░░░░░░░░░░░░░░░░░░░░░░░░  │
+│  ▮85%                       00:07:30             │
+│  Piano - 10 min                      RUNNING     │
+│     ⏸                               ⟳            │  ← C unlabelled: swap refused while RUNNING
+└──────────────────────────────────────────────────┘
+```
+
+The break screen itself (Screen selected) carries a bottom row instead of
+its old centred footer whenever extra timers are configured — the frozen
+screen time on the left, the swap affordance over C, refresh over D.
+Button A stays deliberately unlabelled: the break is still enforced.
+
+```
+┌──────────────────────────────────────────────────┐
+│               SCREEN BREAK                       │  ← 28 pt, white on black
+│  ████████████████████░░░░░░░░░░░░░░░░░░░░░░░░░░  │  ← break bar
+│                  12:34                           │  ← 48 pt break countdown
+│  Screen 1:30            ▶| Piano         ⟳       │  ← 16 pt bottom row
+└──────────────────────────────────────────────────┘
+```
+
+With no extra timers configured there is nothing to swap to, so the break
+screen keeps its original centred `Timer paused - 1:30:00 left` footer and
+no button row.
 
 Button labels sit above the physical buttons: A shows the action a press
 will take (play when IDLE/PAUSED, pause when RUNNING, hidden when EXPIRED),

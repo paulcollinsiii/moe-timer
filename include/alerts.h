@@ -11,7 +11,7 @@
 typedef enum {
     ALERT_EXPIRY = 0, /* red; self-terminates after the configured cycles */
     ALERT_BREAK,      /* cyan; break start — matches the BREAK identity */
-    ALERT_BEDTIME,    /* purple; bed time engage while RUNNING/BREAK */
+    ALERT_BEDTIME,    /* purple; bed time engage while RUNNING or mid-break */
 } alert_kind_t;
 
 #ifdef __cplusplus

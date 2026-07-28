@@ -100,7 +100,8 @@ void buttons_init(void) {
 
 /* Wake policy (UX: prevent button mashing from burning battery/refreshes):
    C wakes only when a swap would actually succeed — extra timers exist and
-   the active timer is not RUNNING/BREAK (the mask is rebuilt at every
+   the active timer is not RUNNING (a Screen Break does NOT refuse, so C
+   stays a wake source right through one; the mask is rebuilt at every
    sleep entry, so it tracks the state machine); B likewise wakes only
    when a reset would succeed — a reloadable selected timer or the
    parent-testing reset, and never while RUNNING. Non-wake buttons are

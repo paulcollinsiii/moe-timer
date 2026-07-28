@@ -21,8 +21,27 @@ typedef enum {
 
 /* Decide the render/alert action for a wake, given the state before the
    wake's action ran and after. An already-EXPIRED timer never re-fires
-   the alert (e.g. a swap landing on an expired slot). */
-wake_render_t wake_policy_render(timer_state_t before, timer_state_t after, bool button_wake);
+   the alert.
+
+   `before` must be the state that was actually PAINTED — the break-screen
+   boundary check depends on it, so callers must not overwrite it.
+   break_ended = a background Screen Break ended on this wake: the panel
+   changed (chip gone, possibly a snap back to Screen) even when before ==
+   after, so force a full refresh.
+   selection_changed = Button C swapped the active slot this wake, so an
+   EXPIRED `after` is a different timer's old news, not a transition —
+   this is how expiry suppression is expressed WITHOUT clobbering
+   `before`. The expiry alert still outranks break_ended. */
+wake_render_t wake_policy_render(timer_state_t before, timer_state_t after, bool button_wake, bool break_ended,
+                                 bool selection_changed);
+
+/* Break-over chime policy: fire only when nothing else is RUNNING (rule
+   4 — the kid mid-activity gets that timer's own alert) and the
+   transition is being acted on within BREAK_CHIME_GRACE_SEC of its wall
+   end (rule 6 — a charge lock, bed-time lock or power cycle can span it,
+   and the chime is an "it just happened" signal, not a replay). The snap
+   back to Screen rides the same answer. */
+bool wake_policy_break_chime(bool extra_running, int32_t overdue_sec);
 
 /* Absorb +-2 s of wake/render jitter so an on-grid countdown renders as a
    round minute (1:10:59 never shows). Values at/below watch_threshold_sec
