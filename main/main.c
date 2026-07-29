@@ -306,6 +306,11 @@ static void extend_awake_failsafe(int seconds); /* defined with the failsafe */
 static void fire_expiry_alert(void);
 static bool poll_pause_button(void);
 static bool poll_button_a_action(void);
+/* Defined with the wake handlers; the break watch below reaches back for
+   them so a press during the break tail goes through the same guards. */
+static bool dispatch_button_action(button_id_t btn, time_t *now, timer_state_t before, bool allow_net_window,
+                                   bool *selection_changed);
+static void render_action_result(button_id_t btn, timer_state_t before, time_t now, bool selection_changed);
 
 /* ---- break end --------------------------------------------------------- */
 
@@ -697,6 +702,38 @@ static void wait_for_render_grid(int max_wait_sec) {
    repaint, and the snap back to Screen) lands within a tick of wall time.
    Keyed on slot 0, so it covers a break running behind another selected
    timer just as well as the break screen itself. */
+/* Button poll for the BREAK tail. The watch below owns the CPU for the
+   whole tail, and a break no longer than SLEEP_PLAN_WATCH_SEC has no
+   other phase — the tail IS the break. Without this poll every press
+   made during it is latched by the ISR and then thrown away at deep
+   sleep, which silently disables the one thing a break is for: walking
+   over to a break-eligible timer and starting it (C to select, A to
+   start). Symptom on-device: "I couldn't move to another timer in the
+   final minute of the screen break."
+
+   Same mask, dispatch and guards as the tick handler's latch drain, so
+   the break's own refusals (A on slot 0, a non-eligible slot) still
+   apply. allow_net_window is false: the window for this wake has already
+   been joined by the time the watch runs, and a second one here would
+   paint over the tail. Returns true when the press changed what the
+   panel shows — the caller stops watching, having already repainted, and
+   the sleep planner re-schedules the break end (or, if the press started
+   an eligible extra, the end is suppressed and there is nothing left to
+   wait for, exactly as the top-of-watch guard decides). */
+static bool poll_break_buttons(void) {
+    int pick = button_latch_pick(buttons_take_pressed(), (1u << BTN_A) | (1u << BTN_B) | (1u << BTN_C));
+    if (pick < 0)
+        return false;
+    time_t now = time(NULL);
+    timer_state_t before = timer_get_state();
+    bool swapped = false;
+    if (!dispatch_button_action((button_id_t)pick, &now, before, false, &swapped))
+        return false;
+    neopixel_show_timer_state();
+    render_action_result((button_id_t)pick, before, now, swapped);
+    return true;
+}
+
 static void watch_break_end(void) {
     if (!timer_break_active())
         return;
@@ -712,6 +749,8 @@ static void watch_break_end(void) {
         ESP_LOGI(TAG, "Break ends in %ld s: staying awake", (long)brem);
         neopixel_show_timer_state();
         while (timer_break_remaining(time(NULL)) > 0) {
+            if (poll_break_buttons())
+                return; /* repainted; the planner owns the end from here */
             vTaskDelay(pdMS_TO_TICKS(250));
         }
     }
@@ -918,7 +957,11 @@ static bool dispatch_button_action(button_id_t btn, time_t *now, timer_state_t b
 /* Post-action tail shared by the wake handler and the tick-wake drain:
    render the resulting state, release the MQTT phase, join the window,
    and re-render when the join changed what the panel shows. */
-static void finish_action_and_render(button_id_t btn, timer_state_t before, time_t now, bool selection_changed) {
+/* Render half of the post-action tail, with no network work: drain a
+   break end, tick, and paint the result under the render policy. Shared
+   with the break watch, which runs after the window has already been
+   joined and so must not touch the MQTT phase. */
+static void render_action_result(button_id_t btn, timer_state_t before, time_t now, bool selection_changed) {
     /* A break can elapse mid-wake (a slow sync, a long press sequence).
        Order-independent now that the edge is latched — this drains early
        so the chime accompanies THIS paint rather than the one after. */
@@ -944,6 +987,11 @@ static void finish_action_and_render(button_id_t btn, timer_state_t before, time
             display_update(&st); /* partial cadence: every Nth is promoted */
         }
     }
+}
+
+static void finish_action_and_render(button_id_t btn, timer_state_t before, time_t now, bool selection_changed) {
+    render_action_result(btn, before, now, selection_changed);
+    bool force_full = (btn == BTN_D);
 
     /* Paint done: release the MQTT phase (display refresh current and
        radio TX bursts must never coincide — brownout), then join, apply
