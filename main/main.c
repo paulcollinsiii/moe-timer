@@ -985,6 +985,12 @@ static void finish_action_and_render(button_id_t btn, timer_state_t before, time
    sleep through it; otherwise render the action's result and drain the
    window. */
 static void finish_or_break(button_id_t btn, timer_state_t before, time_t now, bool selection_changed) {
+    /* Note the ordering: this runs BEFORE finish_action_and_render, whose
+       tick is what would detect an expiry. So a break due here wins over
+       a colliding expiry alert, which is the opposite of the tick
+       handler's post-render check. Not shown to be reachable — the press
+       that got here has just been dispatched, and the final minute
+       belongs to watch_final_minute — but it is not a guarantee. */
     if (maybe_start_break(now)) {
         post_stats_snapshot(); /* break screen painted: release MQTT */
         net_apply_finish();    /* drain + apply deferred before sleeping */
@@ -1024,6 +1030,19 @@ static void handle_timer_tick(void) {
         neopixel_show_timer_state();
     }
 
+    /* Fast path: a break already due on arrival, before the grid wait and
+       the paint — so the panel isn't refreshed with a main layout we are
+       about to replace with the break screen.
+
+       This runs BEFORE this wake's timer_tick, so it cannot see an expiry
+       that the tick is about to detect; with both pending the break would
+       win here and the expiry alert would be skipped entirely
+       (enter_deep_sleep does not return). The post-render call below is
+       what actually provides the expiry-then-break ordering. An expiry
+       reaching this point unprocessed has not been shown to be reachable
+       — the planner's 70 s event lead plus watch_final_minute own the
+       final minute — but this call carries no such guarantee, so do not
+       add one to this comment. */
     if (maybe_start_break(now)) {
         enter_deep_sleep(); /* break just started; sleep through it */
     }
@@ -1078,15 +1097,20 @@ static void handle_timer_tick(void) {
             break;
     }
 
-    /* A break earned in the SAME tick that expired a timer. The check
-       above runs before timer_tick, so the expiry that pushed the balance
-       over the interval is invisible to it — and letting the break win
-       there would skip the expiry alert entirely (fire_expiry_alert is
-       never reached once enter_deep_sleep runs). fire_expiry_alert
-       returns, so re-checking here yields expiry-then-break in one wake,
-       which is the order the alerts have to arrive in. A no-op unless the
-       balance is genuinely over, so it costs nothing on every other path;
-       the button path already has this shape in finish_or_break. */
+    /* A break earned in the SAME tick that expired a timer. The fast-path
+       check above runs before timer_tick, so the expiry that pushed the
+       balance over the interval is invisible to it. fire_expiry_alert
+       returns (it repaints the main layout), so re-checking HERE — after
+       the render switch — is what yields expiry-then-break in one wake,
+       which is the order the alerts have to arrive in. This is the only
+       call site that provides that ordering: finish_or_break has the
+       opposite shape, its maybe_start_break running before the tick in
+       finish_action_and_render. A no-op unless the balance is genuinely
+       over, so it costs nothing on every other path.
+
+       Re-read the clock first: `now` predates the render, and an expiry
+       alert holds the CPU for ~15 s before returning. */
+    now = time(NULL);
     if (maybe_start_break(now)) {
         enter_deep_sleep(); /* break just started; sleep through it */
     }

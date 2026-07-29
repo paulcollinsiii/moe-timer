@@ -49,8 +49,18 @@ bool net_apply_open(void) {
         s_prewindow_defs[i].valid = (def != NULL);
         if (def != NULL) {
             snprintf(s_prewindow_defs[i].name, sizeof(s_prewindow_defs[i].name), "%s", def->name);
-            s_prewindow_defs[i].def =
-                (timer_def_t){s_prewindow_defs[i].name, def->duration_sec, def->reloadable, def->break_eligible};
+            /* Designated, not positional: a positional literal silently
+               drops any field added to timer_def_t later, and this copy
+               is the ONLY record of the pre-window definition — the
+               reconcile compares against it, so a dropped field reads as
+               an edit that never happened (break_eligible did exactly
+               that, making every window look like an eligibility flip). */
+            s_prewindow_defs[i].def = (timer_def_t){
+                .name = s_prewindow_defs[i].name,
+                .duration_sec = def->duration_sec,
+                .reloadable = def->reloadable,
+                .break_eligible = def->break_eligible,
+            };
         }
     }
     s_shift_pending = false;

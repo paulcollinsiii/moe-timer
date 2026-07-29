@@ -294,6 +294,44 @@ void test_unchanged_defs_reconcile_to_idle(void) {
     TEST_ASSERT_EQUAL(TIMER_RUNNING, timer_get_state());
 }
 
+/* The pre-window def copy is the only record of what a slot looked like
+   before the window, so every field of timer_def_t has to survive it. A
+   dropped break_eligible reads as "flipped" on EVERY window: the fold
+   would re-sign the live segment each time, against an old sign that was
+   never true. */
+void test_prewindow_copy_carries_break_eligible(void) {
+    select_slot(1); /* Piano: break-eligible, so its run DRAINS */
+    timer_start(T0, 900);
+    mock_time_set(T0 + 300);
+    TEST_ASSERT_TRUE(net_apply_open());
+    /* Nothing changed: the reconcile must see no eligibility flip, so the
+       segment stays armed and keeps draining at the same sign. */
+    TEST_ASSERT_EQUAL(NET_FINISH_IDLE, net_apply_finish());
+    TEST_ASSERT_EQUAL_INT64((int64_t)T0, g_rtc_state.slots[0].run_started_wall);
+    TEST_ASSERT_EQUAL_INT32(0, g_rtc_state.slots[0].run_accum_sec);
+}
+
+/* And a genuine flip must still be seen: the segment folds at the OLD
+   sign and re-arms, rather than being retroactively re-signed. */
+void test_break_eligible_flip_is_reconciled(void) {
+    select_slot(1);
+    timer_start(T0, 900);
+    /* Bank something first so the fold's direction is observable. */
+    g_rtc_state.slots[0].run_accum_sec = 600;
+    mock_time_set(T0 + 300);
+    TEST_ASSERT_TRUE(net_apply_open());
+    timer_def_t edited[TIMER_SLOT_COUNT];
+    memcpy(edited, PRE_DEFS, sizeof(edited));
+    edited[1].break_eligible = false; /* Piano is a screen activity now */
+    install_table(edited);
+    TEST_ASSERT_EQUAL(NET_FINISH_IDLE, net_apply_finish()); /* flag-only */
+    /* 300 s of eligible run folded at the OLD (draining) sign... */
+    TEST_ASSERT_EQUAL_INT32(300, g_rtc_state.slots[0].run_accum_sec);
+    /* ...and re-armed, so the next 300 s ADD under the new sign. */
+    TEST_ASSERT_EQUAL_INT64((int64_t)T0 + 300, g_rtc_state.slots[0].run_started_wall);
+    TEST_ASSERT_EQUAL_INT32(600, timer_run_accum(T0 + 600));
+}
+
 void test_active_running_slot_renamed_resets_and_chirps(void) {
     select_slot(1);
     timer_start(T0, 900);
@@ -444,6 +482,8 @@ int main(void) {
     RUN_TEST(test_locate_pending_fires_locate_after_apply);
     RUN_TEST(test_no_locate_when_not_pending);
     RUN_TEST(test_unchanged_defs_reconcile_to_idle);
+    RUN_TEST(test_prewindow_copy_carries_break_eligible);
+    RUN_TEST(test_break_eligible_flip_is_reconciled);
     RUN_TEST(test_active_running_slot_renamed_resets_and_chirps);
     RUN_TEST(test_active_slot_shrunk_below_elapsed_expires_with_alert);
     RUN_TEST(test_active_slot_grown_updates_without_chirp);

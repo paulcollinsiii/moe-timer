@@ -197,9 +197,15 @@ void test_main_break_chip(void) {
 }
 
 void test_main_break_chip_no_start(void) {
-    /* Same break chip, but the selected timer is a chore (not
-       break_eligible): Button A carries no play glyph, because a press
-       would be refused. Everything else is unchanged from the chip case. */
+    /* A break running behind a selected chore (not break_eligible):
+       Button A carries no play glyph, because a press would be refused.
+
+       This is a DIFFERENT scenario from test_main_break_chip, not a
+       one-field variant of it — the two states differ in the timer name,
+       state, allocation, remaining and reload label as well, so do not
+       read a diff of the two goldens as "what start_available does".
+       test_start_available_only_changes_button_a below is what isolates
+       that. */
     display_state_t st = base_state();
     st.timer_state = TIMER_PAUSED;
     st.timer_name = "Laundry folding";
@@ -226,6 +232,47 @@ void test_break_screen_no_eligible(void) {
     st.swap_next_name = NULL;
     display_screens_build_break(&st);
     assert_matches_golden("break_screen_no_eligible");
+}
+
+/* Isolates the flag itself: one state rendered twice, differing only in
+   start_available, must differ only inside Button A's cell. Catches a
+   layout that reflows when the glyph disappears — which a golden pair of
+   two different scenarios cannot. */
+void test_start_available_only_changes_button_a(void) {
+    static uint8_t with_glyph[FB_BYTES];
+    display_state_t st = base_state();
+    st.timer_state = TIMER_PAUSED;
+    st.timer_name = "Laundry folding";
+    st.allocation_sec = 1500;
+    st.remaining_sec = 750;
+    st.reload_available = true;
+    st.break_banner = true;
+    st.break_remaining_sec = 372;
+
+    st.start_available = true;
+    display_screens_build_main(&st);
+    lv_refr_now(s_disp);
+    memcpy(with_glyph, s_captured, FB_BYTES);
+
+    st.start_available = false;
+    display_screens_build_main(&st);
+    lv_refr_now(s_disp);
+
+    /* Button A's label is centred on x=17 (BTN_X0), so it lives in the
+       first four byte columns of the bottom label rows. */
+    int differing = 0;
+    for (int r = 0; r < VER; r++) {
+        for (int b = 0; b < HOR / 8; b++) {
+            int i = r * (HOR / 8) + b;
+            if (with_glyph[i] == s_captured[i])
+                continue;
+            differing++;
+            char msg[80];
+            snprintf(msg, sizeof(msg), "row %d byte %d changed outside Button A's cell", r, b);
+            TEST_ASSERT_TRUE_MESSAGE(r >= 112 && b < 4, msg);
+        }
+    }
+    TEST_ASSERT_TRUE_MESSAGE(differing > 0, "start_available changed nothing at all");
 }
 
 void test_main_low_battery_warn_badge(void) {
@@ -276,6 +323,7 @@ int main(void) {
     RUN_TEST(test_break_screen_no_extras);
     RUN_TEST(test_main_break_chip);
     RUN_TEST(test_main_break_chip_no_start);
+    RUN_TEST(test_start_available_only_changes_button_a);
     RUN_TEST(test_break_screen_no_eligible);
     RUN_TEST(test_main_low_battery_warn_badge);
     RUN_TEST(test_charge_me_screen);

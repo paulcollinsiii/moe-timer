@@ -45,7 +45,7 @@ static volatile int s_pub_acks;
 
 /* Window-scoped buffers: allocated at window start, freed at teardown —
    the radio is off (and none of this is needed) for the vast majority of
-   every wake, so these ~7 KB no longer sit in .bss permanently. The
+   every wake, so these ~8.4 KB (sizeof(window_mem_t), which SET_MAX dominates) no longer sit in .bss permanently. The
    pointer doubles as the "window open" flag for the event handler. */
 typedef struct {
     char topic[128];
