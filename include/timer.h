@@ -59,6 +59,13 @@ typedef struct {
     const char *name; /* NULL or "" = slot disabled */
     int32_t duration_sec;
     bool reloadable; /* Button B reloads without ParentTesting */
+    /* "This activity is time away from a screen." One property, two
+       consequences: the timer may be STARTED during a Screen Break, and
+       its RUNNING time DRAINS the exposure balance instead of feeding it.
+       Slot 0 (Screen) is permanently false — screen time is the original
+       non-eligible activity, which is what collapses the eye-rest counter
+       and the break rules into one signed balance (see I8). */
+    bool break_eligible;
 } timer_def_t;
 
 typedef struct {
@@ -66,8 +73,13 @@ typedef struct {
     int64_t expiry_wall_time;   /* Unix ts; 0 if unset */
     int32_t remaining_at_pause; /* seconds saved on PAUSE/BREAK */
     int32_t allocation_sec;
-    /* Eye-rest accrual (slot 0 only): completed RUNNING seconds since last
-       break/reset, plus the wall time the current run segment started. */
+    /* Screen-exposure balance — SLOT 0 ONLY, whichever slot is running.
+       run_accum_sec is the folded balance since the last break/reset;
+       run_started_wall is the wall time the live run segment started (0 =
+       nothing running). The SIGN is not stored: it is derived at fold time
+       from the running slot's break_eligible (I8/I10), so it can never
+       desynchronise from the defs table. The extras' own copies of these
+       two fields are unused. */
     int32_t run_accum_sec;
     int64_t run_started_wall;
     int64_t break_expiry_wall; /* wall time the current break ends; 0 unless BREAK */
@@ -79,7 +91,11 @@ typedef struct {
 typedef struct {
     timer_slot_state_t slots[TIMER_SLOT_COUNT];
     uint8_t active_slot; /* 0 = Screen */
-    char last_date[11];  /* "YYYY-MM-DD\0" */
+    /* Slot that was selected when the current break started. The selection
+       snaps to 0 at break entry, so nothing else records what the break
+       interrupted; break end returns to it (rule 8). */
+    uint8_t break_interrupted_slot;
+    char last_date[11]; /* "YYYY-MM-DD\0" */
     int64_t next_ntp_sync;
 } rtc_state_t;
 
@@ -90,7 +106,7 @@ extern rtc_state_t g_rtc_state;
    day's entire allocation. Bump the version on any layout change — the
    XOR checksum (carried over from the MicroPython predecessor) then
    invalidates stale-layout blobs even if NVS hands them back intact. */
-#define TIMER_SNAPSHOT_VERSION 5 /* v5: + per-slot HA daily-bonus applied tracking */
+#define TIMER_SNAPSHOT_VERSION 6 /* v6: + break_interrupted_slot */
 
 typedef struct {
     uint8_t state; /* timer_state_t */
@@ -109,6 +125,7 @@ typedef struct {
     uint8_t version;
     uint8_t active_slot;
     uint8_t checksum; /* XOR of all bytes with this field zeroed */
+    uint8_t break_interrupted_slot;
     timer_snapshot_slot_t slots[TIMER_SLOT_COUNT];
     char date[11]; /* day the snapshot belongs to; stale days never restore */
 } timer_snapshot_t;
@@ -127,6 +144,19 @@ const timer_def_t *timer_slot_def(int slot);
    extra slot matches (HA grant targeting). */
 int timer_slot_by_name(const char *name);
 int timer_extra_count(void); /* enabled extra slots */
+/* Enabled extra slots marked break_eligible — i.e. slots a Screen Break
+   would actually let you start. 0 means the break offers nothing, which is
+   what suppresses the break screen's swap hint. */
+int timer_eligible_extra_count(void);
+/* Is `slot` a genuine break activity? Slot 0 (Screen), disabled and
+   out-of-range slots are always false. */
+bool timer_slot_break_eligible(int slot);
+/* True when Button A may START or RESUME the active slot: refused only
+   while a Screen Break runs on slot 0 and the active slot is not
+   break_eligible (rule 7). Slot 0 is never eligible, so this also carries
+   the existing "the break screen has no play glyph" behaviour. Pausing is
+   never gated — it is always safe to stop. */
+bool timer_start_allowed(void);
 /* True when a Button C swap would succeed: extras exist and the active
    slot is not RUNNING. A background Screen Break does NOT refuse — going
    and running Piano is exactly what the break time is for. Also gates C
@@ -144,6 +174,13 @@ int timer_next_slot(void);
    the active extra slot is RUNNING — stealing the selection mid-run
    would be hostile. Already on Screen: true, no change. */
 bool timer_select_screen(void);
+/* Put the selection back on the slot the break interrupted (rule 8).
+   Refused (false) while the active slot is RUNNING — the same "never steal
+   the selection mid-run" rule as timer_select_screen. Falls back to slot 0
+   when the recorded slot is no longer enabled. */
+bool timer_select_interrupted(void);
+/* Slot recorded at the last break start (0 until one happens). */
+int timer_break_interrupted_slot(void);
 /* Any extra slot (1..N) RUNNING? Suppresses the break-over chime and the
    snap back to Screen, and tells the sleep planner the break end needs no
    dedicated wake. */
@@ -227,17 +264,35 @@ int32_t timer_slot_remaining(int slot, time_t now, int32_t idle_fallback);
 /* Screen-timer (slot 0) seconds consumed today: allocation - remaining. */
 int32_t timer_screen_used_sec(time_t now);
 
-/* Eye-rest break: accrued RUNNING seconds trigger an enforced break.
-   Screen-only in both directions — timer_break_due is always false on
-   extra slots, and everything below reads/writes SLOT 0 regardless of
-   which slot is currently selected. */
-int32_t timer_run_accum(time_t now);                      /* accum incl. current run segment */
-bool timer_break_due(time_t now, int32_t interval_sec);   /* RUNNING && accum >= interval */
-void timer_start_break(time_t now, int32_t duration_sec); /* slot 0 RUNNING->BREAK; freezes remaining */
-bool timer_break_active(void);                            /* slot 0 == TIMER_BREAK */
-int32_t timer_break_remaining(time_t now);                /* slot 0 BREAK: seconds left, else 0 */
-/* End an elapsed break: slot 0 BREAK -> PAUSED (screen time still
-   frozen), break_expiry_wall cleared.
+/* Eye-rest break, driven by the SCREEN-EXPOSURE BALANCE. Everything below
+   reads/writes SLOT 0 regardless of which slot is selected, but the
+   balance is fed by whichever slot is RUNNING:
+
+     I8  the balance moves iff a slot is RUNNING — up 1:1 when that slot is
+         not break_eligible, down 1:1 when it is. Floored at zero (no
+         banked credit), frozen while nothing runs.
+     I9  slot 0's run_accum_sec is reset by exactly two things: break start
+         and day rollover. Draining to zero is arithmetic, not a reset.
+     I10 every transition into or out of RUNNING folds the live segment at
+         the OLD direction before re-arming at the new one — which is what
+         makes the sign derivable rather than stored. */
+int32_t timer_run_accum(time_t now); /* balance incl. the live segment; >= 0 */
+/* True when the balance has reached the interval. Not gated on RUNNING:
+   the balance can cross while Screen is IDLE or PAUSED and another
+   non-eligible timer drives it. Refused while slot 0 is already in BREAK,
+   and while slot 0 holds no startable screen time (EXPIRED, or PAUSED at
+   zero) — entering BREAK from there would come back as IDLE (I7) and
+   silently refund the day. */
+bool timer_break_due(time_t now, int32_t interval_sec);
+/* Start a break on slot 0: pauses whatever is RUNNING (I6), records the
+   interrupted slot, resets the balance, snaps the selection to slot 0. */
+void timer_start_break(time_t now, int32_t duration_sec);
+bool timer_break_active(void);             /* slot 0 == TIMER_BREAK */
+int32_t timer_break_remaining(time_t now); /* slot 0 BREAK: seconds left, else 0 */
+/* End an elapsed break: slot 0 leaves BREAK to PAUSED when it holds
+   banked screen time, otherwise IDLE (I7 — derived, never stored: Screen
+   may never have been started at all, the break having been earned
+   entirely by a non-eligible extra). break_expiry_wall cleared.
 
    The transition is LATCHED, not returned. timer_tick() calls this
    internally so no path can strand a break — which means any tick could

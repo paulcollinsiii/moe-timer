@@ -1277,13 +1277,13 @@ void test_bonus_applied_resets_at_rollover(void) {
     TEST_ASSERT_EQUAL_INT32(0, g_rtc_state.slots[0].bonus_applied);
 }
 
-void test_bonus_applied_survives_snapshot_v5(void) {
+void test_bonus_applied_survives_snapshot_roundtrip(void) {
     timer_bonus_reconcile(0, 900);
     timer_start(T0, 3600); /* consumes bonus_sec into allocation */
     timer_record_date(T0);
     timer_snapshot_t snap;
     timer_make_snapshot(&snap);
-    TEST_ASSERT_EQUAL_UINT8(5, snap.version);
+    TEST_ASSERT_EQUAL_UINT8(TIMER_SNAPSHOT_VERSION, snap.version);
 
     timer_reset();
     TEST_ASSERT_TRUE(timer_restore_snapshot(&snap, T0 + 100));
@@ -2057,7 +2057,7 @@ int main(void) {
     RUN_TEST(test_adjust_idle_banks_negative_start_clamps_at_zero);
     RUN_TEST(test_snapshot_round_trips_negative_bonus);
     RUN_TEST(test_bonus_applied_resets_at_rollover);
-    RUN_TEST(test_bonus_applied_survives_snapshot_v5);
+    RUN_TEST(test_bonus_applied_survives_snapshot_roundtrip);
     RUN_TEST(test_reset_state_is_idle);
     RUN_TEST(test_reset_expiry_is_zero);
     RUN_TEST(test_reset_remaining_at_pause_is_zero);
