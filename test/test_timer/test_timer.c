@@ -585,6 +585,33 @@ void test_segment_sign_survives_a_snapshot_round_trip(void) {
     TEST_ASSERT_EQUAL_INT32(600, timer_run_accum(T0 + 1800));
 }
 
+/* GAP 2: the fold path, not just the live read. Both sign choices agree
+   in every state reachable today (wherever the selection can diverge from
+   the arming slot, both slots are non-eligible), so this constructs the
+   divergence directly — a regression guard for any future change that
+   makes the selection movable under a running slot. Signing a FOLD by the
+   selection would invert it silently while every read-path test stayed
+   green. */
+void test_fold_signs_by_the_arming_slot_not_the_selection(void) {
+    timer_start(T0, 7200); /* Screen: balance up to 1200 */
+    timer_pause(T0 + 1200);
+    select_slot(SLOT_VIOLIN);
+    timer_start(T0 + 1200, 3600); /* eligible: arming slot = Violin */
+
+    /* Park Violin and move the selection to Screen, leaving slot 0's live
+       segment still armed as Violin's. Poked directly because no legal
+       sequence produces a DISAGREEING divergence today — which is
+       precisely why the fold needs its own guard. */
+    g_rtc_state.slots[SLOT_VIOLIN].state = TIMER_PAUSED;
+    g_rtc_state.active_slot = 0;
+
+    /* timer_start folds the live segment before re-arming. 600 s of an
+       eligible run must land as a DRAIN (1200 - 600), not an accrual. */
+    timer_start(T0 + 1800, 3600);
+    TEST_ASSERT_EQUAL_INT32(600, g_rtc_state.slots[0].run_accum_sec);
+    TEST_ASSERT_EQUAL_INT(0, (int)g_rtc_state.run_segment_slot); /* re-armed for Screen */
+}
+
 /* Same hazard without a reboot: the sign is a property of the run, so
    folding it must not consult the selection either. */
 void test_segment_sign_is_recorded_at_arm_time(void) {
@@ -2554,6 +2581,108 @@ void test_snapshot_rejects_an_out_of_range_interrupted_slot(void) {
     TEST_ASSERT_EQUAL(TIMER_IDLE, timer_get_state());
 }
 
+/* GAP 1: the OTHER I7 site. timer_break_tick's exit is well covered, but
+   a break can also end while the device is powered off, and that path
+   restores slot 0 independently. Refund shape 2 rides it: Screen expires,
+   the break it earned fires from EXPIRED (legal since the guard came
+   out), RTC is wiped mid-break by a panic or EN reset, and the snapshot
+   restores after the break's wall end. Deriving the exit state there
+   hands back a fresh full allocation; the stored one gives EXPIRED. */
+void test_snapshot_break_ended_while_powered_off_restores_the_prior_state(void) {
+    timer_start(T0, 1800);
+    timer_tick(T0 + 1800); /* Screen EXPIRED, balance 1800 */
+    TEST_ASSERT_TRUE(timer_break_due(T0 + 1800, 1800));
+    timer_start_break(T0 + 1800, 900); /* break ends T0+2700 */
+    timer_record_date(T0);
+    timer_snapshot_t snap;
+    timer_make_snapshot(&snap);
+    TEST_ASSERT_EQUAL_UINT8(TIMER_EXPIRED, snap.break_prev_state);
+
+    timer_reset();
+    TEST_ASSERT_TRUE(timer_restore_snapshot(&snap, T0 + 3000)); /* past the end */
+    TEST_ASSERT_EQUAL(TIMER_EXPIRED, timer_slot_state(0));      /* not IDLE */
+    TEST_ASSERT_EQUAL_INT32(0, timer_slot_remaining(0, T0 + 3000, 9999));
+}
+
+/* The same site with banked time: PAUSED must survive it too. */
+void test_snapshot_break_ended_while_powered_off_keeps_banked_time(void) {
+    timer_start(T0, 3600);
+    timer_pause(T0 + 600); /* 3000 s banked */
+    select_slot(SLOT_LAUNDRY);
+    timer_start(T0 + 600, 3600);
+    timer_start_break(T0 + 1800, 900);
+    timer_record_date(T0);
+    timer_snapshot_t snap;
+    timer_make_snapshot(&snap);
+
+    timer_reset();
+    TEST_ASSERT_TRUE(timer_restore_snapshot(&snap, T0 + 3000));
+    TEST_ASSERT_EQUAL(TIMER_PAUSED, timer_slot_state(0));
+    TEST_ASSERT_EQUAL_INT32(3000, g_rtc_state.slots[0].remaining_at_pause);
+}
+
+/* GAP 3: both new range checks feed values straight into the state
+   machine (break_prev_state is assigned to sl->state at two sites), so
+   corruption that slips past the checksum must not be restorable. */
+void test_snapshot_rejects_a_break_prev_state_of_break(void) {
+    timer_start(T0, 3600);
+    timer_record_date(T0);
+    timer_snapshot_t snap;
+    timer_make_snapshot(&snap);
+    snap.break_prev_state = TIMER_BREAK; /* leaving a break INTO a break */
+    snap.checksum = timer_snapshot_checksum(&snap);
+
+    timer_reset();
+    TEST_ASSERT_FALSE(timer_restore_snapshot(&snap, T0 + 100));
+    TEST_ASSERT_EQUAL(TIMER_IDLE, timer_get_state());
+}
+
+void test_snapshot_rejects_a_wild_break_prev_state(void) {
+    timer_start(T0, 3600);
+    timer_record_date(T0);
+    timer_snapshot_t snap;
+    timer_make_snapshot(&snap);
+    snap.break_prev_state = 200; /* past the enum entirely */
+    snap.checksum = timer_snapshot_checksum(&snap);
+
+    timer_reset();
+    TEST_ASSERT_FALSE(timer_restore_snapshot(&snap, T0 + 100));
+    TEST_ASSERT_EQUAL(TIMER_IDLE, timer_get_state());
+}
+
+void test_snapshot_rejects_an_out_of_range_run_segment_slot(void) {
+    timer_start(T0, 3600);
+    timer_record_date(T0);
+    timer_snapshot_t snap;
+    timer_make_snapshot(&snap);
+    snap.run_segment_slot = TIMER_SLOT_COUNT; /* would index past the defs */
+    snap.checksum = timer_snapshot_checksum(&snap);
+
+    timer_reset();
+    TEST_ASSERT_FALSE(timer_restore_snapshot(&snap, T0 + 100));
+    TEST_ASSERT_EQUAL(TIMER_IDLE, timer_get_state());
+}
+
+/* GAP 4: mark_expired's "an expired timer holds nothing" rule applies to
+   the powered-off expiry too, or a slot paused at 1800, resumed and
+   expired in the dark restores as EXPIRED still carrying 1800 — the same
+   stale-banked-value condition refund shape 2 rode on. */
+void test_snapshot_powered_off_expiry_clears_the_banked_remaining(void) {
+    timer_start(T0, 3600);
+    timer_pause(T0 + 1800); /* remaining_at_pause = 1800 */
+    timer_resume(T0 + 1800);
+    timer_record_date(T0);
+    timer_snapshot_t snap;
+    timer_make_snapshot(&snap);
+    TEST_ASSERT_EQUAL_INT32(1800, snap.slots[0].remaining_at_pause);
+
+    timer_reset();
+    TEST_ASSERT_TRUE(timer_restore_snapshot(&snap, T0 + 5000)); /* expired in the dark */
+    TEST_ASSERT_EQUAL(TIMER_EXPIRED, timer_slot_state(0));
+    TEST_ASSERT_EQUAL_INT32(0, g_rtc_state.slots[0].remaining_at_pause);
+    TEST_ASSERT_EQUAL_UINT16(1, timer_slot_completions(0)); /* still counted */
+}
+
 /* A run that expired while the device was powered off is still a fold
    point: the balance must land at the EXPIRY, not keep accruing across
    the dark gap. */
@@ -2636,6 +2765,7 @@ int main(void) {
     RUN_TEST(test_row15_the_balance_floors_at_zero);
     RUN_TEST(test_row16_an_eligibility_edit_folds_at_the_old_sign);
     RUN_TEST(test_segment_sign_survives_a_snapshot_round_trip);
+    RUN_TEST(test_fold_signs_by_the_arming_slot_not_the_selection);
     RUN_TEST(test_segment_sign_is_recorded_at_arm_time);
     RUN_TEST(test_row17_idle_neither_adds_nor_drains);
     RUN_TEST(test_balance_motivating_case_laundry_then_violin_then_screen);
@@ -2772,5 +2902,11 @@ int main(void) {
     RUN_TEST(test_snapshot_round_trips_the_interrupted_slot);
     RUN_TEST(test_snapshot_rejects_an_out_of_range_interrupted_slot);
     RUN_TEST(test_snapshot_restore_folds_a_powered_off_expiry);
+    RUN_TEST(test_snapshot_break_ended_while_powered_off_restores_the_prior_state);
+    RUN_TEST(test_snapshot_break_ended_while_powered_off_keeps_banked_time);
+    RUN_TEST(test_snapshot_rejects_a_break_prev_state_of_break);
+    RUN_TEST(test_snapshot_rejects_a_wild_break_prev_state);
+    RUN_TEST(test_snapshot_rejects_an_out_of_range_run_segment_slot);
+    RUN_TEST(test_snapshot_powered_off_expiry_clears_the_banked_remaining);
     return UNITY_END();
 }

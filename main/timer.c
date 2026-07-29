@@ -817,7 +817,6 @@ bool timer_restore_snapshot(const timer_snapshot_t *snap, time_t now) {
     g_rtc_state.break_prev_state = snap->break_prev_state;
     g_rtc_state.run_segment_slot = snap->run_segment_slot;
     int64_t expired_at = 0; /* 0 = no powered-off expiry to fold */
-    bool expired_eligible = false;
     for (int i = 0; i < TIMER_SLOT_COUNT; i++) {
         const timer_snapshot_slot_t *ss = &snap->slots[i];
         timer_slot_state_t *sl = &g_rtc_state.slots[i];
@@ -834,16 +833,18 @@ bool timer_restore_snapshot(const timer_snapshot_t *snap, time_t now) {
         /* Expiry passed while powered off (snapshot saved before the EXPIRED
            transition landed): restore directly as EXPIRED so the next tick
            does not re-transition and re-fire the already-heard alert. The
-           run still reached 00:00 — count it. */
+           run still reached 00:00 — count it. Through mark_expired, so
+           this site cannot drift from the live one: it also clears the
+           banked remaining, without which the slot restores EXPIRED still
+           carrying whatever it held at its last pause. */
         if (sl->state == TIMER_RUNNING && sl->expiry_wall_time <= (int64_t)now) {
             /* The run ended at its expiry, not now: fold the balance's
                live segment there (I10) so the powered-off gap after it
-               adds nothing. */
+               adds nothing. Deferred past the loop because the fold reads
+               run_segment_slot, and the segment is slot 0's — folding
+               mid-loop would race the restore of slot 0's own fields. */
             expired_at = sl->expiry_wall_time;
-            expired_eligible = timer_slot_break_eligible(i);
-            sl->state = TIMER_EXPIRED;
-            if (sl->completions != UINT16_MAX)
-                sl->completions++;
+            mark_expired(sl);
         }
         /* Break finished while powered off: restore per I7 — the state
            slot 0 held when the break started. */
@@ -852,8 +853,13 @@ bool timer_restore_snapshot(const timer_snapshot_t *snap, time_t now) {
             sl->break_expiry_wall = 0;
         }
     }
+    /* Signed by run_segment_slot like every other fold, not by the slot
+       that expired: the two agree in any uncorrupted snapshot (the
+       expiring slot is the one that armed the segment), and going through
+       the same helper keeps the "sign comes from the arming slot" rule
+       true without exception. */
     if (expired_at != 0)
-        fold_run_segment_signed((time_t)expired_at, expired_eligible);
+        fold_run_segment((time_t)expired_at);
     memcpy(g_rtc_state.last_date, snap->date, sizeof(g_rtc_state.last_date));
     /* The firmware may have been reflashed with this slot removed from
        menuconfig — never strand the device on a slot the buttons can no

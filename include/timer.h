@@ -76,10 +76,12 @@ typedef struct {
     /* Screen-exposure balance — SLOT 0 ONLY, whichever slot is running.
        run_accum_sec is the folded balance since the last break/reset;
        run_started_wall is the wall time the live run segment started (0 =
-       nothing running). The SIGN is not stored: it is derived at fold time
-       from the running slot's break_eligible (I8/I10), so it can never
-       desynchronise from the defs table. The extras' own copies of these
-       two fields are unused. */
+       nothing running). The SIGN is derived at fold time from the
+       break_eligible of the slot that ARMED the segment
+       (rtc_state_t.run_segment_slot) — never from the selection, which
+       can move underneath a run. So the direction itself is not stored,
+       only which slot owns it, and it cannot desynchronise from the defs
+       table. The extras' own copies of these two fields are unused. */
     int32_t run_accum_sec;
     int64_t run_started_wall;
     int64_t break_expiry_wall; /* wall time the current break ends; 0 unless BREAK */
@@ -117,7 +119,7 @@ extern rtc_state_t g_rtc_state;
    day's entire allocation. Bump the version on any layout change — the
    XOR checksum (carried over from the MicroPython predecessor) then
    invalidates stale-layout blobs even if NVS hands them back intact. */
-#define TIMER_SNAPSHOT_VERSION 6 /* v6: + break_interrupted_slot */
+#define TIMER_SNAPSHOT_VERSION 6 /* v6: + break_interrupted_slot, break_prev_state, run_segment_slot */
 
 typedef struct {
     uint8_t state; /* timer_state_t */
@@ -288,7 +290,8 @@ int32_t timer_screen_used_sec(time_t now);
          and day rollover. Draining to zero is arithmetic, not a reset.
      I10 every transition into or out of RUNNING folds the live segment at
          the OLD direction before re-arming at the new one — which is what
-         makes the sign derivable rather than stored. */
+         lets the segment carry only its owning slot rather than a
+         direction bit that could contradict the defs table. */
 int32_t timer_run_accum(time_t now); /* balance incl. the live segment; >= 0 */
 /* True when the balance has reached the interval. Not gated on RUNNING
    or on slot 0's state: the balance can cross while Screen is IDLE,
