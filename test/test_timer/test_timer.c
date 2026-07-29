@@ -592,6 +592,19 @@ void test_balance_motivating_case_laundry_then_violin_then_screen(void) {
     TEST_ASSERT_TRUE(timer_break_due(T0 + 1800 + 1800, 1800));
 }
 
+/* The simpler half of the sleep planning: while an ELIGIBLE timer runs
+   the balance is falling, so there is no break moment to schedule at all.
+   However long Violin runs, no break can become due from it. */
+void test_an_eligible_run_never_makes_a_break_due(void) {
+    timer_start(T0, 7200); /* Screen: balance up to just under the line */
+    timer_pause(T0 + 1799);
+    select_slot(SLOT_VIOLIN);
+    timer_start(T0 + 1799, 7200);
+    for (int32_t t = 0; t <= 3600; t += 60) {
+        TEST_ASSERT_FALSE(timer_break_due(T0 + 1799 + t, 1800));
+    }
+}
+
 /* Slot 0's terminal states are not a break target. Dropping the RUNNING
    requirement from timer_break_due exposes them: an EXPIRED Screen forced
    into BREAK comes back as IDLE (I7) and silently refunds the whole day's
@@ -2502,6 +2515,7 @@ int main(void) {
     RUN_TEST(test_row16_an_eligibility_edit_folds_at_the_old_sign);
     RUN_TEST(test_row17_idle_neither_adds_nor_drains);
     RUN_TEST(test_balance_motivating_case_laundry_then_violin_then_screen);
+    RUN_TEST(test_an_eligible_run_never_makes_a_break_due);
     RUN_TEST(test_break_is_not_due_while_screen_holds_no_startable_time);
     RUN_TEST(test_break_is_not_due_while_one_is_already_running);
     RUN_TEST(test_start_allowed_outside_a_break_is_always_true);

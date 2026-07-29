@@ -144,8 +144,44 @@ void test_break_as_primary_state_is_unchanged(void) {
     TEST_ASSERT_EQUAL_INT32(60, plan(TIMER_BREAK, 17, 900, false));
 }
 
+/* A break becomes DUE (rather than ending) while a non-eligible extra
+   runs — e.g. Laundry 60 min, balance crossing at 30. That moment needs
+   no dedicated wake event: a RUNNING slot always sleeps on the countdown
+   minute grid, so it is capped at 60 s whatever the expiry horizon, and
+   the per-wake maybe_start_break check catches the crossing within a
+   minute. Exactly the fidelity the Screen timer has always had.
+
+   This is a CONTRACT, not an observation: raise the RUNNING cap above a
+   minute and a laundry-driven break silently starts arriving late.
+
+   The bound is 64 s, not 60: when the next grid point (or the grid point
+   less the sync lead) falls inside SLEEP_PLAN_MIN_SEC the planner takes
+   the PREVIOUS grid minute instead, which can add up to MIN_SEC-1. */
+#define RUNNING_SLEEP_MAX (60 + SLEEP_PLAN_MIN_SEC - 1)
+void test_running_never_sleeps_past_the_minute_grid(void) {
+    for (int32_t rem = 61; rem <= 7200; rem++) {
+        TEST_ASSERT_TRUE_MESSAGE(plan(TIMER_RUNNING, 17, rem, false) <= RUNNING_SLEEP_MAX,
+                                 "RUNNING slept past a minute");
+        TEST_ASSERT_TRUE_MESSAGE(plan(TIMER_RUNNING, 17, rem, true) <= RUNNING_SLEEP_MAX,
+                                 "RUNNING slept past a minute (sync due)");
+    }
+}
+
+/* The balance is frozen unless something is RUNNING, so the clock-only
+   states cannot cross the interval while asleep however long they nap —
+   and they are minute-aligned anyway. */
+void test_clock_only_states_stay_minute_aligned(void) {
+    for (int sec = 0; sec < 60; sec++) {
+        TEST_ASSERT_TRUE(plan(TIMER_IDLE, sec, 0, false) <= RUNNING_SLEEP_MAX);
+        TEST_ASSERT_TRUE(plan(TIMER_PAUSED, sec, 0, false) <= RUNNING_SLEEP_MAX);
+        TEST_ASSERT_TRUE(plan(TIMER_EXPIRED, sec, 0, false) <= RUNNING_SLEEP_MAX);
+    }
+}
+
 int main(void) {
     UNITY_BEGIN();
+    RUN_TEST(test_running_never_sleeps_past_the_minute_grid);
+    RUN_TEST(test_clock_only_states_stay_minute_aligned);
     RUN_TEST(test_break_secondary_pulls_the_wake_in);
     RUN_TEST(test_break_secondary_ignored_when_later_than_the_primary);
     RUN_TEST(test_break_secondary_ignored_when_zero);
