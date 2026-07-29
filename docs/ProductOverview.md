@@ -143,27 +143,33 @@ States: `IDLE` → `RUNNING` → `PAUSED` → `EXPIRED`, plus `BREAK` (eye rest)
 ### 5a · Eye Rest (Screen Break)
 
 Every `CONFIG_MAGTAG_BREAK_INTERVAL_MIN` minutes (default 30, 0 disables) of
-**accumulated RUNNING time** — pauses don't reset the accrual — the Screen
-timer auto-transitions to `BREAK` for `CONFIG_MAGTAG_BREAK_DURATION_MIN`
-minutes (default 15).
+**screen exposure** — see 5b; pauses don't reset it — a `BREAK` starts for
+`CONFIG_MAGTAG_BREAK_DURATION_MIN` minutes (default 15).
 
 The break enforces the **Screen timer**, not the whole device (v1.4). Screen
 time stays frozen, there is no early resume, and the end is an absolute wall
 time — but the other timers stay fully usable, which is the point of a break:
 a kid on a 15 min eye rest can go and run Piano or Violin.
 
-- Entry: screen-time frozen (like pause), accrual reset, short break alarm
-  (2 beeps × 3, any button silences), display flips to the **inverted**
-  SCREEN BREAK layout with its own countdown + draining bar, plus a swap
-  hint over Button C.
+- Entry: whatever is RUNNING is paused, screen time frozen, balance reset,
+  short break alarm (2 beeps × 3, any button silences), display flips to the
+  **inverted** SCREEN BREAK layout with its own countdown + draining bar,
+  plus a swap hint over Button C. The break can be earned entirely by a
+  non-eligible extra timer, with Screen never started that day.
 - During, with Screen selected: Button A is ignored (no early resume); B
   (parent mode), C and D work.
 - During, with an extra timer selected: the normal layout for that timer,
   with an inverted `BREAK m:ss` chip in the header where `Last sync`
-  normally sits. That timer starts, pauses, expires and alerts as usual.
-- End: double-beep chime, and the selection snaps back to Screen in
-  `PAUSED`; Button A resumes the screen timer. Break end within ~1 s of wall
-  time (stay-awake watch, same mechanism as expiry).
+  normally sits. A **break-eligible** timer starts, pauses, expires and
+  alerts as usual. A non-eligible one is fully visible and reachable by
+  Button C, but Button A is refused and draws no ▶ — a chore is not a break.
+- The swap hint on the break screen is suppressed when no break-eligible
+  timer is configured: the break has nothing to offer, so it behaves like
+  the older locking break.
+- End: double-beep chime, and the selection returns to whichever timer the
+  break interrupted, with Screen left `PAUSED` if it has banked time or
+  `IDLE` if it never started today. Break end within ~1 s of wall time
+  (stay-awake watch, same mechanism as expiry).
 - **The chime is suppressed when any extra timer is RUNNING** at the moment
   the break ends — the kid is mid-activity and will get that timer's own
   alert. The selection is then left alone too (stealing it mid-run would be
@@ -173,9 +179,47 @@ a kid on a 15 min eye rest can go and run Piano or Violin.
   first seen more than 75 s after its wall time — a charge lock, a bed-time
   lock or a power cycle spanning it — it lands silently. The chime is an "it
   just happened" signal, not a replay.
-- Break state and accrual persist in the NVS snapshot: a power cycle
-  mid-break resumes the break with the same absolute end time, even when a
-  different timer was selected and running.
+- Break state, the balance and the interrupted slot persist in the NVS
+  snapshot: a power cycle mid-break resumes the break with the same absolute
+  end time, even when a different timer was selected and running.
+
+### 5b · Screen exposure (v1.5)
+
+Not every extra timer is a real break from a screen. "Laundry folding" is a
+chore done *with the TV on*: running it during an eye rest defeats the
+break, and running it outside one is real screen exposure the break
+scheduler used to be blind to. So each extra timer declares whether it is a
+genuine break activity (`MAGTAG_TIMER<n>_BREAK_ELIGIBLE`, or the per-timer
+switch in Home Assistant).
+
+Exposure is tracked as a **signed balance**:
+
+- a **non-eligible** timer running (including Screen itself) adds to it 1:1;
+- a **break-eligible** timer running subtracts from it 1:1;
+- nothing running freezes it — idle neither adds nor drains;
+- it never goes below zero, so hours of violin cannot bank hours of TV.
+
+A break is due when the balance reaches the interval. So: fold laundry for
+15 minutes, practise violin for 15, sit down to watch TV, and the break does
+**not** fire immediately — the kid genuinely was off screens. Equally, fold
+laundry for the whole interval without ever starting Screen and the break
+fires anyway, because the eyes do not care which timer was selected.
+
+The exposure balance is published to Home Assistant as the `Screen exposure`
+diagnostic sensor; read against the configured break interval it answers
+"why didn't my break fire?" directly. The panel deliberately does not show
+it.
+
+**Configure non-eligible timers with `RELOADABLE=n`.** One run of a chore
+timer is capped by its own duration, which is the earned-by-the-chore
+intent; but Button B reloads a reloadable timer without ParentTesting, so a
+reloadable chore can be re-earned without doing the chore again.
+
+A kid can of course leave Violin running without touching the violin. That
+is unfixable in principle — the device cannot see the room — and it is the
+same trust the Screen timer already assumes. It is also self-policing: at
+1:1, dodging a 30-minute break costs 30 real minutes of not watching TV,
+which is the outcome the break wanted. Do not harden it.
 
 Pressing Start from PAUSED re-NTP-syncs and sets `expiry_wall_time = now + remaining_at_pause`.
 
@@ -185,7 +229,7 @@ All state is persisted in **RTC slow memory** (survives deep sleep) with an NVS 
 
 | Button | GPIO | Action |
 |--------|------|--------|
-| A | 15 | Start (IDLE/PAUSED → RUNNING, immediate; NTP sync after) / Pause (RUNNING → PAUSED) |
+| A | 15 | Start (IDLE/PAUSED → RUNNING, immediate; NTP sync after) / Pause (RUNNING → PAUSED). During a Screen Break, a **start** is refused on any slot that is not break-eligible — including Screen — and the ▶ label is not drawn (see 5a/5b); pausing is never gated |
 | B | 14 | Reset the **selected** timer to IDLE at full duration — never while RUNNING (pause first): for a reloadable extra timer always, otherwise only when `CONFIG_MAGTAG_PARENT_TESTING=y` |
 | C | 12 | Swap timer type (Screen → extra 1 → … → Screen); refused while RUNNING (a Screen Break does **not** refuse — see 5a) |
 | D | 11 | Force NTP re-sync + full display refresh |
@@ -194,11 +238,12 @@ Wake sources: A and D always; B and C only when their press would succeed, since
 
 ### 6a · Extra timers (v1.3)
 
-Up to four additional countdown timers (menuconfig: `MAGTAG_TIMER<n>_NAME/_MIN/_RELOADABLE`; an empty name disables the slot) for things like Piano practice or Meditation. They are plain countdowns sharing the Screen timer's alerts, NeoPixel sequences, NTP cadence, and RTC + NVS-snapshot persistence, but:
+Up to four additional countdown timers (menuconfig: `MAGTAG_TIMER<n>_NAME/_MIN/_RELOADABLE/_BREAK_ELIGIBLE`; an empty name disables the slot) for things like Piano practice or Laundry folding. They are plain countdowns sharing the Screen timer's alerts, NeoPixel sequences, NTP cadence, and RTC + NVS-snapshot persistence, but:
 
-- No eye-rest breaks of their own (accrual is Screen-only) — but they stay usable **during** a Screen Break, which is what the break time is for (see 5a). Because accrual is Screen-only, a break can never start while an extra timer is selected.
+- No eye-rest breaks of *their own* — the break always belongs to the Screen slot — but a **non-eligible** timer feeds the shared screen-exposure balance (5b) and so can earn one, and a **break-eligible** timer stays usable during a break and drains the balance, which is what the break time is for (see 5a).
 - Fixed configured duration instead of the day-schedule allocation.
 - **Reloadable** timers reset to full via Button B on the same day, no ParentTesting needed. The mode line then counts the day's completed runs (reached 00:00): `Meditation (x2) - 10 min`. A mid-run reset does not count; non-reloadable timers never show a counter — once expired they stay depleted until rollover.
+- **Break-eligible** timers are genuine time away from a screen (see 5b). Configure chore timers non-eligible *and* `RELOADABLE=n`.
 - Day rollover resets every timer, clears the counters, and reverts the selection to Screen.
 
 Only the selected timer can be RUNNING — swapping requires a pause, so pause/expiry state of a deselected timer is frozen until you swap back. The one state that is *not* tied to the selection is `BREAK`: it belongs to the Screen slot and keeps counting down whichever timer you are looking at.

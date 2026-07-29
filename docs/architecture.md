@@ -64,8 +64,8 @@ typedef struct {
     int64_t       expiry_wall_time;   // Unix timestamp; 0 if unset. Set at IDLE->RUNNING and PAUSED->RUNNING; shifted by timer_shift_expiry() after the post-start NTP sync.
     int32_t       remaining_at_pause; // seconds saved on PAUSE/BREAK
     int32_t       allocation_sec;
-    int32_t       run_accum_sec;      // eye-rest accrual (slot 0 only)
-    int64_t       run_started_wall;
+    int32_t       run_accum_sec;      // screen-exposure balance (slot 0 only, whichever slot drives it)
+    int64_t       run_started_wall;   // live segment start; 0 = nothing running
     int64_t       break_expiry_wall;  // 0 unless BREAK (slot 0 only)
     uint16_t      completions;        // runs that reached expiry today
 } timer_slot_state_t;
@@ -73,6 +73,7 @@ typedef struct {
 typedef struct {
     timer_slot_state_t slots[TIMER_SLOT_COUNT]; // slot 0 = Screen, 1..TIMER_EXTRA_SLOTS = extra timers
     uint8_t       active_slot;        // Button C cycles enabled slots; rollover reverts to 0
+    uint8_t       break_interrupted_slot; // slot selected when the break started; break end returns to it
     char          last_date[11];      // "YYYY-MM-DD"
     int64_t       next_ntp_sync;      // timestamp of next required sync
 } rtc_state_t;
@@ -80,11 +81,27 @@ typedef struct {
 
 (The authoritative definitions live in `include/timer.h` — check there first; this snapshot can lag.)
 
-Extra-timer definitions (name/duration/reloadable) come from `MAGTAG_TIMER<n>_*` menuconfig symbols and live in rodata — `timer_defs_install()` must run each boot before any `timer_*` call (host tests inject their own table via `timer_set_defs()`). The single-timer API (`timer_start/pause/tick/...`) always operates on the active slot.
+Extra-timer definitions (name/duration/reloadable/break-eligible) come from `MAGTAG_TIMER<n>_*` menuconfig symbols and live in rodata — `timer_defs_install()` must run each boot before any `timer_*` call (host tests inject their own table via `timer_set_defs()`). The single-timer API (`timer_start/pause/tick/...`) always operates on the active slot.
 
 **State-model invariant (v1.4).** Only the active slot can be `RUNNING`, but `TIMER_BREAK` is decoupled from the selection: it lives on slot 0 only and may be held there while any slot is active, so a Screen Break enforces the *screen timer* without freezing the device. Every break helper (`timer_break_active/_remaining/_tick`, `timer_start_break`, `timer_shift_expiry`) therefore reads slot 0 explicitly, never the active slot. `include/timer.h` carries the authoritative version of this comment; `test/test_timer` encodes it as invariants I1–I5 in an `assert_state_legal()` helper that runs from `tearDown`, so every test in that suite trips on an illegal state.
 
 Callers needing the break-end *edge* must call `timer_break_tick()` before `timer_tick()` — `timer_tick()` also ends an elapsed break (so no path can strand one behind a running extra timer), but silently.
+
+**The screen-exposure balance (v1.5).** `break_eligible` is a per-timer flag meaning "this activity is time away from a screen". It has one consequence in two places: an eligible timer may be *started* during a Screen Break, and its RUNNING time *drains* the exposure balance instead of feeding it. Slot 0 is permanently non-eligible — screen time is the original non-eligible activity, which is what collapses the eye-rest counter and the break rules into a single quantity:
+
+> Screen exposure is a signed balance on slot 0. Non-eligible RUNNING time adds 1:1, eligible RUNNING time subtracts 1:1, floored at zero. A break is due when it reaches the interval, and a Screen Break refuses to start any slot that is not `break_eligible`.
+
+The balance lives on **slot 0 whichever slot is running**, so `timer_run_accum()` keys on slot 0's `run_started_wall != 0`, not on any slot's state — slot 0 is routinely IDLE or PAUSED while a chore timer drives it. The direction is **never stored**: it is derived at every fold from the running slot's `break_eligible`, so an HA edit of the flag cannot desynchronise from the balance. Three consequences worth knowing before touching `timer.c`:
+
+- **Every transition into or out of RUNNING is a fold point** (I10) — start, pause, resume, expiry, a reconcile that renames/disables the slot, and a reconcile that flips `break_eligible` (which folds at the *old* sign, available only from `old_def`, since `net_apply` reinstalls the defs table before reconciling). Miss one and the balance either loses a segment or advances forever.
+- **The floor is enforced twice**: at fold time and at read time, because the in-flight segment is not folded yet. A long eligible run must report 0, never a negative, to logging, HA and the break check.
+- **Only two things reset it** (I9): a break start and the day rollover. `timer_start()` deliberately does *not* — a start that cleared it would let any timer press zero the eye-rest clock.
+
+Idle neither adds nor drains. That is deliberate: the device deep-sleeps whenever nothing runs, so decaying through idle would mean the balance almost never survives to reach the interval, and "paused" is indistinguishable from "walked away".
+
+`timer_break_due()` has no RUNNING requirement (the balance can cross while Screen sits IDLE), but it does refuse while slot 0 holds no startable screen time — `EXPIRED`, or `PAUSED` at zero. A break entered from there leaves as IDLE by I7, which reads as a fresh full allocation and silently refunds the day. An HA grant re-arms slot 0 and the earned break fires against it on the next check.
+
+Break entry pauses whatever is RUNNING (I6 — a break is only honest if the exposure stops), records `break_interrupted_slot`, resets the balance and snaps the selection to slot 0. Break exit derives slot 0's state rather than storing it (I7): `PAUSED` when it holds banked time, `IDLE` when Screen never started today — which happens whenever a chore timer earned the whole break. `test/test_timer` names its cases after the plan's behaviour-table rows (`test_row11_...`), so a failure points at the contract it broke.
 
 The ssd1680 component additionally keeps a `RTC_DATA_ATTR` last-refresh timestamp for its refresh-rate guard; display.c keeps its previous-frame buffer and partial/full cadence counter in RTC memory.
 
