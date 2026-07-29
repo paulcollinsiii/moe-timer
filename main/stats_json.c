@@ -50,9 +50,9 @@ int stats_json_stat(char *buf, size_t len, const stats_snapshot_t *s) {
     for (int i = 0; i < TIMER_EXTRA_SLOTS; i++) {
         pos = jcat(buf, len, pos, i ? ",%u" : "%u", (unsigned)s->completions[i]);
     }
-    pos = jcat(buf, len, pos, "],\"charge_lock\":%s,\"break_s\":%ld,\"fw\":\"%s\",\"reset\":\"%s\"}",
-               s->charge_lock ? "true" : "false", (long)s->break_remaining_s, jesc(fw, sizeof(fw), s->fw),
-               jesc(rst, sizeof(rst), s->reset_reason));
+    pos = jcat(buf, len, pos, "],\"charge_lock\":%s,\"break_s\":%ld,\"accum_s\":%ld,\"fw\":\"%s\",\"reset\":\"%s\"}",
+               s->charge_lock ? "true" : "false", (long)s->break_remaining_s, (long)s->accum_s,
+               jesc(fw, sizeof(fw), s->fw), jesc(rst, sizeof(rst), s->reset_reason));
     return pos;
 }
 
@@ -103,6 +103,13 @@ static const ha_entity_t ENTITIES[] = {
      "stat", STAT_EXPIRE_SEC, true, NULL},
     {"sensor", "break_remaining", "Screen break remaining", "min", "duration",
      "{{ (value_json.break_s / 60) | round(0) }}", "stat", STAT_EXPIRE_SEC, false, DIAG},
+    /* The exposure balance driving the break: rises while a non-eligible
+       timer runs, falls while a break-eligible one does. Read against the
+       configured interval it explains every break that did or did not
+       fire. Key clear of the remaining_/limit_/completions_ prefixes for
+       the same reason as the two above. */
+    {"sensor", "screen_exposure", "Screen exposure", "min", "duration", "{{ (value_json.accum_s / 60) | round(0) }}",
+     "stat", STAT_EXPIRE_SEC, false, DIAG},
     {"sensor", "completions_1", "Timer 1 runs", NULL, NULL, "{{ value_json.completions[0] }}", "stat", STAT_EXPIRE_SEC,
      false, DIAG},
     {"sensor", "completions_2", "Timer 2 runs", NULL, NULL, "{{ value_json.completions[1] }}", "stat", STAT_EXPIRE_SEC,

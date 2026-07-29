@@ -22,7 +22,7 @@
 static const char *TAG = "mqtt_ha";
 
 /* Bump when entities are added/renamed — discovery configs republish once. */
-#define DISC_SCHEMA_VER 14 /* v14: + screen_break / break_remaining entities */
+#define DISC_SCHEMA_VER 15 /* v15: + per-timer break_eligible, screen_exposure */
 
 #define CONNECT_TIMEOUT_MS 5000
 #define PUBLISH_DRAIN_TIMEOUT_MS 3000
@@ -36,9 +36,12 @@ static volatile int s_pub_acks;
 
 #define CONFIG_BUF_MAX 1024
 #define CMD_BUF_MAX 256
-/* 25 registry fields + screen_bonus + locate = 27 distinct keys; headroom
-   so a duplicate (retained + a fresh in-window edit) can't silently drop. */
-#define SET_MAX 32
+/* 31 registry fields + screen_bonus + locate = 33 distinct keys; headroom
+   so a duplicate (retained + a fresh in-window edit) can't silently drop.
+   The count was already stale at 25 before the per-timer break_eligible
+   switches took it past the old cap of 32 — keep it in step with
+   ha_config's FIELDS or edits are dropped with a "set buffer full" log. */
+#define SET_MAX 48
 
 /* Window-scoped buffers: allocated at window start, freed at teardown —
    the radio is off (and none of this is needed) for the vast majority of

@@ -1,3 +1,4 @@
+#include <stdio.h>
 #include <string.h>
 #include <unity.h>
 
@@ -176,11 +177,17 @@ void test_state_json_worst_case_fits_firmware_buffer(void) {
         ha_config_set(key, "1440", ack, sizeof(ack));
         snprintf(key, sizeof(key), "timer%d_reload", n);
         ha_config_set(key, "ON", ack, sizeof(ack));
+        snprintf(key, sizeof(key), "timer%d_break", n);
+        ha_config_set(key, "ON", ack, sizeof(ack));
     }
     char buf[HA_CONFIG_STATE_MAX];
     int ret = ha_config_state_json(buf, sizeof(buf));
     TEST_ASSERT_TRUE(ret < HA_CONFIG_STATE_MAX); /* not truncated */
     TEST_ASSERT_EQUAL_INT((int)strlen(buf), ret);
+    /* Headroom the firmware buffer actually has, so a future field
+       addition trips here rather than silently knocking every editable
+       control offline (a truncated doc is never published). */
+    printf("  worst-case cfg state: %d / %d bytes\n", ret, HA_CONFIG_STATE_MAX);
 }
 
 /* ---- ha_config_state_json ---- */
@@ -385,6 +392,44 @@ void test_set_timer_name_too_long_rejected(void) {
     TEST_ASSERT_EQUAL(HA_CFG_REJECTED, ha_config_set("timer1_name", "SixteenCharsPlus!", ack, sizeof(ack)));
 }
 
+/* Per-timer break-eligible switch: the HA-facing half of the flag. */
+void test_set_timer_break_eligible(void) {
+    char ack[128];
+    TEST_ASSERT_EQUAL(HA_CFG_OK, ha_config_set("timer1_break", "ON", ack, sizeof(ack)));
+    nvs_timer_defs_blob_t b;
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_timer_defs(&b));
+    TEST_ASSERT_EQUAL_UINT8(1, b.defs[0].break_eligible);
+    TEST_ASSERT_EQUAL(HA_CFG_OK, ha_config_set("timer1_break", "OFF", ack, sizeof(ack)));
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_timer_defs(&b));
+    TEST_ASSERT_EQUAL_UINT8(0, b.defs[0].break_eligible);
+}
+
+void test_set_timer_break_eligible_rejects_non_onoff(void) {
+    char ack[128];
+    TEST_ASSERT_EQUAL(HA_CFG_OK, ha_config_set("timer1_break", "ON", ack, sizeof(ack)));
+    TEST_ASSERT_EQUAL(HA_CFG_REJECTED, ha_config_set("timer1_break", "true", ack, sizeof(ack)));
+    TEST_ASSERT_EQUAL(HA_CFG_REJECTED, ha_config_set("timer1_break", "", ack, sizeof(ack)));
+    nvs_timer_defs_blob_t b;
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_timer_defs(&b));
+    TEST_ASSERT_EQUAL_UINT8(1, b.defs[0].break_eligible); /* untouched */
+}
+
+/* Editing one per-slot field must not clobber its siblings: they all
+   read-modify-write the same blob. */
+void test_timer_fields_are_independent(void) {
+    char ack[128];
+    TEST_ASSERT_EQUAL(HA_CFG_OK, ha_config_set("timer1_break", "ON", ack, sizeof(ack)));
+    TEST_ASSERT_EQUAL(HA_CFG_OK, ha_config_set("timer1_reload", "ON", ack, sizeof(ack)));
+    TEST_ASSERT_EQUAL(HA_CFG_OK, ha_config_set("timer1_min", "25", ack, sizeof(ack)));
+    TEST_ASSERT_EQUAL(HA_CFG_OK, ha_config_set("timer1_name", "Violin", ack, sizeof(ack)));
+    nvs_timer_defs_blob_t b;
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_timer_defs(&b));
+    TEST_ASSERT_EQUAL_STRING("Violin", b.defs[0].name);
+    TEST_ASSERT_EQUAL_INT32(25, b.defs[0].min);
+    TEST_ASSERT_EQUAL_UINT8(1, b.defs[0].reload);
+    TEST_ASSERT_EQUAL_UINT8(1, b.defs[0].break_eligible);
+}
+
 void test_set_timer_min_and_reload(void) {
     seed_blob();
     char ack[128];
@@ -409,6 +454,7 @@ void test_state_json_includes_timer_fields(void) {
     TEST_ASSERT_NOT_NULL(strstr(buf, "\"timer1_name\":\"Piano\""));
     TEST_ASSERT_NOT_NULL(strstr(buf, "\"timer1_min\":15"));
     TEST_ASSERT_NOT_NULL(strstr(buf, "\"timer1_reload\":\"ON\""));
+    TEST_ASSERT_NOT_NULL(strstr(buf, "\"timer1_break\":\"OFF\""));
     TEST_ASSERT_NOT_NULL(strstr(buf, "\"timer2_name\":\"\"")); /* empty slot */
 }
 
@@ -432,6 +478,9 @@ int main(void) {
     RUN_TEST(test_set_timer_name_enables_slot);
     RUN_TEST(test_set_timer_name_empty_disables_slot);
     RUN_TEST(test_set_timer_name_too_long_rejected);
+    RUN_TEST(test_set_timer_break_eligible);
+    RUN_TEST(test_set_timer_break_eligible_rejects_non_onoff);
+    RUN_TEST(test_timer_fields_are_independent);
     RUN_TEST(test_set_timer_min_and_reload);
     RUN_TEST(test_set_timer_min_out_of_range_rejected);
     RUN_TEST(test_state_json_includes_timer_fields);

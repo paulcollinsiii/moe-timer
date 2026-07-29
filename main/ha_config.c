@@ -72,6 +72,14 @@ const char *ha_config_json_escape(char *tmp, size_t tmplen, const char *s) {
         .key = "timer" #n "_reload", .component = "switch", .name = "Timer " #n " reloadable", .kind = CFG_TRELOAD, \
         .slot = n                                                                                                   \
     }
+/* "Break eligible": may be started during a Screen Break, and drains the
+   exposure balance instead of feeding it. Key stays clear of the
+   remaining_/limit_/completions_ prefixes mqtt_ha.c matches on. */
+#define TIMER_BREAK(n)                                                                                                \
+    {                                                                                                                 \
+        .key = "timer" #n "_break", .component = "switch", .name = "Timer " #n " break eligible", .kind = CFG_TBREAK, \
+        .slot = n                                                                                                     \
+    }
 /* Alert-tone selects: option string in HA, stored as its u16 index. */
 #define TONE_SELECT(k, nm, set, get)                                                                   \
     {                                                                                                  \
@@ -106,15 +114,19 @@ static const cfg_field_t FIELDS[] = {
     TIMER_NAME(1),
     TIMER_MIN(1),
     TIMER_RELOAD(1), /* extra-timer slots 1..4 */
+    TIMER_BREAK(1),
     TIMER_NAME(2),
     TIMER_MIN(2),
     TIMER_RELOAD(2),
+    TIMER_BREAK(2),
     TIMER_NAME(3),
     TIMER_MIN(3),
     TIMER_RELOAD(3),
+    TIMER_BREAK(3),
     TIMER_NAME(4),
     TIMER_MIN(4),
     TIMER_RELOAD(4),
+    TIMER_BREAK(4),
     TONE_SELECT("tone_expiry", "Expiry tone", nvs_config_set_tone_expiry, nvs_config_get_tone_expiry),
     TONE_SELECT("tone_break", "Break tone", nvs_config_set_tone_break, nvs_config_get_tone_break),
     TONE_SELECT("tone_bed", "Bed time tone", nvs_config_set_tone_bed, nvs_config_get_tone_bed),
@@ -180,7 +192,7 @@ ha_cfg_result_t ha_config_set(const char *key, const char *value, char *ack, siz
     }
     /* Extra-timer slots index the blob by (slot-1); guard against a
        registry that outgrew TIMER_EXTRA_SLOTS. */
-    if ((f->kind == CFG_TNAME || f->kind == CFG_TMIN || f->kind == CFG_TRELOAD) &&
+    if ((f->kind == CFG_TNAME || f->kind == CFG_TMIN || f->kind == CFG_TRELOAD || f->kind == CFG_TBREAK) &&
         (f->slot < 1 || f->slot > TIMER_EXTRA_SLOTS))
         return reject(ack, ack_len, key, "slot");
     switch (f->kind) {
@@ -238,12 +250,17 @@ ha_cfg_result_t ha_config_set(const char *key, const char *value, char *ack, siz
                 return reject(ack, ack_len, key, "nvs");
             break;
         }
-        case CFG_TRELOAD: {
+        case CFG_TRELOAD:
+        case CFG_TBREAK: {
             if (value == NULL || (strcmp(value, "ON") != 0 && strcmp(value, "OFF") != 0))
                 return reject(ack, ack_len, key, "onoff");
+            uint8_t on = (strcmp(value, "ON") == 0) ? 1 : 0;
             nvs_timer_defs_blob_t b;
             load_defs(&b);
-            b.defs[f->slot - 1].reload = (strcmp(value, "ON") == 0) ? 1 : 0;
+            if (f->kind == CFG_TRELOAD)
+                b.defs[f->slot - 1].reload = on;
+            else
+                b.defs[f->slot - 1].break_eligible = on;
             if (nvs_config_set_timer_defs(&b) != ESP_OK)
                 return reject(ack, ack_len, key, "nvs");
             break;
@@ -295,6 +312,10 @@ int ha_config_state_json(char *buf, size_t len) {
                 break;
             case CFG_TRELOAD:
                 pos = jcat(buf, len, pos, "\"%s\":\"%s\"", f->key, defs.defs[f->slot - 1].reload ? "ON" : "OFF");
+                break;
+            case CFG_TBREAK:
+                pos =
+                    jcat(buf, len, pos, "\"%s\":\"%s\"", f->key, defs.defs[f->slot - 1].break_eligible ? "ON" : "OFF");
                 break;
             case CFG_ENUM: {
                 /* HA select state must be one of the options — clamp a

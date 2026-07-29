@@ -36,6 +36,12 @@ typedef struct {
        break runs on slot 0 behind whatever timer is selected, so "state"
        says BREAK only when Screen happens to be the selected one. */
     int32_t break_remaining_s;
+    /* Screen-exposure balance: how much eye exposure has accrued toward
+       the next break. Against the known break interval this answers "why
+       didn't my break fire?" directly, and it is the only visibility the
+       balance gets — the panel deliberately does not show it. Always
+       >= 0 (app_state feeds it timer_run_accum's clamped read). */
+    int32_t accum_s;
     const char *reset_reason; /* this boot's esp_reset_reason, e.g.
                                  "DEEPSLEEP"; anything else on a wake
                                  means the previous wake died — boot

@@ -148,6 +148,10 @@ static void apply_timers(const cJSON *root, err_acc_t *e) {
         const cJSON *name = cJSON_GetObjectItemCaseSensitive(entry, "name");
         const cJSON *min = cJSON_GetObjectItemCaseSensitive(entry, "min");
         const cJSON *reload = cJSON_GetObjectItemCaseSensitive(entry, "reload");
+        /* Absent = a chore, matching the Kconfig default: the safe answer
+           is "this is not a break", since a wrong true would let a screen
+           activity run during (and drain) a break. */
+        const cJSON *brk = cJSON_GetObjectItemCaseSensitive(entry, "break");
         if (name == NULL) {
             slot++; /* {} = disabled slot */
             continue;
@@ -164,6 +168,7 @@ static void apply_timers(const cJSON *root, err_acc_t *e) {
         snprintf(defs.defs[slot].name, sizeof(defs.defs[slot].name), "%s", name->valuestring);
         defs.defs[slot].min = min->valueint;
         defs.defs[slot].reload = (reload != NULL && cJSON_IsTrue(reload)) ? 1 : 0;
+        defs.defs[slot].break_eligible = (brk != NULL && cJSON_IsTrue(brk)) ? 1 : 0;
         slot++;
     }
     nvs_config_set_timer_defs(&defs);

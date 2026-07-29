@@ -39,7 +39,7 @@ void test_stat_payload_exact(void) {
         "\"active_timer\":\"Screen\",\"remaining_s\":[3400,840,0,300,900],"
         "\"allocation_s\":[3600,900,0,600,900],"
         "\"day_type\":\"Weekday\",\"completions\":[0,2,0,1],\"charge_lock\":false,"
-        "\"break_s\":0,\"fw\":\"v1.4.0-test\",\"reset\":\"DEEPSLEEP\"}",
+        "\"break_s\":0,\"accum_s\":0,\"fw\":\"v1.4.0-test\",\"reset\":\"DEEPSLEEP\"}",
         buf);
     TEST_ASSERT_EQUAL_INT((int)strlen(buf), n);
 }
@@ -52,6 +52,17 @@ void test_stat_payload_reports_a_running_break(void) {
     s.break_remaining_s = 754;
     stats_json_stat(buf, sizeof(buf), &s);
     TEST_ASSERT_NOT_NULL(strstr(buf, "\"break_s\":754"));
+}
+
+/* The exposure balance is the only visibility HA gets into why a break
+   did or did not fire — against the known interval it answers the
+   question directly. Always >= 0: app_state feeds it the clamped read. */
+void test_stat_payload_reports_the_exposure_balance(void) {
+    char buf[512];
+    stats_snapshot_t s = base_snapshot();
+    s.accum_s = 1500;
+    stats_json_stat(buf, sizeof(buf), &s);
+    TEST_ASSERT_NOT_NULL(strstr(buf, "\"accum_s\":1500"));
 }
 
 void test_stat_payload_reset_reason_flags_crash_wakes(void) {
@@ -126,9 +137,9 @@ void test_discovery_entity_table_is_populated(void) {
     TEST_ASSERT_NOT_NULL(ents);
     /* battery, battery_mv, light, state, active_timer, day_type,
        charge_lock, last_reset, screen_remaining, screen_limit,
-       screen_break, break_remaining
+       screen_break, break_remaining, screen_exposure
        + per extra slot: completions, remaining, limit */
-    TEST_ASSERT_EQUAL_INT(12 + 3 * TIMER_EXTRA_SLOTS, count);
+    TEST_ASSERT_EQUAL_INT(13 + 3 * TIMER_EXTRA_SLOTS, count);
 }
 
 void test_discovery_last_reset_diagnostic_sensor(void) {
@@ -276,6 +287,23 @@ void test_discovery_screen_break_entities(void) {
     TEST_ASSERT_NOT_NULL(strstr(rem->tpl, "value_json.break_s"));
 }
 
+void test_screen_exposure_entity(void) {
+    const ha_entity_t *exp = find_entity("screen_exposure");
+    TEST_ASSERT_NOT_NULL(exp);
+    TEST_ASSERT_EQUAL_STRING("sensor", exp->component);
+    TEST_ASSERT_EQUAL_STRING("Screen exposure", exp->name);
+    TEST_ASSERT_EQUAL_STRING("min", exp->unit);
+    TEST_ASSERT_EQUAL_STRING("duration", exp->dev_class);
+    TEST_ASSERT_EQUAL_STRING("diagnostic", exp->ent_cat);
+    TEST_ASSERT_NOT_NULL(strstr(exp->tpl, "value_json.accum_s"));
+    /* mqtt_ha.c attaches runtime slot names by matching these three
+       prefixes; screen_exposure must stay clear of all of them or it
+       would be renamed after a timer that has nothing to do with it. */
+    TEST_ASSERT_NOT_EQUAL(0, strncmp(exp->key, "remaining_", 10));
+    TEST_ASSERT_NOT_EQUAL(0, strncmp(exp->key, "limit_", 6));
+    TEST_ASSERT_NOT_EQUAL(0, strncmp(exp->key, "completions_", 12));
+}
+
 void test_break_entities_are_not_mistaken_for_per_slot_sensors(void) {
     /* mqtt_ha.c matches per-slot keys by prefix ("remaining_", "limit_",
        "completions_") to attach the runtime timer name. "break_remaining"
@@ -321,6 +349,7 @@ int main(void) {
     RUN_TEST(test_per_slot_remaining_and_limit_entities);
     RUN_TEST(test_stat_payload_exact);
     RUN_TEST(test_stat_payload_charge_lock_true);
+    RUN_TEST(test_stat_payload_reports_the_exposure_balance);
     RUN_TEST(test_stat_payload_reset_reason_flags_crash_wakes);
     RUN_TEST(test_discovery_last_reset_diagnostic_sensor);
     RUN_TEST(test_stat_payload_escapes_timer_name);
@@ -334,6 +363,7 @@ int main(void) {
     RUN_TEST(test_discovery_completions_use_runtime_slot_names);
     RUN_TEST(test_stat_payload_reports_a_running_break);
     RUN_TEST(test_discovery_screen_break_entities);
+    RUN_TEST(test_screen_exposure_entity);
     RUN_TEST(test_break_entities_are_not_mistaken_for_per_slot_sensors);
     return UNITY_END();
 }
