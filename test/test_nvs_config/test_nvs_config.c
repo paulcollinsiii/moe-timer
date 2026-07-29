@@ -369,6 +369,9 @@ void test_timer_defs_blob_round_trip(void) {
     snprintf(defs.defs[0].name, sizeof(defs.defs[0].name), "Piano");
     defs.defs[0].min = 20;
     defs.defs[0].reload = 1;
+    defs.defs[0].break_eligible = 1; /* v2 */
+    snprintf(defs.defs[1].name, sizeof(defs.defs[1].name), "Laundry");
+    defs.defs[1].min = 30;
     TEST_ASSERT_EQUAL(ESP_OK, nvs_config_set_timer_defs(&defs));
 
     nvs_timer_defs_blob_t out;
@@ -376,13 +379,27 @@ void test_timer_defs_blob_round_trip(void) {
     TEST_ASSERT_EQUAL_STRING("Piano", out.defs[0].name);
     TEST_ASSERT_EQUAL_INT32(20, out.defs[0].min);
     TEST_ASSERT_EQUAL_UINT8(1, out.defs[0].reload);
-    TEST_ASSERT_EQUAL_STRING("", out.defs[1].name); /* disabled slot */
+    TEST_ASSERT_EQUAL_UINT8(1, out.defs[0].break_eligible);
+    TEST_ASSERT_EQUAL_STRING("Laundry", out.defs[1].name);
+    TEST_ASSERT_EQUAL_UINT8(0, out.defs[1].break_eligible); /* chore: not a break */
+    TEST_ASSERT_EQUAL_STRING("", out.defs[2].name);         /* disabled slot */
 }
 
 void test_timer_defs_blob_missing_or_stale_version(void) {
     nvs_timer_defs_blob_t out;
     TEST_ASSERT_EQUAL(ESP_ERR_NVS_NOT_FOUND, nvs_config_get_timer_defs(&out));
     nvs_timer_defs_blob_t defs = {.version = 99};
+    hal_nvs_write_blob("timer_defs", &defs, sizeof(defs));
+    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_VERSION, nvs_config_get_timer_defs(&out));
+}
+
+void test_timer_defs_blob_v1_reads_as_stale(void) {
+    /* The v1 layout had no break_eligible byte. Version drift (and, on a
+       device that somehow kept the old size, size drift) must read as
+       stale so timer_defs_install falls back to the Kconfig table rather
+       than reinterpreting the old bytes. */
+    nvs_timer_defs_blob_t out;
+    nvs_timer_defs_blob_t defs = {.version = 1};
     hal_nvs_write_blob("timer_defs", &defs, sizeof(defs));
     TEST_ASSERT_EQUAL(ESP_ERR_INVALID_VERSION, nvs_config_get_timer_defs(&out));
 }
@@ -511,6 +528,7 @@ int main(void) {
     RUN_TEST(test_cfg_ver_round_trip);
     RUN_TEST(test_timer_defs_blob_round_trip);
     RUN_TEST(test_timer_defs_blob_missing_or_stale_version);
+    RUN_TEST(test_timer_defs_blob_v1_reads_as_stale);
     RUN_TEST(test_reseed_clears_cfg_ver);
     RUN_TEST(test_mqtt_settings_round_trip);
     RUN_TEST(test_mqtt_settings_missing_read_as_empty);

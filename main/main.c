@@ -306,6 +306,11 @@ static void extend_awake_failsafe(int seconds); /* defined with the failsafe */
 static void fire_expiry_alert(void);
 static bool poll_pause_button(void);
 static bool poll_button_a_action(void);
+/* Defined with the wake handlers; the break watch below reaches back for
+   them so a press during the break tail goes through the same guards. */
+static bool dispatch_button_action(button_id_t btn, time_t *now, timer_state_t before, bool allow_net_window,
+                                   bool *selection_changed);
+static void render_action_result(button_id_t btn, timer_state_t before, time_t now, bool selection_changed);
 
 /* ---- break end --------------------------------------------------------- */
 
@@ -350,12 +355,14 @@ static bool handle_break_end(void) {
     }
 
     audio_break_over_chime();
-    /* The chime and the return to Screen are the same event: the break is
-       over, so the screen timer is what you go back to. Cannot be refused
-       here — a refusal means a RUNNING extra, which suppressed the chime
-       above. */
-    if (timer_active_slot() != 0 && timer_select_screen()) {
-        ESP_LOGI(TAG, "Break over: chimed, selection back to Screen");
+    /* The chime and the return are the same event: the break is over, so
+       you go back to whatever it interrupted — which is not necessarily
+       Screen, since a break can now be earned entirely by a non-eligible
+       extra (rule 8). Cannot be refused here: a refusal means a RUNNING
+       timer, which suppressed the chime above. */
+    int interrupted = timer_break_interrupted_slot();
+    if (timer_active_slot() != interrupted && timer_select_interrupted()) {
+        ESP_LOGI(TAG, "Break over: chimed, selection back to slot %d", timer_active_slot());
     } else {
         ESP_LOGI(TAG, "Break over: chimed");
     }
@@ -695,6 +702,38 @@ static void wait_for_render_grid(int max_wait_sec) {
    repaint, and the snap back to Screen) lands within a tick of wall time.
    Keyed on slot 0, so it covers a break running behind another selected
    timer just as well as the break screen itself. */
+/* Button poll for the BREAK tail. The watch below owns the CPU for the
+   whole tail, and a break no longer than SLEEP_PLAN_WATCH_SEC has no
+   other phase — the tail IS the break. Without this poll every press
+   made during it is latched by the ISR and then thrown away at deep
+   sleep, which silently disables the one thing a break is for: walking
+   over to a break-eligible timer and starting it (C to select, A to
+   start). Symptom on-device: "I couldn't move to another timer in the
+   final minute of the screen break."
+
+   Same mask, dispatch and guards as the tick handler's latch drain, so
+   the break's own refusals (A on slot 0, a non-eligible slot) still
+   apply. allow_net_window is false: the window for this wake has already
+   been joined by the time the watch runs, and a second one here would
+   paint over the tail. Returns true when the press changed what the
+   panel shows — the caller stops watching, having already repainted, and
+   the sleep planner re-schedules the break end (or, if the press started
+   an eligible extra, the end is suppressed and there is nothing left to
+   wait for, exactly as the top-of-watch guard decides). */
+static bool poll_break_buttons(void) {
+    int pick = button_latch_pick(buttons_take_pressed(), (1u << BTN_A) | (1u << BTN_B) | (1u << BTN_C));
+    if (pick < 0)
+        return false;
+    time_t now = time(NULL);
+    timer_state_t before = timer_get_state();
+    bool swapped = false;
+    if (!dispatch_button_action((button_id_t)pick, &now, before, false, &swapped))
+        return false;
+    neopixel_show_timer_state();
+    render_action_result((button_id_t)pick, before, now, swapped);
+    return true;
+}
+
 static void watch_break_end(void) {
     if (!timer_break_active())
         return;
@@ -710,6 +749,8 @@ static void watch_break_end(void) {
         ESP_LOGI(TAG, "Break ends in %ld s: staying awake", (long)brem);
         neopixel_show_timer_state();
         while (timer_break_remaining(time(NULL)) > 0) {
+            if (poll_break_buttons())
+                return; /* repainted; the planner owns the end from here */
             vTaskDelay(pdMS_TO_TICKS(250));
         }
     }
@@ -916,7 +957,11 @@ static bool dispatch_button_action(button_id_t btn, time_t *now, timer_state_t b
 /* Post-action tail shared by the wake handler and the tick-wake drain:
    render the resulting state, release the MQTT phase, join the window,
    and re-render when the join changed what the panel shows. */
-static void finish_action_and_render(button_id_t btn, timer_state_t before, time_t now, bool selection_changed) {
+/* Render half of the post-action tail, with no network work: drain a
+   break end, tick, and paint the result under the render policy. Shared
+   with the break watch, which runs after the window has already been
+   joined and so must not touch the MQTT phase. */
+static void render_action_result(button_id_t btn, timer_state_t before, time_t now, bool selection_changed) {
     /* A break can elapse mid-wake (a slow sync, a long press sequence).
        Order-independent now that the edge is latched — this drains early
        so the chime accompanies THIS paint rather than the one after. */
@@ -942,6 +987,11 @@ static void finish_action_and_render(button_id_t btn, timer_state_t before, time
             display_update(&st); /* partial cadence: every Nth is promoted */
         }
     }
+}
+
+static void finish_action_and_render(button_id_t btn, timer_state_t before, time_t now, bool selection_changed) {
+    render_action_result(btn, before, now, selection_changed);
+    bool force_full = (btn == BTN_D);
 
     /* Paint done: release the MQTT phase (display refresh current and
        radio TX bursts must never coincide — brownout), then join, apply
@@ -983,6 +1033,12 @@ static void finish_action_and_render(button_id_t btn, timer_state_t before, time
    sleep through it; otherwise render the action's result and drain the
    window. */
 static void finish_or_break(button_id_t btn, timer_state_t before, time_t now, bool selection_changed) {
+    /* Note the ordering: this runs BEFORE finish_action_and_render, whose
+       tick is what would detect an expiry. So a break due here wins over
+       a colliding expiry alert, which is the opposite of the tick
+       handler's post-render check. Not shown to be reachable — the press
+       that got here has just been dispatched, and the final minute
+       belongs to watch_final_minute — but it is not a guarantee. */
     if (maybe_start_break(now)) {
         post_stats_snapshot(); /* break screen painted: release MQTT */
         net_apply_finish();    /* drain + apply deferred before sleeping */
@@ -1022,6 +1078,19 @@ static void handle_timer_tick(void) {
         neopixel_show_timer_state();
     }
 
+    /* Fast path: a break already due on arrival, before the grid wait and
+       the paint — so the panel isn't refreshed with a main layout we are
+       about to replace with the break screen.
+
+       This runs BEFORE this wake's timer_tick, so it cannot see an expiry
+       that the tick is about to detect; with both pending the break would
+       win here and the expiry alert would be skipped entirely
+       (enter_deep_sleep does not return). The post-render call below is
+       what actually provides the expiry-then-break ordering. An expiry
+       reaching this point unprocessed has not been shown to be reachable
+       — the planner's 70 s event lead plus watch_final_minute own the
+       final minute — but this call carries no such guarantee, so do not
+       add one to this comment. */
     if (maybe_start_break(now)) {
         enter_deep_sleep(); /* break just started; sleep through it */
     }
@@ -1074,6 +1143,24 @@ static void handle_timer_tick(void) {
         default:
             display_update(&st); /* partial; policy promotes every 5th to full */
             break;
+    }
+
+    /* A break earned in the SAME tick that expired a timer. The fast-path
+       check above runs before timer_tick, so the expiry that pushed the
+       balance over the interval is invisible to it. fire_expiry_alert
+       returns (it repaints the main layout), so re-checking HERE — after
+       the render switch — is what yields expiry-then-break in one wake,
+       which is the order the alerts have to arrive in. This is the only
+       call site that provides that ordering: finish_or_break has the
+       opposite shape, its maybe_start_break running before the tick in
+       finish_action_and_render. A no-op unless the balance is genuinely
+       over, so it costs nothing on every other path.
+
+       Re-read the clock first: `now` predates the render, and an expiry
+       alert holds the CPU for ~15 s before returning. */
+    now = time(NULL);
+    if (maybe_start_break(now)) {
+        enter_deep_sleep(); /* break just started; sleep through it */
     }
 
     /* A press that landed while this wake was awake (sync, grid wait,

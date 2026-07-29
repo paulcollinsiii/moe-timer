@@ -25,9 +25,16 @@
 /* Slot table used by the multi-timer tests: slot 0 = Screen (schedule-fed),
    slot 2 left disabled to prove select_next skips holes. */
 static const timer_def_t TEST_DEFS[TIMER_SLOT_COUNT] = {
-    {"Screen", 0, false},      {"Piano", 900, true},   {"", 0, false}, /* disabled */
-    {"Meditation", 600, true}, {"Violin", 900, false},
+    {"Screen", 0, false, false},   /* slot 0: never break-eligible */
+    {"Piano", 900, true, true},    /* break-eligible: drains the balance */
+    {"", 0, false, false},         /* disabled */
+    {"Laundry", 600, true, false}, /* a chore done with the TV on: feeds it */
+    {"Violin", 900, false, true},  /* break-eligible */
 };
+
+#define SLOT_PIANO 1
+#define SLOT_LAUNDRY 3
+#define SLOT_VIOLIN 4
 
 /* I5 witness state — see assert_state_legal below. */
 static bool s_i5_valid;
@@ -325,6 +332,491 @@ void test_shift_expiry_noop_when_idle(void) {
     TEST_ASSERT_EQUAL(TIMER_IDLE, timer_get_state());
 }
 
+/* ---- the screen-exposure balance (break_eligible) ----
+
+   Rows below are the plan's behaviour table
+   (docs/planning/20260728.breakeligible.plan.md); the numbers in the test
+   names are that table's row numbers, so a failure points straight at the
+   contract it broke. */
+
+/* Walk Button C round to `slot` (timer_select_next skips disabled holes). */
+static void select_slot(int slot) {
+    for (int i = 0; i <= TIMER_SLOT_COUNT && timer_active_slot() != slot; i++)
+        TEST_ASSERT_TRUE_MESSAGE(timer_select_next(), "select_slot: swap refused");
+    TEST_ASSERT_EQUAL_INT(slot, timer_active_slot());
+}
+
+/* Row 2: a non-eligible extra feeds slot 0's balance and earns the break,
+   with Screen never started. The break pauses it and snaps to slot 0. */
+void test_row2_a_laundry_run_earns_the_break_and_is_paused_by_it(void) {
+    select_slot(SLOT_LAUNDRY);
+    timer_start(T0, 3600); /* Laundry: not break_eligible -> +1:1 */
+    TEST_ASSERT_EQUAL_INT32(1800, timer_run_accum(T0 + 1800));
+    TEST_ASSERT_TRUE(timer_break_due(T0 + 1800, 1800));
+
+    timer_start_break(T0 + 1800, 900);
+    TEST_ASSERT_EQUAL(TIMER_PAUSED, timer_slot_state(SLOT_LAUNDRY));
+    TEST_ASSERT_EQUAL_INT32(1800, g_rtc_state.slots[SLOT_LAUNDRY].remaining_at_pause);
+    TEST_ASSERT_EQUAL(TIMER_BREAK, timer_slot_state(0));
+    TEST_ASSERT_EQUAL_INT(SLOT_LAUNDRY, timer_break_interrupted_slot());
+    TEST_ASSERT_EQUAL_INT(0, timer_active_slot()); /* selection snapped */
+}
+
+/* Row 3 (timer half): the expiry lands and the break is due in the SAME
+   tick. main.c owns the ordering (expiry alert, then maybe_start_break);
+   what timer.c must guarantee is that the expiry folds the segment and
+   leaves the break genuinely due rather than swallowing it. */
+void test_row3_expiry_and_a_due_break_in_one_tick(void) {
+    select_slot(SLOT_LAUNDRY);
+    timer_start(T0, 1800); /* sized to end exactly on the interval */
+    TEST_ASSERT_FALSE(timer_break_due(T0 + 1799, 1800));
+
+    timer_tick(T0 + 1800);
+    TEST_ASSERT_EQUAL(TIMER_EXPIRED, timer_slot_state(SLOT_LAUNDRY));
+    TEST_ASSERT_TRUE(timer_break_due(T0 + 1800, 1800));
+    timer_start_break(T0 + 1800, 900);
+    TEST_ASSERT_EQUAL_INT(SLOT_LAUNDRY, timer_break_interrupted_slot());
+}
+
+/* Row 4: a break-eligible timer starts normally during a break. */
+void test_row4_a_break_starts_an_eligible_timer_normally(void) {
+    timer_start(T0, 3600);
+    timer_start_break(T0 + 1800, 900);
+    select_slot(SLOT_PIANO);
+    TEST_ASSERT_TRUE(timer_start_allowed());
+    TEST_ASSERT_EQUAL(BTN_A_STARTED, button_a_apply(T0 + 1800));
+    TEST_ASSERT_EQUAL(TIMER_RUNNING, timer_slot_state(SLOT_PIANO));
+}
+
+/* Row 5: a non-eligible timer is refused during a break. */
+void test_row5_a_break_refuses_a_non_eligible_timer(void) {
+    timer_start(T0, 3600);
+    timer_start_break(T0 + 1800, 900);
+    select_slot(SLOT_LAUNDRY);
+    TEST_ASSERT_FALSE(timer_start_allowed());
+    TEST_ASSERT_EQUAL(BTN_A_NONE, button_a_apply(T0 + 1800));
+    TEST_ASSERT_EQUAL(TIMER_IDLE, timer_slot_state(SLOT_LAUNDRY));
+}
+
+/* Row 6: Screen itself is never break-eligible, so the break screen's
+   Button A stays refused (unchanged behaviour, now via the same rule). */
+void test_row6_a_break_refuses_screen_itself(void) {
+    timer_start(T0, 3600);
+    timer_start_break(T0 + 1800, 900);
+    TEST_ASSERT_EQUAL_INT(0, timer_active_slot());
+    TEST_ASSERT_FALSE(timer_start_allowed());
+    TEST_ASSERT_EQUAL(BTN_A_NONE, button_a_apply(T0 + 1800));
+    TEST_ASSERT_EQUAL(TIMER_BREAK, timer_slot_state(0));
+}
+
+/* Row 7: break end returns the selection to the interrupted slot. */
+void test_row7_break_end_returns_to_the_interrupted_slot(void) {
+    select_slot(SLOT_LAUNDRY);
+    timer_start(T0, 3600);
+    timer_start_break(T0 + 1800, 900);
+    TEST_ASSERT_EQUAL_INT(0, timer_active_slot());
+
+    timer_break_tick(T0 + 2700);
+    TEST_ASSERT_TRUE(timer_break_take_ended(T0 + 2700, NULL));
+    TEST_ASSERT_TRUE(timer_select_interrupted());
+    TEST_ASSERT_EQUAL_INT(SLOT_LAUNDRY, timer_active_slot());
+    TEST_ASSERT_EQUAL(TIMER_PAUSED, timer_slot_state(SLOT_LAUNDRY));
+}
+
+/* Row 8: a RUNNING timer at break end suppresses the snap (and, in
+   main.c, the chime) — the selection is never stolen mid-run. */
+void test_row8_break_end_does_not_snap_while_a_timer_runs(void) {
+    timer_start(T0, 3600);
+    timer_start_break(T0 + 1800, 900);
+    select_slot(SLOT_PIANO);
+    timer_start(T0 + 1800, 1800); /* eligible: allowed during the break */
+
+    timer_break_tick(T0 + 2700);
+    TEST_ASSERT_FALSE(timer_select_interrupted());
+    TEST_ASSERT_EQUAL_INT(SLOT_PIANO, timer_active_slot());
+}
+
+/* Row 9: Screen interrupted -> selection stays on 0, banked time intact. */
+void test_row9_break_end_stays_on_screen_when_screen_was_interrupted(void) {
+    timer_start(T0, 3600);
+    timer_start_break(T0 + 1800, 900);
+    TEST_ASSERT_EQUAL_INT(0, timer_break_interrupted_slot());
+
+    timer_break_tick(T0 + 2700);
+    TEST_ASSERT_TRUE(timer_select_interrupted());
+    TEST_ASSERT_EQUAL_INT(0, timer_active_slot());
+    TEST_ASSERT_EQUAL(TIMER_PAUSED, timer_slot_state(0));
+    TEST_ASSERT_EQUAL_INT32(1800, g_rtc_state.slots[0].remaining_at_pause);
+}
+
+/* Row 10 (I7): Screen never started today -> the break exits to IDLE, not
+   to a PAUSED timer holding zero. */
+void test_row10_break_exit_is_idle_when_screen_never_started(void) {
+    select_slot(SLOT_LAUNDRY);
+    timer_start(T0, 3600);
+    timer_start_break(T0 + 1800, 900);
+    TEST_ASSERT_EQUAL_INT32(0, g_rtc_state.slots[0].remaining_at_pause);
+
+    timer_break_tick(T0 + 2700);
+    TEST_ASSERT_EQUAL(TIMER_IDLE, timer_slot_state(0));
+    TEST_ASSERT_EQUAL_INT64(0, g_rtc_state.slots[0].break_expiry_wall);
+}
+
+/* Row 11 (G2): expiry folds the live segment. Without the fold, up to a
+   whole laundry run of accrual evaporates at expiry — and, keyed on
+   run_started_wall rather than state, the balance would instead advance
+   forever afterwards. */
+void test_row11_expiry_folds_the_segment_and_stops_the_balance(void) {
+    select_slot(SLOT_LAUNDRY);
+    timer_start(T0, 1800);
+    timer_tick(T0 + 1800); /* -> EXPIRED */
+
+    TEST_ASSERT_EQUAL_INT32(1800, g_rtc_state.slots[0].run_accum_sec);
+    TEST_ASSERT_EQUAL_INT64(0, g_rtc_state.slots[0].run_started_wall);
+    TEST_ASSERT_EQUAL_INT32(1800, timer_run_accum(T0 + 9000)); /* frozen after */
+    TEST_ASSERT_TRUE(timer_break_due(T0 + 1800, 1800));        /* nothing running */
+}
+
+/* Row 12 (G1): starting ANY timer must not reset the balance. Fold 25 min
+   of laundry, press A on Piano, and the eye-rest clock is back to zero —
+   the cheapest exploit there is, and one a kid finds by accident. */
+void test_row12_starting_a_timer_does_not_reset_the_balance(void) {
+    select_slot(SLOT_LAUNDRY);
+    timer_start(T0, 3600);
+    timer_pause(T0 + 1500); /* 25 min banked */
+    TEST_ASSERT_EQUAL_INT32(1500, timer_run_accum(T0 + 1500));
+
+    select_slot(0);
+    timer_start(T0 + 1500, 3600); /* press A on Screen */
+    TEST_ASSERT_EQUAL_INT32(1500, timer_run_accum(T0 + 1500));
+    TEST_ASSERT_TRUE(timer_break_due(T0 + 1800, 1800)); /* 5 more minutes */
+}
+
+/* Row 13 (G3): a break entered from a non-RUNNING slot 0 must not
+   recompute remaining_at_pause — a PAUSED Screen has expiry_wall_time 0,
+   so the subtraction would clamp the kid's banked time to zero. */
+void test_row13_break_start_preserves_a_paused_screens_banked_time(void) {
+    timer_start(T0, 3600);
+    timer_pause(T0 + 600); /* 3000 s banked, balance 600 */
+    select_slot(SLOT_LAUNDRY);
+    timer_start(T0 + 600, 3600);
+
+    timer_start_break(T0 + 1800, 900);
+    TEST_ASSERT_EQUAL(TIMER_BREAK, timer_slot_state(0));
+    TEST_ASSERT_EQUAL_INT32(3000, g_rtc_state.slots[0].remaining_at_pause);
+}
+
+/* Row 14: an eligible run drains the balance 1:1. */
+void test_row14_an_eligible_run_drains_the_balance(void) {
+    timer_start(T0, 7200); /* Screen: +900 */
+    timer_pause(T0 + 900);
+    TEST_ASSERT_EQUAL_INT32(900, timer_run_accum(T0 + 900));
+
+    select_slot(SLOT_VIOLIN);
+    timer_start(T0 + 900, 1800); /* break-eligible: -600 */
+    TEST_ASSERT_EQUAL_INT32(300, timer_run_accum(T0 + 1500));
+    timer_pause(T0 + 1500);
+    TEST_ASSERT_EQUAL_INT32(300, g_rtc_state.slots[0].run_accum_sec);
+    TEST_ASSERT_EQUAL_INT32(300, timer_run_accum(T0 + 9000)); /* frozen */
+}
+
+/* Row 15: the floor is zero — three hours of violin must not buy three
+   hours of uninterrupted TV. Enforced twice, because the in-flight
+   segment is not folded yet: at read time and at fold time. */
+void test_row15_the_balance_floors_at_zero(void) {
+    timer_start(T0, 7200);
+    timer_pause(T0 + 300); /* balance 300 */
+    select_slot(SLOT_VIOLIN);
+    timer_start(T0 + 300, 3600);
+
+    TEST_ASSERT_EQUAL_INT32(0, timer_run_accum(T0 + 3900)); /* read clamps */
+    timer_pause(T0 + 3900);
+    TEST_ASSERT_EQUAL_INT32(0, g_rtc_state.slots[0].run_accum_sec); /* fold clamps */
+
+    /* No banked credit: Screen still needs the full interval. */
+    select_slot(0);
+    timer_resume(T0 + 3900);
+    TEST_ASSERT_FALSE(timer_break_due(T0 + 3900 + 1799, 1800));
+    TEST_ASSERT_TRUE(timer_break_due(T0 + 3900 + 1800, 1800));
+}
+
+/* Row 16 (3d): an HA edit flipping break_eligible on a RUNNING slot must
+   fold at the OLD sign, or the whole in-flight run is retroactively
+   re-signed. net_apply reinstalls the defs table BEFORE reconciling, so
+   the old direction is only available from old_def. */
+void test_row16_an_eligibility_edit_folds_at_the_old_sign(void) {
+    static const timer_def_t EDITED[TIMER_SLOT_COUNT] = {
+        {"Screen", 0, false, false},  {"Piano", 900, true, true},
+        {"", 0, false, false},        {"Laundry", 600, true, true}, /* HA flipped it to break-eligible */
+        {"Violin", 900, false, true},
+    };
+    select_slot(SLOT_LAUNDRY);
+    timer_start(T0, 3600); /* 600 s at the old (adding) sign */
+
+    timer_set_defs(EDITED, TIMER_SLOT_COUNT);
+    bool was_running = false;
+    TEST_ASSERT_EQUAL(TIMER_RECONCILE_NONE, timer_reconcile_def(SLOT_LAUNDRY, &TEST_DEFS[SLOT_LAUNDRY],
+                                                                &EDITED[SLOT_LAUNDRY], T0 + 600, &was_running));
+    TEST_ASSERT_TRUE(was_running);
+    TEST_ASSERT_EQUAL_INT32(600, g_rtc_state.slots[0].run_accum_sec); /* kept */
+    TEST_ASSERT_EQUAL_INT32(300, timer_run_accum(T0 + 900));          /* now draining */
+    timer_set_defs(TEST_DEFS, TIMER_SLOT_COUNT);
+}
+
+/* The live segment's sign must come from the slot that ARMED it, not
+   from the selection: run_started_wall lives on slot 0, so nothing about
+   the segment is recoverable from the selected slot. Across a crash the
+   arming slot has to ride the snapshot too — restore it as 0 and an
+   eligible timer's drain comes back ADDING, a 1:1 drain silently
+   inverting, with a break able to fire off the inversion. */
+void test_segment_sign_survives_a_snapshot_round_trip(void) {
+    timer_start(T0, 7200); /* Screen: balance up to 1200 */
+    timer_pause(T0 + 1200);
+    select_slot(SLOT_VIOLIN);
+    timer_start(T0 + 1200, 3600); /* break-eligible: draining */
+    timer_record_date(T0);
+    timer_snapshot_t snap;
+    timer_make_snapshot(&snap);
+    TEST_ASSERT_EQUAL_UINT8(SLOT_VIOLIN, snap.run_segment_slot);
+
+    timer_reset();
+    TEST_ASSERT_TRUE(timer_restore_snapshot(&snap, T0 + 1800));
+    /* 600 s of drain, not 600 s of accrual */
+    TEST_ASSERT_EQUAL_INT32(600, timer_run_accum(T0 + 1800));
+}
+
+/* GAP 2: the fold path, not just the live read. Both sign choices agree
+   in every state reachable today (wherever the selection can diverge from
+   the arming slot, both slots are non-eligible), so this constructs the
+   divergence directly — a regression guard for any future change that
+   makes the selection movable under a running slot. Signing a FOLD by the
+   selection would invert it silently while every read-path test stayed
+   green. */
+void test_fold_signs_by_the_arming_slot_not_the_selection(void) {
+    timer_start(T0, 7200); /* Screen: balance up to 1200 */
+    timer_pause(T0 + 1200);
+    select_slot(SLOT_VIOLIN);
+    timer_start(T0 + 1200, 3600); /* eligible: arming slot = Violin */
+
+    /* Park Violin and move the selection to Screen, leaving slot 0's live
+       segment still armed as Violin's. Poked directly because no legal
+       sequence produces a DISAGREEING divergence today — which is
+       precisely why the fold needs its own guard. */
+    g_rtc_state.slots[SLOT_VIOLIN].state = TIMER_PAUSED;
+    g_rtc_state.active_slot = 0;
+
+    /* timer_start folds the live segment before re-arming. 600 s of an
+       eligible run must land as a DRAIN (1200 - 600), not an accrual. */
+    timer_start(T0 + 1800, 3600);
+    TEST_ASSERT_EQUAL_INT32(600, g_rtc_state.slots[0].run_accum_sec);
+    TEST_ASSERT_EQUAL_INT(0, (int)g_rtc_state.run_segment_slot); /* re-armed for Screen */
+}
+
+/* Same hazard without a reboot: the sign is a property of the run, so
+   folding it must not consult the selection either. */
+void test_segment_sign_is_recorded_at_arm_time(void) {
+    timer_start(T0, 7200);
+    timer_pause(T0 + 1200);
+    select_slot(SLOT_VIOLIN);
+    timer_start(T0 + 1200, 3600); /* eligible */
+    g_rtc_state.active_slot = 0;  /* selection yanked out from under it */
+    TEST_ASSERT_EQUAL_INT32(600, timer_run_accum(T0 + 1800));
+    g_rtc_state.active_slot = SLOT_VIOLIN; /* restore for tearDown's I3 */
+}
+
+/* Row 17: idle neither adds nor drains. Deliberate — the device deep-
+   sleeps whenever nothing runs, so decaying through idle would mean the
+   balance almost never survives to reach the interval. */
+void test_row17_idle_neither_adds_nor_drains(void) {
+    timer_start(T0, 7200);
+    timer_pause(T0 + 600);
+    TEST_ASSERT_EQUAL_INT32(600, timer_run_accum(T0 + 600));
+    TEST_ASSERT_EQUAL_INT32(600, timer_run_accum(T0 + 600 + 3600)); /* an hour */
+    TEST_ASSERT_EQUAL_INT32(600, g_rtc_state.slots[0].run_accum_sec);
+}
+
+/* The motivating case (plan "The balance"): fold laundry 15 min, practise
+   violin 15 min, then sit down to watch TV. The break must NOT fire
+   immediately — it fires a full interval into the Screen run. */
+void test_balance_motivating_case_laundry_then_violin_then_screen(void) {
+    select_slot(SLOT_LAUNDRY);
+    timer_start(T0, 3600);
+    timer_pause(T0 + 900); /* +900 */
+    select_slot(SLOT_VIOLIN);
+    timer_start(T0 + 900, 3600);
+    timer_pause(T0 + 1800); /* -900 -> 0 */
+    TEST_ASSERT_EQUAL_INT32(0, timer_run_accum(T0 + 1800));
+
+    select_slot(0);
+    timer_start(T0 + 1800, 7200);
+    TEST_ASSERT_FALSE(timer_break_due(T0 + 1800 + 1799, 1800));
+    TEST_ASSERT_TRUE(timer_break_due(T0 + 1800 + 1800, 1800));
+}
+
+/* The simpler half of the sleep planning: while an ELIGIBLE timer runs
+   the balance is falling, so there is no break moment to schedule at all.
+   However long Violin runs, no break can become due from it. */
+void test_an_eligible_run_never_makes_a_break_due(void) {
+    timer_start(T0, 7200); /* Screen: balance up to just under the line */
+    timer_pause(T0 + 1799);
+    select_slot(SLOT_VIOLIN);
+    timer_start(T0 + 1799, 7200);
+    for (int32_t t = 0; t <= 3600; t += 60) {
+        TEST_ASSERT_FALSE(timer_break_due(T0 + 1799 + t, 1800));
+    }
+}
+
+/* Slot 0's terminal states are not a break target. Dropping the RUNNING
+   requirement from timer_break_due exposes them: an EXPIRED Screen forced
+   into BREAK comes back as IDLE (I7) and silently refunds the whole day's
+   allocation. Reachable with a 60 min allocation and a 30 min interval —
+   the break at 30 min resets the balance, and the second half of the run
+   re-earns it exactly as the timer expires. */
+/* Slot 0 leaves a break in the state it entered it with (I7). Deriving
+   that state from remaining_at_pause instead refunds the whole day in two
+   different ways, both reachable on a plain 60/30 config. */
+
+/* Refund shape 1: an HA deduction lands DURING the break. A derived exit
+   reads the zeroed remaining as "never started" and hands back a fresh
+   allocation; the honest answer is a PAUSED timer holding nothing. */
+void test_break_exit_survives_an_ha_deduction_mid_break(void) {
+    timer_start(T0, 3600);
+    timer_pause(T0 + 600); /* 3000 s banked */
+    select_slot(SLOT_LAUNDRY);
+    timer_start(T0 + 600, 3600);
+    timer_start_break(T0 + 1800, 900);
+    TEST_ASSERT_EQUAL_INT32(3000, g_rtc_state.slots[0].remaining_at_pause);
+
+    timer_adjust(0, -3000); /* parent takes the time back mid-break */
+    assert_state_legal();   /* re-baseline the I5 witness: see its comment */
+    TEST_ASSERT_EQUAL_INT32(0, g_rtc_state.slots[0].remaining_at_pause);
+
+    timer_break_tick(T0 + 2700);
+    TEST_ASSERT_EQUAL(TIMER_PAUSED, timer_slot_state(0)); /* NOT idle */
+    TEST_ASSERT_EQUAL_INT32(0, timer_slot_remaining(0, T0 + 2700, 9999));
+}
+
+/* Refund shape 2: an EXPIRED slot 0 carries a stale remaining_at_pause
+   from an earlier pause, so a derived exit hands back whatever was banked
+   then. Reachable on a 60 min allocation with a 30 min interval: the
+   break at 30 min resets the balance and the second half re-earns it. */
+void test_break_exit_from_an_expired_screen_stays_expired(void) {
+    timer_start(T0, 3600);
+    timer_pause(T0 + 1800); /* remaining_at_pause = 1800 */
+    timer_resume(T0 + 1800);
+    timer_tick(T0 + 3600); /* runs out -> EXPIRED */
+    TEST_ASSERT_EQUAL(TIMER_EXPIRED, timer_slot_state(0));
+    /* An expired timer has nothing left, and says so — a stale banked
+       value here is what the derived exit would have handed back. */
+    TEST_ASSERT_EQUAL_INT32(0, g_rtc_state.slots[0].remaining_at_pause);
+
+    select_slot(SLOT_LAUNDRY);
+    timer_start(T0 + 3600, 3600);
+    timer_start_break(T0 + 5400, 900);
+    timer_break_tick(T0 + 6300);
+    TEST_ASSERT_EQUAL(TIMER_EXPIRED, timer_slot_state(0));
+    TEST_ASSERT_EQUAL_INT32(0, timer_slot_remaining(0, T0 + 6300, 9999));
+}
+
+/* The other direction the guard broke: eye rest must keep working after
+   the day's screen allocation is exhausted. EXPIRED is the NORMAL
+   end-of-day state, and folding laundry with the TV on is exactly when
+   the break still matters. */
+void test_a_break_still_fires_after_the_allocation_is_exhausted(void) {
+    timer_start(T0, 1800);
+    timer_tick(T0 + 1800); /* Screen EXPIRED, balance 1800 */
+    TEST_ASSERT_EQUAL(TIMER_EXPIRED, timer_slot_state(0));
+
+    /* The break earned by that run fires even though Screen is done... */
+    TEST_ASSERT_TRUE(timer_break_due(T0 + 1800, 1800));
+    timer_start_break(T0 + 1800, 900);
+    timer_break_tick(T0 + 2700);
+    TEST_ASSERT_EQUAL(TIMER_EXPIRED, timer_slot_state(0));
+
+    /* ...and so does the next one, driven entirely by a chore. */
+    select_slot(SLOT_LAUNDRY);
+    timer_start(T0 + 2700, 3600);
+    TEST_ASSERT_TRUE(timer_break_due(T0 + 2700 + 1800, 1800));
+}
+
+/* A parent deducting screen time from HA must not silently switch eye
+   rest off for the rest of the day. */
+void test_an_ha_deduction_to_empty_does_not_disable_breaks(void) {
+    timer_start(T0, 3600);
+    timer_pause(T0 + 600);
+    timer_adjust(0, -3000); /* empties it: PAUSED -> EXPIRED */
+    TEST_ASSERT_EQUAL(TIMER_EXPIRED, timer_slot_state(0));
+
+    select_slot(SLOT_LAUNDRY);
+    timer_start(T0 + 600, 3600);
+    TEST_ASSERT_TRUE(timer_break_due(T0 + 600 + 1200, 1800)); /* 600 + 1200 */
+}
+
+/* A break already running is never "due" again — the balance it reset
+   can only be drained by the eligible timers it allows. */
+void test_break_is_not_due_while_one_is_already_running(void) {
+    timer_start(T0, 3600);
+    timer_start_break(T0 + 1800, 900);
+    TEST_ASSERT_FALSE(timer_break_due(T0 + 1800, 1800));
+    TEST_ASSERT_EQUAL_INT32(0, timer_run_accum(T0 + 2000));
+}
+
+/* I9 names exactly two resets: break start and day rollover. Button B on
+   Screen (ParentTesting only) memsets the slot, which used to take the
+   balance with it. */
+void test_reloading_screen_keeps_the_exposure_balance(void) {
+    select_slot(SLOT_LAUNDRY);
+    timer_start(T0, 3600);
+    timer_pause(T0 + 1500);
+    select_slot(0);
+    TEST_ASSERT_TRUE(timer_reload());
+    TEST_ASSERT_EQUAL(TIMER_IDLE, timer_slot_state(0));
+    TEST_ASSERT_EQUAL_INT32(1500, timer_run_accum(T0 + 1500));
+}
+
+/* Outside a break every slot is startable — the gate is the break, not
+   the flag. */
+void test_start_allowed_outside_a_break_is_always_true(void) {
+    TEST_ASSERT_TRUE(timer_start_allowed());
+    select_slot(SLOT_LAUNDRY);
+    TEST_ASSERT_TRUE(timer_start_allowed());
+    TEST_ASSERT_EQUAL(BTN_A_STARTED, button_a_apply(T0));
+}
+
+/* The break screen's swap hint promises a timer you can actually start. */
+void test_eligible_extra_count_counts_only_break_eligible_slots(void) {
+    TEST_ASSERT_EQUAL_INT(3, timer_extra_count());          /* Piano, Laundry, Violin */
+    TEST_ASSERT_EQUAL_INT(2, timer_eligible_extra_count()); /* Piano, Violin */
+    TEST_ASSERT_FALSE(timer_slot_break_eligible(0));        /* Screen, always */
+    TEST_ASSERT_TRUE(timer_slot_break_eligible(SLOT_PIANO));
+    TEST_ASSERT_FALSE(timer_slot_break_eligible(SLOT_LAUNDRY));
+    TEST_ASSERT_FALSE(timer_slot_break_eligible(2));  /* disabled */
+    TEST_ASSERT_FALSE(timer_slot_break_eligible(99)); /* out of range */
+}
+
+/* The balance lives on slot 0 whichever slot drives it, so an NTP step
+   must move SLOT 0's segment start — not the active slot's. */
+void test_shift_expiry_moves_the_balance_segment_on_slot_zero(void) {
+    select_slot(SLOT_LAUNDRY);
+    timer_start(T0, 3600);
+    timer_shift_expiry(120);
+    TEST_ASSERT_EQUAL_INT32(600, timer_run_accum(T0 + 120 + 600));
+}
+
+/* A rename/disable edit ends the run, so its live segment must be folded
+   too — otherwise slot 0's balance advances forever behind a slot that no
+   longer exists (the G2 failure mode by another route). */
+void test_reconcile_reset_folds_the_live_segment(void) {
+    static const timer_def_t GONE = {"", 0, false, false};
+    select_slot(SLOT_LAUNDRY);
+    timer_start(T0, 3600);
+    TEST_ASSERT_EQUAL(TIMER_RECONCILE_RESET,
+                      timer_reconcile_def(SLOT_LAUNDRY, &TEST_DEFS[SLOT_LAUNDRY], &GONE, T0 + 600, NULL));
+    TEST_ASSERT_EQUAL_INT32(600, g_rtc_state.slots[0].run_accum_sec);
+    TEST_ASSERT_EQUAL_INT64(0, g_rtc_state.slots[0].run_started_wall);
+    TEST_ASSERT_EQUAL_INT32(600, timer_run_accum(T0 + 9000));
+}
+
 /* ---- eye-rest: run-time accrual + TIMER_BREAK ---- */
 
 void test_run_accum_counts_running_time(void) {
@@ -340,14 +832,19 @@ void test_run_accum_excludes_pause_gaps(void) {
     TEST_ASSERT_EQUAL_INT32(900, timer_run_accum(T0 + 9300));
 }
 
-void test_break_due_at_interval_only_when_running(void) {
+void test_break_due_at_interval_survives_a_pause(void) {
+    /* A break that has been EARNED cannot be dodged: the balance reaching
+       the interval is the whole condition. Pausing holds it (no exposure,
+       no movement) but does not un-earn it — the RUNNING requirement the
+       predecessor had is gone, because slot 0 is routinely IDLE or PAUSED
+       while a non-eligible extra drives the balance. */
     timer_start(T0, 7200);
     TEST_ASSERT_FALSE(timer_break_due(T0 + 1799, 1800));
     TEST_ASSERT_TRUE(timer_break_due(T0 + 1800, 1800));
-    timer_pause(T0 + 1800); /* accum 1800, but PAUSED never triggers */
-    TEST_ASSERT_FALSE(timer_break_due(T0 + 2000, 1800));
+    timer_pause(T0 + 1800);
+    TEST_ASSERT_TRUE(timer_break_due(T0 + 2000, 1800)); /* still owed */
     timer_reset();
-    TEST_ASSERT_FALSE(timer_break_due(T0 + 9999, 1800)); /* IDLE */
+    TEST_ASSERT_FALSE(timer_break_due(T0 + 9999, 1800)); /* IDLE, balance 0 */
 }
 
 void test_start_break_freezes_timer_and_arms_break(void) {
@@ -647,7 +1144,7 @@ void test_slot_by_name(void) {
     TEST_ASSERT_EQUAL_INT(0, timer_slot_by_name(NULL)); /* default Screen */
     TEST_ASSERT_EQUAL_INT(0, timer_slot_by_name(""));
     TEST_ASSERT_EQUAL_INT(1, timer_slot_by_name("Piano"));
-    TEST_ASSERT_EQUAL_INT(3, timer_slot_by_name("Meditation"));
+    TEST_ASSERT_EQUAL_INT(3, timer_slot_by_name("Laundry"));
     TEST_ASSERT_EQUAL_INT(4, timer_slot_by_name("Violin"));
     TEST_ASSERT_EQUAL_INT(-1, timer_slot_by_name("Guitar")); /* not configured */
 }
@@ -702,7 +1199,7 @@ void test_slot_states_are_independent(void) {
     timer_start(T0, 900);
     timer_pause(T0 + 200); /* Piano paused, 700 left */
 
-    timer_select_next(); /* -> Meditation */
+    timer_select_next(); /* -> Laundry */
     timer_select_next(); /* -> Violin */
     timer_select_next(); /* -> Screen */
     TEST_ASSERT_EQUAL_INT(0, timer_active_slot());
@@ -720,15 +1217,24 @@ void test_expiry_wall_accessor_tracks_active_slot(void) {
     timer_start(T0, 900);
     TEST_ASSERT_EQUAL_INT64((int64_t)T0 + 900, timer_expiry_wall());
     timer_pause(T0 + 100);
-    timer_select_next(); /* Meditation, idle */
+    timer_select_next(); /* Laundry, idle */
     TEST_ASSERT_EQUAL_INT64(0, timer_expiry_wall());
 }
 
-void test_break_never_due_on_extra_slot(void) {
-    timer_select_next(); /* Piano */
+/* Was "breaks are Screen-only", which is no longer true: a NON-eligible
+   extra earns a break exactly as Screen does. What remains true is the
+   direction — an eligible extra drains the balance, so running one can
+   never bring a break on. */
+void test_break_due_follows_the_running_slots_eligibility(void) {
+    select_slot(SLOT_PIANO); /* break-eligible: drains */
     timer_start(T0, 900);
-    /* Accrual passed the interval, but breaks are Screen-only */
     TEST_ASSERT_FALSE(timer_break_due(T0 + 800, 600));
+    timer_pause(T0 + 800);
+
+    select_slot(SLOT_LAUNDRY); /* a chore: accrues, and earns one */
+    timer_start(T0 + 800, 900);
+    TEST_ASSERT_FALSE(timer_break_due(T0 + 800 + 599, 600));
+    TEST_ASSERT_TRUE(timer_break_due(T0 + 800 + 600, 600));
 }
 
 /* ---- multi-timer slots: reload ---- */
@@ -807,7 +1313,7 @@ void test_completions_are_per_slot(void) {
     timer_select_next(); /* Piano */
     timer_start(T0, 900);
     timer_tick(T0 + 901);
-    timer_select_next(); /* Meditation */
+    timer_select_next(); /* Laundry */
     TEST_ASSERT_EQUAL_UINT16(0, timer_completions());
 }
 
@@ -998,7 +1504,8 @@ void test_completions_saturate_at_uint16_max(void) {
 }
 
 static const timer_def_t DEFS_NO_EXTRAS[TIMER_SLOT_COUNT] = {
-    {"Screen", 0, false}, {"", 0, false}, {"", 0, false}, {"", 0, false}, {"", 0, false},
+    {"Screen", 0, false, false}, {"", 0, false, false}, {"", 0, false, false},
+    {"", 0, false, false},       {"", 0, false, false},
 };
 
 void test_snapshot_restore_falls_back_when_active_slot_disabled(void) {
@@ -1277,13 +1784,13 @@ void test_bonus_applied_resets_at_rollover(void) {
     TEST_ASSERT_EQUAL_INT32(0, g_rtc_state.slots[0].bonus_applied);
 }
 
-void test_bonus_applied_survives_snapshot_v5(void) {
+void test_bonus_applied_survives_snapshot_roundtrip(void) {
     timer_bonus_reconcile(0, 900);
     timer_start(T0, 3600); /* consumes bonus_sec into allocation */
     timer_record_date(T0);
     timer_snapshot_t snap;
     timer_make_snapshot(&snap);
-    TEST_ASSERT_EQUAL_UINT8(5, snap.version);
+    TEST_ASSERT_EQUAL_UINT8(TIMER_SNAPSHOT_VERSION, snap.version);
 
     timer_reset();
     TEST_ASSERT_TRUE(timer_restore_snapshot(&snap, T0 + 100));
@@ -1297,12 +1804,12 @@ void test_bonus_applied_survives_snapshot_v5(void) {
 
 /* The active-slot def as it was before the network window (Piano, 15 min,
    reloadable — matches TEST_DEFS slot 1). */
-static const timer_def_t RECON_OLD = {"Piano", 900, true};
+static const timer_def_t RECON_OLD = {"Piano", 900, true, true};
 
 void test_reconcile_rename_running_resets_with_was_running(void) {
     timer_select_next(); /* Piano */
     timer_start(T0, 900);
-    timer_def_t renamed = {"Guitar", 900, true};
+    timer_def_t renamed = {"Guitar", 900, true, true};
     bool was_running = false;
     TEST_ASSERT_EQUAL(TIMER_RECONCILE_RESET, timer_reconcile_def(1, &RECON_OLD, &renamed, T0 + 100, &was_running));
     TEST_ASSERT_TRUE(was_running);
@@ -1315,7 +1822,7 @@ void test_reconcile_rename_paused_resets_without_was_running(void) {
     timer_select_next();
     timer_start(T0, 900);
     timer_pause(T0 + 100);
-    timer_def_t renamed = {"Guitar", 900, true};
+    timer_def_t renamed = {"Guitar", 900, true, true};
     bool was_running = true;
     TEST_ASSERT_EQUAL(TIMER_RECONCILE_RESET, timer_reconcile_def(1, &RECON_OLD, &renamed, T0 + 200, &was_running));
     TEST_ASSERT_FALSE(was_running);
@@ -1326,7 +1833,7 @@ void test_reconcile_rename_preserves_completions(void) {
     timer_select_next();
     g_rtc_state.slots[1].completions = 3;
     timer_start(T0, 900);
-    timer_def_t renamed = {"Guitar", 900, true};
+    timer_def_t renamed = {"Guitar", 900, true, true};
     TEST_ASSERT_EQUAL(TIMER_RECONCILE_RESET, timer_reconcile_def(1, &RECON_OLD, &renamed, T0 + 100, NULL));
     TEST_ASSERT_EQUAL_UINT16(3, timer_completions());
 }
@@ -1334,7 +1841,7 @@ void test_reconcile_rename_preserves_completions(void) {
 void test_reconcile_disable_resets_like_rename(void) {
     timer_select_next();
     timer_start(T0, 900);
-    timer_def_t disabled = {"", 0, false};
+    timer_def_t disabled = {"", 0, false, false};
     bool was_running = false;
     TEST_ASSERT_EQUAL(TIMER_RECONCILE_RESET, timer_reconcile_def(1, &RECON_OLD, &disabled, T0 + 100, &was_running));
     TEST_ASSERT_TRUE(was_running);
@@ -1344,12 +1851,14 @@ void test_reconcile_disable_resets_like_rename(void) {
 void test_reconcile_duration_grow_running_delta_shifts_expiry(void) {
     timer_select_next();
     timer_start(T0, 900); /* expiry T0+900 */
-    timer_def_t grown = {"Piano", 1200, true};
+    timer_def_t grown = {"Piano", 1200, true, true};
     TEST_ASSERT_EQUAL(TIMER_RECONCILE_UPDATED, timer_reconcile_def(1, &RECON_OLD, &grown, T0 + 300, NULL));
     TEST_ASSERT_EQUAL(TIMER_RUNNING, timer_get_state());
     TEST_ASSERT_EQUAL_INT64((int64_t)T0 + 1200, g_rtc_state.slots[1].expiry_wall_time);
     TEST_ASSERT_EQUAL_INT32(1200, g_rtc_state.slots[1].allocation_sec);
-    TEST_ASSERT_EQUAL_INT64((int64_t)T0, g_rtc_state.slots[1].run_started_wall);
+    /* The run SEGMENT is untouched by a duration edit — and it lives on
+       slot 0, which owns the exposure balance whatever is running. */
+    TEST_ASSERT_EQUAL_INT64((int64_t)T0, g_rtc_state.slots[0].run_started_wall);
 }
 
 void test_reconcile_duration_grow_after_pause_resume_history(void) {
@@ -1360,7 +1869,7 @@ void test_reconcile_duration_grow_after_pause_resume_history(void) {
     timer_start(T0, 900);    /* expiry T0+900 */
     timer_pause(T0 + 300);   /* remaining 600 */
     timer_resume(T0 + 1000); /* expiry T0+1600, run_started T0+1000 */
-    timer_def_t grown = {"Piano", 1200, true};
+    timer_def_t grown = {"Piano", 1200, true, true};
     TEST_ASSERT_EQUAL(TIMER_RECONCILE_UPDATED, timer_reconcile_def(1, &RECON_OLD, &grown, T0 + 1100, NULL));
     /* +300 delta on the real expiry — NOT T0+1000+1200 = T0+2200 */
     TEST_ASSERT_EQUAL_INT64((int64_t)T0 + 1900, g_rtc_state.slots[1].expiry_wall_time);
@@ -1369,7 +1878,7 @@ void test_reconcile_duration_grow_after_pause_resume_history(void) {
 void test_reconcile_duration_shrink_past_elapsed_expires(void) {
     timer_select_next();
     timer_start(T0, 900);
-    timer_def_t shrunk = {"Piano", 600, true};
+    timer_def_t shrunk = {"Piano", 600, true, true};
     bool was_running = false;
     /* 700 s elapsed >= new 600 s duration: the run is over */
     TEST_ASSERT_EQUAL(TIMER_RECONCILE_EXPIRED, timer_reconcile_def(1, &RECON_OLD, &shrunk, T0 + 700, &was_running));
@@ -1381,7 +1890,7 @@ void test_reconcile_duration_shrink_past_elapsed_expires(void) {
 void test_reconcile_duration_shrink_running_still_ahead_updates(void) {
     timer_select_next();
     timer_start(T0, 900);
-    timer_def_t shrunk = {"Piano", 600, true};
+    timer_def_t shrunk = {"Piano", 600, true, true};
     TEST_ASSERT_EQUAL(TIMER_RECONCILE_UPDATED, timer_reconcile_def(1, &RECON_OLD, &shrunk, T0 + 100, NULL));
     TEST_ASSERT_EQUAL(TIMER_RUNNING, timer_get_state());
     TEST_ASSERT_EQUAL_INT64((int64_t)T0 + 600, g_rtc_state.slots[1].expiry_wall_time);
@@ -1392,7 +1901,7 @@ void test_reconcile_duration_grow_paused_extends_remaining(void) {
     timer_select_next();
     timer_start(T0, 900);
     timer_pause(T0 + 300); /* remaining 600 */
-    timer_def_t grown = {"Piano", 1200, true};
+    timer_def_t grown = {"Piano", 1200, true, true};
     TEST_ASSERT_EQUAL(TIMER_RECONCILE_UPDATED, timer_reconcile_def(1, &RECON_OLD, &grown, T0 + 400, NULL));
     TEST_ASSERT_EQUAL(TIMER_PAUSED, timer_get_state());
     TEST_ASSERT_EQUAL_INT32(900, g_rtc_state.slots[1].remaining_at_pause);
@@ -1402,8 +1911,8 @@ void test_reconcile_duration_grow_paused_extends_remaining(void) {
 void test_reconcile_duration_shrink_paused_past_elapsed_expires(void) {
     timer_select_next();
     timer_start(T0, 900);
-    timer_pause(T0 + 300);                     /* elapsed 300, remaining 600 */
-    timer_def_t shrunk = {"Piano", 240, true}; /* 300 elapsed >= 240 */
+    timer_pause(T0 + 300);                           /* elapsed 300, remaining 600 */
+    timer_def_t shrunk = {"Piano", 240, true, true}; /* 300 elapsed >= 240 */
     bool was_running = true;
     TEST_ASSERT_EQUAL(TIMER_RECONCILE_EXPIRED, timer_reconcile_def(1, &RECON_OLD, &shrunk, T0 + 400, &was_running));
     TEST_ASSERT_FALSE(was_running);
@@ -1418,7 +1927,7 @@ void test_reconcile_duration_shift_preserves_granted_time(void) {
     timer_select_next();
     timer_start(T0, 900);
     timer_adjust(1, 300); /* allocation 1200, expiry T0+1200 */
-    timer_def_t shrunk = {"Piano", 600, true};
+    timer_def_t shrunk = {"Piano", 600, true, true};
     TEST_ASSERT_EQUAL(TIMER_RECONCILE_UPDATED, timer_reconcile_def(1, &RECON_OLD, &shrunk, T0 + 100, NULL));
     TEST_ASSERT_EQUAL_INT64((int64_t)T0 + 900, g_rtc_state.slots[1].expiry_wall_time);
     TEST_ASSERT_EQUAL_INT32(900, g_rtc_state.slots[1].allocation_sec); /* grant kept */
@@ -1427,7 +1936,7 @@ void test_reconcile_duration_shift_preserves_granted_time(void) {
 void test_reconcile_reload_flag_only_is_none(void) {
     timer_select_next();
     timer_start(T0, 900);
-    timer_def_t reload_off = {"Piano", 900, false};
+    timer_def_t reload_off = {"Piano", 900, false, true};
     TEST_ASSERT_EQUAL(TIMER_RECONCILE_NONE, timer_reconcile_def(1, &RECON_OLD, &reload_off, T0 + 100, NULL));
     TEST_ASSERT_EQUAL(TIMER_RUNNING, timer_get_state());
     TEST_ASSERT_EQUAL_INT64((int64_t)T0 + 900, g_rtc_state.slots[1].expiry_wall_time);
@@ -1436,15 +1945,15 @@ void test_reconcile_reload_flag_only_is_none(void) {
 void test_reconcile_identical_def_is_none(void) {
     timer_select_next();
     timer_start(T0, 900);
-    timer_def_t same = {"Piano", 900, true};
+    timer_def_t same = {"Piano", 900, true, true};
     TEST_ASSERT_EQUAL(TIMER_RECONCILE_NONE, timer_reconcile_def(1, &RECON_OLD, &same, T0 + 100, NULL));
     TEST_ASSERT_EQUAL(TIMER_RUNNING, timer_get_state());
 }
 
 void test_reconcile_screen_slot_exempt(void) {
     timer_start(T0, 3600); /* Screen running */
-    timer_def_t a = {"Screen", 3600, false};
-    timer_def_t b = {"Screen", 600, false};
+    timer_def_t a = {"Screen", 3600, false, false};
+    timer_def_t b = {"Screen", 600, false, false};
     TEST_ASSERT_EQUAL(TIMER_RECONCILE_NONE, timer_reconcile_def(0, &a, &b, T0 + 100, NULL));
     TEST_ASSERT_EQUAL(TIMER_RUNNING, timer_get_state());
     TEST_ASSERT_EQUAL_INT64((int64_t)T0 + 3600, g_rtc_state.slots[0].expiry_wall_time);
@@ -1459,7 +1968,7 @@ void test_reconcile_non_active_paused_slot(void) {
     timer_start(T0, 900);
     timer_pause(T0 + 60);        /* remaining 840 */
     g_rtc_state.active_slot = 0; /* back on Screen; Piano stays PAUSED */
-    timer_def_t shrunk = {"Piano", 120, true};
+    timer_def_t shrunk = {"Piano", 120, true, true};
     TEST_ASSERT_EQUAL(TIMER_RECONCILE_UPDATED, timer_reconcile_def(1, &RECON_OLD, &shrunk, T0 + 100, NULL));
     TEST_ASSERT_EQUAL(TIMER_PAUSED, g_rtc_state.slots[1].state);
     TEST_ASSERT_EQUAL_INT32(60, g_rtc_state.slots[1].remaining_at_pause); /* 840 + (120-900) */
@@ -1471,7 +1980,7 @@ void test_reconcile_non_active_paused_slot(void) {
 
 void test_reconcile_idle_and_expired_slots_are_none(void) {
     timer_select_next(); /* Piano, IDLE */
-    timer_def_t renamed = {"Guitar", 600, true};
+    timer_def_t renamed = {"Guitar", 600, true, true};
     TEST_ASSERT_EQUAL(TIMER_RECONCILE_NONE, timer_reconcile_def(1, &RECON_OLD, &renamed, T0, NULL));
     TEST_ASSERT_EQUAL(TIMER_IDLE, timer_get_state());
 
@@ -1690,7 +2199,7 @@ void test_select_next_off_slot_zero_and_back_preserves_break(void) {
     TEST_ASSERT_EQUAL(TIMER_IDLE, timer_get_state());
     TEST_ASSERT_TRUE(timer_break_active());
     TEST_ASSERT_EQUAL_INT32(700, timer_break_remaining(T0 + 800));
-    TEST_ASSERT_TRUE(timer_select_next()); /* -> Meditation (slot 2 disabled) */
+    TEST_ASSERT_TRUE(timer_select_next()); /* -> Laundry (slot 2 disabled) */
     TEST_ASSERT_TRUE(timer_select_next()); /* -> Violin */
     TEST_ASSERT_TRUE(timer_select_next()); /* -> Screen */
     TEST_ASSERT_EQUAL_INT(0, timer_active_slot());
@@ -1898,7 +2407,8 @@ void test_shift_expiry_moves_extra_expiry_and_background_break(void) {
     timer_start(T0 + 700, 1200); /* Piano expires T0+1900 */
     timer_shift_expiry(120);
     TEST_ASSERT_EQUAL_INT64((int64_t)T0 + 1900 + 120, g_rtc_state.slots[1].expiry_wall_time);
-    TEST_ASSERT_EQUAL_INT64((int64_t)T0 + 700 + 120, g_rtc_state.slots[1].run_started_wall);
+    /* The balance's segment start is on slot 0, not on the running extra */
+    TEST_ASSERT_EQUAL_INT64((int64_t)T0 + 700 + 120, g_rtc_state.slots[0].run_started_wall);
     TEST_ASSERT_EQUAL_INT64((int64_t)T0 + 1500 + 120, g_rtc_state.slots[0].break_expiry_wall);
 }
 
@@ -1965,7 +2475,7 @@ void test_any_extra_running_ignores_slot_zero(void) {
 void test_next_slot_walks_enabled_slots_and_skips_holes(void) {
     TEST_ASSERT_EQUAL_INT(1, timer_next_slot()); /* Screen -> Piano */
     TEST_ASSERT_TRUE(timer_select_next());
-    TEST_ASSERT_EQUAL_INT(3, timer_next_slot()); /* Piano -> Meditation (2 disabled) */
+    TEST_ASSERT_EQUAL_INT(3, timer_next_slot()); /* Piano -> Laundry (2 disabled) */
     TEST_ASSERT_TRUE(timer_select_next());
     TEST_ASSERT_EQUAL_INT(4, timer_next_slot());
     TEST_ASSERT_TRUE(timer_select_next());
@@ -2042,6 +2552,154 @@ void test_snapshot_rejects_a_break_on_an_extra_slot(void) {
     TEST_ASSERT_EQUAL(TIMER_IDLE, timer_get_state());
 }
 
+/* v6: the interrupted slot round-trips, so a break that spans a crash
+   still knows where to put the selection back. */
+void test_snapshot_round_trips_the_interrupted_slot(void) {
+    select_slot(SLOT_LAUNDRY);
+    timer_start(T0, 3600);
+    timer_start_break(T0 + 1800, 900);
+    timer_record_date(T0);
+    timer_snapshot_t snap;
+    timer_make_snapshot(&snap);
+    TEST_ASSERT_EQUAL_UINT8(SLOT_LAUNDRY, snap.break_interrupted_slot);
+
+    timer_reset();
+    TEST_ASSERT_TRUE(timer_restore_snapshot(&snap, T0 + 2000));
+    TEST_ASSERT_EQUAL_INT(SLOT_LAUNDRY, timer_break_interrupted_slot());
+}
+
+void test_snapshot_rejects_an_out_of_range_interrupted_slot(void) {
+    timer_start(T0, 3600);
+    timer_record_date(T0);
+    timer_snapshot_t snap;
+    timer_make_snapshot(&snap);
+    snap.break_interrupted_slot = TIMER_SLOT_COUNT; /* one past the end */
+    snap.checksum = timer_snapshot_checksum(&snap);
+
+    timer_reset();
+    TEST_ASSERT_FALSE(timer_restore_snapshot(&snap, T0 + 100));
+    TEST_ASSERT_EQUAL(TIMER_IDLE, timer_get_state());
+}
+
+/* GAP 1: the OTHER I7 site. timer_break_tick's exit is well covered, but
+   a break can also end while the device is powered off, and that path
+   restores slot 0 independently. Refund shape 2 rides it: Screen expires,
+   the break it earned fires from EXPIRED (legal since the guard came
+   out), RTC is wiped mid-break by a panic or EN reset, and the snapshot
+   restores after the break's wall end. Deriving the exit state there
+   hands back a fresh full allocation; the stored one gives EXPIRED. */
+void test_snapshot_break_ended_while_powered_off_restores_the_prior_state(void) {
+    timer_start(T0, 1800);
+    timer_tick(T0 + 1800); /* Screen EXPIRED, balance 1800 */
+    TEST_ASSERT_TRUE(timer_break_due(T0 + 1800, 1800));
+    timer_start_break(T0 + 1800, 900); /* break ends T0+2700 */
+    timer_record_date(T0);
+    timer_snapshot_t snap;
+    timer_make_snapshot(&snap);
+    TEST_ASSERT_EQUAL_UINT8(TIMER_EXPIRED, snap.break_prev_state);
+
+    timer_reset();
+    TEST_ASSERT_TRUE(timer_restore_snapshot(&snap, T0 + 3000)); /* past the end */
+    TEST_ASSERT_EQUAL(TIMER_EXPIRED, timer_slot_state(0));      /* not IDLE */
+    TEST_ASSERT_EQUAL_INT32(0, timer_slot_remaining(0, T0 + 3000, 9999));
+}
+
+/* The same site with banked time: PAUSED must survive it too. */
+void test_snapshot_break_ended_while_powered_off_keeps_banked_time(void) {
+    timer_start(T0, 3600);
+    timer_pause(T0 + 600); /* 3000 s banked */
+    select_slot(SLOT_LAUNDRY);
+    timer_start(T0 + 600, 3600);
+    timer_start_break(T0 + 1800, 900);
+    timer_record_date(T0);
+    timer_snapshot_t snap;
+    timer_make_snapshot(&snap);
+
+    timer_reset();
+    TEST_ASSERT_TRUE(timer_restore_snapshot(&snap, T0 + 3000));
+    TEST_ASSERT_EQUAL(TIMER_PAUSED, timer_slot_state(0));
+    TEST_ASSERT_EQUAL_INT32(3000, g_rtc_state.slots[0].remaining_at_pause);
+}
+
+/* GAP 3: both new range checks feed values straight into the state
+   machine (break_prev_state is assigned to sl->state at two sites), so
+   corruption that slips past the checksum must not be restorable. */
+void test_snapshot_rejects_a_break_prev_state_of_break(void) {
+    timer_start(T0, 3600);
+    timer_record_date(T0);
+    timer_snapshot_t snap;
+    timer_make_snapshot(&snap);
+    snap.break_prev_state = TIMER_BREAK; /* leaving a break INTO a break */
+    snap.checksum = timer_snapshot_checksum(&snap);
+
+    timer_reset();
+    TEST_ASSERT_FALSE(timer_restore_snapshot(&snap, T0 + 100));
+    TEST_ASSERT_EQUAL(TIMER_IDLE, timer_get_state());
+}
+
+void test_snapshot_rejects_a_wild_break_prev_state(void) {
+    timer_start(T0, 3600);
+    timer_record_date(T0);
+    timer_snapshot_t snap;
+    timer_make_snapshot(&snap);
+    snap.break_prev_state = 200; /* past the enum entirely */
+    snap.checksum = timer_snapshot_checksum(&snap);
+
+    timer_reset();
+    TEST_ASSERT_FALSE(timer_restore_snapshot(&snap, T0 + 100));
+    TEST_ASSERT_EQUAL(TIMER_IDLE, timer_get_state());
+}
+
+void test_snapshot_rejects_an_out_of_range_run_segment_slot(void) {
+    timer_start(T0, 3600);
+    timer_record_date(T0);
+    timer_snapshot_t snap;
+    timer_make_snapshot(&snap);
+    snap.run_segment_slot = TIMER_SLOT_COUNT; /* would index past the defs */
+    snap.checksum = timer_snapshot_checksum(&snap);
+
+    timer_reset();
+    TEST_ASSERT_FALSE(timer_restore_snapshot(&snap, T0 + 100));
+    TEST_ASSERT_EQUAL(TIMER_IDLE, timer_get_state());
+}
+
+/* GAP 4: mark_expired's "an expired timer holds nothing" rule applies to
+   the powered-off expiry too, or a slot paused at 1800, resumed and
+   expired in the dark restores as EXPIRED still carrying 1800 — the same
+   stale-banked-value condition refund shape 2 rode on. */
+void test_snapshot_powered_off_expiry_clears_the_banked_remaining(void) {
+    timer_start(T0, 3600);
+    timer_pause(T0 + 1800); /* remaining_at_pause = 1800 */
+    timer_resume(T0 + 1800);
+    timer_record_date(T0);
+    timer_snapshot_t snap;
+    timer_make_snapshot(&snap);
+    TEST_ASSERT_EQUAL_INT32(1800, snap.slots[0].remaining_at_pause);
+
+    timer_reset();
+    TEST_ASSERT_TRUE(timer_restore_snapshot(&snap, T0 + 5000)); /* expired in the dark */
+    TEST_ASSERT_EQUAL(TIMER_EXPIRED, timer_slot_state(0));
+    TEST_ASSERT_EQUAL_INT32(0, g_rtc_state.slots[0].remaining_at_pause);
+    TEST_ASSERT_EQUAL_UINT16(1, timer_slot_completions(0)); /* still counted */
+}
+
+/* A run that expired while the device was powered off is still a fold
+   point: the balance must land at the EXPIRY, not keep accruing across
+   the dark gap. */
+void test_snapshot_restore_folds_a_powered_off_expiry(void) {
+    select_slot(SLOT_LAUNDRY);
+    timer_start(T0, 600);
+    timer_record_date(T0);
+    timer_snapshot_t snap;
+    timer_make_snapshot(&snap);
+
+    timer_reset();
+    TEST_ASSERT_TRUE(timer_restore_snapshot(&snap, T0 + 5000));
+    TEST_ASSERT_EQUAL(TIMER_EXPIRED, timer_slot_state(SLOT_LAUNDRY));
+    TEST_ASSERT_EQUAL_INT32(600, timer_run_accum(T0 + 5000));
+    TEST_ASSERT_EQUAL_INT64(0, g_rtc_state.slots[0].run_started_wall);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_bonus_reconcile_grants_only_the_delta);
@@ -2057,7 +2715,7 @@ int main(void) {
     RUN_TEST(test_adjust_idle_banks_negative_start_clamps_at_zero);
     RUN_TEST(test_snapshot_round_trips_negative_bonus);
     RUN_TEST(test_bonus_applied_resets_at_rollover);
-    RUN_TEST(test_bonus_applied_survives_snapshot_v5);
+    RUN_TEST(test_bonus_applied_survives_snapshot_roundtrip);
     RUN_TEST(test_reset_state_is_idle);
     RUN_TEST(test_reset_expiry_is_zero);
     RUN_TEST(test_reset_remaining_at_pause_is_zero);
@@ -2090,7 +2748,38 @@ int main(void) {
     RUN_TEST(test_shift_expiry_noop_when_idle);
     RUN_TEST(test_run_accum_counts_running_time);
     RUN_TEST(test_run_accum_excludes_pause_gaps);
-    RUN_TEST(test_break_due_at_interval_only_when_running);
+    RUN_TEST(test_break_due_at_interval_survives_a_pause);
+    RUN_TEST(test_row2_a_laundry_run_earns_the_break_and_is_paused_by_it);
+    RUN_TEST(test_row3_expiry_and_a_due_break_in_one_tick);
+    RUN_TEST(test_row4_a_break_starts_an_eligible_timer_normally);
+    RUN_TEST(test_row5_a_break_refuses_a_non_eligible_timer);
+    RUN_TEST(test_row6_a_break_refuses_screen_itself);
+    RUN_TEST(test_row7_break_end_returns_to_the_interrupted_slot);
+    RUN_TEST(test_row8_break_end_does_not_snap_while_a_timer_runs);
+    RUN_TEST(test_row9_break_end_stays_on_screen_when_screen_was_interrupted);
+    RUN_TEST(test_row10_break_exit_is_idle_when_screen_never_started);
+    RUN_TEST(test_row11_expiry_folds_the_segment_and_stops_the_balance);
+    RUN_TEST(test_row12_starting_a_timer_does_not_reset_the_balance);
+    RUN_TEST(test_row13_break_start_preserves_a_paused_screens_banked_time);
+    RUN_TEST(test_row14_an_eligible_run_drains_the_balance);
+    RUN_TEST(test_row15_the_balance_floors_at_zero);
+    RUN_TEST(test_row16_an_eligibility_edit_folds_at_the_old_sign);
+    RUN_TEST(test_segment_sign_survives_a_snapshot_round_trip);
+    RUN_TEST(test_fold_signs_by_the_arming_slot_not_the_selection);
+    RUN_TEST(test_segment_sign_is_recorded_at_arm_time);
+    RUN_TEST(test_row17_idle_neither_adds_nor_drains);
+    RUN_TEST(test_balance_motivating_case_laundry_then_violin_then_screen);
+    RUN_TEST(test_an_eligible_run_never_makes_a_break_due);
+    RUN_TEST(test_break_exit_survives_an_ha_deduction_mid_break);
+    RUN_TEST(test_break_exit_from_an_expired_screen_stays_expired);
+    RUN_TEST(test_a_break_still_fires_after_the_allocation_is_exhausted);
+    RUN_TEST(test_an_ha_deduction_to_empty_does_not_disable_breaks);
+    RUN_TEST(test_break_is_not_due_while_one_is_already_running);
+    RUN_TEST(test_reloading_screen_keeps_the_exposure_balance);
+    RUN_TEST(test_start_allowed_outside_a_break_is_always_true);
+    RUN_TEST(test_eligible_extra_count_counts_only_break_eligible_slots);
+    RUN_TEST(test_shift_expiry_moves_the_balance_segment_on_slot_zero);
+    RUN_TEST(test_reconcile_reset_folds_the_live_segment);
     RUN_TEST(test_start_break_freezes_timer_and_arms_break);
     RUN_TEST(test_break_remaining_counts_down);
     RUN_TEST(test_tick_during_break_holds_then_transitions_to_paused);
@@ -2124,7 +2813,7 @@ int main(void) {
     RUN_TEST(test_reload_allowed_non_reloadable_needs_parent_testing);
     RUN_TEST(test_slot_states_are_independent);
     RUN_TEST(test_expiry_wall_accessor_tracks_active_slot);
-    RUN_TEST(test_break_never_due_on_extra_slot);
+    RUN_TEST(test_break_due_follows_the_running_slots_eligibility);
     RUN_TEST(test_reload_refused_while_running);
     RUN_TEST(test_reload_from_paused_returns_to_idle);
     RUN_TEST(test_reload_from_expired_returns_to_idle);
@@ -2210,5 +2899,14 @@ int main(void) {
     RUN_TEST(test_snapshot_round_trips_background_break_with_running_extra);
     RUN_TEST(test_snapshot_break_ended_while_powered_off_restores_paused_non_active);
     RUN_TEST(test_snapshot_rejects_a_break_on_an_extra_slot);
+    RUN_TEST(test_snapshot_round_trips_the_interrupted_slot);
+    RUN_TEST(test_snapshot_rejects_an_out_of_range_interrupted_slot);
+    RUN_TEST(test_snapshot_restore_folds_a_powered_off_expiry);
+    RUN_TEST(test_snapshot_break_ended_while_powered_off_restores_the_prior_state);
+    RUN_TEST(test_snapshot_break_ended_while_powered_off_keeps_banked_time);
+    RUN_TEST(test_snapshot_rejects_a_break_prev_state_of_break);
+    RUN_TEST(test_snapshot_rejects_a_wild_break_prev_state);
+    RUN_TEST(test_snapshot_rejects_an_out_of_range_run_segment_slot);
+    RUN_TEST(test_snapshot_powered_off_expiry_clears_the_banked_remaining);
     return UNITY_END();
 }

@@ -313,7 +313,7 @@ void test_holidays_cap_enforced(void) {
 void test_timers_array_maps_to_blob(void) {
     char ack[256];
     apply(
-        "{\"ver\":\"1\",\"timers\":[{\"name\":\"Piano\",\"min\":20,\"reload\":true},{},"
+        "{\"ver\":\"1\",\"timers\":[{\"name\":\"Piano\",\"min\":20,\"reload\":true,\"break\":true},{},"
         "{\"name\":\"Meditation\",\"min\":10,\"reload\":true},{}]}",
         ack, sizeof(ack));
     nvs_timer_defs_blob_t defs;
@@ -323,8 +323,10 @@ void test_timers_array_maps_to_blob(void) {
     TEST_ASSERT_EQUAL_UINT8(1, defs.defs[0].reload);
     TEST_ASSERT_EQUAL_STRING("", defs.defs[1].name); /* {} = disabled */
     TEST_ASSERT_EQUAL_STRING("Meditation", defs.defs[2].name);
-    TEST_ASSERT_EQUAL_UINT8(1, defs.defs[2].reload); /* reload: true */
-    TEST_ASSERT_EQUAL_STRING("", defs.defs[3].name); /* {} = disabled */
+    TEST_ASSERT_EQUAL_UINT8(1, defs.defs[2].reload);         /* reload: true */
+    TEST_ASSERT_EQUAL_UINT8(1, defs.defs[0].break_eligible); /* break: true */
+    TEST_ASSERT_EQUAL_UINT8(0, defs.defs[2].break_eligible); /* absent = a chore */
+    TEST_ASSERT_EQUAL_STRING("", defs.defs[3].name);         /* {} = disabled */
 }
 
 void test_timers_overlong_name_rejected(void) {
@@ -335,6 +337,27 @@ void test_timers_overlong_name_rejected(void) {
     /* Blob not written (whole array rejected on a bad entry) */
     nvs_timer_defs_blob_t defs;
     TEST_ASSERT_EQUAL(ESP_ERR_NVS_NOT_FOUND, nvs_config_get_timer_defs(&defs));
+}
+
+/* One bad entry rejects the whole array, so the ack must say WHICH entry
+   or the edit looks like it silently did nothing to every timer. */
+void test_timers_error_names_the_offending_entry(void) {
+    char ack[256];
+    apply(
+        "{\"ver\":\"1\",\"timers\":[{\"name\":\"Piano\",\"min\":20},"
+        "{\"name\":\"NonEligible Testing\",\"min\":2},{\"name\":\"Violin\",\"min\":30}]}",
+        ack, sizeof(ack));
+    TEST_ASSERT_NOT_NULL(strstr(ack, "timers[1]"));
+    nvs_timer_defs_blob_t defs;
+    TEST_ASSERT_EQUAL(ESP_ERR_NVS_NOT_FOUND, nvs_config_get_timer_defs(&defs));
+}
+
+/* Same for an out-of-range duration — the slot index is the useful part. */
+void test_timers_bad_min_names_the_offending_entry(void) {
+    char ack[256];
+    apply("{\"ver\":\"1\",\"timers\":[{\"name\":\"Piano\",\"min\":20},{\"name\":\"Violin\",\"min\":9999}]}", ack,
+          sizeof(ack));
+    TEST_ASSERT_NOT_NULL(strstr(ack, "timers[1]"));
 }
 
 int main(void) {
@@ -364,5 +387,7 @@ int main(void) {
     RUN_TEST(test_holidays_cap_enforced);
     RUN_TEST(test_timers_array_maps_to_blob);
     RUN_TEST(test_timers_overlong_name_rejected);
+    RUN_TEST(test_timers_error_names_the_offending_entry);
+    RUN_TEST(test_timers_bad_min_names_the_offending_entry);
     return UNITY_END();
 }
