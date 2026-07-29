@@ -29,8 +29,11 @@ typedef struct {
        normally sits. False when the break screen itself will be drawn. */
     bool break_banner;
     /* Break screen only: the timer Button C would select, for the swap
-       hint. NULL = no extra timers configured — the break screen then
-       falls back to its centred "Timer paused" footer. */
+       hint. NULL = the break has nothing to offer — no extra timers at
+       all, or none that are break_eligible, since the hint must promise a
+       timer a press would actually start. The break screen then falls
+       back to its centred "Timer paused" footer, i.e. it behaves like the
+       pre-non-blocking locking break, which is correct. */
     const char *swap_next_name;
     /* Extra timers (v1.3): NULL/"" name = Screen (day-type mode line) */
     const char *timer_name;
@@ -38,7 +41,11 @@ typedef struct {
     bool reloadable;
     bool swap_available;   /* Button C label (extras exist, state allows swap) */
     bool reload_available; /* Button B label without ParentTesting */
-    bool charge_warn;      /* battery <= 15%: Charge Me!!! badge on the bar */
+    /* Button A label: false while a Screen Break refuses to start this
+       slot (not break_eligible). Same "label shows iff a press would
+       work" convention as the two above. */
+    bool start_available;
+    bool charge_warn; /* battery <= 15%: Charge Me!!! badge on the bar */
 } display_state_t;
 
 #ifdef __cplusplus

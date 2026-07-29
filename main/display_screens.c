@@ -195,7 +195,12 @@ static void build_button_row(lv_obj_t *scr, const display_state_t *st) {
         default:
             break;
     }
-    if (a_sym) {
+    /* start_available carries the Screen Break's per-slot refusal: during
+       a break a non-eligible timer draws no play glyph, because a press
+       would do nothing. Pausing is never gated, and a RUNNING slot during
+       a break is break-eligible by construction (I6), so one flag covers
+       both labels. */
+    if (a_sym && st->start_available) {
         make_label(scr, a_sym, &lv_font_montserrat_12, LV_ALIGN_BOTTOM_MID, BTN_MID_OFS(0), -2);
     }
     /* reload_available already folds in ParentTesting and the not-RUNNING

@@ -59,6 +59,7 @@ static display_state_t base_state(void) {
         .battery_pct = 87,
         .break_duration_sec = 900,
         .swap_available = true,
+        .start_available = true,
     };
 }
 
@@ -195,6 +196,38 @@ void test_main_break_chip(void) {
     assert_rows_blank(24, 25); /* chip stays inside the header band's bytes */
 }
 
+void test_main_break_chip_no_start(void) {
+    /* Same break chip, but the selected timer is a chore (not
+       break_eligible): Button A carries no play glyph, because a press
+       would be refused. Everything else is unchanged from the chip case. */
+    display_state_t st = base_state();
+    st.timer_state = TIMER_PAUSED;
+    st.timer_name = "Laundry folding";
+    st.allocation_sec = 1500;
+    st.remaining_sec = 750;
+    st.reload_available = true;
+    st.break_banner = true;
+    st.break_remaining_sec = 372; /* 6:12 */
+    st.start_available = false;
+    display_screens_build_main(&st);
+    assert_matches_golden("main_break_chip_no_start");
+    assert_rows_blank(24, 25);
+}
+
+void test_break_screen_no_eligible(void) {
+    /* Extras exist but none is break-eligible, so the break has nothing
+       to offer: app_state suppresses the hint (swap_next_name NULL) and
+       the screen falls back to the centred footer — the pre-non-blocking
+       locking break, which is the right behaviour here. */
+    display_state_t st = base_state();
+    st.timer_state = TIMER_BREAK;
+    st.remaining_sec = 5400;
+    st.break_remaining_sec = 700;
+    st.swap_next_name = NULL;
+    display_screens_build_break(&st);
+    assert_matches_golden("break_screen_no_eligible");
+}
+
 void test_main_low_battery_warn_badge(void) {
     /* <= 15%: the progress bar carries the Charge Me!!! badge */
     display_state_t st = base_state();
@@ -242,6 +275,8 @@ int main(void) {
     RUN_TEST(test_break_screen);
     RUN_TEST(test_break_screen_no_extras);
     RUN_TEST(test_main_break_chip);
+    RUN_TEST(test_main_break_chip_no_start);
+    RUN_TEST(test_break_screen_no_eligible);
     RUN_TEST(test_main_low_battery_warn_badge);
     RUN_TEST(test_charge_me_screen);
     RUN_TEST(test_timesup_screen);

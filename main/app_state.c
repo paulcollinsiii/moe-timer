@@ -62,6 +62,12 @@ display_state_t app_state_display(const app_state_in_t *in, int32_t remaining, t
        Screen reads as "no name" — which is right, the hint only renders
        while Screen is the selected slot. */
     const timer_def_t *next_def = timer_slot_def(timer_next_slot());
+    /* ...and during a break it must reflect whether a STARTABLE timer
+       exists, not merely another enabled slot: offering a swap to a chore
+       that Button A will then refuse is worse than offering nothing. */
+    if (timer_break_active() && timer_eligible_extra_count() == 0) {
+        next_def = NULL;
+    }
     return (display_state_t){
         .remaining_sec = remaining,
         .allocation_sec = alloc,
@@ -80,6 +86,7 @@ display_state_t app_state_display(const app_state_in_t *in, int32_t remaining, t
         .reloadable = (def != NULL) && def->reloadable,
         .swap_available = timer_swap_allowed(),
         .reload_available = timer_reload_allowed(in->parent_testing),
+        .start_available = timer_start_allowed(),
     };
 }
 

@@ -184,6 +184,51 @@ void test_display_swap_available_during_a_break(void) {
     TEST_ASSERT_TRUE(app_state_display(&IN_HEALTHY, 0, T0 + 800).swap_available);
 }
 
+/* ---- start_available: the break gates Button A per slot ---- */
+
+void test_display_start_available_outside_a_break(void) {
+    /* No break: every slot is startable, so the play glyph always shows. */
+    TEST_ASSERT_TRUE(app_state_display(&IN_HEALTHY, 0, T0).start_available);
+    TEST_ASSERT_TRUE(timer_select_next()); /* -> Piano */
+    TEST_ASSERT_TRUE(app_state_display(&IN_HEALTHY, 0, T0).start_available);
+}
+
+void test_display_start_available_is_false_for_screen_during_a_break(void) {
+    arm_break();
+    TEST_ASSERT_FALSE(app_state_display(&IN_HEALTHY, 0, T0 + 800).start_available);
+}
+
+void test_display_start_available_tracks_break_eligible_during_a_break(void) {
+    arm_break();
+    TEST_ASSERT_TRUE(timer_select_next()); /* -> Piano: break-eligible */
+    TEST_ASSERT_TRUE(app_state_display(&IN_HEALTHY, 0, T0 + 800).start_available);
+    TEST_ASSERT_TRUE(timer_select_next()); /* -> Laundry: a chore, refused */
+    display_state_t st = app_state_display(&IN_HEALTHY, 0, T0 + 800);
+    TEST_ASSERT_FALSE(st.start_available);
+    TEST_ASSERT_TRUE(st.swap_available); /* still reachable by C (rule 8) */
+    TEST_ASSERT_TRUE(st.break_banner);
+}
+
+/* The break screen's swap hint must promise a timer you can actually
+   start. With only non-eligible extras the break offers nothing, so the
+   hint is suppressed and the break falls back to its centred footer. */
+void test_display_swap_hint_suppressed_when_no_eligible_extra(void) {
+    static const timer_def_t ONLY_A_CHORE[TIMER_SLOT_COUNT] = {
+        {"Screen", 0, false, false},    {"", 0, false, false}, {"", 0, false, false},
+        {"Laundry", 600, false, false}, {"", 0, false, false},
+    };
+    timer_set_defs(ONLY_A_CHORE, TIMER_SLOT_COUNT);
+    /* Outside a break the hint is not drawn at all, so it stays honest. */
+    TEST_ASSERT_EQUAL_STRING("Laundry", app_state_display(&IN_HEALTHY, 0, T0).swap_next_name);
+    arm_break();
+    TEST_ASSERT_NULL(app_state_display(&IN_HEALTHY, 0, T0 + 800).swap_next_name);
+}
+
+void test_display_swap_hint_survives_when_an_eligible_extra_exists(void) {
+    arm_break();
+    TEST_ASSERT_EQUAL_STRING("Piano", app_state_display(&IN_HEALTHY, 0, T0 + 800).swap_next_name);
+}
+
 /* ---- stats snapshot ----------------------------------------------------- */
 
 void test_stats_disabled_slot_reports_zero_zero(void) {
@@ -250,6 +295,11 @@ int main(void) {
     RUN_TEST(test_display_swap_next_name_is_the_slot_c_would_pick);
     RUN_TEST(test_display_swap_next_name_null_without_extras);
     RUN_TEST(test_display_swap_available_during_a_break);
+    RUN_TEST(test_display_start_available_outside_a_break);
+    RUN_TEST(test_display_start_available_is_false_for_screen_during_a_break);
+    RUN_TEST(test_display_start_available_tracks_break_eligible_during_a_break);
+    RUN_TEST(test_display_swap_hint_suppressed_when_no_eligible_extra);
+    RUN_TEST(test_display_swap_hint_survives_when_an_eligible_extra_exists);
     RUN_TEST(test_stats_disabled_slot_reports_zero_zero);
     RUN_TEST(test_stats_idle_screen_falls_back_to_schedule);
     RUN_TEST(test_stats_started_slot_allocation_includes_grant);
