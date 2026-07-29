@@ -99,9 +99,15 @@ The balance lives on **slot 0 whichever slot is running**, so `timer_run_accum()
 
 Idle neither adds nor drains. That is deliberate: the device deep-sleeps whenever nothing runs, so decaying through idle would mean the balance almost never survives to reach the interval, and "paused" is indistinguishable from "walked away".
 
-`timer_break_due()` has no RUNNING requirement (the balance can cross while Screen sits IDLE), but it does refuse while slot 0 holds no startable screen time — `EXPIRED`, or `PAUSED` at zero. A break entered from there leaves as IDLE by I7, which reads as a fresh full allocation and silently refunds the day. An HA grant re-arms slot 0 and the earned break fires against it on the next check.
+`timer_break_due()` is gated on neither RUNNING nor slot 0's state — only on a break not already running. The balance can cross while Screen sits IDLE, an earned break is not un-earned by pausing, and eye rest must keep working after the day's allocation is spent: `EXPIRED` is the *normal* end-of-day state, and folding laundry with the TV on is exactly when a break still matters.
 
-Break entry pauses whatever is RUNNING (I6 — a break is only honest if the exposure stops), records `break_interrupted_slot`, resets the balance and snaps the selection to slot 0. Break exit derives slot 0's state rather than storing it (I7): `PAUSED` when it holds banked time, `IDLE` when Screen never started today — which happens whenever a chore timer earned the whole break. `test/test_timer` names its cases after the plan's behaviour-table rows (`test_row11_...`), so a failure points at the contract it broke.
+Break entry pauses whatever is RUNNING (I6), records `break_interrupted_slot` and `break_prev_state`, resets the balance and snaps the selection to slot 0. Break exit puts slot 0 back into `break_prev_state` (I7).
+
+**I7 is stored, not derived, and that is load-bearing.** Deriving slot 0's exit state from `remaining_at_pause` refunds the whole day in two ways, both reachable on a plain 60/30 config: an HA deduction landing *during* the break zeroes the banked value, so the exit reads as "never started" and hands back a fresh allocation; and an `EXPIRED` slot 0 used to carry a stale banked value from an earlier pause, so the exit handed that back instead. (`mark_expired` now clears `remaining_at_pause` — an expired timer holds nothing, which `timer_slot_remaining` already reported.) Deriving from `allocation_sec` instead fails too, because an HA deduction can zero that as well. The byte is free: the snapshot was already being versioned for `break_interrupted_slot`.
+
+Likewise the live segment's sign comes from `run_segment_slot` — the slot that *armed* it — never from the selection. `run_started_wall` lives on slot 0, so nothing about the segment is recoverable from the selected slot, and the selection can move underneath it (`timer_ensure_active_slot_enabled` runs unconditionally on a snapshot restore and does not check RUNNING). Both bytes ride the snapshot; restoring the arming slot as 0 would invert an eligible timer's drain into an accrual.
+
+`test/test_timer` names its cases after the plan's behaviour-table rows (`test_row11_...`), so a failure points at the contract it broke.
 
 The ssd1680 component additionally keeps a `RTC_DATA_ATTR` last-refresh timestamp for its refresh-rate guard; display.c keeps its previous-frame buffer and partial/full cadence counter in RTC memory.
 

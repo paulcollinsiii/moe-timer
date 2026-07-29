@@ -190,9 +190,16 @@ bool timer_reload(void) {
     if (sl->state == TIMER_RUNNING)
         return false; /* pause first */
     uint16_t completions = sl->completions;
+    /* On slot 0 these two are the exposure balance, which only a break
+       start and the day rollover may reset (I9) — a parent reloading the
+       screen timer is neither. Zero (and therefore a no-op) on extras. */
+    int32_t accum = sl->run_accum_sec;
+    int64_t segment = sl->run_started_wall;
     memset(sl, 0, sizeof(*sl));
     sl->state = TIMER_IDLE;
     sl->completions = completions; /* reload never counts as a run */
+    sl->run_accum_sec = accum;
+    sl->run_started_wall = segment;
     return true;
 }
 
@@ -295,15 +302,19 @@ static void fold_run_segment_signed(time_t now, bool eligible) {
     s0->run_started_wall = 0;
 }
 
-/* Fold at the sign `slot`'s definition currently carries. Only the active
-   slot can be RUNNING (I1), so callers pass the slot whose run is ending. */
-static void fold_run_segment(int slot, time_t now) {
-    fold_run_segment_signed(now, timer_slot_break_eligible(slot));
+/* Fold at the sign of the slot that ARMED the segment. Never the active
+   slot: the segment lives on slot 0 and the selection can move
+   underneath it (timer_ensure_active_slot_enabled runs unconditionally on
+   a snapshot restore and does not check RUNNING), which would turn a
+   drain into an accrual. The sign is a property of the run. */
+static void fold_run_segment(time_t now) {
+    fold_run_segment_signed(now, timer_slot_break_eligible(g_rtc_state.run_segment_slot));
 }
 
-/* Arm a fresh segment on slot 0 for a run starting now. */
-static void arm_run_segment(time_t now) {
+/* Arm a fresh segment on slot 0 for a run of `slot` starting now. */
+static void arm_run_segment(int slot, time_t now) {
     screen_slot()->run_started_wall = (int64_t)now;
+    g_rtc_state.run_segment_slot = (uint8_t)slot;
 }
 
 void timer_start(time_t now, int32_t allocation_sec) {
@@ -320,8 +331,8 @@ void timer_start(time_t now, int32_t allocation_sec) {
        on Piano puts the eye-rest clock back to zero. Only a break start
        and the day rollover reset it (I9); here we merely fold whatever
        was running and re-arm. */
-    fold_run_segment(g_rtc_state.active_slot, now);
-    arm_run_segment(now);
+    fold_run_segment(now);
+    arm_run_segment(g_rtc_state.active_slot, now);
 }
 
 static void mark_expired(timer_slot_state_t *sl);
@@ -349,8 +360,10 @@ void timer_adjust(int slot, int32_t sec) {
             if (sl->remaining_at_pause <= 0) {
                 sl->remaining_at_pause = 0;
                 /* Emptied PAUSED expires (same contract as
-                   timer_reconcile_def). A BREAK stays intact — the frozen
-                   time is just zero; the post-break resume expires it.
+                   timer_reconcile_def). A BREAK stays intact and keeps its
+                   frozen zero: it leaves the break in the state it entered
+                   with (I7), so an emptied one comes back PAUSED holding
+                   nothing — pressing A then expires it by the normal path.
                    PAUSED has no live segment, so no fold is owed. */
                 if (sl->state == TIMER_PAUSED)
                     mark_expired(sl);
@@ -391,6 +404,10 @@ void timer_bonus_reconcile(int slot, int32_t target_sec) {
    behind an expired timer. */
 static void mark_expired(timer_slot_state_t *sl) {
     sl->state = TIMER_EXPIRED;
+    /* An expired timer holds nothing — timer_slot_remaining already
+       reports 0 for it, and leaving a stale banked value behind is what
+       a break entered from EXPIRED would otherwise hand back. */
+    sl->remaining_at_pause = 0;
     if (sl->completions != UINT16_MAX)
         sl->completions++; /* the run reached 00:00; saturate, never wrap */
 }
@@ -398,7 +415,7 @@ static void mark_expired(timer_slot_state_t *sl) {
 static void expire_slot(int slot, time_t now) {
     timer_slot_state_t *sl = &g_rtc_state.slots[slot];
     if (sl->state == TIMER_RUNNING)
-        fold_run_segment(slot, now);
+        fold_run_segment(now);
     mark_expired(sl);
 }
 
@@ -440,7 +457,7 @@ timer_reconcile_t timer_reconcile_def(int slot, const timer_def_t *old_def, cons
        reconciling, so old_def is the only place the old sign survives. */
     if (running && old_def->break_eligible != new_def->break_eligible) {
         fold_run_segment_signed(now, old_def->break_eligible);
-        arm_run_segment(now);
+        arm_run_segment(slot, now);
     }
 
     int32_t delta = new_def->duration_sec - old_def->duration_sec;
@@ -505,7 +522,7 @@ void timer_pause(time_t now) {
     int64_t remaining = sl->expiry_wall_time - (int64_t)now;
     sl->remaining_at_pause = (remaining > 0) ? (int32_t)remaining : 0;
     sl->expiry_wall_time = 0;
-    fold_run_segment(g_rtc_state.active_slot, now);
+    fold_run_segment(now);
     sl->state = TIMER_PAUSED;
 }
 
@@ -514,7 +531,7 @@ void timer_resume(time_t now) {
     if (sl->state != TIMER_PAUSED)
         return; /* no-op; caller checks state */
     sl->expiry_wall_time = (int64_t)now + sl->remaining_at_pause;
-    arm_run_segment(now); /* the balance lives on slot 0, not here */
+    arm_run_segment(g_rtc_state.active_slot, now); /* the balance lives on slot 0 */
     sl->state = TIMER_RUNNING;
 }
 
@@ -529,7 +546,7 @@ int32_t timer_run_accum(time_t now) {
     if (s0->run_started_wall != 0) {
         int64_t seg = (int64_t)now - s0->run_started_wall;
         if (seg > 0)
-            accum += timer_slot_break_eligible(g_rtc_state.active_slot) ? -seg : seg;
+            accum += timer_slot_break_eligible(g_rtc_state.run_segment_slot) ? -seg : seg;
     }
     return (accum > 0) ? (int32_t)accum : 0;
 }
@@ -537,22 +554,16 @@ int32_t timer_run_accum(time_t now) {
 bool timer_break_due(time_t now, int32_t interval_sec) {
     if (interval_sec <= 0)
         return false;
-    const timer_slot_state_t *s0 = screen_slot();
-    if (s0->state == TIMER_BREAK)
+    if (screen_slot()->state == TIMER_BREAK)
         return false; /* one is already running */
-    /* Slot 0's terminal states are not a break target. A break entered
-       from EXPIRED (or from a PAUSED timer holding zero) comes back out
-       as IDLE by I7 — which reads as a full, fresh allocation and
-       silently refunds the day. There is nothing left to enforce a break
-       against there anyway; an HA grant re-arms Screen and the earned
-       break fires against it on the next check. */
-    if (s0->state == TIMER_EXPIRED)
-        return false;
-    if (s0->state == TIMER_PAUSED && s0->remaining_at_pause <= 0)
-        return false;
-    /* No RUNNING requirement: the balance may have crossed while Screen
-       sat IDLE and a non-eligible extra did the work, and an earned break
-       is not un-earned by pausing. */
+    /* No RUNNING requirement and no requirement on slot 0's state: the
+       balance may have crossed while Screen sat IDLE and a non-eligible
+       extra did the work, an earned break is not un-earned by pausing,
+       and eye rest must keep working once the day's allocation is spent
+       (EXPIRED is the normal end-of-day state, and folding laundry with
+       the TV on is exactly when a break still matters). Slot 0 comes back
+       from the break in the state it went in with, so there is nothing
+       here to protect. */
     return timer_run_accum(now) >= interval_sec;
 }
 
@@ -580,6 +591,10 @@ void timer_start_break(time_t now, int32_t duration_sec) {
        to zero, and destroy the kid's banked screen time. */
     if (active()->state == TIMER_RUNNING)
         timer_pause(now);
+
+    /* Captured AFTER the pause: a break must never resume the screen
+       timer by itself, so a RUNNING slot 0 is remembered as PAUSED. */
+    g_rtc_state.break_prev_state = (uint8_t)s0->state;
 
     s0->expiry_wall_time = 0;
     s0->run_accum_sec = 0; /* fresh window after the break (I9) */
@@ -609,10 +624,10 @@ void timer_break_tick(time_t now) {
        IT is, which is what the grace window actually judges. */
     s_break_ended_wall = sl->break_expiry_wall;
     s_break_ended_latched = true;
-    /* I7, derived rather than stored: PAUSED when Screen has banked time
-       waiting for a manual resume, IDLE when it never started today (the
-       break having been earned entirely by a non-eligible extra). */
-    sl->state = (sl->remaining_at_pause > 0) ? TIMER_PAUSED : TIMER_IDLE;
+    /* I7: back to whatever slot 0 was doing before the break — PAUSED
+       with its banked time, IDLE if Screen never started today, EXPIRED
+       if the day's allocation was already spent. */
+    sl->state = (timer_state_t)g_rtc_state.break_prev_state;
     sl->break_expiry_wall = 0;
 }
 
@@ -719,6 +734,8 @@ void timer_make_snapshot(timer_snapshot_t *out) {
     out->version = TIMER_SNAPSHOT_VERSION;
     out->active_slot = g_rtc_state.active_slot;
     out->break_interrupted_slot = g_rtc_state.break_interrupted_slot;
+    out->break_prev_state = g_rtc_state.break_prev_state;
+    out->run_segment_slot = g_rtc_state.run_segment_slot;
     for (int i = 0; i < TIMER_SLOT_COUNT; i++) {
         const timer_slot_state_t *sl = &g_rtc_state.slots[i];
         timer_snapshot_slot_t *os = &out->slots[i];
@@ -748,6 +765,12 @@ static bool snapshot_valid(const timer_snapshot_t *snap, time_t now) {
     if (snap->active_slot >= TIMER_SLOT_COUNT)
         return false;
     if (snap->break_interrupted_slot >= TIMER_SLOT_COUNT)
+        return false;
+    if (snap->run_segment_slot >= TIMER_SLOT_COUNT)
+        return false;
+    /* Leaving a break INTO a break is nonsense, and a state past the
+       enum would be restored straight into the state machine. */
+    if (snap->break_prev_state >= TIMER_BREAK)
         return false;
     for (int i = 0; i < TIMER_SLOT_COUNT; i++) {
         const timer_snapshot_slot_t *sl = &snap->slots[i];
@@ -791,6 +814,8 @@ bool timer_restore_snapshot(const timer_snapshot_t *snap, time_t now) {
 
     g_rtc_state.active_slot = snap->active_slot;
     g_rtc_state.break_interrupted_slot = snap->break_interrupted_slot;
+    g_rtc_state.break_prev_state = snap->break_prev_state;
+    g_rtc_state.run_segment_slot = snap->run_segment_slot;
     int64_t expired_at = 0; /* 0 = no powered-off expiry to fold */
     bool expired_eligible = false;
     for (int i = 0; i < TIMER_SLOT_COUNT; i++) {
@@ -820,10 +845,10 @@ bool timer_restore_snapshot(const timer_snapshot_t *snap, time_t now) {
             if (sl->completions != UINT16_MAX)
                 sl->completions++;
         }
-        /* Break finished while powered off: restore per I7 — PAUSED when
-           Screen has banked time, IDLE when it never started. */
+        /* Break finished while powered off: restore per I7 — the state
+           slot 0 held when the break started. */
         if (sl->state == TIMER_BREAK && sl->break_expiry_wall <= (int64_t)now) {
-            sl->state = (sl->remaining_at_pause > 0) ? TIMER_PAUSED : TIMER_IDLE;
+            sl->state = (timer_state_t)g_rtc_state.break_prev_state;
             sl->break_expiry_wall = 0;
         }
     }

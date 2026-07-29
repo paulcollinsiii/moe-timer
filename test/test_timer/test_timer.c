@@ -563,6 +563,40 @@ void test_row16_an_eligibility_edit_folds_at_the_old_sign(void) {
     timer_set_defs(TEST_DEFS, TIMER_SLOT_COUNT);
 }
 
+/* The live segment's sign must come from the slot that ARMED it, not
+   from the selection: run_started_wall lives on slot 0, so nothing about
+   the segment is recoverable from the selected slot. Across a crash the
+   arming slot has to ride the snapshot too — restore it as 0 and an
+   eligible timer's drain comes back ADDING, a 1:1 drain silently
+   inverting, with a break able to fire off the inversion. */
+void test_segment_sign_survives_a_snapshot_round_trip(void) {
+    timer_start(T0, 7200); /* Screen: balance up to 1200 */
+    timer_pause(T0 + 1200);
+    select_slot(SLOT_VIOLIN);
+    timer_start(T0 + 1200, 3600); /* break-eligible: draining */
+    timer_record_date(T0);
+    timer_snapshot_t snap;
+    timer_make_snapshot(&snap);
+    TEST_ASSERT_EQUAL_UINT8(SLOT_VIOLIN, snap.run_segment_slot);
+
+    timer_reset();
+    TEST_ASSERT_TRUE(timer_restore_snapshot(&snap, T0 + 1800));
+    /* 600 s of drain, not 600 s of accrual */
+    TEST_ASSERT_EQUAL_INT32(600, timer_run_accum(T0 + 1800));
+}
+
+/* Same hazard without a reboot: the sign is a property of the run, so
+   folding it must not consult the selection either. */
+void test_segment_sign_is_recorded_at_arm_time(void) {
+    timer_start(T0, 7200);
+    timer_pause(T0 + 1200);
+    select_slot(SLOT_VIOLIN);
+    timer_start(T0 + 1200, 3600); /* eligible */
+    g_rtc_state.active_slot = 0;  /* selection yanked out from under it */
+    TEST_ASSERT_EQUAL_INT32(600, timer_run_accum(T0 + 1800));
+    g_rtc_state.active_slot = SLOT_VIOLIN; /* restore for tearDown's I3 */
+}
+
 /* Row 17: idle neither adds nor drains. Deliberate — the device deep-
    sleeps whenever nothing runs, so decaying through idle would mean the
    balance almost never survives to reach the interval. */
@@ -611,18 +645,84 @@ void test_an_eligible_run_never_makes_a_break_due(void) {
    allocation. Reachable with a 60 min allocation and a 30 min interval —
    the break at 30 min resets the balance, and the second half of the run
    re-earns it exactly as the timer expires. */
-void test_break_is_not_due_while_screen_holds_no_startable_time(void) {
-    timer_start(T0, 1800);
-    timer_tick(T0 + 1800); /* -> EXPIRED, balance folded at 1800 */
-    TEST_ASSERT_EQUAL(TIMER_EXPIRED, timer_slot_state(0));
-    TEST_ASSERT_EQUAL_INT32(1800, timer_run_accum(T0 + 1800));
-    TEST_ASSERT_FALSE(timer_break_due(T0 + 1800, 1800));
+/* Slot 0 leaves a break in the state it entered it with (I7). Deriving
+   that state from remaining_at_pause instead refunds the whole day in two
+   different ways, both reachable on a plain 60/30 config. */
 
-    /* Self-healing: an HA grant gives Screen time again, and the break
-       that was genuinely earned fires against it. */
-    timer_adjust(0, 600);
-    TEST_ASSERT_EQUAL(TIMER_PAUSED, timer_slot_state(0));
+/* Refund shape 1: an HA deduction lands DURING the break. A derived exit
+   reads the zeroed remaining as "never started" and hands back a fresh
+   allocation; the honest answer is a PAUSED timer holding nothing. */
+void test_break_exit_survives_an_ha_deduction_mid_break(void) {
+    timer_start(T0, 3600);
+    timer_pause(T0 + 600); /* 3000 s banked */
+    select_slot(SLOT_LAUNDRY);
+    timer_start(T0 + 600, 3600);
+    timer_start_break(T0 + 1800, 900);
+    TEST_ASSERT_EQUAL_INT32(3000, g_rtc_state.slots[0].remaining_at_pause);
+
+    timer_adjust(0, -3000); /* parent takes the time back mid-break */
+    assert_state_legal();   /* re-baseline the I5 witness: see its comment */
+    TEST_ASSERT_EQUAL_INT32(0, g_rtc_state.slots[0].remaining_at_pause);
+
+    timer_break_tick(T0 + 2700);
+    TEST_ASSERT_EQUAL(TIMER_PAUSED, timer_slot_state(0)); /* NOT idle */
+    TEST_ASSERT_EQUAL_INT32(0, timer_slot_remaining(0, T0 + 2700, 9999));
+}
+
+/* Refund shape 2: an EXPIRED slot 0 carries a stale remaining_at_pause
+   from an earlier pause, so a derived exit hands back whatever was banked
+   then. Reachable on a 60 min allocation with a 30 min interval: the
+   break at 30 min resets the balance and the second half re-earns it. */
+void test_break_exit_from_an_expired_screen_stays_expired(void) {
+    timer_start(T0, 3600);
+    timer_pause(T0 + 1800); /* remaining_at_pause = 1800 */
+    timer_resume(T0 + 1800);
+    timer_tick(T0 + 3600); /* runs out -> EXPIRED */
+    TEST_ASSERT_EQUAL(TIMER_EXPIRED, timer_slot_state(0));
+    /* An expired timer has nothing left, and says so — a stale banked
+       value here is what the derived exit would have handed back. */
+    TEST_ASSERT_EQUAL_INT32(0, g_rtc_state.slots[0].remaining_at_pause);
+
+    select_slot(SLOT_LAUNDRY);
+    timer_start(T0 + 3600, 3600);
+    timer_start_break(T0 + 5400, 900);
+    timer_break_tick(T0 + 6300);
+    TEST_ASSERT_EQUAL(TIMER_EXPIRED, timer_slot_state(0));
+    TEST_ASSERT_EQUAL_INT32(0, timer_slot_remaining(0, T0 + 6300, 9999));
+}
+
+/* The other direction the guard broke: eye rest must keep working after
+   the day's screen allocation is exhausted. EXPIRED is the NORMAL
+   end-of-day state, and folding laundry with the TV on is exactly when
+   the break still matters. */
+void test_a_break_still_fires_after_the_allocation_is_exhausted(void) {
+    timer_start(T0, 1800);
+    timer_tick(T0 + 1800); /* Screen EXPIRED, balance 1800 */
+    TEST_ASSERT_EQUAL(TIMER_EXPIRED, timer_slot_state(0));
+
+    /* The break earned by that run fires even though Screen is done... */
     TEST_ASSERT_TRUE(timer_break_due(T0 + 1800, 1800));
+    timer_start_break(T0 + 1800, 900);
+    timer_break_tick(T0 + 2700);
+    TEST_ASSERT_EQUAL(TIMER_EXPIRED, timer_slot_state(0));
+
+    /* ...and so does the next one, driven entirely by a chore. */
+    select_slot(SLOT_LAUNDRY);
+    timer_start(T0 + 2700, 3600);
+    TEST_ASSERT_TRUE(timer_break_due(T0 + 2700 + 1800, 1800));
+}
+
+/* A parent deducting screen time from HA must not silently switch eye
+   rest off for the rest of the day. */
+void test_an_ha_deduction_to_empty_does_not_disable_breaks(void) {
+    timer_start(T0, 3600);
+    timer_pause(T0 + 600);
+    timer_adjust(0, -3000); /* empties it: PAUSED -> EXPIRED */
+    TEST_ASSERT_EQUAL(TIMER_EXPIRED, timer_slot_state(0));
+
+    select_slot(SLOT_LAUNDRY);
+    timer_start(T0 + 600, 3600);
+    TEST_ASSERT_TRUE(timer_break_due(T0 + 600 + 1200, 1800)); /* 600 + 1200 */
 }
 
 /* A break already running is never "due" again — the balance it reset
@@ -632,6 +732,19 @@ void test_break_is_not_due_while_one_is_already_running(void) {
     timer_start_break(T0 + 1800, 900);
     TEST_ASSERT_FALSE(timer_break_due(T0 + 1800, 1800));
     TEST_ASSERT_EQUAL_INT32(0, timer_run_accum(T0 + 2000));
+}
+
+/* I9 names exactly two resets: break start and day rollover. Button B on
+   Screen (ParentTesting only) memsets the slot, which used to take the
+   balance with it. */
+void test_reloading_screen_keeps_the_exposure_balance(void) {
+    select_slot(SLOT_LAUNDRY);
+    timer_start(T0, 3600);
+    timer_pause(T0 + 1500);
+    select_slot(0);
+    TEST_ASSERT_TRUE(timer_reload());
+    TEST_ASSERT_EQUAL(TIMER_IDLE, timer_slot_state(0));
+    TEST_ASSERT_EQUAL_INT32(1500, timer_run_accum(T0 + 1500));
 }
 
 /* Outside a break every slot is startable — the gate is the break, not
@@ -1081,11 +1194,20 @@ void test_expiry_wall_accessor_tracks_active_slot(void) {
     TEST_ASSERT_EQUAL_INT64(0, timer_expiry_wall());
 }
 
-void test_break_never_due_on_extra_slot(void) {
-    timer_select_next(); /* Piano */
+/* Was "breaks are Screen-only", which is no longer true: a NON-eligible
+   extra earns a break exactly as Screen does. What remains true is the
+   direction — an eligible extra drains the balance, so running one can
+   never bring a break on. */
+void test_break_due_follows_the_running_slots_eligibility(void) {
+    select_slot(SLOT_PIANO); /* break-eligible: drains */
     timer_start(T0, 900);
-    /* Accrual passed the interval, but breaks are Screen-only */
     TEST_ASSERT_FALSE(timer_break_due(T0 + 800, 600));
+    timer_pause(T0 + 800);
+
+    select_slot(SLOT_LAUNDRY); /* a chore: accrues, and earns one */
+    timer_start(T0 + 800, 900);
+    TEST_ASSERT_FALSE(timer_break_due(T0 + 800 + 599, 600));
+    TEST_ASSERT_TRUE(timer_break_due(T0 + 800 + 600, 600));
 }
 
 /* ---- multi-timer slots: reload ---- */
@@ -2513,11 +2635,17 @@ int main(void) {
     RUN_TEST(test_row14_an_eligible_run_drains_the_balance);
     RUN_TEST(test_row15_the_balance_floors_at_zero);
     RUN_TEST(test_row16_an_eligibility_edit_folds_at_the_old_sign);
+    RUN_TEST(test_segment_sign_survives_a_snapshot_round_trip);
+    RUN_TEST(test_segment_sign_is_recorded_at_arm_time);
     RUN_TEST(test_row17_idle_neither_adds_nor_drains);
     RUN_TEST(test_balance_motivating_case_laundry_then_violin_then_screen);
     RUN_TEST(test_an_eligible_run_never_makes_a_break_due);
-    RUN_TEST(test_break_is_not_due_while_screen_holds_no_startable_time);
+    RUN_TEST(test_break_exit_survives_an_ha_deduction_mid_break);
+    RUN_TEST(test_break_exit_from_an_expired_screen_stays_expired);
+    RUN_TEST(test_a_break_still_fires_after_the_allocation_is_exhausted);
+    RUN_TEST(test_an_ha_deduction_to_empty_does_not_disable_breaks);
     RUN_TEST(test_break_is_not_due_while_one_is_already_running);
+    RUN_TEST(test_reloading_screen_keeps_the_exposure_balance);
     RUN_TEST(test_start_allowed_outside_a_break_is_always_true);
     RUN_TEST(test_eligible_extra_count_counts_only_break_eligible_slots);
     RUN_TEST(test_shift_expiry_moves_the_balance_segment_on_slot_zero);
@@ -2555,7 +2683,7 @@ int main(void) {
     RUN_TEST(test_reload_allowed_non_reloadable_needs_parent_testing);
     RUN_TEST(test_slot_states_are_independent);
     RUN_TEST(test_expiry_wall_accessor_tracks_active_slot);
-    RUN_TEST(test_break_never_due_on_extra_slot);
+    RUN_TEST(test_break_due_follows_the_running_slots_eligibility);
     RUN_TEST(test_reload_refused_while_running);
     RUN_TEST(test_reload_from_paused_returns_to_idle);
     RUN_TEST(test_reload_from_expired_returns_to_idle);

@@ -95,6 +95,17 @@ typedef struct {
        snaps to 0 at break entry, so nothing else records what the break
        interrupted; break end returns to it (rule 8). */
     uint8_t break_interrupted_slot;
+    /* Slot 0's state at break entry (after the forced pause), restored at
+       break end (I7). Stored rather than derived: every derivation from
+       remaining_at_pause / allocation_sec refunds the day somewhere — an
+       HA deduction landing mid-break reads as "never started", and an
+       EXPIRED slot 0 reads as whatever was banked before it expired. */
+    uint8_t break_prev_state;
+    /* Slot that ARMED the live run segment on slot 0. The segment's sign
+       is a property of the run, not of the selection — which can move
+       underneath it (timer_ensure_active_slot_enabled on a restore) and
+       would otherwise invert a drain into an accrual. */
+    uint8_t run_segment_slot;
     char last_date[11]; /* "YYYY-MM-DD\0" */
     int64_t next_ntp_sync;
 } rtc_state_t;
@@ -126,6 +137,8 @@ typedef struct {
     uint8_t active_slot;
     uint8_t checksum; /* XOR of all bytes with this field zeroed */
     uint8_t break_interrupted_slot;
+    uint8_t break_prev_state;
+    uint8_t run_segment_slot;
     timer_snapshot_slot_t slots[TIMER_SLOT_COUNT];
     char date[11]; /* day the snapshot belongs to; stale days never restore */
 } timer_snapshot_t;
@@ -277,22 +290,21 @@ int32_t timer_screen_used_sec(time_t now);
          the OLD direction before re-arming at the new one — which is what
          makes the sign derivable rather than stored. */
 int32_t timer_run_accum(time_t now); /* balance incl. the live segment; >= 0 */
-/* True when the balance has reached the interval. Not gated on RUNNING:
-   the balance can cross while Screen is IDLE or PAUSED and another
-   non-eligible timer drives it. Refused while slot 0 is already in BREAK,
-   and while slot 0 holds no startable screen time (EXPIRED, or PAUSED at
-   zero) — entering BREAK from there would come back as IDLE (I7) and
-   silently refund the day. */
+/* True when the balance has reached the interval. Not gated on RUNNING
+   or on slot 0's state: the balance can cross while Screen is IDLE,
+   PAUSED or EXPIRED and a non-eligible extra drives it — eye rest is
+   about exposure, so it must keep working after the day's screen
+   allocation is spent. Refused only while a break is already running. */
 bool timer_break_due(time_t now, int32_t interval_sec);
 /* Start a break on slot 0: pauses whatever is RUNNING (I6), records the
    interrupted slot, resets the balance, snaps the selection to slot 0. */
 void timer_start_break(time_t now, int32_t duration_sec);
 bool timer_break_active(void);             /* slot 0 == TIMER_BREAK */
 int32_t timer_break_remaining(time_t now); /* slot 0 BREAK: seconds left, else 0 */
-/* End an elapsed break: slot 0 leaves BREAK to PAUSED when it holds
-   banked screen time, otherwise IDLE (I7 — derived, never stored: Screen
-   may never have been started at all, the break having been earned
-   entirely by a non-eligible extra). break_expiry_wall cleared.
+/* End an elapsed break: slot 0 returns to the state it was in when the
+   break started (I7), which may be IDLE — Screen need never have been
+   started, the break having been earned entirely by a non-eligible
+   extra. break_expiry_wall cleared.
 
    The transition is LATCHED, not returned. timer_tick() calls this
    internally so no path can strand a break — which means any tick could
