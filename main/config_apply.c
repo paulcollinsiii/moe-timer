@@ -138,11 +138,17 @@ static void apply_timers(const cJSON *root, err_acc_t *e) {
     defs.version = TIMER_DEFS_BLOB_VERSION;
     int slot = 0;
     const cJSON *entry;
+    /* One bad entry rejects the whole array, so the error has to name the
+       entry: "timers" alone reads as "none of your timers applied" with
+       no clue which one to fix, and an over-long name is the easy way to
+       land here. */
+    char where[16];
     cJSON_ArrayForEach(entry, arr) {
         if (slot >= TIMER_EXTRA_SLOTS)
             break;
+        snprintf(where, sizeof(where), "timers[%d]", slot);
         if (!cJSON_IsObject(entry)) {
-            err_add(e, "timers");
+            err_add(e, where);
             return;
         }
         const cJSON *name = cJSON_GetObjectItemCaseSensitive(entry, "name");
@@ -157,12 +163,12 @@ static void apply_timers(const cJSON *root, err_acc_t *e) {
             continue;
         }
         if (!cJSON_IsString(name) || strlen(name->valuestring) >= sizeof(defs.defs[slot].name)) {
-            err_add(e, "timers");
+            err_add(e, where);
             return; /* whole array rejected — a half-written table is worse */
         }
         if (min == NULL || !cJSON_IsNumber(min) || min->valuedouble < CFG_BOUND_TIMER_MIN_LO ||
             min->valuedouble > CFG_BOUND_TIMER_MIN_HI) {
-            err_add(e, "timers");
+            err_add(e, where);
             return;
         }
         snprintf(defs.defs[slot].name, sizeof(defs.defs[slot].name), "%s", name->valuestring);

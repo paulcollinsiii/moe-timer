@@ -60,8 +60,15 @@ const char *ha_config_json_escape(char *tmp, size_t tmplen, const char *s) {
 #define TEXT(k, nm, maxlen, set, get) \
     { .key = k, .component = "text", .name = nm, .kind = CFG_STR, .hi = maxlen, .set_str = set, .get_str = get }
 /* Extra-timer slot fields — read-modify-write the timer_defs blob by slot. */
-#define TIMER_NAME(n) \
-    { .key = "timer" #n "_name", .component = "text", .name = "Timer " #n " name", .kind = CFG_TNAME, .slot = n }
+/* Derived from the blob field, not written out: `hi` is what discovery
+   advertises to HA *and* what ha_config_set rejects on, so the two can
+   never drift apart. */
+#define CFG_TIMER_NAME_CAP ((int)sizeof(((nvs_timer_defs_blob_t *)0)->defs[0].name))
+#define TIMER_NAME(n)                                                                                   \
+    {                                                                                                   \
+        .key = "timer" #n "_name", .component = "text", .name = "Timer " #n " name", .kind = CFG_TNAME, \
+        .hi = CFG_TIMER_NAME_CAP, .slot = n                                                             \
+    }
 #define TIMER_MIN(n)                                                                                       \
     {                                                                                                      \
         .key = "timer" #n "_min", .component = "number", .name = "Timer " #n " minutes", .unit = "min",    \
@@ -227,7 +234,7 @@ ha_cfg_result_t ha_config_set(const char *key, const char *value, char *ack, siz
         }
         case CFG_TNAME: {
             nvs_timer_defs_blob_t b;
-            if (value == NULL || strlen(value) >= sizeof(b.defs[0].name))
+            if (value == NULL || strlen(value) >= (size_t)f->hi)
                 return reject(ack, ack_len, key, "len");
             if (!str_is_clean(value))
                 return reject(ack, ack_len, key, "char");
@@ -366,7 +373,14 @@ int ha_config_discovery(char *buf, size_t len, const char *dev_id, const char *d
         if (f->unit != NULL)
             pos = jcat(buf, len, pos, ",\"unit_of_meas\":\"%s\"", f->unit);
     } else if (strcmp(f->component, "text") == 0) {
-        pos = jcat(buf, len, pos, ",\"mode\":\"text\"");
+        /* HA's text platform defaults max to 255. Without an explicit max
+           the UI accepts a value the device must then reject with "len",
+           and nothing surfaces that unless you watch the ack topic — the
+           control simply snaps back at the next cfg republish. Worse for
+           the bulk config document, where one over-long timer name aborts
+           the whole timers array. `hi` is the buffer size, so the longest
+           string that fits is hi - 1. */
+        pos = jcat(buf, len, pos, ",\"mode\":\"text\",\"max\":%d", f->hi - 1);
     } else if (strcmp(f->component, "switch") == 0) {
         pos = jcat(buf, len, pos, ",\"pl_on\":\"ON\",\"pl_off\":\"OFF\",\"optimistic\":true");
     } else if (strcmp(f->component, "select") == 0) {
