@@ -49,7 +49,8 @@ bool net_apply_open(void) {
         s_prewindow_defs[i].valid = (def != NULL);
         if (def != NULL) {
             snprintf(s_prewindow_defs[i].name, sizeof(s_prewindow_defs[i].name), "%s", def->name);
-            s_prewindow_defs[i].def = (timer_def_t){s_prewindow_defs[i].name, def->duration_sec, def->reloadable};
+            s_prewindow_defs[i].def =
+                (timer_def_t){s_prewindow_defs[i].name, def->duration_sec, def->reloadable, def->break_eligible};
         }
     }
     s_shift_pending = false;

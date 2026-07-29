@@ -16,8 +16,8 @@
 #define T0 ((time_t)1767571200)
 
 static const timer_def_t TEST_DEFS[TIMER_SLOT_COUNT] = {
-    {"Screen", 0, false},      {"Piano", 900, true},   {"", 0, false}, /* disabled */
-    {"Meditation", 600, true}, {"Violin", 900, false},
+    {"Screen", 0, false, false},   {"Piano", 900, true, true},   {"", 0, false, false}, /* disabled */
+    {"Laundry", 600, true, false}, {"Violin", 900, false, true},
 };
 
 void setUp(void) {

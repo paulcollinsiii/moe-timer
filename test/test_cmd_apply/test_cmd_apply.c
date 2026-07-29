@@ -13,7 +13,8 @@
 // clang-format on
 
 static const timer_def_t DEFS[TIMER_SLOT_COUNT] = {
-    {"Screen", 0, false}, {"Piano", 900, true}, {"", 0, false}, {"Meditation", 600, true}, {"", 0, false},
+    {"Screen", 0, false, false},     {"Piano", 900, true, true}, {"", 0, false, false},
+    {"Meditation", 600, true, true}, {"", 0, false, false},
 };
 
 void setUp(void) {

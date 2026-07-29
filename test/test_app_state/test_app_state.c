@@ -22,7 +22,9 @@
 
 /* Slot 2 left disabled to prove the 0/0 stats rule. */
 static const timer_def_t TEST_DEFS[TIMER_SLOT_COUNT] = {
-    {"Screen", 0, false}, {"Piano", 900, true}, {"", 0, false}, {"Meditation", 600, false}, {"", 0, false},
+    {"Screen", 0, false, false}, {"Piano", 900, true, true},
+    {"", 0, false, false},       {"Laundry", 600, false, false}, /* not break-eligible */
+    {"", 0, false, false},
 };
 
 static const app_state_in_t IN_HEALTHY = {
@@ -163,13 +165,14 @@ void test_display_break_banner_drops_when_the_break_ends(void) {
 void test_display_swap_next_name_is_the_slot_c_would_pick(void) {
     /* Screen selected: C lands on Piano (slot 1) */
     TEST_ASSERT_EQUAL_STRING("Piano", app_state_display(&IN_HEALTHY, 0, T0).swap_next_name);
-    TEST_ASSERT_TRUE(timer_select_next()); /* -> Piano; next is Meditation (2 disabled) */
-    TEST_ASSERT_EQUAL_STRING("Meditation", app_state_display(&IN_HEALTHY, 0, T0).swap_next_name);
+    TEST_ASSERT_TRUE(timer_select_next()); /* -> Piano; next is Laundry (2 disabled) */
+    TEST_ASSERT_EQUAL_STRING("Laundry", app_state_display(&IN_HEALTHY, 0, T0).swap_next_name);
 }
 
 void test_display_swap_next_name_null_without_extras(void) {
     static const timer_def_t NO_EXTRAS[TIMER_SLOT_COUNT] = {
-        {"Screen", 0, false}, {"", 0, false}, {"", 0, false}, {"", 0, false}, {"", 0, false},
+        {"Screen", 0, false, false}, {"", 0, false, false}, {"", 0, false, false},
+        {"", 0, false, false},       {"", 0, false, false},
     };
     timer_set_defs(NO_EXTRAS, TIMER_SLOT_COUNT);
     TEST_ASSERT_NULL(app_state_display(&IN_HEALTHY, 0, T0).swap_next_name);

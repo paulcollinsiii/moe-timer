@@ -350,12 +350,14 @@ static bool handle_break_end(void) {
     }
 
     audio_break_over_chime();
-    /* The chime and the return to Screen are the same event: the break is
-       over, so the screen timer is what you go back to. Cannot be refused
-       here — a refusal means a RUNNING extra, which suppressed the chime
-       above. */
-    if (timer_active_slot() != 0 && timer_select_screen()) {
-        ESP_LOGI(TAG, "Break over: chimed, selection back to Screen");
+    /* The chime and the return are the same event: the break is over, so
+       you go back to whatever it interrupted — which is not necessarily
+       Screen, since a break can now be earned entirely by a non-eligible
+       extra (rule 8). Cannot be refused here: a refusal means a RUNNING
+       timer, which suppressed the chime above. */
+    int interrupted = timer_break_interrupted_slot();
+    if (timer_active_slot() != interrupted && timer_select_interrupted()) {
+        ESP_LOGI(TAG, "Break over: chimed, selection back to slot %d", timer_active_slot());
     } else {
         ESP_LOGI(TAG, "Break over: chimed");
     }
@@ -1074,6 +1076,19 @@ static void handle_timer_tick(void) {
         default:
             display_update(&st); /* partial; policy promotes every 5th to full */
             break;
+    }
+
+    /* A break earned in the SAME tick that expired a timer. The check
+       above runs before timer_tick, so the expiry that pushed the balance
+       over the interval is invisible to it — and letting the break win
+       there would skip the expiry alert entirely (fire_expiry_alert is
+       never reached once enter_deep_sleep runs). fire_expiry_alert
+       returns, so re-checking here yields expiry-then-break in one wake,
+       which is the order the alerts have to arrive in. A no-op unless the
+       balance is genuinely over, so it costs nothing on every other path;
+       the button path already has this shape in finish_or_break. */
+    if (maybe_start_break(now)) {
+        enter_deep_sleep(); /* break just started; sleep through it */
     }
 
     /* A press that landed while this wake was awake (sync, grid wait,

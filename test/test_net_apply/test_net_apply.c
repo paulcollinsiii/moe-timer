@@ -141,7 +141,8 @@ static void ops_locate(void) {
 /* Pre-window table: slot 1 Piano 15 min reloadable, slot 2 disabled,
    slot 3 Meditation 10 min. */
 static const timer_def_t PRE_DEFS[TIMER_SLOT_COUNT] = {
-    {"Screen", 0, false}, {"Piano", 900, true}, {"", 0, false}, {"Meditation", 600, true}, {"", 0, false},
+    {"Screen", 0, false, false},     {"Piano", 900, true, true}, {"", 0, false, false},
+    {"Meditation", 600, true, true}, {"", 0, false, false},
 };
 
 static void install_table(const timer_def_t *defs) {
