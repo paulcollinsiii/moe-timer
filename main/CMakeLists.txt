@@ -8,6 +8,7 @@ idf_component_register(
         "wake_policy.c"
         "wake_flow.c"
         "status_led.c"
+        "config_cache.c"
         "display.c"
         "display_screens.c"
         "display_layout.c"

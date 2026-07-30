@@ -11,6 +11,7 @@
 #include "button_actions.h"
 #include "button_latch.h"
 #include "buttons.h"
+#include "config_cache.h"
 #include "display.h"
 #include "driver/gpio.h"
 #include "esp_app_desc.h"
@@ -29,8 +30,6 @@
 #include "nvs_config.h"
 #include "nvs_defaults.h"
 #include "nvs_flash.h"
-#include "quiet_hours.h"
-#include "schedule.h"
 #include "sleep_plan.h"
 #include "stats_json.h"
 #include "status_led.h"
@@ -55,34 +54,10 @@ static const char *TAG = "main";
    long. */
 #define IDLE_SYNC_INTERVAL_SEC (CONFIG_MAGTAG_IDLE_SYNC_INTERVAL_MIN * 60)
 
-/* Status pixels stay dark during configured quiet hours (alert pulses are
-   exempt — they accompany an audible, dismissable alarm). The window is
-   read from NVS once per wake — this callback fires from the LED task on
-   every pixel update; invalidated after a network window applies edits. */
-static bool s_quiet_cfg_loaded;
-static uint16_t s_quiet_start_cfg;
-static uint16_t s_quiet_end_cfg;
-
-/* Bed time follows the same wake-scoped cache pattern; both caches are
-   dropped by config_caches_invalidate() after a network window so an HA
-   edit applies within the same wake. An invalid stored value falls back
-   to the compile-time default rather than daytime-locking the device. */
-static bool s_bedtime_cfg_loaded;
-static uint16_t s_bedtime_cfg;
-
+/* Adapts the wake-scoped quiet-hours cache to neopixel.c's bool(void)
+   callback ABI, which has nowhere to take the clock from. */
 static bool status_leds_quiet(void) {
-    time_t now = time(NULL);
-    struct tm tm;
-    localtime_r(&now, &tm);
-    if (!s_quiet_cfg_loaded) {
-        s_quiet_start_cfg = NVS_DEFAULT_QUIET_START;
-        s_quiet_end_cfg = NVS_DEFAULT_QUIET_END;
-        nvs_config_get_quiet_start(&s_quiet_start_cfg);
-        nvs_config_get_quiet_end(&s_quiet_end_cfg);
-        s_quiet_cfg_loaded = true;
-    }
-    return quiet_hours_active(tm.tm_hour * 60 + tm.tm_min, quiet_hhmm_to_minutes(s_quiet_start_cfg),
-                              quiet_hhmm_to_minutes(s_quiet_end_cfg));
+    return config_cache_quiet_active(time(NULL));
 }
 
 /* Held-through-sleep guard: EXT1 ANY_LOW is level-triggered, so a button
@@ -358,22 +333,13 @@ static void poll_button_a_cb(void) {
     (void)poll_button_a_action();
 }
 
-/* The window may have applied HA config edits (allocations, holidays,
-   school dates, quiet hours, bedtime): drop the wake-scoped caches so
-   every read after the finish sees the edited values. */
-static void config_caches_invalidate(void) {
-    schedule_cache_invalidate();
-    s_quiet_cfg_loaded = false;
-    s_bedtime_cfg_loaded = false;
-}
-
 static void run_locate_alarm(void) {
     alert_run_locate(extend_awake_failsafe);
 }
 
 static const net_apply_ops_t NET_APPLY_OPS = {
     .join_poll = poll_button_a_cb,
-    .on_config_applied = config_caches_invalidate,
+    .on_config_applied = config_cache_invalidate,
     .on_active_reset_chirp = audio_break_over_chime,
     .on_active_expired_alert = fire_expiry_alert,
     .post_stats = post_stats_snapshot,
@@ -426,19 +392,6 @@ static void check_charge_lock(void) {
 
 /* ---- bed time ----------------------------------------------------------- */
 
-static int bedtime_cfg_minutes(void) {
-    if (!s_bedtime_cfg_loaded) {
-        s_bedtime_cfg = NVS_DEFAULT_BEDTIME;
-        nvs_config_get_bedtime(&s_bedtime_cfg);
-        s_bedtime_cfg_loaded = true;
-    }
-    int m = bedtime_minutes((int)s_bedtime_cfg);
-    if (m < 0 && s_bedtime_cfg != 0) {
-        m = bedtime_minutes(NVS_DEFAULT_BEDTIME);
-    }
-    return m;
-}
-
 /* Lock onto the Bed Time screen and sleep - does not return. The timer
    is paused, never expired: day rollover resets the slots overnight, so
    expiring would only skew the daily-summary stats. */
@@ -462,7 +415,7 @@ static void bedtime_engage(time_t now, bool alert) {
    right after day rollover (rollover-first ordering is what clears the
    lock on the new day). May not return. */
 static void check_bedtime(time_t now) {
-    if (!bedtime_active(time_util_minutes_of_day(now), bedtime_cfg_minutes())) {
+    if (!bedtime_active(time_util_minutes_of_day(now), config_cache_bedtime_minutes())) {
         if (s_bedtime_locked) {
             s_bedtime_locked = false;
             s_bedtime_released = true; /* repaint over the Bed Time screen */
@@ -478,7 +431,7 @@ static void check_bedtime(time_t now) {
        edit landing here is the only remote fix path while buttons are
        dead, and it must not wait another 2 h. */
     net_apply_try_window(); /* finish drops the bedtime cache with the rest */
-    if (!bedtime_active(time_util_minutes_of_day(time(NULL)), bedtime_cfg_minutes())) {
+    if (!bedtime_active(time_util_minutes_of_day(time(NULL)), config_cache_bedtime_minutes())) {
         s_bedtime_locked = false;
         s_bedtime_released = true;
         ESP_LOGW(TAG, "Bed time released (config edit or clock step)");
@@ -502,7 +455,7 @@ static bool maybe_start_break(time_t now) {
        device would lock mid-break. Skip it and go straight to Bed Time,
        audibly (this is the one alerting path that starts before the
        threshold itself is reached). */
-    if (bedtime_break_would_cross(time_util_minutes_of_day(now), (int)duration_min, bedtime_cfg_minutes())) {
+    if (bedtime_break_would_cross(time_util_minutes_of_day(now), (int)duration_min, config_cache_bedtime_minutes())) {
         ESP_LOGW(TAG, "Screen break due but would cross bed time");
         bedtime_engage(now, true); /* no return */
     }
