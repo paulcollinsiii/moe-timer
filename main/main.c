@@ -33,7 +33,10 @@
 #include "schedule.h"
 #include "sleep_plan.h"
 #include "stats_json.h"
+#include "status_led.h"
+#include "time_util.h"
 #include "timer.h"
+#include "wake_flow.h"
 #include "wake_policy.h"
 
 static const char *TAG = "main";
@@ -141,13 +144,11 @@ static bool try_restore_timer_snapshot(time_t now) {
     return true;
 }
 
-static const char *reset_reason_str(void);
-
 static void enter_deep_sleep(void) {
     /* Late-wake forensics repeat: the boot-time log of this line is often
        lost to USB CDC re-enumeration; by sleep entry the console has had
        the whole wake to come up. */
-    ESP_LOGI(TAG, "this boot: reset %s", reset_reason_str());
+    ESP_LOGI(TAG, "this boot: reset %s", wake_flow_reset_reason_str(esp_reset_reason()));
     /* Never sleep with the network task alive: it holds WiFi and may be
        mid-publish. Normal paths finished the window already (no-op here);
        this covers cut-short paths. Bounded — on the failsafe path the
@@ -254,39 +255,6 @@ static void enter_deep_sleep(void) {
     esp_deep_sleep_start();
 }
 
-/* Status pixels: one for timer state here, a different one for WiFi
-   (pixel 3, owned by net_window.c) so both can be read at once. */
-#define NP_STATE_PIXEL 0
-
-/* Boot forensics: the USB CDC console drops output around sleep/reset
-   transitions, so a crash's evidence must ride channels that survive —
-   the stat payload (HA "Last reset" sensor) and a late-wake log line.
-   Anything but DEEPSLEEP on a wake means the previous wake died. */
-static const char *reset_reason_str(void) {
-    switch (esp_reset_reason()) {
-        case ESP_RST_DEEPSLEEP:
-            return "DEEPSLEEP";
-        case ESP_RST_POWERON:
-            return "POWERON";
-        case ESP_RST_BROWNOUT:
-            return "BROWNOUT";
-        case ESP_RST_PANIC:
-            return "PANIC";
-        case ESP_RST_INT_WDT:
-            return "INT_WDT";
-        case ESP_RST_TASK_WDT:
-            return "TASK_WDT";
-        case ESP_RST_WDT:
-            return "WDT";
-        case ESP_RST_SW:
-            return "SW";
-        case ESP_RST_EXT:
-            return "EXT";
-        default:
-            return "UNKNOWN";
-    }
-}
-
 /* Side-effect-free stat snapshot for the HA session (no timer_tick — a
    read here must never transition the state machine). Assembly rules
    live in app_state.c (host-tested); only the device reads are here. */
@@ -297,7 +265,7 @@ static void stats_collect(stats_snapshot_t *out) {
         .charge_locked = s_charge_locked,
         .parent_testing = PARENT_TESTING,
         .fw_version = esp_app_get_description()->version,
-        .reset_reason = reset_reason_str(),
+        .reset_reason = wake_flow_reset_reason_str(esp_reset_reason()),
     };
     app_state_stats(&in, time(NULL), out);
 }
@@ -412,29 +380,6 @@ static const net_apply_ops_t NET_APPLY_OPS = {
     .on_locate = run_locate_alarm,
 };
 
-/* Traffic-light state feedback while the slow e-ink refresh runs:
-   RUNNING = green, PAUSED = amber, EXPIRED = red, BREAK = cyan,
-   IDLE = white. Status class — quiet hours handled by the module. */
-static void neopixel_show_timer_state(void) {
-    switch (timer_get_state()) {
-        case TIMER_RUNNING:
-            neopixel_status_pixel(NP_STATE_PIXEL, 0, 20, 0);
-            break;
-        case TIMER_PAUSED:
-            neopixel_status_pixel(NP_STATE_PIXEL, 25, 15, 0);
-            break;
-        case TIMER_EXPIRED:
-            neopixel_status_pixel(NP_STATE_PIXEL, 25, 0, 0);
-            break;
-        case TIMER_BREAK:
-            neopixel_status_pixel(NP_STATE_PIXEL, 0, 10, 25); /* blue-cyan */
-            break;
-        default:
-            neopixel_status_pixel(NP_STATE_PIXEL, 10, 10, 10);
-            break;
-    }
-}
-
 /* Render state via app_state.c (assembly rules host-tested); only the
    battery ADC read is device-side. Light/fw/reset are stats-only and
    deliberately not read here — no ADC work per paint. */
@@ -481,12 +426,6 @@ static void check_charge_lock(void) {
 
 /* ---- bed time ----------------------------------------------------------- */
 
-static int minutes_of_day(time_t t) {
-    struct tm tm;
-    localtime_r(&t, &tm);
-    return tm.tm_hour * 60 + tm.tm_min;
-}
-
 static int bedtime_cfg_minutes(void) {
     if (!s_bedtime_cfg_loaded) {
         s_bedtime_cfg = NVS_DEFAULT_BEDTIME;
@@ -523,7 +462,7 @@ static void bedtime_engage(time_t now, bool alert) {
    right after day rollover (rollover-first ordering is what clears the
    lock on the new day). May not return. */
 static void check_bedtime(time_t now) {
-    if (!bedtime_active(minutes_of_day(now), bedtime_cfg_minutes())) {
+    if (!bedtime_active(time_util_minutes_of_day(now), bedtime_cfg_minutes())) {
         if (s_bedtime_locked) {
             s_bedtime_locked = false;
             s_bedtime_released = true; /* repaint over the Bed Time screen */
@@ -539,7 +478,7 @@ static void check_bedtime(time_t now) {
        edit landing here is the only remote fix path while buttons are
        dead, and it must not wait another 2 h. */
     net_apply_try_window(); /* finish drops the bedtime cache with the rest */
-    if (!bedtime_active(minutes_of_day(time(NULL)), bedtime_cfg_minutes())) {
+    if (!bedtime_active(time_util_minutes_of_day(time(NULL)), bedtime_cfg_minutes())) {
         s_bedtime_locked = false;
         s_bedtime_released = true;
         ESP_LOGW(TAG, "Bed time released (config edit or clock step)");
@@ -563,7 +502,7 @@ static bool maybe_start_break(time_t now) {
        device would lock mid-break. Skip it and go straight to Bed Time,
        audibly (this is the one alerting path that starts before the
        threshold itself is reached). */
-    if (bedtime_break_would_cross(minutes_of_day(now), (int)duration_min, bedtime_cfg_minutes())) {
+    if (bedtime_break_would_cross(time_util_minutes_of_day(now), (int)duration_min, bedtime_cfg_minutes())) {
         ESP_LOGW(TAG, "Screen break due but would cross bed time");
         bedtime_engage(now, true); /* no return */
     }
@@ -571,10 +510,10 @@ static bool maybe_start_break(time_t now) {
     timer_start_break(now, (int32_t)duration_min * 60);
     save_timer_snapshot();
     display_state_t st = make_state(timer_tick(now), now);
-    neopixel_show_timer_state(); /* blue during the refresh */
-    display_full_refresh(&st);   /* inverted SCREEN BREAK layout */
-    alert_run(ALERT_BREAK);      /* pulse end darkens the pixels */
-    return true;                 /* caller sleeps; stop_sync guards the gate */
+    status_led_show_timer_state(); /* blue during the refresh */
+    display_full_refresh(&st);     /* inverted SCREEN BREAK layout */
+    alert_run(ALERT_BREAK);        /* pulse end darkens the pixels */
+    return true;                   /* caller sleeps; stop_sync guards the gate */
 }
 
 /* Full expiry sequence: big TIME'S UP screen, beeps + red pulse, then back
@@ -671,7 +610,7 @@ static bool poll_button_a_action(void) {
     if (button_a_apply(time(NULL)) == BTN_A_NONE)
         return false;
     ESP_LOGI(TAG, "button A during join: state %d -> %d", (int)st, (int)timer_get_state());
-    neopixel_show_timer_state();
+    status_led_show_timer_state();
     return true;
 }
 
@@ -729,7 +668,7 @@ static bool poll_break_buttons(void) {
     bool swapped = false;
     if (!dispatch_button_action((button_id_t)pick, &now, before, false, &swapped))
         return false;
-    neopixel_show_timer_state();
+    status_led_show_timer_state();
     render_action_result((button_id_t)pick, before, now, swapped);
     return true;
 }
@@ -747,7 +686,7 @@ static void watch_break_end(void) {
         return; /* not our tail; the planner will wake us closer */
     if (brem > 0) {
         ESP_LOGI(TAG, "Break ends in %ld s: staying awake", (long)brem);
-        neopixel_show_timer_state();
+        status_led_show_timer_state();
         while (timer_break_remaining(time(NULL)) > 0) {
             if (poll_break_buttons())
                 return; /* repainted; the planner owns the end from here */
@@ -783,7 +722,7 @@ static void watch_final_minute(void) {
             return;
         }
     }
-    neopixel_show_timer_state();
+    status_led_show_timer_state();
 
     /* Break config read once — the loop below spins at 250 ms. Short
        allocations can put break-due INSIDE this watch (e.g. 3 min screen
@@ -808,7 +747,7 @@ static void watch_final_minute(void) {
             neopixel_stop(); /* clear the binary-countdown pixels */
             time_t pnow = time(NULL);
             display_state_t st = make_state(timer_tick(pnow), pnow);
-            neopixel_show_timer_state(); /* amber through the refresh until sleep */
+            status_led_show_timer_state(); /* amber through the refresh until sleep */
             display_full_refresh(&st);
             return;
         }
@@ -896,7 +835,7 @@ static bool dispatch_button_action(button_id_t btn, time_t *now, timer_state_t b
                     /* Hold the pre-press colour briefly so the WHITE/AMBER ->
                        GREEN transition is visible as an acknowledgement */
                     vTaskDelay(pdMS_TO_TICKS(250));
-                    neopixel_show_timer_state();
+                    status_led_show_timer_state();
 
                     /* NTP-gated paint: wait only for the sync (seconds) so the
                        panel renders once, with the corrected clock and shifted
@@ -980,7 +919,7 @@ static void render_action_result(button_id_t btn, timer_state_t before, time_t n
            layout (empty bar, TIME'S UP state). */
         ESP_LOGI(TAG, "button %d: state %d -> %d, %s refresh", (int)btn, (int)before, (int)timer_get_state(),
                  (force_full || bwr == WAKE_RENDER_FULL) ? "full" : "partial");
-        neopixel_show_timer_state(); /* resulting state, lit until sleep */
+        status_led_show_timer_state(); /* resulting state, lit until sleep */
         if (force_full || bwr == WAKE_RENDER_FULL) {
             display_full_refresh(&st);
         } else {
@@ -1018,7 +957,7 @@ static void finish_action_and_render(button_id_t btn, timer_state_t before, time
             fire_expiry_alert();
         } else {
             display_state_t rst = make_state(rrem, rnow);
-            neopixel_show_timer_state();
+            status_led_show_timer_state();
             if (force_full || rwr == WAKE_RENDER_FULL) {
                 display_full_refresh(&rst);
             } else {
@@ -1075,7 +1014,7 @@ static void handle_timer_tick(void) {
        report). Deep-sleep tick wakes stay dark: a dim blink every minute,
        all day, isn't worth the battery. */
     if (esp_reset_reason() != ESP_RST_DEEPSLEEP) {
-        neopixel_show_timer_state();
+        status_led_show_timer_state();
     }
 
     /* Fast path: a break already due on arrival, before the grid wait and
@@ -1174,7 +1113,7 @@ static void handle_timer_tick(void) {
         timer_state_t painted = timer_get_state();
         bool swapped = false;
         if (dispatch_button_action((button_id_t)pick, &now, painted, !synced_this_wake, &swapped)) {
-            neopixel_show_timer_state();
+            status_led_show_timer_state();
             finish_or_break((button_id_t)pick, painted, now, swapped);
         }
     }
@@ -1196,7 +1135,7 @@ static void handle_button_wake(void) {
 
     /* Immediate "button heard" ack — current state colour, updated to the
        resulting state below once the action has run. */
-    neopixel_show_timer_state();
+    status_led_show_timer_state();
 
     time_t now = time(NULL);
     handle_day_rollover(&now);

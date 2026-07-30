@@ -21,3 +21,20 @@ typedef int esp_err_t;
 /* RTC_DATA_ATTR places data in RTC slow memory on ESP32.
    On native, it's a no-op — g_rtc_state is a regular static. */
 #define RTC_DATA_ATTR
+
+/* Reset causes, in ESP-IDF's declaration order so the values match the
+   real enum (esp_system.h). Trimmed to the causes the forensics map
+   names; IDF's remaining reasons (SDIO, USB, JTAG, ...) exist only on
+   device and reach the map's default arm there. */
+typedef enum {
+    ESP_RST_UNKNOWN = 0,
+    ESP_RST_POWERON,
+    ESP_RST_EXT,
+    ESP_RST_SW,
+    ESP_RST_PANIC,
+    ESP_RST_INT_WDT,
+    ESP_RST_TASK_WDT,
+    ESP_RST_WDT,
+    ESP_RST_DEEPSLEEP,
+    ESP_RST_BROWNOUT,
+} esp_reset_reason_t;

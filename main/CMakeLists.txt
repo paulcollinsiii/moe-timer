@@ -6,6 +6,8 @@ idf_component_register(
         "timer.c"
         "timer_defs.c"
         "wake_policy.c"
+        "wake_flow.c"
+        "status_led.c"
         "display.c"
         "display_screens.c"
         "display_layout.c"
