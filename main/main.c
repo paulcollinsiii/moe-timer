@@ -163,33 +163,24 @@ static void enter_deep_sleep(void) {
 
     /* All sleep-duration policy lives in the pure, host-tested planner
        (sleep_plan.c): minute-boundary alignment for clean renders, the
-       NTP early-wake lead, and the expiry/break-end event lead. Alignment
-       precision is bounded by the S2's RC-oscillator sleep drift — the
-       periodic NTP sync keeps it honest. */
+       NTP early-wake lead, the expiry/break-end event lead, and which of
+       the readings below each state actually uses. Alignment precision is
+       bounded by the S2's RC-oscillator sleep drift — the periodic NTP
+       sync keeps it honest.
+       Every reading is taken unconditionally: all seven are side-effect
+       free getters, so gathering them costs nothing and keeps the choice
+       of which ones matter on the tested side of the seam. */
     time_t plan_now = time(NULL);
-    sleep_plan_in_t plan_in = {
+    sleep_plan_timer_in_t plan_readings = {
         .state = timer_get_state(),
-        .sec_into_minute = (int)(plan_now % 60),
-        .event_remaining_sec = 0,
-        .sync_due_by_next_wake = false,
-        .break_remaining_sec = 0,
+        .now = plan_now,
+        .expiry_wall = timer_expiry_wall(),
+        .ntp_recheck_due = timer_needs_ntp_sync(plan_now + SLEEP_PLAN_SYNC_LOOKAHEAD_SEC),
+        .break_active = timer_break_active(),
+        .break_remaining_sec = timer_break_remaining(plan_now),
+        .extra_running = timer_any_extra_running(),
     };
-    if (plan_in.state == TIMER_RUNNING) {
-        plan_in.event_remaining_sec = (int32_t)(timer_expiry_wall() - (int64_t)plan_now);
-        /* due if the recheck window lapses before the wake after next */
-        plan_in.sync_due_by_next_wake = timer_needs_ntp_sync(plan_now + 90);
-    } else if (plan_in.state == TIMER_BREAK) {
-        plan_in.event_remaining_sec = timer_break_remaining(plan_now);
-    }
-    /* Secondary event: a break running behind another selected timer.
-       Only when its end will actually CHIME does it need a dedicated
-       wake — a suppressed end (an extra timer RUNNING) is silent, so it
-       can land at whatever the next tick wake is and just drop the chip
-       there. Suppression can only change via a button press, which is a
-       wake and therefore a re-plan. */
-    if (timer_break_active() && plan_in.state != TIMER_BREAK && !timer_any_extra_running()) {
-        plan_in.break_remaining_sec = timer_break_remaining(plan_now);
-    }
+    sleep_plan_in_t plan_in = sleep_plan_from_timer(&plan_readings);
     uint64_t sleep_us = (uint64_t)sleep_plan_seconds(&plan_in) * 1000000ULL;
     esp_sleep_enable_timer_wakeup(sleep_us);
     ESP_LOGI(TAG, "Entering deep sleep (%llu s)", (unsigned long long)(sleep_us / 1000000ULL));

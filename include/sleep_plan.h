@@ -1,6 +1,7 @@
 #pragma once
 #include <stdbool.h>
 #include <stdint.h>
+#include <time.h>
 
 #include "timer.h" /* timer_state_t */
 
@@ -34,16 +35,55 @@ typedef struct {
     int32_t event_remaining_sec; /* RUNNING: to expiry; BREAK: to break end; else 0 */
     bool sync_due_by_next_wake;  /* RUNNING only; false otherwise */
     /* Optional SECONDARY event: a Screen Break running on slot 0 behind
-       another selected timer. 0 = none. main.c fills this only when the
-       break end will actually chime (nothing RUNNING) — a suppressed end
-       is silent and needs no dedicated wake, it just drops the chip at
-       whatever the next tick wake is. Ignored when the break IS the
-       primary event (state == TIMER_BREAK, i.e. Screen selected). */
+       another selected timer. 0 = none. sleep_plan_from_timer() fills
+       this only when the break end will actually chime (nothing RUNNING)
+       — a suppressed end is silent and needs no dedicated wake, it just
+       drops the chip at whatever the next tick wake is. Ignored when the
+       break IS the primary event (state == TIMER_BREAK, i.e. Screen
+       selected). */
     int32_t break_remaining_sec;
 } sleep_plan_in_t;
 
 /* Seconds to deep-sleep before the next wake. Pure — host-tested. */
 int32_t sleep_plan_seconds(const sleep_plan_in_t *in);
+
+/* How far ahead the NTP recheck window is probed at sleep entry: the
+   sync is "due" if the window lapses before the wake AFTER next, so the
+   early-wake lead has a wake to be applied to. One tick wake is at most
+   60 s (RUNNING never sleeps past the countdown grid) plus the grid slack
+   the planner may add, so 90 s clears it. */
+#define SLEEP_PLAN_SYNC_LOOKAHEAD_SEC 90
+
+/* Everything the plan assembly reads from the timer module at sleep
+   entry, taken raw. main.c reads all of it unconditionally — each of
+   these is a side-effect-free getter — so that the branching over which
+   readings matter lives in sleep_plan_from_timer() below rather than in
+   the one file with no host test.
+   Do NOT pre-digest these at the call site: the moment main.c decides
+   which reading is relevant, the decision is back where it cannot be
+   tested. */
+typedef struct {
+    timer_state_t state;         /* timer_get_state() — the SELECTED slot */
+    time_t now;                  /* the single clock read the whole plan folds against */
+    int64_t expiry_wall;         /* timer_expiry_wall(); meaningful only when RUNNING */
+    bool ntp_recheck_due;        /* timer_needs_ntp_sync(now + SLEEP_PLAN_SYNC_LOOKAHEAD_SEC) */
+    bool break_active;           /* timer_break_active() — slot 0 is on a break */
+    int32_t break_remaining_sec; /* timer_break_remaining(now) */
+    bool extra_running;          /* timer_any_extra_running() — suppresses the chime */
+} sleep_plan_timer_in_t;
+
+/* Fold the timer readings into the planner's input. Pure — host-tested.
+
+   Two readings name the same wall event from different sides and must not
+   be confused: when Screen is SELECTED during its break the end is the
+   PRIMARY event (state == TIMER_BREAK, so it lands in
+   event_remaining_sec); when a break runs BEHIND another selected timer
+   it is the secondary, and only earns a dedicated wake if it will chime.
+   `break_active` — not a non-zero remaining — is what gates the
+   secondary: timer_break_remaining() happens to return 0 with no break
+   running, but inheriting correctness from another module's internal
+   guard is how the rule quietly dies when that module changes. */
+sleep_plan_in_t sleep_plan_from_timer(const sleep_plan_timer_in_t *in);
 
 #ifdef __cplusplus
 }

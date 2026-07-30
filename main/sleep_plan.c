@@ -12,7 +12,12 @@
    - RUNNING/BREAK wakes land ~SLEEP_PLAN_EVENT_LEAD_SEC before their event
      (expiry / break end) so the awake-side watch loop takes over
    - a Screen Break running BEHIND another selected timer is a secondary
-     event with the same lead, so its chime lands on time too */
+     event with the same lead, so its chime lands on time too
+
+   sleep_plan_from_timer() below owns the other half: folding the raw
+   timer readings into that input, i.e. which reading each state actually
+   uses and when a background break earns its own wake. It lives here
+   rather than in main.c because it is all decision and no device. */
 #include "sleep_plan.h"
 
 int32_t sleep_plan_seconds(const sleep_plan_in_t *in) {
@@ -53,4 +58,36 @@ int32_t sleep_plan_seconds(const sleep_plan_in_t *in) {
     if (sleep_sec < SLEEP_PLAN_MIN_SEC)
         sleep_sec = SLEEP_PLAN_MIN_SEC;
     return sleep_sec;
+}
+
+sleep_plan_in_t sleep_plan_from_timer(const sleep_plan_timer_in_t *in) {
+    sleep_plan_in_t out = {
+        .state = in->state,
+        .sec_into_minute = (int)(in->now % 60),
+        .event_remaining_sec = 0,
+        .sync_due_by_next_wake = false,
+        .break_remaining_sec = 0,
+    };
+    if (in->state == TIMER_RUNNING) {
+        out.event_remaining_sec = (int32_t)(in->expiry_wall - (int64_t)in->now);
+        /* Left signed on purpose: a wake that arrives after the expiry
+           reports a NEGATIVE remaining, and the planner's own clamp is
+           what handles it. Folding to 0 here would move the grid. */
+        out.sync_due_by_next_wake = in->ntp_recheck_due;
+    } else if (in->state == TIMER_BREAK) {
+        /* Screen selected during its own break: the break end IS the
+           primary event, so it goes in event_remaining_sec and the
+           secondary rule below deliberately skips this state. */
+        out.event_remaining_sec = in->break_remaining_sec;
+    }
+    /* Secondary event: a break running behind another selected timer.
+       Only when its end will actually CHIME does it need a dedicated
+       wake — a suppressed end (an extra timer RUNNING) is silent, so it
+       can land at whatever the next tick wake is and just drop the chip
+       there. Suppression can only change via a button press, which is a
+       wake and therefore a re-plan. */
+    if (in->break_active && in->state != TIMER_BREAK && !in->extra_running) {
+        out.break_remaining_sec = in->break_remaining_sec;
+    }
+    return out;
 }
