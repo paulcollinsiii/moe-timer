@@ -1,5 +1,4 @@
 #include <stdlib.h>
-#include <string.h>
 #include <time.h>
 
 #include "alerts.h"
@@ -35,6 +34,7 @@
 #include "status_led.h"
 #include "time_util.h"
 #include "timer.h"
+#include "timer_persist.h"
 #include "wake_flow.h"
 #include "wake_policy.h"
 
@@ -85,40 +85,6 @@ static RTC_DATA_ATTR bool s_bedtime_locked;
 static bool s_bedtime_released; /* morning/config release: repaint over Bed Time */
 #define BEDTIME_SLEEP_SEC 7200
 
-/* Persist the timer to NVS so a panic/reset (which wipes RTC memory)
-   cannot refund the day's allocation. Write only on change — snapshot
-   fields are stable across routine RUNNING ticks, so this costs flash
-   wear only on actual state transitions. */
-static void save_timer_snapshot(void) {
-    timer_snapshot_t snap, stored;
-    timer_make_snapshot(&snap);
-    if (nvs_config_load_timer_snapshot(&stored) == ESP_OK && memcmp(&snap, &stored, sizeof(snap)) == 0) {
-        return;
-    }
-    esp_err_t ret = nvs_config_save_timer_snapshot(&snap);
-    if (ret != ESP_OK) {
-        ESP_LOGW(TAG, "snapshot save failed: %s", esp_err_to_name(ret));
-    }
-}
-
-/* After a panic/external reset OR power cycle, RTC memory is wiped —
-   restore today's timer state from NVS instead of letting the rollover
-   refund the allocation. Returns true when state was restored. Called
-   twice: at boot (works after a panic, where the RTC clock survives) and
-   again after the rollover's NTP sync (covers power-on, where the clock
-   is invalid until corrected). */
-static bool try_restore_timer_snapshot(time_t now) {
-    if (timer_current_date()[0] != '\0')
-        return false; /* RTC state intact — normal deep-sleep wake */
-    timer_snapshot_t snap;
-    if (nvs_config_load_timer_snapshot(&snap) != ESP_OK)
-        return false;
-    if (!timer_restore_snapshot(&snap, now))
-        return false;
-    ESP_LOGW(TAG, "Timer state restored from NVS snapshot, state=%d", (int)timer_get_state());
-    return true;
-}
-
 static void enter_deep_sleep(void) {
     /* Late-wake forensics repeat: the boot-time log of this line is often
        lost to USB CDC re-enumeration; by sleep entry the console has had
@@ -132,7 +98,7 @@ static void enter_deep_sleep(void) {
        context. */
     net_window_join(15000, NULL);
     net_window_log_last(); /* timing repeat: the boot-time line is often lost to CDC */
-    save_timer_snapshot();
+    timer_persist_save();
     /* EXT1 ANY_LOW is level-triggered: a still-held button would re-wake
        instantly and re-fire its action. Wait (bounded) for release. */
     for (int i = 0; i < 30 && buttons_scan_held() != 0; i++) {
@@ -401,7 +367,7 @@ static void bedtime_engage(time_t now, bool alert) {
     if (timer_get_state() == TIMER_RUNNING) {
         timer_pause(now);
     }
-    save_timer_snapshot();
+    timer_persist_save();
     display_bedtime(); /* one full refresh; later wakes leave the panel alone */
     if (alert) {
         alert_run(ALERT_BEDTIME);
@@ -461,7 +427,7 @@ static bool maybe_start_break(time_t now) {
     }
     ESP_LOGI(TAG, "Screen break due (accum %ld s)", (long)timer_run_accum(now));
     timer_start_break(now, (int32_t)duration_min * 60);
-    save_timer_snapshot();
+    timer_persist_save();
     display_state_t st = make_state(timer_tick(now), now);
     status_led_show_timer_state(); /* blue during the refresh */
     display_full_refresh(&st);     /* inverted SCREEN BREAK layout */
@@ -477,7 +443,7 @@ static void fire_expiry_alert(void) {
     /* Persist EXPIRED before the ~15 s alert + redraw, not at the eventual
        enter_deep_sleep: an EN reset or power cut mid-alert would otherwise
        restore the stale RUNNING snapshot and replay the final minute. */
-    save_timer_snapshot();
+    timer_persist_save();
     display_timesup();
     alert_run(ALERT_EXPIRY);
     time_t now = time(NULL);
@@ -516,7 +482,7 @@ static void handle_day_rollover(time_t *now) {
     /* Power cycling must not refund the allocation: with the clock now
        corrected, a same-day NVS snapshot beats a reset. Only a genuine
        date change (or Button B in parent mode) resets the day. */
-    if (try_restore_timer_snapshot(*now)) {
+    if (timer_persist_try_restore(*now)) {
         return;
     }
     timer_reset();
@@ -1203,7 +1169,7 @@ void app_main(void) {
 
     /* Must run after TZ is set (date comparison) and before the wake
        handlers (whose rollover check would otherwise reset the timer). */
-    try_restore_timer_snapshot(time(NULL));
+    timer_persist_try_restore(time(NULL));
 
     net_apply_init(&NET_APPLY_OPS);
     buttons_init();

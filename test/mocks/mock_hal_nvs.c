@@ -18,43 +18,64 @@ typedef struct {
 static Entry s_store[MAX_ENTRIES];
 static int s_fail_writes;
 
-/* Read-call accounting, kept separate from the store so misses count too. */
+/* Per-key call accounting, kept separate from the store so misses count
+   too — a read of an absent key is still a flash access. */
 typedef struct {
     char key[MAX_KEY_LEN];
-    int reads;
-} ReadCount;
+    int calls;
+} CallCount;
 
-static ReadCount s_read_counts[MAX_ENTRIES];
+static CallCount s_read_counts[MAX_ENTRIES];
+static CallCount s_write_counts[MAX_ENTRIES];
 
-static void count_read(const char *key) {
+static void count_call(CallCount *table, const char *key) {
     for (int i = 0; i < MAX_ENTRIES; i++) {
-        if (s_read_counts[i].reads > 0 && strcmp(s_read_counts[i].key, key) == 0) {
-            s_read_counts[i].reads++;
+        if (table[i].calls > 0 && strcmp(table[i].key, key) == 0) {
+            table[i].calls++;
             return;
         }
     }
     for (int i = 0; i < MAX_ENTRIES; i++) {
-        if (s_read_counts[i].reads == 0) {
-            strncpy(s_read_counts[i].key, key, MAX_KEY_LEN - 1);
-            s_read_counts[i].key[MAX_KEY_LEN - 1] = '\0';
-            s_read_counts[i].reads = 1;
+        if (table[i].calls == 0) {
+            strncpy(table[i].key, key, MAX_KEY_LEN - 1);
+            table[i].key[MAX_KEY_LEN - 1] = '\0';
+            table[i].calls = 1;
             return;
         }
     }
 }
 
-int mock_nvs_read_count(const char *key) {
+static int lookup_calls(const CallCount *table, const char *key) {
     for (int i = 0; i < MAX_ENTRIES; i++) {
-        if (s_read_counts[i].reads > 0 && strcmp(s_read_counts[i].key, key) == 0) {
-            return s_read_counts[i].reads;
+        if (table[i].calls > 0 && strcmp(table[i].key, key) == 0) {
+            return table[i].calls;
         }
     }
     return 0;
 }
 
+static void count_read(const char *key) {
+    count_call(s_read_counts, key);
+}
+
+/* Counted before the failure injection is consumed: an attempted write is
+   an attempted flash access whether or not it lands. */
+static void count_write(const char *key) {
+    count_call(s_write_counts, key);
+}
+
+int mock_nvs_read_count(const char *key) {
+    return lookup_calls(s_read_counts, key);
+}
+
+int mock_nvs_write_count(const char *key) {
+    return lookup_calls(s_write_counts, key);
+}
+
 void mock_nvs_reset(void) {
     memset(s_store, 0, sizeof(s_store));
     memset(s_read_counts, 0, sizeof(s_read_counts));
+    memset(s_write_counts, 0, sizeof(s_write_counts));
     s_fail_writes = 0;
 }
 
@@ -107,6 +128,7 @@ esp_err_t hal_nvs_read_u16(const char *key, uint16_t *out) {
 }
 
 esp_err_t hal_nvs_write_u16(const char *key, uint16_t val) {
+    count_write(key);
     if (take_write_failure())
         return ESP_FAIL;
     Entry *e = alloc_entry(key);
@@ -134,6 +156,7 @@ esp_err_t hal_nvs_read_str(const char *key, char *buf, size_t *len) {
 }
 
 esp_err_t hal_nvs_write_str(const char *key, const char *val) {
+    count_write(key);
     if (take_write_failure())
         return ESP_FAIL;
     Entry *e = alloc_entry(key);
@@ -162,6 +185,7 @@ esp_err_t hal_nvs_read_blob(const char *key, void *buf, size_t *len) {
 }
 
 esp_err_t hal_nvs_write_blob(const char *key, const void *buf, size_t len) {
+    count_write(key);
     if (take_write_failure())
         return ESP_FAIL;
     Entry *e = alloc_entry(key);
