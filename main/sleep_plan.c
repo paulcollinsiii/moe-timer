@@ -91,3 +91,36 @@ sleep_plan_in_t sleep_plan_from_timer(const sleep_plan_timer_in_t *in) {
     }
     return out;
 }
+
+wake_sleep_mode_t wake_sleep_mode_select(bool charge_locked, bool bedtime_locked) {
+    if (charge_locked)
+        return WAKE_SLEEP_CHARGE_LOCK;
+    if (bedtime_locked)
+        return WAKE_SLEEP_BEDTIME;
+    return WAKE_SLEEP_NORMAL;
+}
+
+sleep_outcome_t sleep_plan_outcome(wake_sleep_mode_t mode, const sleep_plan_in_t *in) {
+    /* No default case on purpose: adding an enumerator without handling it
+       is a hard -Wswitch error in the FIRMWARE build, which compiles
+       -Werror. The host suites run -Wall -Wextra without -Werror, so there
+       it is only a warning — which is why the fallback below fails closed
+       instead of trusting the switch to be exhaustive. */
+    switch (mode) {
+        case WAKE_SLEEP_NORMAL:
+            /* sleep_plan_seconds() clamps to SLEEP_PLAN_MIN_SEC, so the
+               unsigned narrowing can never see a negative. */
+            return (sleep_outcome_t){.seconds = (uint32_t)sleep_plan_seconds(in), .enable_buttons = true, .reason = ""};
+        case WAKE_SLEEP_CHARGE_LOCK:
+            return (sleep_outcome_t){
+                .seconds = CHARGE_LOCK_SLEEP_SEC, .enable_buttons = false, .reason = "charge lock, "};
+        case WAKE_SLEEP_BEDTIME:
+            return (sleep_outcome_t){.seconds = BEDTIME_SLEEP_SEC, .enable_buttons = false, .reason = "bed time, "};
+    }
+    /* Unreachable while wake_sleep_mode_select() is the only producer, but
+       a cast value would land here. Fail CLOSED: this whole mechanism
+       exists to keep the buttons dark on a battery that cannot afford a
+       refresh, so an unrecognised mode takes the lock interval with no
+       wake sources rather than a planner nap with buttons armed. */
+    return (sleep_outcome_t){.seconds = CHARGE_LOCK_SLEEP_SEC, .enable_buttons = false, .reason = "unknown mode, "};
+}

@@ -407,6 +407,87 @@ void test_from_timer_feeds_the_planner(void) {
     TEST_ASSERT_EQUAL_INT32(43, sleep_plan_seconds(&p)); /* suppressed: wall grid */
 }
 
+/* ---- sleep mode: which policy a wake ends under ------------------------ */
+
+static sleep_plan_in_t idle_at(int sec_into_minute) {
+    sleep_plan_in_t in = {
+        .state = TIMER_IDLE,
+        .sec_into_minute = sec_into_minute,
+        .event_remaining_sec = 0,
+        .sync_due_by_next_wake = false,
+        .break_remaining_sec = 0,
+    };
+    return in;
+}
+
+/* Both locks can be engaged at once: bed time engages at night and
+   survives in RTC memory, so a later wake can find the battery in the
+   lock band while the night is still on. Charge lock has to win — its
+   whole point is that the battery cannot afford the 2 h cadence. */
+void test_charge_lock_wins_over_bedtime(void) {
+    TEST_ASSERT_EQUAL_INT(WAKE_SLEEP_CHARGE_LOCK, wake_sleep_mode_select(true, true));
+}
+
+void test_mode_select_covers_every_lock_combination(void) {
+    TEST_ASSERT_EQUAL_INT(WAKE_SLEEP_NORMAL, wake_sleep_mode_select(false, false));
+    TEST_ASSERT_EQUAL_INT(WAKE_SLEEP_CHARGE_LOCK, wake_sleep_mode_select(true, false));
+    TEST_ASSERT_EQUAL_INT(WAKE_SLEEP_BEDTIME, wake_sleep_mode_select(false, true));
+    TEST_ASSERT_EQUAL_INT(WAKE_SLEEP_CHARGE_LOCK, wake_sleep_mode_select(true, true));
+}
+
+void test_charge_lock_outcome_is_a_fixed_buttonless_interval(void) {
+    sleep_plan_in_t in = idle_at(17);
+    sleep_outcome_t out = sleep_plan_outcome(WAKE_SLEEP_CHARGE_LOCK, &in);
+    TEST_ASSERT_EQUAL_UINT32(600, out.seconds);
+    TEST_ASSERT_FALSE(out.enable_buttons);
+    TEST_ASSERT_EQUAL_STRING("charge lock, ", out.reason);
+}
+
+void test_bedtime_outcome_is_a_fixed_buttonless_interval(void) {
+    sleep_plan_in_t in = idle_at(17);
+    sleep_outcome_t out = sleep_plan_outcome(WAKE_SLEEP_BEDTIME, &in);
+    TEST_ASSERT_EQUAL_UINT32(7200, out.seconds);
+    TEST_ASSERT_FALSE(out.enable_buttons);
+    TEST_ASSERT_EQUAL_STRING("bed time, ", out.reason);
+}
+
+/* The normal path is the planner, unchanged, with buttons armed. */
+void test_normal_outcome_defers_to_the_planner(void) {
+    sleep_plan_in_t in = idle_at(17);
+    sleep_outcome_t out = sleep_plan_outcome(WAKE_SLEEP_NORMAL, &in);
+    TEST_ASSERT_EQUAL_UINT32(43, out.seconds); /* == plan(TIMER_IDLE, 17, ...) */
+    TEST_ASSERT_TRUE(out.enable_buttons);
+    TEST_ASSERT_EQUAL_STRING("", out.reason);
+}
+
+/* A locked wake does no timer work at all, so the planner's answer must
+   not leak into it — main.c gathers the readings unconditionally. */
+void test_lock_outcomes_ignore_the_planner_input(void) {
+    sleep_plan_in_t running = {
+        .state = TIMER_RUNNING,
+        .sec_into_minute = 30,
+        .event_remaining_sec = 3600,
+        .sync_due_by_next_wake = true,
+        .break_remaining_sec = 90,
+    };
+    TEST_ASSERT_EQUAL_UINT32(600, sleep_plan_outcome(WAKE_SLEEP_CHARGE_LOCK, &running).seconds);
+    TEST_ASSERT_EQUAL_UINT32(7200, sleep_plan_outcome(WAKE_SLEEP_BEDTIME, &running).seconds);
+    /* same input, normal mode: the planner really would have said 20 */
+    TEST_ASSERT_EQUAL_UINT32(20, sleep_plan_outcome(WAKE_SLEEP_NORMAL, &running).seconds);
+}
+
+/* An out-of-range mode cannot arise while wake_sleep_mode_select() is the
+   only producer, but a cast value would reach the fallback — and it must
+   point the safe way. Buttons dark on a lock-length interval, never the
+   planner's answer with the buttons armed. */
+void test_unknown_mode_fails_closed(void) {
+    sleep_plan_in_t in = idle_at(17);
+    sleep_outcome_t out = sleep_plan_outcome((wake_sleep_mode_t)99, &in);
+    TEST_ASSERT_FALSE(out.enable_buttons);
+    TEST_ASSERT_EQUAL_UINT32(600, out.seconds); /* not 43, the planner's answer */
+    TEST_ASSERT_EQUAL_STRING("unknown mode, ", out.reason);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_running_never_sleeps_past_the_minute_grid);
@@ -437,5 +518,12 @@ int main(void) {
     RUN_TEST(test_from_timer_clock_only_states_have_no_event);
     RUN_TEST(test_from_timer_sec_into_minute_tracks_the_clock);
     RUN_TEST(test_from_timer_feeds_the_planner);
+    RUN_TEST(test_charge_lock_wins_over_bedtime);
+    RUN_TEST(test_mode_select_covers_every_lock_combination);
+    RUN_TEST(test_charge_lock_outcome_is_a_fixed_buttonless_interval);
+    RUN_TEST(test_bedtime_outcome_is_a_fixed_buttonless_interval);
+    RUN_TEST(test_normal_outcome_defers_to_the_planner);
+    RUN_TEST(test_lock_outcomes_ignore_the_planner_input);
+    RUN_TEST(test_unknown_mode_fails_closed);
     return UNITY_END();
 }

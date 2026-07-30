@@ -74,7 +74,6 @@ static RTC_DATA_ATTR int64_t s_sleep_entry_time;
    leave persistent artifacts, and every wake costs charge it can't spare. */
 static RTC_DATA_ATTR bool s_charge_locked;
 static bool s_charge_lock_released; /* recovery wake: repaint over Charge Me! */
-#define CHARGE_LOCK_SLEEP_SEC 600
 
 /* Bed Time lock (config HHMM .. day rollover): Bed Time screen painted
    once, buttons stay dark, and the device sleeps ~2 h chunks waking only
@@ -83,9 +82,19 @@ static bool s_charge_lock_released; /* recovery wake: repaint over Charge Me! */
    night - it merely replays the engage (paint + alert) once. */
 static RTC_DATA_ATTR bool s_bedtime_locked;
 static bool s_bedtime_released; /* morning/config release: repaint over Bed Time */
-#define BEDTIME_SLEEP_SEC 7200
 
-static void enter_deep_sleep(void) {
+/* The two lock flags read as one policy question; the precedence between
+   them is host-tested in sleep_plan.c. Every sleep site asks through here
+   rather than inspecting the flags, so there is exactly one place for
+   lock_gate.c to take over. Sampling at the call site (not inside
+   enter_deep_sleep, past its 15 s net_window_join) also shrinks the
+   awake_failsafe_cb race to the few ms between gate entry and the flag
+   write — and a mis-sampled wake self-corrects on the next one. */
+static wake_sleep_mode_t current_sleep_mode(void) {
+    return wake_sleep_mode_select(s_charge_locked, s_bedtime_locked);
+}
+
+static void enter_deep_sleep(wake_sleep_mode_t mode) {
     /* Late-wake forensics repeat: the boot-time log of this line is often
        lost to USB CDC re-enumeration; by sleep entry the console has had
        the whole wake to come up. */
@@ -106,8 +115,9 @@ static void enter_deep_sleep(void) {
     }
 
     /* Snapshot still-held buttons for the continuation guard. Must read
-       BEFORE buttons_configure_wakeup() switches the pads to the RTC mux
-       (digital gpio_get_level is unreliable after that). */
+       while the pads are still digital: buttons_configure_wakeup_if() at
+       the end of this function is what hands them to the RTC mux, and
+       gpio_get_level is unreliable afterwards. */
     s_held_mask_at_sleep = buttons_scan_held();
     s_sleep_entry_time = (int64_t)time(NULL);
 
@@ -141,26 +151,6 @@ static void enter_deep_sleep(void) {
        the wake-scoped handle. */
     hal_nvs_close();
 
-    /* Charge-locked: no button wake sources (a press could only burn a
-       refresh the battery can't afford) and a fixed long interval instead
-       of the planner — wakes only re-check the battery. */
-    if (s_charge_locked) {
-        esp_sleep_enable_timer_wakeup((uint64_t)CHARGE_LOCK_SLEEP_SEC * 1000000ULL);
-        ESP_LOGI(TAG, "Entering deep sleep (charge lock, %d s)", CHARGE_LOCK_SLEEP_SEC);
-        esp_deep_sleep_start();
-    }
-
-    /* Bed-time locked (charge lock above wins by ordering): buttons stay
-       dark until day rollover; fixed ~2 h wakes only re-sync the clock
-       and re-check the gate. */
-    if (s_bedtime_locked) {
-        esp_sleep_enable_timer_wakeup((uint64_t)BEDTIME_SLEEP_SEC * 1000000ULL);
-        ESP_LOGI(TAG, "Entering deep sleep (bed time, %d s)", BEDTIME_SLEEP_SEC);
-        esp_deep_sleep_start();
-    }
-
-    buttons_configure_wakeup();
-
     /* All sleep-duration policy lives in the pure, host-tested planner
        (sleep_plan.c): minute-boundary alignment for clean renders, the
        NTP early-wake lead, the expiry/break-end event lead, and which of
@@ -181,9 +171,14 @@ static void enter_deep_sleep(void) {
         .extra_running = timer_any_extra_running(),
     };
     sleep_plan_in_t plan_in = sleep_plan_from_timer(&plan_readings);
-    uint64_t sleep_us = (uint64_t)sleep_plan_seconds(&plan_in) * 1000000ULL;
-    esp_sleep_enable_timer_wakeup(sleep_us);
-    ESP_LOGI(TAG, "Entering deep sleep (%llu s)", (unsigned long long)(sleep_us / 1000000ULL));
+    /* The mode picks between the planner and a lock's fixed interval, and
+       carries the button decision with it — the readings above are pure
+       getters, so gathering them on a locked wake costs nothing and keeps
+       this path straight. */
+    sleep_outcome_t out = sleep_plan_outcome(mode, &plan_in);
+    buttons_configure_wakeup_if(out.enable_buttons);
+    esp_sleep_enable_timer_wakeup((uint64_t)out.seconds * 1000000ULL);
+    ESP_LOGI(TAG, "Entering deep sleep (%s%lu s)", out.reason, (unsigned long)out.seconds);
     esp_deep_sleep_start();
 }
 
@@ -344,7 +339,7 @@ static void check_charge_lock(void) {
            before the long battery-recheck sleeps begin. */
         net_apply_try_window();
     }
-    enter_deep_sleep(); /* lock-aware: long interval, no button wake */
+    enter_deep_sleep(current_sleep_mode()); /* charge-locked here: 600 s, no button wake */
 }
 
 /* ---- bed time ----------------------------------------------------------- */
@@ -365,7 +360,7 @@ static void bedtime_engage(time_t now, bool alert) {
     }
     /* Best-effort HA stat before the long no-button sleeps begin. */
     net_apply_try_window();
-    enter_deep_sleep(); /* lock-aware: ~2 h interval, no button wake */
+    enter_deep_sleep(current_sleep_mode()); /* bed-time locked here: ~2 h, no button wake */
 }
 
 /* Gate, modeled on check_charge_lock: called from both wake handlers
@@ -394,7 +389,7 @@ static void check_bedtime(time_t now) {
         ESP_LOGW(TAG, "Bed time released (config edit or clock step)");
         return; /* fall through to the normal wake, which repaints */
     }
-    enter_deep_sleep();
+    enter_deep_sleep(current_sleep_mode());
 }
 
 /* Returns true when a break was started (caller should go straight to
@@ -891,7 +886,7 @@ static void finish_or_break(button_id_t btn, timer_state_t before, time_t now, b
     if (maybe_start_break(now)) {
         post_stats_snapshot(); /* break screen painted: release MQTT */
         net_apply_finish();    /* drain + apply deferred before sleeping */
-        enter_deep_sleep();
+        enter_deep_sleep(current_sleep_mode());
     }
     finish_action_and_render(btn, before, now, selection_changed);
 }
@@ -941,7 +936,7 @@ static void handle_timer_tick(void) {
        final minute — but this call carries no such guarantee, so do not
        add one to this comment. */
     if (maybe_start_break(now)) {
-        enter_deep_sleep(); /* break just started; sleep through it */
+        enter_deep_sleep(current_sleep_mode()); /* break just started; sleep through it */
     }
 
     /* Land the render on the state's grid — the planner woke us on (or,
@@ -1009,7 +1004,7 @@ static void handle_timer_tick(void) {
        alert holds the CPU for ~15 s before returning. */
     now = time(NULL);
     if (maybe_start_break(now)) {
-        enter_deep_sleep(); /* break just started; sleep through it */
+        enter_deep_sleep(current_sleep_mode()); /* break just started; sleep through it */
     }
 
     /* A press that landed while this wake was awake (sync, grid wait,
@@ -1028,7 +1023,7 @@ static void handle_timer_tick(void) {
         }
     }
     maybe_wait_for_event();
-    enter_deep_sleep();
+    enter_deep_sleep(current_sleep_mode());
 }
 
 static void handle_button_wake(void) {
@@ -1040,7 +1035,7 @@ static void handle_button_wake(void) {
        and go back to waiting for release. */
     if (btn != BTN_NONE && (s_held_mask_at_sleep & (1u << (int)btn)) && (int64_t)time(NULL) - s_sleep_entry_time <= 2) {
         ESP_LOGI(TAG, "button %d still held from previous wake - ignoring", (int)btn);
-        enter_deep_sleep(); /* does not return */
+        enter_deep_sleep(current_sleep_mode()); /* does not return */
     }
 
     /* Immediate "button heard" ack — current state colour, updated to the
@@ -1087,7 +1082,7 @@ static void handle_button_wake(void) {
 
     finish_or_break(btn, before, now, swapped); /* e.g. resume with accrual already past the interval */
     maybe_wait_for_event();
-    enter_deep_sleep();
+    enter_deep_sleep(current_sleep_mode());
 }
 
 /* Last-resort battery protection: no wake may run forever (WiFi driver
@@ -1099,7 +1094,7 @@ static void handle_button_wake(void) {
 static void awake_failsafe_cb(void *arg) {
     (void)arg;
     ESP_LOGE(TAG, "Awake failsafe: still awake after %d s - forcing deep sleep", CONFIG_MAGTAG_MAX_AWAKE_SEC);
-    enter_deep_sleep();
+    enter_deep_sleep(current_sleep_mode());
 }
 
 static esp_timer_handle_t s_failsafe_timer;

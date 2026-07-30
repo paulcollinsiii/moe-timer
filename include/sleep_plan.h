@@ -85,6 +85,49 @@ typedef struct {
    guard is how the rule quietly dies when that module changes. */
 sleep_plan_in_t sleep_plan_from_timer(const sleep_plan_timer_in_t *in);
 
+/* ---- sleep mode: which policy a wake ends under ------------------------ */
+
+/* The two locks deliberately stop doing timer work, so they bypass the
+   planner for a fixed long interval and leave the buttons dark. Fixed and
+   not menuconfig, like the leads above: both are protection margins, not
+   preferences — 600 s is "re-read the battery often enough to notice a
+   charger" and 7200 s is "wake only for NTP and the rollover check". */
+#define CHARGE_LOCK_SLEEP_SEC 600
+#define BEDTIME_SLEEP_SEC 7200
+
+typedef enum {
+    WAKE_SLEEP_NORMAL = 0,
+    WAKE_SLEEP_CHARGE_LOCK,
+    WAKE_SLEEP_BEDTIME,
+} wake_sleep_mode_t;
+
+/* Precedence between the locks. Both can be engaged at once, by a
+   specific path: bed time engages and sets its flag in RTC memory, the
+   device sleeps its 2 h chunk, and the next wake runs check_charge_lock()
+   — which comes before any bedtime code — with the battery at or under
+   BATT_LOCK_PCT. The charge flag goes up while the bed-time flag is still
+   set, and nothing on that boot clears it. (The 10-15% hysteresis band
+   only HOLDS an engaged lock; engaging needs <= BATT_LOCK_PCT.) Charge
+   lock wins: a battery that cannot afford a refresh cannot afford the 2 h
+   cadence either. Pure — host-tested. */
+wake_sleep_mode_t wake_sleep_mode_select(bool charge_locked, bool bedtime_locked);
+
+/* Everything the deep-sleep call needs, so main.c can act on the mode
+   without a branch of its own. `reason` is a log PREFIX — empty on the
+   normal path, "<why>, " on the locked ones — so a single format string
+   reproduces all three messages. */
+typedef struct {
+    uint32_t seconds;
+    bool enable_buttons;
+    const char *reason;
+} sleep_outcome_t;
+
+/* Resolve a mode into that outcome. NORMAL defers to sleep_plan_seconds();
+   the locks ignore `in` entirely (main.c gathers the readings
+   unconditionally — they are all side-effect-free getters). Pure —
+   host-tested. */
+sleep_outcome_t sleep_plan_outcome(wake_sleep_mode_t mode, const sleep_plan_in_t *in);
+
 #ifdef __cplusplus
 }
 #endif

@@ -7,6 +7,7 @@ idf_component_register(
         "timer_defs.c"
         "timer_persist.c"
         "wake_policy.c"
+        "buttons_policy.c"
         "wake_flow.c"
         "status_led.c"
         "config_cache.c"
