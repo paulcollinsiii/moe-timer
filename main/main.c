@@ -5,7 +5,6 @@
 #include "app_state.h"
 #include "audio.h"
 #include "battery.h"
-#include "bedtime.h"
 #include "button_latch.h"
 #include "buttons.h"
 #include "config_cache.h"
@@ -21,7 +20,6 @@
 #include "hal_nvs.h"
 #include "light.h"
 #include "lock_gate.h"
-#include "mqtt_ha.h"
 #include "neopixel.h"
 #include "net_apply.h"
 #include "net_window.h"
@@ -31,7 +29,6 @@
 #include "sleep_plan.h"
 #include "stats_json.h"
 #include "status_led.h"
-#include "time_util.h"
 #include "timer.h"
 #include "timer_persist.h"
 #include "wake_flow.h"
@@ -174,7 +171,6 @@ static void stats_collect(stats_snapshot_t *out) {
 }
 
 static void extend_awake_failsafe(int seconds); /* defined with the failsafe */
-static void fire_expiry_alert(void);
 
 /* ---- network window (WiFi → NTP → snapshot rendezvous → MQTT) ----------
    Mechanics (task, completion signals) live in net_window.c; the
@@ -205,7 +201,7 @@ static const net_apply_ops_t NET_APPLY_OPS = {
     .join_poll = poll_button_a_cb,
     .on_config_applied = config_cache_invalidate,
     .on_active_reset_chirp = audio_break_over_chime,
-    .on_active_expired_alert = fire_expiry_alert,
+    .on_active_expired_alert = wake_flow_fire_expiry_alert,
     .post_stats = post_stats_snapshot,
     .on_locate = run_locate_alarm,
 };
@@ -233,87 +229,14 @@ void paint_current_state_full(void) {
     display_full_refresh(&st);
 }
 
-/* Returns true when a break was started (caller should go straight to
-   sleep). Persists BREAK before the alarm, same rationale as the EXPIRED
-   at-transition save. */
-static bool maybe_start_break(time_t now) {
-    uint16_t interval_min = NVS_DEFAULT_BREAK_INTERVAL_MIN, duration_min = NVS_DEFAULT_BREAK_DURATION_MIN;
-    nvs_config_get_break_interval_min(&interval_min);
-    nvs_config_get_break_duration_min(&duration_min);
-    if (interval_min == 0) /* eye-rest breaks disabled */
-        return false;
-    if (!timer_break_due(now, (int32_t)interval_min * 60))
-        return false;
-    /* A break that would still be running at bedtime is pointless - the
-       device would lock mid-break. Skip it and go straight to Bed Time,
-       audibly (this is the one alerting path that starts before the
-       threshold itself is reached). */
-    if (bedtime_break_would_cross(time_util_minutes_of_day(now), (int)duration_min, config_cache_bedtime_minutes())) {
-        ESP_LOGW(TAG, "Screen break due but would cross bed time");
-        lock_gate_bedtime_engage(now, true); /* no return */
-    }
-    ESP_LOGI(TAG, "Screen break due (accum %ld s)", (long)timer_run_accum(now));
-    timer_start_break(now, (int32_t)duration_min * 60);
-    timer_persist_save();
+/* Declared in wake_flow.h: the break gate there paints a freshly started
+   break through this, for the same reason as the seam above — plus the
+   LED between the assembly and the refresh, which is what holds the panel
+   blue for the whole multi-second flush. */
+void paint_break_started(time_t now) {
     display_state_t st = make_state(timer_tick(now), now);
     status_led_show_timer_state(); /* blue during the refresh */
     display_full_refresh(&st);     /* inverted SCREEN BREAK layout */
-    alert_run(ALERT_BREAK);        /* pulse end darkens the pixels */
-    return true;                   /* caller sleeps; stop_sync guards the gate */
-}
-
-/* Full expiry sequence: big TIME'S UP screen, beeps + red pulse, then back
-   to the main layout (empty bar, TIME'S UP state in the corner) once the
-   alert is dismissed or times out — the big screen would only last until
-   the next tick redraw anyway. */
-static void fire_expiry_alert(void) {
-    /* Persist EXPIRED before the ~15 s alert + redraw, not at the eventual
-       enter_deep_sleep: an EN reset or power cut mid-alert would otherwise
-       restore the stale RUNNING snapshot and replay the final minute. */
-    timer_persist_save();
-    display_timesup();
-    alert_run(ALERT_EXPIRY);
-    time_t now = time(NULL);
-    display_state_t st = make_state(timer_tick(now), now);
-    display_full_refresh(&st);
-}
-
-/* ---- day rollover ----------------------------------------------------- */
-
-/* Yesterday's usage numbers for HA, captured BEFORE the rollover resets
-   the slots; published by the rollover's own network window. */
-static void queue_rollover_summary(void) {
-    if (timer_current_date()[0] == '\0') {
-        return; /* cold boot / restored-from-nothing: no day to report */
-    }
-    int32_t used = timer_screen_used_sec(time(NULL));
-    uint16_t comp[TIMER_EXTRA_SLOTS];
-    for (int i = 0; i < TIMER_EXTRA_SLOTS; i++) {
-        comp[i] = timer_slot_completions(1 + i);
-    }
-    mqtt_ha_queue_summary(timer_current_date(), used, comp);
-}
-
-static void handle_day_rollover(time_t *now) {
-    if (!timer_is_new_day(*now))
-        return;
-    /* last_date + wall time in the log: if a rollover ever fires when the
-       date has NOT actually changed, this pinpoints why (bad stored date
-       vs. stepped clock). */
-    ESP_LOGW(TAG, "Day rollover (last_date='%s', now=%lld)", timer_current_date(), (long long)*now);
-    queue_rollover_summary();    /* yesterday's stats, before any reset */
-    mqtt_ha_queue_bonus_clear(); /* clear the retained HA bonus target this window */
-    /* Fail-open: reset to IDLE with today's allocation even if sync fails */
-    net_apply_try_window();
-    *now = time(NULL);
-    /* Power cycling must not refund the allocation: with the clock now
-       corrected, a same-day NVS snapshot beats a reset. Only a genuine
-       date change (or Button B in parent mode) resets the day. */
-    if (timer_persist_try_restore(*now)) {
-        return;
-    }
-    timer_reset();
-    timer_record_date(*now);
 }
 
 /* ---- event watch ------------------------------------------------------- */
@@ -433,7 +356,7 @@ static void watch_final_minute(void) {
             /* Back-to-back renders are safe: display.c absorbs the
                driver's refresh-rate guard interval instead of letting the
                frame be dropped. */
-            if (maybe_start_break(time(NULL))) {
+            if (wake_flow_maybe_start_break(time(NULL))) {
                 return; /* BREAK painted + alarm run; caller sleeps through it */
             }
         }
@@ -450,7 +373,7 @@ static void watch_final_minute(void) {
         vTaskDelay(pdMS_TO_TICKS(250));
     }
     timer_tick(time(NULL)); /* RUNNING -> EXPIRED */
-    fire_expiry_alert();
+    wake_flow_fire_expiry_alert();
 }
 
 static void maybe_wait_for_event(void) {
@@ -500,7 +423,7 @@ void render_action_result(button_id_t btn, timer_state_t before, time_t now, boo
     wake_render_t bwr =
         wake_policy_render(before, timer_get_state(), true, wake_flow_break_ended_this_wake(), selection_changed);
     if (bwr == WAKE_RENDER_EXPIRY_ALERT) {
-        fire_expiry_alert(); /* alert owns the NeoPixels (red pulse) */
+        wake_flow_fire_expiry_alert(); /* alert owns the NeoPixels (red pulse) */
     } else {
         /* Includes EXPIRED: any button returns the display to the main
            layout (empty bar, TIME'S UP state). */
@@ -542,7 +465,7 @@ static void finish_action_and_render(button_id_t btn, timer_state_t before, time
         wake_render_t rwr =
             wake_policy_render(painted, timer_get_state(), true, wake_flow_break_ended_this_wake(), false);
         if (rwr == WAKE_RENDER_EXPIRY_ALERT) {
-            fire_expiry_alert();
+            wake_flow_fire_expiry_alert();
         } else {
             display_state_t rst = make_state(rrem, rnow);
             status_led_show_timer_state();
@@ -566,7 +489,7 @@ static void finish_or_break(button_id_t btn, timer_state_t before, time_t now, b
        handler's post-render check. Not shown to be reachable — the press
        that got here has just been dispatched, and the final minute
        belongs to watch_final_minute — but it is not a guarantee. */
-    if (maybe_start_break(now)) {
+    if (wake_flow_maybe_start_break(now)) {
         post_stats_snapshot(); /* break screen painted: release MQTT */
         net_apply_finish();    /* drain + apply deferred before sleeping */
         enter_deep_sleep(lock_gate_sleep_mode());
@@ -576,7 +499,7 @@ static void finish_or_break(button_id_t btn, timer_state_t before, time_t now, b
 
 static void handle_timer_tick(void) {
     time_t now = time(NULL);
-    handle_day_rollover(&now);
+    wake_flow_handle_day_rollover(&now);
     lock_gate_check_bedtime(now); /* may not return; before the sync block so a
                            locked re-wake runs exactly one net window
                            (the rare release-by-edit fall-through repaints
@@ -618,7 +541,7 @@ static void handle_timer_tick(void) {
        — the planner's 70 s event lead plus watch_final_minute own the
        final minute — but this call carries no such guarantee, so do not
        add one to this comment. */
-    if (maybe_start_break(now)) {
+    if (wake_flow_maybe_start_break(now)) {
         enter_deep_sleep(lock_gate_sleep_mode()); /* break just started; sleep through it */
     }
 
@@ -660,7 +583,7 @@ static void handle_timer_tick(void) {
     wr = lock_gate_promote_render(wr); /* a lock released this wake owes the panel a full one */
     switch (wr) {
         case WAKE_RENDER_EXPIRY_ALERT:
-            fire_expiry_alert();
+            wake_flow_fire_expiry_alert();
             break;
         case WAKE_RENDER_FULL:
             display_full_refresh(&st);
@@ -672,19 +595,20 @@ static void handle_timer_tick(void) {
 
     /* A break earned in the SAME tick that expired a timer. The fast-path
        check above runs before timer_tick, so the expiry that pushed the
-       balance over the interval is invisible to it. fire_expiry_alert
-       returns (it repaints the main layout), so re-checking HERE — after
-       the render switch — is what yields expiry-then-break in one wake,
-       which is the order the alerts have to arrive in. This is the only
-       call site that provides that ordering: finish_or_break has the
-       opposite shape, its maybe_start_break running before the tick in
-       finish_action_and_render. A no-op unless the balance is genuinely
-       over, so it costs nothing on every other path.
+       balance over the interval is invisible to it.
+       wake_flow_fire_expiry_alert returns (it repaints the main layout),
+       so re-checking HERE — after the render switch — is what yields
+       expiry-then-break in one wake, which is the order the alerts have
+       to arrive in. This is the only call site that provides that
+       ordering: finish_or_break has the opposite shape, its break gate
+       running before the tick in finish_action_and_render. A no-op unless
+       the balance is genuinely over, so it costs nothing on every other
+       path.
 
        Re-read the clock first: `now` predates the render, and an expiry
        alert holds the CPU for ~15 s before returning. */
     now = time(NULL);
-    if (maybe_start_break(now)) {
+    if (wake_flow_maybe_start_break(now)) {
         enter_deep_sleep(lock_gate_sleep_mode()); /* break just started; sleep through it */
     }
 
@@ -724,7 +648,7 @@ static void handle_button_wake(void) {
     status_led_show_timer_state();
 
     time_t now = time(NULL);
-    handle_day_rollover(&now);
+    wake_flow_handle_day_rollover(&now);
     /* IDLE overnight: the threshold crossing may first be observed on a
        button press (idle wakes are up to an hour apart). The press is
        swallowed and the transition is silent per the alert rules. */

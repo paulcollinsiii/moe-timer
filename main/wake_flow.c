@@ -3,21 +3,38 @@
    lives here is the flow. */
 #include "wake_flow.h"
 
+#include "alerts.h"
 #include "audio.h"
+#include "bedtime.h"
 #include "button_actions.h"
 #include "button_latch.h"
 #include "buttons.h"
+#include "config_cache.h"
+#include "display.h"
 #include "hal_time.h"
+#include "lock_gate.h"
+#include "mqtt_ha.h"
 #include "net_apply.h"
 #include "net_window.h"
+#include "nvs_config.h"
+#include "nvs_defaults.h"
 #include "status_led.h"
+#include "time_util.h"
 #include "timer.h"
+#include "timer_persist.h"
 #include "wake_policy.h"
 
 #ifndef NATIVE
 #include "esp_log.h"
 #else
+/* These discard their varargs, so ANY function call made inside a log
+   argument is invisible to every host test — it is never evaluated here.
+   Two exist today, timer_run_accum() and timer_current_date(), and both
+   are verified pure reads. Before putting a third call in a log line,
+   check it has no side effect: a state change smuggled in as a %d
+   argument would run on device and be unobservable in the suite. */
 #define ESP_LOGI(tag, ...) ((void)(tag))
+#define ESP_LOGW(tag, ...) ((void)(tag))
 #endif
 
 /* Kconfig bool as a C expression (defined as 1 when =y, absent when =n),
@@ -256,4 +273,87 @@ bool wake_flow_poll_break_buttons(void) {
     status_led_show_timer_state();
     render_action_result((button_id_t)pick, before, now, swapped);
     return true;
+}
+
+/* ---- the eye-rest break gate -------------------------------------------- */
+
+/* Returns true when a break was started (caller should go straight to
+   sleep). Persists BREAK before the alarm, same rationale as the EXPIRED
+   at-transition save. */
+bool wake_flow_maybe_start_break(time_t now) {
+    uint16_t interval_min = NVS_DEFAULT_BREAK_INTERVAL_MIN, duration_min = NVS_DEFAULT_BREAK_DURATION_MIN;
+    nvs_config_get_break_interval_min(&interval_min);
+    nvs_config_get_break_duration_min(&duration_min);
+    if (interval_min == 0) /* eye-rest breaks disabled */
+        return false;
+    if (!timer_break_due(now, (int32_t)interval_min * 60))
+        return false;
+    /* A break that would still be running at bedtime is pointless - the
+       device would lock mid-break. Skip it and go straight to Bed Time,
+       audibly (this is the one alerting path that starts before the
+       threshold itself is reached). */
+    if (bedtime_break_would_cross(time_util_minutes_of_day(now), (int)duration_min, config_cache_bedtime_minutes())) {
+        ESP_LOGW(TAG, "Screen break due but would cross bed time");
+        lock_gate_bedtime_engage(now, true); /* no return */
+    }
+    ESP_LOGI(TAG, "Screen break due (accum %ld s)", (long)timer_run_accum(now));
+    timer_start_break(now, (int32_t)duration_min * 60);
+    timer_persist_save();
+    paint_break_started(now); /* blue LED through the inverted SCREEN BREAK refresh */
+    alert_run(ALERT_BREAK);   /* pulse end darkens the pixels */
+    return true;              /* caller sleeps; stop_sync guards the gate */
+}
+
+/* ---- the expiry alert --------------------------------------------------- */
+
+void wake_flow_fire_expiry_alert(void) {
+    /* Persist EXPIRED before the ~15 s alert + redraw, not at the eventual
+       enter_deep_sleep: an EN reset or power cut mid-alert would otherwise
+       restore the stale RUNNING snapshot and replay the final minute. */
+    timer_persist_save();
+    display_timesup();
+    alert_run(ALERT_EXPIRY);
+    /* Back to the main layout. The tail is character for character the
+       break-end repaint's paint half — re-read the clock, tick, full
+       refresh — so it reaches the panel through that same seam instead of
+       carrying a second copy of it. */
+    paint_current_state_full();
+}
+
+/* ---- day rollover ------------------------------------------------------- */
+
+/* Yesterday's usage numbers for HA, captured BEFORE the rollover resets
+   the slots; published by the rollover's own network window. */
+static void queue_rollover_summary(void) {
+    if (timer_current_date()[0] == '\0') {
+        return; /* cold boot / restored-from-nothing: no day to report */
+    }
+    int32_t used = timer_screen_used_sec(hal_time_now());
+    uint16_t comp[TIMER_EXTRA_SLOTS];
+    for (int i = 0; i < TIMER_EXTRA_SLOTS; i++) {
+        comp[i] = timer_slot_completions(1 + i);
+    }
+    mqtt_ha_queue_summary(timer_current_date(), used, comp);
+}
+
+void wake_flow_handle_day_rollover(time_t *now) {
+    if (!timer_is_new_day(*now))
+        return;
+    /* last_date + wall time in the log: if a rollover ever fires when the
+       date has NOT actually changed, this pinpoints why (bad stored date
+       vs. stepped clock). */
+    ESP_LOGW(TAG, "Day rollover (last_date='%s', now=%lld)", timer_current_date(), (long long)*now);
+    queue_rollover_summary();    /* yesterday's stats, before any reset */
+    mqtt_ha_queue_bonus_clear(); /* clear the retained HA bonus target this window */
+    /* Fail-open: reset to IDLE with today's allocation even if sync fails */
+    net_apply_try_window();
+    *now = hal_time_now();
+    /* Power cycling must not refund the allocation: with the clock now
+       corrected, a same-day NVS snapshot beats a reset. Only a genuine
+       date change (or Button B in parent mode) resets the day. */
+    if (timer_persist_try_restore(*now)) {
+        return;
+    }
+    timer_reset();
+    timer_record_date(*now);
 }

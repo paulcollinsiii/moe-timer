@@ -485,7 +485,7 @@ void test_restore_is_refused_when_rtc_is_intact_but_stale(void) {
        date differs from today". Here RTC survived across midnight holding
        yesterday, and NVS holds a valid snapshot dated TODAY — the one
        arrangement where the two rules disagree. RTC wins: the caller
-       (handle_day_rollover) then reaches timer_reset(), which is correct,
+       (wake_flow_handle_day_rollover) then reaches timer_reset(), correctly,
        because a genuine date change is exactly when the day SHOULD be
        refunded. Rewriting the guard as `if (!timer_is_new_day(now))` or
        `if (timer_current_date() == today)` fails here. */
@@ -649,7 +649,7 @@ void test_day_rollover_with_a_same_day_snapshot_does_not_refund_the_allocation(v
        timer_is_new_day() reads "" as a new day and the wake handler's
        rollover fires — timer_reset() would hand back the whole day's
        screen allocation. This restore is the only thing standing in
-       front of it: handle_day_rollover reaches timer_reset() exactly
+       front of it: wake_flow_handle_day_rollover reaches timer_reset() exactly
        when this returns false. */
     arm_rich_state(NOON); /* 3600 s allocated, 1234 s left => 2366 s spent */
     const int32_t spent = timer_screen_used_sec(NOON);

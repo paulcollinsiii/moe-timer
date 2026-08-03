@@ -160,7 +160,7 @@ void test_break_as_primary_state_is_unchanged(void) {
    runs — e.g. Laundry 60 min, balance crossing at 30. That moment needs
    no dedicated wake event: a RUNNING slot always sleeps on the countdown
    minute grid, so it is capped at 60 s whatever the expiry horizon, and
-   the per-wake maybe_start_break check catches the crossing within a
+   the per-wake wake_flow_maybe_start_break check catches the crossing in a
    minute. Exactly the fidelity the Screen timer has always had.
 
    This is a CONTRACT, not an observation: raise the RUNNING cap above a

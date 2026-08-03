@@ -1,31 +1,45 @@
+#include <setjmp.h>
+#include <stdlib.h>
 #include <string.h>
 #include <unity.h>
 
 /* Single-TU: the real policies this module consults — the chime grace
-   window, the render choice, and the press latch with its A > C > B > D
-   priority — are compiled in alongside the module under test, so the
-   edges below are pinned against the shipping rules rather than a
-   restatement of them. button_latch.c in particular is what makes row 5 a
-   statement about the real masked take: buttons.c's take wrappers are
-   pure pass-throughs to it (a critical section either side), so the
-   stubs below delegate to it exactly as the device does. The mock clock
-   comes along because every decision here is a wall-time comparison.
-   Everything with a device behind it gets a link-time spy stub in the
-   preamble below. */
+   window, the render choice, the press latch with its A > C > B > D
+   priority, and the bed-time crossing rule — are compiled in alongside
+   the module under test, so the edges below are pinned against the
+   shipping rules rather than a restatement of them. button_latch.c in
+   particular is what makes row 5 a statement about the real masked take:
+   buttons.c's take wrappers are pure pass-throughs to it (a critical
+   section either side), so the stubs below delegate to it exactly as the
+   device does. bedtime.c (with the quiet-hours HHMM helpers it leans on)
+   is what makes row 21 a statement about the real crossing arithmetic
+   rather than about an injected bool. The mock clock comes along because
+   every decision here is a wall-time comparison. Everything with a device
+   behind it gets a link-time spy stub in the preamble below. */
 // clang-format off
+#include "../../main/bedtime.c"
 #include "../../main/button_latch.c"
+#include "../../main/quiet_hours.c"
 #include "../../main/wake_policy.c"
 #include "mock_hal_time.c"
 // clang-format on
 
+#include "alerts.h"
 #include "audio.h"
 #include "button_actions.h"
 #include "buttons.h"
+#include "config_cache.h"
+#include "display.h"
+#include "lock_gate.h"
+#include "mqtt_ha.h"
 #include "net_apply.h"
 #include "net_window.h"
+#include "nvs_config.h"
+#include "nvs_defaults.h"
 #include "sleep_plan.h" /* BREAK_CHIME_GRACE_SEC */
 #include "status_led.h"
 #include "timer.h"
+#include "timer_persist.h"
 #include "wake_flow.h"
 
 /* ---- the effect log -----------------------------------------------------
@@ -54,9 +68,29 @@ typedef enum {
     EV_RELOAD,
     EV_SELECT_NEXT,
     EV_ACTION_RENDER,
+    /* the break gate */
+    EV_CFG_INTERVAL,
+    EV_CFG_DURATION,
+    EV_BREAK_DUE,
+    EV_BEDTIME_ENGAGE,
+    EV_START_BREAK,
+    EV_PERSIST_SAVE,
+    EV_BREAK_PAINT,
+    EV_ALERT_BREAK,
+    /* the expiry alert */
+    EV_TIMESUP,
+    EV_ALERT_EXPIRY,
+    /* the day rollover */
+    EV_IS_NEW_DAY,
+    EV_QUEUE_SUMMARY,
+    EV_BONUS_CLEAR,
+    EV_TRY_WINDOW,
+    EV_PERSIST_RESTORE,
+    EV_TIMER_RESET,
+    EV_RECORD_DATE,
 } flow_event_t;
 
-static flow_event_t flow_log[32];
+static flow_event_t flow_log[64];
 static int flow_log_n;
 
 static void flow_log_push(flow_event_t ev) {
@@ -330,6 +364,216 @@ uint8_t buttons_take_pressed_mask(uint8_t mask) {
     return button_latch_take_masked(mask);
 }
 
+/* ---- the injected break-gate model --------------------------------------
+
+   The gate reads its two numbers from NVS, and the caller pre-seeds both
+   with the compile-time defaults before asking. So the stub models a
+   getter that can DECLINE to write (the key was never stored), which is
+   the only way the pre-seed is observable at all — a stub that always
+   wrote would make deleting those initialisers invisible. */
+
+static bool flow_cfg_writes; /* do the getters fill the out-params? */
+static uint16_t flow_interval_min;
+static uint16_t flow_duration_min;
+static uint16_t flow_seen_interval_default; /* what the caller pre-seeded */
+static uint16_t flow_seen_duration_default;
+
+static bool flow_break_due_ret;
+static time_t flow_break_due_now;
+static int32_t flow_break_due_interval; /* SECONDS, as passed */
+
+static int flow_bed_min; /* what the bed-time cache answers */
+static time_t flow_start_break_now;
+static int32_t flow_start_break_dur; /* SECONDS, as passed */
+static time_t flow_break_paint_now;
+static alert_kind_t flow_last_alert;
+static bool flow_alert_dismissed;
+
+/* Bed time DOES NOT RETURN on device, so the stub does not either:
+   unwinding to the case is what makes "the gate went to bed" and "the
+   gate started a break" two distinguishable outcomes. A returning stub
+   would let the break start anyway and the row-21 case would still
+   pass. */
+static jmp_buf flow_bed_jmp;
+static bool flow_bed_engaged;
+static time_t flow_bed_engage_now;
+static bool flow_bed_engage_alert;
+
+esp_err_t nvs_config_get_break_interval_min(uint16_t *out) {
+    flow_log_push(EV_CFG_INTERVAL);
+    flow_seen_interval_default = *out;
+    if (!flow_cfg_writes)
+        return ESP_FAIL; /* never stored: the caller's default stands */
+    *out = flow_interval_min;
+    return ESP_OK;
+}
+
+esp_err_t nvs_config_get_break_duration_min(uint16_t *out) {
+    flow_log_push(EV_CFG_DURATION);
+    flow_seen_duration_default = *out;
+    if (!flow_cfg_writes)
+        return ESP_FAIL;
+    *out = flow_duration_min;
+    return ESP_OK;
+}
+
+bool timer_break_due(time_t now, int32_t interval_sec) {
+    flow_log_push(EV_BREAK_DUE);
+    flow_break_due_now = now;
+    flow_break_due_interval = interval_sec;
+    return flow_break_due_ret;
+}
+
+/* Log-only on the host: the sole call sits inside an ESP_LOGI vararg,
+   which this module's NATIVE block discards. Defined so the TU links and
+   so a mutant that gave it a side effect would still have somewhere to
+   land. */
+int32_t timer_run_accum(time_t now) {
+    (void)now;
+    return 0;
+}
+
+void timer_start_break(time_t now, int32_t duration_sec) {
+    flow_log_push(EV_START_BREAK);
+    flow_start_break_now = now;
+    flow_start_break_dur = duration_sec;
+    flow_state = TIMER_BREAK;
+}
+
+int config_cache_bedtime_minutes(void) {
+    return flow_bed_min;
+}
+
+void lock_gate_bedtime_engage(time_t now, bool alert) {
+    flow_log_push(EV_BEDTIME_ENGAGE);
+    flow_bed_engaged = true;
+    flow_bed_engage_now = now;
+    flow_bed_engage_alert = alert;
+    longjmp(flow_bed_jmp, 1); /* no return, exactly as on device */
+}
+
+void timer_persist_save(void) {
+    flow_log_push(EV_PERSIST_SAVE);
+}
+
+/* The other paint seam main.c implements. Records the instant it was
+   handed: the break must paint against the moment it STARTED, not a
+   re-read clock, which is the whole reason this is its own seam. */
+void paint_break_started(time_t now) {
+    flow_log_push(EV_BREAK_PAINT);
+    flow_break_paint_now = now;
+    flow_painted_slot = flow_active_slot;
+    flow_painted_remaining = flow_slot_remaining[flow_active_slot];
+}
+
+bool alert_run(alert_kind_t kind) {
+    flow_last_alert = kind;
+    flow_log_push(kind == ALERT_EXPIRY ? EV_ALERT_EXPIRY : EV_ALERT_BREAK);
+    return flow_alert_dismissed;
+}
+
+void display_timesup(void) {
+    flow_log_push(EV_TIMESUP);
+}
+
+/* ---- the injected day-rollover model ------------------------------------ */
+
+static bool flow_new_day;
+static time_t flow_new_day_arg;
+static const char *flow_date; /* timer_current_date() */
+static int32_t flow_screen_used;
+static time_t flow_screen_used_arg;
+static uint16_t flow_completions[TIMER_SLOT_COUNT];
+static int flow_completion_slots[TIMER_EXTRA_SLOTS]; /* which slots were asked for */
+static int flow_completion_asks;
+/* How many completions had been read by the time the day's usage was:
+   0 means the usage was sampled BEFORE the loop, which is the shipped
+   order. Kept out of the shared effect log so the end-to-end trace cases
+   stay about the rollover's own steps. */
+static int flow_comps_asked_when_used_read;
+
+/* What reached mqtt_ha_queue_summary. */
+static const char *flow_summary_date;
+static int32_t flow_summary_used;
+static uint16_t flow_summary_comp[TIMER_EXTRA_SLOTS];
+
+static bool flow_restore_ok;
+static time_t flow_restore_arg;
+static time_t flow_record_date_arg;
+static bool flow_reset_called;
+static time_t flow_clock_after_window; /* 0 = the window does not step the clock */
+
+bool timer_is_new_day(time_t now) {
+    flow_log_push(EV_IS_NEW_DAY);
+    flow_new_day_arg = now;
+    return flow_new_day;
+}
+
+const char *timer_current_date(void) {
+    return flow_date;
+}
+
+int32_t timer_screen_used_sec(time_t now) {
+    flow_screen_used_arg = now;
+    flow_comps_asked_when_used_read = flow_completion_asks;
+    return flow_screen_used;
+}
+
+uint16_t timer_slot_completions(int slot) {
+    if (flow_completion_asks < TIMER_EXTRA_SLOTS)
+        flow_completion_slots[flow_completion_asks++] = slot;
+    if (slot < 0 || slot >= TIMER_SLOT_COUNT)
+        return 0xFFFFu; /* out of range: a visible wrong answer, not a crash */
+    return flow_completions[slot];
+}
+
+void mqtt_ha_queue_summary(const char *date, int32_t screen_used_s, const uint16_t completions[TIMER_EXTRA_SLOTS]) {
+    flow_log_push(EV_QUEUE_SUMMARY);
+    flow_summary_date = date;
+    flow_summary_used = screen_used_s;
+    memcpy(flow_summary_comp, completions, sizeof flow_summary_comp);
+}
+
+void mqtt_ha_queue_bonus_clear(void) {
+    flow_log_push(EV_BONUS_CLEAR);
+}
+
+/* The rollover's own window. Steps the clock when a case asks, which is
+   the whole reason `now` is an out-param. */
+esp_err_t net_apply_try_window(void) {
+    flow_log_push(EV_TRY_WINDOW);
+    if (flow_clock_after_window != 0) {
+        mock_time_set(flow_clock_after_window);
+    }
+    return ESP_OK;
+}
+
+bool timer_persist_try_restore(time_t now) {
+    flow_log_push(EV_PERSIST_RESTORE);
+    flow_restore_arg = now;
+    return flow_restore_ok;
+}
+
+/* The clock step is load-bearing, not scenery. The mock clock is frozen
+   except inside hal_delay_ms(), so with a still clock nothing downstream
+   of the rollover's `*now = hal_time_now()` can tell "reuse the corrected
+   value" apart from "re-read the clock" — timer_record_date(hal_time_now())
+   passes every assertion. On device a real timer_persist_try_restore()
+   (NVS blob read + CRC) and this reset (RTC memset) run in that gap, and
+   a second boundary landing there at midnight records the wrong date and
+   misattributes the day's allocation. Stepping here is what makes
+   test_the_recorded_date_is_the_corrected_clock_too able to see it. */
+void timer_reset(void) {
+    flow_log_push(EV_TIMER_RESET);
+    flow_reset_called = true;
+    mock_time_set(hal_time_now() + 5);
+}
+
+void timer_record_date(time_t now) {
+    flow_log_push(EV_RECORD_DATE);
+    flow_record_date_arg = now;
+}
+
 // clang-format off
 #include "../../main/wake_flow.c"
 // clang-format on
@@ -372,7 +616,34 @@ static uint8_t flow_latch_residue(void) {
     return button_latch_take();
 }
 
+/* Run the break gate under a landing pad for the bed-time engage, which
+   does not return on device. Reports what actually happened, which a bare
+   call cannot: FLOW_GATE_BEDTIME and FLOW_GATE_STARTED are the two
+   outcomes row 21 has to tell apart. */
+typedef enum {
+    FLOW_GATE_NO_BREAK = 0, /* returned false */
+    FLOW_GATE_STARTED,      /* returned true */
+    FLOW_GATE_BEDTIME,      /* never returned: went to bed instead */
+} flow_gate_result_t;
+
+static flow_gate_result_t flow_run_break_gate(time_t now) {
+    if (setjmp(flow_bed_jmp) != 0)
+        return FLOW_GATE_BEDTIME;
+    return wake_flow_maybe_start_break(now) ? FLOW_GATE_STARTED : FLOW_GATE_NO_BREAK;
+}
+
+/* Minutes-of-day for the bed-time cache, in the same UTC day the clock
+   helpers above use. */
+static int flow_bed_at(int hour, int minute) {
+    return hour * 60 + minute;
+}
+
 void setUp(void) {
+    /* time_util_minutes_of_day() reads the local calendar, so the day the
+       break gate compares against bed time is only arithmetic if the zone
+       is pinned. Same fixed UTC day as the clock helpers above. */
+    setenv("TZ", "UTC0", 1);
+    tzset();
     mock_time_reset();
     flow_log_n = 0;
     flow_break_running = false;
@@ -410,12 +681,60 @@ void setUp(void) {
     flow_render_btn = BTN_NONE;
     flow_render_before = TIMER_IDLE;
     flow_render_selection_changed = false;
+
+    /* The break gate. Stored config by default (the getters answer), a
+       balance that has NOT crossed, and bed time disabled — so a case
+       opts INTO each of the three things that make the gate act. */
+    flow_cfg_writes = true;
+    flow_interval_min = 30;
+    flow_duration_min = 15;
+    flow_break_due_ret = false;
+    flow_bed_min = -1; /* disabled: bedtime_* treat negative as off */
+    flow_alert_dismissed = false;
+    flow_bed_engaged = false;
+    flow_bed_engage_alert = false;
+
+    /* The day rollover. Not a new day by default, and a restore that
+       fails — so the reset path is the one a case has to ask for. */
+    flow_new_day = false;
+    flow_date = "2026-07-28";
+    flow_screen_used = 1234;
+    flow_restore_ok = false;
+    flow_reset_called = false;
+    flow_clock_after_window = 0;
+    flow_completion_asks = 0;
+    flow_comps_asked_when_used_read = -1; /* poisoned: never read */
+    for (int i = 0; i < TIMER_SLOT_COUNT; i++) {
+        /* Distinct per slot so the 1+i offset is observable: a mutant
+           reading slot i instead would report Screen's number. */
+        flow_completions[i] = (uint16_t)(100 + i);
+    }
+    for (int i = 0; i < TIMER_EXTRA_SLOTS; i++) {
+        flow_completion_slots[i] = -1;
+        flow_summary_comp[i] = 0xEEEEu;
+    }
+
     /* Poisoned: values the module cannot produce, so "never written" and
        "written with what we expected" can never be the same assertion. */
     flow_reload_parent_arg = -1; /* never asked */
     flow_shift_arg = -424242;
     flow_delay_at_led = 0xFFFFFFFFu;
     flow_render_now = -1;
+    flow_seen_interval_default = 0xFFFFu;
+    flow_seen_duration_default = 0xFFFFu;
+    flow_break_due_now = -1;
+    flow_break_due_interval = -1;
+    flow_start_break_now = -1;
+    flow_start_break_dur = -1;
+    flow_break_paint_now = -1;
+    flow_last_alert = (alert_kind_t)-1;
+    flow_bed_engage_now = -1;
+    flow_new_day_arg = -1;
+    flow_screen_used_arg = -1;
+    flow_summary_date = NULL;
+    flow_summary_used = -424242;
+    flow_restore_arg = -1;
+    flow_record_date_arg = -1;
 }
 
 void tearDown(void) {}
@@ -1862,6 +2181,488 @@ void test_the_break_tail_reports_the_state_that_was_painted_not_the_new_one(void
     TEST_ASSERT_FALSE(flow_render_selection_changed);
 }
 
+/* ---- ROW 22: the break gate's config -----------------------------------
+   "Break interval configured 0" => no break ever starts. The value is a
+   real HA knob, so this is the documented way to switch eye rest off. */
+
+void test_row22_a_zero_interval_never_starts_a_break(void) {
+    flow_interval_min = 0;
+    flow_break_due_ret = true; /* the balance is over: irrelevant */
+    TEST_ASSERT_EQUAL_INT(FLOW_GATE_NO_BREAK, flow_run_break_gate(flow_at(14, 0)));
+    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_START_BREAK));
+    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_BREAK_PAINT));
+    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_ALERT_BREAK));
+    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_PERSIST_SAVE));
+}
+
+/* The zero check has to come FIRST: with breaks switched off the balance
+   must not even be asked, or a stale accrual could still trip a mutant
+   that reordered the two. */
+void test_row22_a_zero_interval_is_decided_before_the_balance_is_asked(void) {
+    flow_interval_min = 0;
+    flow_break_due_ret = true;
+    (void)flow_run_break_gate(flow_at(14, 0));
+    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_BREAK_DUE));
+}
+
+/* Both numbers are read before anything is decided — the duration is
+   needed by the bed-time check further down, which runs before the
+   start. */
+void test_the_gate_reads_both_config_values_up_front(void) {
+    flow_interval_min = 0;
+    (void)flow_run_break_gate(flow_at(14, 0));
+    TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_CFG_INTERVAL));
+    TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_CFG_DURATION));
+}
+
+/* A getter that declines to write leaves the caller's pre-seed standing,
+   and the pre-seed is the compile-time default. Without this the two
+   initialisers could be deleted unnoticed and an unconfigured device
+   would run with an interval of zero — i.e. no eye rest at all. */
+void test_the_compile_time_defaults_stand_when_nvs_never_stored_them(void) {
+    flow_cfg_writes = false;
+    flow_break_due_ret = true;
+    TEST_ASSERT_EQUAL_INT(FLOW_GATE_STARTED, flow_run_break_gate(flow_at(14, 0)));
+    TEST_ASSERT_EQUAL_UINT16(NVS_DEFAULT_BREAK_INTERVAL_MIN, flow_seen_interval_default);
+    TEST_ASSERT_EQUAL_UINT16(NVS_DEFAULT_BREAK_DURATION_MIN, flow_seen_duration_default);
+    TEST_ASSERT_EQUAL_INT32((int32_t)NVS_DEFAULT_BREAK_INTERVAL_MIN * 60, flow_break_due_interval);
+    TEST_ASSERT_EQUAL_INT32((int32_t)NVS_DEFAULT_BREAK_DURATION_MIN * 60, flow_start_break_dur);
+}
+
+/* ZERO is the disable, and nothing else is. A guard widened by one (`<= 1`)
+   keeps the row-22 case passing while silently switching eye rest off for
+   every device configured with a one-minute interval — which is what
+   ParentTesting demos actually use. Mutation testing is what surfaced it:
+   `== 0` -> `<= 1` escaped a suite that only ever tried 0 and 30. */
+void test_row22_a_one_minute_interval_is_an_interval_not_a_disable(void) {
+    flow_interval_min = 1;
+    flow_break_due_ret = true;
+    TEST_ASSERT_EQUAL_INT(FLOW_GATE_STARTED, flow_run_break_gate(flow_at(14, 0)));
+    TEST_ASSERT_EQUAL_INT32(60, flow_break_due_interval);
+    TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_START_BREAK));
+}
+
+/* The other side of the same guard: a one-minute break DURATION is also a
+   real duration. */
+void test_a_one_minute_duration_is_a_real_duration(void) {
+    flow_duration_min = 1;
+    flow_break_due_ret = true;
+    TEST_ASSERT_EQUAL_INT(FLOW_GATE_STARTED, flow_run_break_gate(flow_at(14, 0)));
+    TEST_ASSERT_EQUAL_INT32(60, flow_start_break_dur);
+}
+
+/* ---- the break gate: the balance ---------------------------------------- */
+
+void test_a_balance_short_of_the_interval_starts_nothing(void) {
+    flow_break_due_ret = false;
+    TEST_ASSERT_EQUAL_INT(FLOW_GATE_NO_BREAK, flow_run_break_gate(flow_at(14, 0)));
+    TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_BREAK_DUE));
+    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_START_BREAK));
+    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_PERSIST_SAVE));
+    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_BREAK_PAINT));
+    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_ALERT_BREAK));
+}
+
+/* Both config values are MINUTES and both consumers want SECONDS. A
+   missing *60 on either side is a 60x error in the wrong direction. */
+void test_the_interval_is_asked_of_the_balance_in_seconds(void) {
+    flow_interval_min = 45;
+    flow_break_due_ret = false;
+    (void)flow_run_break_gate(flow_at(14, 0));
+    TEST_ASSERT_EQUAL_INT32(45 * 60, flow_break_due_interval);
+}
+
+void test_the_break_is_started_for_the_configured_duration_in_seconds(void) {
+    flow_duration_min = 12;
+    flow_break_due_ret = true;
+    TEST_ASSERT_EQUAL_INT(FLOW_GATE_STARTED, flow_run_break_gate(flow_at(14, 0)));
+    TEST_ASSERT_EQUAL_INT32(12 * 60, flow_start_break_dur);
+}
+
+/* The gate takes `now` rather than reading the clock, because its callers
+   do not agree on which instant they mean — two of them re-read the wall
+   clock after an alert has held the CPU for ~15 s. The live clock is
+   parked somewhere else here so a re-read would be visible. */
+void test_the_gate_uses_the_clock_it_was_handed_not_the_live_one(void) {
+    mock_time_set(flow_at(9, 0));
+    flow_break_due_ret = true;
+    TEST_ASSERT_EQUAL_INT(FLOW_GATE_STARTED, flow_run_break_gate(flow_at(14, 30)));
+    TEST_ASSERT_EQUAL_INT64(flow_at(14, 30), flow_break_due_now);
+    TEST_ASSERT_EQUAL_INT64(flow_at(14, 30), flow_start_break_now);
+    TEST_ASSERT_EQUAL_INT64(flow_at(14, 30), flow_break_paint_now);
+}
+
+/* ---- the break gate: the start sequence --------------------------------- */
+
+/* Persist BEFORE the ~15 s alarm, same rationale as the EXPIRED
+   at-transition save: a power cut during the alarm must not restore a
+   snapshot taken before the break existed. And the paint must precede the
+   alarm, or the alarm pulses over the previous layout. */
+void test_a_started_break_persists_then_paints_then_alarms(void) {
+    flow_break_due_ret = true;
+    TEST_ASSERT_EQUAL_INT(FLOW_GATE_STARTED, flow_run_break_gate(flow_at(14, 0)));
+    int started = flow_log_at(EV_START_BREAK);
+    int saved = flow_log_at(EV_PERSIST_SAVE);
+    int painted = flow_log_at(EV_BREAK_PAINT);
+    int alarmed = flow_log_at(EV_ALERT_BREAK);
+    TEST_ASSERT_TRUE(started >= 0);
+    TEST_ASSERT_TRUE(started < saved);
+    TEST_ASSERT_TRUE(saved < painted);
+    TEST_ASSERT_TRUE(painted < alarmed);
+}
+
+void test_a_started_break_runs_the_break_alarm_not_the_expiry_one(void) {
+    flow_break_due_ret = true;
+    (void)flow_run_break_gate(flow_at(14, 0));
+    TEST_ASSERT_EQUAL_INT(ALERT_BREAK, flow_last_alert);
+    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_ALERT_EXPIRY));
+}
+
+/* The full ordered trace, so an effect that moved rather than vanished is
+   caught too. */
+void test_the_started_break_effect_order_is_pinned_end_to_end(void) {
+    flow_break_due_ret = true;
+    (void)flow_run_break_gate(flow_at(14, 0));
+    static const flow_event_t expect[] = {EV_CFG_INTERVAL, EV_CFG_DURATION, EV_BREAK_DUE,  EV_START_BREAK,
+                                          EV_PERSIST_SAVE, EV_BREAK_PAINT,  EV_ALERT_BREAK};
+    TEST_ASSERT_EQUAL_INT((int)(sizeof expect / sizeof expect[0]), flow_log_n);
+    for (int i = 0; i < flow_log_n; i++) {
+        TEST_ASSERT_EQUAL_INT((int)expect[i], (int)flow_log[i]);
+    }
+}
+
+/* ---- ROW 21: a break that would cross bed time -------------------------
+   "Break due but it would cross bedtime" => break skipped; bedtime
+   engages audibly. The engage does not return, so the break start below
+   it is unreachable — which is exactly what a returning stub would
+   hide. */
+
+void test_row21_a_break_that_would_cross_bed_time_goes_to_bed_instead(void) {
+    flow_break_due_ret = true;
+    flow_duration_min = 15;
+    flow_bed_min = flow_bed_at(20, 0);
+    TEST_ASSERT_EQUAL_INT(FLOW_GATE_BEDTIME, flow_run_break_gate(flow_at(19, 50)));
+    TEST_ASSERT_TRUE(flow_bed_engaged);
+    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_START_BREAK));
+    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_BREAK_PAINT));
+    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_ALERT_BREAK));
+    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_PERSIST_SAVE));
+}
+
+/* Audibly, unconditionally: this is the one alerting path that begins
+   before its own threshold is reached, so the child gets a warning
+   instead of the screen simply going dark. A `false` here is silent
+   bedtime — the exact bug the row exists to prevent. */
+void test_row21_the_bed_time_engage_is_always_audible(void) {
+    flow_break_due_ret = true;
+    flow_bed_min = flow_bed_at(20, 0);
+    (void)flow_run_break_gate(flow_at(19, 50));
+    TEST_ASSERT_TRUE(flow_bed_engage_alert);
+}
+
+void test_row21_the_bed_time_engage_gets_the_gates_own_clock(void) {
+    mock_time_set(flow_at(9, 0));
+    flow_break_due_ret = true;
+    flow_bed_min = flow_bed_at(20, 0);
+    (void)flow_run_break_gate(flow_at(19, 50));
+    TEST_ASSERT_EQUAL_INT64(flow_at(19, 50), flow_bed_engage_now);
+}
+
+/* The crossing is decided on the DURATION, not on a fixed margin: the
+   same instant with a shorter break is fine. */
+void test_a_break_that_finishes_before_bed_time_still_starts(void) {
+    flow_break_due_ret = true;
+    flow_duration_min = 9;
+    flow_bed_min = flow_bed_at(20, 0);
+    TEST_ASSERT_EQUAL_INT(FLOW_GATE_STARTED, flow_run_break_gate(flow_at(19, 50)));
+    TEST_ASSERT_FALSE(flow_bed_engaged);
+}
+
+/* The equality boundary, one minute the other side of the case above:
+   landing EXACTLY on bed time counts as crossing. */
+void test_a_break_landing_exactly_on_bed_time_is_skipped(void) {
+    flow_break_due_ret = true;
+    flow_duration_min = 10;
+    flow_bed_min = flow_bed_at(20, 0);
+    TEST_ASSERT_EQUAL_INT(FLOW_GATE_BEDTIME, flow_run_break_gate(flow_at(19, 50)));
+}
+
+void test_bed_time_disabled_never_skips_a_break(void) {
+    flow_break_due_ret = true;
+    flow_duration_min = 600; /* absurdly long: only the disable can save it */
+    flow_bed_min = -1;
+    TEST_ASSERT_EQUAL_INT(FLOW_GATE_STARTED, flow_run_break_gate(flow_at(19, 50)));
+    TEST_ASSERT_FALSE(flow_bed_engaged);
+}
+
+/* Already past bed time: the crossing test is false (you cannot cross a
+   line you are behind), so this gate lets the break through. Reaching
+   here at all means lock_gate_check_bedtime did not run first, which no
+   wake path does — pinned so the gate's own answer is unambiguous. */
+void test_a_break_starting_after_bed_time_is_not_this_gates_problem(void) {
+    flow_break_due_ret = true;
+    flow_bed_min = flow_bed_at(20, 0);
+    TEST_ASSERT_EQUAL_INT(FLOW_GATE_STARTED, flow_run_break_gate(flow_at(21, 0)));
+    TEST_ASSERT_FALSE(flow_bed_engaged);
+}
+
+/* The bed-time check runs only once the balance has actually crossed:
+   a break that is not due cannot send the device to bed early. */
+void test_a_break_that_is_not_due_never_reaches_the_bed_time_check(void) {
+    flow_break_due_ret = false;
+    flow_bed_min = flow_bed_at(20, 0);
+    TEST_ASSERT_EQUAL_INT(FLOW_GATE_NO_BREAK, flow_run_break_gate(flow_at(19, 50)));
+    TEST_ASSERT_FALSE(flow_bed_engaged);
+}
+
+/* ---- ROW 12: power cut mid-expiry-alert --------------------------------
+   "snapshot already persisted as EXPIRED". The alert holds the CPU for
+   ~15 s; an EN reset or a pulled cable during it must not restore the
+   stale RUNNING snapshot and replay the final minute. */
+
+void test_row12_the_expired_snapshot_is_persisted_before_anything_else(void) {
+    wake_flow_fire_expiry_alert();
+    TEST_ASSERT_EQUAL_INT(0, flow_log_at(EV_PERSIST_SAVE));
+}
+
+void test_row12_the_snapshot_is_persisted_before_the_alarm_runs(void) {
+    wake_flow_fire_expiry_alert();
+    TEST_ASSERT_TRUE(flow_log_at(EV_PERSIST_SAVE) < flow_log_at(EV_ALERT_EXPIRY));
+    TEST_ASSERT_TRUE(flow_log_at(EV_PERSIST_SAVE) < flow_log_at(EV_TIMESUP));
+}
+
+/* The big TIME'S UP screen goes up BEFORE the alarm, or the beeps and the
+   red pulse arrive against the old layout. */
+void test_the_timesup_screen_precedes_the_alarm(void) {
+    wake_flow_fire_expiry_alert();
+    TEST_ASSERT_TRUE(flow_log_at(EV_TIMESUP) < flow_log_at(EV_ALERT_EXPIRY));
+}
+
+/* And the main layout comes back after it — the big screen would only
+   last until the next tick redraw anyway. */
+void test_the_main_layout_is_repainted_after_the_alarm(void) {
+    wake_flow_fire_expiry_alert();
+    TEST_ASSERT_TRUE(flow_log_at(EV_ALERT_EXPIRY) < flow_log_at(EV_REPAINT));
+    TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_REPAINT));
+}
+
+void test_the_expiry_alert_runs_the_expiry_alarm_not_the_break_one(void) {
+    wake_flow_fire_expiry_alert();
+    TEST_ASSERT_EQUAL_INT(ALERT_EXPIRY, flow_last_alert);
+    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_ALERT_BREAK));
+}
+
+void test_the_expiry_alert_effect_order_is_pinned_end_to_end(void) {
+    wake_flow_fire_expiry_alert();
+    static const flow_event_t expect[] = {EV_PERSIST_SAVE, EV_TIMESUP, EV_ALERT_EXPIRY, EV_REPAINT};
+    TEST_ASSERT_EQUAL_INT((int)(sizeof expect / sizeof expect[0]), flow_log_n);
+    for (int i = 0; i < flow_log_n; i++) {
+        TEST_ASSERT_EQUAL_INT((int)expect[i], (int)flow_log[i]);
+    }
+}
+
+/* The alert RETURNS, unlike the bed-time engage: the tick handler
+   re-checks the break gate straight after it, which is the only place
+   expiry-then-break is ordered correctly within one wake. */
+void test_the_expiry_alert_returns_to_its_caller(void) {
+    wake_flow_fire_expiry_alert();
+    flow_log_push(EV_LED); /* only reachable if the call above came back */
+    TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_LED));
+}
+
+/* ---- the day rollover: the no-op path ----------------------------------- */
+
+void test_a_wake_on_the_same_day_rolls_nothing_over(void) {
+    time_t now = flow_at(14, 0);
+    flow_new_day = false;
+    wake_flow_handle_day_rollover(&now);
+    TEST_ASSERT_EQUAL_INT(1, flow_log_n);
+    TEST_ASSERT_EQUAL_INT((int)EV_IS_NEW_DAY, (int)flow_log[0]);
+    TEST_ASSERT_EQUAL_INT64(flow_at(14, 0), now); /* the caller's clock is left alone */
+}
+
+void test_the_new_day_check_reads_the_clock_it_was_handed(void) {
+    mock_time_set(flow_at(9, 0));
+    time_t now = flow_at(14, 0);
+    wake_flow_handle_day_rollover(&now);
+    TEST_ASSERT_EQUAL_INT64(flow_at(14, 0), flow_new_day_arg);
+}
+
+/* ---- ROW 13: rollover with a valid same-day NVS snapshot ---------------
+   "snapshot wins; allocation not refunded". Power cycling a device at
+   09:00 must not hand back the morning's spent screen time. */
+
+void test_row13_a_valid_same_day_snapshot_beats_the_reset(void) {
+    time_t now = flow_at(0, 5);
+    flow_new_day = true;
+    flow_restore_ok = true;
+    wake_flow_handle_day_rollover(&now);
+    TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_PERSIST_RESTORE));
+    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_TIMER_RESET));
+    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_RECORD_DATE));
+    TEST_ASSERT_FALSE(flow_reset_called);
+}
+
+void test_row13_a_genuine_date_change_resets_and_records_the_new_day(void) {
+    time_t now = flow_at(0, 5);
+    flow_new_day = true;
+    flow_restore_ok = false;
+    wake_flow_handle_day_rollover(&now);
+    TEST_ASSERT_TRUE(flow_reset_called);
+    TEST_ASSERT_TRUE(flow_log_at(EV_TIMER_RESET) < flow_log_at(EV_RECORD_DATE));
+}
+
+/* The restore is asked with the CORRECTED clock: the window may have
+   stepped it across the date line, and asking with the pre-window value
+   is how a same-day snapshot gets misjudged. */
+void test_the_snapshot_is_judged_against_the_corrected_clock(void) {
+    time_t now = flow_at(0, 5);
+    flow_new_day = true;
+    flow_clock_after_window = flow_at(6, 30);
+    wake_flow_handle_day_rollover(&now);
+    TEST_ASSERT_EQUAL_INT64(flow_at(6, 30), flow_restore_arg);
+}
+
+/* `now` is an out-param for exactly this reason: everything later in the
+   wake (the bed-time gate, the grid wait, this wake's tick) keys off the
+   value the rollover leaves behind. */
+void test_the_rollover_hands_the_corrected_clock_back_to_the_caller(void) {
+    time_t now = flow_at(0, 5);
+    flow_new_day = true;
+    flow_clock_after_window = flow_at(6, 30);
+    wake_flow_handle_day_rollover(&now);
+    TEST_ASSERT_EQUAL_INT64(flow_at(6, 30), now);
+}
+
+void test_the_recorded_date_is_the_corrected_clock_too(void) {
+    time_t now = flow_at(0, 5);
+    flow_new_day = true;
+    flow_restore_ok = false;
+    flow_clock_after_window = flow_at(6, 30);
+    wake_flow_handle_day_rollover(&now);
+    TEST_ASSERT_EQUAL_INT64(flow_at(6, 30), flow_record_date_arg);
+}
+
+/* Fail-open: a window that never syncs still leaves a usable day. */
+void test_a_rollover_whose_window_never_syncs_still_resets_the_day(void) {
+    time_t now = flow_at(0, 5);
+    flow_new_day = true;
+    flow_restore_ok = false;
+    flow_clock_after_window = 0; /* no step: the sync failed */
+    mock_time_set(flow_at(0, 5));
+    wake_flow_handle_day_rollover(&now);
+    TEST_ASSERT_TRUE(flow_reset_called);
+    TEST_ASSERT_EQUAL_INT64(flow_at(0, 5), now);
+}
+
+/* ---- the day rollover: yesterday's summary ------------------------------ */
+
+/* Captured BEFORE the reset wipes the counters — and before the window
+   that will publish it. */
+void test_yesterdays_summary_is_queued_before_anything_is_reset(void) {
+    time_t now = flow_at(0, 5);
+    flow_new_day = true;
+    flow_restore_ok = false;
+    wake_flow_handle_day_rollover(&now);
+    int queued = flow_log_at(EV_QUEUE_SUMMARY);
+    TEST_ASSERT_TRUE(queued >= 0);
+    TEST_ASSERT_TRUE(queued < flow_log_at(EV_TRY_WINDOW));
+    TEST_ASSERT_TRUE(queued < flow_log_at(EV_TIMER_RESET));
+}
+
+void test_the_summary_carries_the_stored_date_and_the_days_screen_usage(void) {
+    time_t now = flow_at(0, 5);
+    flow_new_day = true;
+    flow_date = "2026-07-28";
+    flow_screen_used = 4321;
+    wake_flow_handle_day_rollover(&now);
+    TEST_ASSERT_EQUAL_STRING("2026-07-28", flow_summary_date);
+    TEST_ASSERT_EQUAL_INT32(4321, flow_summary_used);
+}
+
+/* The completions come from the EXTRA slots (1..N), not from Screen: the
+   1+i offset is the whole point of the loop, and dropping it would report
+   Screen's number four times. */
+void test_the_summary_reads_the_extra_slots_not_the_screen_slot(void) {
+    time_t now = flow_at(0, 5);
+    flow_new_day = true;
+    wake_flow_handle_day_rollover(&now);
+    TEST_ASSERT_EQUAL_INT(TIMER_EXTRA_SLOTS, flow_completion_asks);
+    for (int i = 0; i < TIMER_EXTRA_SLOTS; i++) {
+        TEST_ASSERT_EQUAL_INT(1 + i, flow_completion_slots[i]);
+        TEST_ASSERT_EQUAL_UINT16((uint16_t)(100 + 1 + i), flow_summary_comp[i]);
+    }
+}
+
+/* Nothing to report before the first day was ever recorded. */
+void test_a_cold_boot_with_no_stored_date_queues_no_summary(void) {
+    time_t now = flow_at(0, 5);
+    flow_new_day = true;
+    flow_date = "";
+    wake_flow_handle_day_rollover(&now);
+    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_QUEUE_SUMMARY));
+}
+
+/* ...but the rest of the rollover still happens: a cold boot must still
+   land on a fresh day. */
+void test_a_cold_boot_rollover_still_clears_the_bonus_and_resets(void) {
+    time_t now = flow_at(0, 5);
+    flow_new_day = true;
+    flow_date = "";
+    flow_restore_ok = false;
+    wake_flow_handle_day_rollover(&now);
+    TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_BONUS_CLEAR));
+    TEST_ASSERT_TRUE(flow_reset_called);
+}
+
+void test_the_retained_bonus_target_is_cleared_on_every_rollover(void) {
+    time_t now = flow_at(0, 5);
+    flow_new_day = true;
+    wake_flow_handle_day_rollover(&now);
+    TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_BONUS_CLEAR));
+    TEST_ASSERT_TRUE(flow_log_at(EV_BONUS_CLEAR) < flow_log_at(EV_TRY_WINDOW));
+}
+
+/* The usage figure is read at the live clock, which at this point is
+   still yesterday's — reading it after the window would attribute the
+   step to yesterday's total. */
+void test_the_days_usage_is_read_before_the_window_steps_the_clock(void) {
+    time_t now = flow_at(0, 5);
+    mock_time_set(flow_at(0, 5));
+    flow_new_day = true;
+    flow_clock_after_window = flow_at(6, 30);
+    wake_flow_handle_day_rollover(&now);
+    TEST_ASSERT_EQUAL_INT64(flow_at(0, 5), flow_screen_used_arg);
+}
+
+/* The usage figure is sampled BEFORE the completions loop, not after it.
+   Screen's used seconds are allocation-minus-remaining at `now`, so on a
+   RUNNING slot the answer moves while the loop runs — and a summary whose
+   two halves were read at different instants is a subtly wrong day.
+   Mutation testing surfaced this: hoisting the read below the loop
+   escaped a suite that only checked WHICH clock it was given. */
+void test_the_days_usage_is_sampled_before_the_completions_loop(void) {
+    time_t now = flow_at(0, 5);
+    flow_new_day = true;
+    wake_flow_handle_day_rollover(&now);
+    TEST_ASSERT_EQUAL_INT(0, flow_comps_asked_when_used_read);
+    TEST_ASSERT_EQUAL_INT(TIMER_EXTRA_SLOTS, flow_completion_asks);
+}
+
+/* The full ordered trace of a rollover that resets. */
+void test_the_rollover_effect_order_is_pinned_end_to_end(void) {
+    time_t now = flow_at(0, 5);
+    flow_new_day = true;
+    flow_restore_ok = false;
+    wake_flow_handle_day_rollover(&now);
+    static const flow_event_t expect[] = {EV_IS_NEW_DAY,      EV_QUEUE_SUMMARY, EV_BONUS_CLEAR, EV_TRY_WINDOW,
+                                          EV_PERSIST_RESTORE, EV_TIMER_RESET,   EV_RECORD_DATE};
+    TEST_ASSERT_EQUAL_INT((int)(sizeof expect / sizeof expect[0]), flow_log_n);
+    for (int i = 0; i < flow_log_n; i++) {
+        TEST_ASSERT_EQUAL_INT((int)expect[i], (int)flow_log[i]);
+    }
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_deepsleep_is_the_healthy_reason);
@@ -1953,5 +2754,50 @@ int main(void) {
     RUN_TEST(test_a_refused_press_in_the_break_tail_neither_lights_nor_renders);
     RUN_TEST(test_the_break_tail_lights_the_pixels_before_it_renders);
     RUN_TEST(test_the_break_tail_reports_the_state_that_was_painted_not_the_new_one);
+    RUN_TEST(test_row22_a_zero_interval_never_starts_a_break);
+    RUN_TEST(test_row22_a_zero_interval_is_decided_before_the_balance_is_asked);
+    RUN_TEST(test_the_gate_reads_both_config_values_up_front);
+    RUN_TEST(test_the_compile_time_defaults_stand_when_nvs_never_stored_them);
+    RUN_TEST(test_row22_a_one_minute_interval_is_an_interval_not_a_disable);
+    RUN_TEST(test_a_one_minute_duration_is_a_real_duration);
+    RUN_TEST(test_a_balance_short_of_the_interval_starts_nothing);
+    RUN_TEST(test_the_interval_is_asked_of_the_balance_in_seconds);
+    RUN_TEST(test_the_break_is_started_for_the_configured_duration_in_seconds);
+    RUN_TEST(test_the_gate_uses_the_clock_it_was_handed_not_the_live_one);
+    RUN_TEST(test_a_started_break_persists_then_paints_then_alarms);
+    RUN_TEST(test_a_started_break_runs_the_break_alarm_not_the_expiry_one);
+    RUN_TEST(test_the_started_break_effect_order_is_pinned_end_to_end);
+    RUN_TEST(test_row21_a_break_that_would_cross_bed_time_goes_to_bed_instead);
+    RUN_TEST(test_row21_the_bed_time_engage_is_always_audible);
+    RUN_TEST(test_row21_the_bed_time_engage_gets_the_gates_own_clock);
+    RUN_TEST(test_a_break_that_finishes_before_bed_time_still_starts);
+    RUN_TEST(test_a_break_landing_exactly_on_bed_time_is_skipped);
+    RUN_TEST(test_bed_time_disabled_never_skips_a_break);
+    RUN_TEST(test_a_break_starting_after_bed_time_is_not_this_gates_problem);
+    RUN_TEST(test_a_break_that_is_not_due_never_reaches_the_bed_time_check);
+    RUN_TEST(test_row12_the_expired_snapshot_is_persisted_before_anything_else);
+    RUN_TEST(test_row12_the_snapshot_is_persisted_before_the_alarm_runs);
+    RUN_TEST(test_the_timesup_screen_precedes_the_alarm);
+    RUN_TEST(test_the_main_layout_is_repainted_after_the_alarm);
+    RUN_TEST(test_the_expiry_alert_runs_the_expiry_alarm_not_the_break_one);
+    RUN_TEST(test_the_expiry_alert_effect_order_is_pinned_end_to_end);
+    RUN_TEST(test_the_expiry_alert_returns_to_its_caller);
+    RUN_TEST(test_a_wake_on_the_same_day_rolls_nothing_over);
+    RUN_TEST(test_the_new_day_check_reads_the_clock_it_was_handed);
+    RUN_TEST(test_row13_a_valid_same_day_snapshot_beats_the_reset);
+    RUN_TEST(test_row13_a_genuine_date_change_resets_and_records_the_new_day);
+    RUN_TEST(test_the_snapshot_is_judged_against_the_corrected_clock);
+    RUN_TEST(test_the_rollover_hands_the_corrected_clock_back_to_the_caller);
+    RUN_TEST(test_the_recorded_date_is_the_corrected_clock_too);
+    RUN_TEST(test_a_rollover_whose_window_never_syncs_still_resets_the_day);
+    RUN_TEST(test_yesterdays_summary_is_queued_before_anything_is_reset);
+    RUN_TEST(test_the_summary_carries_the_stored_date_and_the_days_screen_usage);
+    RUN_TEST(test_the_summary_reads_the_extra_slots_not_the_screen_slot);
+    RUN_TEST(test_a_cold_boot_with_no_stored_date_queues_no_summary);
+    RUN_TEST(test_a_cold_boot_rollover_still_clears_the_bonus_and_resets);
+    RUN_TEST(test_the_retained_bonus_target_is_cleared_on_every_rollover);
+    RUN_TEST(test_the_days_usage_is_read_before_the_window_steps_the_clock);
+    RUN_TEST(test_the_days_usage_is_sampled_before_the_completions_loop);
+    RUN_TEST(test_the_rollover_effect_order_is_pinned_end_to_end);
     return UNITY_END();
 }

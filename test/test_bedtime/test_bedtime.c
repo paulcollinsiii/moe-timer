@@ -96,7 +96,7 @@ void test_alert_for_a_background_break(void) {
    out of code that already exists, and both tests exist to catch a future
    change that quietly breaks them.
 
-   1. bedtime_break_would_cross sits INSIDE maybe_start_break, which is
+   1. bedtime_break_would_cross sits INSIDE wake_flow_maybe_start_break, which
       source-agnostic — it is reached the same way
       whether the balance was driven by Screen or by a laundry-folding
       chore. A break that would still be running at bed time is skipped in

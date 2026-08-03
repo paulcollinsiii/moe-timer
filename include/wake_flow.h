@@ -143,6 +143,60 @@ bool wake_flow_poll_button_a_action(void);
    shows — the caller stops watching, having already repainted. */
 bool wake_flow_poll_break_buttons(void);
 
+/* ---- the break gate, the expiry alert and the day rollover -------------- */
+
+/* Eye-rest break gate, run wherever the exposure balance can have crossed
+   the interval. Returns true when a break was STARTED, which the caller
+   must read as "the break screen is painted and the alarm has run — go
+   straight to sleep"; false means nothing happened at all.
+
+   Takes `now` rather than reading the clock, because the call sites do
+   not agree on which instant they mean and must not: two of them
+   deliberately re-read the wall clock first (an expiry alert holds the
+   CPU for ~15 s before returning), while the post-press one passes the
+   clock the dispatched action left behind.
+
+   Two ways to return false — and one way not to return at all:
+     - a configured interval of 0 disables eye-rest breaks entirely;
+     - the balance has simply not reached the interval yet;
+     - a break that would still be running at bed time never starts. The
+       device goes to bed early and AUDIBLY instead, through
+       lock_gate_bedtime_engage(), which DOES NOT RETURN — the one
+       alerting path that begins before its own threshold is reached.
+   Persists BREAK before the alarm, same rationale as the EXPIRED
+   at-transition save below: a power cut during the ~15 s alarm must not
+   restore a snapshot taken before the break existed. */
+bool wake_flow_maybe_start_break(time_t now);
+
+/* Full expiry sequence: big TIME'S UP screen, beeps + red pulse, then
+   back to the main layout (empty bar, TIME'S UP state in the corner) once
+   the alert is dismissed or times out — the big screen would only last
+   until the next tick redraw anyway.
+
+   RETURNS, unlike the bed-time engage above, and the tick handler depends
+   on that: re-checking the break gate after this is what yields
+   expiry-then-break within one wake.
+
+   Exposed rather than wrapped in a main.c thunk because it is
+   ADDRESS-TAKEN: net_apply's on_active_expired_alert hook points straight
+   at it, so a network window that expires the active timer runs this same
+   sequence. */
+void wake_flow_fire_expiry_alert(void);
+
+/* Day rollover, run first in both wake handlers. A no-op unless the
+   stored date differs from today's.
+
+   `now` is by POINTER because the rollover opens its own network window
+   and the caller must carry on against the CORRECTED clock, not the one
+   it walked in with — every later decision in the wake (the bed-time
+   gate, the grid wait, this wake's tick) keys off that value.
+
+   Yesterday's numbers are queued for HA before anything is reset. A
+   same-day NVS snapshot then beats the reset: power cycling must never
+   refund the day's allocation, so only a genuine date change gets a fresh
+   one. */
+void wake_flow_handle_day_rollover(time_t *now);
+
 /* ---- seams implemented by main.c ---------------------------------------- */
 
 /* Render seam, implemented by main.c: tick the timer and full-refresh the
@@ -160,6 +214,17 @@ void paint_current_state_full(void);
    it paints through make_state() (battery ADC + the ParentTesting flag);
    it moves here with the rest of the post-action tail. */
 void render_action_result(button_id_t btn, timer_state_t before, time_t now, bool selection_changed);
+
+/* Break-start paint seam, also implemented by main.c and also unprefixed,
+   for the same reason as the two above: it paints through make_state()
+   (battery ADC + the ParentTesting flag).
+
+   Deliberately not paint_current_state_full() with an argument. That one
+   re-reads the wall clock, where a starting break must paint against the
+   instant it started; and the LED sits BETWEEN the state assembly and the
+   refresh here, so the panel is blue for the whole multi-second flush
+   rather than only after it. */
+void paint_break_started(time_t now);
 
 #ifdef __cplusplus
 }
