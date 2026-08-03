@@ -44,6 +44,7 @@ idf_component_register(
         "quiet_hours.c"
         "bedtime.c"
         "sleep_plan.c"
+        "lock_gate.c"
         "hal_time.c"
         "hal_nvs.c"
     INCLUDE_DIRS

@@ -103,10 +103,11 @@ typedef enum {
 
 /* Precedence between the locks. Both can be engaged at once, by a
    specific path: bed time engages and sets its flag in RTC memory, the
-   device sleeps its 2 h chunk, and the next wake runs check_charge_lock()
-   — which comes before any bedtime code — with the battery at or under
-   BATT_LOCK_PCT. The charge flag goes up while the bed-time flag is still
-   set, and nothing on that boot clears it. (The 10-15% hysteresis band
+   device sleeps its 2 h chunk, and the next wake runs
+   lock_gate_check_charge() — which comes before any bedtime code — with
+   the battery at or under BATT_LOCK_PCT. The charge flag goes up while
+   the bed-time flag is still set, and nothing on that boot clears it.
+   (The 10-15% hysteresis band
    only HOLDS an engaged lock; engaging needs <= BATT_LOCK_PCT.) Charge
    lock wins: a battery that cannot afford a refresh cannot afford the 2 h
    cadence either. Pure — host-tested. */

@@ -114,8 +114,8 @@ void test_break_crossing_is_source_agnostic(void) {
 /* 2. bedtime_should_alert keys on the state of the ACTIVE slot, and only
       the active slot can be RUNNING (I1). A break-eligible timer running
       up to bed time therefore fires the bed-time screen audibly, exactly
-      as the Screen timer does — and bedtime_engage's timer_pause covers
-      it, since it pauses whatever is RUNNING. */
+      as the Screen timer does — and lock_gate_bedtime_engage's timer_pause
+      covers it, since it pauses whatever is RUNNING. */
 void test_alert_for_an_eligible_timer_running_into_bedtime(void) {
     /* Violin RUNNING with no break in progress: RUNNING is enough. */
     TEST_ASSERT_TRUE(bedtime_should_alert(TIMER_RUNNING, false));

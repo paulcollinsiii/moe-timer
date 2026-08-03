@@ -193,8 +193,8 @@ void test_bedtime_miss_reads_the_key_exactly_once(void) {
 }
 
 void test_bedtime_hit_reads_nothing_more(void) {
-    /* Three call sites per wake (check_bedtime, the rollover recheck and
-       the break-crossing test); one read between them. */
+    /* Three call sites per wake (lock_gate_check_bedtime, the rollover
+       recheck and the break-crossing test); one read between them. */
     (void)config_cache_bedtime_minutes();
     (void)config_cache_bedtime_minutes();
     (void)config_cache_bedtime_minutes();

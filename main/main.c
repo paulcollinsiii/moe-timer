@@ -5,7 +5,6 @@
 #include "app_state.h"
 #include "audio.h"
 #include "battery.h"
-#include "battery_policy.h"
 #include "bedtime.h"
 #include "button_actions.h"
 #include "button_latch.h"
@@ -22,6 +21,7 @@
 #include "freertos/task.h"
 #include "hal_nvs.h"
 #include "light.h"
+#include "lock_gate.h"
 #include "mqtt_ha.h"
 #include "neopixel.h"
 #include "net_apply.h"
@@ -68,33 +68,10 @@ static bool status_leds_quiet(void) {
 static RTC_DATA_ATTR uint8_t s_held_mask_at_sleep;
 static RTC_DATA_ATTR int64_t s_sleep_entry_time;
 
-/* Battery charge lock (<= 10%, released > 15%): the Charge Me! screen is
-   painted once, then the device sleeps long intervals with buttons and
-   all timer/NTP work disabled — an e-ink refresh during brownout can
-   leave persistent artifacts, and every wake costs charge it can't spare. */
-static RTC_DATA_ATTR bool s_charge_locked;
-static bool s_charge_lock_released; /* recovery wake: repaint over Charge Me! */
-
-/* Bed Time lock (config HHMM .. day rollover): Bed Time screen painted
-   once, buttons stay dark, and the device sleeps ~2 h chunks waking only
-   for NTP + the rollover check. RTC-only on purpose: the gate recomputes
-   from wall-clock time on every boot, so a hard reset cannot unlock the
-   night - it merely replays the engage (paint + alert) once. */
-static RTC_DATA_ATTR bool s_bedtime_locked;
-static bool s_bedtime_released; /* morning/config release: repaint over Bed Time */
-
-/* The two lock flags read as one policy question; the precedence between
-   them is host-tested in sleep_plan.c. Every sleep site asks through here
-   rather than inspecting the flags, so there is exactly one place for
-   lock_gate.c to take over. Sampling at the call site (not inside
-   enter_deep_sleep, past its 15 s net_window_join) also shrinks the
-   awake_failsafe_cb race to the few ms between gate entry and the flag
-   write — and a mis-sampled wake self-corrects on the next one. */
-static wake_sleep_mode_t current_sleep_mode(void) {
-    return wake_sleep_mode_select(s_charge_locked, s_bedtime_locked);
-}
-
-static void enter_deep_sleep(wake_sleep_mode_t mode) {
+/* Declared in lock_gate.h: the gates there end a wake by calling this,
+   and it stays here because deep sleep is an ESP-IDF contract with no
+   module home. Does not return. */
+void enter_deep_sleep(wake_sleep_mode_t mode) {
     /* Late-wake forensics repeat: the boot-time log of this line is often
        lost to USB CDC re-enumeration; by sleep entry the console has had
        the whole wake to come up. */
@@ -189,7 +166,7 @@ static void stats_collect(stats_snapshot_t *out) {
     app_state_in_t in = {
         .batt_mv = battery_read_mv(),
         .light_mv = light_read_mv(),
-        .charge_locked = s_charge_locked,
+        .charge_locked = lock_gate_charge_locked(),
         .parent_testing = PARENT_TESTING,
         .fw_version = esp_app_get_description()->version,
         .reset_reason = wake_flow_reset_reason_str(esp_reset_reason()),
@@ -311,87 +288,6 @@ static display_state_t make_state(int32_t remaining, time_t now) {
     return app_state_display(&in, remaining, now);
 }
 
-/* ---- battery charge lock ---------------------------------------------- */
-
-/* Runs before wake dispatch. Returns normally when operation may continue;
-   when the battery is in the lock band it paints Charge Me! once (pausing
-   a RUNNING timer so the allocation doesn't burn while the device is
-   unusable), then sleeps — this call does not return. */
-static void check_charge_lock(void) {
-    int pct = battery_percent_from_mv(battery_read_mv());
-    batt_policy_t pol = battery_policy_evaluate(pct, s_charge_locked);
-    if (pol != BATT_LOCK) {
-        if (s_charge_locked) {
-            s_charge_locked = false;
-            s_charge_lock_released = true; /* repaint over the Charge Me! screen */
-            ESP_LOGW(TAG, "Charge lock released (%d%%)", pct);
-        }
-        return;
-    }
-    if (!s_charge_locked) {
-        s_charge_locked = true;
-        ESP_LOGW(TAG, "Charge lock engaged (%d%%)", pct);
-        if (timer_get_state() == TIMER_RUNNING) {
-            timer_pause(time(NULL));
-        }
-        display_charge_me(); /* one full refresh; later wakes leave the panel alone */
-        /* Best-effort HA notification (charge_lock: true) — the last stat
-           before the long battery-recheck sleeps begin. */
-        net_apply_try_window();
-    }
-    enter_deep_sleep(current_sleep_mode()); /* charge-locked here: 600 s, no button wake */
-}
-
-/* ---- bed time ----------------------------------------------------------- */
-
-/* Lock onto the Bed Time screen and sleep - does not return. The timer
-   is paused, never expired: day rollover resets the slots overnight, so
-   expiring would only skew the daily-summary stats. */
-static void bedtime_engage(time_t now, bool alert) {
-    s_bedtime_locked = true;
-    ESP_LOGW(TAG, "Bed time engaged (state %d%s)", (int)timer_get_state(), alert ? ", alerting" : "");
-    if (timer_get_state() == TIMER_RUNNING) {
-        timer_pause(now);
-    }
-    timer_persist_save();
-    display_bedtime(); /* one full refresh; later wakes leave the panel alone */
-    if (alert) {
-        alert_run(ALERT_BEDTIME);
-    }
-    /* Best-effort HA stat before the long no-button sleeps begin. */
-    net_apply_try_window();
-    enter_deep_sleep(current_sleep_mode()); /* bed-time locked here: ~2 h, no button wake */
-}
-
-/* Gate, modeled on check_charge_lock: called from both wake handlers
-   right after day rollover (rollover-first ordering is what clears the
-   lock on the new day). May not return. */
-static void check_bedtime(time_t now) {
-    if (!bedtime_active(time_util_minutes_of_day(now), config_cache_bedtime_minutes())) {
-        if (s_bedtime_locked) {
-            s_bedtime_locked = false;
-            s_bedtime_released = true; /* repaint over the Bed Time screen */
-            ESP_LOGW(TAG, "Bed time released");
-        }
-        return;
-    }
-    if (!s_bedtime_locked) {
-        bedtime_engage(now, bedtime_should_alert(timer_get_state(), timer_break_active())); /* no return */
-    }
-    /* Locked re-wake (~2 h cadence): NTP + HA config pickup only, no
-       repaint (e-ink retains). Re-check after the window - a bedtime
-       edit landing here is the only remote fix path while buttons are
-       dead, and it must not wait another 2 h. */
-    net_apply_try_window(); /* finish drops the bedtime cache with the rest */
-    if (!bedtime_active(time_util_minutes_of_day(time(NULL)), config_cache_bedtime_minutes())) {
-        s_bedtime_locked = false;
-        s_bedtime_released = true;
-        ESP_LOGW(TAG, "Bed time released (config edit or clock step)");
-        return; /* fall through to the normal wake, which repaints */
-    }
-    enter_deep_sleep(current_sleep_mode());
-}
-
 /* Returns true when a break was started (caller should go straight to
    sleep). Persists BREAK before the alarm, same rationale as the EXPIRED
    at-transition save. */
@@ -409,7 +305,7 @@ static bool maybe_start_break(time_t now) {
        threshold itself is reached). */
     if (bedtime_break_would_cross(time_util_minutes_of_day(now), (int)duration_min, config_cache_bedtime_minutes())) {
         ESP_LOGW(TAG, "Screen break due but would cross bed time");
-        bedtime_engage(now, true); /* no return */
+        lock_gate_bedtime_engage(now, true); /* no return */
     }
     ESP_LOGI(TAG, "Screen break due (accum %ld s)", (long)timer_run_accum(now));
     timer_start_break(now, (int32_t)duration_min * 60);
@@ -886,7 +782,7 @@ static void finish_or_break(button_id_t btn, timer_state_t before, time_t now, b
     if (maybe_start_break(now)) {
         post_stats_snapshot(); /* break screen painted: release MQTT */
         net_apply_finish();    /* drain + apply deferred before sleeping */
-        enter_deep_sleep(current_sleep_mode());
+        enter_deep_sleep(lock_gate_sleep_mode());
     }
     finish_action_and_render(btn, before, now, selection_changed);
 }
@@ -894,7 +790,7 @@ static void finish_or_break(button_id_t btn, timer_state_t before, time_t now, b
 static void handle_timer_tick(void) {
     time_t now = time(NULL);
     handle_day_rollover(&now);
-    check_bedtime(now); /* may not return; before the sync block so a
+    lock_gate_check_bedtime(now); /* may not return; before the sync block so a
                            locked re-wake runs exactly one net window
                            (the rare release-by-edit fall-through repaints
                            and may add this wake's regular sync) */
@@ -936,7 +832,7 @@ static void handle_timer_tick(void) {
        final minute — but this call carries no such guarantee, so do not
        add one to this comment. */
     if (maybe_start_break(now)) {
-        enter_deep_sleep(current_sleep_mode()); /* break just started; sleep through it */
+        enter_deep_sleep(lock_gate_sleep_mode()); /* break just started; sleep through it */
     }
 
     /* Land the render on the state's grid — the planner woke us on (or,
@@ -974,9 +870,7 @@ static void handle_timer_tick(void) {
     }
 
     wake_render_t wr = wake_policy_render(before, timer_get_state(), false, s_break_ended, false);
-    if ((s_charge_lock_released || s_bedtime_released) && wr == WAKE_RENDER_PARTIAL) {
-        wr = WAKE_RENDER_FULL; /* the panel still shows a lock screen — repaint fully */
-    }
+    wr = lock_gate_promote_render(wr); /* a lock released this wake owes the panel a full one */
     switch (wr) {
         case WAKE_RENDER_EXPIRY_ALERT:
             fire_expiry_alert();
@@ -1004,7 +898,7 @@ static void handle_timer_tick(void) {
        alert holds the CPU for ~15 s before returning. */
     now = time(NULL);
     if (maybe_start_break(now)) {
-        enter_deep_sleep(current_sleep_mode()); /* break just started; sleep through it */
+        enter_deep_sleep(lock_gate_sleep_mode()); /* break just started; sleep through it */
     }
 
     /* A press that landed while this wake was awake (sync, grid wait,
@@ -1023,7 +917,7 @@ static void handle_timer_tick(void) {
         }
     }
     maybe_wait_for_event();
-    enter_deep_sleep(current_sleep_mode());
+    enter_deep_sleep(lock_gate_sleep_mode());
 }
 
 static void handle_button_wake(void) {
@@ -1035,7 +929,7 @@ static void handle_button_wake(void) {
        and go back to waiting for release. */
     if (btn != BTN_NONE && (s_held_mask_at_sleep & (1u << (int)btn)) && (int64_t)time(NULL) - s_sleep_entry_time <= 2) {
         ESP_LOGI(TAG, "button %d still held from previous wake - ignoring", (int)btn);
-        enter_deep_sleep(current_sleep_mode()); /* does not return */
+        enter_deep_sleep(lock_gate_sleep_mode()); /* does not return */
     }
 
     /* Immediate "button heard" ack — current state colour, updated to the
@@ -1047,7 +941,7 @@ static void handle_button_wake(void) {
     /* IDLE overnight: the threshold crossing may first be observed on a
        button press (idle wakes are up to an hour apart). The press is
        swallowed and the transition is silent per the alert rules. */
-    check_bedtime(now); /* may not return */
+    lock_gate_check_bedtime(now); /* may not return */
     /* Same ordering as the tick handler: after rollover + bedtime, before
        `before` is captured, so a snap back to Screen rides the
        s_break_ended promotion rather than confusing the state diff. */
@@ -1082,7 +976,7 @@ static void handle_button_wake(void) {
 
     finish_or_break(btn, before, now, swapped); /* e.g. resume with accrual already past the interval */
     maybe_wait_for_event();
-    enter_deep_sleep(current_sleep_mode());
+    enter_deep_sleep(lock_gate_sleep_mode());
 }
 
 /* Last-resort battery protection: no wake may run forever (WiFi driver
@@ -1094,7 +988,7 @@ static void handle_button_wake(void) {
 static void awake_failsafe_cb(void *arg) {
     (void)arg;
     ESP_LOGE(TAG, "Awake failsafe: still awake after %d s - forcing deep sleep", CONFIG_MAGTAG_MAX_AWAKE_SEC);
-    enter_deep_sleep(current_sleep_mode());
+    enter_deep_sleep(lock_gate_sleep_mode());
 }
 
 static esp_timer_handle_t s_failsafe_timer;
@@ -1176,7 +1070,7 @@ void app_main(void) {
     ESP_LOGI(TAG, "Wakeup causes: 0x%08lx, reset reason: %d", (unsigned long)causes, (int)esp_reset_reason());
 
     /* Battery gate before any wake work: does not return while locked */
-    check_charge_lock();
+    lock_gate_check_charge();
 
     if (causes & BIT(ESP_SLEEP_WAKEUP_EXT1)) {
         handle_button_wake();
