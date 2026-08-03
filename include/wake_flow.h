@@ -1,5 +1,9 @@
 #pragma once
 #include <stdbool.h>
+#include <time.h>
+
+#include "buttons.h" /* button_id_t */
+#include "timer.h"   /* timer_state_t */
 #ifndef NATIVE
 #include "esp_system.h" /* esp_reset_reason_t */
 #endif
@@ -63,6 +67,84 @@ bool wake_flow_break_end_repaint(void);
    A plain static behind this: the next wake is a fresh boot. */
 bool wake_flow_break_ended_this_wake(void);
 
+/* ---- the button guard matrix ------------------------------------------- */
+
+/* Apply one button action (A/B/C — D is wake-only). Shared by the EXT1
+   wake handler, the tick-wake latch drain and the break tail, so all
+   three honour the same state guards.
+
+   The signature is the contract, and every part of it encodes a shipped
+   defect — do not "clean it up":
+
+   `before` is by VALUE because it is the state that was PAINTED, not the
+   state that is live. wake_policy_render()'s break-screen boundary check
+   is the only thing standing between a swap during a break and a ghosted
+   panel, and it can only see that boundary if `before` still names the
+   layout on the glass. The guards below therefore key on this parameter,
+   never on timer_get_state().
+
+   `now` is by POINTER because a start/resume can span a network window
+   (seconds) and the caller must render against the clock the action
+   actually left behind, corrected and shifted, not the one it walked in
+   with.
+
+   `selection_changed` is an OUT-PARAM rather than a rewrite of `before`
+   because both facts have to survive: landing on an already-EXPIRED slot
+   must not re-fire its alert (which is what this reports), while `before`
+   remains the only record of which layout was painted. Overwriting
+   `before` to signal the swap made those renders partial, which ghosted
+   the panel. Always written — false on every arm, including refusals and
+   the buttons this function ignores.
+
+   allow_net_window gates the NTP window on a start/resume: a wake that
+   already ran a window skips the redundant second one (clock corrected,
+   buffered HA effects already applied). Returns true when the press
+   changed timer state (the caller must render). */
+bool wake_flow_dispatch_button_action(button_id_t btn, time_t *now, timer_state_t before, bool allow_net_window,
+                                      bool *selection_changed);
+
+/* Awake pause poll. Buttons are only dispatched on EXT1 wake — while the
+   firmware is awake a press would vanish — so the long awake waits poll
+   this instead: a Button A press while RUNNING pauses immediately, the
+   one action that must not be lost. The GPIO ISR latches the edge the
+   moment it lands (even inside an e-ink flush or an NTP sync) and this
+   consumes the latch, so no press is lost to a blind spot.
+
+   MASKED take: only the A bit is consumed. Latched B/C presses stay in
+   the latch for the tick-wake drain — a poll during the grid wait must
+   not eat them. Returns true when it paused. */
+bool wake_flow_poll_pause_button(void);
+
+/* Latched Button A during the window join-wait: the screen has already
+   painted and the device looks done, so a dropped press reads as broken.
+   Mirrors the wake handler — RUNNING pauses, IDLE starts, PAUSED resumes,
+   BREAK/EXPIRED stay wake-press-only. The LED acks instantly; the repaint
+   rides the post-join changed-state re-render, because the panel must
+   stay quiet while the MQTT tail is transmitting (brownout, see the
+   snapshot rendezvous). The clock was already synced this wake, so a
+   start here needs no expiry shift. Same masked take as the pause poll.
+   Returns true when the state map did something. */
+bool wake_flow_poll_button_a_action(void);
+
+/* Button poll for the BREAK tail. The break watch owns the CPU for the
+   whole tail, and a break no longer than SLEEP_PLAN_WATCH_SEC has no
+   other phase — the tail IS the break. Without this poll every press made
+   during it is latched by the ISR and then thrown away at deep sleep,
+   which silently disables the one thing a break is for: walking over to a
+   break-eligible timer and starting it (C to select, A to start). Symptom
+   on-device: "I couldn't move to another timer in the final minute of the
+   screen break."
+
+   Same mask, dispatch and guards as the tick handler's latch drain, so
+   the break's own refusals (A on slot 0, a non-eligible slot) still
+   apply. allow_net_window is false: the window for this wake has already
+   been joined by the time the watch runs, and a second one here would
+   paint over the tail. Returns true when the press changed what the panel
+   shows — the caller stops watching, having already repainted. */
+bool wake_flow_poll_break_buttons(void);
+
+/* ---- seams implemented by main.c ---------------------------------------- */
+
 /* Render seam, implemented by main.c: tick the timer and full-refresh the
    panel with the result. It stays there because the state it paints needs
    a battery ADC read and the compile-time ParentTesting flag, neither of
@@ -70,6 +152,14 @@ bool wake_flow_break_ended_this_wake(void);
    wake_flow does not implement it — which is the same shape as
    enter_deep_sleep(), declared by lock_gate.h and owned by main.c. */
 void paint_current_state_full(void);
+
+/* Post-action render seam, also implemented by main.c and also
+   deliberately unprefixed: drain a break end, tick, and paint the result
+   under the render policy, with no network work. The break tail above
+   reaches it after a dispatched press. It stays in main.c for now because
+   it paints through make_state() (battery ADC + the ParentTesting flag);
+   it moves here with the rest of the post-action tail. */
+void render_action_result(button_id_t btn, timer_state_t before, time_t now, bool selection_changed);
 
 #ifdef __cplusplus
 }

@@ -63,6 +63,10 @@ add_host_test(test_buttons_policy)
 add_host_test(test_button_latch)
 add_host_test(test_wake_policy)
 add_host_test(test_wake_flow)
+# Same cases, built as a ParentTesting=y firmware: that flag is a
+# compile-time Kconfig bool, so the two values need two binaries. See the
+# header comment in test_wake_flow_parent.c.
+add_host_test(test_wake_flow_parent EXTRA_DEFS CONFIG_MAGTAG_PARENT_TESTING=1)
 add_host_test(test_status_led)
 add_host_test(test_config_cache)
 add_host_test(test_timer_persist)
