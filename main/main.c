@@ -24,7 +24,6 @@
 #include "net_apply.h"
 #include "net_window.h"
 #include "nvs_config.h"
-#include "nvs_defaults.h"
 #include "nvs_flash.h"
 #include "sleep_plan.h"
 #include "stats_json.h"
@@ -219,6 +218,17 @@ static display_state_t make_state(int32_t remaining, time_t now) {
     return app_state_display(&in, remaining, now);
 }
 
+/* Declared in wake_flow.h: the state-assembly seam. The final-minute
+   watch assembles two renders of its own — a partial at each countdown
+   mark and a full refresh with the LED lit between the assembly and the
+   flush — and wrapping either as a paint seam would put that flow back in
+   main.c. So the seam is cut at the only part that cannot move (the
+   battery ADC read and the compile-time ParentTesting flag above) and
+   this is the branch-free thunk over it. */
+display_state_t make_display_state(int32_t remaining, time_t now) {
+    return make_state(remaining, now);
+}
+
 /* Declared in wake_flow.h: the break-end owner there repaints through
    this after draining an edge, and it stays here because the state it
    paints needs the battery ADC read and the compile-time ParentTesting
@@ -241,140 +251,8 @@ void paint_break_started(time_t now) {
 
 /* ---- event watch ------------------------------------------------------- */
 
-/* The planner lands the pre-event wake ~SLEEP_PLAN_EVENT_LEAD_SEC out;
-   any wake inside SLEEP_PLAN_WATCH_SEC stays awake so the expiry (TIME'S
-   UP) or break end (chime + PAUSED) fires within a tick of wall time. */
-
-/* Absorb the wake residue so the render lands on the state's grid:
-   RUNNING/BREAK on the countdown's round minute (the display truly reads
-   1:11:00), clock-only states on the wall :00. Bounded — wakes that are
-   legitimately off-grid (event watch handoff, slow sync) render where
-   they are and self-correct next cycle. Aborts early on a pause press
-   (the caller then renders PAUSED, off-grid but honest). */
-static void wait_for_render_grid(int max_wait_sec) {
-    time_t now = time(NULL);
-    timer_state_t st = timer_get_state();
-    int32_t event_remaining = 0;
-    if (st == TIMER_RUNNING) {
-        event_remaining = (int32_t)(timer_expiry_wall() - (int64_t)now);
-    } else if (st == TIMER_BREAK) {
-        event_remaining = timer_break_remaining(now);
-    }
-    int32_t to = wake_policy_grid_wait_sec(st, event_remaining, (int)(now % 60), max_wait_sec);
-    for (int32_t i = 0; i < to * 10; i++) {
-        if (wake_flow_poll_pause_button())
-            return;
-        vTaskDelay(pdMS_TO_TICKS(100));
-    }
-}
-
-/* BREAK tail: stay awake through the last seconds so the end (chime +
-   repaint, and the snap back to Screen) lands within a tick of wall time.
-   Keyed on slot 0, so it covers a break running behind another selected
-   timer just as well as the break screen itself. */
-/* The tail's press poll lives in wake_flow (wake_flow_poll_break_buttons):
-   a press it accepts has already repainted, so the watch stops there and
-   the sleep planner re-schedules the break end — or, if the press started
-   an eligible extra, the end is suppressed and there is nothing left to
-   wait for, exactly as the top-of-watch guard below decides. */
-static void watch_break_end(void) {
-    if (!timer_break_active())
-        return;
-    if (timer_any_extra_running()) {
-        /* Suppressed end: no chime, no snap — there is nothing to wait
-           for. The chip simply disappears at the next tick wake. */
-        return;
-    }
-    int32_t brem = timer_break_remaining(time(NULL));
-    if (brem > SLEEP_PLAN_WATCH_SEC)
-        return; /* not our tail; the planner will wake us closer */
-    if (brem > 0) {
-        ESP_LOGI(TAG, "Break ends in %ld s: staying awake", (long)brem);
-        status_led_show_timer_state();
-        while (timer_break_remaining(time(NULL)) > 0) {
-            if (wake_flow_poll_break_buttons())
-                return; /* repainted; the planner owns the end from here */
-            vTaskDelay(pdMS_TO_TICKS(250));
-        }
-    }
-    wake_flow_break_end_repaint(); /* chime + snap back, then repaint */
-}
-
-/* RUNNING tail: own the final minute — countdown partials, binary LEDs,
-   the pause poll, and the expiry alert at zero. */
-static void watch_final_minute(void) {
-    time_t now = time(NULL);
-    int64_t remaining = timer_expiry_wall() - (int64_t)now;
-    if (remaining <= 0 || remaining > SLEEP_PLAN_WATCH_SEC)
-        return;
-
-    ESP_LOGI(TAG, "Final minute: staying awake (%lld s remaining)", (long long)remaining);
-    buttons_take_pressed(); /* only presses made DURING the watch may pause */
-    /* Expiry is a wall time, so a clock step here directly sharpens the
-       moment the alert fires. Skip when recently synced or when the sync
-       itself (~5-9 s) would blow past the expiry. */
-    if (timer_needs_ntp_sync(now) && remaining > 15) {
-        net_apply_try_window();
-        /* The window's reconcile may have reset/expired the timer (config
-           edit); the alert (if any) already fired — don't watch a countdown
-           that no longer exists, and never double-fire the alert below. */
-        if (timer_get_state() != TIMER_RUNNING) {
-            return;
-        }
-    }
-    status_led_show_timer_state();
-
-    /* Break config read once — the loop below spins at 250 ms. Short
-       allocations can put break-due INSIDE this watch (e.g. 3 min screen
-       with a 2 min interval: due lands at exactly 60 s remaining); the
-       per-wake check in the handlers has already passed by then, so the
-       loop must keep checking or the break is silently swallowed by the
-       expiry. */
-    uint16_t break_interval_min = NVS_DEFAULT_BREAK_INTERVAL_MIN;
-    nvs_config_get_break_interval_min(&break_interval_min);
-
-    /* Countdown: partial display steps at the quarter-minute marks (the
-       step schedule lives in wake_policy — a late wake skips passed
-       marks), and the last 15 s on the pixels as a binary count (status
-       class: light green, brightness-scaled, muted by quiet hours). */
-    int64_t rem = timer_expiry_wall() - (int64_t)time(NULL);
-    int next_step = wake_policy_first_countdown_step((int32_t)rem);
-    int32_t leds_shown = -1;
-    while ((rem = timer_expiry_wall() - (int64_t)time(NULL)) > 0) {
-        /* The event watch owns the whole final minute — without this poll
-           a pause press here would be lost and the expiry unavoidable. */
-        if (wake_flow_poll_pause_button()) {
-            neopixel_stop(); /* clear the binary-countdown pixels */
-            time_t pnow = time(NULL);
-            display_state_t st = make_state(timer_tick(pnow), pnow);
-            status_led_show_timer_state(); /* amber through the refresh until sleep */
-            display_full_refresh(&st);
-            return;
-        }
-        if (break_interval_min != 0 && timer_break_due(time(NULL), (int32_t)break_interval_min * 60)) {
-            neopixel_stop(); /* clear the binary-countdown pixels */
-            /* Back-to-back renders are safe: display.c absorbs the
-               driver's refresh-rate guard interval instead of letting the
-               frame be dropped. */
-            if (wake_flow_maybe_start_break(time(NULL))) {
-                return; /* BREAK painted + alarm run; caller sleeps through it */
-            }
-        }
-        if (next_step < WAKE_COUNTDOWN_STEPS && rem <= (int64_t)wake_policy_countdown_step(next_step)) {
-            time_t step_now = time(NULL);
-            display_state_t st = make_state(wake_policy_countdown_step(next_step), step_now);
-            display_update(&st); /* partial; ~2-3 s, well under the 15 s spacing */
-            next_step++;
-        }
-        if (rem <= 15 && (int32_t)rem != leds_shown) {
-            neopixel_status_binary4((uint8_t)rem, 20, 60, 20); /* light green */
-            leds_shown = (int32_t)rem;
-        }
-        vTaskDelay(pdMS_TO_TICKS(250));
-    }
-    timer_tick(time(NULL)); /* RUNNING -> EXPIRED */
-    wake_flow_fire_expiry_alert();
-}
+/* Both watches live in wake_flow.c (what each one guarantees is on its
+   declaration in wake_flow.h); this is only the choice between them. */
 
 static void maybe_wait_for_event(void) {
     if (timer_get_state() == TIMER_RUNNING) {
@@ -384,9 +262,9 @@ static void maybe_wait_for_event(void) {
            time) or an extra timer — and a RUNNING extra suppresses the
            chime anyway. The break still ends on its own wall clock at
            the next wake. */
-        watch_final_minute();
+        wake_flow_watch_final_minute();
     } else {
-        watch_break_end(); /* a no-op unless a break ends inside the window */
+        wake_flow_watch_break_end(); /* a no-op unless a break ends inside the window */
     }
 
     /* GUARANTEED DRAIN. Everything above can end the break as a side
@@ -488,7 +366,8 @@ static void finish_or_break(button_id_t btn, timer_state_t before, time_t now, b
        a colliding expiry alert, which is the opposite of the tick
        handler's post-render check. Not shown to be reachable — the press
        that got here has just been dispatched, and the final minute
-       belongs to watch_final_minute — but it is not a guarantee. */
+       belongs to wake_flow_watch_final_minute — but it is not a
+       guarantee. */
     if (wake_flow_maybe_start_break(now)) {
         post_stats_snapshot(); /* break screen painted: release MQTT */
         net_apply_finish();    /* drain + apply deferred before sleeping */
@@ -538,9 +417,9 @@ static void handle_timer_tick(void) {
        (enter_deep_sleep does not return). The post-render call below is
        what actually provides the expiry-then-break ordering. An expiry
        reaching this point unprocessed has not been shown to be reachable
-       — the planner's 70 s event lead plus watch_final_minute own the
-       final minute — but this call carries no such guarantee, so do not
-       add one to this comment. */
+       — the planner's 70 s event lead plus wake_flow_watch_final_minute
+       own the final minute — but this call carries no such guarantee, so
+       do not add one to this comment. */
     if (wake_flow_maybe_start_break(now)) {
         enter_deep_sleep(lock_gate_sleep_mode()); /* break just started; sleep through it */
     }
@@ -555,7 +434,7 @@ static void handle_timer_tick(void) {
        — the next tick wake re-aligns. */
     timer_state_t before = timer_get_state();
     if (esp_reset_reason() == ESP_RST_DEEPSLEEP) {
-        wait_for_render_grid(25);
+        wake_flow_wait_for_render_grid(25);
     }
     now = time(NULL);
 

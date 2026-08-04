@@ -88,9 +88,20 @@ typedef enum {
     EV_PERSIST_RESTORE,
     EV_TIMER_RESET,
     EV_RECORD_DATE,
+    /* the awake watches */
+    EV_TIMER_TICK,
+    EV_MAKE_STATE,
+    EV_FULL_REFRESH,
+    EV_PARTIAL,
+    EV_PIXELS_OFF,
+    EV_PIXELS_BINARY,
 } flow_event_t;
 
-static flow_event_t flow_log[64];
+/* Room for a whole watch: the final-minute loop spins at 250 ms for up to
+   SLEEP_PLAN_WATCH_SEC and asks the break balance on every pass, so a
+   single case can log several hundred events. A log that silently
+   truncated would turn an ordering assertion into a coin toss. */
+static flow_event_t flow_log[1024];
 static int flow_log_n;
 
 static void flow_log_push(flow_event_t ev) {
@@ -263,6 +274,14 @@ btn_a_action_t button_a_apply(time_t at) {
         case BTN_A_STARTED:
         case BTN_A_RESUMED:
             flow_state = TIMER_RUNNING;
+            /* timer_any_extra_running() is a fact about the slots, not a
+               free switch: starting a slot that is not Screen IS what
+               makes it true. Row 2 turns on that link — the started extra
+               is what suppresses the break end — so the model has to
+               carry it rather than let a case assert it into place. */
+            if (flow_active_slot != FLOW_SCREEN) {
+                flow_extra_running = true;
+            }
             break;
         default:
             break; /* BTN_A_NONE: BREAK/EXPIRED, no transition */
@@ -352,15 +371,46 @@ void render_action_result(button_id_t btn, timer_state_t before, time_t at, bool
     flow_log_push(EV_ACTION_RENDER);
 }
 
+/* A press that lands PART WAY THROUGH an awake wait, which is what rows 1,
+   2 and 6 are all about. The suite's clock only moves inside
+   hal_delay_ms(), so "the user pressed A twelve seconds into the wait" is
+   expressed as a delay total: the edge is recorded through the REAL latch
+   once the wait has burned that long, exactly as the GPIO ISR would have
+   latched it mid-loop on device. -1 (the default) disables it, so every
+   case that does not arm one is untouched.
+
+   Armed from mock_hal_time's delay hook and NOT from the take stubs
+   below. That was the original shape and it made the known-bug case
+   vacuous: the press only entered the latch as a side effect of the code
+   under test performing a take, so a change that stops taking (which is
+   exactly the eventual fix for BUG-2) made the press never arrive at all,
+   and "the press was eaten" became indistinguishable from "there was no
+   press". An ISR does not wait to be asked. flow_deferred_delivered is
+   the other half of that lesson: a case that turns on a press being eaten
+   must assert the press was actually delivered, or deleting the arming
+   lines leaves every one of its assertions still true. */
+static int32_t flow_deferred_press_ms;
+static button_id_t flow_deferred_press_btn;
+static int flow_deferred_delivered;        /* how many armed presses actually landed */
+static void flow_deferred_press_due(void); /* defined with the harness below */
+
+/* How many times each take ran — the polling cadence of a loop is part of
+   its contract (100 ms in the grid wait, 250 ms in both watches) and a
+   total delay alone cannot tell 30 polls of 100 ms from 3 of 1000 ms. */
+static int flow_mask_takes; /* the pause poll's masked take */
+static int flow_full_takes; /* the break tail's (and the watch entry's) take */
+
 /* buttons.c's take wrappers are pure pass-throughs to the latch compiled
    in above (it adds only a critical section), so these are the device's
    behaviour, not a model of it. Row 5 is a property of button_latch's
    masked take, and this is what puts the real one under the module. */
 uint8_t buttons_take_pressed(void) {
+    flow_full_takes++;
     return button_latch_take();
 }
 
 uint8_t buttons_take_pressed_mask(uint8_t mask) {
+    flow_mask_takes++;
     return button_latch_take_masked(mask);
 }
 
@@ -379,6 +429,7 @@ static uint16_t flow_seen_interval_default; /* what the caller pre-seeded */
 static uint16_t flow_seen_duration_default;
 
 static bool flow_break_due_ret;
+static time_t flow_break_due_from; /* 0 = use flow_break_due_ret, see below */
 static time_t flow_break_due_now;
 static int32_t flow_break_due_interval; /* SECONDS, as passed */
 
@@ -417,10 +468,17 @@ esp_err_t nvs_config_get_break_duration_min(uint16_t *out) {
     return ESP_OK;
 }
 
+/* The balance crosses the interval at a WALL INSTANT, and row 9 is about
+   a crossing that happens INSIDE the final-minute watch — after the
+   per-wake check has already passed. flow_break_due_from is that instant;
+   0 (the default) leaves the plain injected answer every other case
+   uses. */
 bool timer_break_due(time_t now, int32_t interval_sec) {
     flow_log_push(EV_BREAK_DUE);
     flow_break_due_now = now;
     flow_break_due_interval = interval_sec;
+    if (flow_break_due_from != 0)
+        return now >= flow_break_due_from;
     return flow_break_due_ret;
 }
 
@@ -502,6 +560,7 @@ static time_t flow_restore_arg;
 static time_t flow_record_date_arg;
 static bool flow_reset_called;
 static time_t flow_clock_after_window; /* 0 = the window does not step the clock */
+static int flow_state_after_window;    /* -1 = the window leaves the state alone */
 
 bool timer_is_new_day(time_t now) {
     flow_log_push(EV_IS_NEW_DAY);
@@ -538,12 +597,19 @@ void mqtt_ha_queue_bonus_clear(void) {
     flow_log_push(EV_BONUS_CLEAR);
 }
 
-/* The rollover's own window. Steps the clock when a case asks, which is
-   the whole reason `now` is an out-param. */
+/* The rollover's own window, and the final-minute watch's sharpening
+   sync. Steps the clock when a case asks, which is the whole reason `now`
+   is an out-param; and can leave the timer somewhere other than RUNNING,
+   which is what the reconcile does on device when a config edit lands
+   mid-window — the watch must then abandon a countdown that no longer
+   exists. -1 (the default) leaves the state alone. */
 esp_err_t net_apply_try_window(void) {
     flow_log_push(EV_TRY_WINDOW);
     if (flow_clock_after_window != 0) {
         mock_time_set(flow_clock_after_window);
+    }
+    if (flow_state_after_window >= 0) {
+        flow_state = (timer_state_t)flow_state_after_window;
     }
     return ESP_OK;
 }
@@ -572,6 +638,120 @@ void timer_reset(void) {
 void timer_record_date(time_t now) {
     flow_log_push(EV_RECORD_DATE);
     flow_record_date_arg = now;
+}
+
+/* ---- the injected watch model -------------------------------------------
+
+   The three awake watches are polling loops, so most of what they promise
+   is a question of HOW MANY TIMES and IN WHAT ORDER, not of a return
+   value. The mock clock is what makes that observable: it only moves
+   inside hal_delay_ms(), so a loop's total delay IS the wall time it
+   believed it waited, and every "n seconds into the wait" below is
+   written as a delay total rather than as a clock the case could set by
+   hand. */
+
+static int64_t flow_expiry_wall; /* the active slot's expiry, as timer.c reports it */
+static bool flow_needs_sync;
+static time_t flow_needs_sync_arg;
+static int32_t flow_tick_ret;
+static time_t flow_tick_arg;
+static time_t flow_break_remaining_arg;
+
+/* What actually reached the panel and the pixels. */
+static int32_t flow_partial_seen[8]; /* every partial's remaining_sec, in order */
+static time_t flow_partial_at[8];    /* and the wall clock each was assembled against */
+static int flow_partial_n;
+static int32_t flow_full_remaining;
+static time_t flow_full_wall;
+static uint8_t flow_binary_seen[32]; /* every binary countdown value, in order */
+static uint32_t flow_binary_at[32];  /* and how far into the wait each was written */
+static int flow_binary_n;
+static uint8_t flow_binary_rgb[3]; /* the colour of the first one */
+
+int64_t timer_expiry_wall(void) {
+    return flow_expiry_wall;
+}
+
+bool timer_needs_ntp_sync(time_t now) {
+    flow_needs_sync_arg = now;
+    return flow_needs_sync;
+}
+
+bool timer_break_active(void) {
+    return flow_break_running;
+}
+
+/* timer.c's own arithmetic, clamp included: seconds to the break's wall
+   end, never negative, and 0 whenever slot 0 is not on a break at all.
+   The clamp is load-bearing — the break tail's loop condition is `> 0`,
+   so a stub that returned negatives would exit the loop for a different
+   reason than the device does. */
+int32_t timer_break_remaining(time_t now) {
+    flow_break_remaining_arg = now;
+    if (!flow_break_running)
+        return 0;
+    int64_t left = (int64_t)flow_break_wall_end - (int64_t)now;
+    return left > 0 ? (int32_t)left : 0;
+}
+
+int32_t timer_tick(time_t now) {
+    flow_log_push(EV_TIMER_TICK);
+    flow_tick_arg = now;
+    return flow_tick_ret;
+}
+
+void neopixel_stop(void) {
+    flow_log_push(EV_PIXELS_OFF);
+}
+
+/* The instant each write happened is recorded as well as its value. The
+   value alone is 250 ms blind: sliding every pixel update to the far side
+   of the poll delay shows the same fifteen numbers in the same order, one
+   quarter-second late each — which on a countdown whose entire job is to
+   be in step with the wall clock is the thing that matters. */
+void neopixel_status_binary4(uint8_t value, uint8_t r, uint8_t g, uint8_t b) {
+    flow_log_push(EV_PIXELS_BINARY);
+    if (flow_binary_n == 0) {
+        flow_binary_rgb[0] = r;
+        flow_binary_rgb[1] = g;
+        flow_binary_rgb[2] = b;
+    }
+    if (flow_binary_n < (int)(sizeof flow_binary_seen / sizeof flow_binary_seen[0])) {
+        flow_binary_at[flow_binary_n] = mock_delay_total_ms();
+        flow_binary_seen[flow_binary_n++] = value;
+    }
+}
+
+/* The state-assembly seam main.c implements (make_state: a battery ADC
+   read plus app_state's assembly rules). Only the two fields the watches
+   put on the panel are modelled — what this suite is about is WHICH
+   number was assembled and against WHICH clock, which is exactly the pair
+   a wrong remaining or a stale clock would corrupt. */
+display_state_t make_display_state(int32_t remaining, time_t now) {
+    flow_log_push(EV_MAKE_STATE);
+    display_state_t st;
+    memset(&st, 0, sizeof st);
+    st.remaining_sec = remaining;
+    st.wall_time = now;
+    return st;
+}
+
+void display_full_refresh(const display_state_t *st) {
+    flow_log_push(EV_FULL_REFRESH);
+    flow_full_remaining = st->remaining_sec;
+    flow_full_wall = st->wall_time;
+}
+
+/* Both halves are recorded. The countdown marks are PINNED values, so the
+   number alone cannot tell a mark painted on time from the same mark
+   painted a second late — the wall clock it was assembled against is the
+   only thing that can. */
+void display_update(const display_state_t *st) {
+    flow_log_push(EV_PARTIAL);
+    if (flow_partial_n < (int)(sizeof flow_partial_seen / sizeof flow_partial_seen[0])) {
+        flow_partial_at[flow_partial_n] = st->wall_time;
+        flow_partial_seen[flow_partial_n++] = st->remaining_sec;
+    }
 }
 
 // clang-format off
@@ -611,7 +791,20 @@ static void flow_press(button_id_t btn) {
     flow_edge_us += 10 * BUTTON_LATCH_DEBOUNCE_US;
 }
 
-/* What is STILL latched. Consumes, so it is an end-of-case assertion. */
+/* The mid-wait press. Installed as mock_hal_time's delay hook in setUp(),
+   so it fires on the passage of wall time and not on anything the code
+   under test does or stops doing. Fires once. */
+static void flow_deferred_press_due(void) {
+    if (flow_deferred_press_ms < 0 || (int32_t)mock_delay_total_ms() < flow_deferred_press_ms)
+        return;
+    flow_deferred_press_ms = -1; /* one press, not one per delay */
+    flow_deferred_delivered++;
+    flow_press(flow_deferred_press_btn);
+}
+
+/* What is STILL latched. Consumes, so it is an end-of-case assertion.
+   Goes through the latch directly, NOT through the take stubs, so asking
+   what survived can never itself manufacture a deferred press. */
 static uint8_t flow_latch_residue(void) {
     return button_latch_take();
 }
@@ -689,7 +882,8 @@ void setUp(void) {
     flow_interval_min = 30;
     flow_duration_min = 15;
     flow_break_due_ret = false;
-    flow_bed_min = -1; /* disabled: bedtime_* treat negative as off */
+    flow_break_due_from = 0; /* the plain injected answer, at every instant */
+    flow_bed_min = -1;       /* disabled: bedtime_* treat negative as off */
     flow_alert_dismissed = false;
     flow_bed_engaged = false;
     flow_bed_engage_alert = false;
@@ -702,6 +896,7 @@ void setUp(void) {
     flow_restore_ok = false;
     flow_reset_called = false;
     flow_clock_after_window = 0;
+    flow_state_after_window = -1;
     flow_completion_asks = 0;
     flow_comps_asked_when_used_read = -1; /* poisoned: never read */
     for (int i = 0; i < TIMER_SLOT_COUNT; i++) {
@@ -713,6 +908,22 @@ void setUp(void) {
         flow_completion_slots[i] = -1;
         flow_summary_comp[i] = 0xEEEEu;
     }
+
+    /* The awake watches. No press queued, no countdown, no stale clock —
+       so a case opts into each of those the same way it opts into the
+       break gate's three switches above. */
+    flow_deferred_press_ms = -1;
+    flow_deferred_press_btn = BTN_NONE;
+    flow_deferred_delivered = 0;
+    /* After mock_time_reset() above, which does not clear it. */
+    mock_delay_set_hook(flow_deferred_press_due);
+    flow_mask_takes = 0;
+    flow_full_takes = 0;
+    flow_expiry_wall = 0;
+    flow_needs_sync = false;
+    flow_tick_ret = 0;
+    flow_partial_n = 0;
+    flow_binary_n = 0;
 
     /* Poisoned: values the module cannot produce, so "never written" and
        "written with what we expected" can never be the same assertion. */
@@ -735,6 +946,20 @@ void setUp(void) {
     flow_summary_used = -424242;
     flow_restore_arg = -1;
     flow_record_date_arg = -1;
+    flow_needs_sync_arg = -1;
+    flow_tick_arg = -1;
+    flow_break_remaining_arg = -1;
+    flow_full_remaining = -424242;
+    flow_full_wall = -1;
+    for (int i = 0; i < (int)(sizeof flow_partial_seen / sizeof flow_partial_seen[0]); i++) {
+        flow_partial_seen[i] = -424242;
+        flow_partial_at[i] = -1;
+    }
+    for (int i = 0; i < (int)(sizeof flow_binary_seen / sizeof flow_binary_seen[0]); i++) {
+        flow_binary_seen[i] = 0xFFu;
+        flow_binary_at[i] = 0xFFFFFFFFu;
+    }
+    flow_binary_rgb[0] = flow_binary_rgb[1] = flow_binary_rgb[2] = 0xFFu;
 }
 
 void tearDown(void) {}
@@ -849,7 +1074,7 @@ void test_an_elapsed_break_that_nothing_ticked_still_chimes(void) {
 
 /* The exact instant the primary break-end path lands on, and the reason
    this pair exists rather than a single "elapsed" case. timer.c latches
-   at `now >= break_expiry_wall`, and watch_break_end()'s wait loop exits
+   at `now >= break_expiry_wall`, and wake_flow_watch_break_end()'s loop exits
    the moment timer_break_remaining() reaches 0 — which is `now ==
    break_expiry_wall` precisely, not a second later — and only then calls
    the drain. A clock slipped one second late here latches nothing at that
@@ -2663,6 +2888,770 @@ void test_the_rollover_effect_order_is_pinned_end_to_end(void) {
     }
 }
 
+/* ---- the render-grid wait -----------------------------------------------
+
+   The wait LENGTH is wake_policy_grid_wait_sec's (compiled in above and
+   pinned in its own suite); what belongs here is the polling half — that
+   the policy is asked with the right three readings, and that the loop
+   that burns the answer stays responsive to Button A for the whole of it.
+   Every case reads the wait back through mock_delay_total_ms(), which is
+   the only wall clock this suite has. */
+
+void test_the_grid_wait_absorbs_the_residue_of_a_running_countdown(void) {
+    time_t now = flow_at(14, 0);
+    mock_time_set(now);
+    flow_state = TIMER_RUNNING;
+    flow_expiry_wall = (int64_t)now + 3625; /* 25 s off the round minute */
+    wake_flow_wait_for_render_grid(25);
+    TEST_ASSERT_EQUAL_UINT32(25000, mock_delay_total_ms());
+    TEST_ASSERT_EQUAL_INT64(now + 25, hal_time_now());
+}
+
+void test_the_grid_wait_uses_the_break_countdown_when_a_break_is_selected(void) {
+    time_t now = flow_at(14, 0);
+    mock_time_set(now);
+    flow_state = TIMER_BREAK;
+    flow_arm_break(now + 190, FLOW_SCREEN, FLOW_SCREEN); /* 10 s off the minute */
+    wake_flow_wait_for_render_grid(25);
+    TEST_ASSERT_EQUAL_UINT32(10000, mock_delay_total_ms());
+    /* asked at the instant the wait started, not at some later re-read */
+    TEST_ASSERT_EQUAL_INT64(now, flow_break_remaining_arg);
+}
+
+void test_the_grid_wait_lands_a_clock_only_state_on_the_wall_minute(void) {
+    /* IDLE/PAUSED/EXPIRED show only the clock, so the grid is the wall
+       :00 — and the expiry, which is meaningless here, is never read. */
+    time_t now = flow_at(14, 0) + 35;
+    mock_time_set(now);
+    flow_state = TIMER_PAUSED;
+    flow_expiry_wall = (int64_t)now + 3625;
+    wake_flow_wait_for_render_grid(25);
+    TEST_ASSERT_EQUAL_UINT32(25000, mock_delay_total_ms());
+}
+
+void test_a_residue_exactly_at_the_cap_is_waited_out(void) {
+    time_t now = flow_at(14, 0) + 35; /* 25 s to the wall minute */
+    mock_time_set(now);
+    flow_state = TIMER_IDLE;
+    wake_flow_wait_for_render_grid(25);
+    TEST_ASSERT_EQUAL_UINT32(25000, mock_delay_total_ms());
+}
+
+void test_a_residue_one_second_past_the_cap_renders_in_place(void) {
+    time_t now = flow_at(14, 0) + 34; /* 26 s to the wall minute */
+    mock_time_set(now);
+    flow_state = TIMER_IDLE;
+    wake_flow_wait_for_render_grid(25);
+    TEST_ASSERT_EQUAL_UINT32(0, mock_delay_total_ms());
+}
+
+void test_the_cap_the_caller_passes_is_the_one_that_applies(void) {
+    /* The 25 in the tick handler is a call-site number, not a constant
+       baked in here: the same residue is waited out under a bigger cap
+       and abandoned under a smaller one. */
+    time_t now = flow_at(14, 0) + 35;
+    mock_time_set(now);
+    flow_state = TIMER_IDLE;
+    wake_flow_wait_for_render_grid(24);
+    TEST_ASSERT_EQUAL_UINT32(0, mock_delay_total_ms());
+    mock_time_set(now);
+    wake_flow_wait_for_render_grid(60);
+    TEST_ASSERT_EQUAL_UINT32(25000, mock_delay_total_ms());
+}
+
+void test_a_state_already_on_its_grid_never_polls_at_all(void) {
+    /* to == 0 means not one poll — which is what leaves a latched press
+       to the tick handler's own drain instead of eating it here. */
+    time_t now = flow_at(14, 0);
+    mock_time_set(now);
+    flow_state = TIMER_IDLE;
+    flow_press(BTN_A);
+    wake_flow_wait_for_render_grid(25);
+    TEST_ASSERT_EQUAL_UINT32(0, mock_delay_total_ms());
+    TEST_ASSERT_EQUAL_INT(0, flow_mask_takes);
+    TEST_ASSERT_EQUAL_UINT8(1u << BTN_A, flow_latch_residue());
+}
+
+void test_an_expiry_that_has_already_passed_is_not_waited_on(void) {
+    /* The watch/alert path owns a passed event; standing here for 25 s
+       first would delay the TIME'S UP by that much. */
+    time_t now = flow_at(14, 0);
+    mock_time_set(now);
+    flow_state = TIMER_RUNNING;
+    flow_expiry_wall = (int64_t)now - 5;
+    wake_flow_wait_for_render_grid(25);
+    TEST_ASSERT_EQUAL_UINT32(0, mock_delay_total_ms());
+}
+
+void test_the_grid_wait_polls_ten_times_a_second(void) {
+    /* The cadence is the contract, not just the total: a press must never
+       wait longer than ~100 ms to be seen. */
+    time_t now = flow_at(14, 0) + 57; /* 3 s to the wall minute */
+    mock_time_set(now);
+    flow_state = TIMER_IDLE;
+    wake_flow_wait_for_render_grid(25);
+    TEST_ASSERT_EQUAL_INT(30, flow_mask_takes);
+    TEST_ASSERT_EQUAL_UINT32(3000, mock_delay_total_ms());
+}
+
+/* ROW 6: Button A during a long grid wait while RUNNING. Buttons are only
+   dispatched on EXT1 wake, so before 2d9d61f a press made during this
+   wait simply vanished — up to 25 s of a device that looks broken. */
+void test_row6_a_press_during_a_long_grid_wait_pauses_at_that_moment(void) {
+    time_t now = flow_at(14, 0);
+    mock_time_set(now);
+    flow_state = TIMER_RUNNING;
+    flow_expiry_wall = (int64_t)now + 3625; /* a 25 s wait ahead */
+    flow_deferred_press_btn = BTN_A;
+    flow_deferred_press_ms = 12000; /* pressed twelve seconds in */
+    wake_flow_wait_for_render_grid(25);
+    TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_PAUSE));
+    TEST_ASSERT_EQUAL_INT(TIMER_PAUSED, (int)flow_state);
+    /* Paused THERE — the wait aborts rather than running out its 25 s and
+       pausing at the end (which would lose 13 s of the child's time). */
+    TEST_ASSERT_EQUAL_UINT32(12000, mock_delay_total_ms());
+    TEST_ASSERT_EQUAL_INT64(now + 12, flow_pause_arg);
+    TEST_ASSERT_EQUAL_UINT8(0, flow_latch_residue());
+}
+
+/* KNOWN DEFECT, PINNED DELIBERATELY — NOT A BLESSING.
+
+   wake_flow_poll_pause_button() consumes the A bit BEFORE it checks the
+   state, so a press made while the timer is not RUNNING is swallowed and
+   nothing later in the wake can act on it. Through this wait that is up
+   to 25 seconds in which Button A does nothing at all — the user-visible
+   symptom is "I pressed start and it ignored me".
+
+   It is left exactly as it shipped because this refactor is strictly
+   behaviour-preserving and fixing a bug mid-move destroys the ability to
+   prove nothing changed; the fix is recorded for its own commit (see the
+   long comment in wake_flow_poll_pause_button). When that commit lands
+   THIS TEST MUST FAIL — a press should survive to the tick handler's
+   drain — and it must be rewritten deliberately, not deleted quietly. */
+void test_row6_a_press_while_not_running_is_eaten_KNOWN_BUG(void) {
+    time_t now = flow_at(14, 0) + 35;
+    mock_time_set(now);
+    flow_state = TIMER_PAUSED; /* an A press here means "resume" */
+    flow_deferred_press_btn = BTN_A;
+    flow_deferred_press_ms = 5000;
+    wake_flow_wait_for_render_grid(25);
+
+    /* The press REALLY HAPPENED. Without this the whole case is vacuous:
+       every assertion below is equally true of a wait during which nobody
+       pressed anything, so deleting the two arming lines above would leave
+       it passing. The delay hook arms the press on wall time alone, so
+       this holds whatever the code under test does with it. */
+    TEST_ASSERT_EQUAL_INT(1, flow_deferred_delivered);
+    TEST_ASSERT_EQUAL_UINT32(25000, mock_delay_total_ms()); /* it landed inside the wait */
+
+    /* And it was EATEN: taken out of the latch and thrown away. The pair
+       is what makes this a bug report rather than a description — the
+       press was delivered (above) and is now gone (below) without having
+       done anything at all. */
+    TEST_ASSERT_EQUAL_UINT8(0, flow_latch_residue());
+    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_PAUSE));
+    TEST_ASSERT_EQUAL_INT(TIMER_PAUSED, (int)flow_state);
+    /* The take ran on every poll, which is the mechanism: guard-first
+       would have taken nothing and left the press for the tick drain. */
+    TEST_ASSERT_EQUAL_INT(250, flow_mask_takes);
+}
+
+void test_a_press_latched_before_the_grid_wait_pauses_before_the_first_delay(void) {
+    /* The poll runs at the TOP of each pass, not the bottom: a press the
+       ISR latched while the wake was still busy (a slow sync, an e-ink
+       flush) is acted on immediately rather than after a first 100 ms of
+       standing still. Mutation testing found this: moving the poll below
+       the delay left every other assertion in this file intact. */
+    time_t now = flow_at(14, 0);
+    mock_time_set(now);
+    flow_state = TIMER_RUNNING;
+    flow_expiry_wall = (int64_t)now + 3625;
+    flow_press(BTN_A);
+    wake_flow_wait_for_render_grid(25);
+    TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_PAUSE));
+    TEST_ASSERT_EQUAL_UINT32(0, mock_delay_total_ms());
+    TEST_ASSERT_EQUAL_INT64(now, flow_pause_arg);
+}
+
+void test_the_grid_wait_leaves_b_and_c_latched_for_the_tick_drain(void) {
+    time_t now = flow_at(14, 0) + 35;
+    mock_time_set(now);
+    flow_state = TIMER_RUNNING;
+    flow_expiry_wall = (int64_t)now + 3625;
+    flow_press(BTN_B);
+    flow_press(BTN_C);
+    wake_flow_wait_for_render_grid(25);
+    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_PAUSE));
+    TEST_ASSERT_EQUAL_UINT8((uint8_t)((1u << BTN_B) | (1u << BTN_C)), flow_latch_residue());
+}
+
+/* ---- the break tail ------------------------------------------------------
+
+   Keyed on slot 0, so it covers a break running behind another selected
+   timer just as well as the break screen itself. */
+
+void test_the_break_watch_is_inert_when_no_break_is_running(void) {
+    mock_time_set(flow_at(14, 0));
+    wake_flow_watch_break_end();
+    TEST_ASSERT_EQUAL_INT(0, flow_log_n);
+    TEST_ASSERT_EQUAL_UINT32(0, mock_delay_total_ms());
+}
+
+/* ROW 2, first half: a RUNNING extra suppresses the end outright — no
+   chime, no snap, nothing to wait for. */
+void test_row2_a_running_extra_leaves_the_break_tail_alone(void) {
+    time_t now = flow_at(14, 0);
+    mock_time_set(now);
+    flow_arm_break(now + 5, FLOW_SCREEN, FLOW_PIANO);
+    flow_extra_running = true;
+    wake_flow_watch_break_end();
+    TEST_ASSERT_EQUAL_INT(0, flow_log_n);
+    TEST_ASSERT_EQUAL_UINT32(0, mock_delay_total_ms());
+}
+
+void test_a_break_end_beyond_the_watch_window_is_left_to_the_planner(void) {
+    time_t now = flow_at(14, 0);
+    mock_time_set(now);
+    flow_arm_break(now + SLEEP_PLAN_WATCH_SEC + 1, FLOW_SCREEN, FLOW_SCREEN);
+    wake_flow_watch_break_end();
+    TEST_ASSERT_EQUAL_INT(0, flow_log_n);
+    TEST_ASSERT_EQUAL_UINT32(0, mock_delay_total_ms());
+}
+
+void test_a_break_end_exactly_at_the_watch_window_is_watched(void) {
+    time_t now = flow_at(14, 0);
+    mock_time_set(now);
+    flow_arm_break(now + SLEEP_PLAN_WATCH_SEC, FLOW_SCREEN, FLOW_SCREEN);
+    wake_flow_watch_break_end();
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)SLEEP_PLAN_WATCH_SEC * 1000u, mock_delay_total_ms());
+    TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_CHIME));
+}
+
+void test_the_break_watch_lights_the_state_before_it_starts_waiting(void) {
+    /* The blue pixel is the "still on a break" ack for the whole tail; lit
+       after the wait it would only ever be seen for a tick. */
+    time_t now = flow_at(14, 0);
+    mock_time_set(now);
+    flow_arm_break(now + 5, FLOW_SCREEN, FLOW_SCREEN);
+    wake_flow_watch_break_end();
+    TEST_ASSERT_EQUAL_INT(0, flow_log_at(EV_LED));
+    /* The loop itself logs nothing, so a position alone cannot tell "lit
+       first" from "lit after the wait" — the delay total at the moment it
+       lit can. */
+    TEST_ASSERT_EQUAL_UINT32(0, flow_delay_at_led);
+    TEST_ASSERT_EQUAL_UINT32(5000, mock_delay_total_ms());
+}
+
+void test_a_single_second_of_break_tail_is_still_watched(void) {
+    /* brem == 1 is the smallest tail there is; it still gets the pixel and
+       still gets waited out, rather than falling through to the drain as
+       an already-ended break would. */
+    time_t now = flow_at(14, 0);
+    mock_time_set(now);
+    flow_arm_break(now + 1, FLOW_SCREEN, FLOW_SCREEN);
+    wake_flow_watch_break_end();
+    TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_LED));
+    TEST_ASSERT_EQUAL_UINT32(1000, mock_delay_total_ms());
+    TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_CHIME));
+}
+
+void test_the_break_watch_waits_out_the_tail_then_chimes_and_repaints(void) {
+    time_t now = flow_at(14, 0);
+    mock_time_set(now);
+    flow_arm_break(now + 5, FLOW_PIANO, FLOW_SCREEN);
+    wake_flow_watch_break_end();
+    TEST_ASSERT_EQUAL_UINT32(5000, mock_delay_total_ms());
+    TEST_ASSERT_EQUAL_INT64(now + 5, hal_time_now());
+    TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_CHIME));
+    TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_SNAP_BACK));
+    TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_REPAINT));
+    /* the repaint shows the slot the snap landed on, not slot 0 */
+    TEST_ASSERT_EQUAL_INT(FLOW_PIANO, flow_painted_slot);
+}
+
+void test_a_break_whose_end_has_already_passed_repaints_without_waiting(void) {
+    /* brem == 0: the tail is over before it began, so there is nothing to
+       stay awake for — but the edge still owes the panel a repaint. */
+    time_t now = flow_at(14, 0);
+    mock_time_set(now);
+    flow_arm_break(now, FLOW_SCREEN, FLOW_SCREEN);
+    wake_flow_watch_break_end();
+    TEST_ASSERT_EQUAL_UINT32(0, mock_delay_total_ms());
+    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_LED));
+    TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_CHIME));
+    TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_REPAINT));
+}
+
+void test_the_break_watch_polls_four_times_a_second(void) {
+    time_t now = flow_at(14, 0);
+    mock_time_set(now);
+    flow_arm_break(now + 2, FLOW_SCREEN, FLOW_SCREEN);
+    wake_flow_watch_break_end();
+    TEST_ASSERT_EQUAL_INT(8, flow_full_takes);
+    TEST_ASSERT_EQUAL_UINT32(2000, mock_delay_total_ms());
+}
+
+/* ROW 1: Button C pressed during the final seconds of a break. Before
+   1f954da the tail spun with no poll at all and every press made during
+   it was thrown away at deep sleep — "I couldn't move to another timer in
+   the final minute of the screen break". */
+void test_row1_button_c_in_the_break_tail_moves_the_selection_and_ends_the_watch(void) {
+    time_t now = flow_at(14, 0);
+    mock_time_set(now);
+    flow_arm_break(now + 20, FLOW_SCREEN, FLOW_SCREEN);
+    flow_state = TIMER_BREAK; /* the break screen itself is showing */
+    flow_select_ok = true;
+    flow_select_slot = FLOW_PIANO;
+    flow_state_at_select = TIMER_IDLE;
+    flow_deferred_press_btn = BTN_C;
+    flow_deferred_press_ms = 3000;
+    wake_flow_watch_break_end();
+    TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_SELECT_NEXT));
+    TEST_ASSERT_EQUAL_INT(FLOW_PIANO, flow_active_slot);
+    /* repainted through the shared post-action render, reporting the swap
+       and the layout that was on the glass (the break screen) */
+    TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_ACTION_RENDER));
+    TEST_ASSERT_TRUE(flow_render_selection_changed);
+    TEST_ASSERT_EQUAL_INT(TIMER_BREAK, (int)flow_render_before);
+    /* and the watch stopped there: it did not sit out the last 17 s, and
+       the end it no longer owns was neither chimed nor drained */
+    TEST_ASSERT_EQUAL_UINT32(3000, mock_delay_total_ms());
+    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_CHIME));
+    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_REPAINT));
+    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_BREAK_TICK));
+}
+
+/* ROW 2, second half: Button A on a break-eligible extra. C walked the
+   selection over during the break; A starts it, and the running extra is
+   then exactly what suppresses the break end. */
+void test_row2_button_a_on_a_break_eligible_extra_starts_it_and_suppresses_the_end(void) {
+    time_t now = flow_at(14, 0);
+    mock_time_set(now);
+    flow_arm_break(now + 20, FLOW_SCREEN, FLOW_PIANO);
+    flow_state = TIMER_IDLE; /* Piano, selected but not started */
+    flow_a_result = BTN_A_STARTED;
+    flow_deferred_press_btn = BTN_A;
+    flow_deferred_press_ms = 2000;
+    wake_flow_watch_break_end();
+    TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_A_APPLY));
+    TEST_ASSERT_EQUAL_INT(TIMER_RUNNING, (int)flow_state);
+    TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_ACTION_RENDER));
+    /* 2000 ms of tail, then the dispatch's own 250 ms hold on the
+       pre-press colour — the watch stopped at the press and did not sit
+       out the remaining 18 s. */
+    TEST_ASSERT_EQUAL_UINT32(2250, mock_delay_total_ms());
+    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_CHIME));
+    /* Suppressed from here on: the started extra is what the top-of-watch
+       guard reads, so re-entering the watch has nothing left to wait for
+       and the end will pass silently at the next tick wake. */
+    TEST_ASSERT_TRUE(timer_any_extra_running());
+    flow_log_n = 0;
+    wake_flow_watch_break_end();
+    TEST_ASSERT_EQUAL_INT(0, flow_log_n);
+    TEST_ASSERT_EQUAL_UINT32(2250, mock_delay_total_ms());
+}
+
+void test_a_press_latched_before_the_break_tail_is_serviced_before_the_first_delay(void) {
+    /* The poll runs at the TOP of each pass, not the bottom — the same
+       property as the grid wait, and for a sharper reason here: on a tail
+       of a second or two, a poll that only ran after the first 250 ms
+       would service the press late, and on the shortest tail of all would
+       never run before the break ended and chimed over it. That is row 1's
+       own symptom ("I couldn't move to another timer in the final minute
+       of the screen break") coming back through the side door.
+
+       Button C rather than A: the start/resume arm holds the pre-press
+       colour for 250 ms, which would muddy the very number under test. */
+    time_t now = flow_at(14, 0);
+    mock_time_set(now);
+    flow_arm_break(now + 20, FLOW_SCREEN, FLOW_SCREEN);
+    flow_state = TIMER_BREAK;
+    flow_select_ok = true;
+    flow_select_slot = FLOW_PIANO;
+    flow_state_at_select = TIMER_IDLE;
+    flow_press(BTN_C);
+    wake_flow_watch_break_end();
+    TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_SELECT_NEXT));
+    TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_ACTION_RENDER));
+    TEST_ASSERT_EQUAL_UINT32(0, mock_delay_total_ms());
+    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_CHIME));
+}
+
+void test_a_refused_press_in_the_break_tail_does_not_end_the_watch(void) {
+    /* Button A on the break screen itself is refused by the guard matrix,
+       so the tail carries on to its own end rather than being cut short
+       by a press that changed nothing. */
+    time_t now = flow_at(14, 0);
+    mock_time_set(now);
+    flow_arm_break(now + 3, FLOW_SCREEN, FLOW_SCREEN);
+    flow_state = TIMER_BREAK;
+    flow_deferred_press_btn = BTN_A;
+    flow_deferred_press_ms = 1000;
+    wake_flow_watch_break_end();
+    TEST_ASSERT_EQUAL_UINT32(3000, mock_delay_total_ms());
+    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_ACTION_RENDER));
+    TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_CHIME));
+    TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_REPAINT));
+}
+
+/* ---- the final minute ----------------------------------------------------
+
+   The RUNNING tail owns the last ~75 s: countdown partials, the binary
+   LED count, the pause poll, the mid-watch break check, and the expiry
+   alert at zero. */
+
+void test_the_final_minute_watch_is_inert_once_the_expiry_has_passed(void) {
+    time_t now = flow_at(14, 0);
+    mock_time_set(now);
+    flow_state = TIMER_RUNNING;
+    flow_expiry_wall = (int64_t)now; /* remaining == 0 */
+    wake_flow_watch_final_minute();
+    TEST_ASSERT_EQUAL_INT(0, flow_log_n);
+    TEST_ASSERT_EQUAL_UINT32(0, mock_delay_total_ms());
+    TEST_ASSERT_EQUAL_INT(0, flow_full_takes); /* not even the entry discard */
+}
+
+void test_one_second_of_countdown_is_still_the_final_minute(void) {
+    time_t now = flow_at(14, 0);
+    mock_time_set(now);
+    flow_state = TIMER_RUNNING;
+    flow_expiry_wall = (int64_t)now + 1;
+    wake_flow_watch_final_minute();
+    TEST_ASSERT_EQUAL_UINT32(1000, mock_delay_total_ms());
+    TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_ALERT_EXPIRY));
+}
+
+void test_a_countdown_beyond_the_watch_window_is_left_to_the_planner(void) {
+    time_t now = flow_at(14, 0);
+    mock_time_set(now);
+    flow_state = TIMER_RUNNING;
+    flow_expiry_wall = (int64_t)now + SLEEP_PLAN_WATCH_SEC + 1;
+    wake_flow_watch_final_minute();
+    TEST_ASSERT_EQUAL_INT(0, flow_log_n);
+    TEST_ASSERT_EQUAL_UINT32(0, mock_delay_total_ms());
+}
+
+void test_a_countdown_exactly_at_the_watch_window_is_watched(void) {
+    time_t now = flow_at(14, 0);
+    mock_time_set(now);
+    flow_state = TIMER_RUNNING;
+    flow_expiry_wall = (int64_t)now + SLEEP_PLAN_WATCH_SEC;
+    wake_flow_watch_final_minute();
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)SLEEP_PLAN_WATCH_SEC * 1000u, mock_delay_total_ms());
+    TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_ALERT_EXPIRY));
+}
+
+void test_the_final_minute_watch_discards_presses_made_before_it_started(void) {
+    /* A resume with <70 s left flows straight into this watch; the release
+       bounce of the very press that resumed would otherwise re-pause it
+       instantly. Only presses made DURING the watch may pause. */
+    time_t now = flow_at(14, 0);
+    mock_time_set(now);
+    flow_state = TIMER_RUNNING;
+    flow_expiry_wall = (int64_t)now + 2;
+    flow_press(BTN_A);
+    wake_flow_watch_final_minute();
+    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_PAUSE));
+    TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_ALERT_EXPIRY));
+    TEST_ASSERT_EQUAL_UINT8(0, flow_latch_residue());
+}
+
+void test_a_stale_clock_with_room_to_spare_sharpens_the_expiry_first(void) {
+    /* Expiry is a wall time, so a clock step here directly sharpens the
+       moment the alert fires — but only when the sync (~5-9 s) fits. */
+    time_t now = flow_at(14, 0);
+    mock_time_set(now);
+    flow_state = TIMER_RUNNING;
+    flow_expiry_wall = (int64_t)now + 16;
+    flow_needs_sync = true;
+    wake_flow_watch_final_minute();
+    TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_TRY_WINDOW));
+    TEST_ASSERT_EQUAL_INT64(now, flow_needs_sync_arg);
+    TEST_ASSERT_TRUE(flow_log_at(EV_TRY_WINDOW) < flow_log_at(EV_LED));
+}
+
+void test_fifteen_seconds_left_is_too_little_room_to_sync(void) {
+    time_t now = flow_at(14, 0);
+    mock_time_set(now);
+    flow_state = TIMER_RUNNING;
+    flow_expiry_wall = (int64_t)now + 15;
+    flow_needs_sync = true;
+    wake_flow_watch_final_minute();
+    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_TRY_WINDOW));
+    TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_ALERT_EXPIRY));
+}
+
+void test_a_fresh_clock_needs_no_sync_however_much_room_there_is(void) {
+    time_t now = flow_at(14, 0);
+    mock_time_set(now);
+    flow_state = TIMER_RUNNING;
+    flow_expiry_wall = (int64_t)now + 70;
+    flow_needs_sync = false;
+    wake_flow_watch_final_minute();
+    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_TRY_WINDOW));
+}
+
+void test_a_sync_that_moved_the_timer_out_of_running_ends_the_watch(void) {
+    /* The window's reconcile can reset or expire the timer (a config edit
+       landing mid-sync); the alert, if there was one, has already fired
+       inside the window. Watching a countdown that no longer exists would
+       double-fire it. */
+    time_t now = flow_at(14, 0);
+    mock_time_set(now);
+    flow_state = TIMER_RUNNING;
+    flow_expiry_wall = (int64_t)now + 40;
+    flow_needs_sync = true;
+    flow_state_after_window = TIMER_IDLE;
+    wake_flow_watch_final_minute();
+    TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_TRY_WINDOW));
+    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_LED));
+    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_ALERT_EXPIRY));
+    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_PARTIAL));
+    TEST_ASSERT_EQUAL_UINT32(0, mock_delay_total_ms());
+}
+
+void test_the_final_minute_watch_lights_the_state_before_it_counts_down(void) {
+    time_t now = flow_at(14, 0);
+    mock_time_set(now);
+    flow_state = TIMER_RUNNING;
+    flow_expiry_wall = (int64_t)now + 60;
+    wake_flow_watch_final_minute();
+    TEST_ASSERT_TRUE(flow_log_at(EV_LED) >= 0);
+    TEST_ASSERT_TRUE(flow_log_at(EV_LED) < flow_log_at(EV_CFG_INTERVAL));
+    TEST_ASSERT_TRUE(flow_log_at(EV_LED) < flow_log_at(EV_PARTIAL));
+}
+
+void test_the_countdown_steps_at_the_quarter_minute_marks(void) {
+    /* Pinned values, not the live remaining: the text has to read exactly
+       00:01:00 / 00:00:45 / 00:00:30 / 00:00:15. */
+    time_t now = flow_at(14, 0);
+    mock_time_set(now);
+    flow_state = TIMER_RUNNING;
+    flow_expiry_wall = (int64_t)now + 60;
+    wake_flow_watch_final_minute();
+    TEST_ASSERT_EQUAL_INT(4, flow_partial_n);
+    TEST_ASSERT_EQUAL_INT32(60, flow_partial_seen[0]);
+    TEST_ASSERT_EQUAL_INT32(45, flow_partial_seen[1]);
+    TEST_ASSERT_EQUAL_INT32(30, flow_partial_seen[2]);
+    TEST_ASSERT_EQUAL_INT32(15, flow_partial_seen[3]);
+    TEST_ASSERT_EQUAL_UINT32(60000, mock_delay_total_ms());
+}
+
+void test_a_late_entry_skips_the_marks_it_has_already_passed(void) {
+    time_t now = flow_at(14, 0);
+    mock_time_set(now);
+    flow_state = TIMER_RUNNING;
+    flow_expiry_wall = (int64_t)now + 40; /* the 60 and 45 marks are gone */
+    wake_flow_watch_final_minute();
+    TEST_ASSERT_EQUAL_INT(2, flow_partial_n);
+    TEST_ASSERT_EQUAL_INT32(30, flow_partial_seen[0]);
+    TEST_ASSERT_EQUAL_INT32(15, flow_partial_seen[1]);
+}
+
+void test_each_countdown_mark_is_painted_against_a_freshly_read_clock(void) {
+    time_t now = flow_at(14, 0);
+    mock_time_set(now);
+    flow_state = TIMER_RUNNING;
+    flow_expiry_wall = (int64_t)now + 20;
+    wake_flow_watch_final_minute();
+    /* The 15 s mark is painted at the instant it is reached — five seconds
+       into the watch — and against the clock read AT that instant, not the
+       one the watch walked in with. The value alone cannot say that: it is
+       a pinned 15 either way. */
+    TEST_ASSERT_EQUAL_INT(1, flow_partial_n);
+    TEST_ASSERT_EQUAL_INT32(15, flow_partial_seen[0]);
+    TEST_ASSERT_EQUAL_INT64(now + 5, flow_partial_at[0]);
+    TEST_ASSERT_EQUAL_UINT32(20000, mock_delay_total_ms());
+}
+
+void test_a_wake_one_second_late_does_not_repaint_the_sixty_second_mark(void) {
+    /* 59 s left: the 00:01:00 mark has already gone by, and painting it
+       anyway would put a number on the panel that is a second in the past
+       — which is the whole reason the first step is chosen by policy
+       rather than assumed to be zero. */
+    time_t now = flow_at(14, 0);
+    mock_time_set(now);
+    flow_state = TIMER_RUNNING;
+    flow_expiry_wall = (int64_t)now + 59;
+    wake_flow_watch_final_minute();
+    TEST_ASSERT_EQUAL_INT(3, flow_partial_n);
+    TEST_ASSERT_EQUAL_INT32(45, flow_partial_seen[0]);
+    TEST_ASSERT_EQUAL_INT64(now + 14, flow_partial_at[0]);
+    TEST_ASSERT_EQUAL_INT32(30, flow_partial_seen[1]);
+    TEST_ASSERT_EQUAL_INT32(15, flow_partial_seen[2]);
+}
+
+void test_the_last_fifteen_seconds_ride_the_pixels_as_a_binary_count(void) {
+    time_t now = flow_at(14, 0);
+    mock_time_set(now);
+    flow_state = TIMER_RUNNING;
+    flow_expiry_wall = (int64_t)now + 16; /* one second above the threshold */
+    wake_flow_watch_final_minute();
+    TEST_ASSERT_EQUAL_INT(15, flow_binary_n); /* 15 down to 1, once each */
+    for (int i = 0; i < 15; i++) {
+        TEST_ASSERT_EQUAL_UINT8((uint8_t)(15 - i), flow_binary_seen[i]);
+        /* On the second, not a poll later: the write happens before the
+           delay that ends the pass, so the pixels change as the number
+           does. */
+        TEST_ASSERT_EQUAL_UINT32((uint32_t)(i + 1) * 1000u, flow_binary_at[i]);
+    }
+    /* light green; the driver scales it by the configured brightness */
+    TEST_ASSERT_EQUAL_UINT8(20, flow_binary_rgb[0]);
+    TEST_ASSERT_EQUAL_UINT8(60, flow_binary_rgb[1]);
+    TEST_ASSERT_EQUAL_UINT8(20, flow_binary_rgb[2]);
+}
+
+void test_the_binary_count_is_written_once_per_second_not_once_per_poll(void) {
+    /* Four polls to the second: a pixel write on every one of them would
+       be four times the RMT traffic for the same picture. */
+    time_t now = flow_at(14, 0);
+    mock_time_set(now);
+    flow_state = TIMER_RUNNING;
+    flow_expiry_wall = (int64_t)now + 4;
+    wake_flow_watch_final_minute();
+    TEST_ASSERT_EQUAL_INT(4, flow_binary_n);
+    TEST_ASSERT_EQUAL_INT(16, flow_mask_takes);
+}
+
+void test_the_expiry_alert_fires_when_the_countdown_reaches_zero(void) {
+    time_t now = flow_at(14, 0);
+    mock_time_set(now);
+    flow_state = TIMER_RUNNING;
+    flow_expiry_wall = (int64_t)now + 3;
+    wake_flow_watch_final_minute();
+    /* the tick that moves RUNNING -> EXPIRED comes first, against the
+       clock at the end of the wait, and the alert sequence follows it */
+    TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_TIMER_TICK));
+    TEST_ASSERT_EQUAL_INT64(now + 3, flow_tick_arg);
+    TEST_ASSERT_TRUE(flow_log_at(EV_TIMER_TICK) < flow_log_at(EV_PERSIST_SAVE));
+    TEST_ASSERT_TRUE(flow_log_at(EV_PERSIST_SAVE) < flow_log_at(EV_TIMESUP));
+    TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_ALERT_EXPIRY));
+}
+
+void test_a_pause_press_in_the_final_minute_repaints_and_cancels_the_expiry(void) {
+    time_t now = flow_at(14, 0);
+    mock_time_set(now);
+    flow_state = TIMER_RUNNING;
+    flow_expiry_wall = (int64_t)now + 30;
+    flow_tick_ret = 1234;
+    flow_deferred_press_btn = BTN_A;
+    flow_deferred_press_ms = 5000;
+    wake_flow_watch_final_minute();
+    TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_PAUSE));
+    TEST_ASSERT_EQUAL_UINT32(5000, mock_delay_total_ms());
+    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_ALERT_EXPIRY));
+    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_TIMESUP));
+    /* The whole exit sequence, in order and with nothing between: pause,
+       pixels cleared, tick, state assembled against a freshly read clock,
+       LED, flush. The LED sits BETWEEN the assembly and the refresh so
+       the panel is amber for the whole of the multi-second flush rather
+       than only after it — a pair of positions could not say that; the
+       contiguous tail can. */
+    static const flow_event_t tail[] = {EV_PAUSE, EV_PIXELS_OFF, EV_TIMER_TICK, EV_MAKE_STATE, EV_LED, EV_FULL_REFRESH};
+    const int n_tail = (int)(sizeof tail / sizeof tail[0]);
+    TEST_ASSERT_TRUE(flow_log_n >= n_tail);
+    for (int i = 0; i < n_tail; i++) {
+        TEST_ASSERT_EQUAL_INT((int)tail[i], (int)flow_log[flow_log_n - n_tail + i]);
+    }
+    TEST_ASSERT_EQUAL_INT64(now + 5, flow_tick_arg);
+    TEST_ASSERT_EQUAL_INT32(1234, flow_full_remaining);
+    TEST_ASSERT_EQUAL_INT64(now + 5, flow_full_wall);
+}
+
+void test_the_final_minute_watch_polls_four_times_a_second(void) {
+    time_t now = flow_at(14, 0);
+    mock_time_set(now);
+    flow_state = TIMER_RUNNING;
+    flow_expiry_wall = (int64_t)now + 2;
+    wake_flow_watch_final_minute();
+    TEST_ASSERT_EQUAL_INT(8, flow_mask_takes);
+    TEST_ASSERT_EQUAL_UINT32(2000, mock_delay_total_ms());
+}
+
+/* ROW 9: a break that becomes due INSIDE the final-minute watch. The
+   per-wake check has already passed by then, so before f2008da the break
+   was silently swallowed by the expiry; 54357fa is why the break screen
+   that follows has to reach the panel rather than being dropped by the
+   driver's refresh-rate guard. */
+void test_row9_a_break_due_inside_the_final_minute_paints_it_and_ends_the_watch(void) {
+    time_t now = flow_at(14, 0);
+    mock_time_set(now);
+    flow_state = TIMER_RUNNING;
+    flow_expiry_wall = (int64_t)now + 60;
+    flow_break_due_from = now + 20; /* the balance crosses mid-watch */
+    wake_flow_watch_final_minute();
+    TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_START_BREAK));
+    TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_BREAK_PAINT));
+    TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_ALERT_BREAK));
+    /* started at the instant it came due, not at the end of the minute */
+    TEST_ASSERT_EQUAL_INT64(now + 20, flow_start_break_now);
+    TEST_ASSERT_EQUAL_UINT32(20000, mock_delay_total_ms());
+    /* The binary-countdown pixels are cleared before the break screen —
+       and exactly once. A count of 0 would make the position comparison
+       below pass on an effect that never happened (flow_log_at returns
+       -1); a count of 2 would mean the balance was asked against a clock
+       that runs ahead of the one the gate then uses, clearing the pixels
+       on a pass that starts nothing. */
+    TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_PIXELS_OFF));
+    TEST_ASSERT_TRUE(flow_log_at(EV_PIXELS_OFF) < flow_log_at(EV_BREAK_PAINT));
+    /* and the expiry, still 40 s away, was neither fired nor ticked past */
+    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_ALERT_EXPIRY));
+    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_TIMESUP));
+    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_TIMER_TICK));
+}
+
+void test_row9_the_balance_is_asked_on_every_poll_not_only_at_entry(void) {
+    /* The whole point of f2008da: the check lives INSIDE the loop. */
+    time_t now = flow_at(14, 0);
+    mock_time_set(now);
+    flow_state = TIMER_RUNNING;
+    flow_expiry_wall = (int64_t)now + 20;
+    wake_flow_watch_final_minute();
+    TEST_ASSERT_EQUAL_INT(80, flow_log_count(EV_BREAK_DUE)); /* 20 s at 250 ms */
+    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_START_BREAK));
+    /* nothing due: the expiry is still the thing that happens */
+    TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_ALERT_EXPIRY));
+}
+
+void test_row9_the_break_interval_is_read_once_before_the_loop(void) {
+    time_t now = flow_at(14, 0);
+    mock_time_set(now);
+    flow_state = TIMER_RUNNING;
+    flow_expiry_wall = (int64_t)now + 20;
+    wake_flow_watch_final_minute();
+    TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_CFG_INTERVAL));
+    TEST_ASSERT_TRUE(flow_log_at(EV_CFG_INTERVAL) < flow_log_at(EV_BREAK_DUE));
+    /* in seconds, from the stored minutes */
+    TEST_ASSERT_EQUAL_INT32(30 * 60, flow_break_due_interval);
+}
+
+void test_row9_a_zero_break_interval_is_never_asked_of_the_balance(void) {
+    time_t now = flow_at(14, 0);
+    mock_time_set(now);
+    flow_state = TIMER_RUNNING;
+    flow_expiry_wall = (int64_t)now + 5;
+    flow_interval_min = 0;     /* eye-rest breaks disabled */
+    flow_break_due_ret = true; /* would fire the instant it was asked */
+    wake_flow_watch_final_minute();
+    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_BREAK_DUE));
+    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_START_BREAK));
+    TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_ALERT_EXPIRY));
+}
+
+void test_the_watch_falls_back_to_the_compile_time_break_interval(void) {
+    /* NVS never stored one: the caller's pre-seeded default has to be
+       what the balance is judged against, not zero (which would disable
+       the mid-watch check entirely). */
+    time_t now = flow_at(14, 0);
+    mock_time_set(now);
+    flow_state = TIMER_RUNNING;
+    flow_expiry_wall = (int64_t)now + 5;
+    flow_cfg_writes = false;
+    wake_flow_watch_final_minute();
+    TEST_ASSERT_EQUAL_UINT16(NVS_DEFAULT_BREAK_INTERVAL_MIN, flow_seen_interval_default);
+    TEST_ASSERT_EQUAL_INT32((int32_t)NVS_DEFAULT_BREAK_INTERVAL_MIN * 60, flow_break_due_interval);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_deepsleep_is_the_healthy_reason);
@@ -2799,5 +3788,58 @@ int main(void) {
     RUN_TEST(test_the_days_usage_is_read_before_the_window_steps_the_clock);
     RUN_TEST(test_the_days_usage_is_sampled_before_the_completions_loop);
     RUN_TEST(test_the_rollover_effect_order_is_pinned_end_to_end);
+    /* ---- the render-grid wait ---- */
+    RUN_TEST(test_the_grid_wait_absorbs_the_residue_of_a_running_countdown);
+    RUN_TEST(test_the_grid_wait_uses_the_break_countdown_when_a_break_is_selected);
+    RUN_TEST(test_the_grid_wait_lands_a_clock_only_state_on_the_wall_minute);
+    RUN_TEST(test_a_residue_exactly_at_the_cap_is_waited_out);
+    RUN_TEST(test_a_residue_one_second_past_the_cap_renders_in_place);
+    RUN_TEST(test_the_cap_the_caller_passes_is_the_one_that_applies);
+    RUN_TEST(test_a_state_already_on_its_grid_never_polls_at_all);
+    RUN_TEST(test_an_expiry_that_has_already_passed_is_not_waited_on);
+    RUN_TEST(test_the_grid_wait_polls_ten_times_a_second);
+    RUN_TEST(test_row6_a_press_during_a_long_grid_wait_pauses_at_that_moment);
+    RUN_TEST(test_row6_a_press_while_not_running_is_eaten_KNOWN_BUG);
+    RUN_TEST(test_a_press_latched_before_the_grid_wait_pauses_before_the_first_delay);
+    RUN_TEST(test_the_grid_wait_leaves_b_and_c_latched_for_the_tick_drain);
+    /* ---- the break tail ---- */
+    RUN_TEST(test_the_break_watch_is_inert_when_no_break_is_running);
+    RUN_TEST(test_row2_a_running_extra_leaves_the_break_tail_alone);
+    RUN_TEST(test_a_break_end_beyond_the_watch_window_is_left_to_the_planner);
+    RUN_TEST(test_a_break_end_exactly_at_the_watch_window_is_watched);
+    RUN_TEST(test_the_break_watch_lights_the_state_before_it_starts_waiting);
+    RUN_TEST(test_a_single_second_of_break_tail_is_still_watched);
+    RUN_TEST(test_the_break_watch_waits_out_the_tail_then_chimes_and_repaints);
+    RUN_TEST(test_a_break_whose_end_has_already_passed_repaints_without_waiting);
+    RUN_TEST(test_the_break_watch_polls_four_times_a_second);
+    RUN_TEST(test_row1_button_c_in_the_break_tail_moves_the_selection_and_ends_the_watch);
+    RUN_TEST(test_row2_button_a_on_a_break_eligible_extra_starts_it_and_suppresses_the_end);
+    RUN_TEST(test_a_press_latched_before_the_break_tail_is_serviced_before_the_first_delay);
+    RUN_TEST(test_a_refused_press_in_the_break_tail_does_not_end_the_watch);
+    /* ---- the final minute ---- */
+    RUN_TEST(test_the_final_minute_watch_is_inert_once_the_expiry_has_passed);
+    RUN_TEST(test_one_second_of_countdown_is_still_the_final_minute);
+    RUN_TEST(test_a_countdown_beyond_the_watch_window_is_left_to_the_planner);
+    RUN_TEST(test_a_countdown_exactly_at_the_watch_window_is_watched);
+    RUN_TEST(test_the_final_minute_watch_discards_presses_made_before_it_started);
+    RUN_TEST(test_a_stale_clock_with_room_to_spare_sharpens_the_expiry_first);
+    RUN_TEST(test_fifteen_seconds_left_is_too_little_room_to_sync);
+    RUN_TEST(test_a_fresh_clock_needs_no_sync_however_much_room_there_is);
+    RUN_TEST(test_a_sync_that_moved_the_timer_out_of_running_ends_the_watch);
+    RUN_TEST(test_the_final_minute_watch_lights_the_state_before_it_counts_down);
+    RUN_TEST(test_the_countdown_steps_at_the_quarter_minute_marks);
+    RUN_TEST(test_a_late_entry_skips_the_marks_it_has_already_passed);
+    RUN_TEST(test_each_countdown_mark_is_painted_against_a_freshly_read_clock);
+    RUN_TEST(test_a_wake_one_second_late_does_not_repaint_the_sixty_second_mark);
+    RUN_TEST(test_the_last_fifteen_seconds_ride_the_pixels_as_a_binary_count);
+    RUN_TEST(test_the_binary_count_is_written_once_per_second_not_once_per_poll);
+    RUN_TEST(test_the_expiry_alert_fires_when_the_countdown_reaches_zero);
+    RUN_TEST(test_a_pause_press_in_the_final_minute_repaints_and_cancels_the_expiry);
+    RUN_TEST(test_the_final_minute_watch_polls_four_times_a_second);
+    RUN_TEST(test_row9_a_break_due_inside_the_final_minute_paints_it_and_ends_the_watch);
+    RUN_TEST(test_row9_the_balance_is_asked_on_every_poll_not_only_at_entry);
+    RUN_TEST(test_row9_the_break_interval_is_read_once_before_the_loop);
+    RUN_TEST(test_row9_a_zero_break_interval_is_never_asked_of_the_balance);
+    RUN_TEST(test_the_watch_falls_back_to_the_compile_time_break_interval);
     return UNITY_END();
 }

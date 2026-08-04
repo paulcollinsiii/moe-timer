@@ -3,6 +3,11 @@
 static time_t s_mock_time = MOCK_TIME_DEFAULT;
 static uint32_t s_delay_total_ms;
 static uint32_t s_delay_carry_ms; /* sub-second remainder, see hal_delay_ms */
+static void (*s_delay_hook)(void);
+
+void mock_delay_set_hook(void (*fn)(void)) {
+    s_delay_hook = fn;
+}
 
 void mock_time_set(time_t t) {
     s_mock_time = t;
@@ -39,4 +44,9 @@ void hal_delay_ms(uint32_t ms) {
     s_delay_carry_ms += ms;
     s_mock_time += (time_t)(s_delay_carry_ms / 1000u);
     s_delay_carry_ms %= 1000u;
+    /* After the clock has moved, so a hook can key off either the total or
+       the wall time and see the state the waiting code will see next. */
+    if (s_delay_hook != NULL) {
+        s_delay_hook();
+    }
 }

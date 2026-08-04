@@ -3,6 +3,7 @@
 #include <time.h>
 
 #include "buttons.h" /* button_id_t */
+#include "display.h" /* display_state_t */
 #include "timer.h"   /* timer_state_t */
 #ifndef NATIVE
 #include "esp_system.h" /* esp_reset_reason_t */
@@ -197,6 +198,64 @@ void wake_flow_fire_expiry_alert(void);
    one. */
 void wake_flow_handle_day_rollover(time_t *now);
 
+/* ---- the awake watches -------------------------------------------------- */
+
+/* Absorb the wake residue so the render lands on the state's grid:
+   RUNNING/BREAK on the countdown's round minute (the display truly reads
+   1:11:00), clock-only states on the wall :00. HOW LONG to wait is the
+   pure policy's decision (wake_policy_grid_wait_sec, tested there); what
+   is here is the burning of it — a stretch that can run for max_wait_sec
+   seconds, polled ten times a second so a Button A press inside it is not
+   lost. Aborts early on a pause press: the caller then renders PAUSED,
+   off-grid but honest.
+
+   KNOWN DEFECT, DELIBERATELY PRESERVED: the poll consumes the A press
+   BEFORE it checks the state, so a press made while the timer is not
+   RUNNING is eaten here and nothing later in the wake can act on it — up
+   to max_wait_sec seconds in which Button A does nothing at all. The
+   reasoning and the eventual fix are recorded on
+   wake_flow_poll_pause_button(); the current behaviour is pinned by
+   test_row6_a_press_while_not_running_is_eaten_KNOWN_BUG. */
+void wake_flow_wait_for_render_grid(int max_wait_sec);
+
+/* BREAK tail: stay awake through the last seconds of a Screen Break so
+   its end (chime + repaint, and the snap back to whatever it interrupted)
+   lands within a tick of wall time. Keyed on slot 0, so it covers a break
+   running behind another selected timer just as well as the break screen
+   itself.
+
+   Three ways to decline the job, all of them at the top: no break is
+   running; an extra is RUNNING, which suppresses the end entirely (no
+   chime, no snap — nothing to wait for); or the end is further out than
+   SLEEP_PLAN_WATCH_SEC, which is the planner's to schedule, not this
+   function's to sit through.
+
+   Polls wake_flow_poll_break_buttons() at 250 ms throughout — a press it
+   accepts has already repainted, so the watch stops there and the planner
+   re-schedules the end (or the press started an eligible extra and the
+   end is suppressed, exactly as the top-of-watch guard would have
+   decided). Otherwise the wait ends on wall time and the edge is drained
+   and repainted through wake_flow_break_end_repaint(). */
+void wake_flow_watch_break_end(void);
+
+/* RUNNING tail: own the final minute — the countdown partials at the
+   quarter-minute marks, the last 15 s as a binary count on the pixels,
+   the pause poll, the eye-rest break check, and the expiry alert at zero.
+
+   Declines the same way the break tail does: an expiry already passed
+   belongs to the alert path, and one further out than
+   SLEEP_PLAN_WATCH_SEC belongs to the planner.
+
+   Three things it does that are each a fixed field report rather than
+   housekeeping: presses latched BEFORE the watch are discarded at entry
+   (a resume with <70 s left flows straight in here, and its own release
+   bounce would re-pause instantly); a stale clock is sharpened by a
+   network window first, but only when the sync would not itself blow past
+   the expiry; and the break balance is re-checked on EVERY poll, because
+   a short allocation can put break-due inside this watch after the
+   per-wake check has already passed. */
+void wake_flow_watch_final_minute(void);
+
 /* ---- seams implemented by main.c ---------------------------------------- */
 
 /* Render seam, implemented by main.c: tick the timer and full-refresh the
@@ -225,6 +284,21 @@ void render_action_result(button_id_t btn, timer_state_t before, time_t now, boo
    refresh here, so the panel is blue for the whole multi-second flush
    rather than only after it. */
 void paint_break_started(time_t now);
+
+/* State-assembly seam, also implemented by main.c and also unprefixed.
+   The narrowest of the four: it hands back the display_state_t for a
+   given remaining and a given clock, and paints nothing at all.
+
+   The final-minute watch needs it because its two renders are NOT the
+   same paint as any of the seams above — one is a partial update of a
+   pinned countdown value, the other a full refresh with the LED lit
+   between the assembly and the flush — and wrapping each of them as its
+   own paint seam would push that flow BACK into main.c, which is the
+   direction this refactor is undoing. So the seam is cut at the one thing
+   that genuinely cannot move: make_state()'s battery ADC read and the
+   compile-time ParentTesting flag. main.c satisfies it with a branch-free
+   one-line thunk over the make_state() it already had. */
+display_state_t make_display_state(int32_t remaining, time_t now);
 
 #ifdef __cplusplus
 }
