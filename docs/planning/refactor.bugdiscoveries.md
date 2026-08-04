@@ -40,35 +40,86 @@ The press produced no effect at all, not merely a late repaint, and normal
 service resumed only after an unrelated scheduled wake. That points at the
 press being discarded rather than deferred.
 
-### Candidate root cause — NOT yet confirmed
+### Original candidate root cause — REFUTED 2026-08-04
 
-The awake-press latch is ISR-fed and armed for the whole awake window, so the
-press is very likely *recorded*. The problem is that nothing on this wake path
-appears to *consume* it, and the latch does not survive to the next wake:
+The first hypothesis was that the tick path opens the network window and
+returns to sleep **without ever polling the latch**, so the press is recorded
+and then destroyed by the next boot's `button_latch_reset()`. That was checked
+directly against `136cb06` — the exact build the bug was observed on — and it
+does not hold. Two of its three legs are wrong:
 
-* `buttons_watch_begin()` (`main/buttons.c:41`) calls `button_latch_reset()`,
-  and is invoked from `buttons_init()` (`main/buttons.c:99`) — which runs on
-  **every boot**. So anything still latched at sleep entry is destroyed on the
-  next wake.
-* `buttons_watch_end()` (`main/buttons.c:57`) detaches the ISR before
-  `buttons_configure_wakeup_if()` moves the pads to the RTC mux, so the latch
-  also stops recording before sleep.
-* An NTP-sync wake is a *timer* wake, so it runs the tick path, not
-  `handle_button_wake`. If that path opens the network window and returns to
-  sleep without polling the latch, the press is latched, never dispatched, and
-  then cleared at the next `buttons_init()`.
+* **The tick path does poll the latch.** `136cb06:main/main.c:697` runs
+  `button_latch_pick(buttons_take_pressed(), (1u<<BTN_A)|(1u<<BTN_B)|(1u<<BTN_C))`
+  unconditionally, and its own comment names this case: *"a press that landed
+  while this wake was awake (sync, grid wait, e-ink flush)"*. BTN_C is in the
+  mask. (Now `main/wake_flow.c:815` after the cycle-11 move; structurally
+  identical.)
+* **The ISR is armed for the entire awake window.** `buttons_watch_begin()` is
+  reachable only from `buttons_init()` (`main/buttons.c:99`, every boot) and
+  `buttons_watch_end()` only from sleep entry (`main/buttons.c:125`). There is
+  no interval mid-wake where presses stop being latched. The
+  `button_latch_reset()` observation is true but irrelevant: it fires at boot,
+  long before the press.
+* **No early sleep sits between the sync block and the poll.** The only
+  `enter_deep_sleep()` calls in between are the two break-start exits, and
+  `lock_gate_check_bedtime()` runs *before* the sync block. An ordinary hourly
+  NTP-sync wake reaches the poll.
 
-The press also cannot be recovered via EXT1: the device is already awake when
-it happens, EXT1 only arms at sleep entry, and if the button is *still held* at
-sleep entry the held-through-sleep guard (behaviour row 7) deliberately ignores
-it. Both paths therefore drop it.
+`allow_net_window` was also checked and cleared: per `include/wake_flow.h:101`
+it only suppresses a *redundant second* NTP window on a start/resume. It does
+not refuse the press, so `!synced_this_wake` being false on a sync wake is not
+the mechanism either.
+
+### Still open — narrowed candidates
+
+The mechanism is genuinely not identified yet.
+
+**Nothing eats a latched C before the drain.** Every latch consumer reachable
+on an IDLE sync tick was enumerated: `main/wake_flow.c:272` and `:282` are both
+**masked-A** takes, and `button_latch_take_masked()` clears only the masked
+bits, so a latched C passes straight through them. `main/wake_flow.c:467` (the
+final-minute watch's unmasked entry discard) is **not reached at all** —
+`maybe_wait_for_event()` at `main/wake_flow.c:652` branches on
+`timer_get_state() == TIMER_RUNNING`, and an IDLE sync wake takes the
+`watch_break_end` arm. `alerts.c`'s unmasked takes sit inside `run_alert()`,
+unreachable with no expiry. So a C press made during the window is picked at
+`main/wake_flow.c:815` and dispatched, exactly as intended.
+
+*(An earlier revision of this file named `:467` as the leading candidate. That
+was wrong for the reported path — recorded here so the dead lead is not
+re-followed.)*
+
+What survives:
+
+1. **The press landed in the post-drain window** — after `main/wake_flow.c:815`
+   and before the ISR detaches. That covers `maybe_wait_for_event()`,
+   `enter_deep_sleep`'s prologue, and the bounded release-wait at
+   `main/main.c:70`, which spins up to **3 s** on `buttons_scan_held()` — a
+   *level* read, not a latch read. A press made and released inside it is
+   latched, never consumed, and then destroyed by `buttons_watch_end()`.
+2. **Something in the network window suppresses the ISR itself** — the window
+   runs on a dedicated `net_win` task; if the press is never latched, every
+   downstream poll is correctly finding nothing.
+
+**Neither candidate explains the sync-wake specificity**, which is the part
+that actually needs explaining: the window in candidate 1 is the same width on
+every wake, sync or not, so it does not predict that C works normally right
+after the 1-minute update and fails right after the hourly sync. Ruled out as
+the amplifier: `net_window_join(15000)` at `main/main.c:65` — `net_apply_finish`
+has already joined and cleared `s_active` (`main/net_window.c:180`), so the
+sleep-path join returns immediately.
 
 ### To confirm
 
-Establish whether the sync/idle cadence path calls `buttons_take_pressed()` (or
-the masked variant) after the network window closes and before sleep. If it
-does not, the hypothesis holds. The network window can run for several seconds,
-so the deaf interval is long enough to be hit routinely in normal use.
+Distinguish 1 from 2 by determining whether the press is *latched at all*
+during the network window, rather than assuming it is. That is the fork; until
+it is settled neither candidate should be fixed.
+
+Note that BUG-2's eat also occurs on this path — the grid wait runs here and
+takes the A bit while not RUNNING — and is pinned by
+`test_row6_the_bug2_eat_also_happens_on_the_idle_sync_path_KNOWN_BUG`. That
+test documents **BUG-2 on the sync path, not BUG-1**: it stages an A press, and
+it dies to a BUG-2 fix. Do not read it as closing this entry.
 
 ### Fix constraint
 
@@ -103,11 +154,21 @@ when a user who sees a stale panel is most likely to press something.
 
 ### Note on the relationship to BUG-1
 
-These are probably **not** the same defect: BUG-2 takes the press from the latch
-and drops it in a specific state, whereas BUG-1 appears never to poll at all on
-that wake path. But they share a root shape — *a press is latched during a long
-awake window and no owner services it* — and a fix for either should be checked
-against the other rather than applied in isolation.
+This was originally written as "probably **not** the same defect", on the
+grounds that BUG-1 never polled at all. That grounds was refuted on 2026-08-04
+— the tick path *does* poll. A follow-up guess that BUG-1 was simply BUG-2 on
+the sync path was then **also** refuted: BUG-2 takes the **A** bit only, and a
+masked take clears only the bits it names, so it cannot consume the **C** press
+BUG-1 reported.
+
+So the original verdict stands, for a better reason than it was first given:
+these are **not** the same defect. BUG-2 does occur on the sync path — pinned by
+`test_row6_the_bug2_eat_also_happens_on_the_idle_sync_path_KNOWN_BUG` — but
+fixing it will not fix BUG-1.
+
+They still share a root shape (*a press is latched during a long awake window
+and no owner services it*), so a fix for either must be checked against the
+other rather than applied in isolation.
 
 ---
 
@@ -127,6 +188,17 @@ so the exclusion is unobservable and no test covers it.
 **The moment BTN_D gains a dispatch arm, this exclusion becomes load-bearing**
 and silently suppresses it in the break tail. Whoever adds that arm must decide
 deliberately whether D belongs in this mask, and add a test either way.
+
+**Scope correction (cycle 11):** there are TWO of these masks, not one. The
+tick-wake latch drain in `wake_flow_handle_timer_tick()` carries the identical
+exclusion, for the identical reason, and is equally unobservable today —
+mutation testing in cycle 11 confirmed that adding `(1u << BTN_D)` to it is the
+one mutant of that cycle's 81 that the host suite cannot kill. The equivalence
+holds because D, winning the pick alone, reaches the dispatch's outer `default`
+arm, which writes `selection_changed = false` and returns false; the only
+residual difference on device is one extra side-effect-free `timer_get_state()`
+read. Both call sites need a deliberate decision and a test when D gains an arm.
+Recorded on `test_a_latched_d_press_is_never_dispatched_by_the_tick_drain`.
 
 ---
 

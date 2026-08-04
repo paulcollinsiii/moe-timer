@@ -27,18 +27,26 @@
 #include "wake_policy.h"
 
 #ifndef NATIVE
+#include "esp_attr.h" /* RTC_DATA_ATTR */
 #include "esp_log.h"
+#include "esp_system.h" /* esp_reset_reason() */
 #else
+/* The host build has no esp_system.h; wake_flow.h only pulls it in on
+   device. The reset reason gates the render-grid wait, so the suite has
+   to be able to answer it. */
+esp_reset_reason_t esp_reset_reason(void);
+
 /* These discard their varargs, so ANY function call made inside a log
    argument is invisible to every host test — it is never evaluated here.
-   FIVE call sites exist today, and every one is a verified pure read:
+   SIX call sites exist today, and every one is a verified pure read:
      - timer_active_slot()   x2 (the break-over snap, the Button C swap)
      - timer_get_state()        (the join poll's "state %d -> %d")
+     - timer_get_state()        (the post-action render's "state %d -> %d")
      - timer_run_accum(now)     (the break gate's accrual)
      - timer_current_date()     (the day rollover)
-   Before putting a sixth call in a log line, check it has no side effect
-   AND update the list above: a state change smuggled in as a %d argument
-   would run on device and be unobservable in the suite, and an
+   Before putting a seventh call in a log line, check it has no side
+   effect AND update the list above: a state change smuggled in as a %d
+   argument would run on device and be unobservable in the suite, and an
    enumeration nobody maintains is what lets that happen unnoticed. */
 #define ESP_LOGI(tag, ...) ((void)(tag))
 #define ESP_LOGW(tag, ...) ((void)(tag))
@@ -54,7 +62,25 @@
 #define PARENT_TESTING false
 #endif
 
+/* IDLE shows only the clock — sync on the menuconfig cadence (default
+   hourly) instead of every 10 min. The S2 has no crystal-backed RTC; its
+   RC-oscillator timekeeping can drift minutes/day, so don't set this too
+   long. The fallback matches the Kconfig default and only ever applies to
+   the host build, which has no sdkconfig — same shape timer_defs.c uses
+   for its slot definitions. */
+#ifndef CONFIG_MAGTAG_IDLE_SYNC_INTERVAL_MIN
+#define CONFIG_MAGTAG_IDLE_SYNC_INTERVAL_MIN 60
+#endif
+#define IDLE_SYNC_INTERVAL_SEC (CONFIG_MAGTAG_IDLE_SYNC_INTERVAL_MIN * 60)
+
 static const char *TAG = "wake_flow";
+
+/* The post-action render half, defined with the rest of the tail at the
+   bottom of this file. Declared here because the break tail's press poll
+   — which sits with the other guard-matrix entry points above it —
+   reaches it after a dispatched press, and the tail in turn calls the
+   expiry alert and the break-end drain that are declared further down. */
+static void render_action_result(button_id_t btn, timer_state_t before, time_t now, bool selection_changed);
 
 const char *wake_flow_reset_reason_str(esp_reset_reason_t reason) {
     switch (reason) {
@@ -503,4 +529,359 @@ void wake_flow_watch_final_minute(void) {
     }
     timer_tick(hal_time_now()); /* RUNNING -> EXPIRED */
     wake_flow_fire_expiry_alert();
+}
+
+/* ---- the post-action tail ----------------------------------------------- */
+
+/* What each of these guarantees is on the declarations in wake_flow.h for
+   the two that have one; the three statics below are reached only through
+   the wake handlers at the bottom of this file. */
+
+/* Collect and hand off the stats snapshot (no-op without a window). */
+void wake_flow_post_stats_snapshot(void) {
+    if (!net_window_active())
+        return;
+    stats_snapshot_t snap;
+    stats_collect(&snap);
+    net_window_post_snapshot(&snap);
+}
+
+/* Render half of the post-action tail, with no network work: drain a
+   break end, tick, and paint the result under the render policy. Shared
+   with the break-tail poll above, which runs after the window has already
+   been joined and so must not touch the MQTT phase — which is why the
+   render is its own half rather than the top of the function below. */
+static void render_action_result(button_id_t btn, timer_state_t before, time_t now, bool selection_changed) {
+    /* A break can elapse mid-wake (a slow sync, a long press sequence).
+       Order-independent now that the edge is latched — this drains early
+       so the chime accompanies THIS paint rather than the one after. */
+    wake_flow_break_end();
+    int32_t remaining = timer_tick(now);
+    display_state_t st = make_display_state(remaining, now);
+
+    /* Button D is the user-facing "refresh everything" button — it always
+       gets a real full refresh regardless of the render policy. */
+    bool force_full = (btn == BTN_D);
+    wake_render_t bwr =
+        wake_policy_render(before, timer_get_state(), true, wake_flow_break_ended_this_wake(), selection_changed);
+    if (bwr == WAKE_RENDER_EXPIRY_ALERT) {
+        wake_flow_fire_expiry_alert(); /* alert owns the NeoPixels (red pulse) */
+    } else {
+        /* Includes EXPIRED: any button returns the display to the main
+           layout (empty bar, TIME'S UP state). */
+        ESP_LOGI(TAG, "button %d: state %d -> %d, %s refresh", (int)btn, (int)before, (int)timer_get_state(),
+                 (force_full || bwr == WAKE_RENDER_FULL) ? "full" : "partial");
+        status_led_show_timer_state(); /* resulting state, lit until sleep */
+        if (force_full || bwr == WAKE_RENDER_FULL) {
+            display_full_refresh(&st);
+        } else {
+            display_update(&st); /* partial cadence: every Nth is promoted */
+        }
+    }
+}
+
+/* Post-action tail shared by both wake handlers and the tick-wake latch
+   drain: render the resulting state, release the MQTT phase, join the
+   window, and re-render when the join changed what the panel shows. */
+static void finish_action_and_render(button_id_t btn, timer_state_t before, time_t now, bool selection_changed) {
+    render_action_result(btn, before, now, selection_changed);
+    bool force_full = (btn == BTN_D);
+
+    /* Paint done: release the MQTT phase (display refresh current and
+       radio TX bursts must never coincide — brownout), then join, apply
+       the buffered network→timer effects, reconcile a redefined timer.
+       Re-render only when something changed what the panel shows (a
+       Button A action landed during the join, a config edit moved the
+       timer, or the expiry passed while draining). */
+    wake_flow_post_stats_snapshot();
+    timer_state_t painted = timer_get_state();
+    net_finish_t nf = net_apply_finish();
+    if (nf != NET_FINISH_ALERTED && (nf == NET_FINISH_CHANGED || timer_get_state() != painted)) {
+        time_t rnow = hal_time_now();
+        /* Drain BEFORE the tick that feeds the render: the window can
+           span the break end, and a drain that snaps the selection back
+           to Screen must be reflected in the remaining below — otherwise
+           the Screen layout renders the previous timer's number. */
+        wake_flow_break_end();
+        int32_t rrem = timer_tick(rnow);
+        /* selection_changed is false: `painted` already reflects the
+           post-swap slot, and an expiry that landed DURING the window is
+           a real transition that must still alert. */
+        wake_render_t rwr =
+            wake_policy_render(painted, timer_get_state(), true, wake_flow_break_ended_this_wake(), false);
+        if (rwr == WAKE_RENDER_EXPIRY_ALERT) {
+            wake_flow_fire_expiry_alert();
+        } else {
+            display_state_t rst = make_display_state(rrem, rnow);
+            status_led_show_timer_state();
+            if (force_full || rwr == WAKE_RENDER_FULL) {
+                display_full_refresh(&rst);
+            } else {
+                display_update(&rst);
+            }
+        }
+    }
+}
+
+/* Shared post-action tail: if the action pushed the accrual past the
+   break interval (e.g. a resume landing after it), paint the break and
+   sleep through it; otherwise render the action's result and drain the
+   window. */
+static void finish_or_break(button_id_t btn, timer_state_t before, time_t now, bool selection_changed) {
+    /* Note the ordering: this runs BEFORE finish_action_and_render, whose
+       tick is what would detect an expiry. So a break due here wins over
+       a colliding expiry alert, which is the opposite of the tick
+       handler's post-render check. Not shown to be reachable — the press
+       that got here has just been dispatched, and the final minute
+       belongs to wake_flow_watch_final_minute — but it is not a
+       guarantee. */
+    if (wake_flow_maybe_start_break(now)) {
+        wake_flow_post_stats_snapshot(); /* break screen painted: release MQTT */
+        net_apply_finish();              /* drain + apply deferred before sleeping */
+        enter_deep_sleep(lock_gate_sleep_mode());
+    }
+    finish_action_and_render(btn, before, now, selection_changed);
+}
+
+/* ---- the pre-sleep event watch ------------------------------------------ */
+
+/* Both watches live above (what each one guarantees is on its declaration
+   in wake_flow.h); this is only the choice between them, plus the drain
+   that has to happen whichever one ran. */
+static void maybe_wait_for_event(void) {
+    if (timer_get_state() == TIMER_RUNNING) {
+        /* The final-minute watch may ignore a break ending inside the
+           same window, and that is correct: a RUNNING active slot is
+           either Screen (which cannot be on its own break at the same
+           time) or an extra timer — and a RUNNING extra suppresses the
+           chime anyway. The break still ends on its own wall clock at
+           the next wake. */
+        wake_flow_watch_final_minute();
+    } else {
+        wake_flow_watch_break_end(); /* a no-op unless a break ends inside the window */
+    }
+
+    /* GUARANTEED DRAIN. Everything above can end the break as a side
+       effect of a timer_tick — most sharply the expiry alert, which holds
+       the CPU for ~15 s and can straddle the break's wall end. The latch
+       means those ticks no longer lose the edge; this is the one point
+       both wake handlers reach after all timer work and before sleep, so
+       draining here is what makes "every tick is safe" true rather than a
+       promise each new call site has to keep. */
+    wake_flow_break_end_repaint();
+}
+
+/* ---- the wake handlers --------------------------------------------------- */
+
+/* Held-through-sleep guard: EXT1 ANY_LOW is level-triggered, so a button
+   still held when the release-wait in enter_deep_sleep() times out (3 s)
+   re-wakes the chip instantly and would re-fire its action. Record what
+   was held at sleep entry; an immediate re-wake by one of those buttons
+   is a continuation to ignore, not a new press. RTC memory, because the
+   whole point is to survive the sleep that separates the write from the
+   read. */
+static RTC_DATA_ATTR uint8_t s_held_mask_at_sleep;
+static RTC_DATA_ATTR int64_t s_sleep_entry_time;
+
+/* Why enter_deep_sleep() calls this rather than wake_flow doing it itself
+   is on the declaration in wake_flow.h: the read must happen while the
+   pads are still digital. */
+void wake_flow_note_sleep_entry(void) {
+    s_held_mask_at_sleep = buttons_scan_held();
+    s_sleep_entry_time = (int64_t)hal_time_now();
+}
+
+void wake_flow_handle_timer_tick(void) {
+    time_t now = hal_time_now();
+    wake_flow_handle_day_rollover(&now);
+    lock_gate_check_bedtime(now); /* may not return; before the sync block so a
+                           locked re-wake runs exactly one net window
+                           (the rare release-by-edit fall-through repaints
+                           and may add this wake's regular sync) */
+    /* After rollover + bedtime (both of which want to see a live break),
+       and before `before` is captured below — so a snap back to Screen is
+       invisible to the before/after comparison and the wake-sticky
+       break-ended promotion is what forces the full refresh. */
+    wake_flow_break_end();
+
+    bool synced_this_wake = false;
+    if (wake_policy_sync_due(timer_get_state(), timer_needs_ntp_sync(now), now, timer_last_ntp_sync(),
+                             IDLE_SYNC_INTERVAL_SEC)) {
+        net_apply_try_window();
+        now = hal_time_now();
+        synced_this_wake = true;
+    }
+
+    /* Cold boot / external reset only: the rollover + sync above already
+       showed the WiFi pixel, but the grid wait + first paint below can
+       hold a blank panel for tens of seconds more with buttons still
+       wake-press-only — a dark, silent device reads as hung (field
+       report). Deep-sleep tick wakes stay dark: a dim blink every minute,
+       all day, isn't worth the battery. */
+    if (esp_reset_reason() != ESP_RST_DEEPSLEEP) {
+        status_led_show_timer_state();
+    }
+
+    /* Fast path: a break already due on arrival, before the grid wait and
+       the paint — so the panel isn't refreshed with a main layout we are
+       about to replace with the break screen.
+
+       This runs BEFORE this wake's timer_tick, so it cannot see an expiry
+       that the tick is about to detect; with both pending the break would
+       win here and the expiry alert would be skipped entirely
+       (enter_deep_sleep does not return). The post-render call below is
+       what actually provides the expiry-then-break ordering. An expiry
+       reaching this point unprocessed has not been shown to be reachable
+       — the planner's 70 s event lead plus wake_flow_watch_final_minute
+       own the final minute — but this call carries no such guarantee, so
+       do not add one to this comment. */
+    if (wake_flow_maybe_start_break(now)) {
+        enter_deep_sleep(lock_gate_sleep_mode()); /* break just started; sleep through it */
+    }
+
+    /* Land the render on the state's grid — the planner woke us on (or,
+       when a sync was due, ~20 s before) the grid point; absorb the
+       residue here. 25 s covers the sync lead without stalling
+       event-watch wakes. Captured BEFORE the wait: a pause press during
+       it must register as a state change (full refresh). Skipped on
+       power-on/reset: the panel is blank and holding it dark for up to
+       25 more seconds (field: 19 s) is worse than one off-minute render
+       — the next tick wake re-aligns. */
+    timer_state_t before = timer_get_state();
+    if (esp_reset_reason() == ESP_RST_DEEPSLEEP) {
+        wake_flow_wait_for_render_grid(25);
+    }
+    now = hal_time_now();
+
+    /* The grid wait above can span the break end; drain before the paint
+       so the chime lands with it (the latch means a later drain would
+       still work, just a paint too late). */
+    wake_flow_break_end();
+    int32_t remaining = timer_tick(now);
+
+    /* The grid wait makes the true remaining a round minute at render
+       time; snap away wake/render jitter so 1:10:59 never shows.
+       Genuinely off-grid renders (slow sync) stay honest. */
+    int32_t shown = remaining;
+    if (timer_get_state() == TIMER_RUNNING) {
+        shown = wake_policy_snap_minute(shown, SLEEP_PLAN_WATCH_SEC);
+    }
+    display_state_t st = make_display_state(shown, now);
+    /* Same jitter snap for the break countdown, whether it is the break
+       screen's own big clock or the chip behind another timer. */
+    if (st.timer_state == TIMER_BREAK || st.break_banner) {
+        st.break_remaining_sec = wake_policy_snap_minute(st.break_remaining_sec, SLEEP_PLAN_WATCH_SEC);
+    }
+
+    wake_render_t wr = wake_policy_render(before, timer_get_state(), false, wake_flow_break_ended_this_wake(), false);
+    wr = lock_gate_promote_render(wr); /* a lock released this wake owes the panel a full one */
+    switch (wr) {
+        case WAKE_RENDER_EXPIRY_ALERT:
+            wake_flow_fire_expiry_alert();
+            break;
+        case WAKE_RENDER_FULL:
+            display_full_refresh(&st);
+            break;
+        default:
+            display_update(&st); /* partial; policy promotes every 5th to full */
+            break;
+    }
+
+    /* A break earned in the SAME tick that expired a timer. The fast-path
+       check above runs before timer_tick, so the expiry that pushed the
+       balance over the interval is invisible to it.
+       wake_flow_fire_expiry_alert returns (it repaints the main layout),
+       so re-checking HERE — after the render switch — is what yields
+       expiry-then-break in one wake, which is the order the alerts have
+       to arrive in. This is the only call site that provides that
+       ordering: finish_or_break has the opposite shape, its break gate
+       running before the tick in finish_action_and_render. A no-op unless
+       the balance is genuinely over, so it costs nothing on every other
+       path.
+
+       Re-read the clock first: `now` predates the render, and an expiry
+       alert holds the CPU for ~15 s before returning. */
+    now = hal_time_now();
+    if (wake_flow_maybe_start_break(now)) {
+        enter_deep_sleep(lock_gate_sleep_mode()); /* break just started; sleep through it */
+    }
+
+    /* A press that landed while this wake was awake (sync, grid wait,
+       e-ink flush) is in the latch — act on it now or it evaporates at
+       deep sleep (losing the start/pause race against the minute render).
+       Same guards as a wake press via the shared dispatch; D stays
+       wake-press-only. Must run BEFORE maybe_wait_for_event: the
+       final-minute watch discards pre-watch latched presses at entry. */
+    int pick = button_latch_pick(buttons_take_pressed(), (1u << BTN_A) | (1u << BTN_B) | (1u << BTN_C));
+    if (pick >= 0) {
+        timer_state_t painted = timer_get_state();
+        bool swapped = false;
+        if (wake_flow_dispatch_button_action((button_id_t)pick, &now, painted, !synced_this_wake, &swapped)) {
+            status_led_show_timer_state();
+            finish_or_break((button_id_t)pick, painted, now, swapped);
+        }
+    }
+    maybe_wait_for_event();
+    enter_deep_sleep(lock_gate_sleep_mode());
+}
+
+void wake_flow_handle_button_wake(void) {
+    button_id_t btn = buttons_get_wakeup_button();
+
+    /* Continuation of a hold, not a new press: same button as at sleep
+       entry and the sleep lasted no time at all. Skip all action AND
+       display work (a hold would otherwise churn the panel every ~3 s)
+       and go back to waiting for release. */
+    if (btn != BTN_NONE && (s_held_mask_at_sleep & (1u << (int)btn)) &&
+        (int64_t)hal_time_now() - s_sleep_entry_time <= 2) {
+        ESP_LOGI(TAG, "button %d still held from previous wake - ignoring", (int)btn);
+        enter_deep_sleep(lock_gate_sleep_mode()); /* does not return */
+    }
+
+    /* Immediate "button heard" ack — current state colour, updated to the
+       resulting state below once the action has run. */
+    status_led_show_timer_state();
+
+    time_t now = hal_time_now();
+    wake_flow_handle_day_rollover(&now);
+    /* IDLE overnight: the threshold crossing may first be observed on a
+       button press (idle wakes are up to an hour apart). The press is
+       swallowed and the transition is silent per the alert rules. */
+    lock_gate_check_bedtime(now); /* may not return */
+    /* Same ordering as the tick handler: after rollover + bedtime, before
+       `before` is captured, so a snap back to Screen rides the
+       wake-sticky break-ended promotion rather than confusing the state
+       diff. */
+    wake_flow_break_end();
+    timer_state_t before = timer_get_state();
+    bool swapped = false;
+
+    switch (btn) {
+        case BTN_A:
+        case BTN_B:
+        case BTN_C:
+            wake_flow_dispatch_button_action(btn, &now, before, true, &swapped);
+            break;
+        case BTN_D:
+            /* NTP-gated paint, same as BTN A: sync now, MQTT after paint */
+            if (net_apply_open()) {
+                net_window_wait_ntp();
+            }
+            now = hal_time_now();
+            break;
+        case BTN_NONE:
+        default:
+            break;
+    }
+
+    /* Drain latch: the wake press itself was handled via the EXT1 decode
+       above; its release bounce (or a second tap during the action) must
+       not replay through the awake-press consumers below — e.g. a resume
+       with <70 s remaining flows straight into the final-minute watch,
+       where a stale A edge would instantly re-pause. */
+    buttons_take_pressed();
+
+    finish_or_break(btn, before, now, swapped); /* e.g. resume with accrual already past the interval */
+    maybe_wait_for_event();
+    enter_deep_sleep(lock_gate_sleep_mode());
 }

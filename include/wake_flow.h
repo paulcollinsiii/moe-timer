@@ -2,9 +2,10 @@
 #include <stdbool.h>
 #include <time.h>
 
-#include "buttons.h" /* button_id_t */
-#include "display.h" /* display_state_t */
-#include "timer.h"   /* timer_state_t */
+#include "buttons.h"    /* button_id_t */
+#include "display.h"    /* display_state_t */
+#include "stats_json.h" /* stats_snapshot_t */
+#include "timer.h"      /* timer_state_t */
 #ifndef NATIVE
 #include "esp_system.h" /* esp_reset_reason_t */
 #endif
@@ -256,6 +257,56 @@ void wake_flow_watch_break_end(void);
    per-wake check has already passed. */
 void wake_flow_watch_final_minute(void);
 
+/* ---- the wake handlers -------------------------------------------------- */
+
+/* The two wake entry points. app_main picks between them on the hardware
+   wake cause and does nothing else with the wake; everything from the day
+   rollover to the deep-sleep call is here.
+
+   Neither RETURNS: both end in enter_deep_sleep(), and so do several
+   early exits along the way (a lock gate engaging, a break starting, a
+   button held through the previous sleep). Every statement after a call
+   to either of them is dead on device.
+
+   The tick handler covers RTC-timer wakes AND cold boot; the button
+   handler covers EXT1. They are two functions rather than one with a
+   flag because they differ in more than a branch: the tick handler owns
+   the sync cadence, the render-grid alignment and the routine repaint,
+   while the button handler owns the wake-press decode, the
+   held-through-sleep guard and the immediate LED ack. What they do share
+   — the post-action tail and the pre-sleep event watch — they share by
+   calling the same statics, not by being the same function. */
+void wake_flow_handle_timer_tick(void);
+void wake_flow_handle_button_wake(void);
+
+/* Record what was still held at sleep entry, for the continuation guard
+   at the top of the button handler. EXT1 ANY_LOW is level-triggered, so a
+   button still held when enter_deep_sleep()'s release-wait times out
+   (3 s) re-wakes the chip instantly and would re-fire its action; an
+   immediate re-wake by one of the buttons recorded here is a continuation
+   to ignore, not a new press.
+
+   Called by enter_deep_sleep() (main.c, which owns the sleep contract)
+   rather than by this module, because the read has to happen at a precise
+   point in that sequence: while the pads are still digital. It is
+   buttons_configure_wakeup_if() at the end of enter_deep_sleep that hands
+   them to the RTC mux, and gpio_get_level is unreliable afterwards. Both
+   halves of the guard — this write and the read that consults it — live
+   here so the RTC-memory pair has exactly one owner. */
+void wake_flow_note_sleep_entry(void);
+
+/* Collect and hand the HA stats snapshot to the open network window; a
+   no-op when no window is open. Released only AFTER the wake's paint has
+   finished: the network task blocks on this rendezvous before opening the
+   MQTT session, which is what keeps panel refresh current and radio TX
+   bursts from coinciding (the combination browned out the rail on
+   device).
+
+   Exposed rather than kept static because it is ADDRESS-TAKEN: net_apply's
+   post_stats hook points straight at it, so a window opened anywhere runs
+   the same collection. Same reason as wake_flow_fire_expiry_alert above. */
+void wake_flow_post_stats_snapshot(void);
+
 /* ---- seams implemented by main.c ---------------------------------------- */
 
 /* Render seam, implemented by main.c: tick the timer and full-refresh the
@@ -266,13 +317,18 @@ void wake_flow_watch_final_minute(void);
    enter_deep_sleep(), declared by lock_gate.h and owned by main.c. */
 void paint_current_state_full(void);
 
-/* Post-action render seam, also implemented by main.c and also
-   deliberately unprefixed: drain a break end, tick, and paint the result
-   under the render policy, with no network work. The break tail above
-   reaches it after a dispatched press. It stays in main.c for now because
-   it paints through make_state() (battery ADC + the ParentTesting flag);
-   it moves here with the rest of the post-action tail. */
-void render_action_result(button_id_t btn, timer_state_t before, time_t now, bool selection_changed);
+/* Stats-assembly seam, also implemented by main.c and also unprefixed.
+   Fills a snapshot for the HA session from the device reads that have no
+   module home — the battery and light ADCs, the app description's version
+   string, esp_reset_reason(), and the compile-time ParentTesting flag —
+   and then hands them to app_state.c, where the assembly rules are
+   host-tested. Deliberately side-effect free: no timer_tick, because a
+   stat read must never transition the state machine.
+
+   The counterpart of make_display_state() below: that one is the paint's
+   unmovable half, this one is the snapshot's. wake_flow_post_stats_snapshot()
+   is the branch that decides whether to call it at all. */
+void stats_collect(stats_snapshot_t *out);
 
 /* Break-start paint seam, also implemented by main.c and also unprefixed,
    for the same reason as the two above: it paints through make_state()
