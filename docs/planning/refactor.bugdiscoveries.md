@@ -202,6 +202,32 @@ Recorded on `test_a_latched_d_press_is_never_dispatched_by_the_tick_drain`.
 
 ---
 
+## Build hardening — not a defect, but a hazard task 12 introduced
+
+Task 12 replaced `.on_locate = run_locate_alarm` (a static initializer that
+bound the awake-failsafe extender and therefore **could not** be forgotten)
+with a runtime `alerts_set_extend_awake()` call from `app_main`, which can be.
+A forgotten install is not a crash — `alert_run_locate` NULL-guards and logs a
+warning — but the locate alarm then runs without pushing the failsafe out and
+can be cut short by the awake cap.
+
+The structural backstop is that `extend_awake_failsafe` is `static` and the
+install is its only remaining reference, so dropping the install makes it
+unused. **That is currently only a warning.** IDF passes
+`-Wall -Werror -Wno-error=unused-function` to every TU, deliberately disarming
+exactly this diagnostic; the build exits 0 with the install deleted (verified).
+
+Appending `-Werror=unused-function` would restore it — verified rather than
+assumed: GCC is last-flag-wins, and IDF appends its own block via
+`idf_build_set_property(COMPILE_OPTIONS ... APPEND)` at
+`tools/cmake/build.cmake:212`, so a later project-level append lands after it
+and wins. IDF even ships `idf_build_replace_options_from_property` for this.
+Not done in task 12 — out of scope, and it will surface unrelated warnings
+elsewhere that need their own triage. Worth its own task.
+
+Caveat: the backstop holds only while `extend_awake_failsafe` has exactly one
+reference. A second caller in main.c makes a dropped install silent again.
+
 ## Not tracked here
 
 Documentation staleness found during the refactor — `docs/architecture.md`

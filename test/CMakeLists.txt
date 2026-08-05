@@ -68,6 +68,17 @@ add_host_test(test_wake_flow)
 # header comment in test_wake_flow_parent.c.
 add_host_test(test_wake_flow_parent EXTRA_DEFS CONFIG_MAGTAG_PARENT_TESTING=1)
 add_host_test(test_status_led)
+# alerts.c reads two alarm-length Kconfig ints straight out of sdkconfig.h,
+# which the host build has no equivalent of. Supplied here rather than as
+# #ifndef fallbacks inside alerts.c, so a renamed or dropped Kconfig symbol
+# still breaks the firmware build loudly instead of silently compiling
+# against a default. The values below merely happened to match
+# Kconfig.projbuild's defaults when written and nothing keeps them in step
+# — that is deliberate and harmless, because no test asserts on either
+# value (the locate pattern's poll cap is a literal); they exist only to
+# make the two pattern initialisers compile.
+add_host_test(test_alerts
+    EXTRA_DEFS CONFIG_MAGTAG_EXPIRY_ALARM_CYCLES=5 CONFIG_MAGTAG_BREAK_ALARM_CYCLES=3)
 add_host_test(test_config_cache)
 add_host_test(test_timer_persist)
 add_host_test(test_time_util)

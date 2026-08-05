@@ -156,8 +156,6 @@ void stats_collect(stats_snapshot_t *out) {
     app_state_stats(&in, time(NULL), out);
 }
 
-static void extend_awake_failsafe(int seconds); /* defined with the failsafe */
-
 /* ---- network window (WiFi → NTP → snapshot rendezvous → MQTT) ----------
    Mechanics (task, completion signals) live in net_window.c; the
    orchestration (pre-window def capture, post-join reconcile/apply) in
@@ -170,17 +168,13 @@ static void poll_button_a_cb(void) {
     (void)wake_flow_poll_button_a_action();
 }
 
-static void run_locate_alarm(void) {
-    alert_run_locate(extend_awake_failsafe);
-}
-
 static const net_apply_ops_t NET_APPLY_OPS = {
     .join_poll = poll_button_a_cb,
     .on_config_applied = config_cache_invalidate,
     .on_active_reset_chirp = audio_break_over_chime,
     .on_active_expired_alert = wake_flow_fire_expiry_alert,
     .post_stats = wake_flow_post_stats_snapshot,
-    .on_locate = run_locate_alarm,
+    .on_locate = alert_run_locate,
 };
 
 /* Render state via app_state.c (assembly rules host-tested); only the
@@ -299,6 +293,10 @@ void app_main(void) {
        handlers (whose rollover check would otherwise reset the timer). */
     timer_persist_try_restore(time(NULL));
 
+    /* Paired with the line below: net_apply_init is what makes .on_locate
+       dispatchable, so this is where a missing install would bite. Order
+       against arm_awake_failsafe is free — the extender null-guards. */
+    alerts_set_extend_awake(extend_awake_failsafe);
     net_apply_init(&NET_APPLY_OPS);
     buttons_init();
     battery_init();
