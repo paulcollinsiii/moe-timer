@@ -8,24 +8,25 @@ sources so no body is hand-transcribed. Only these substitutions are made,
 each of them a change this refactor explicitly claims is device-identical:
   * time(NULL)      -> hal_time_now()   (hal_time.c: `return time(NULL);`)
   * make_display_state(...) -> make_state(...)
-    main.c's state-assembly seam is a one-line thunk over its make_state,
-    and the harness models make_state once, so both sides reach the same
-    modelled ADC read + assembly. The same equivalence cycle10 and cycle11
-    lean on, taken in the opposite direction.
+    wake_flow.c's state-assembly seam is the ADC read plus app_state's
+    assembly, and the harness models exactly that pair once as make_state,
+    so both sides reach the same modelled read + assembly. The same
+    equivalence cycle10 and cycle11 lean on, taken in the opposite
+    direction.
   * symbol renaming to old_/new_ namespaces
 
 The BASE main.c has both repaints written out INLINE inside the functions
-under test. On the NEW side they are factored out, and the two live in
-different places, so they are sourced differently here:
-  * paint_break_started      - wake_flow.c's, since the residency audit
-    moved it there. Extracted with the other NEW bodies and namespaced
-    with them, because it is code under test: the LED it lights BETWEEN
-    the assembly and the flush is an ordering the sweep must be able to
-    see move. (Before the move it came from main.c and was written into
-    the shared seam block below - which the OLD side never called anyway,
-    its copy being inline, so it was never actually shared.)
-  * paint_current_state_full - still main.c's, extracted from the CURRENT
-    main.c into the seam block below.
+under test; on the NEW side they are factored out. Both now live in
+wake_flow.c, so both are extracted with the other NEW bodies and
+namespaced with them, because both are code under test:
+  * paint_break_started      - moved there by the residency audit. The LED
+    it lights BETWEEN the assembly and the flush is an ordering the sweep
+    must be able to see move.
+  * paint_current_state_full - moved there by the audit's own review,
+    which struck the reason main.c had been keeping it on ("the battery
+    ADC read has no host answer" is not one of the four residency reasons,
+    and lock_gate.c refutes it). It used to be extracted from main.c into
+    a separate seam block; there is no main.c seam left in this cycle.
 """
 import re
 import subprocess
@@ -75,30 +76,29 @@ def namespace(body, prefix, names):
 
 old_main = read_git(BASE, "main/main.c")
 new_flow = read_file("main/wake_flow.c")
-new_main = read_file("main/main.c")
 
 OLD_NAMES = ["maybe_start_break", "fire_expiry_alert", "queue_rollover_summary", "handle_day_rollover"]
-# paint_break_started FIRST: the harness is one translation unit written in
-# this order, and wake_flow_maybe_start_break below calls it.
-NEW_NAMES = ["paint_break_started", "wake_flow_maybe_start_break", "wake_flow_fire_expiry_alert",
-             "queue_rollover_summary", "wake_flow_handle_day_rollover"]
+# The two paints FIRST: the harness is one translation unit written in this
+# order, and the functions below call them (maybe_start_break ->
+# paint_break_started, fire_expiry_alert -> paint_current_state_full).
+NEW_NAMES = ["paint_break_started", "paint_current_state_full", "wake_flow_maybe_start_break",
+             "wake_flow_fire_expiry_alert", "queue_rollover_summary", "wake_flow_handle_day_rollover"]
 
 old_bodies = "\n\n".join(extract(old_main, n) for n in OLD_NAMES)
 new_bodies = "\n\n".join(extract(new_flow, n) for n in NEW_NAMES)
-seams = extract(new_main, "paint_current_state_full")
 
 # --- the only permitted rewrites -------------------------------------------
 old_bodies = old_bodies.replace("time(NULL)", "hal_time_now()")
-seams = seams.replace("time(NULL)", "hal_time_now()")
 new_bodies = new_bodies.replace("make_display_state(", "make_state(")
 old_bodies = namespace(old_bodies, "old_", OLD_NAMES)
 new_bodies = namespace(new_bodies, "new_", NEW_NAMES)
-seams = re.sub(r"\bstatic\b\s+", "", seams)  # make_state is ours; the seam stays non-static
 
-# NEW bodies must call the harness's seam implementation, which the
-# namespacing above did not touch (it is not in NEW_NAMES) - good.
-# new_paint_break_started keeps its `static`: it is defined and used inside
-# this one TU, exactly as in wake_flow.c.
+# Both paints keep their `static`: each is defined and used inside this one
+# TU, exactly as in wake_flow.c. paint_current_state_full needs no
+# time(NULL) rewrite - wake_flow.c already reads the clock through
+# hal_time_now(), which is the same call on device (hal_time.c).
+if "time(NULL)" in new_bodies:
+    sys.exit("a raw time(NULL) survived into the NEW bodies - the sweep would compare two clocks")
 
 MUTANTS = {
     "control": [],
@@ -129,18 +129,16 @@ MUTANTS = {
 }
 
 
-def apply_mutant(bodies, seamsrc, edits):
-    """Apply each edit to whichever of the two NEW-side sources holds it.
+def apply_mutant(bodies, edits):
+    """Apply each edit to the NEW-side bodies, which are now the only
+    NEW-side source (nothing under test is extracted from main.c any more).
     Missing anchors are fatal: a mutant that silently did nothing would
     read as an equivalence."""
     for a, b in edits:
-        if a in bodies:
-            bodies = bodies.replace(a, b, 1)
-        elif a in seamsrc:
-            seamsrc = seamsrc.replace(a, b, 1)
-        else:
+        if a not in bodies:
             sys.exit(f"mutant anchor not found:\n{a}")
-    return bodies, seamsrc
+        bodies = bodies.replace(a, b, 1)
+    return bodies
 
 
 PRE = r"""
@@ -440,11 +438,9 @@ int main(void) {
 """
 
 for mname, edits in MUTANTS.items():
-    nb, sm = apply_mutant(new_bodies, seams, edits)
+    nb = apply_mutant(new_bodies, edits)
     with open(os.path.join(OUT, f"harness_{mname}.c"), "w") as f:
         f.write(PRE)
-        f.write("\n/* ---- main.c's remaining paint seam (extracted verbatim) ---- */\n")
-        f.write(sm)
         f.write("\n\n/* ---- OLD implementations (136cb06 main.c) ---- */\n")
         f.write(old_bodies)
         f.write("\n\n/* ---- NEW implementations (wake_flow.c) ---- */\n")

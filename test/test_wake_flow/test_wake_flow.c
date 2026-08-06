@@ -25,7 +25,9 @@
 // clang-format on
 
 #include "alerts.h"
+#include "app_state.h"
 #include "audio.h"
+#include "battery.h"
 #include "button_actions.h"
 #include "buttons.h"
 #include "config_cache.h"
@@ -54,7 +56,9 @@ typedef enum {
     EV_BREAK_TICK = 1,
     EV_CHIME,
     EV_SNAP_BACK,
-    EV_REPAINT,
+    /* EV_REPAINT was here: paint_current_state_full()'s stub pushed it.
+       That seam is wake_flow.c's own static now, so the repaint appears in
+       the log as its body instead — see flow_repaint_at() below. */
     /* the guard matrix */
     EV_A_APPLY,
     EV_PAUSE,
@@ -187,6 +191,64 @@ static int flow_break_paint_count(void) {
     return flow_break_paint_at() >= 0 ? 1 : 0;
 }
 
+/* "Nothing was painted", asked WITHOUT presupposing the break start.
+
+   The helper above cannot answer that question: it anchors on
+   EV_START_BREAK and returns -1 by construction whenever that event is
+   absent, so `0 == flow_log_count(EV_START_BREAK)` followed by
+   `0 == flow_break_paint_count()` is a tautology — the second line cannot
+   fail while the first passes, and the three gate cases that were written
+   that way had lost the independent observation the older EV_BREAK_PAINT
+   stub gave them. These two events are what a paint leaves in the log
+   whether or not a break was ever started, so a gate that painted on a
+   path it should have returned from fails here. */
+static void flow_assert_nothing_painted(void) {
+    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_MAKE_STATE));
+    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_FULL_REFRESH));
+}
+
+/* Where the full-state repaint reached the panel — the index of its FULL
+   REFRESH — or -1. Same shape, and the same reason, as the helper above.
+
+   paint_current_state_full() was a main.c seam this file stubbed, so "the
+   panel was repainted" used to be one logged event. The audit's review
+   moved it into wake_flow.c: "the battery ADC read has no host answer" is
+   not one of the four residency reasons, and lock_gate.c refutes it by
+   reading the same ADC under a host test. So what the log carries now is
+   the body — a tick, a state assembly, a full refresh, with NOTHING
+   between them.
+
+   That adjacency is the discriminator, and it is exact rather than
+   lenient because this is the only full refresh in the module with
+   nothing between the assembly and the flush. Every other one puts
+   something there:
+     - paint_break_started()       EV_LED, held blue through the refresh
+     - render_action_result()      EV_LED (and its re-render half likewise)
+     - the final-minute pause      EV_LED
+     - the tick handler's render   EV_PROMOTE_RENDER
+   Those four orderings are each pinned by a case of their own, so a
+   reordering that would confuse this helper fails an ordering test first
+   rather than silently inflating a repaint count. */
+static int flow_repaint_body_at(int from) {
+    for (int i = from; i + 2 < flow_log_n; i++) {
+        if (flow_log[i] == EV_TIMER_TICK && flow_log[i + 1] == EV_MAKE_STATE && flow_log[i + 2] == EV_FULL_REFRESH)
+            return i;
+    }
+    return -1;
+}
+
+static int flow_repaint_at(void) {
+    int at = flow_repaint_body_at(0);
+    return at < 0 ? -1 : at + 2; /* the flush: where the panel got it */
+}
+
+static int flow_repaint_count(void) {
+    int n = 0;
+    for (int at = flow_repaint_body_at(0); at >= 0; at = flow_repaint_body_at(at + 3))
+        n++;
+    return n;
+}
+
 /* ---- the injected break model -------------------------------------------
 
    Deliberately not a bare bool. Both rows this suite exists for turn on
@@ -274,16 +336,14 @@ void audio_break_over_chime(void) {
     flow_log_push(EV_CHIME);
 }
 
-/* The render seam main.c implements: make_state(timer_tick(now), now)
-   followed by a full refresh. What reaches the panel is the ACTIVE slot's
-   number under the ACTIVE slot's layout — which is exactly what row 3 is
-   about, so the stub records both. A paint that runs before the drain
-   therefore records the PRE-snap slot, and the row-3 case fails. */
-void paint_current_state_full(void) {
-    flow_log_push(EV_REPAINT);
-    flow_painted_slot = flow_active_slot;
-    flow_painted_remaining = flow_slot_remaining[flow_active_slot];
-}
+/* paint_current_state_full() was stubbed here until the audit's review
+   moved it out of main.c and into wake_flow.c. It is code under test now,
+   so there is deliberately no stub: it reaches the log through
+   timer_tick(), app_state_display() and display_full_refresh(), all
+   stubbed below, and flow_repaint_at() is how a case asks where it
+   landed. What reaches the panel is the ACTIVE slot's number under the
+   ACTIVE slot's layout — row 3's subject — and the app_state_display()
+   stub is what records that pair now. */
 
 /* ---- the injected button + action model ---------------------------------
 
@@ -329,12 +389,22 @@ static uint32_t flow_delay_at_led; /* mock_delay_total_ms() when the LED first l
 
    FLOW_RENDERS() stands in for the old EV_ACTION_RENDER count: the
    render's state assembly is the one thing it always does and nothing
-   else on these paths does — except the break screen's paint, which
-   assembles a state of its own now that wake_flow.c owns it rather than
-   main.c. That one is subtracted back out, because every use of this
-   macro means "a MAIN LAYOUT was drawn" and several of them assert 0 on
-   exactly the paths where the break screen took the wake. */
-#define FLOW_RENDERS() (flow_log_count(EV_MAKE_STATE) - flow_break_paint_count())
+   else on these paths does — except the two paints that own their own
+   flush, the break screen's and the full repaint's, both of which
+   assemble a state of their own now that wake_flow.c owns them rather
+   than main.c. Both are subtracted back out, because every use of this
+   macro means "the ACTION/TICK render drew a main layout" and several of
+   them assert 0 on exactly the paths where the break screen or the
+   post-alarm repaint took the wake. Each has its own helper for cases
+   that want to assert on it directly. */
+#define FLOW_RENDERS() (flow_log_count(EV_MAKE_STATE) - flow_break_paint_count() - flow_repaint_count())
+
+/* The flush half of the same question: full refreshes the ACTION/TICK
+   render itself put on the panel. Cases that ask it mean "the render
+   painted nothing of its own", and the two seams that own their own flush
+   would otherwise answer for it — the post-alarm repaint in particular
+   runs on exactly the paths where the render is expected to be silent. */
+#define FLOW_RENDER_FLUSHES() (flow_log_count(EV_FULL_REFRESH) - flow_break_paint_count() - flow_repaint_count())
 
 timer_state_t timer_get_state(void) {
     return flow_state;
@@ -743,6 +813,12 @@ static bool flow_needs_sync;
 static time_t flow_needs_sync_arg;
 static int32_t flow_tick_ret;
 static time_t flow_tick_arg;
+/* The FIRST tick's clock as well as the last. A path that ends in the
+   expiry alert ticks twice — its own, then the post-alarm repaint's,
+   which used to be hidden inside a main.c seam this file stubbed — and
+   the case that pins "ticked against the clock at the end of the wait"
+   is asking about the first one. */
+static time_t flow_tick_arg_first;
 static time_t flow_break_remaining_arg;
 
 /* What actually reached the panel and the pixels. */
@@ -806,13 +882,22 @@ int32_t timer_break_remaining(time_t now) {
    case in this file. */
 static int flow_state_after_tick;
 
+/* Opt-in: report the ACTIVE slot's number instead of the single injected
+   one. Row 3 is what needs it — "the repaint shows the snapped-back slot"
+   is only observable if the number FOLLOWS the selection, which is what
+   timer.c does and what the stubbed paint seam used to model directly.
+   Off everywhere else, so every other case keeps one fixed value. */
+static bool flow_tick_follows_slot;
+
 int32_t timer_tick(time_t now) {
     flow_log_push(EV_TIMER_TICK);
+    if (flow_log_count(EV_TIMER_TICK) == 1)
+        flow_tick_arg_first = now;
     flow_tick_arg = now;
     if (flow_state_after_tick >= 0) {
         flow_state = (timer_state_t)flow_state_after_tick;
     }
-    return flow_tick_ret;
+    return flow_tick_follows_slot ? flow_slot_remaining[flow_active_slot] : flow_tick_ret;
 }
 
 void neopixel_stop(void) {
@@ -837,10 +922,16 @@ void neopixel_status_binary4(uint8_t value, uint8_t r, uint8_t g, uint8_t b) {
     }
 }
 
-/* The state-assembly seam main.c implements (make_state: a battery ADC
-   read plus app_state's assembly rules). What this suite is about is
-   WHICH number was assembled and against WHICH clock, which is exactly
-   the pair a wrong remaining or a stale clock would corrupt.
+/* The state assembly used to be main.c's make_display_state(), stubbed
+   here as one function. The audit's review moved it into wake_flow.c, so
+   the stub goes down one level instead: the battery ADC below, and
+   app_state.c's assembly rules here. Everything the old stub recorded is
+   recorded by this one, at the same point in the flow, which is why every
+   EV_MAKE_STATE assertion in the file keeps its number.
+
+   What this suite is about is WHICH number was assembled and against
+   WHICH clock, which is exactly the pair a wrong remaining or a stale
+   clock would corrupt.
 
    The three break fields are injected rather than derived because the
    tick handler SNAPS st.break_remaining_sec after assembly, and only when
@@ -852,8 +943,36 @@ static timer_state_t flow_made_state_kind;
 static bool flow_made_break_banner;
 static int32_t flow_made_break_remaining;
 
-display_state_t make_display_state(int32_t remaining, time_t now) {
+/* What the assembly was handed. flow_assembled_mv is the ADC value that
+   travelled; flow_assembled_parent the compile-time flag, which the
+   ParentTesting twin binary is what proves both values of. */
+static int flow_assembled_mv;
+static bool flow_assembled_parent;
+
+/* Cases inject a percentage; the pair below is a FAKE CURVE and not an
+   identity, following test_lock_gate. A read that got dropped or an mv
+   that got substituted on the way into app_state_in_t then shows up as a
+   nonsense number rather than as the right answer by luck. Deliberately
+   NOT logged: the two end-to-end cases that pin a whole effect sequence
+   would otherwise have to carry an event that says nothing about
+   ordering. */
+#define FLOW_MV_OFFSET 2500
+static int flow_batt_pct;
+
+int battery_read_mv(void) {
+    return flow_batt_pct * 10 + FLOW_MV_OFFSET;
+}
+
+display_state_t app_state_display(const app_state_in_t *in, int32_t remaining, time_t now) {
     flow_log_push(EV_MAKE_STATE);
+    flow_assembled_mv = in->batt_mv;
+    flow_assembled_parent = in->parent_testing;
+    /* Row 3's pair: the slot the selection was on when the state was
+       assembled, and the number that went with it. A paint that runs
+       before the drain records the PRE-snap slot and the row-3 case
+       fails on the value, not merely on the call sequence. */
+    flow_painted_slot = flow_active_slot;
+    flow_painted_remaining = remaining;
     display_state_t st;
     memset(&st, 0, sizeof st);
     st.remaining_sec = remaining;
@@ -1174,6 +1293,12 @@ void setUp(void) {
     flow_slot_remaining[2] = FLOW_PIANO_REMAINING;
     flow_painted_slot = -1;
     flow_painted_remaining = -1;
+    flow_tick_follows_slot = false;
+    /* A percentage no real curve endpoint sits on, so an assertion that
+       matched a default rather than the injected read stands out. */
+    flow_batt_pct = 67;
+    flow_assembled_mv = -1;
+    flow_assembled_parent = true; /* poisoned: the shipping build is false */
     /* Wake-sticky on device (one wake is one boot), so the suite zeroes it
        directly — as test_lock_gate does with the lock flags — rather than
        making wake_flow carry a reset entry point production never calls. */
@@ -1483,7 +1608,7 @@ void test_a_latch_left_by_a_foreign_tick_is_still_drained(void) {
     TEST_ASSERT_TRUE(wake_flow_break_end_repaint());
 
     TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_CHIME));
-    TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_REPAINT));
+    TEST_ASSERT_EQUAL_INT(1, flow_repaint_count());
     TEST_ASSERT_TRUE(wake_flow_break_ended_this_wake());
 }
 
@@ -1592,19 +1717,23 @@ void test_no_snap_when_the_selection_is_already_where_it_belongs(void) {
    30:00. Ticking first and draining afterwards painted Piano's 6:40 under
    Screen's name and allocation, which is what shipped.
 
-   The seam stub records the slot AND its remaining at paint time, so the
-   wrong order fails on the value, not merely on the call sequence. */
+   The assembly stub records the slot AND its remaining at paint time, so
+   the wrong order fails on the value, not merely on the call sequence.
+   flow_tick_follows_slot is what makes the number follow the selection —
+   the paint is real code now, so the remaining it paints comes through
+   the tick rather than out of the seam stub. */
 void test_row3_the_repaint_shows_the_snapped_back_slot(void) {
     flow_arm_break(flow_at(16, 0), FLOW_SCREEN, FLOW_PIANO);
+    flow_tick_follows_slot = true;
     mock_time_set(flow_at(16, 0) + 3);
 
     TEST_ASSERT_TRUE(wake_flow_break_end_repaint());
 
-    TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_REPAINT));
+    TEST_ASSERT_EQUAL_INT(1, flow_repaint_count());
     TEST_ASSERT_EQUAL_INT(FLOW_SCREEN, flow_painted_slot);
     TEST_ASSERT_EQUAL_INT32(FLOW_SCREEN_REMAINING, flow_painted_remaining);
     /* and the ordering that produces it */
-    TEST_ASSERT_TRUE(flow_log_at(EV_SNAP_BACK) < flow_log_at(EV_REPAINT));
+    TEST_ASSERT_TRUE(flow_log_at(EV_SNAP_BACK) < flow_repaint_at());
 }
 
 /* The guaranteed drain runs on every wake that does timer work. A repaint
@@ -1613,13 +1742,13 @@ void test_row3_the_repaint_shows_the_snapped_back_slot(void) {
 void test_a_wake_without_a_break_end_never_repaints(void) {
     mock_time_set(flow_at(14, 0));
     TEST_ASSERT_FALSE(wake_flow_break_end_repaint());
-    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_REPAINT));
+    TEST_ASSERT_EQUAL_INT(0, flow_repaint_count());
 
     /* and mid-break, which is the other way to reach the drain with no edge */
     flow_arm_break(flow_at(16, 0), FLOW_SCREEN, FLOW_SCREEN);
     mock_time_set(flow_at(15, 30));
     TEST_ASSERT_FALSE(wake_flow_break_end_repaint());
-    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_REPAINT));
+    TEST_ASSERT_EQUAL_INT(0, flow_repaint_count());
 }
 
 /* Both sites that repaint reach it after something else may already have
@@ -1632,7 +1761,7 @@ void test_the_repaint_happens_once_per_edge(void) {
     TEST_ASSERT_TRUE(wake_flow_break_end_repaint());
     TEST_ASSERT_FALSE(wake_flow_break_end_repaint());
 
-    TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_REPAINT));
+    TEST_ASSERT_EQUAL_INT(1, flow_repaint_count());
 }
 
 /* A silent end still changes the panel: the inverted BREAK chip is gone.
@@ -1646,7 +1775,83 @@ void test_a_silent_break_end_still_repaints(void) {
     TEST_ASSERT_TRUE(wake_flow_break_end_repaint());
 
     TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_CHIME));
-    TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_REPAINT));
+    TEST_ASSERT_EQUAL_INT(1, flow_repaint_count());
+}
+
+/* ---- the two renders that came back out of main.c -----------------------
+
+   make_display_state() and paint_current_state_full() were seams declared
+   in wake_flow.h and implemented in main.c on the grounds that the battery
+   ADC read in the first has no host answer. That is not one of the four
+   residency reasons, and lock_gate.c refutes it by reading the same ADC
+   under a host test, so both are wake_flow.c statics now. Being code under
+   test rather than stubs, they get cases of their own: what they were only
+   trusted to do is now asserted. */
+
+/* The ADC value has to arrive at the assembly unaltered. battery_read_mv()
+   is a fake curve here rather than an identity (test_lock_gate's
+   precedent), so a read that got dropped or a value that got substituted
+   on the way into app_state_in_t shows up as a nonsense number instead of
+   as the right answer by luck. */
+void test_the_state_assembly_hands_the_battery_read_to_app_state(void) {
+    flow_batt_pct = 73;
+
+    display_state_t st = make_display_state(1234, flow_at(15, 0));
+
+    TEST_ASSERT_EQUAL_INT(73 * 10 + FLOW_MV_OFFSET, flow_assembled_mv);
+    TEST_ASSERT_EQUAL_INT32(1234, st.remaining_sec);
+    TEST_ASSERT_EQUAL_INT64(flow_at(15, 0), st.wall_time);
+    TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_MAKE_STATE));
+}
+
+/* The other field the assembly carries. PARENT_TESTING is a compile-time
+   Kconfig bool, so this case only proves one of its two values per binary
+   — which is exactly what the test_wake_flow_parent twin exists for. */
+void test_the_state_assembly_carries_the_parent_testing_flag(void) {
+    (void)make_display_state(0, flow_at(15, 0));
+    TEST_ASSERT_EQUAL_INT(PARENT_TESTING ? 1 : 0, flow_assembled_parent ? 1 : 0);
+}
+
+/* Nothing but the assembly: a stat read must never transition the state
+   machine, and neither must a paint's ingredient list. */
+void test_the_state_assembly_neither_ticks_nor_paints(void) {
+    (void)make_display_state(60, flow_at(15, 0));
+    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_TIMER_TICK));
+    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_FULL_REFRESH));
+    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_PARTIAL));
+}
+
+/* The repaint's body, which used to be main.c's three unwatched lines: it
+   ticks against a freshly read clock, assembles against that same clock,
+   and flushes the result. Ticking after the assembly, or assembling
+   against a stale clock, both survive a call-sequence assertion — so the
+   number and the wall time are asserted, not just the order. */
+void test_the_full_repaint_ticks_then_assembles_then_flushes(void) {
+    mock_time_set(flow_at(15, 30));
+    flow_tick_ret = 777;
+
+    paint_current_state_full();
+
+    static const flow_event_t expect[] = {EV_TIMER_TICK, EV_MAKE_STATE, EV_FULL_REFRESH};
+    TEST_ASSERT_EQUAL_INT((int)(sizeof expect / sizeof expect[0]), flow_log_n);
+    for (int i = 0; i < flow_log_n; i++) {
+        TEST_ASSERT_EQUAL_INT((int)expect[i], (int)flow_log[i]);
+    }
+    TEST_ASSERT_EQUAL_INT64(flow_at(15, 30), flow_tick_arg);
+    TEST_ASSERT_EQUAL_INT32(777, flow_full_remaining);
+    TEST_ASSERT_EQUAL_INT64(flow_at(15, 30), flow_full_wall);
+}
+
+/* And it is a FULL refresh, never the partial cadence: the two callers
+   reach it exactly when the panel owes a redraw the cadence would skip —
+   a break's inverted chip has vanished, or the TIME'S UP screen is still
+   up. A partial there leaves the stale layout on the e-ink. */
+void test_the_full_repaint_never_goes_partial(void) {
+    mock_time_set(flow_at(15, 30));
+    paint_current_state_full();
+    TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_FULL_REFRESH));
+    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_PARTIAL));
+    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_PROMOTE_RENDER)); /* no policy consulted */
 }
 
 /* ---- ROW 4: the wake-sticky flag and the ghost -------------------------- */
@@ -1982,7 +2187,7 @@ void test_the_join_poll_neither_paints_nor_syncs(void) {
 
     TEST_ASSERT_TRUE(wake_flow_poll_button_a_action());
 
-    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_REPAINT));
+    TEST_ASSERT_EQUAL_INT(0, flow_repaint_count());
     TEST_ASSERT_EQUAL_INT(0, FLOW_RENDERS());
     TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_NET_OPEN));
     TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_WAIT_NTP));
@@ -2799,7 +3004,7 @@ void test_row22_a_zero_interval_never_starts_a_break(void) {
     flow_break_due_ret = true; /* the balance is over: irrelevant */
     TEST_ASSERT_EQUAL_INT(FLOW_GATE_NO_BREAK, flow_run_break_gate(flow_at(14, 0)));
     TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_START_BREAK));
-    TEST_ASSERT_EQUAL_INT(0, flow_break_paint_count());
+    flow_assert_nothing_painted();
     TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_ALERT_BREAK));
     TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_PERSIST_SAVE));
 }
@@ -2868,7 +3073,7 @@ void test_a_balance_short_of_the_interval_starts_nothing(void) {
     TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_BREAK_DUE));
     TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_START_BREAK));
     TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_PERSIST_SAVE));
-    TEST_ASSERT_EQUAL_INT(0, flow_break_paint_count());
+    flow_assert_nothing_painted();
     TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_ALERT_BREAK));
 }
 
@@ -2992,7 +3197,7 @@ void test_row21_a_break_that_would_cross_bed_time_goes_to_bed_instead(void) {
     TEST_ASSERT_EQUAL_INT(FLOW_GATE_BEDTIME, flow_run_break_gate(flow_at(19, 50)));
     TEST_ASSERT_TRUE(flow_bed_engaged);
     TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_START_BREAK));
-    TEST_ASSERT_EQUAL_INT(0, flow_break_paint_count());
+    flow_assert_nothing_painted();
     TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_ALERT_BREAK));
     TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_PERSIST_SAVE));
 }
@@ -3090,8 +3295,8 @@ void test_the_timesup_screen_precedes_the_alarm(void) {
    last until the next tick redraw anyway. */
 void test_the_main_layout_is_repainted_after_the_alarm(void) {
     wake_flow_fire_expiry_alert();
-    TEST_ASSERT_TRUE(flow_log_at(EV_ALERT_EXPIRY) < flow_log_at(EV_REPAINT));
-    TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_REPAINT));
+    TEST_ASSERT_TRUE(flow_log_at(EV_ALERT_EXPIRY) < flow_repaint_at());
+    TEST_ASSERT_EQUAL_INT(1, flow_repaint_count());
 }
 
 void test_the_expiry_alert_runs_the_expiry_alarm_not_the_break_one(void) {
@@ -3100,9 +3305,15 @@ void test_the_expiry_alert_runs_the_expiry_alarm_not_the_break_one(void) {
     TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_ALERT_BREAK));
 }
 
+/* The last three used to be one event, EV_REPAINT, because the repaint was
+   a main.c seam this file stubbed. It is wake_flow.c's own static now, so
+   the pin covers its inside as well: the tick that feeds the number, the
+   assembly, the flush — and nothing between them, which is also what makes
+   flow_repaint_at() able to find it. */
 void test_the_expiry_alert_effect_order_is_pinned_end_to_end(void) {
     wake_flow_fire_expiry_alert();
-    static const flow_event_t expect[] = {EV_PERSIST_SAVE, EV_TIMESUP, EV_ALERT_EXPIRY, EV_REPAINT};
+    static const flow_event_t expect[] = {EV_PERSIST_SAVE, EV_TIMESUP,    EV_ALERT_EXPIRY,
+                                          EV_TIMER_TICK,   EV_MAKE_STATE, EV_FULL_REFRESH};
     TEST_ASSERT_EQUAL_INT((int)(sizeof expect / sizeof expect[0]), flow_log_n);
     for (int i = 0; i < flow_log_n; i++) {
         TEST_ASSERT_EQUAL_INT((int)expect[i], (int)flow_log[i]);
@@ -3587,7 +3798,7 @@ void test_the_break_watch_waits_out_the_tail_then_chimes_and_repaints(void) {
     TEST_ASSERT_EQUAL_INT64(now + 5, hal_time_now());
     TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_CHIME));
     TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_SNAP_BACK));
-    TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_REPAINT));
+    TEST_ASSERT_EQUAL_INT(1, flow_repaint_count());
     /* the repaint shows the slot the snap landed on, not slot 0 */
     TEST_ASSERT_EQUAL_INT(FLOW_PIANO, flow_painted_slot);
 }
@@ -3602,7 +3813,7 @@ void test_a_break_whose_end_has_already_passed_repaints_without_waiting(void) {
     TEST_ASSERT_EQUAL_UINT32(0, mock_delay_total_ms());
     TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_LED));
     TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_CHIME));
-    TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_REPAINT));
+    TEST_ASSERT_EQUAL_INT(1, flow_repaint_count());
 }
 
 void test_the_break_watch_polls_four_times_a_second(void) {
@@ -3644,7 +3855,7 @@ void test_row1_button_c_in_the_break_tail_moves_the_selection_and_ends_the_watch
     TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_BREAK_TICK));
     TEST_ASSERT_TRUE(flow_break_running);
     TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_CHIME));
-    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_REPAINT));
+    TEST_ASSERT_EQUAL_INT(0, flow_repaint_count());
 }
 
 /* ROW 2, second half: Button A on a break-eligible extra. C walked the
@@ -3721,7 +3932,7 @@ void test_a_refused_press_in_the_break_tail_does_not_end_the_watch(void) {
     TEST_ASSERT_EQUAL_UINT32(3000, mock_delay_total_ms());
     TEST_ASSERT_EQUAL_INT(0, FLOW_RENDERS());
     TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_CHIME));
-    TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_REPAINT));
+    TEST_ASSERT_EQUAL_INT(1, flow_repaint_count());
 }
 
 /* ---- the final minute ----------------------------------------------------
@@ -3950,9 +4161,13 @@ void test_the_expiry_alert_fires_when_the_countdown_reaches_zero(void) {
     flow_expiry_wall = (int64_t)now + 3;
     wake_flow_watch_final_minute();
     /* the tick that moves RUNNING -> EXPIRED comes first, against the
-       clock at the end of the wait, and the alert sequence follows it */
-    TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_TIMER_TICK));
-    TEST_ASSERT_EQUAL_INT64(now + 3, flow_tick_arg);
+       clock at the end of the wait, and the alert sequence follows it.
+       Two ticks, not one: the second is the alert's own post-alarm
+       repaint, which was a stubbed main.c seam until it moved into
+       wake_flow.c — hence the FIRST tick's clock below. */
+    TEST_ASSERT_EQUAL_INT(2, flow_log_count(EV_TIMER_TICK));
+    TEST_ASSERT_EQUAL_INT(1, flow_repaint_count());
+    TEST_ASSERT_EQUAL_INT64(now + 3, flow_tick_arg_first);
     TEST_ASSERT_TRUE(flow_log_at(EV_TIMER_TICK) < flow_log_at(EV_PERSIST_SAVE));
     TEST_ASSERT_TRUE(flow_log_at(EV_PERSIST_SAVE) < flow_log_at(EV_TIMESUP));
     TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_ALERT_EXPIRY));
@@ -4157,11 +4372,13 @@ void test_a_transition_into_expired_alerts_instead_of_painting(void) {
 
     TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_ALERT_EXPIRY));
     /* the alert owns the panel and the pixels: no paint and no LED of the
-       render's own (the alert's own repaint seam is EV_REPAINT) */
-    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_FULL_REFRESH));
+       render's own — the one full refresh in the log is the alert's own
+       post-alarm repaint, which is why that one is subtracted here and
+       asserted separately below */
+    TEST_ASSERT_EQUAL_INT(0, FLOW_RENDER_FLUSHES());
     TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_PARTIAL));
     TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_LED));
-    TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_REPAINT));
+    TEST_ASSERT_EQUAL_INT(1, flow_repaint_count());
 }
 
 /* Row 20's suppression, carried through the render rather than asserted
@@ -4187,7 +4404,7 @@ void test_button_d_still_yields_to_the_expiry_alert(void) {
     render_action_result(BTN_D, TIMER_RUNNING, flow_at(15, 0), false);
 
     TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_ALERT_EXPIRY));
-    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_FULL_REFRESH));
+    TEST_ASSERT_EQUAL_INT(0, FLOW_RENDER_FLUSHES()); /* the alert's repaint is not D's */
 }
 
 /* The pixel is instant; the e-ink flush behind it takes seconds. Lighting
@@ -4267,10 +4484,10 @@ void test_row11_the_whole_expiry_alert_completes_before_the_stats_go_out(void) {
     finish_action_and_render(BTN_A, TIMER_RUNNING, flow_at(15, 0), false);
 
     TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_ALERT_EXPIRY));
-    TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_REPAINT));
+    TEST_ASSERT_EQUAL_INT(1, flow_repaint_count());
     TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_STATS_POST));
     TEST_ASSERT_TRUE(flow_log_at(EV_ALERT_EXPIRY) < flow_log_at(EV_STATS_POST));
-    TEST_ASSERT_TRUE(flow_log_at(EV_REPAINT) < flow_log_at(EV_STATS_POST));
+    TEST_ASSERT_TRUE(flow_repaint_at() < flow_log_at(EV_STATS_POST));
 }
 
 void test_row11_the_snapshot_is_collected_before_it_is_posted(void) {
@@ -4527,7 +4744,7 @@ void test_the_drain_after_the_final_minute_watch_repaints_a_missed_edge(void) {
     maybe_wait_for_event();
 
     TEST_ASSERT_TRUE(flow_expiry_wall_reads > 0); /* the watch really was the branch */
-    TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_REPAINT));
+    TEST_ASSERT_EQUAL_INT(1, flow_repaint_count());
 }
 
 void test_the_drain_after_the_break_watch_repaints_a_missed_edge(void) {
@@ -4543,7 +4760,7 @@ void test_the_drain_after_the_break_watch_repaints_a_missed_edge(void) {
     maybe_wait_for_event();
 
     TEST_ASSERT_TRUE(flow_break_active_reads > 0);
-    TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_REPAINT));
+    TEST_ASSERT_EQUAL_INT(1, flow_repaint_count());
 }
 
 /* Reached on every path, including the one where neither watch did
@@ -4556,7 +4773,7 @@ void test_the_drain_is_reached_even_when_neither_watch_acts(void) {
     maybe_wait_for_event();
 
     TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_BREAK_TICK));
-    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_REPAINT)); /* nothing to repaint */
+    TEST_ASSERT_EQUAL_INT(0, flow_repaint_count()); /* nothing to repaint */
 }
 
 /* ---- CYCLE 11, ROW 8: the grid wait is for deep-sleep wakes only --------
@@ -4903,7 +5120,7 @@ void test_the_promoted_value_is_what_the_render_switch_reads(void) {
 
     TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_ALERT_EXPIRY));
     TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_PARTIAL));
-    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_FULL_REFRESH));
+    TEST_ASSERT_EQUAL_INT(0, FLOW_RENDER_FLUSHES()); /* the alert's repaint is not the switch's */
 }
 
 /* The latch drain: a press made while this wake was awake (sync, grid
@@ -5865,6 +6082,11 @@ int main(void) {
     RUN_TEST(test_a_wake_without_a_break_end_never_repaints);
     RUN_TEST(test_the_repaint_happens_once_per_edge);
     RUN_TEST(test_a_silent_break_end_still_repaints);
+    RUN_TEST(test_the_state_assembly_hands_the_battery_read_to_app_state);
+    RUN_TEST(test_the_state_assembly_carries_the_parent_testing_flag);
+    RUN_TEST(test_the_state_assembly_neither_ticks_nor_paints);
+    RUN_TEST(test_the_full_repaint_ticks_then_assembles_then_flushes);
+    RUN_TEST(test_the_full_repaint_never_goes_partial);
     RUN_TEST(test_the_flag_is_not_set_without_an_edge);
     RUN_TEST(test_any_edge_sets_the_flag_including_a_silent_one);
     RUN_TEST(test_the_flag_survives_a_later_drain_that_found_nothing);

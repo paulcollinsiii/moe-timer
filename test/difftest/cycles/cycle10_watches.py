@@ -18,10 +18,14 @@ read and of the delay. What is still pinned - and what actually matters for a
 polling loop - is their COUNT, their ARGUMENTS and their POSITION in the
 trace.
 
-The NEW side routes its two renders through main.c's state-assembly seam
+The NEW side routes its two renders through the state-assembly seam
 (make_display_state), which is itself extracted mechanically from the CURRENT
-main.c; the OLD side calls main.c's make_state directly. The harness models
-make_state once, so both reach the same modelled ADC read + assembly.
+wake_flow.c - it lived in main.c until the residency audit's review moved it,
+"the battery ADC read has no host answer" not being one of the four residency
+reasons and lock_gate.c refuting it anyway. The OLD side calls main.c's
+make_state directly, which the harness models. The extracted seam and that
+model are deliberately trace-equivalent - same ADC read, same log line, same
+E_MAKE_STATE - so both sides reach the same modelled read + assembly.
 
 wake_policy.c is compiled in for real rather than stubbed: a stub would be a
 second implementation of the wait length and the countdown schedule to keep in
@@ -74,14 +78,13 @@ def namespace(body, prefix, names):
 
 old_main = read_git(BASE, "main/main.c")
 new_flow = read_file("main/wake_flow.c")
-new_main = read_file("main/main.c")
 
 OLD_NAMES = ["wait_for_render_grid", "watch_break_end", "watch_final_minute"]
 NEW_NAMES = ["wake_flow_wait_for_render_grid", "wake_flow_watch_break_end", "wake_flow_watch_final_minute"]
 
 old_bodies = "\n\n".join(extract(old_main, n) for n in OLD_NAMES)
 new_bodies = "\n\n".join(extract(new_flow, n) for n in NEW_NAMES)
-seams = extract(new_main, "make_display_state")
+seams = extract(new_flow, "make_display_state")
 
 # --- the only permitted rewrites -------------------------------------------
 old_bodies = old_bodies.replace("time(NULL)", "hal_time_now()")
@@ -226,6 +229,7 @@ PRE = r"""
 #include <string.h>
 #include <stdarg.h>
 
+#include "app_state.h"
 #include "buttons.h"
 #include "display.h"
 #include "hal_time.h"
@@ -253,6 +257,12 @@ static void diff_logv(const char *tag, const char *fmt, ...);
 #define ESP_LOGW(tag, ...) diff_logv(tag, __VA_ARGS__)
 #define ESP_LOGD(tag, ...) diff_logv(tag, __VA_ARGS__)
 static const char *TAG = "diff";
+
+/* The extracted state-assembly seam reads it; wake_flow.c derives it from
+   the Kconfig bool and only the function body is extracted. false is the
+   shipping configuration, and the flag reaches nothing this sweep
+   compares - it is one field of the app_state_in_t both sides fill. */
+#define PARENT_TESTING false
 
 /* ---- the ordered effect trace ------------------------------------------ */
 enum {
@@ -415,9 +425,13 @@ uint8_t buttons_take_pressed(void) { tr(E_TAKE_PRESSED, 0, 0, 0); return 0; }
 int battery_read_mv(void) { tr(E_BATT, P.batt_mv, 0, 0); return P.batt_mv; }
 int battery_percent_from_mv(int mv) { return mv / 40; }
 
-/* main.c's make_state, modelled: the ADC read then the assembly. Two
+/* The OLD side's make_state, modelled: the ADC read then the assembly. Two
    display_state_t fields carry the pair so the paint stubs can report
-   exactly what was painted. */
+   exactly what was painted. The NEW side no longer needs this - its
+   make_display_state is the real body, extracted from wake_flow.c and
+   compiled in below - so the model has to stay TRACE-EQUIVALENT to it:
+   same ADC read, same log line, same E_MAKE_STATE. app_state_display()
+   under it is what closes the pair. */
 static display_state_t make_state(int32_t remaining, time_t now) {
     int mv = battery_read_mv();
     ESP_LOGD(TAG, "battery: %d mV (%d%%)", mv, battery_percent_from_mv(mv));
@@ -425,6 +439,21 @@ static display_state_t make_state(int32_t remaining, time_t now) {
     memset(&st, 0, sizeof st);
     st.remaining_sec = remaining;
     st.wall_time = now;
+    tr(E_MAKE_STATE, (long long)remaining, (long long)now, 0);
+    return st;
+}
+
+/* The assembly half, for the extracted make_display_state to land on. The
+   ADC read and the log line are in the extracted body itself, so this
+   records only what make_state records at the same point. `in` is read so
+   a seam that stopped filling it would not pass silently. */
+display_state_t app_state_display(const app_state_in_t *in, int32_t remaining, time_t now) {
+    display_state_t st;
+    memset(&st, 0, sizeof st);
+    st.remaining_sec = remaining;
+    st.wall_time = now;
+    (void)in->batt_mv;
+    (void)in->parent_testing;
     tr(E_MAKE_STATE, (long long)remaining, (long long)now, 0);
     return st;
 }
@@ -595,7 +624,7 @@ for mname, edits in MUTANTS.items():
     nb, sm = apply_mutant(new_bodies, seams, edits)
     with open(os.path.join(OUT, f"harness_{mname}.c"), "w") as f:
         f.write(PRE)
-        f.write("\n/* ---- main.c state-assembly seam (extracted verbatim) ---- */\n")
+        f.write("\n/* ---- wake_flow.c state-assembly seam (extracted verbatim) ---- */\n")
         f.write(sm)
         f.write(f"\n\n/* ---- OLD implementations ({BASE} main.c) ---- */\n")
         f.write(old_bodies)

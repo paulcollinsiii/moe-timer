@@ -17,19 +17,57 @@ Module map, hardware target, persistent-state layout, and subsystem design notes
 ## Layer Model
 
 Every module sits in exactly one of three layers, and the layer decides how it is
-tested. Calls go **down** only.
+tested. The numbering is a **testability ladder, not a call graph**: layer 1 is what
+a host test can call with nothing stubbed, layer 2 needs link-time stubs for its
+effects, layer 3 needs hardware. Layer 2 is the layer that calls *both* ways — it
+sequences layer-1 decisions and calls layer-3 drivers for the effects — so "calls go
+down only" would be false however the layers were numbered. Very little about the
+call direction is actually invariant here; what is, and every exception to it, is
+enumerated under the list.
 
-1. **Pure policy** — `wake_policy`, `sleep_plan`, `bedtime`, `quiet_hours`, `battery_policy`, `battery_soc`, `button_actions`, `buttons_policy`, `button_latch`, `status_led`, `display_layout`, `display_screens`, `config_validate`, `stats_json`, `tones`, `wav_header`, `mqtt_rx`, `mqtt_topics`, `time_util`, `date_fmt`. Total functions over their arguments — no clock, no NVS, no GPIO, no ESP includes. Host-tested directly.
-2. **Stateful orchestration** — `wake_flow`, `lock_gate`, `timer`, `timer_defs`, `timer_persist`, `config_cache`, `config_apply`, `cmd_apply`, `ha_config`, `net_apply`, `app_state`, `alerts`, `schedule`. Owns the RTC/NVS state, sequences the layer-1 calls, and calls module APIs for the effects. Host-tested by single-TU include: the suite `#include`s the `.c` under test and resolves its device effects with link-time stubs (`test/test_wake_flow` is the worked example).
+1. **Pure policy** — `wake_policy`, `sleep_plan`, `bedtime`, `quiet_hours`, `battery_policy`, `battery_soc`, `button_actions`, `buttons_policy`, `button_latch`, `status_led`, `display_layout`, `display_screens`, `config_validate`, `stats_json`, `tones`, `wav_header`, `mqtt_rx`, `mqtt_topics`, `time_util`, `date_fmt` (header-only). Total functions over their arguments: a `time_t` only ever arrives as a parameter (nothing here reads the clock), and no NVS, no GPIO, no ESP includes. Host-tested directly. Layer-1 modules do call each other — `bedtime` → `quiet_hours`, `display_screens` → `display_layout`, `wake_policy` → `sleep_plan`'s constants — which is inside the layer, not up out of it. Two of them also sit behind a layer-3 *header* without being layer-3 code: `battery_soc` implements `battery_percent_from_mv` out of `battery.h`, and `display_layout` implements the `display_bar_fill_px`/`display_format_*` half of `display.h`. `display_screens` additionally compiles against LVGL and uses `localtime_r`/`strftime` to format a time_t it was handed.
+2. **Stateful orchestration** — `wake_flow`, `lock_gate`, `timer`, `timer_defs`, `timer_persist`, `config_cache`, `config_apply`, `cmd_apply`, `ha_config`, `net_apply`, `app_state`, `alerts`, `schedule`. Owns the RTC/NVS state, sequences the layer-1 calls, and calls layer-3 drivers for the effects. Host-tested by single-TU include: the suite `#include`s the `.c` under test and resolves its device effects with link-time stubs (`test/test_wake_flow` is the worked example).
 3. **Device drivers** — `display`, `neopixel`, `audio`, `buttons`, `battery`, `light`, `net_window`, `wifi_session`, `ntp`, `mqtt_ha`, `device_id`, `nvs_config`, `hal_nvs`, `hal_time`, `components/ssd1680`. Touch silicon; verified on hardware ([hardware_smoke_test.md](hardware_smoke_test.md)).
 
-`main/main.c` is none of the three — it is the **composition root**. It may hold wiring and device calls but may not hold a *decision*: a line survives there only by naming one of four residency reasons — (1) boot ordering is a hardware contract, (2) it runs in ISR/`esp_timer` context where a module API is not safe, (3) it owns an ESP-IDF handle or call with no module home, (4) it is a ≤3-line branch-free thunk adapting to another module's callback signature. The rule is in `.claude/CLAUDE.md`; main.c's own header comment names the reason for every symbol in it, which is why the file is 423 lines of which only ~163 are code. The extraction that produced this shape (1342 → 423 lines) is `docs/planning/20260729.refactormain.plan.md`.
+**The direction rule.** Only one rule actually holds across the tree: **no layer-3
+driver calls layer 2**. Everything else people expect to be true here is not, so it
+is spelled out rather than asserted:
+
+- A driver calling **layer 1** is normal and pervasive, not an exception — that is
+  just a driver reaching for a pure helper, which is what the ladder is for.
+  `audio.c` → `tones_*`/`wav_header_parse`, `buttons.c` → `button_latch_*` and
+  `buttons_policy_wake_mask`, `mqtt_ha.c` → `stats_json_*`/`mqtt_rx_on_data`.
+- Layer 1 is meant not to call *out* at all. Two modules break that.
+- Even the one rule has three exceptions, listed below with the two layer-1 ones.
+
+Every entry here was found by scanning the call graph, not by reading the previous
+version of this section. An earlier draft claimed "calls go down only", and the
+draft that replaced it claimed "no layer-3 driver calls layer 2 or layer 1" — both
+were false, and both were written in commits whose stated purpose was accuracy. If
+you edit this list, re-scan; do not reason from the prose.
+
+The three drivers that do reach into layer 2:
+
+- `net_window.c:147,183` — `timer_record_ntp_sync(time(NULL))`. A **mutator**: the
+  driver writes layer-2 state directly. The sharpest violation of the three.
+- `buttons.c:117-121` — reads `timer_swap_allowed()` and `timer_reload_allowed()`
+  to fill the `buttons_policy` input struct. Reads only.
+- `mqtt_ha.c:201` — reads `timer_slot_def(slot)` to publish discovery. Reads only.
+
+And the two layer-1 modules that call out, listed here rather than reclassified or
+defined away, because in both cases the pure table is what the tests are about and
+the impure call is one line over it:
+
+- `status_led.c` — `status_led_for_state()` is a pure state→RGB table. `status_led_show_timer_state()` takes no arguments: it reads `timer_get_state()` (layer 2) and drives `neopixel_status_pixel()` (layer 3). One call up and one call down, in a four-line function.
+- `button_actions.c` — the A/B/C outcome map is a pure decision table, but it applies itself: `button_a_apply()` branches on `timer_get_state()` and then calls `timer_pause`/`timer_start`/`timer_resume`, which are layer-2 **mutators**. `button_a_start_allocation()` likewise reaches `timer_active_def()` and `schedule_*`. `test_button_actions` stubs timer and schedule to test it, which is layer-2 treatment for a layer-1 file.
+
+`main/main.c` is none of the three — it is the **composition root**. It may hold wiring and device calls but may not hold a *decision*: a line survives there only by naming one of four residency reasons — (1) boot ordering is a hardware contract, (2) it runs in ISR/`esp_timer` context where a module API is not safe, (3) it owns an ESP-IDF handle with no module home, (4) it is a ≤3-line branch-free thunk adapting to another module's callback signature. The rule is in `.claude/CLAUDE.md` and is quoted, not paraphrased: an earlier draft of this line read "handle *or call*", which is a widening that exists nowhere in the rule and which was admitting three render seams. With it restored, `make_display_state` and `paint_current_state_full` could name no reason and moved to `wake_flow.c`. main.c's own header comment names the reason for every symbol left in it, and names the one branch that has no reason (the button-release wait in `enter_deep_sleep`) as debt rather than labelling it. The extraction that produced this shape (1342 → 385 lines, of which ~150 are code) is `docs/planning/20260729.refactormain.plan.md`.
 
 ## Module Structure
 
 | File | Responsibility |
 |------|---------------|
-| `main/main.c` | Composition root: `app_main`'s boot ordering, the `NET_APPLY_OPS` wiring, the awake-failsafe `esp_timer`, the three render/stats seams `wake_flow.h` declares (`make_display_state`, `paint_current_state_full`, `stats_collect`), and `enter_deep_sleep` — whose remaining content is the sleep-entry *order*, not policy |
+| `main/main.c` | Composition root: `app_main`'s boot ordering, the `NET_APPLY_OPS` wiring, the awake-failsafe `esp_timer`, the one seam `wake_flow.h` still declares (`stats_collect`), and `enter_deep_sleep` — whose remaining content is the sleep-entry *order*, not policy. The two render seams it used to implement (`make_display_state`, `paint_current_state_full`) are wake_flow.c statics |
 | `main/wake_flow.c` | The wake orchestration (layer 2): the `esp_sleep_get_wakeup_causes()` decode and both handlers, the button guard matrix + action tails, day rollover, break start, the final-minute and break-end watches, the render-grid wait, the break-end owner, the post-panic quiet window, the held-through-sleep guard — host-tested |
 | `main/lock_gate.c` | The two screen locks (charge + Bed Time): RTC lock flags, engage/release edges, the post-release full-refresh promotion, and the sleep mode each implies — host-tested |
 | `main/config_cache.c` | Wake-scoped NVS caches for quiet hours and Bed Time (read once per wake; one invalidator, fired by a config apply) — host-tested |

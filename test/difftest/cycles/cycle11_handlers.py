@@ -13,10 +13,14 @@ sources so no body is hand-transcribed. Only these substitutions are made,
 each of them a change this refactor explicitly claims is device-identical:
   * time(NULL)     -> hal_time_now()   (hal_time.c: `return time(NULL);`)
   * make_state(...) -> make_display_state(...)
-    main.c's state-assembly seam, a branch-free thunk over make_state, is
-    extracted VERBATIM from the current main.c and compiled in; the harness
-    models make_state once, so both sides reach the same modelled ADC read
-    plus assembly. Identical treatment to cycle 10.
+    The state-assembly seam is extracted VERBATIM from the current
+    wake_flow.c and compiled in, and BOTH sides are routed through it, so
+    the ADC read and the assembly are the shipping ones rather than a
+    model. It lived in main.c (as a thunk over a make_state that did the
+    work) until the residency audit's review moved it: "the battery ADC
+    read has no host answer" is not one of the four residency reasons, and
+    lock_gate.c refutes it by reading the same ADC under a host test.
+    Identical treatment to cycle 10.
   * post_stats_snapshot -> wake_flow_post_stats_snapshot (a rename; the
     function is ADDRESS-TAKEN by main.c's net_apply ops table, so it had to
     stay exposed). Handled by the old_/new_ namespacing, not by a textual
@@ -88,7 +92,6 @@ def namespace(body, prefix, names):
 
 old_main = read_git(BASE, "main/main.c")
 new_flow = read_file("main/wake_flow.c")
-new_main = read_file("main/main.c")
 
 OLD_NAMES = ["post_stats_snapshot", "render_action_result", "finish_action_and_render",
              "finish_or_break", "maybe_wait_for_event", "handle_timer_tick", "handle_button_wake"]
@@ -98,7 +101,7 @@ NEW_NAMES = ["wake_flow_post_stats_snapshot", "render_action_result", "finish_ac
 
 old_bodies = "\n\n".join(extract(old_main, n) for n in OLD_NAMES)
 new_bodies = "\n\n".join(extract(new_flow, n) for n in NEW_NAMES)
-seams = extract(new_main, "make_display_state")
+seams = extract(new_flow, "make_display_state")
 
 # --- the only permitted rewrites -------------------------------------------
 old_bodies = old_bodies.replace("time(NULL)", "hal_time_now()")
@@ -602,6 +605,12 @@ static void diff_logv(const char *tag, const char *fmt, ...);
 #define ESP_LOGD(tag, ...) diff_logv(tag, __VA_ARGS__)
 static const char *TAG = "diff";
 
+/* The extracted state-assembly seam reads it; wake_flow.c derives it from
+   the Kconfig bool and only the function body is extracted. false is the
+   shipping configuration, and both sides reach the seam, so the value is
+   the same on either side of the comparison whatever it is. */
+#define PARENT_TESTING false
+
 /* The sync cadence macro. Device-side it comes from sdkconfig.h; both
    sides read the same name, so one definition here keeps the comparison
    about the refactor rather than about a build setting. */
@@ -834,12 +843,18 @@ esp_reset_reason_t esp_reset_reason(void) { tr(E_RESET_REASON, P.reset_reason, 0
 int battery_read_mv(void) { tr(E_BATT, P.batt_mv, 0, 0); return P.batt_mv; }
 int battery_percent_from_mv(int mv) { return mv / 40; }
 
-/* main.c's make_state, modelled: the ADC read then the assembly. The three
-   break fields are what the tick handler SNAPS after assembly, so they are
-   part of what the paint stubs report. */
-static display_state_t make_state(int32_t remaining, time_t now) {
-    int mv = battery_read_mv();
-    ESP_LOGD(TAG, "battery: %d mV (%d%%)", mv, battery_percent_from_mv(mv));
+/* app_state.c's assembly, modelled. Both sides now reach it through the
+   SHIPPING make_display_state, extracted from wake_flow.c below - the ADC
+   read and the log line are in that extracted body, so what is left to
+   model here is the assembly itself. The three break fields are what the
+   tick handler SNAPS after assembly, so they are part of what the paint
+   stubs report. `in` is read so a seam that stopped filling it would not
+   pass silently.
+
+   There used to be a hand-written make_state here, back when the seam was
+   a main.c thunk over it. It is gone: with the real body compiled in, a
+   model of it would be a second implementation of the same three lines. */
+display_state_t app_state_display(const app_state_in_t *in, int32_t remaining, time_t now) {
     display_state_t st;
     memset(&st, 0, sizeof st);
     st.remaining_sec = remaining;
@@ -847,6 +862,8 @@ static display_state_t make_state(int32_t remaining, time_t now) {
     st.timer_state = (timer_state_t)P.made_kind;
     st.break_banner = P.made_banner != 0;
     st.break_remaining_sec = P.made_break_rem;
+    (void)in->batt_mv;
+    (void)in->parent_testing;
     tr(E_MAKE_STATE, (long long)remaining, (long long)now, 0);
     return st;
 }
@@ -1130,7 +1147,7 @@ for mname, edits in MUTANTS.items():
     nb = namespace(nb, "new_", NEW_NAMES)
     with open(os.path.join(OUT, f"harness_{mname}.c"), "w") as f:
         f.write(PRE)
-        f.write("\n/* ---- main.c state-assembly seam (extracted verbatim) ---- */\n")
+        f.write("\n/* ---- wake_flow.c state-assembly seam (extracted verbatim) ---- */\n")
         f.write(sm)
         f.write(f"\n\n/* ---- OLD implementations ({BASE} main.c) ---- */\n")
         f.write(old_bodies)

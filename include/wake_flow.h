@@ -4,7 +4,6 @@
 #include <time.h>
 
 #include "buttons.h"    /* button_id_t */
-#include "display.h"    /* display_state_t */
 #include "stats_json.h" /* stats_snapshot_t */
 #include "timer.h"      /* timer_state_t */
 #ifndef NATIVE
@@ -349,59 +348,39 @@ void wake_flow_note_sleep_entry(void);
    the same collection. Same reason as wake_flow_fire_expiry_alert above. */
 void wake_flow_post_stats_snapshot(void);
 
-/* ---- seams implemented by main.c ---------------------------------------- */
+/* ---- the one seam still implemented by main.c --------------------------- */
 
-/* Render seam, implemented by main.c: tick the timer and full-refresh the
-   panel with the result. Deliberately not wake_flow_-prefixed — wake_flow
-   does not implement it — which is the same shape as enter_deep_sleep(),
-   declared by lock_gate.h and owned by main.c.
+/* Stats-assembly seam, implemented by main.c and deliberately not
+   wake_flow_-prefixed — wake_flow does not implement it — which is the
+   same shape as enter_deep_sleep(), declared by lock_gate.h and owned by
+   main.c. Fills a snapshot for the HA session and hands it to
+   app_state.c, where the assembly rules are host-tested. Deliberately
+   side-effect free: no timer_tick, because a stat read must never
+   transition the state machine. wake_flow_post_stats_snapshot() is the
+   branch that decides whether to call it at all.
 
-   It stays in main.c as a three-statement, branch-free thunk over the
-   battery ADC read. Note that the older reason given here — "the ADC has
-   no home in wake_flow" — has not been true since make_display_state()
-   below was cut: this module can assemble a state for itself, so the
-   thing keeping this seam in main.c is its size, not its dependencies.
-   The residency audit left it on those terms; main.c records the same
-   caveat next to the definition. */
-void paint_current_state_full(void);
-
-/* Stats-assembly seam, also implemented by main.c and also unprefixed.
-   Fills a snapshot for the HA session from the device reads that have no
-   module home — the battery and light ADCs, the app description's version
-   string, esp_reset_reason(), and the compile-time ParentTesting flag —
-   and then hands them to app_state.c, where the assembly rules are
-   host-tested. Deliberately side-effect free: no timer_tick, because a
-   stat read must never transition the state machine.
-
-   The counterpart of make_display_state() below: that one is the paint's
-   unmovable half, this one is the snapshot's. wake_flow_post_stats_snapshot()
-   is the branch that decides whether to call it at all. */
+   What keeps it in main.c is esp_app_get_description() and
+   esp_reset_reason(); main.c records next to the definition why that is
+   the weakest residency claim left in the file. Explicitly NOT the two
+   ADC reads in it — see below. */
 void stats_collect(stats_snapshot_t *out);
 
-/* There was a fourth seam here, paint_break_started(): the break screen's
-   paint, taking the instant the break started. It is now wake_flow.c's
-   own static function and no longer part of this contract. The residency
-   audit moved it because the ADC read underneath admitted the CALL in
-   main.c but not the ORDERING inside it — the LED is lit BETWEEN the
-   state assembly and the flush, which holds the panel blue for the whole
-   multi-second refresh, and that is a decision. Nothing outside
-   wake_flow.c called it, so nothing here has to declare it; the order is
-   pinned by test_wake_flow instead of by a comment. */
+/* Three seams used to be declared here and implemented in main.c:
+   paint_break_started(), paint_current_state_full() and
+   make_display_state(). All three are wake_flow.c's own statics now.
 
-/* State-assembly seam, also implemented by main.c and also unprefixed.
-   The narrowest of the three: it hands back the display_state_t for a
-   given remaining and a given clock, and paints nothing at all.
+   The first went during the residency audit, because the battery ADC
+   read underneath it admitted a device CALL in the composition root but
+   not the ORDERING inside it (the LED is lit BETWEEN the state assembly
+   and the flush, holding the panel blue for the whole multi-second
+   refresh), and an ordering is a decision.
 
-   The final-minute watch needs it because its two renders are NOT the
-   same paint as any of the seams above — one is a partial update of a
-   pinned countdown value, the other a full refresh with the LED lit
-   between the assembly and the flush — and wrapping each of them as its
-   own paint seam would push that flow BACK into main.c, which is the
-   direction this refactor is undoing. So the seam is cut at the one thing
-   that genuinely cannot move: make_state()'s battery ADC read and the
-   compile-time ParentTesting flag. main.c satisfies it with a branch-free
-   one-line thunk over the make_state() it already had. */
-display_state_t make_display_state(int32_t remaining, time_t now);
+   The other two went when the audit's own review took the next step: "the
+   ADC read has no host answer" is not one of the four reasons the rule
+   lists, and it is refuted by lock_gate.c, which reads the same ADC and
+   is host-tested. Nothing outside wake_flow.c ever called any of them, so
+   nothing here has to declare them; what they do is pinned by
+   test_wake_flow instead of by a comment. */
 
 #ifdef __cplusplus
 }

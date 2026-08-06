@@ -4,7 +4,9 @@
 #include "wake_flow.h"
 
 #include "alerts.h"
+#include "app_state.h"
 #include "audio.h"
+#include "battery.h"
 #include "bedtime.h"
 #include "button_actions.h"
 #include "button_latch.h"
@@ -60,16 +62,18 @@ typedef enum {
 
 /* These discard their varargs, so ANY function call made inside a log
    argument is invisible to every host test — it is never evaluated here.
-   SIX call sites exist today, and every one is a verified pure read:
-     - timer_active_slot()   x2 (the break-over snap, the Button C swap)
-     - timer_get_state()        (the join poll's "state %d -> %d")
-     - timer_get_state()        (the post-action render's "state %d -> %d")
-     - timer_run_accum(now)     (the break gate's accrual)
-     - timer_current_date()     (the day rollover)
-   Before putting a seventh call in a log line, check it has no side
+   SEVEN call sites exist today, and every one is a verified pure read:
+     - timer_active_slot()          x2 (the break-over snap, the Button C swap)
+     - timer_get_state()               (the join poll's "state %d -> %d")
+     - timer_get_state()               (the post-action render's "state %d -> %d")
+     - timer_run_accum(now)            (the break gate's accrual)
+     - timer_current_date()            (the day rollover)
+     - battery_percent_from_mv(mv)     (the state assembly's battery line)
+   Before putting an eighth call in a log line, check it has no side
    effect AND update the list above: a state change smuggled in as a %d
    argument would run on device and be unobservable in the suite, and an
    enumeration nobody maintains is what lets that happen unnoticed. */
+#define ESP_LOGD(tag, ...) ((void)(tag))
 #define ESP_LOGI(tag, ...) ((void)(tag))
 #define ESP_LOGW(tag, ...) ((void)(tag))
 #endif
@@ -115,6 +119,65 @@ static const char *TAG = "wake_flow";
    reaches it after a dispatched press, and the tail in turn calls the
    expiry alert and the break-end drain that are declared further down. */
 static void render_action_result(button_id_t btn, timer_state_t before, time_t now, bool selection_changed);
+
+/* ---- the two renders this module used to reach through main.c ----------
+
+   Both were seams declared in wake_flow.h and implemented in main.c, on
+   the grounds that the battery ADC read at the bottom of them "has no
+   host answer". The residency audit's review struck that reason: it is
+   not one of the four the rule lists, and lock_gate.c already reads the
+   same ADC and is host-tested (test_lock_gate stubs battery_read_mv).
+   With that gone neither could name an admissible reason, so both moved
+   here, where every other render in the module already lives.
+
+   Both are static: nothing outside this file called either of them, and
+   an exported symbol with no out-of-module caller is a seam that exists
+   only to be stubbed. The suite reaches them the same way it reaches
+   paint_break_started() — through the stubs one level down
+   (battery_read_mv, app_state_display, display_full_refresh), which is
+   what pushes them from "trusted" to "tested". */
+
+/* The state assembly. main.c had this as make_state() plus a one-line
+   make_display_state() thunk over it; with no ABI to adapt to on this
+   side the thunk collapses into the body it wrapped.
+
+   Only the battery ADC read is device-side — the assembly rules are
+   app_state.c's and are host-tested there. Light/fw/reset are stats-only
+   and deliberately not read here: no extra ADC work per paint.
+
+   Unchanged by the move APART FROM THE LOG TAG: the debug line below used
+   to print under main.c's TAG="main" and now prints under "wake_flow".
+   Serial output only. Its battery_percent_from_mv() call is the seventh
+   entry in the log-vararg census at the top of this file — the host build
+   discards it, so it must stay a pure read. */
+static display_state_t make_display_state(int32_t remaining, time_t now) {
+    int mv = battery_read_mv();
+    ESP_LOGD(TAG, "battery: %d mV (%d%%)", mv, battery_percent_from_mv(mv));
+    app_state_in_t in = {
+        .batt_mv = mv,
+        .parent_testing = PARENT_TESTING,
+    };
+    return app_state_display(&in, remaining, now);
+}
+
+/* Tick the timer and full-refresh the panel with the result. Reached by
+   the break-end owner after it drains an edge, and by the expiry alert
+   once the alarm has finished; the ORDER — drain first, then this — is
+   the caller's and is tested at the caller.
+
+   Character for character main.c's body, with one substitution: its
+   `time(NULL)` is `hal_time_now()` here, which wraps time(NULL) in
+   production (hal_time.c) and so is the same call on device. Every other
+   clock read in this module already goes through it, and a raw time(NULL)
+   in a host-built TU would read the real wall clock straight past the
+   suite's injected one. timer_tick() stays exactly where it was: inside
+   the assembly's argument, so the tick and the number painted cannot
+   drift apart. */
+static void paint_current_state_full(void) {
+    time_t now = hal_time_now();
+    display_state_t st = make_display_state(timer_tick(now), now);
+    display_full_refresh(&st);
+}
 
 const char *wake_flow_reset_reason_str(esp_reset_reason_t reason) {
     switch (reason) {
@@ -203,7 +266,13 @@ bool wake_flow_break_end(void) {
    enter_deep_sleep() calls this the panel is done and the network task is
    gone, so every side effect the owner above performs — the tick, the
    chime, the snap back, the wake-sticky flag — would land after the last
-   render and be seen by nobody. What is left is the report. */
+   render and be seen by nobody. What is left is the report.
+
+   Behaviour is unchanged by the move out of main.c APART FROM THE LOG
+   TAG: this warning used to print under main.c's TAG="main" and now
+   prints under "wake_flow". Serial output only — nothing parses it — but
+   it is the one observable difference, so it is recorded here rather
+   than left for someone to find while grepping a capture. */
 bool wake_flow_report_undrained_break_end(void) {
     int32_t overdue = 0;
     if (!timer_break_take_ended(hal_time_now(), &overdue)) {
@@ -382,8 +451,9 @@ bool wake_flow_poll_break_buttons(void) {
 
    Lived in main.c until the residency audit moved it: the battery ADC
    read underneath admits a device CALL in the composition root, but not
-   an ordering, and an ordering is a decision. make_display_state() is the
-   ADC seam main.c still owns, so this reaches the read through it exactly
+   an ordering, and an ordering is a decision. make_display_state() —
+   which followed it out of main.c when the audit's own review found that
+   the ADC admitted nothing either — is how this reaches the read, exactly
    as the five other renders in this file do.
 
    Deliberately not paint_current_state_full() with an argument. That one

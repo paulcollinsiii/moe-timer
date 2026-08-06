@@ -37,22 +37,36 @@
    TAG, the PARENT_TESTING macro and the NET_APPLY_OPS table — are pure
    wiring, admitted by the headline rule rather than by a number, because
    a construct with nothing to execute has nothing to decide. The
-   numbered reasons:
+   numbered reasons, quoted from the rule rather than paraphrased — the
+   rule is not negotiable against the code that has to satisfy it:
 
      1. Boot ordering is a hardware contract.
      2. It runs in an ISR or esp_timer context where a module API is not
         safe.
-     3. It owns an ESP-IDF handle or call with no module home.
+     3. It owns an ESP-IDF handle with no module home.
      4. It is a <=3-line, branch-free thunk adapting a module ABI to
         another module's callback signature.
 
    "It's only a few lines" and "it's just plumbing" are not reasons. An
    `if` here that is not a null-guard on an injected pointer is a review
-   blocker: the three that used to be — the panic quiet, the sleep-time
+   blocker. Three that used to be — the panic quiet, the sleep-time
    break-end drain and the wake-cause decode — are host-tested calls into
-   wake_flow.c as of the residency audit. What is left branches only on
-   ESP-IDF error codes and on the one handle this file owns. Adding a
-   line here means naming its reason in the review. */
+   wake_flow.c as of the residency audit. Every branch that is LEFT,
+   enumerated so the next reviewer can check the claim instead of
+   trusting it:
+
+     - app_main's NVS re-init, on esp_err_t: ESP-IDF's documented idiom.
+     - arm_awake_failsafe's two, on esp_err_t from the esp_timer handle
+       this file owns (reason 3).
+     - extend_awake_failsafe's, a null-guard on that same handle.
+     - enter_deep_sleep's button-release wait,
+       `i < 30 && buttons_scan_held() != 0`. This one branches on a
+       MODULE API — neither an esp_err_t nor the handle above — and the
+       3 s cap is a policy number. It names NO reason on the list. It is
+       recorded here as DEBT rather than given a label; the comment at
+       the loop says where it belongs.
+
+   Adding a line here means naming its reason in the review. */
 
 static const char *TAG = "main";
 
@@ -96,11 +110,19 @@ void enter_deep_sleep(wake_sleep_mode_t mode) {
     net_window_log_last(); /* timing repeat: the boot-time line is often lost to CDC */
     timer_persist_save();
     /* EXT1 ANY_LOW is level-triggered: a still-held button would re-wake
-       instantly and re-fire its action. Wait (bounded) for release.
-       Covered by the same reason 3 as the function: this is the wake
-       source de-asserting, not a policy about how long to indulge the
-       user, and the 3 s cap exists so a stuck pad cannot hang the sleep.
-       wake_flow's continuation guard is what handles a timeout. */
+       instantly and re-fire its action. Wait (bounded) for release before
+       the wake sources are armed at the bottom of this function;
+       wake_flow's continuation guard is what handles a timeout.
+
+       DEBT, named rather than labelled. The loop branches on
+       buttons_scan_held() — buttons.c's API, not an esp_err_t and not the
+       esp_timer handle this file owns — and 30 x 100 ms encodes a 3 s cap,
+       which is a number somebody chose. Reason 3 admits the sleep entry
+       AROUND it (the wake sources, the pad holds, esp_deep_sleep_start);
+       it does not reach in here. A host-tested
+       buttons_wait_for_release(cap_ms) in buttons.c is where this goes,
+       and until it does this loop is a rule violation on record rather
+       than a survivor with a reason. */
     for (int i = 0; i < 30 && buttons_scan_held() != 0; i++) {
         vTaskDelay(pdMS_TO_TICKS(100));
     }
@@ -174,13 +196,21 @@ void enter_deep_sleep(wake_sleep_mode_t mode) {
     esp_deep_sleep_start();
 }
 
-/* Residency 3. Declared in wake_flow.h: the stats-assembly seam. The
-   reads are the reason — two ADCs, the app description and
-   esp_reset_reason(), none of which a host build can answer — and the
-   assembly rules they feed are host-tested in app_state.c. No branch
-   here, and deliberately side-effect-free: no timer_tick, because a stat
-   read must never transition the state machine. Whether to collect at
-   all is wake_flow_post_stats_snapshot()'s decision, not this file's. */
+/* Residency 3, and the weakest claim left in the file — recorded as that
+   rather than argued. Declared in wake_flow.h: the stats-assembly seam,
+   whose assembly rules are host-tested in app_state.c.
+
+   What it can honestly point at is esp_app_get_description() and
+   esp_reset_reason(), which have no module home. Note that neither is a
+   HANDLE, which is what reason 3 as written says, so this sits at the
+   edge of the rule and is named here as DEBT for the next reviewer.
+   What does NOT admit it is the two ADC reads: "the read has no host
+   answer" was struck as a reason when the render seams moved into
+   wake_flow.c, because lock_gate.c reads the battery and is host-tested.
+
+   No branch here, and deliberately side-effect-free: no timer_tick,
+   because a stat read must never transition the state machine. Whether
+   to collect at all is wake_flow_post_stats_snapshot()'s decision. */
 void stats_collect(stats_snapshot_t *out) {
     app_state_in_t in = {
         .batt_mv = battery_read_mv(),
@@ -223,74 +253,6 @@ static const net_apply_ops_t NET_APPLY_OPS = {
     .post_stats = wake_flow_post_stats_snapshot,
     .on_locate = alert_run_locate,
 };
-
-/* ---- the three render seams wake_flow.h declares and this file implements
-   ------------------------------------------------------------------------
-   All three exist so that wake_flow.c can be host-tested without a battery
-   ADC. All three are admitted by residency 3, and the reason is the same
-   for each: the battery ADC read at the bottom of them has no host
-   answer. Note what does NOT admit them — residency 4 is for adapting to
-   another module's CALLBACK signature, and these are direct calls declared
-   in wake_flow.h with no function pointer anywhere. They are held to
-   reason 4's discipline (<=3 lines, branch-free) as a matter of keeping
-   them honest, but reason 3 is what earns them their place. Calling them
-   "thunks (residency 4)" would be the kind of plausible-sounding label the
-   audit exists to catch.
-
-   That is the narrowest boundary that works — wrapping the final-minute
-   watch's two renders as paint seams instead would pull that whole flow
-   back into this file, which is the direction the refactor undoes.
-
-   There was a fourth, paint_break_started, until the audit's follow-up:
-   the ADC underneath it admitted the CALL, but the LED it lit BETWEEN the
-   state assembly and the flush was an ordering, and an ordering is a
-   decision. It now lives in wake_flow.c over make_display_state, where a
-   host test pins the order. That is the test to apply to the three below:
-   what admits them is the read, and nothing above the read.
-
-   Honest note for the next reviewer: these are the weakest survivors in
-   the file. battery.c is itself a module, so reason 3 here means "the
-   read has no host answer", not "the API has no home". They are also the
-   only symbols the checked-in differential sweeps extract from this file
-   verbatim (cycle09 takes paint_current_state_full, cycle10/11 take
-   make_display_state), so moving them is a change to the sweeps too, not
-   just to the code. */
-
-/* Residency 3. Render state via app_state.c (assembly rules host-tested);
-   only the battery ADC read is device-side. Light/fw/reset are stats-only
-   and deliberately not read here — no ADC work per paint. */
-static display_state_t make_state(int32_t remaining, time_t now) {
-    int mv = battery_read_mv();
-    ESP_LOGD(TAG, "battery: %d mV (%d%%)", mv, battery_percent_from_mv(mv));
-    app_state_in_t in = {
-        .batt_mv = mv,
-        .parent_testing = PARENT_TESTING,
-    };
-    return app_state_display(&in, remaining, now);
-}
-
-/* Residency 3 (the ADC below it), held to reason 4's shape: the narrowest
-   of the three, one line and no branch. It is also the one the other two
-   would collapse into if they ever had to move — the break-start paint
-   already did, and it reaches the read through here. The final-minute
-   watch assembles two renders of its own — a partial at each countdown
-   mark and a full refresh with the LED lit between the assembly and the
-   flush — and wrapping either as a paint seam would put that flow back in
-   main.c. So the seam is cut at the only part that cannot move (the
-   battery ADC read above) and this is the thunk over it. */
-display_state_t make_display_state(int32_t remaining, time_t now) {
-    return make_state(remaining, now);
-}
-
-/* Residency 3 (the ADC below it), held to reason 4's shape. The break-end
-   owner in wake_flow repaints through this after draining an edge; three
-   statements, no branch. WHEN it is called, and that the drain happens
-   first, are wake_flow's and are tested there. */
-void paint_current_state_full(void) {
-    time_t now = time(NULL);
-    display_state_t st = make_state(timer_tick(now), now);
-    display_full_refresh(&st);
-}
 
 /* Residency 2 — the canonical case for it. Last-resort battery
    protection: no wake may run forever (WiFi driver hang, stuck BUSY,
