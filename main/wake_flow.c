@@ -27,14 +27,36 @@
 #include "wake_policy.h"
 
 #ifndef NATIVE
-#include "esp_attr.h" /* RTC_DATA_ATTR */
+#include "esp_attr.h"     /* RTC_DATA_ATTR */
+#include "esp_bit_defs.h" /* BIT() */
 #include "esp_log.h"
+#include "esp_sleep.h"  /* esp_sleep_source_t, for the wake-cause decode */
 #include "esp_system.h" /* esp_reset_reason() */
 #else
 /* The host build has no esp_system.h; wake_flow.h only pulls it in on
    device. The reset reason gates the render-grid wait, so the suite has
    to be able to answer it. */
 esp_reset_reason_t esp_reset_reason(void);
+
+/* Wake causes, in ESP-IDF's declaration order so the bit positions match
+   the real enum (esp_sleep.h) — the same arrangement esp_compat.h uses
+   for the reset reasons. Trimmed to what the decode names; the causes
+   this device cannot produce (touchpad, ULP, UART, BT) exist only on
+   silicon and would land on the same tick arm there.
+
+   Note what the suite can and cannot prove with these: the DECODE is
+   tested here, but no test can catch a wrong VALUE, because it reads the
+   constant from this same enum and drift moves both sides of the
+   comparison together. That gap is closed by the _Static_assert below,
+   not by a test — do not renumber these without reading it. */
+typedef enum {
+    ESP_SLEEP_WAKEUP_UNDEFINED = 0,
+    ESP_SLEEP_WAKEUP_ALL,
+    ESP_SLEEP_WAKEUP_EXT0,
+    ESP_SLEEP_WAKEUP_EXT1,
+    ESP_SLEEP_WAKEUP_TIMER,
+} esp_sleep_source_t;
+#define BIT(nr) (1UL << (nr))
 
 /* These discard their varargs, so ANY function call made inside a log
    argument is invisible to every host test — it is never evaluated here.
@@ -51,6 +73,18 @@ esp_reset_reason_t esp_reset_reason(void);
 #define ESP_LOGI(tag, ...) ((void)(tag))
 #define ESP_LOGW(tag, ...) ((void)(tag))
 #endif
+
+/* Deliberately OUTSIDE the split above, which is what makes it a pin
+   rather than a restatement: on device this checks the real esp_sleep.h,
+   on host it checks the fallback, and both are held to the same numbers.
+   The suite alone cannot catch a wrong constant — it takes
+   BIT(ESP_SLEEP_WAKEUP_EXT1) from the same enum as the decode, so drift
+   moves both sides of the comparison together and every wake-cause test
+   keeps passing while asserting the inverse of what the silicon does.
+   Values are esp_sleep.h's as of IDF 6.0.1. If IDF ever renumbers, the
+   firmware build is where you want to find out. */
+_Static_assert(ESP_SLEEP_WAKEUP_EXT1 == 3, "wake-cause decode assumes IDF's numbering; host fallback mirrors it");
+_Static_assert(ESP_SLEEP_WAKEUP_TIMER == 4, "wake-cause decode assumes IDF's numbering; host fallback mirrors it");
 
 /* Kconfig bool as a C expression (defined as 1 when =y, absent when =n),
    the same shape main.c and buttons.c use. sdkconfig.h arrives with
@@ -107,6 +141,19 @@ const char *wake_flow_reset_reason_str(esp_reset_reason_t reason) {
     }
 }
 
+/* How long to stay off the console after a panic. Long enough for a host
+   port-open to complete against silence, short enough that a device stuck
+   in a genuine panic loop still reboots visibly rather than looking
+   dead. */
+#define PANIC_QUIET_MS 2000
+
+void wake_flow_boot_quiet_after_panic(void) {
+    if (esp_reset_reason() != ESP_RST_PANIC) {
+        return;
+    }
+    hal_delay_ms(PANIC_QUIET_MS);
+}
+
 /* ---- break end --------------------------------------------------------- */
 
 /* A Screen Break runs on slot 0 and keeps running behind whatever timer
@@ -149,6 +196,20 @@ bool wake_flow_break_end(void) {
     } else {
         ESP_LOGI(TAG, "Break over: chimed");
     }
+    return true;
+}
+
+/* Deliberately a RAW take and not wake_flow_break_end(): by the time
+   enter_deep_sleep() calls this the panel is done and the network task is
+   gone, so every side effect the owner above performs — the tick, the
+   chime, the snap back, the wake-sticky flag — would land after the last
+   render and be seen by nobody. What is left is the report. */
+bool wake_flow_report_undrained_break_end(void) {
+    int32_t overdue = 0;
+    if (!timer_break_take_ended(hal_time_now(), &overdue)) {
+        return false;
+    }
+    ESP_LOGW(TAG, "break end reached sleep undrained (%ld s late)", (long)overdue);
     return true;
 }
 
@@ -312,6 +373,28 @@ bool wake_flow_poll_break_buttons(void) {
 }
 
 /* ---- the eye-rest break gate -------------------------------------------- */
+
+/* The break screen's paint, and the ORDER is the point: the LED is lit
+   BETWEEN the state assembly and the flush, which is what holds the panel
+   blue for the whole multi-second e-paper refresh instead of only after
+   it. Lit after the refresh it would be a blink nobody sees; that is
+   behaviour, not formatting, so it is pinned by a test here.
+
+   Lived in main.c until the residency audit moved it: the battery ADC
+   read underneath admits a device CALL in the composition root, but not
+   an ordering, and an ordering is a decision. make_display_state() is the
+   ADC seam main.c still owns, so this reaches the read through it exactly
+   as the five other renders in this file do.
+
+   Deliberately not paint_current_state_full() with an argument. That one
+   re-reads the wall clock, where a starting break must paint against the
+   instant it started — the gate's callers do not agree on which instant
+   they mean, and two of them are ~15 s stale by the time they ask. */
+static void paint_break_started(time_t now) {
+    display_state_t st = make_display_state(timer_tick(now), now);
+    status_led_show_timer_state(); /* blue during the refresh */
+    display_full_refresh(&st);     /* inverted SCREEN BREAK layout */
+}
 
 /* Returns true when a break was started (caller should go straight to
    sleep). Persists BREAK before the alarm, same rationale as the EXPIRED
@@ -884,4 +967,22 @@ void wake_flow_handle_button_wake(void) {
     finish_or_break(btn, before, now, swapped); /* e.g. resume with accrual already past the interval */
     maybe_wait_for_event();
     enter_deep_sleep(lock_gate_sleep_mode());
+}
+
+void wake_flow_handle_wake(uint32_t causes) {
+    /* A BITMASK, not a value: the silicon can report several sources for
+       one wake, so a press that coincided with the RTC alarm carries the
+       timer bit too. Testing for equality would send it to the tick
+       handler, where the press is never decoded and is thrown away at
+       the next sleep. */
+    if (causes & BIT(ESP_SLEEP_WAKEUP_EXT1)) {
+        wake_flow_handle_button_wake();
+    } else {
+        /* Everything else, including a cold boot — which reports NO
+           cause at all (esp_sleep_get_wakeup_causes() returns 0 when the
+           reset was not an exit from deep sleep). The tick handler is
+           what installs the day, syncs the clock and paints, so a power
+           on has to land here and not on a wake button nobody pressed. */
+        wake_flow_handle_timer_tick();
+    }
 }

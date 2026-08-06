@@ -1,5 +1,6 @@
 #pragma once
 #include <stdbool.h>
+#include <stdint.h>
 #include <time.h>
 
 #include "buttons.h"    /* button_id_t */
@@ -31,6 +32,19 @@ extern "C" {
    payload. */
 const char *wake_flow_reset_reason_str(esp_reset_reason_t reason);
 
+/* The panic-loop breaker, called from app_main before the boot prints.
+   The S2 ROM USB console can panic when a host port-open races those
+   prints; each panic reboots, re-enumerates USB and re-races, freezing
+   the device for as long as a monitor keeps reconnecting. After a panic
+   this stays quiet briefly so the host's open completes against silence.
+
+   Reads the reset reason itself rather than taking it, so app_main is
+   left with a call and no branch — WHICH reason earns the pause, and how
+   long it lasts, are the decision and they are tested here. Every other
+   reason returns immediately: a delay on every wake would put two
+   seconds of CPU on the battery for nothing. */
+void wake_flow_boot_quiet_after_panic(void);
+
 /* ---- the break-end edge ------------------------------------------------ */
 
 /* The single owner of the break-end edge: surfaces an elapsed Screen
@@ -60,6 +74,19 @@ bool wake_flow_break_end(void);
    snap back changes which slot the paint will read. Returns true when
    this call drained an edge (and therefore painted). */
 bool wake_flow_break_end_repaint(void);
+
+/* The safety net enter_deep_sleep() reaches on its way down: takes a
+   break-end edge that nothing drained and reports it. Both wake handlers
+   run the guaranteed drain above before sleeping, so a true return here
+   means a NEW code path reached sleep without one — that is what the
+   warning is for, and it is the only reason this exists.
+
+   A raw take, not the owner above: the panel is already done by the time
+   this runs, so a tick, a chime or a snap back would be side effects
+   nobody can see, and this also runs from the awake failsafe's esp_timer
+   context where audio is not safe. Lives here rather than in main.c so
+   the break-end latch keeps exactly one owner. */
+bool wake_flow_report_undrained_break_end(void);
 
 /* Did a background Screen Break end on this wake? Sticky for the whole
    wake, because every render after the end must be a full refresh: the
@@ -279,6 +306,21 @@ void wake_flow_watch_final_minute(void);
 void wake_flow_handle_timer_tick(void);
 void wake_flow_handle_button_wake(void);
 
+/* The wake-cause decode, and the only one of the three app_main calls
+   here that picks anything. app_main reads the causes — that read is an
+   ESP-IDF call on a boot-scoped hardware register and stays there — and
+   hands the value straight over, so the choice between the two handlers
+   above is made where it can be tested.
+
+   `causes` is the BITMASK esp_sleep_get_wakeup_causes() returns, not a
+   single cause: EXT1 arrives alongside the timer bit when a press
+   coincides with the RTC alarm, and a cold boot reports no bits at all.
+   Both of those are why this is a mask test with the tick handler on the
+   else arm, and both have a case in the suite.
+
+   DOES NOT RETURN — see the handlers above. */
+void wake_flow_handle_wake(uint32_t causes);
+
 /* Record what was still held at sleep entry, for the continuation guard
    at the top of the button handler. EXT1 ANY_LOW is level-triggered, so a
    button still held when enter_deep_sleep()'s release-wait times out
@@ -310,11 +352,17 @@ void wake_flow_post_stats_snapshot(void);
 /* ---- seams implemented by main.c ---------------------------------------- */
 
 /* Render seam, implemented by main.c: tick the timer and full-refresh the
-   panel with the result. It stays there because the state it paints needs
-   a battery ADC read and the compile-time ParentTesting flag, neither of
-   which has a home here yet. Deliberately not wake_flow_-prefixed —
-   wake_flow does not implement it — which is the same shape as
-   enter_deep_sleep(), declared by lock_gate.h and owned by main.c. */
+   panel with the result. Deliberately not wake_flow_-prefixed — wake_flow
+   does not implement it — which is the same shape as enter_deep_sleep(),
+   declared by lock_gate.h and owned by main.c.
+
+   It stays in main.c as a three-statement, branch-free thunk over the
+   battery ADC read. Note that the older reason given here — "the ADC has
+   no home in wake_flow" — has not been true since make_display_state()
+   below was cut: this module can assemble a state for itself, so the
+   thing keeping this seam in main.c is its size, not its dependencies.
+   The residency audit left it on those terms; main.c records the same
+   caveat next to the definition. */
 void paint_current_state_full(void);
 
 /* Stats-assembly seam, also implemented by main.c and also unprefixed.
@@ -330,19 +378,18 @@ void paint_current_state_full(void);
    is the branch that decides whether to call it at all. */
 void stats_collect(stats_snapshot_t *out);
 
-/* Break-start paint seam, also implemented by main.c and also unprefixed,
-   for the same reason as the two above: it paints through make_state()
-   (battery ADC + the ParentTesting flag).
-
-   Deliberately not paint_current_state_full() with an argument. That one
-   re-reads the wall clock, where a starting break must paint against the
-   instant it started; and the LED sits BETWEEN the state assembly and the
-   refresh here, so the panel is blue for the whole multi-second flush
-   rather than only after it. */
-void paint_break_started(time_t now);
+/* There was a fourth seam here, paint_break_started(): the break screen's
+   paint, taking the instant the break started. It is now wake_flow.c's
+   own static function and no longer part of this contract. The residency
+   audit moved it because the ADC read underneath admitted the CALL in
+   main.c but not the ORDERING inside it — the LED is lit BETWEEN the
+   state assembly and the flush, which holds the panel blue for the whole
+   multi-second refresh, and that is a decision. Nothing outside
+   wake_flow.c called it, so nothing here has to declare it; the order is
+   pinned by test_wake_flow instead of by a comment. */
 
 /* State-assembly seam, also implemented by main.c and also unprefixed.
-   The narrowest of the four: it hands back the display_state_t for a
+   The narrowest of the three: it hands back the display_state_t for a
    given remaining and a given clock, and paints nothing at all.
 
    The final-minute watch needs it because its two renders are NOT the

@@ -26,10 +26,33 @@
 #include "nvs_flash.h"
 #include "sleep_plan.h"
 #include "stats_json.h"
-#include "status_led.h"
 #include "timer.h"
 #include "timer_persist.h"
 #include "wake_flow.h"
+
+/* This file is the composition root and nothing else. The rule it is held
+   to (.claude/CLAUDE.md) is that it may contain wiring and device calls
+   but may not contain a DECISION. Every symbol below with an executable
+   statement names the numbered reason that admits it; the rest — the log
+   TAG, the PARENT_TESTING macro and the NET_APPLY_OPS table — are pure
+   wiring, admitted by the headline rule rather than by a number, because
+   a construct with nothing to execute has nothing to decide. The
+   numbered reasons:
+
+     1. Boot ordering is a hardware contract.
+     2. It runs in an ISR or esp_timer context where a module API is not
+        safe.
+     3. It owns an ESP-IDF handle or call with no module home.
+     4. It is a <=3-line, branch-free thunk adapting a module ABI to
+        another module's callback signature.
+
+   "It's only a few lines" and "it's just plumbing" are not reasons. An
+   `if` here that is not a null-guard on an injected pointer is a review
+   blocker: the three that used to be — the panic quiet, the sleep-time
+   break-end drain and the wake-cause decode — are host-tested calls into
+   wake_flow.c as of the residency audit. What is left branches only on
+   ESP-IDF error codes and on the one handle this file owns. Adding a
+   line here means naming its reason in the review. */
 
 static const char *TAG = "main";
 
@@ -42,15 +65,22 @@ static const char *TAG = "main";
 #define PARENT_TESTING false
 #endif
 
-/* Adapts the wake-scoped quiet-hours cache to neopixel.c's bool(void)
-   callback ABI, which has nowhere to take the clock from. */
+/* Residency 4. Adapts the wake-scoped quiet-hours cache to neopixel.c's
+   bool(void) callback ABI, which has nowhere to take the clock from. One
+   line, no branch; the quiet-hours rule itself is in config_cache.c. */
 static bool status_leds_quiet(void) {
     return config_cache_quiet_active(time(NULL));
 }
 
-/* Declared in lock_gate.h: the gates there end a wake by calling this,
-   and it stays here because deep sleep is an ESP-IDF contract with no
-   module home. Does not return. */
+/* Residency 3, and the largest thing here that earns it: deep sleep is an
+   ESP-IDF contract with no module home — the wake sources, the RTC pad
+   holds and esp_deep_sleep_start() itself. Declared in lock_gate.h,
+   because the gates there end a wake by calling this. Does not return.
+
+   Everything in it that is a POLICY has already left: which buttons arm,
+   how long to sleep and why are sleep_plan.c's, and the break-end report
+   below is wake_flow's. What remains is the ORDER, which is the part that
+   cannot move — each step below is a hardware precondition for the next. */
 void enter_deep_sleep(wake_sleep_mode_t mode) {
     /* Late-wake forensics repeat: the boot-time log of this line is often
        lost to USB CDC re-enumeration; by sleep entry the console has had
@@ -66,7 +96,11 @@ void enter_deep_sleep(wake_sleep_mode_t mode) {
     net_window_log_last(); /* timing repeat: the boot-time line is often lost to CDC */
     timer_persist_save();
     /* EXT1 ANY_LOW is level-triggered: a still-held button would re-wake
-       instantly and re-fire its action. Wait (bounded) for release. */
+       instantly and re-fire its action. Wait (bounded) for release.
+       Covered by the same reason 3 as the function: this is the wake
+       source de-asserting, not a policy about how long to indulge the
+       user, and the 3 s cap exists so a stuck pad cannot hang the sleep.
+       wake_flow's continuation guard is what handles a timeout. */
     for (int i = 0; i < 30 && buttons_scan_held() != 0; i++) {
         vTaskDelay(pdMS_TO_TICKS(100));
     }
@@ -94,16 +128,16 @@ void enter_deep_sleep(wake_sleep_mode_t mode) {
     gpio_hold_en(GPIO_NUM_16);
     gpio_deep_sleep_hold_en();
 
-    /* Safety net: a latched break end that nothing drained is lost here.
-       wake_flow's pre-sleep event watch drains on every path that does
-       timer work, so this should be unreachable — log it rather than
-       chime, since
-       this also runs from the failsafe's esp_timer context where audio
-       is not safe. A line here means a new code path skipped the drain. */
-    int32_t undrained = 0;
-    if (timer_break_take_ended(time(NULL), &undrained)) {
-        ESP_LOGW(TAG, "break end reached sleep undrained (%ld s late)", (long)undrained);
-    }
+    /* Safety net: a latched break end that nothing drained reaches sleep
+       here. The take, the report, and the reasons it does none of the
+       things the break-end owner would do (no tick, no chime, no snap
+       back — the panel is finished, and this can run from the failsafe's
+       esp_timer context where audio is not safe) are all in wake_flow.c
+       with a host test, so the edge keeps one owner. What stays here is
+       the POSITION, which is the load-bearing part: it has to sit after
+       every path that could have drained the edge, or "undrained" would
+       mean nothing. */
+    wake_flow_report_undrained_break_end();
 
     /* Last NVS write (snapshot) is behind us on every path below; release
        the wake-scoped handle. */
@@ -140,10 +174,13 @@ void enter_deep_sleep(wake_sleep_mode_t mode) {
     esp_deep_sleep_start();
 }
 
-/* Declared in wake_flow.h: the stats-assembly seam. Side-effect-free (no
-   timer_tick — a read here must never transition the state machine).
-   Assembly rules live in app_state.c (host-tested); only the device reads
-   are here, which is what keeps it in main.c. */
+/* Residency 3. Declared in wake_flow.h: the stats-assembly seam. The
+   reads are the reason — two ADCs, the app description and
+   esp_reset_reason(), none of which a host build can answer — and the
+   assembly rules they feed are host-tested in app_state.c. No branch
+   here, and deliberately side-effect-free: no timer_tick, because a stat
+   read must never transition the state machine. Whether to collect at
+   all is wake_flow_post_stats_snapshot()'s decision, not this file's. */
 void stats_collect(stats_snapshot_t *out) {
     app_state_in_t in = {
         .batt_mv = battery_read_mv(),
@@ -161,13 +198,23 @@ void stats_collect(stats_snapshot_t *out) {
    orchestration (pre-window def capture, post-join reconcile/apply) in
    net_apply.c. main.c only supplies the device effects below. */
 
-/* Join poll: Button A stays live while the MQTT tail drains — the screen
-   is already painted and a dropped press would read as broken. Never
-   passed from the failsafe's esp_timer context. */
+/* Residency 4. Join poll: Button A stays live while the MQTT tail drains
+   — the screen is already painted and a dropped press would read as
+   broken. One line, no branch; which states a press acts on is decided in
+   wake_flow. Never passed from the failsafe's esp_timer context. */
 static void poll_button_a_cb(void) {
     (void)wake_flow_poll_button_a_action();
 }
 
+/* The composition root proper: wiring, and the one construct here with no
+   executable statement at all, so there is nothing in it to decide. It is
+   not admitted by a numbered reason because it does not need one — the
+   test a move is supposed to buy does not exist. Asserting that a field
+   holds the function it was just assigned is a tautology, and binding
+   this inside net_apply.c instead would give that module link-time
+   dependencies on audio, alerts, config_cache and wake_flow, making its
+   own suite harder to stub rather than easier. That is the rule's purpose
+   pointing the other way. */
 static const net_apply_ops_t NET_APPLY_OPS = {
     .join_poll = poll_button_a_cb,
     .on_config_applied = config_cache_invalidate,
@@ -177,9 +224,41 @@ static const net_apply_ops_t NET_APPLY_OPS = {
     .on_locate = alert_run_locate,
 };
 
-/* Render state via app_state.c (assembly rules host-tested); only the
-   battery ADC read is device-side. Light/fw/reset are stats-only and
-   deliberately not read here — no ADC work per paint. */
+/* ---- the three render seams wake_flow.h declares and this file implements
+   ------------------------------------------------------------------------
+   All three exist so that wake_flow.c can be host-tested without a battery
+   ADC. All three are admitted by residency 3, and the reason is the same
+   for each: the battery ADC read at the bottom of them has no host
+   answer. Note what does NOT admit them — residency 4 is for adapting to
+   another module's CALLBACK signature, and these are direct calls declared
+   in wake_flow.h with no function pointer anywhere. They are held to
+   reason 4's discipline (<=3 lines, branch-free) as a matter of keeping
+   them honest, but reason 3 is what earns them their place. Calling them
+   "thunks (residency 4)" would be the kind of plausible-sounding label the
+   audit exists to catch.
+
+   That is the narrowest boundary that works — wrapping the final-minute
+   watch's two renders as paint seams instead would pull that whole flow
+   back into this file, which is the direction the refactor undoes.
+
+   There was a fourth, paint_break_started, until the audit's follow-up:
+   the ADC underneath it admitted the CALL, but the LED it lit BETWEEN the
+   state assembly and the flush was an ordering, and an ordering is a
+   decision. It now lives in wake_flow.c over make_display_state, where a
+   host test pins the order. That is the test to apply to the three below:
+   what admits them is the read, and nothing above the read.
+
+   Honest note for the next reviewer: these are the weakest survivors in
+   the file. battery.c is itself a module, so reason 3 here means "the
+   read has no host answer", not "the API has no home". They are also the
+   only symbols the checked-in differential sweeps extract from this file
+   verbatim (cycle09 takes paint_current_state_full, cycle10/11 take
+   make_display_state), so moving them is a change to the sweeps too, not
+   just to the code. */
+
+/* Residency 3. Render state via app_state.c (assembly rules host-tested);
+   only the battery ADC read is device-side. Light/fw/reset are stats-only
+   and deliberately not read here — no ADC work per paint. */
 static display_state_t make_state(int32_t remaining, time_t now) {
     int mv = battery_read_mv();
     ESP_LOGD(TAG, "battery: %d mV (%d%%)", mv, battery_percent_from_mv(mv));
@@ -190,49 +269,51 @@ static display_state_t make_state(int32_t remaining, time_t now) {
     return app_state_display(&in, remaining, now);
 }
 
-/* Declared in wake_flow.h: the state-assembly seam. The final-minute
+/* Residency 3 (the ADC below it), held to reason 4's shape: the narrowest
+   of the three, one line and no branch. It is also the one the other two
+   would collapse into if they ever had to move — the break-start paint
+   already did, and it reaches the read through here. The final-minute
    watch assembles two renders of its own — a partial at each countdown
    mark and a full refresh with the LED lit between the assembly and the
    flush — and wrapping either as a paint seam would put that flow back in
    main.c. So the seam is cut at the only part that cannot move (the
-   battery ADC read and the compile-time ParentTesting flag above) and
-   this is the branch-free thunk over it. */
+   battery ADC read above) and this is the thunk over it. */
 display_state_t make_display_state(int32_t remaining, time_t now) {
     return make_state(remaining, now);
 }
 
-/* Declared in wake_flow.h: the break-end owner there repaints through
-   this after draining an edge, and it stays here because the state it
-   paints needs the battery ADC read and the compile-time ParentTesting
-   flag above. */
+/* Residency 3 (the ADC below it), held to reason 4's shape. The break-end
+   owner in wake_flow repaints through this after draining an edge; three
+   statements, no branch. WHEN it is called, and that the drain happens
+   first, are wake_flow's and are tested there. */
 void paint_current_state_full(void) {
     time_t now = time(NULL);
     display_state_t st = make_state(timer_tick(now), now);
     display_full_refresh(&st);
 }
 
-/* Declared in wake_flow.h: the break gate there paints a freshly started
-   break through this, for the same reason as the seam above — plus the
-   LED between the assembly and the refresh, which is what holds the panel
-   blue for the whole multi-second flush. */
-void paint_break_started(time_t now) {
-    display_state_t st = make_state(timer_tick(now), now);
-    status_led_show_timer_state(); /* blue during the refresh */
-    display_full_refresh(&st);     /* inverted SCREEN BREAK layout */
-}
-
-/* Last-resort battery protection: no wake may run forever (WiFi driver
-   hang, stuck BUSY, firmware bug) — the CPU would otherwise stay awake
-   until the battery dies. Runs in the esp_timer task; enter_deep_sleep
-   persists the snapshot first, so no allocation is lost. A mid-refresh
-   force-sleep can leave the panel scruffy for one frame — acceptable for
-   a path that only fires when something is already wedged. */
+/* Residency 2 — the canonical case for it. Last-resort battery
+   protection: no wake may run forever (WiFi driver hang, stuck BUSY,
+   firmware bug) — the CPU would otherwise stay awake until the battery
+   dies. Runs in the esp_timer task, where most module APIs are not safe
+   to call, which is exactly why the callback is here and does nothing but
+   log and sleep. enter_deep_sleep persists the snapshot first, so no
+   allocation is lost. A mid-refresh force-sleep can leave the panel
+   scruffy for one frame — acceptable for a path that only fires when
+   something is already wedged. */
 static void awake_failsafe_cb(void *arg) {
     (void)arg;
     ESP_LOGE(TAG, "Awake failsafe: still awake after %d s - forcing deep sleep", CONFIG_MAGTAG_MAX_AWAKE_SEC);
     enter_deep_sleep(lock_gate_sleep_mode());
 }
 
+/* Residency 3 for the three symbols below: this file owns the
+   esp_timer_handle_t, and an esp_timer has no module home. The `if`s in
+   arm_ are on esp_err_t from that handle and cannot be separated from
+   owning it — creating a timer and starting it are two fallible ESP-IDF
+   calls, and the second is only meaningful if the first succeeded. The
+   `if` in extend_ is a null-guard on the same handle. None of the three
+   decides anything about the wake; the cap itself is a Kconfig value. */
 static esp_timer_handle_t s_failsafe_timer;
 
 static void arm_awake_failsafe(void) {
@@ -247,7 +328,11 @@ static void arm_awake_failsafe(void) {
 }
 
 /* Push the awake failsafe out so a long deliberate awake stretch (the
-   locate alarm) isn't cut short by it. */
+   locate alarm) isn't cut short by it. Installed into alerts.c at boot;
+   HOW LONG to push is the caller's, and this only applies it. Keep this
+   to exactly one reference — it is `static`, so the unused-function
+   warning is the only thing left that would notice a dropped install
+   (see refactor.bugdiscoveries.md). */
 static void extend_awake_failsafe(int seconds) {
     if (s_failsafe_timer != NULL) {
         esp_timer_stop(s_failsafe_timer);
@@ -255,6 +340,14 @@ static void extend_awake_failsafe(int seconds) {
     }
 }
 
+/* Residency 1, whole-function: this is the boot sequence, and the order
+   of it is a hardware contract at every step — the NeoPixel gate before
+   any peripheral touches GPIO 21, NVS before anything reads config, TZ
+   before any date comparison, timer_defs_install() before the first
+   timer_* call, and the wake-cause read while the register still holds
+   this boot's value. The sequence cannot be host-tested because it IS the
+   ordering; what it must not contain is a decision, and after the audit
+   it contains one branch, the ESP-IDF-documented NVS re-init idiom. */
 void app_main(void) {
     /* MUST be first peripheral call: GPIO 21 power gate HIGH (NeoPixels off) */
     neopixel_init();
@@ -262,15 +355,16 @@ void app_main(void) {
     neopixel_set_quiet_cb(status_leds_quiet);
     neopixel_set_status_brightness(CONFIG_MAGTAG_STATUS_LED_BRIGHTNESS);
 
-    /* Panic-loop breaker: the S2 ROM USB console can panic when a host
-       port-open races boot prints (seen in bring-up). Each panic reboots,
-       re-enumerates USB, and re-races — freezing the device for as long
-       as a monitor keeps reconnecting. After a panic, stay quiet briefly
-       so the host's open completes against silence and the loop breaks. */
-    if (esp_reset_reason() == ESP_RST_PANIC) {
-        vTaskDelay(pdMS_TO_TICKS(2000));
-    }
+    /* Panic-loop breaker. WHICH reset reason earns a quiet window and how
+       long it lasts are decided in wake_flow.c and host-tested; what is
+       reason 1 here is only the position — it has to happen before this
+       boot's first console output, which is what the quiet is for. */
+    wake_flow_boot_quiet_after_panic();
 
+    /* The one surviving branch. ESP-IDF's documented NVS init idiom: a
+       flash image whose NVS partition is full or was written by a newer
+       version cannot be opened until it is erased, and there is nowhere
+       to put this but in front of the first nvs call. */
     esp_err_t ret = nvs_flash_init();
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
         ESP_ERROR_CHECK(nvs_flash_erase());
@@ -318,12 +412,12 @@ void app_main(void) {
     /* Battery gate before any wake work: does not return while locked */
     lock_gate_check_charge();
 
-    /* Both handlers live in wake_flow.c and neither returns. This branch
-       is the wake-cause decode itself — the hardware fact esp_sleep.h
-       reports — and nothing else about the wake is decided here. */
-    if (causes & BIT(ESP_SLEEP_WAKEUP_EXT1)) {
-        wake_flow_handle_button_wake();
-    } else {
-        wake_flow_handle_timer_tick(); /* RTC timer wake AND cold boot */
-    }
+    /* Reason 3 covers the READ above and stops there. The causes register
+       is boot-scoped — valid only until something re-arms a wake source —
+       so esp_sleep_get_wakeup_causes() has to be called here; but what
+       the value MEANS is a decision, and it used to be an `if` in this
+       file choosing between two non-returning handlers, which is the
+       largest fork in the firmware and had no test at all. The decode now
+       lives in wake_flow.c with one. Does not return. */
+    wake_flow_handle_wake(causes);
 }

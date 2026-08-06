@@ -7,9 +7,25 @@ Functions are extracted MECHANICALLY (brace matching by name) from the two
 sources so no body is hand-transcribed. Only these substitutions are made,
 each of them a change this refactor explicitly claims is device-identical:
   * time(NULL)      -> hal_time_now()   (hal_time.c: `return time(NULL);`)
+  * make_display_state(...) -> make_state(...)
+    main.c's state-assembly seam is a one-line thunk over its make_state,
+    and the harness models make_state once, so both sides reach the same
+    modelled ADC read + assembly. The same equivalence cycle10 and cycle11
+    lean on, taken in the opposite direction.
   * symbol renaming to old_/new_ namespaces
-The NEW side additionally routes through the two main.c paint seams, which
-are themselves extracted mechanically from the CURRENT main.c.
+
+The BASE main.c has both repaints written out INLINE inside the functions
+under test. On the NEW side they are factored out, and the two live in
+different places, so they are sourced differently here:
+  * paint_break_started      - wake_flow.c's, since the residency audit
+    moved it there. Extracted with the other NEW bodies and namespaced
+    with them, because it is code under test: the LED it lights BETWEEN
+    the assembly and the flush is an ordering the sweep must be able to
+    see move. (Before the move it came from main.c and was written into
+    the shared seam block below - which the OLD side never called anyway,
+    its copy being inline, so it was never actually shared.)
+  * paint_current_state_full - still main.c's, extracted from the CURRENT
+    main.c into the seam block below.
 """
 import re
 import subprocess
@@ -62,29 +78,34 @@ new_flow = read_file("main/wake_flow.c")
 new_main = read_file("main/main.c")
 
 OLD_NAMES = ["maybe_start_break", "fire_expiry_alert", "queue_rollover_summary", "handle_day_rollover"]
-NEW_NAMES = ["wake_flow_maybe_start_break", "wake_flow_fire_expiry_alert",
+# paint_break_started FIRST: the harness is one translation unit written in
+# this order, and wake_flow_maybe_start_break below calls it.
+NEW_NAMES = ["paint_break_started", "wake_flow_maybe_start_break", "wake_flow_fire_expiry_alert",
              "queue_rollover_summary", "wake_flow_handle_day_rollover"]
 
 old_bodies = "\n\n".join(extract(old_main, n) for n in OLD_NAMES)
 new_bodies = "\n\n".join(extract(new_flow, n) for n in NEW_NAMES)
-seams = "\n\n".join(extract(new_main, n) for n in ["paint_break_started", "paint_current_state_full"])
+seams = extract(new_main, "paint_current_state_full")
 
 # --- the only permitted rewrites -------------------------------------------
 old_bodies = old_bodies.replace("time(NULL)", "hal_time_now()")
 seams = seams.replace("time(NULL)", "hal_time_now()")
+new_bodies = new_bodies.replace("make_display_state(", "make_state(")
 old_bodies = namespace(old_bodies, "old_", OLD_NAMES)
 new_bodies = namespace(new_bodies, "new_", NEW_NAMES)
-seams = re.sub(r"\bstatic\b\s+", "", seams)  # make_state is ours; seams stay non-static
+seams = re.sub(r"\bstatic\b\s+", "", seams)  # make_state is ours; the seam stays non-static
 
-# NEW bodies must call the harness's seam implementations, which the
-# namespacing above did not touch (they are not in NEW_NAMES) - good.
+# NEW bodies must call the harness's seam implementation, which the
+# namespacing above did not touch (it is not in NEW_NAMES) - good.
+# new_paint_break_started keeps its `static`: it is defined and used inside
+# this one TU, exactly as in wake_flow.c.
 
 MUTANTS = {
     "control": [],
     # 1. reorder two effects: persist and paint swap places
     "reorder_persist_paint": [
-        ("    timer_persist_save();\n    paint_break_started(now);",
-         "    paint_break_started(now);\n    timer_persist_save();")],
+        ("    timer_persist_save();\n    new_paint_break_started(now);",
+         "    new_paint_break_started(now);\n    timer_persist_save();")],
     # 2. move a clock sample: read the corrected clock BEFORE the window
     "move_clock_sample": [
         ("    net_apply_try_window();\n    *now = hal_time_now();",
@@ -95,6 +116,16 @@ MUTANTS = {
     "delete_record_date": [("    timer_record_date(*now);", "    ;")],
     # 5. boundary shift on the completions loop
     "boundary_slot_offset": [("comp[i] = timer_slot_completions(1 + i);", "comp[i] = timer_slot_completions(i);")],
+    # 6. reorder the two effects INSIDE the break-start paint. The LED is
+    #    lit BETWEEN the assembly and the flush so the panel stays blue for
+    #    the whole multi-second refresh; the OLD side has that ordering
+    #    inline, so perturbing wake_flow.c's copy must move the NEW trace
+    #    alone.
+    "reorder_led_refresh": [
+        ("    status_led_show_timer_state(); /* blue during the refresh */\n"
+         "    display_full_refresh(&st);     /* inverted SCREEN BREAK layout */",
+         "    display_full_refresh(&st);     /* inverted SCREEN BREAK layout */\n"
+         "    status_led_show_timer_state(); /* blue during the refresh */")],
 }
 
 
@@ -412,7 +443,7 @@ for mname, edits in MUTANTS.items():
     nb, sm = apply_mutant(new_bodies, seams, edits)
     with open(os.path.join(OUT, f"harness_{mname}.c"), "w") as f:
         f.write(PRE)
-        f.write("\n/* ---- main.c paint seams (extracted verbatim) ---- */\n")
+        f.write("\n/* ---- main.c's remaining paint seam (extracted verbatim) ---- */\n")
         f.write(sm)
         f.write("\n\n/* ---- OLD implementations (136cb06 main.c) ---- */\n")
         f.write(old_bodies)
