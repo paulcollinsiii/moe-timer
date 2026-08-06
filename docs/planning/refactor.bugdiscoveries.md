@@ -52,8 +52,8 @@ does not hold. Two of its three legs are wrong:
   `button_latch_pick(buttons_take_pressed(), (1u<<BTN_A)|(1u<<BTN_B)|(1u<<BTN_C))`
   unconditionally, and its own comment names this case: *"a press that landed
   while this wake was awake (sync, grid wait, e-ink flush)"*. BTN_C is in the
-  mask. (Now `main/wake_flow.c:815` after the cycle-11 move; structurally
-  identical.)
+  mask. (Now `main/wake_flow.c:968`, inside `wake_flow_handle_timer_tick()`,
+  after the cycle-11 move and the task-13 audit; structurally identical.)
 * **The ISR is armed for the entire awake window.** `buttons_watch_begin()` is
   reachable only from `buttons_init()` (`main/buttons.c:99`, every boot) and
   `buttons_watch_end()` only from sleep entry (`main/buttons.c:125`). There is
@@ -65,7 +65,7 @@ does not hold. Two of its three legs are wrong:
   `lock_gate_check_bedtime()` runs *before* the sync block. An ordinary hourly
   NTP-sync wake reaches the poll.
 
-`allow_net_window` was also checked and cleared: per `include/wake_flow.h:101`
+`allow_net_window` was also checked and cleared: per `include/wake_flow.h:127`
 it only suppresses a *redundant second* NTP window on a start/resume. It does
 not refuse the press, so `!synced_this_wake` being false on a sync wake is not
 the mechanism either.
@@ -75,26 +75,27 @@ the mechanism either.
 The mechanism is genuinely not identified yet.
 
 **Nothing eats a latched C before the drain.** Every latch consumer reachable
-on an IDLE sync tick was enumerated: `main/wake_flow.c:272` and `:282` are both
-**masked-A** takes, and `button_latch_take_masked()` clears only the masked
-bits, so a latched C passes straight through them. `main/wake_flow.c:467` (the
-final-minute watch's unmasked entry discard) is **not reached at all** —
-`maybe_wait_for_event()` at `main/wake_flow.c:652` branches on
-`timer_get_state() == TIMER_RUNNING`, and an IDLE sync wake takes the
-`watch_break_end` arm. `alerts.c`'s unmasked takes sit inside `run_alert()`,
+on an IDLE sync tick was enumerated: `main/wake_flow.c:402` and `:412` are both
+**masked-A** takes (`buttons_take_pressed_mask(1u << BTN_A)`, which reaches
+`button_latch_take_masked()` via `main/buttons.c:70`), and that clears only the
+masked bits, so a latched C passes straight through them.
+`main/wake_flow.c:620` (the final-minute watch's unmasked entry discard) is
+**not reached at all** — `maybe_wait_for_event()` at `main/wake_flow.c:804`
+branches on `timer_get_state() == TIMER_RUNNING`, and an IDLE sync wake takes
+the `watch_break_end` arm. `alerts.c`'s unmasked takes sit inside `run_alert()`,
 unreachable with no expiry. So a C press made during the window is picked at
-`main/wake_flow.c:815` and dispatched, exactly as intended.
+`main/wake_flow.c:968` and dispatched, exactly as intended.
 
-*(An earlier revision of this file named `:467` as the leading candidate. That
-was wrong for the reported path — recorded here so the dead lead is not
-re-followed.)*
+*(An earlier revision of this file named the final-minute watch's entry discard
+— then at `:467`, now `:620` — as the leading candidate. That was wrong for the
+reported path — recorded here so the dead lead is not re-followed.)*
 
 What survives:
 
-1. **The press landed in the post-drain window** — after `main/wake_flow.c:815`
+1. **The press landed in the post-drain window** — after `main/wake_flow.c:968`
    and before the ISR detaches. That covers `maybe_wait_for_event()`,
    `enter_deep_sleep`'s prologue, and the bounded release-wait at
-   `main/main.c:70`, which spins up to **3 s** on `buttons_scan_held()` — a
+   `main/main.c:126`, which spins up to **3 s** on `buttons_scan_held()` — a
    *level* read, not a latch read. A press made and released inside it is
    latched, never consumed, and then destroyed by `buttons_watch_end()`.
 2. **Something in the network window suppresses the ISR itself** — the window
@@ -105,9 +106,9 @@ What survives:
 that actually needs explaining: the window in candidate 1 is the same width on
 every wake, sync or not, so it does not predict that C works normally right
 after the 1-minute update and fails right after the hourly sync. Ruled out as
-the amplifier: `net_window_join(15000)` at `main/main.c:65` — `net_apply_finish`
-has already joined and cleared `s_active` (`main/net_window.c:180`), so the
-sleep-path join returns immediately.
+the amplifier: `net_window_join(15000, NULL)` at `main/main.c:109` —
+`net_apply_finish` has already joined and cleared `s_active`
+(`main/net_window.c:177`), so the sleep-path join returns immediately.
 
 ### To confirm
 
@@ -232,5 +233,12 @@ reference. A second caller in main.c makes a dropped install silent again.
 
 Documentation staleness found during the refactor — `docs/architecture.md`
 lines 128–129, and the stale claim that `handle_break_end()` "lives in main.c" —
-is not a behaviour defect and belongs to **task 14 (docs)** of the refactor
-plan, not to this list.
+is not a behaviour defect and belonged to **task 14 (docs)** of the refactor
+plan, not to this list. Task 14 has since landed and both are fixed.
+
+One documentation hazard is still open and is recorded here only because it can
+mislead a future reader of *this* file: `docs/ProductOverview.md`'s
+"Implementation Notes for Coding Agents" still instructs agents to use LovyanGFX
+and `display.cpp` and cites removed IDF APIs. It carries a **Superseded** marker
+as of task 14 but was deliberately not rewritten, because it is the pre-build
+design record. Read the marker before the instructions.
