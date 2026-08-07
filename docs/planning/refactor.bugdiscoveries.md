@@ -47,7 +47,7 @@ freely.
 | 3 | **BUG-5** — timer-defs blob drift discards the user's table | User-data policy; independent of the button work | — |
 | 4 | **BUG-7** — a RUNNING slot outliving its own definition | State-machine change to an uncovered path; independent | — |
 | 5 | **BUG-2**, then **BUG-3** | Same latch/mask surface — fix together so each is checked against the other. Both need a re-baselined sweep to show the fix changed *only* the intended cases. | 1 |
-| 6 | **BUG-1** | Needs hardware instrumentation to settle its fork, and shares the latch surface with BUG-2, so it is cheaper once that is settled | 1, 5 |
+| — | **BUG-1** | **Parked 2026-08-07.** Settling its fork needs an instrumented build run on hardware, which is reporter time rather than engineering time. Revisit after item 5: BUG-2's fix touches the same latch surface and may move the ground under it. | — |
 
 **Constraint 1 — BUG-4 before BUG-2/BUG-3.** Fixing a pinned bug makes the
 sweep's control diverge by design. That is only informative if the sweep can be
@@ -62,7 +62,8 @@ rather than applied in isolation.
 
 ## BUG-1 — Button presses are swallowed during the hourly NTP-sync wake
 
-**Status:** HYPOTHESIS · **Found:** 2026-08-04, hardware, build `136cb06`
+**Status:** PARKED 2026-08-07 (was HYPOTHESIS) · **Found:** 2026-08-04, hardware,
+build `136cb06`
 **Severity:** user-visible; the device appears dead to input for several seconds
 
 ### Observed
@@ -396,19 +397,55 @@ that move for different reasons, and today nothing ties them together. A blob
 bump with no accompanying document change currently means "device defaults win"
 by accident rather than by decision.
 
+### Measured: the size check cannot replace the version field
+
+Relevant because dropping `TIMER_DEFS_BLOB_VERSION` and leaning on the existing
+`len != sizeof(*out)` test is the obvious simplification, and it does not work.
+`nvs_timer_def_t` is `char name[16]; int32_t min; uint8_t reload; uint8_t
+break_eligible;` — 22 bytes of content in a 24-byte struct, so it carries **two
+spare padding bytes**. Compiling the v1 (pre-`6fab99d`), v2 (current) and a
+hypothetical v3 layout with one more `uint8_t` flag:
+
+| Layout | `sizeof(def)` | `sizeof(blob)` | size check catches drift? |
+|---|---|---|---|
+| v1 — no `break_eligible` | 24 | 100 | — |
+| v2 — current | 24 | 100 | **no** |
+| v3 — one more `uint8_t` flag | 24 | 100 | **no** |
+
+All three are byte-identical in size. The size test would not have caught the
+v1→v2 bump that created this defect, and will not catch the next flag either,
+because the next two `uint8_t` fields land in existing padding for free. **The
+version field is the only thing that has ever detected drift here.**
+
+Both writers `memset` before filling, so a v1 blob misread as v2 would today
+yield `break_eligible = 0` everywhere rather than garbage — silently wrong, not
+random. The sharper hazard is any future change that *reuses* a padding byte or
+*reorders* fields: same size, different meaning, old bytes read as valid new
+values.
+
 ### Fix constraints
 
-* **Migrate rather than discard.** Read a v1 blob, copy the common prefix,
-  default `break_eligible` from the Kconfig value for that slot, write back as
-  v2. This is what makes the stated policy's second clause ("bug fixes land
-  without changing the HA set config") actually hold.
+* **Migrate rather than discard. Decided 2026-08-07 (reporter).** Read a v1
+  blob, copy the common prefix, default `break_eligible` from the Kconfig value
+  for that slot, write back as v2. This is what makes the stated policy's
+  second clause ("bug fixes land without changing the HA set config") actually
+  hold.
+* **Consequence of that decision, flagged deliberately:** the silent re-seed is
+  currently the *only* mechanism by which device defaults ever beat the HA
+  document. `config_apply` has no such branch — it skips when `cfg_ver` matches
+  and applies when it does not (`main/config_apply.c:233`), and never prefers
+  its own defaults. So migrating does not merely fix a bug, it **removes the
+  only implementation of "device defaults win"** that exists. If that clause of
+  the stated policy is wanted for real, it is new work and must be built
+  deliberately.
 * **Whatever the policy, log it.** "Stale blob, config reset" and "no blob yet,
   seeding" are different events and must not share a silent code path. This
   constraint is unconditional and is arguably worth landing on its own even if
   the migration is deferred.
-* **Decide the two-version relationship explicitly.** Either tie the blob
-  version to `DISC_SCHEMA_VER`, or state in the code why they are independent.
-  Leaving it implicit is how this became invisible.
+* **Decide the two-version relationship explicitly — OPEN, under discussion.**
+  Either tie the blob version to `DISC_SCHEMA_VER`, drop it, or state in the
+  code why they are independent. Leaving it implicit is how this became
+  invisible. See the measurement below before choosing.
 * Fixing this must not resurrect the defect formerly filed as BUG-6: a re-seed
   writes Kconfig names into every slot, which makes each slot look *existing*
   to `apply_timers()`, so a subsequent document that omits `break` will now
@@ -506,10 +543,14 @@ feature was the wrong trade.
 Give the function a `now` and treat a disabled RUNNING slot the way a mid-window
 disable is already treated:
 
-* fold the live segment — **its sign is unrecoverable, so the choice must be
-  documented.** Most likely "as non-eligible", the conservative direction, since
-  it errs toward *more* eye rest rather than less. **This is a product decision,
-  not a technical one, and is the one open question in this entry.**
+* fold the live segment **as non-eligible** — i.e. as screen exposure.
+  **Decided 2026-08-07 (reporter):** the sign is genuinely unrecoverable, so
+  take the conservative direction, which errs toward *more* eye rest rather
+  than less. The cost is that a break activity interrupted by a reflash counts
+  against the allowance; accepted on the grounds that dropping config this way
+  is unlikely to happen mid-run. Note this is the same direction the code takes
+  today by accident — the defect being fixed is the *powered-off gap* being
+  swept in with it, not the sign itself.
 * reset the slot like `timer_reload` does — `memset`, keep `completions`;
 * then move the selection.
 
