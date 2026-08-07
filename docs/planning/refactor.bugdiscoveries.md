@@ -7,18 +7,25 @@ The refactor's whole value is the claim that behaviour did not change — proven
 by differential sweeps comparing full ordered effect traces against a baseline
 commit. Fixing a bug mid-move destroys that proof for the function it touches:
 the control harness would diverge, and there would be no way to tell an
-intended fix from an accidental regression. So each of these is pinned by a
-test that asserts the CURRENT, WRONG behaviour, and gets its own commit after
-the refactor lands.
+intended fix from an accidental regression. So each FIRMWARE defect here is
+pinned by a test that asserts the CURRENT, WRONG behaviour, and gets its own
+commit after the refactor lands.
 
-Close these out before declaring the refactor finished. Each fix must flip its
-pinning test deliberately, not silently.
+BUG-4 is the exception and is marked as such: it is a defect in the
+verification harness itself, not in firmware, so there is no device behaviour
+to pin. It is filed here rather than as a chore because it makes the sweeps
+report a false PASS, and the sweeps are what every other entry's "deliberately
+preserved" claim rests on.
+
+Close these out before declaring the refactor finished. Each firmware fix must
+flip its pinning test deliberately, not silently.
 
 | Status | Meaning |
 |---|---|
 | OPEN | Reproduced, not yet fixed |
 | HYPOTHESIS | Observed on hardware, root cause not yet confirmed in code |
 | CONDITIONAL | Not a bug today; becomes one if a named change lands |
+| hazard | Not wrong today (verified); a named future change makes it wrong |
 
 ---
 
@@ -52,7 +59,7 @@ does not hold. Two of its three legs are wrong:
   `button_latch_pick(buttons_take_pressed(), (1u<<BTN_A)|(1u<<BTN_B)|(1u<<BTN_C))`
   unconditionally, and its own comment names this case: *"a press that landed
   while this wake was awake (sync, grid wait, e-ink flush)"*. BTN_C is in the
-  mask. (Now `main/wake_flow.c:968`, inside `wake_flow_handle_timer_tick()`,
+  mask. (Now `main/wake_flow.c:1009`, inside `wake_flow_handle_timer_tick()`,
   after the cycle-11 move and the task-13 audit; structurally identical.)
 * **The ISR is armed for the entire awake window.** `buttons_watch_begin()` is
   reachable only from `buttons_init()` (`main/buttons.c:99`, every boot) and
@@ -75,27 +82,27 @@ the mechanism either.
 The mechanism is genuinely not identified yet.
 
 **Nothing eats a latched C before the drain.** Every latch consumer reachable
-on an IDLE sync tick was enumerated: `main/wake_flow.c:402` and `:412` are both
+on an IDLE sync tick was enumerated: `main/wake_flow.c:411` and `:421` are both
 **masked-A** takes (`buttons_take_pressed_mask(1u << BTN_A)`, which reaches
 `button_latch_take_masked()` via `main/buttons.c:70`), and that clears only the
 masked bits, so a latched C passes straight through them.
-`main/wake_flow.c:620` (the final-minute watch's unmasked entry discard) is
-**not reached at all** — `maybe_wait_for_event()` at `main/wake_flow.c:804`
+`main/wake_flow.c:629` (the final-minute watch's unmasked entry discard) is
+**not reached at all** — `maybe_wait_for_event()` at `main/wake_flow.c:845`
 branches on `timer_get_state() == TIMER_RUNNING`, and an IDLE sync wake takes
 the `watch_break_end` arm. `alerts.c`'s unmasked takes sit inside `run_alert()`,
 unreachable with no expiry. So a C press made during the window is picked at
-`main/wake_flow.c:968` and dispatched, exactly as intended.
+`main/wake_flow.c:1009` and dispatched, exactly as intended.
 
 *(An earlier revision of this file named the final-minute watch's entry discard
-— then at `:467`, now `:620` — as the leading candidate. That was wrong for the
+— then at `:467`, now `:629` — as the leading candidate. That was wrong for the
 reported path — recorded here so the dead lead is not re-followed.)*
 
 What survives:
 
-1. **The press landed in the post-drain window** — after `main/wake_flow.c:968`
+1. **The press landed in the post-drain window** — after `main/wake_flow.c:1009`
    and before the ISR detaches. That covers `maybe_wait_for_event()`,
    `enter_deep_sleep`'s prologue, and the bounded release-wait at
-   `main/main.c:126`, which spins up to **3 s** on `buttons_scan_held()` — a
+   `main/main.c:122`, which spins up to **3 s** on `buttons_scan_held()` — a
    *level* read, not a latch read. A press made and released inside it is
    latched, never consumed, and then destroyed by `buttons_watch_end()`.
 2. **Something in the network window suppresses the ISR itself** — the window
@@ -106,7 +113,7 @@ What survives:
 that actually needs explaining: the window in candidate 1 is the same width on
 every wake, sync or not, so it does not predict that C works normally right
 after the 1-minute update and fails right after the hourly sync. Ruled out as
-the amplifier: `net_window_join(15000, NULL)` at `main/main.c:109` —
+the amplifier: `net_window_join(15000, NULL)` at `main/main.c:105` —
 `net_apply_finish` has already joined and cleared `s_active`
 (`main/net_window.c:177`), so the sleep-path join returns immediately.
 
@@ -200,6 +207,136 @@ arm, which writes `selection_changed = false` and returns false; the only
 residual difference on device is one extra side-effect-free `timer_get_state()`
 read. Both call sites need a deliberate decision and a test when D gains an arm.
 Recorded on `test_a_latched_d_press_is_never_dispatched_by_the_tick_drain`.
+
+---
+
+## BUG-4 — the checked-in sweeps test a hardcoded path, not the caller's tree
+
+**Status:** OPEN · **Found:** 2026-08-07, during the stat-gather move
+**Severity:** high, but scoped to the VERIFICATION HARNESS — no firmware
+defect. It makes the sweep report a false PASS, which is worse than a
+crash, because the sweep is the whole behaviour-preservation argument.
+
+`test/difftest/run.sh` derives the repo from its own location
+(`BASH_SOURCE`, line 17-18) and uses it for the include paths and
+`EXTRA_SRC`. The three cycle generators ignore that and pin their own
+absolute constant:
+
+```python
+REPO = "/workspaces/magtag-espidf/.claude/worktrees/refactor-main-impl"
+```
+
+(`cycles/cycle09_rollover.py:36`, `cycle10_watches.py:39`,
+`cycle11_handlers.py:53`.) `REPO` is what supplies both sides of the
+comparison — `git -C REPO show <BASE>:main/main.c` for the baseline and
+`open(REPO/main/wake_flow.c)` for the current code. So the code actually
+swept is whatever lives at that absolute path, regardless of where the
+sweep was invoked from.
+
+### Demonstrated, not inferred
+
+The whole tree was copied to a scratch directory, the COPY's
+`main/wake_flow.c` had `wake_flow_handle_timer_tick` renamed so that
+`extract()` could not possibly find it, and the COPY's `run.sh` was run.
+A sweep reading its own checkout must die with `could not find definition
+of wake_flow_handle_timer_tick`. Instead it completed and reported
+
+```
+harness_control  cases=121504  divergences=0  OK  (identical)
+```
+
+with exit 0 — it had read the worktree's file and never looked at the
+copy's.
+
+### Why this matters after the branch merges
+
+Two failure modes, and the safe one is the one that goes away:
+
+1. **While this worktree exists** — running the sweep from the main
+   checkout silently sweeps the WORKTREE and reports OK. Anyone
+   re-verifying the refactor from main gets a green result that says
+   nothing about the code in front of them.
+2. **Once the worktree is deleted**, which is the normal end state —
+   `git -C <gone> show` raises, `run.sh` prints `generate FAILED` and
+   exits 1. Loud, but the sweeps are then permanently unrunnable for
+   everyone, which defeats the point of `a7050d4` checking them in.
+
+Note the results in the commits on this branch are NOT affected: every
+run was invoked from inside the worktree, where `REPO` and the caller's
+tree are the same directory. The claim they make is sound; what is broken
+is anyone else's ability to re-make it.
+
+### Fix constraint
+
+`REPO` must come from the script's own location the way `run.sh` already
+does it (`os.path.dirname(os.path.abspath(__file__))` walked up two
+levels), not from a constant. Whatever replaces it needs a test that
+*fails* when the sweep is pointed at a tree it did not come from —
+otherwise the next copy of this defect is invisible again.
+
+Related: `BASE` is a bare SHA on this branch (`7aab085` and friends). If
+this branch is squash-merged those objects become unreachable and the
+baseline read fails for the same reason. Belongs to **task 15**, which
+is where the sweep gets generalised anyway.
+
+---
+
+## Log-stub vararg landmine — censused in one file, unrecorded in two
+
+**Status:** hazard, not a defect today (verified) · **Found:** 2026-08-07
+
+Every host-built module that logs defines a stub of the form
+
+```c
+#define ESP_LOGI(tag, ...) ((void)(tag))
+```
+
+which **discards the varargs**, so any function call sitting inside a log
+argument is never evaluated on host. If such a call ever has a side
+effect, the device does it and the host does not — and neither the host
+suite nor the differential sweep can see the difference, because both are
+host builds. That is a divergence with no detector.
+
+`wake_flow.c` carries a maintained census comment for exactly this reason.
+It was re-counted mechanically (comments and string literals stripped, so
+format-string words like `"...unavailable("` do not register as calls) and
+it is accurate: **seven** sites, at `:164`, `:267`, `:378`, `:431`,
+`:497`, `:543`, `:766`.
+
+The same scan found sites in two files that carry **no census and no
+warning**:
+
+* `main/timer_persist.c:33` (`esp_err_to_name`) and `:45`
+  (`timer_get_state`)
+* `main/lock_gate.c:87` (`timer_get_state`)
+
+All six distinct callees across all three files were checked for writes to
+module state and all are pure reads, so **nothing diverges today**. The
+hazard is that the discipline protecting against it exists in one file and
+not in the other two that need it. Either give those files the same census
+comment, or replace the stubs with a variadic-consuming one
+(`(void)sizeof(printf(__VA_ARGS__))` or similar) so the arguments are
+type-checked and evaluated on host too — the second closes the class
+rather than documenting it.
+
+## Sweep trace cap — cycle09 cannot report truncation
+
+**Status:** latent, measured · **Found:** 2026-08-07
+
+`run.sh` refuses a run whose trace overflowed, because the comparison
+tests lengths before contents and a divergence past the cap would be
+invisible. Cycles 10 and 11 supply the counter (`g_overflow`) and a cap of
+8192. **Cycle 09 has neither** — `TRACE_MAX` is 256 and the recorder drops
+events with no `else` arm — which is why every cycle09 line prints
+`[overflow not reported]` and its control's 0 proves less than the other
+two cycles' do.
+
+Measured rather than assumed: the control was instrumented with a
+high-water mark and the longest trace cycle09 produces over all 29592
+cases is **18 events against a cap of 256** — a 14x margin. So this is a
+latent gap, not an active blind spot, and it is disclosed on every line of
+output. Close it in **task 15** by giving cycle09 the counter the other
+two have.
 
 ---
 
