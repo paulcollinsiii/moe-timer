@@ -423,6 +423,75 @@ random. The sharper hazard is any future change that *reuses* a padding byte or
 *reorders* fields: same size, different meaning, old bytes read as valid new
 values.
 
+### Measured: a layout digest cannot replace the padding it hides in
+
+A compile-time checksum over the struct layout was proposed as a stronger guard
+than a bare `sizeof` assert — one constant catching reorders, additions and
+renames at once. Measured against the case that actually produced this defect,
+it does not:
+
+| Guard | Field reordered | Field added into trailing padding | Field renamed |
+|---|---|---|---|
+| `sizeof` assert | no | **no** | no |
+| `offsetof` asserts per field | yes | **no** | no |
+| Layout digest over enumerated fields | yes | **no** | no |
+| Designated-initializer canary | — | **no** (see below) | no |
+
+Both the digest and the per-field asserts are built from the *enumerated*
+fields, so a field nobody enumerated is invisible to both. Adding a `uint8_t`
+into the two trailing padding bytes leaves `sizeof` at 24 and every existing
+offset unchanged — the digest comes out **identical** (verified: 24574019 either
+way). That is exactly the shape of the v1→v2 `break_eligible` addition.
+
+The designated-initializer canary — a `static const` naming every field, relying
+on `-Wmissing-field-initializers` to flag a new one — was also tested and **does
+not warn**: GCC does not apply that diagnostic to designated initializers, with
+either `-Wextra` or the flag named explicitly.
+
+**Field names are invisible to the compiler**, so no compile-time mechanism can
+catch a rename. That is acceptable: a rename that keeps type and position does
+not change the stored bytes. It only matters if it signals a *semantic* change,
+which no layout guard can see.
+
+### The guard that does work: remove the hiding place
+
+Make the implicit padding an explicit field, then assert that no implicit
+padding remains. A new field then has nowhere to land silently — it must either
+grow the struct (caught) or visibly consume the named reserve, which is an edit
+sitting directly beneath the version constant.
+
+```c
+typedef struct {
+    char    name[16];       /* "" = slot disabled */
+    int32_t min;
+    uint8_t reload;
+    uint8_t break_eligible;
+    uint8_t rsvd[2];        /* was implicit padding; named so nothing can hide */
+} nvs_timer_def_t;
+
+_Static_assert(sizeof(nvs_timer_def_t) == 24, "layout grew: migrate or bump BLOB_VERSION");
+_Static_assert(offsetof(nvs_timer_def_t, min) == 16, "fields reordered");
+_Static_assert(offsetof(nvs_timer_def_t, reload) == 20, "fields reordered");
+_Static_assert(offsetof(nvs_timer_def_t, break_eligible) == 21, "fields reordered");
+_Static_assert(offsetof(nvs_timer_def_t, rsvd) == 22, "fields reordered");
+_Static_assert(16 + 4 + 1 + 1 + 2 == sizeof(nvs_timer_def_t),
+               "implicit padding reappeared: a new field could hide in it");
+_Static_assert(sizeof(nvs_timer_defs_blob_t) == 100, "blob layout changed");
+```
+
+The blob header needs the same treatment — `uint8_t version` followed by a
+4-byte-aligned array carries 3 implicit padding bytes, so it becomes
+`uint8_t version; uint8_t rsvd[3];`.
+
+**This change is free to deploy.** Verified: naming the padding leaves
+`sizeof(def) == 24`, `sizeof(blob) == 100` and `offsetof(blob, defs) == 4`
+exactly as they are today, so it is byte-identical to blobs already on devices
+and needs no migration of its own. Both writers already `memset` before
+filling, so the reserve stays zeroed and is usable by a future field.
+
+Prefer the individual asserts over a single digest: identical detection power,
+but a digest reports one opaque number where these name the field that moved.
+
 ### Fix constraints
 
 * **Migrate rather than discard. Decided 2026-08-07 (reporter).** Read a v1
@@ -442,10 +511,22 @@ values.
   seeding" are different events and must not share a silent code path. This
   constraint is unconditional and is arguably worth landing on its own even if
   the migration is deferred.
-* **Decide the two-version relationship explicitly — OPEN, under discussion.**
-  Either tie the blob version to `DISC_SCHEMA_VER`, drop it, or state in the
-  code why they are independent. Leaving it implicit is how this became
-  invisible. See the measurement below before choosing.
+* **Keep `TIMER_DEFS_BLOB_VERSION`, independent of `DISC_SCHEMA_VER`, and
+  guard the layout mechanically. Decided 2026-08-07.** Two alternatives were
+  rejected with reasons:
+  * *Tie it to `DISC_SCHEMA_VER`* — no. That constant bumps for cosmetic entity
+    changes (v16 was "text entities advertise their max length"), so keying the
+    blob on it would make every cosmetic HA tweak invalidate the stored timer
+    table. Strictly worse than today. The two versions answer different
+    questions and the code should say so.
+  * *Store the defs as JSON and retire layout versioning entirely* — no. It
+    would work, and it would unify the stored form with the wire form, but it
+    puts a cJSON parse at `timer_defs_install()` time. That is early boot,
+    where today cJSON only runs inside the network window.
+* **The version's role changes** from an equality tripwire that discards to a
+  migration-ladder input (`if (v < CURRENT) migrate_up()`). That is what the
+  migrate decision above actually means, and it deletes the silent-discard
+  branch rather than making it quieter.
 * Fixing this must not resurrect the defect formerly filed as BUG-6: a re-seed
   writes Kconfig names into every slot, which makes each slot look *existing*
   to `apply_timers()`, so a subsequent document that omits `break` will now
