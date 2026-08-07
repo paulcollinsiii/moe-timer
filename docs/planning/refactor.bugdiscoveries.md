@@ -281,6 +281,92 @@ is where the sweep gets generalised anyway.
 
 ---
 
+## BUG-5 — a stale timer-defs blob silently resets every HA timer edit
+
+**Status:** OPEN · **Found:** 2026-08-07, hardware, build `59c3afa`
+**Severity:** user-visible data loss — HA-configured timer definitions revert
+to compile-time defaults with no log line and no indication anything happened.
+
+### Reported
+
+After flashing `59c3afa` and letting a full sync run, the "break eligible"
+switches for extra timers 3 and 4 went to **OFF** in HA, having been set ON
+there. Timers 1 and 2 were unaffected.
+
+### Who is canonical (the reporter's actual question)
+
+**The device's NVS blob is canonical.** HA holds no durable copy of a timer
+definition — the switch entities mirror whatever `ha_config_state_json()`
+(`main/ha_config.c:296`) last published to the `cfg` topic. So when the blob
+changes, HA's UI follows it. "The publish is toggling the flag" is literally
+what happens: the publish is the device telling HA what it now believes.
+
+Three writers reach that blob, and they do not agree on semantics:
+
+1. `main/ha_config.c:270` — the HA switch, a **surgical per-field** write.
+2. `main/config_apply.c:177` — the retained config document, a **whole-table
+   replace** in which an absent `break` field means false. Deliberate; the
+   comment at `:157-159` argues a wrong true is worse than a wrong false.
+3. `main/timer_defs.c:81-91` — the seed from the Kconfig table.
+
+### Why 3 and 4 specifically — the pattern is not a coincidence
+
+The checked-in `sdkconfig` is:
+
+```
+CONFIG_MAGTAG_TIMER1_NAME="Piano"    CONFIG_MAGTAG_TIMER1_BREAK_ELIGIBLE=y
+CONFIG_MAGTAG_TIMER2_NAME="Violin"   CONFIG_MAGTAG_TIMER2_BREAK_ELIGIBLE=y
+CONFIG_MAGTAG_TIMER3_NAME="Laundry"  # TIMER3_BREAK_ELIGIBLE is not set
+CONFIG_MAGTAG_TIMER4_NAME=""         # TIMER4_BREAK_ELIGIBLE is not set
+```
+
+Writer 3 therefore produces **exactly** ON, ON, OFF, OFF. No further assumption
+is needed to reproduce the report, which is what makes the Kconfig re-seed the
+leading candidate over the config-document path.
+
+### The defect
+
+`nvs_config_get_timer_defs()` (`main/nvs_config.c:248`) returns
+`ESP_ERR_INVALID_VERSION` on **any** size or version drift. `timer_defs_install()`
+does not distinguish that from "never configured" — both take the same branch,
+whose comment says *"No HA-managed blob yet"*, and it re-seeds from Kconfig and
+writes the result back over the user's table.
+
+There is **no migration and no log line at all** on that path. A user's entire
+timer configuration can be discarded silently.
+
+`TIMER_DEFS_BLOB_VERSION` went to 2 in `6fab99d feat(timer)!: add break_eligible
+to the timer definition`. Any device carrying a pre-`6fab99d` blob — or one whose
+NVS was erased — hits this on first boot of a newer build. The `!` marks the
+break, but a breaking schema change that silently eats configuration is still a
+defect: v1's fields are a strict prefix of v2's, so a real migration is available
+and would preserve names, minutes and reload while defaulting only the new field.
+
+### Distinguishing it from the config-document path — no code needed
+
+The re-seed (writer 3) resets the WHOLE table, not just the break flags. Writer
+2 resets only what the document omits. So:
+
+* **Check timer 4 in HA.** Kconfig has `TIMER4_NAME=""` — disabled. If timer 4
+  now shows as empty/disabled, writer 3 fired.
+* If timer 4 kept an HA-set name and only the break flags moved, it is writer 2,
+  meaning the retained `config` document carries a `timers` array without `break`
+  on entries 3 and 4. Note writer 2 is `cfg_ver`-guarded
+  (`main/config_apply.c:205`), so it only fires when the document version changes
+  or when `cfg_ver` itself was lost.
+
+### Fix constraints
+
+* Migrate rather than discard: read a v1 blob, copy the common prefix, default
+  `break_eligible` to the Kconfig value for that slot, write back as v2.
+* Whatever the policy, **log it**. "Stale blob, config reset" and "no blob yet,
+  seeding" are different events and must not share a silent code path.
+* Writer 2's "absent means false" is defensible in isolation but becomes a trap
+  next to writer 1's surgical write. Any fix should decide deliberately whether
+  a config document that omits `break` is asserting false or asserting nothing.
+
+---
+
 ## Log-stub vararg landmine — censused in one file, unrecorded in two
 
 **Status:** hazard, not a defect today (verified) · **Found:** 2026-08-07
