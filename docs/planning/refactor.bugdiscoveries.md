@@ -1,7 +1,8 @@
 # Open defects and hazards — the working list
 
 This began as the register of defects found while executing
-`20260729.refactormain.plan.md` and deliberately **not** fixed during it. That
+`docs/planning/implemented/20260729.refactormain.plan.md` and deliberately
+**not** fixed during it. That
 refactor has landed and merged (`5d837a6` on `integration`), so the register is
 now simply **the task list for the next phase**.
 
