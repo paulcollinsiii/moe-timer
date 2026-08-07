@@ -1,37 +1,70 @@
-# Bug discoveries deferred during the main.c refactor
+# Open defects and hazards — the working list
 
-Defects found while executing `20260729.refactormain.plan.md`, deliberately
-**not** fixed during it.
+This began as the register of defects found while executing
+`docs/planning/implemented/20260729.refactormain.plan.md` and deliberately
+**not** fixed during it. That
+refactor has landed and merged (`5d837a6` on `integration`), so the register is
+now simply **the task list for the next phase**.
 
-The refactor's whole value is the claim that behaviour did not change — proven
-by differential sweeps comparing full ordered effect traces against a baseline
-commit. Fixing a bug mid-move destroys that proof for the function it touches:
-the control harness would diverge, and there would be no way to tell an
-intended fix from an accidental regression. So each FIRMWARE defect here is
-pinned by a test that asserts the CURRENT, WRONG behaviour, and gets its own
-commit after the refactor lands.
+The original deferral rule no longer binds. It existed because the refactor's
+whole value was the claim that behaviour did not change, proven by differential
+sweeps against a baseline commit; fixing a bug mid-move would have made an
+intended fix indistinguishable from an accidental regression. That proof is
+banked. Each firmware defect below is still pinned by a test asserting the
+CURRENT, WRONG behaviour, and **each fix must flip its pinning test
+deliberately, not silently** — a fix that leaves its pin passing has not been
+demonstrated.
 
-BUG-4 is the exception and is marked as such: it is a defect in the
-verification harness itself, not in firmware, so there is no device behaviour
-to pin. It is filed here rather than as a chore because it makes the sweeps
-report a false PASS, and the sweeps are what every other entry's "deliberately
-preserved" claim rests on.
-
-Close these out before declaring the refactor finished. Each firmware fix must
-flip its pinning test deliberately, not silently.
+Entries are **deleted from this file when they land**, not marked done. A closed
+item keeps a one-line tombstone only where source comments name it, so those
+references still resolve. Durable lessons do not live here at all — see
+**Standing rules** at the foot, which exist to be promoted out of this file
+before it is consumed.
 
 | Status | Meaning |
 |---|---|
 | OPEN | Reproduced, not yet fixed |
 | HYPOTHESIS | Observed on hardware, root cause not yet confirmed in code |
 | CONDITIONAL | Not a bug today; becomes one if a named change lands |
-| hazard | Not wrong today (verified); a named future change makes it wrong |
+| HAZARD | Not wrong today (verified); a named future change makes it wrong |
+
+Two entries are not firmware defects and are marked so: **BUG-4** is a defect in
+the verification harness, and **HAZ-2** a gap in it. They are filed here rather
+than as chores because the sweeps are what every "deliberately preserved" claim
+in this file rests on.
+
+---
+
+## Order of work
+
+Ordered by dependency first, then by cost. The two genuine sequencing
+constraints are called out; everything else is independent and can be reordered
+freely.
+
+| # | Item | Why here | Blocked by |
+|---|---|---|---|
+| 1 | **BUG-4** + **HAZ-2** — harness portability and the cycle09 trace cap | The sweeps currently point at a worktree that has served its purpose and can be deleted at any time, taking the ability to re-verify anything else in this list with it. Same file family, one commit. | — |
+| 2 | **HAZ-1** — calls inside log-statement arguments | Mechanical, closes a whole class, touches nothing else | — |
+| 3 | **BUG-5** — timer-defs blob drift discards the user's table | User-data policy; independent of the button work | — |
+| 4 | **BUG-7** — a RUNNING slot outliving its own definition | State-machine change to an uncovered path; independent | — |
+| 5 | **BUG-2**, then **BUG-3** | Same latch/mask surface — fix together so each is checked against the other. Both need a re-baselined sweep to show the fix changed *only* the intended cases. | 1 |
+| — | **BUG-1** | **Parked 2026-08-07.** Settling its fork needs an instrumented build run on hardware, which is reporter time rather than engineering time. Revisit after item 5: BUG-2's fix touches the same latch surface and may move the ground under it. | — |
+
+**Constraint 1 — BUG-4 before BUG-2/BUG-3.** Fixing a pinned bug makes the
+sweep's control diverge by design. That is only informative if the sweep can be
+re-baselined and re-run from an arbitrary checkout, which is exactly what BUG-4
+prevents today.
+
+**Constraint 2 — BUG-2 and BUG-3 together.** They share a root shape and both
+touch button-latch masks; a fix for either must be checked against the other
+rather than applied in isolation.
 
 ---
 
 ## BUG-1 — Button presses are swallowed during the hourly NTP-sync wake
 
-**Status:** HYPOTHESIS · **Found:** 2026-08-04, hardware, build `136cb06`
+**Status:** PARKED 2026-08-07 (was HYPOTHESIS) · **Found:** 2026-08-04, hardware,
+build `136cb06`
 **Severity:** user-visible; the device appears dead to input for several seconds
 
 ### Observed
@@ -248,7 +281,7 @@ harness_control  cases=121504  divergences=0  OK  (identical)
 with exit 0 — it had read the worktree's file and never looked at the
 copy's.
 
-### Why this matters after the branch merges
+### Why this matters now the branch has merged
 
 Two failure modes, and the safe one is the one that goes away:
 
@@ -256,10 +289,12 @@ Two failure modes, and the safe one is the one that goes away:
    checkout silently sweeps the WORKTREE and reports OK. Anyone
    re-verifying the refactor from main gets a green result that says
    nothing about the code in front of them.
-2. **Once the worktree is deleted**, which is the normal end state —
-   `git -C <gone> show` raises, `run.sh` prints `generate FAILED` and
-   exits 1. Loud, but the sweeps are then permanently unrunnable for
-   everyone, which defeats the point of `a7050d4` checking them in.
+2. **Once the worktree is deleted**, which is the normal end state and is
+   now imminent — the branch merged as `5d837a6` and the worktree has no
+   further purpose — `git -C <gone> show` raises, `run.sh` prints
+   `generate FAILED` and exits 1. Loud, but the sweeps are then permanently
+   unrunnable for everyone, which defeats the point of `a7050d4` checking
+   them in. **This is why the entry is item 1.**
 
 Note the results in the commits on this branch are NOT affected: every
 run was invoked from inside the worktree, where `REPO` and the caller's
@@ -274,332 +309,523 @@ levels), not from a constant. Whatever replaces it needs a test that
 *fails* when the sweep is pointed at a tree it did not come from —
 otherwise the next copy of this defect is invisible again.
 
-Related: `BASE` is a bare SHA on this branch (`7aab085` and friends). If
-this branch is squash-merged those objects become unreachable and the
-baseline read fails for the same reason. Belongs to **task 15**, which
-is where the sweep gets generalised anyway.
+Related: `BASE` is a bare SHA on this branch (`7aab085` and friends).
+The merge was `--no-ff`, not a squash, so those objects remain reachable
+from `integration` and the baseline read still works — but it survives on
+a merge-strategy accident, not by design. Pin `BASE` to a tag or an
+annotated ref as part of the same fix. The wider generalisation belongs to
+`docs/planning/20260807.propertychecker.plan.md`, which names this entry as
+its prerequisite.
 
 ---
 
-## BUG-5 — a stale timer-defs blob silently resets every HA timer edit
+## BUG-5 — a timer-defs blob version bump silently discards the user's table
 
 **Status:** OPEN · **Found:** 2026-08-07, hardware, build `59c3afa`
-**Severity:** user-visible data loss — HA-configured timer definitions revert
-to compile-time defaults with no log line and no indication anything happened.
+**Severity:** user-visible data loss, **one-shot per version bump** — an
+HA-configured timer table reverts to compile-time defaults with no log line and
+no indication anything happened.
 
-### Reported
-
-After flashing `59c3afa` and letting a full sync run, the "break eligible"
-switches for extra timers 3 and 4 went to **OFF** in HA, having been set ON
-there. Timers 1 and 2 were unaffected.
-
-### Who is canonical (the reporter's actual question)
-
-**The device's NVS blob is canonical.** HA holds no durable copy of a timer
-definition — the switch entities mirror whatever `ha_config_state_json()`
-(`main/ha_config.c:296`) last published to the `cfg` topic. So when the blob
-changes, HA's UI follows it. "The publish is toggling the flag" is literally
-what happens: the publish is the device telling HA what it now believes.
-
-Three writers reach that blob, and they do not agree on semantics:
-
-1. `main/ha_config.c:270` — the HA switch, a **surgical per-field** write.
-2. `main/config_apply.c:177` — the retained config document, a **whole-table
-   replace** in which an absent `break` field means false. Deliberate; the
-   comment at `:157-159` argues a wrong true is worse than a wrong false.
-3. `main/timer_defs.c:81-91` — the seed from the Kconfig table.
-
-### Why 3 and 4 specifically — the pattern is not a coincidence
-
-The checked-in `sdkconfig` is:
-
-```
-CONFIG_MAGTAG_TIMER1_NAME="Piano"    CONFIG_MAGTAG_TIMER1_BREAK_ELIGIBLE=y
-CONFIG_MAGTAG_TIMER2_NAME="Violin"   CONFIG_MAGTAG_TIMER2_BREAK_ELIGIBLE=y
-CONFIG_MAGTAG_TIMER3_NAME="Laundry"  # TIMER3_BREAK_ELIGIBLE is not set
-CONFIG_MAGTAG_TIMER4_NAME=""         # TIMER4_BREAK_ELIGIBLE is not set
-```
-
-Writer 3 therefore produces **exactly** ON, ON, OFF, OFF. No further assumption
-is needed to reproduce the report, which is what makes the Kconfig re-seed the
-leading candidate over the config-document path.
+> **Rescoped 2026-08-07.** This entry was originally titled *"a stale timer-defs
+> blob silently resets every HA timer edit"* and was written as the explanation
+> for the reported break-eligible reverts. It is not that. The recurring cause
+> was the bulk config document (the entry formerly numbered BUG-6, fixed in
+> `733e86e`); the ON, ON, OFF, OFF pattern the reporter saw followed from that,
+> not from this. What remains here is a real but **narrower** defect: a blob
+> version bump discards user configuration once, silently. The diagnostic
+> scaffolding that existed to tell the two apart has been dropped as spent.
 
 ### The defect
 
 `nvs_config_get_timer_defs()` (`main/nvs_config.c:248`) returns
-`ESP_ERR_INVALID_VERSION` on **any** size or version drift. `timer_defs_install()`
-does not distinguish that from "never configured" — both take the same branch,
-whose comment says *"No HA-managed blob yet"*, and it re-seeds from Kconfig and
-writes the result back over the user's table.
+`ESP_ERR_INVALID_VERSION` on **any** size or version drift.
+`timer_defs_install()` (`main/timer_defs.c:76`) does not distinguish that from
+"never configured" — both take the same branch, whose comment reads *"No
+HA-managed blob yet"*, and it re-seeds from the Kconfig table and writes the
+result back over the user's table.
 
 There is **no migration and no log line at all** on that path. A user's entire
-timer configuration can be discarded silently.
+timer configuration can be discarded without a trace.
 
-`TIMER_DEFS_BLOB_VERSION` went to 2 in `6fab99d feat(timer)!: add break_eligible
-to the timer definition`. Any device carrying a pre-`6fab99d` blob — or one whose
-NVS was erased — hits this on first boot of a newer build. The `!` marks the
-break, but a breaking schema change that silently eats configuration is still a
-defect: v1's fields are a strict prefix of v2's, so a real migration is available
-and would preserve names, minutes and reload while defaulting only the new field.
+`TIMER_DEFS_BLOB_VERSION` went to 2 in `6fab99d feat(timer)!: add
+break_eligible to the timer definition`. Any device carrying a pre-`6fab99d`
+blob — or one whose NVS was erased — hits this on first boot of a newer build.
+The `!` marks the break, but a breaking schema change that silently eats
+configuration is still a defect: v1's fields are a strict prefix of v2's, so a
+real migration is available and would preserve names, minutes and reload while
+defaulting only the new field.
 
-### CORRECTION 2026-08-07 — the re-seed is not the recurring cause
+### Who is canonical — corrected
 
-Follow-up from hardware settled it. The reporter confirmed: the flags did
-**not** come back on a later sync, the timer **names DID update to match the
-HA config**, and a manual re-toggle applies correctly (until it reverts again).
+An earlier revision of this file asserted *"the device's NVS blob is canonical;
+HA holds no durable copy of a timer definition."* **The second half is wrong**
+and the correction matters, because it changes what a fix may rely on. Two
+durable copies exist off-device:
 
-Names updating is the tell: that only happens when `apply_timers()` runs, so
-the **bulk config document is applying**, not merely the Kconfig re-seed. The
-re-seed may have been the first trigger; it is not what makes this recur. See
-**BUG-6**, which is the actual mechanism. This entry stands as a real defect on
-its own — a silent, unlogged reset of user configuration on blob drift — but it
-is not the one the reporter is hitting repeatedly.
+1. **The retained bulk `config` document.** Fully durable on the broker;
+   reapplied when its `ver` differs from the stored `cfg_ver`
+   (`main/config_apply.c:233`, recorded at `:265`).
+2. **The retained per-entity `set/` commands.** HA's config entities advertise
+   `"retain":true` on their command topic (`main/ha_config.c:358`), so the
+   broker does hold each value — but `apply_sets()` **deletes each one once
+   applied** (`main/mqtt_ha.c:312-323`), deliberately, so a stale set cannot
+   re-override the bulk document every window. So this copy is durable only
+   until first consumption.
 
-### Distinguishing it from the config-document path — no code needed
+The blob is the *runtime* source of truth and is what `ha_config_state_json()`
+publishes, so HA's UI mirrors it — "the publish is toggling the flag" is the
+device telling HA what it now believes. But the blob is not the only durable
+store, and copy 2's consume-on-apply is precisely why the original report never
+self-healed.
 
-The re-seed (writer 3) resets the WHOLE table, not just the break flags. Writer
-2 resets only what the document omits. So:
+### The stated policy (reporter, 2026-08-07)
 
-* **Check timer 4 in HA.** Kconfig has `TIMER4_NAME=""` — disabled. If timer 4
-  now shows as empty/disabled, writer 3 fired.
-* If timer 4 kept an HA-set name and only the break flags moved, it is writer 2,
-  meaning the retained `config` document carries a `timers` array without `break`
-  on entries 3 and 4. Note writer 2 is `cfg_ver`-guarded
-  (`main/config_apply.c:205`), so it only fires when the document version changes
-  or when `cfg_ver` itself was lost.
+> * defaults are loaded at flash
+> * device does a full sync and sees the existing document from HA
+> * **if the document versions are the same** (the config structure has not
+>   changed) **the HA doc is canonical**
+> * **if the doc versions have changed, the device defaults win**
+>
+> "That allows for upgrades to happen cleanly, while bug fixes land without
+> changing the HA set config."
+
+The version meant is `DISC_SCHEMA_VER` (`main/mqtt_ha.c:25`, currently 16).
+
+**Note the axis mismatch, which the fix must resolve deliberately.** That policy
+is stated over the *discovery/document* schema; this defect is on
+`TIMER_DEFS_BLOB_VERSION`, the *NVS blob* schema. They are different versions
+that move for different reasons, and today nothing ties them together. A blob
+bump with no accompanying document change currently means "device defaults win"
+by accident rather than by decision.
+
+### Measured: the size check cannot replace the version field
+
+Relevant because dropping `TIMER_DEFS_BLOB_VERSION` and leaning on the existing
+`len != sizeof(*out)` test is the obvious simplification, and it does not work.
+`nvs_timer_def_t` is `char name[16]; int32_t min; uint8_t reload; uint8_t
+break_eligible;` — 22 bytes of content in a 24-byte struct, so it carries **two
+spare padding bytes**. Compiling the v1 (pre-`6fab99d`), v2 (current) and a
+hypothetical v3 layout with one more `uint8_t` flag:
+
+| Layout | `sizeof(def)` | `sizeof(blob)` | size check catches drift? |
+|---|---|---|---|
+| v1 — no `break_eligible` | 24 | 100 | — |
+| v2 — current | 24 | 100 | **no** |
+| v3 — one more `uint8_t` flag | 24 | 100 | **no** |
+
+All three are byte-identical in size. The size test would not have caught the
+v1→v2 bump that created this defect, and will not catch the next flag either,
+because the next two `uint8_t` fields land in existing padding for free. **The
+version field is the only thing that has ever detected drift here.**
+
+Both writers `memset` before filling, so a v1 blob misread as v2 would today
+yield `break_eligible = 0` everywhere rather than garbage — silently wrong, not
+random. The sharper hazard is any future change that *reuses* a padding byte or
+*reorders* fields: same size, different meaning, old bytes read as valid new
+values.
+
+### Measured: a layout digest cannot replace the padding it hides in
+
+A compile-time checksum over the struct layout was proposed as a stronger guard
+than a bare `sizeof` assert — one constant catching reorders, additions and
+renames at once. Measured against the case that actually produced this defect,
+it does not:
+
+| Guard | Field reordered | Field added into trailing padding | Field renamed |
+|---|---|---|---|
+| `sizeof` assert | no | **no** | no |
+| `offsetof` asserts per field | yes | **no** | no |
+| Layout digest over enumerated fields | yes | **no** | no |
+| Designated-initializer canary | — | **no** (see below) | no |
+
+Both the digest and the per-field asserts are built from the *enumerated*
+fields, so a field nobody enumerated is invisible to both. Adding a `uint8_t`
+into the two trailing padding bytes leaves `sizeof` at 24 and every existing
+offset unchanged — the digest comes out **identical** (verified: 24574019 either
+way). That is exactly the shape of the v1→v2 `break_eligible` addition.
+
+The designated-initializer canary — a `static const` naming every field, relying
+on `-Wmissing-field-initializers` to flag a new one — was also tested and **does
+not warn**: GCC does not apply that diagnostic to designated initializers, with
+either `-Wextra` or the flag named explicitly.
+
+**Field names are invisible to the compiler**, so no compile-time mechanism can
+catch a rename. That is acceptable: a rename that keeps type and position does
+not change the stored bytes. It only matters if it signals a *semantic* change,
+which no layout guard can see.
+
+### The guard that does work: remove the hiding place
+
+Make the implicit padding an explicit field, then assert that no implicit
+padding remains. A new field then has nowhere to land silently — it must either
+grow the struct (caught) or visibly consume the named reserve, which is an edit
+sitting directly beneath the version constant.
+
+```c
+typedef struct {
+    char    name[16];       /* "" = slot disabled */
+    int32_t min;
+    uint8_t reload;
+    uint8_t break_eligible;
+    uint8_t rsvd[2];        /* was implicit padding; named so nothing can hide */
+} nvs_timer_def_t;
+
+_Static_assert(sizeof(nvs_timer_def_t) == 24, "layout grew: migrate or bump BLOB_VERSION");
+_Static_assert(offsetof(nvs_timer_def_t, min) == 16, "fields reordered");
+_Static_assert(offsetof(nvs_timer_def_t, reload) == 20, "fields reordered");
+_Static_assert(offsetof(nvs_timer_def_t, break_eligible) == 21, "fields reordered");
+_Static_assert(offsetof(nvs_timer_def_t, rsvd) == 22, "fields reordered");
+_Static_assert(16 + 4 + 1 + 1 + 2 == sizeof(nvs_timer_def_t),
+               "implicit padding reappeared: a new field could hide in it");
+_Static_assert(sizeof(nvs_timer_defs_blob_t) == 100, "blob layout changed");
+```
+
+The blob header needs the same treatment — `uint8_t version` followed by a
+4-byte-aligned array carries 3 implicit padding bytes, so it becomes
+`uint8_t version; uint8_t rsvd[3];`.
+
+**This change is free to deploy.** Verified: naming the padding leaves
+`sizeof(def) == 24`, `sizeof(blob) == 100` and `offsetof(blob, defs) == 4`
+exactly as they are today, so it is byte-identical to blobs already on devices
+and needs no migration of its own. Both writers already `memset` before
+filling, so the reserve stays zeroed and is usable by a future field.
+
+Prefer the individual asserts over a single digest: identical detection power,
+but a digest reports one opaque number where these name the field that moved.
 
 ### Fix constraints
 
-* Migrate rather than discard: read a v1 blob, copy the common prefix, default
-  `break_eligible` to the Kconfig value for that slot, write back as v2.
-* Whatever the policy, **log it**. "Stale blob, config reset" and "no blob yet,
-  seeding" are different events and must not share a silent code path.
-* Writer 2's "absent means false" is defensible in isolation but becomes a trap
-  next to writer 1's surgical write. Any fix should decide deliberately whether
-  a config document that omits `break` is asserting false or asserting nothing.
+* **Migrate rather than discard. Decided 2026-08-07 (reporter).** Read a v1
+  blob, copy the common prefix, default `break_eligible` from the Kconfig value
+  for that slot, write back as v2. This is what makes the stated policy's
+  second clause ("bug fixes land without changing the HA set config") actually
+  hold.
+* **Consequence of that decision, flagged deliberately:** the silent re-seed is
+  currently the *only* mechanism by which device defaults ever beat the HA
+  document. `config_apply` has no such branch — it skips when `cfg_ver` matches
+  and applies when it does not (`main/config_apply.c:233`), and never prefers
+  its own defaults. So migrating does not merely fix a bug, it **removes the
+  only implementation of "device defaults win"** that exists. If that clause of
+  the stated policy is wanted for real, it is new work and must be built
+  deliberately.
+* **Whatever the policy, log it.** "Stale blob, config reset" and "no blob yet,
+  seeding" are different events and must not share a silent code path. This
+  constraint is unconditional and is arguably worth landing on its own even if
+  the migration is deferred.
+* **Keep `TIMER_DEFS_BLOB_VERSION`, independent of `DISC_SCHEMA_VER`, and
+  guard the layout mechanically. Decided 2026-08-07.** Two alternatives were
+  rejected with reasons:
+  * *Tie it to `DISC_SCHEMA_VER`* — no. That constant bumps for cosmetic entity
+    changes (v16 was "text entities advertise their max length"), so keying the
+    blob on it would make every cosmetic HA tweak invalidate the stored timer
+    table. Strictly worse than today. The two versions answer different
+    questions and the code should say so.
+  * *Store the defs as JSON and retire layout versioning entirely* — no. It
+    would work, and it would unify the stored form with the wire form, but it
+    puts a cJSON parse at `timer_defs_install()` time. That is early boot,
+    where today cJSON only runs inside the network window.
+* **The version's role changes** from an equality tripwire that discards to a
+  migration-ladder input (`if (v < CURRENT) migrate_up()`). That is what the
+  migrate decision above actually means, and it deletes the silent-discard
+  branch rather than making it quieter.
+* Fixing this must not resurrect the defect formerly filed as BUG-6: a re-seed
+  writes Kconfig names into every slot, which makes each slot look *existing*
+  to `apply_timers()`, so a subsequent document that omits `break` will now
+  preserve the **Kconfig** value rather than the user's. Migration avoids this;
+  reset-and-log does not.
 
 ---
 
-## BUG-6 — the bulk config document destroys `break_eligible` every time it applies
+## BUG-7 — a RUNNING slot outlives its own definition
 
-**Status:** FIXED 2026-08-07 · **Found:** 2026-08-07, hardware, build `59c3afa`
-**Severity:** user-visible, **recurring** — an HA-set switch silently reverts
-whenever the bulk config document is republished with a new `ver`.
+**Status:** OPEN · **Found:** during `feature/break-eligible` review · **Severity:**
+user-visible; corrupts the screen-exposure balance and breaks two documented
+state invariants
 
-### Reported
+Folded in from `docs/planning/20260729.orphaned-running-slot.note.md`, which is
+deleted; it was already confirmed out of scope for the branch that found it and
+is an uncovered corner case, which is what this list is for. It **predates** the
+refactor: present unchanged at `5154a04` and at every commit back through the
+introduction of `timer_ensure_active_slot_enabled`.
 
-"Break Eligible" for extra timers 3 and 4 reverts to OFF. It does not come back
-on a later sync. The timer **names DO update** to match the HA config. Manually
-re-toggling the switch applies correctly — until it reverts again.
+### The defect
 
-### Mechanism — every reported fact follows from it
-
-There are two config channels, and the firmware makes the bulk document win by
-consuming the other one:
-
-1. **Per-field sets.** HA's entity commands are retained
-   (`"retain":true`, `main/ha_config.c:358`), so the broker holds each value.
-   `apply_sets()` applies one, then **clears the retained command**
-   (`main/mqtt_ha.c:318-323`). Its comment states the intent: *"stops a stale
-   set from re-overriding the bulk config document every window."* A set is
-   therefore a **one-shot edit**, not a durable store.
-2. **The bulk document.** `apply_timers()` (`main/config_apply.c:126-181`) is a
-   **whole-table replace**: `memset` the blob, refill from the JSON array,
-   write. `break_eligible` comes from `(brk != NULL && cJSON_IsTrue(brk))`
-   (`:177`) — **absent means false**.
-
-The sequence that reproduces the report exactly:
-
-1. User toggles the switch → retained `set/timer3_break=ON`.
-2. Next window: applied (NVS = 1), retained command **cleared**. HA shows ON.
-   Everything looks correct.
-3. Later the bulk document is republished with a new `ver` — e.g. the nightly
-   holidays automation `docs/home_assistant.md` recommends.
-4. `apply_timers` whole-table replaces. **Names update** (they are in the
-   document). `break` is absent → **cleared to 0**.
-5. `apply_sets` runs after `config_apply` in `apply_incoming()`
-   (`main/mqtt_ha.c:433` then `:464`), so a live set WOULD win — but step 2
-   already consumed it. **Nothing is left to restore the flag.**
-6. The device publishes the post-clobber state; HA's switch follows to OFF.
-   It never heals.
-
-### Why only `break_eligible`, and why names were fine
-
-`break_eligible` is **the only timer-def field the documented bulk schema
-cannot express.** `docs/home_assistant.md:185` shows entries of
-`{"name", "min", "reload"}` only. Those three round-trip through the document
-and survive. `break` does not appear there — even though
-`main/config_apply.c:160` parses it — so every application of a
-documentation-shaped document asserts false for it.
-
-Which slots survive is a property of the operator's document: entries carrying
-`break: true` are preserved, entries omitting it are cleared. That is the
-checkable prediction here.
-
-### Immediate workaround — no firmware change
-
-Add `"break": true` to the affected entries of the retained config document:
-
-```json
-"timers": [
-  {"name": "Piano",   "min": 15, "reload": true,  "break": true},
-  {"name": "Violin",  "min": 15, "reload": true,  "break": true},
-  {"name": "Laundry", "min": 45, "reload": false, "break": true},
-  {}
-]
+```c
+void timer_ensure_active_slot_enabled(void) {
+    if (!slot_enabled(g_rtc_state.active_slot))
+        g_rtc_state.active_slot = 0;
+}
 ```
 
-The key is already parsed; only the documentation omits it.
+`timer_ensure_active_slot_enabled()` (`main/timer.c:57`) moves the selection off
+a slot whose definition is gone. It does **not** check whether that slot is
+`RUNNING`, and `timer_restore_snapshot()` calls it unconditionally at the end
+(`main/timer.c:~860`). The slot's own state is restored first and left alone —
+the comment there says so explicitly (*"its state stays restored; only the
+selection moves"*).
 
-### Fixed
+So after restoring a snapshot whose active slot was RUNNING and whose
+`MAGTAG_TIMER<n>_NAME` was emptied by a reflash, the device is left with a
+RUNNING slot that is not the active slot.
 
-`apply_timers()` now starts from the **stored** table rather than from zero,
-and the optional keys follow: **absent leaves an existing slot alone**, false
-only for a slot the document defines for the first time. Applied to `reload`
-as well as `break` — identical shape, identical defect; `reload` bites less
-often only because it IS documented.
+### Repro
 
-`docs/home_assistant.md` was the other half and is corrected: `break` appears
-in the bulk `timers` example, the per-timer break switch is listed with the
-other entities, and the optional-key rule is stated with both caveats (a new
-slot has no stored value to keep; "already defined" is by slot, not by name,
-so a repurposed slot must say `"break": false` explicitly).
+1. Configure an extra timer — say slot 1, "Piano".
+2. Start it. Let a snapshot be written (any `enter_deep_sleep`).
+3. Reflash with `MAGTAG_TIMER1_NAME=""`, or delete the timer from Home
+   Assistant, which empties the name in the defs blob.
+4. Boot the same day, so the snapshot restores.
 
-Pinned by five cases in `test_config_apply`. Two —
-`test_an_absent_break_leaves_an_existing_slot_alone` and
-`test_an_absent_reload_leaves_an_existing_slot_alone` — fail against the old
-semantics, verified by reverting the change. The other three (new-slot
-default, explicit false still clears, a disabled slot does not donate its
-flags) pass either way **by design**: they pin behaviour deliberately
-PRESERVED, so they guard against over-correcting the fix into "ignore the
-key" rather than regression-testing the bug.
+Slot 1 comes back RUNNING; the selection is forced to slot 0.
 
-**Still open on the design side, deliberately not addressed here:** the two
-channels remain asymmetric. `apply_sets` still consumes the retained set/
-command (`main/mqtt_ha.c:318-323`), so a per-field edit is still one-shot.
-That is now sound for the timer fields, because the document can express all
-of them and no longer overrides them by omission — but the same trap reopens
-for any future entity-settable field the bulk schema does not carry. The
-durable rule is: **anything settable from an HA entity must be expressible in
-the bulk document.**
+### Invariants broken
 
-### Original fix constraints
+From `include/timer.h` and `test/test_timer`'s `assert_state_legal()`:
 
-* **`docs/home_assistant.md` is stale and is part of the defect** — it omits
-  `break` from the bulk `timers` schema and omits the break switch from the
-  entity list. A field that exists in the firmware, is settable from HA, and is
-  destroyed by an undocumented default is a documentation bug with teeth.
-* **Decide what an absent key means.** Today it asserts false. The safety
-  argument at `main/config_apply.c:157-159` (a wrong `true` lets a screen
-  activity run during a break) justifies false for a slot being defined for the
-  FIRST time; it does not justify overriding a value the user already set. The
-  likely correct rule is *absent = leave unchanged for an existing slot, false
-  for a new one.*
-* **Whichever rule wins, the two channels must agree.** Consuming the retained
-  set (channel 1) is only sound if the document (channel 2) can express
-  everything the entities can. Today it cannot, and that gap is the bug.
+* **I1** — only the ACTIVE slot may be RUNNING.
+* **I3** — a RUNNING slot is always the active slot.
+* **I2** becomes reachable too (more than one RUNNING slot) as soon as the user
+  presses A on the now-selected Screen: nothing pauses the orphan, so both slots
+  end up RUNNING.
+
+`test_timer`'s teardown *would* trip on this, but **no test constructs it** —
+the existing coverage
+(`test_snapshot_restore_falls_back_when_active_slot_disabled`) pauses the slot
+before snapshotting, so nothing is RUNNING.
+
+### Downstream effect on the exposure balance
+
+With the screen-exposure balance (v1.5) this stopped being a tidiness problem.
+The live run segment lives on slot 0 and is signed by
+`rtc_state_t.run_segment_slot` — the slot that armed it. After the restore that
+slot is disabled, so `timer_slot_break_eligible()` returns false for it (a slot
+with no definition cannot claim to be a break activity).
+
+Pressing A on Screen then folds the orphan's segment as **positive accrual**,
+even though it was a break-eligible timer draining the balance. The wall-clock
+gap since the reflash is counted as screen exposure, and the device is left with
+two RUNNING slots.
+
+This is **not** a defect in the sign rule: once the definition is gone the
+eligibility is genuinely unrecoverable, because the flag lived in the defs table
+that was reflashed. The defect is that the run was allowed to survive its own
+definition at all.
+
+### Why it was not fixed where it was found
+
+The obvious fix — fold the orphan's segment out and reset the slot, the same
+contract `timer_reconcile_def` already applies to a rename/disable — needs a
+`now` to fold at, and `timer_ensure_active_slot_enabled()` takes no arguments.
+Adding one ripples to its callers. That is a state-machine change to a path with
+no existing coverage, and doing it inside a review-fix round on an unrelated
+feature was the wrong trade.
+
+### Suggested shape
+
+Give the function a `now` and treat a disabled RUNNING slot the way a mid-window
+disable is already treated:
+
+* fold the live segment **as non-eligible** — i.e. as screen exposure.
+  **Decided 2026-08-07 (reporter):** the sign is genuinely unrecoverable, so
+  take the conservative direction, which errs toward *more* eye rest rather
+  than less. The cost is that a break activity interrupted by a reflash counts
+  against the allowance; accepted on the grounds that dropping config this way
+  is unlikely to happen mid-run. Note this is the same direction the code takes
+  today by accident — the defect being fixed is the *powered-off gap* being
+  swept in with it, not the sign itself.
+* reset the slot like `timer_reload` does — `memset`, keep `completions`;
+* then move the selection.
+
+Add the missing test: snapshot a RUNNING extra, install a defs table without it,
+restore, assert `assert_state_legal()` passes and the balance did not gain the
+powered-off gap.
 
 ---
 
-## Log-stub vararg landmine — censused in one file, unrecorded in two
+## HAZ-1 — function calls inside log-statement arguments
 
-**Status:** hazard, not a defect today (verified) · **Found:** 2026-08-07
+**Status:** HAZARD — no defect today (all call sites verified pure) · **Found:**
+2026-08-07 · **Rescoped 2026-08-07** after the device-side behaviour was checked
 
-Every host-built module that logs defines a stub of the form
+Originally filed as a host-build artifact: the host log stub discards its
+varargs, so a call inside a log argument is not evaluated on host. That framing
+was too narrow and let the risk read as a testing quirk. It is not.
+
+### The actual rule: log arguments are conditionally evaluated *on device too*
+
+`ESP_LOGx` expands through `ESP_LOG_LEVEL_LOCAL`, which wraps the entire call —
+**arguments included** — in a compile-time conditional:
+
+```c
+#define ESP_LOG_LEVEL_LOCAL(configs, tag, format, ...) \
+    do { if (ESP_LOG_ENABLED(configs)) { ESP_LOG_LEVEL(...); } } while(0)
+/* esp_log.h:157 */
+
+#define ESP_LOG_ENABLED(configs) (LOG_LOCAL_LEVEL >= ESP_LOG_GET_LEVEL(configs))
+/* esp_log_level.h:73 — a compile-time constant */
+```
+
+When the level is disabled the guard is `if (0)` and **the argument expressions
+are never evaluated on the device**. A call placed there is not "a call that
+might get optimised out one day" — it is a call whose execution is a function of
+a Kconfig value.
+
+### This is already active, not hypothetical
+
+`sdkconfig` sets `CONFIG_LOG_MAXIMUM_LEVEL=3` (INFO), so `ESP_LOGD` and
+`ESP_LOGV` are compiled out **today**. `main/wake_flow.c:164` is an `ESP_LOGD`
+whose argument list calls `battery_percent_from_mv(mv)` — **that call does not
+happen on the device as shipped.** It is pure, so nothing is currently wrong;
+but the mechanism is live, not waiting for anyone to change a flag.
+
+Lowering `CONFIG_LOG_MAXIMUM_LEVEL` to WARN — an entirely routine size/power
+change on a battery device — silently extends the same treatment to all five
+`ESP_LOGI` sites below. Lowering it to ERROR takes the four `ESP_LOGW` sites too.
+
+### Why nothing would catch it
+
+The host stubs are of the form
 
 ```c
 #define ESP_LOGI(tag, ...) ((void)(tag))
 ```
 
-which **discards the varargs**, so any function call sitting inside a log
-argument is never evaluated on host. If such a call ever has a side
-effect, the device does it and the host does not — and neither the host
-suite nor the differential sweep can see the difference, because both are
-host builds. That is a divergence with no detector.
+which discards the varargs, so host and device happen to **agree** — by
+accident, and only while the level is disabled. Worse, the differential sweep
+cannot see the difference either, because both sides of the comparison are host
+builds. A side-effecting call in a log argument is a divergence with **no
+detector anywhere in the project**.
 
-`wake_flow.c` carries a maintained census comment for exactly this reason.
-It was re-counted mechanically (comments and string literals stripped, so
-format-string words like `"...unavailable("` do not register as calls) and
-it is accurate: **seven** sites, at `:164`, `:267`, `:378`, `:431`,
-`:497`, `:543`, `:766`.
+### Census — verified mechanically
 
-The same scan found sites in two files that carry **no census and no
-warning**:
+Re-counted with comments and string literals stripped, so format-string words
+like `"...unavailable("` do not register as calls.
 
-* `main/timer_persist.c:33` (`esp_err_to_name`) and `:45`
-  (`timer_get_state`)
-* `main/lock_gate.c:87` (`timer_get_state`)
+Stubs are defined in **five** files: `main/wake_flow.c:85-87`,
+`main/alerts.c:41-42`, `main/net_apply.c:18-19`, `main/timer_persist.c:16`,
+`main/lock_gate.c:21`. (`alerts.c` and `net_apply.c` carry stubs but no
+calls-in-arguments, so they are exposure-free today.)
 
-All six distinct callees across all three files were checked for writes to
-module state and all are pure reads, so **nothing diverges today**. The
-hazard is that the discipline protecting against it exists in one file and
-not in the other two that need it. Either give those files the same census
-comment, or replace the stubs with a variadic-consuming one
-(`(void)sizeof(printf(__VA_ARGS__))` or similar) so the arguments are
-type-checked and evaluated on host too — the second closes the class
-rather than documenting it.
+**Ten** call sites, **six** distinct callees, all verified pure reads:
 
-## Sweep trace cap — cycle09 cannot report truncation
+| Site | Level | Call | Evaluated on device today? |
+|---|---|---|---|
+| `main/wake_flow.c:164` | D | `battery_percent_from_mv(mv)` | **no — already compiled out** |
+| `main/wake_flow.c:267` | I | `timer_active_slot()` | yes |
+| `main/wake_flow.c:378` | I | `timer_active_slot()` | yes |
+| `main/wake_flow.c:431` | I | `timer_get_state()` | yes |
+| `main/wake_flow.c:497` | I | `timer_run_accum(now)` | yes |
+| `main/wake_flow.c:543` | W | `timer_current_date()` | yes |
+| `main/wake_flow.c:766` | I | `timer_get_state()` | yes |
+| `main/timer_persist.c:33` | W | `esp_err_to_name(ret)` | yes |
+| `main/timer_persist.c:45` | W | `timer_get_state()` | yes |
+| `main/lock_gate.c:87` | W | `timer_get_state()` | yes |
 
-**Status:** latent, measured · **Found:** 2026-08-07
+`wake_flow.c` carries a maintained census comment for exactly this reason and it
+is accurate. `timer_persist.c` and `lock_gate.c` carry **none** — and that is the
+real finding here. The discipline protecting against this exists in one of the
+three files that need it, which means it is not a discipline, it is a habit that
+did not propagate.
 
-`run.sh` refuses a run whose trace overflowed, because the comparison
-tests lengths before contents and a divergence past the cap would be
-invisible. Cycles 10 and 11 supply the counter (`g_overflow`) and a cap of
-8192. **Cycle 09 has neither** — `TRACE_MAX` is 256 and the recorder drops
-events with no `else` arm — which is why every cycle09 line prints
-`[overflow not reported]` and its control's 0 proves less than the other
-two cycles' do.
+### Recommended fix — a bright line, not a better census
 
-Measured rather than assumed: the control was instrumented with a
-high-water mark and the longest trace cycle09 produces over all 29592
-cases is **18 events against a cap of 256** — a 14x margin. So this is a
-latent gap, not an active blind spot, and it is disclosed on every line of
-output. Close it in **task 15** by giving cycle09 the counter the other
-two have.
+**Rule: no function call in a log-statement argument list, except an
+allowlisted pure formatter (`esp_err_to_name` and friends).** Hoist the rest to
+a local computed before the log statement.
+
+Enforce it with a checked-in scanner run from pre-commit — the
+comment-and-string-stripping scanner used for the census above is most of it
+already. Cost is roughly nine mechanical edits and one hook.
+
+The alternative — keep the calls, extend `wake_flow.c`'s census comment to the
+other two files, and require a purity judgement per addition — is cheaper now
+and is what the code does today. It is not recommended: it has already been
+tried implicitly and failed to reach two of three files, and it asks every
+future contributor to reason about compile-time argument evaluation correctly.
+A bright line asks nobody to reason about anything.
+
+**Wrinkle the fix must handle:** hoisting a value consumed only by a
+compiled-out log makes it set-but-unused, which `-Wall` will flag —
+`main/wake_flow.c:164`'s `ESP_LOGD` is exactly this case. Pair each hoist with a
+`(void)` or scope it to levels that are not compiled out; do not discover this
+halfway through and quietly revert the rule.
 
 ---
 
-## Build hardening — not a defect, but a hazard task 12 introduced
+## HAZ-2 — cycle09 cannot report trace truncation
 
-Task 12 replaced `.on_locate = run_locate_alarm` (a static initializer that
-bound the awake-failsafe extender and therefore **could not** be forgotten)
-with a runtime `alerts_set_extend_awake()` call from `app_main`, which can be.
-A forgotten install is not a crash — `alert_run_locate` NULL-guards and logs a
-warning — but the locate alarm then runs without pushing the failsafe out and
-can be cut short by the awake cap.
+**Status:** HAZARD, measured · **Found:** 2026-08-07 · **Not a firmware defect**
 
-The structural backstop is that `extend_awake_failsafe` is `static` and the
-install is its only remaining reference, so dropping the install makes it
-unused. **That is currently only a warning.** IDF passes
-`-Wall -Werror -Wno-error=unused-function` to every TU, deliberately disarming
-exactly this diagnostic; the build exits 0 with the install deleted (verified).
+`run.sh` refuses a run whose trace overflowed, because the comparison tests
+lengths before contents and a divergence past the cap would be invisible. Cycles
+10 and 11 supply the counter (`g_overflow`) and a cap of 8192. **Cycle 09 has
+neither** — `TRACE_MAX` is 256 and the recorder drops events with no `else` arm
+— which is why every cycle09 line prints `[overflow not reported]` and its
+control's 0 proves less than the other two cycles' do.
 
-**CLOSED 2026-08-07.** `-Werror=unused-function` is re-armed via
-`target_compile_options(${COMPONENT_LIB} PRIVATE ...)` at the foot of
-`main/CMakeLists.txt` and `components/ssd1680/CMakeLists.txt`. Scoped to our
-own targets rather than set globally, because a global re-arm also covers IDF's
-components and the managed dependencies, whose unused statics need triage that
-has nothing to do with this project — that scoping is what made it safe to do
-now rather than "worth its own task".
+Measured rather than assumed: the control was instrumented with a high-water
+mark, and the longest trace cycle09 produces over all 29592 cases is **18 events
+against a cap of 256** — a 14x margin. So this is a latent gap, not an active
+blind spot, and it is disclosed on every line of output.
 
-The last-flag-wins reasoning held: the emitted command line ends
-`... -Wno-error=unused-function ... -Werror=unused-function -MD ...`, ours
-last.
+Close it alongside **BUG-4** (item 1): same files, same commit.
 
-Verified two-sided, which is the only verification that means anything here:
-the build passes as-is, AND deleting the `alerts_set_extend_awake()` install
-from `app_main` now fails with
+---
 
-```
-main/main.c:267:13: error: 'extend_awake_failsafe' defined but not used
-                          [-Werror=unused-function]
-```
+## Standing rules
 
-at exit 2, where before it exited 0. The backstop is live.
+These are the durable lessons, kept separate because **everything above is meant
+to be deleted as it lands and these are not.** Promote them into
+`docs/home_assistant.md` (R1, R2) and the project conventions (R3) before this
+file is consumed.
 
-Caveat: the backstop holds only while `extend_awake_failsafe` has exactly one
-reference. A second caller in main.c makes a dropped install silent again.
+**R1 — new timer config is durable config, and durable config lives in HA.**
+When adding a field to timers 1–4, ask *"is this durable config that should be
+in HA?"* The answer is almost always yes. If it is, the field must be:
+1. expressible in the bulk `config` document,
+2. documented in `docs/home_assistant.md`,
+3. published in the state JSON so HA's UI reflects the device's actual belief.
+
+Missing (1) is what caused the break-eligible reverts; missing (2) is what made
+it invisible for so long.
+
+**R2 — anything settable from an HA entity must be expressible in the bulk
+document.** `apply_sets()` deletes the retained `set/` command once applied
+(`main/mqtt_ha.c:312-323`), so an entity-only field has **no durable store
+anywhere** and will be destroyed by the next application of the bulk document.
+R2 is the mechanical reason R1 is not merely tidiness.
+
+*Known asymmetry, accepted deliberately:* the two config channels are still
+asymmetric — a per-field set is one-shot by design. That is sound for the timer
+fields today, because the document can now express all of them and no longer
+overrides by omission. R2 is what keeps it sound for the next field.
+
+**R3 — no side-effecting call in a log-statement argument.** Log arguments are
+evaluated conditionally at compile time on device as well as host (see HAZ-1),
+so a side effect placed there is a Kconfig value away from disappearing.
+
+---
+
+## Closed
+
+Kept as one-liners only because source comments name them; delete these once the
+comments are reworded.
+
+* **BUG-6 — the bulk config document destroyed `break_eligible` on every
+  apply.** Fixed in `733e86e`: `apply_timers()` starts from the stored table, so
+  an absent optional key leaves an existing slot unchanged and means false only
+  for a slot being defined for the first time; `docs/home_assistant.md`
+  documents `break` and the optional-key rule. Named by `main/config_apply.c:192`
+  and `test/test_config_apply/test_config_apply.c:334`. The durable lesson is
+  **R2**.
+* **Build hardening — `-Werror=unused-function` disarmed by IDF.** Closed in
+  `1865a3f`, re-armed per-target on `main` and `components/ssd1680` so IDF's own
+  components and managed dependencies are unaffected. Verified two-sided: the
+  build passes as-is and fails when the `alerts_set_extend_awake()` install is
+  deleted. Caveat: the backstop holds only while `extend_awake_failsafe` has
+  exactly one reference.
+
+---
 
 ## Not tracked here
 
