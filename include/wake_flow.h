@@ -348,26 +348,12 @@ void wake_flow_note_sleep_entry(void);
    the same collection. Same reason as wake_flow_fire_expiry_alert above. */
 void wake_flow_post_stats_snapshot(void);
 
-/* ---- the one seam still implemented by main.c --------------------------- */
+/* ---- nothing here is implemented by main.c any more ---------------------- */
 
-/* Stats-assembly seam, implemented by main.c and deliberately not
-   wake_flow_-prefixed — wake_flow does not implement it — which is the
-   same shape as enter_deep_sleep(), declared by lock_gate.h and owned by
-   main.c. Fills a snapshot for the HA session and hands it to
-   app_state.c, where the assembly rules are host-tested. Deliberately
-   side-effect free: no timer_tick, because a stat read must never
-   transition the state machine. wake_flow_post_stats_snapshot() is the
-   branch that decides whether to call it at all.
-
-   What keeps it in main.c is esp_app_get_description() and
-   esp_reset_reason(); main.c records next to the definition why that is
-   the weakest residency claim left in the file. Explicitly NOT the two
-   ADC reads in it — see below. */
-void stats_collect(stats_snapshot_t *out);
-
-/* Three seams used to be declared here and implemented in main.c:
-   paint_break_started(), paint_current_state_full() and
-   make_display_state(). All three are wake_flow.c's own statics now.
+/* Four seams used to be declared here and implemented in main.c:
+   paint_break_started(), paint_current_state_full(), make_display_state()
+   and stats_collect(). All four are wake_flow.c's own statics now, and
+   this header declares none of them.
 
    The first went during the residency audit, because the battery ADC
    read underneath it admitted a device CALL in the composition root but
@@ -375,12 +361,25 @@ void stats_collect(stats_snapshot_t *out);
    and the flush, holding the panel blue for the whole multi-second
    refresh), and an ordering is a decision.
 
-   The other two went when the audit's own review took the next step: "the
+   The next two went when the audit's own review took the next step: "the
    ADC read has no host answer" is not one of the four reasons the rule
    lists, and it is refuted by lock_gate.c, which reads the same ADC and
-   is host-tested. Nothing outside wake_flow.c ever called any of them, so
-   nothing here has to declare them; what they do is pinned by
-   test_wake_flow instead of by a comment. */
+   is host-tested.
+
+   stats_collect() went last, and it is the one that shows what the escape
+   hatch cost. Its residency claim was esp_app_get_description() and
+   esp_reset_reason() — bare CALLS, not handles, so reason 3 as written
+   never admitted it. The shape it left behind is the tell: main.c
+   implemented a seam that main.c itself never called, so the only edge
+   into it came from wake_flow.c, and wake_flow.c had to reach back up
+   through this header to get it. Deleting the declaration deletes that
+   cycle. It did NOT move to app_state.c, which takes batt_mv and light_mv
+   as INPUTS and reads no ADC; pushing the reads down would have made a
+   suite that needs no device stubs grow two.
+
+   Nothing outside wake_flow.c ever called any of the four, so nothing
+   here has to declare them; what they do is pinned by test_wake_flow
+   instead of by a comment. */
 
 #ifdef __cplusplus
 }

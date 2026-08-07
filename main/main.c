@@ -2,14 +2,12 @@
 #include <time.h>
 
 #include "alerts.h"
-#include "app_state.h"
 #include "audio.h"
 #include "battery.h"
 #include "buttons.h"
 #include "config_cache.h"
 #include "display.h"
 #include "driver/gpio.h"
-#include "esp_app_desc.h"
 #include "esp_log.h"
 #include "esp_sleep.h"
 #include "esp_system.h"
@@ -17,7 +15,6 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "hal_nvs.h"
-#include "light.h"
 #include "lock_gate.h"
 #include "neopixel.h"
 #include "net_apply.h"
@@ -25,7 +22,6 @@
 #include "nvs_config.h"
 #include "nvs_flash.h"
 #include "sleep_plan.h"
-#include "stats_json.h"
 #include "timer.h"
 #include "timer_persist.h"
 #include "wake_flow.h"
@@ -194,33 +190,6 @@ void enter_deep_sleep(wake_sleep_mode_t mode) {
     esp_sleep_enable_timer_wakeup((uint64_t)out.seconds * 1000000ULL);
     ESP_LOGI(TAG, "Entering deep sleep (%s%lu s)", out.reason, (unsigned long)out.seconds);
     esp_deep_sleep_start();
-}
-
-/* Residency 3, and the weakest claim left in the file — recorded as that
-   rather than argued. Declared in wake_flow.h: the stats-assembly seam,
-   whose assembly rules are host-tested in app_state.c.
-
-   What it can honestly point at is esp_app_get_description() and
-   esp_reset_reason(), which have no module home. Note that neither is a
-   HANDLE, which is what reason 3 as written says, so this sits at the
-   edge of the rule and is named here as DEBT for the next reviewer.
-   What does NOT admit it is the two ADC reads: "the read has no host
-   answer" was struck as a reason when the render seams moved into
-   wake_flow.c, because lock_gate.c reads the battery and is host-tested.
-
-   No branch here, and deliberately side-effect-free: no timer_tick,
-   because a stat read must never transition the state machine. Whether
-   to collect at all is wake_flow_post_stats_snapshot()'s decision. */
-void stats_collect(stats_snapshot_t *out) {
-    app_state_in_t in = {
-        .batt_mv = battery_read_mv(),
-        .light_mv = light_read_mv(),
-        .charge_locked = lock_gate_charge_locked(),
-        .parent_testing = PARENT_TESTING,
-        .fw_version = esp_app_get_description()->version,
-        .reset_reason = wake_flow_reset_reason_str(esp_reset_reason()),
-    };
-    app_state_stats(&in, time(NULL), out);
 }
 
 /* ---- network window (WiFi → NTP → snapshot rendezvous → MQTT) ----------

@@ -38,3 +38,16 @@ typedef enum {
     ESP_RST_DEEPSLEEP,
     ESP_RST_BROWNOUT,
 } esp_reset_reason_t;
+
+/* The app description ESP-IDF builds into the image (esp_app_desc.h).
+   Trimmed to the one field any host-built TU reads — `version`, which the
+   stat snapshot publishes — for the same reason the enum above is
+   trimmed: the fields nobody names would be dead weight the suite has to
+   keep in step for nothing. Nothing crosses a real ABI on host, so the
+   layout does not have to match; `version` is a char array in IDF too, so
+   the decay-to-pointer that the snapshot relies on behaves identically in
+   both builds. A TU that starts reading project_name or idf_ver adds it
+   here and gets a compile error on device if it guessed the name wrong. */
+typedef struct {
+    char version[32];
+} esp_app_desc_t;

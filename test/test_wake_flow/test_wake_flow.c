@@ -1061,12 +1061,52 @@ bool net_window_active(void) {
     return flow_window_active;
 }
 
-/* The seam main.c still implements (battery + light ADCs, the app
-   description, the reset reason). Only its ORDER relative to the paint
-   matters here — row 11 — so the payload is not modelled. */
-void stats_collect(stats_snapshot_t *out) {
+/* The stat-snapshot gather used to be main.c's, stubbed here whole, so
+   row 11 could only ever check its ORDER relative to the paint. It is
+   wake_flow.c's own static now, which means the stub drops one level —
+   onto the four leaves it reads — and the payload becomes checkable.
+
+   Light gets its own fake curve, deliberately not battery's: the two
+   fields are adjacent ints in app_state_in_t and an identity stub on both
+   would let a swapped pair pass. Different multiplier AND different
+   offset, so neither a transposition nor a doubled read of one ADC lands
+   on a value the other could have produced. Like battery's, not logged —
+   the end-to-end sequence cases assert on ordering, and an ADC read says
+   nothing about ordering. */
+#define FLOW_LIGHT_OFFSET 300
+static int flow_light_pct;
+static bool flow_charge_locked;
+
+int light_read_mv(void) {
+    return flow_light_pct * 7 + FLOW_LIGHT_OFFSET;
+}
+
+bool lock_gate_charge_locked(void) {
+    return flow_charge_locked;
+}
+
+/* Distinctive enough that a version arriving from anywhere else — a
+   literal, a stale copy, an empty string — is visible as itself rather
+   than as a plausible-looking number. */
+const esp_app_desc_t *esp_app_get_description(void) {
+    static const esp_app_desc_t desc = {.version = "test-fw-9.9.9"};
+    return &desc;
+}
+
+/* Now the bottom of the gather rather than a stand-in for the whole of
+   it: this is where EV_STATS_COLLECT is pushed, so the event still means
+   "a snapshot was assembled" and still lands at the same point in every
+   sequence — the four reads above it are unlogged, so no ordering case
+   moves. What is new is that the assembled struct is captured, which is
+   what makes the gather itself testable instead of merely counted. */
+static app_state_in_t flow_stats_in;
+static time_t flow_stats_now;
+
+void app_state_stats(const app_state_in_t *in, time_t now, stats_snapshot_t *out) {
     flow_log_push(EV_STATS_COLLECT);
     flow_stats_collects++;
+    flow_stats_in = *in;
+    flow_stats_now = now;
     memset(out, 0, sizeof *out);
 }
 
@@ -1389,6 +1429,10 @@ void setUp(void) {
     flow_window_active = false;
     flow_stats_collects = 0;
     flow_stats_posts = 0;
+    flow_light_pct = 0;
+    flow_charge_locked = false;
+    memset(&flow_stats_in, 0, sizeof flow_stats_in);
+    flow_stats_now = 0;
     flow_net_finish = NET_FINISH_IDLE;
     flow_state_after_finish = -1;
     flow_finish_seconds = 0;
@@ -1852,6 +1896,112 @@ void test_the_full_repaint_never_goes_partial(void) {
     TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_FULL_REFRESH));
     TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_PARTIAL));
     TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_PROMOTE_RENDER)); /* no policy consulted */
+}
+
+/* ---- the stat gather, the fourth seam that came out of main.c -----------
+
+   stats_collect() was declared in wake_flow.h and implemented in main.c on
+   a residency-3 claim over esp_app_get_description() and
+   esp_reset_reason(). Neither is a HANDLE, so the claim never held; and
+   main.c never called the function it implemented, so wake_flow.c had to
+   reach back up through the header for it. Now a static here.
+
+   Row 11 already covers WHETHER it runs and in what order. What was never
+   covered is what it puts in the struct — six fields that main.c's version
+   could have transposed, dropped or hard-coded with nothing to catch it.
+   Each case below fails on a specific wrong value, not merely on a missing
+   call. */
+
+/* Both ADCs, in one case, because the interesting failure is between them:
+   batt_mv and light_mv are adjacent ints, so a transposition compiles
+   silently. The two fake curves have different multipliers and different
+   offsets, which is what makes a swap land on a value neither read could
+   have produced. */
+void test_the_stat_gather_reads_both_adcs_into_their_own_fields(void) {
+    flow_batt_pct = 73;
+    flow_light_pct = 41;
+
+    stats_snapshot_t snap;
+    stats_collect(&snap);
+
+    TEST_ASSERT_EQUAL_INT(73 * 10 + FLOW_MV_OFFSET, flow_stats_in.batt_mv);
+    TEST_ASSERT_EQUAL_INT(41 * 7 + FLOW_LIGHT_OFFSET, flow_stats_in.light_mv);
+    TEST_ASSERT_EQUAL_INT(1, flow_stats_collects);
+}
+
+/* Both directions: a hard-coded false would pass a one-sided case. */
+void test_the_stat_gather_carries_the_charge_lock_either_way(void) {
+    stats_snapshot_t snap;
+
+    flow_charge_locked = true;
+    stats_collect(&snap);
+    TEST_ASSERT_TRUE(flow_stats_in.charge_locked);
+
+    flow_charge_locked = false;
+    stats_collect(&snap);
+    TEST_ASSERT_FALSE(flow_stats_in.charge_locked);
+}
+
+/* PARENT_TESTING is a compile-time Kconfig bool, so this proves one of its
+   two values per binary — the test_wake_flow_parent twin is what proves
+   the other, the same arrangement the state assembly above uses. */
+void test_the_stat_gather_carries_the_parent_testing_flag(void) {
+    stats_snapshot_t snap;
+    stats_collect(&snap);
+    TEST_ASSERT_EQUAL_INT(PARENT_TESTING ? 1 : 0, flow_stats_in.parent_testing ? 1 : 0);
+}
+
+/* The firmware version has to come from the image description. A literal
+   or an empty string would satisfy "a string arrived". */
+void test_the_stat_gather_publishes_the_image_version(void) {
+    stats_snapshot_t snap;
+    stats_collect(&snap);
+    TEST_ASSERT_NOT_NULL(flow_stats_in.fw_version);
+    TEST_ASSERT_EQUAL_STRING("test-fw-9.9.9", flow_stats_in.fw_version);
+}
+
+/* The reset reason is not passed through raw — it goes through this
+   module's own decode. Asserting the DECODED string is what pins that the
+   call is still wrapped; handing app_state the enum would still compile
+   into the const char * field on many toolchains, and would publish
+   garbage. */
+void test_the_stat_gather_publishes_the_decoded_reset_reason(void) {
+    flow_reset_reason = ESP_RST_BROWNOUT;
+
+    stats_snapshot_t snap;
+    stats_collect(&snap);
+
+    TEST_ASSERT_EQUAL_STRING("BROWNOUT", flow_stats_in.reset_reason);
+    TEST_ASSERT_EQUAL_INT(1, flow_reset_reason_reads);
+}
+
+/* The one deliberate change made when the body moved: main.c's time(NULL)
+   became hal_time_now(). In a host-built TU a raw time(NULL) reads the
+   REAL wall clock straight past the suite's injected one, so this case
+   fails on a stale-clock regression rather than on a missing call — the
+   injected time is a fixed 2020s-era stamp and the real clock is not. */
+void test_the_stat_gather_reads_the_injected_clock_not_the_wall_clock(void) {
+    mock_time_set(flow_at(15, 30));
+
+    stats_snapshot_t snap;
+    stats_collect(&snap);
+
+    TEST_ASSERT_EQUAL_INT64(flow_at(15, 30), flow_stats_now);
+}
+
+/* Side-effect free, the property row 11's ordering cases cannot see: a
+   stat read must never transition the state machine or touch the panel.
+   Same shape as the state assembly's case above. */
+void test_the_stat_gather_neither_ticks_nor_paints(void) {
+    mock_time_set(flow_at(15, 30));
+
+    stats_snapshot_t snap;
+    stats_collect(&snap);
+
+    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_TIMER_TICK));
+    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_FULL_REFRESH));
+    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_PARTIAL));
+    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_MAKE_STATE));
 }
 
 /* ---- ROW 4: the wake-sticky flag and the ghost -------------------------- */
@@ -6087,6 +6237,13 @@ int main(void) {
     RUN_TEST(test_the_state_assembly_neither_ticks_nor_paints);
     RUN_TEST(test_the_full_repaint_ticks_then_assembles_then_flushes);
     RUN_TEST(test_the_full_repaint_never_goes_partial);
+    RUN_TEST(test_the_stat_gather_reads_both_adcs_into_their_own_fields);
+    RUN_TEST(test_the_stat_gather_carries_the_charge_lock_either_way);
+    RUN_TEST(test_the_stat_gather_carries_the_parent_testing_flag);
+    RUN_TEST(test_the_stat_gather_publishes_the_image_version);
+    RUN_TEST(test_the_stat_gather_publishes_the_decoded_reset_reason);
+    RUN_TEST(test_the_stat_gather_reads_the_injected_clock_not_the_wall_clock);
+    RUN_TEST(test_the_stat_gather_neither_ticks_nor_paints);
     RUN_TEST(test_the_flag_is_not_set_without_an_edge);
     RUN_TEST(test_any_edge_sets_the_flag_including_a_silent_one);
     RUN_TEST(test_the_flag_survives_a_later_drain_that_found_nothing);

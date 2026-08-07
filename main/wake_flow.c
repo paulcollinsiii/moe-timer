@@ -14,6 +14,7 @@
 #include "config_cache.h"
 #include "display.h"
 #include "hal_time.h"
+#include "light.h"
 #include "lock_gate.h"
 #include "mqtt_ha.h"
 #include "neopixel.h"
@@ -29,6 +30,7 @@
 #include "wake_policy.h"
 
 #ifndef NATIVE
+#include "esp_app_desc.h" /* esp_app_get_description(), for the stat snapshot */
 #include "esp_attr.h"     /* RTC_DATA_ATTR */
 #include "esp_bit_defs.h" /* BIT() */
 #include "esp_log.h"
@@ -39,6 +41,13 @@
    device. The reset reason gates the render-grid wait, so the suite has
    to be able to answer it. */
 esp_reset_reason_t esp_reset_reason(void);
+
+/* Nor esp_app_desc.h. The stat snapshot publishes the running firmware
+   version, so the suite has to be able to answer this too; the struct
+   itself is the host shim in test/mocks/esp_compat.h, alongside the
+   reset-reason enum, because the stub has to name the type before this
+   file is included. */
+const esp_app_desc_t *esp_app_get_description(void);
 
 /* Wake causes, in ESP-IDF's declaration order so the bit positions match
    the real enum (esp_sleep.h) — the same arrangement esp_compat.h uses
@@ -689,6 +698,38 @@ void wake_flow_watch_final_minute(void) {
 /* What each of these guarantees is on the declarations in wake_flow.h for
    the two that have one; the three statics below are reached only through
    the wake handlers at the bottom of this file. */
+
+/* Fill a stat snapshot for the HA session: gather the four device reads
+   the assembly cannot make for itself and hand them to app_state.c, where
+   the assembly rules are host-tested. Deliberately side-effect free — no
+   timer_tick, because a stat read must never transition the state
+   machine; whether to collect at all is the caller's branch, below.
+
+   Was main.c's, declared in wake_flow.h and called only from here, which
+   made main.c implement a seam its own code never used. It claimed
+   residency reason 3 on esp_app_get_description() and esp_reset_reason(),
+   and neither is a HANDLE — the reason as written admits handles, so the
+   claim was dead and the rule says such code moves. It did NOT move to
+   app_state.c: that module takes batt_mv and light_mv as INPUTS and never
+   reads an ADC, and pushing the reads down there would force its suite to
+   grow device stubs, inverting a seam that is deliberate.
+
+   Character for character main.c's body, with one substitution: its
+   `time(NULL)` is `hal_time_now()` here, for the same reason as
+   paint_current_state_full above — every clock read in this module goes
+   through it, and a raw time(NULL) in a host-built TU would read the real
+   wall clock straight past the suite's injected one. */
+static void stats_collect(stats_snapshot_t *out) {
+    app_state_in_t in = {
+        .batt_mv = battery_read_mv(),
+        .light_mv = light_read_mv(),
+        .charge_locked = lock_gate_charge_locked(),
+        .parent_testing = PARENT_TESTING,
+        .fw_version = esp_app_get_description()->version,
+        .reset_reason = wake_flow_reset_reason_str(esp_reset_reason()),
+    };
+    app_state_stats(&in, hal_time_now(), out);
+}
 
 /* Collect and hand off the stats snapshot (no-op without a window). */
 void wake_flow_post_stats_snapshot(void) {
