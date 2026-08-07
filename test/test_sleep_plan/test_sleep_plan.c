@@ -90,6 +90,18 @@ void test_event_wake_clamps_when_event_imminent(void) {
     TEST_ASSERT_EQUAL_INT32(5, plan(TIMER_RUNNING, 17, 72, false)); /* 72-70=2 -> 5 */
 }
 
+/* remaining EXACTLY 0 takes NO event handoff: the event is happening this
+   wake, so there is nothing left to lead up to. Leading to an event 70 s
+   in the past would clamp to MIN_SEC and burn a pointless wake 5 s later;
+   the grid wake is the right answer. The `> 0` that expresses this is a
+   live boundary — RUNNING lands on 0 at expiry and timer_break_remaining()
+   returns 0 the moment a break ends — so it is pinned here. */
+void test_event_wake_skipped_when_the_event_is_exactly_now(void) {
+    TEST_ASSERT_EQUAL_INT32(60, plan(TIMER_RUNNING, 17, 0, false));
+    TEST_ASSERT_EQUAL_INT32(40, plan(TIMER_RUNNING, 17, 0, true)); /* 60 - sync lead */
+    TEST_ASSERT_EQUAL_INT32(60, plan(TIMER_BREAK, 17, 0, false));
+}
+
 void test_break_aligns_to_break_grid_no_sync_lead(void) {
     TEST_ASSERT_EQUAL_INT32(20, plan(TIMER_BREAK, 17, 500, false)); /* 8:20 -> 8:00 */
     TEST_ASSERT_EQUAL_INT32(30, plan(TIMER_BREAK, 17, 100, false)); /* event lead wins */
@@ -148,7 +160,7 @@ void test_break_as_primary_state_is_unchanged(void) {
    runs — e.g. Laundry 60 min, balance crossing at 30. That moment needs
    no dedicated wake event: a RUNNING slot always sleeps on the countdown
    minute grid, so it is capped at 60 s whatever the expiry horizon, and
-   the per-wake maybe_start_break check catches the crossing within a
+   the per-wake wake_flow_maybe_start_break check catches the crossing in a
    minute. Exactly the fidelity the Screen timer has always had.
 
    This is a CONTRACT, not an observation: raise the RUNNING cap above a
@@ -178,6 +190,304 @@ void test_clock_only_states_stay_minute_aligned(void) {
     }
 }
 
+/* ---- plan assembly: raw timer readings -> sleep_plan_in_t ----
+   main.c reads the timer module unconditionally at sleep entry (every one
+   of those reads is side-effect free) and hands the readings here; the
+   branching that decides which of them matter lives below, where it can
+   be tested. The readings stay raw — the selected slot's state and
+   expiry, slot 0's break, whether any extra runs — precisely so main.c
+   holds no `if`.
+
+   Note what these tests pin that the device cannot: the assembly's
+   guards are exercised on input combinations the real timer module never
+   produces (a break_remaining with no break active, a RUNNING selection
+   over a chiming break). That is the point — the guards are the
+   contract, and a guard whose only defence is "the caller never does
+   that" is a guard the next caller deletes. */
+
+#define NOW ((time_t)1753800017) /* :17 past the minute */
+#define NOW_SEC_INTO_MINUTE 17
+/* Distinct on purpose: a field transposition between the expiry horizon,
+   the break horizon and the clock must change an assertion, so no two of
+   them may share a value or a residue mod 60. */
+#define EXPIRY_HORIZON 323 /* %60 = 23, wall %60 = 40 */
+#define BREAK_HORIZON 100  /* %60 = 40 */
+
+static sleep_plan_in_t from(sleep_plan_timer_in_t in) {
+    return sleep_plan_from_timer(&in);
+}
+
+void test_from_timer_running_takes_expiry_and_sync(void) {
+    sleep_plan_in_t p = from((sleep_plan_timer_in_t){
+        .state = TIMER_RUNNING, .now = NOW, .expiry_wall = NOW + EXPIRY_HORIZON, .ntp_recheck_due = true});
+    TEST_ASSERT_EQUAL_INT(TIMER_RUNNING, p.state);
+    TEST_ASSERT_EQUAL_INT(NOW_SEC_INTO_MINUTE, p.sec_into_minute);
+    TEST_ASSERT_EQUAL_INT32(EXPIRY_HORIZON, p.event_remaining_sec);
+    TEST_ASSERT_TRUE(p.sync_due_by_next_wake);
+    TEST_ASSERT_EQUAL_INT32(0, p.break_remaining_sec);
+
+    /* the recheck flag is carried, not invented */
+    p = from((sleep_plan_timer_in_t){
+        .state = TIMER_RUNNING, .now = NOW, .expiry_wall = NOW + EXPIRY_HORIZON, .ntp_recheck_due = false});
+    TEST_ASSERT_FALSE(p.sync_due_by_next_wake);
+}
+
+/* A RUNNING slot whose expiry already passed (a late wake) keeps a
+   NEGATIVE remaining — the planner's own clamp handles it. Folding it to
+   0 here would silently move the grid. */
+void test_from_timer_running_expiry_may_be_negative(void) {
+    sleep_plan_in_t p = from((sleep_plan_timer_in_t){.state = TIMER_RUNNING, .now = NOW, .expiry_wall = NOW - 5});
+    TEST_ASSERT_EQUAL_INT32(-5, p.event_remaining_sec);
+}
+
+void test_from_timer_break_takes_break_remaining_as_the_primary_event(void) {
+    /* Screen selected during its own break. The break end is the PRIMARY
+       event, so it lands in event_remaining_sec and the secondary field
+       stays 0; the far-future expiry_wall must be ignored, and BREAK
+       never syncs however due the recheck is. */
+    sleep_plan_in_t p = from((sleep_plan_timer_in_t){.state = TIMER_BREAK,
+                                                     .now = NOW,
+                                                     .expiry_wall = NOW + 9999,
+                                                     .ntp_recheck_due = true,
+                                                     .break_active = true,
+                                                     .break_remaining_sec = BREAK_HORIZON});
+    TEST_ASSERT_EQUAL_INT(TIMER_BREAK, p.state);
+    TEST_ASSERT_EQUAL_INT(NOW_SEC_INTO_MINUTE, p.sec_into_minute);
+    TEST_ASSERT_EQUAL_INT32(BREAK_HORIZON, p.event_remaining_sec);
+    TEST_ASSERT_FALSE(p.sync_due_by_next_wake);
+    TEST_ASSERT_EQUAL_INT32(0, p.break_remaining_sec);
+}
+
+void test_from_timer_background_break_without_extra_running_gets_a_wake(void) {
+    /* Piano paused, Screen on a break behind it: the end will chime, so
+       it earns its own wake as the SECONDARY event. */
+    const timer_state_t states[] = {TIMER_IDLE, TIMER_PAUSED, TIMER_EXPIRED};
+    for (size_t i = 0; i < sizeof(states) / sizeof(states[0]); i++) {
+        sleep_plan_in_t p = from((sleep_plan_timer_in_t){.state = states[i],
+                                                         .now = NOW,
+                                                         .expiry_wall = NOW + 9999,
+                                                         .ntp_recheck_due = true,
+                                                         .break_active = true,
+                                                         .break_remaining_sec = BREAK_HORIZON,
+                                                         .extra_running = false});
+        TEST_ASSERT_EQUAL_INT(states[i], p.state);
+        TEST_ASSERT_EQUAL_INT32(BREAK_HORIZON, p.break_remaining_sec);
+        TEST_ASSERT_EQUAL_INT32(0, p.event_remaining_sec);
+        TEST_ASSERT_FALSE(p.sync_due_by_next_wake);
+    }
+}
+
+void test_from_timer_background_break_with_extra_running_is_suppressed(void) {
+    /* A RUNNING extra suppresses the chime (rule 4), so the end is silent
+       and needs no dedicated wake — it drops the chip at whatever the
+       next tick wake is. */
+    sleep_plan_in_t p = from((sleep_plan_timer_in_t){.state = TIMER_PAUSED,
+                                                     .now = NOW,
+                                                     .break_active = true,
+                                                     .break_remaining_sec = BREAK_HORIZON,
+                                                     .extra_running = true});
+    TEST_ASSERT_EQUAL_INT32(0, p.break_remaining_sec);
+
+    /* the shape the device actually reaches: the running extra IS the
+       selection, so state is RUNNING and its expiry is the primary */
+    p = from((sleep_plan_timer_in_t){.state = TIMER_RUNNING,
+                                     .now = NOW,
+                                     .expiry_wall = NOW + EXPIRY_HORIZON,
+                                     .break_active = true,
+                                     .break_remaining_sec = BREAK_HORIZON,
+                                     .extra_running = true});
+    TEST_ASSERT_EQUAL_INT32(EXPIRY_HORIZON, p.event_remaining_sec);
+    TEST_ASSERT_EQUAL_INT32(0, p.break_remaining_sec);
+}
+
+/* The secondary rule keys off break_active, NOT off the remaining value
+   being non-zero. timer_break_remaining() happens to return 0 when slot 0
+   is not on a break, but that is timer.c's business: the assembly must
+   not inherit its correctness from another module's internal guard. */
+void test_from_timer_no_break_active_leaves_the_secondary_zero(void) {
+    sleep_plan_in_t p = from((sleep_plan_timer_in_t){.state = TIMER_PAUSED,
+                                                     .now = NOW,
+                                                     .break_active = false,
+                                                     .break_remaining_sec = BREAK_HORIZON,
+                                                     .extra_running = false});
+    TEST_ASSERT_EQUAL_INT32(0, p.break_remaining_sec);
+}
+
+/* The `state != TIMER_BREAK` half of the secondary rule, pinned over the
+   whole enum: only the state in which the break IS the primary event
+   suppresses the secondary field. */
+void test_from_timer_secondary_rule_across_every_state(void) {
+    const timer_state_t states[] = {TIMER_IDLE, TIMER_RUNNING, TIMER_PAUSED, TIMER_EXPIRED, TIMER_BREAK};
+    for (size_t i = 0; i < sizeof(states) / sizeof(states[0]); i++) {
+        sleep_plan_in_t p = from((sleep_plan_timer_in_t){.state = states[i],
+                                                         .now = NOW,
+                                                         .expiry_wall = NOW + EXPIRY_HORIZON,
+                                                         .break_active = true,
+                                                         .break_remaining_sec = BREAK_HORIZON,
+                                                         .extra_running = false});
+        int32_t expect = (states[i] == TIMER_BREAK) ? 0 : BREAK_HORIZON;
+        TEST_ASSERT_EQUAL_INT32(expect, p.break_remaining_sec);
+    }
+}
+
+/* The secondary rule asks "is this the state where the break is the
+   PRIMARY event", not "is this state below TIMER_BREAK" — so an
+   out-of-range state must still take the secondary wake. timer.c's
+   snapshot validator happens to reject a restored state above
+   TIMER_BREAK today, but that is its guard, not this function's, and a
+   pure function's contract may not be inherited from another module's
+   internals. Written as `<` instead of `!=` this silently drops the
+   chime wake, and nothing else in the suite notices. */
+void test_from_timer_secondary_rule_keys_on_break_not_on_ordering(void) {
+    sleep_plan_in_t p = from((sleep_plan_timer_in_t){.state = (timer_state_t)(TIMER_BREAK + 1),
+                                                     .now = NOW,
+                                                     .break_active = true,
+                                                     .break_remaining_sec = BREAK_HORIZON,
+                                                     .extra_running = false});
+    TEST_ASSERT_EQUAL_INT32(BREAK_HORIZON, p.break_remaining_sec);
+}
+
+/* Only RUNNING has an expiry and only RUNNING syncs: the clock-only
+   states must ignore both readings however loudly they are set. */
+void test_from_timer_clock_only_states_have_no_event(void) {
+    const timer_state_t states[] = {TIMER_IDLE, TIMER_PAUSED, TIMER_EXPIRED};
+    for (size_t i = 0; i < sizeof(states) / sizeof(states[0]); i++) {
+        sleep_plan_in_t p = from((sleep_plan_timer_in_t){
+            .state = states[i], .now = NOW, .expiry_wall = NOW + 9999, .ntp_recheck_due = true});
+        TEST_ASSERT_EQUAL_INT32(0, p.event_remaining_sec);
+        TEST_ASSERT_FALSE(p.sync_due_by_next_wake);
+        TEST_ASSERT_EQUAL_INT32(0, p.break_remaining_sec);
+    }
+}
+
+/* sec_into_minute folds the CLOCK, not either event horizon — both of
+   which are held fixed here so a transposition cannot pass. */
+void test_from_timer_sec_into_minute_tracks_the_clock(void) {
+    const time_t minute_top = NOW - NOW_SEC_INTO_MINUTE; /* :00 */
+    for (int sec = 0; sec < 60; sec++) {
+        sleep_plan_in_t p = from((sleep_plan_timer_in_t){.state = TIMER_IDLE,
+                                                         .now = minute_top + sec,
+                                                         .expiry_wall = NOW + EXPIRY_HORIZON,
+                                                         .break_active = true,
+                                                         .break_remaining_sec = BREAK_HORIZON});
+        TEST_ASSERT_EQUAL_INT(sec, p.sec_into_minute);
+    }
+}
+
+/* End-to-end: the assembly feeds the planner. Catches any field swap
+   that happens to keep the struct self-consistent but moves the nap. */
+void test_from_timer_feeds_the_planner(void) {
+    sleep_plan_timer_in_t running = {
+        .state = TIMER_RUNNING, .now = NOW, .expiry_wall = NOW + EXPIRY_HORIZON, .ntp_recheck_due = false};
+    sleep_plan_in_t p = sleep_plan_from_timer(&running);
+    TEST_ASSERT_EQUAL_INT32(23, sleep_plan_seconds(&p)); /* 323 -> countdown grid */
+
+    sleep_plan_timer_in_t brk = {.state = TIMER_BREAK,
+                                 .now = NOW,
+                                 .expiry_wall = NOW + 9999,
+                                 .break_active = true,
+                                 .break_remaining_sec = BREAK_HORIZON};
+    p = sleep_plan_from_timer(&brk);
+    TEST_ASSERT_EQUAL_INT32(30, sleep_plan_seconds(&p)); /* 100-70 event lead */
+
+    sleep_plan_timer_in_t bg_chimes = {.state = TIMER_PAUSED,
+                                       .now = NOW,
+                                       .break_active = true,
+                                       .break_remaining_sec = BREAK_HORIZON,
+                                       .extra_running = false};
+    p = sleep_plan_from_timer(&bg_chimes);
+    TEST_ASSERT_EQUAL_INT32(30, sleep_plan_seconds(&p)); /* secondary pulls it in */
+
+    sleep_plan_timer_in_t bg_silent = {.state = TIMER_PAUSED,
+                                       .now = NOW,
+                                       .break_active = true,
+                                       .break_remaining_sec = BREAK_HORIZON,
+                                       .extra_running = true};
+    p = sleep_plan_from_timer(&bg_silent);
+    TEST_ASSERT_EQUAL_INT32(43, sleep_plan_seconds(&p)); /* suppressed: wall grid */
+}
+
+/* ---- sleep mode: which policy a wake ends under ------------------------ */
+
+static sleep_plan_in_t idle_at(int sec_into_minute) {
+    sleep_plan_in_t in = {
+        .state = TIMER_IDLE,
+        .sec_into_minute = sec_into_minute,
+        .event_remaining_sec = 0,
+        .sync_due_by_next_wake = false,
+        .break_remaining_sec = 0,
+    };
+    return in;
+}
+
+/* Both locks can be engaged at once: bed time engages at night and
+   survives in RTC memory, so a later wake can find the battery in the
+   lock band while the night is still on. Charge lock has to win — its
+   whole point is that the battery cannot afford the 2 h cadence. */
+void test_charge_lock_wins_over_bedtime(void) {
+    TEST_ASSERT_EQUAL_INT(WAKE_SLEEP_CHARGE_LOCK, wake_sleep_mode_select(true, true));
+}
+
+void test_mode_select_covers_every_lock_combination(void) {
+    TEST_ASSERT_EQUAL_INT(WAKE_SLEEP_NORMAL, wake_sleep_mode_select(false, false));
+    TEST_ASSERT_EQUAL_INT(WAKE_SLEEP_CHARGE_LOCK, wake_sleep_mode_select(true, false));
+    TEST_ASSERT_EQUAL_INT(WAKE_SLEEP_BEDTIME, wake_sleep_mode_select(false, true));
+    TEST_ASSERT_EQUAL_INT(WAKE_SLEEP_CHARGE_LOCK, wake_sleep_mode_select(true, true));
+}
+
+void test_charge_lock_outcome_is_a_fixed_buttonless_interval(void) {
+    sleep_plan_in_t in = idle_at(17);
+    sleep_outcome_t out = sleep_plan_outcome(WAKE_SLEEP_CHARGE_LOCK, &in);
+    TEST_ASSERT_EQUAL_UINT32(600, out.seconds);
+    TEST_ASSERT_FALSE(out.enable_buttons);
+    TEST_ASSERT_EQUAL_STRING("charge lock, ", out.reason);
+}
+
+void test_bedtime_outcome_is_a_fixed_buttonless_interval(void) {
+    sleep_plan_in_t in = idle_at(17);
+    sleep_outcome_t out = sleep_plan_outcome(WAKE_SLEEP_BEDTIME, &in);
+    TEST_ASSERT_EQUAL_UINT32(7200, out.seconds);
+    TEST_ASSERT_FALSE(out.enable_buttons);
+    TEST_ASSERT_EQUAL_STRING("bed time, ", out.reason);
+}
+
+/* The normal path is the planner, unchanged, with buttons armed. */
+void test_normal_outcome_defers_to_the_planner(void) {
+    sleep_plan_in_t in = idle_at(17);
+    sleep_outcome_t out = sleep_plan_outcome(WAKE_SLEEP_NORMAL, &in);
+    TEST_ASSERT_EQUAL_UINT32(43, out.seconds); /* == plan(TIMER_IDLE, 17, ...) */
+    TEST_ASSERT_TRUE(out.enable_buttons);
+    TEST_ASSERT_EQUAL_STRING("", out.reason);
+}
+
+/* A locked wake does no timer work at all, so the planner's answer must
+   not leak into it — main.c gathers the readings unconditionally. */
+void test_lock_outcomes_ignore_the_planner_input(void) {
+    sleep_plan_in_t running = {
+        .state = TIMER_RUNNING,
+        .sec_into_minute = 30,
+        .event_remaining_sec = 3600,
+        .sync_due_by_next_wake = true,
+        .break_remaining_sec = 90,
+    };
+    TEST_ASSERT_EQUAL_UINT32(600, sleep_plan_outcome(WAKE_SLEEP_CHARGE_LOCK, &running).seconds);
+    TEST_ASSERT_EQUAL_UINT32(7200, sleep_plan_outcome(WAKE_SLEEP_BEDTIME, &running).seconds);
+    /* same input, normal mode: the planner really would have said 20 */
+    TEST_ASSERT_EQUAL_UINT32(20, sleep_plan_outcome(WAKE_SLEEP_NORMAL, &running).seconds);
+}
+
+/* An out-of-range mode cannot arise while wake_sleep_mode_select() is the
+   only producer, but a cast value would reach the fallback — and it must
+   point the safe way. Buttons dark on a lock-length interval, never the
+   planner's answer with the buttons armed. */
+void test_unknown_mode_fails_closed(void) {
+    sleep_plan_in_t in = idle_at(17);
+    sleep_outcome_t out = sleep_plan_outcome((wake_sleep_mode_t)99, &in);
+    TEST_ASSERT_FALSE(out.enable_buttons);
+    TEST_ASSERT_EQUAL_UINT32(600, out.seconds); /* not 43, the planner's answer */
+    TEST_ASSERT_EQUAL_STRING("unknown mode, ", out.reason);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_running_never_sleeps_past_the_minute_grid);
@@ -195,6 +505,25 @@ int main(void) {
     RUN_TEST(test_event_wake_lands_before_expiry);
     RUN_TEST(test_final_countdown_handoff_sequence);
     RUN_TEST(test_event_wake_clamps_when_event_imminent);
+    RUN_TEST(test_event_wake_skipped_when_the_event_is_exactly_now);
     RUN_TEST(test_break_aligns_to_break_grid_no_sync_lead);
+    RUN_TEST(test_from_timer_running_takes_expiry_and_sync);
+    RUN_TEST(test_from_timer_running_expiry_may_be_negative);
+    RUN_TEST(test_from_timer_break_takes_break_remaining_as_the_primary_event);
+    RUN_TEST(test_from_timer_background_break_without_extra_running_gets_a_wake);
+    RUN_TEST(test_from_timer_background_break_with_extra_running_is_suppressed);
+    RUN_TEST(test_from_timer_no_break_active_leaves_the_secondary_zero);
+    RUN_TEST(test_from_timer_secondary_rule_across_every_state);
+    RUN_TEST(test_from_timer_secondary_rule_keys_on_break_not_on_ordering);
+    RUN_TEST(test_from_timer_clock_only_states_have_no_event);
+    RUN_TEST(test_from_timer_sec_into_minute_tracks_the_clock);
+    RUN_TEST(test_from_timer_feeds_the_planner);
+    RUN_TEST(test_charge_lock_wins_over_bedtime);
+    RUN_TEST(test_mode_select_covers_every_lock_combination);
+    RUN_TEST(test_charge_lock_outcome_is_a_fixed_buttonless_interval);
+    RUN_TEST(test_bedtime_outcome_is_a_fixed_buttonless_interval);
+    RUN_TEST(test_normal_outcome_defers_to_the_planner);
+    RUN_TEST(test_lock_outcomes_ignore_the_planner_input);
+    RUN_TEST(test_unknown_mode_fails_closed);
     return UNITY_END();
 }

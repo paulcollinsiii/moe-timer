@@ -58,8 +58,31 @@ add_host_test(test_battery)
 add_host_test(test_quiet_hours)
 add_host_test(test_bedtime)
 add_host_test(test_sleep_plan)
+add_host_test(test_lock_gate)
+add_host_test(test_buttons_policy)
 add_host_test(test_button_latch)
 add_host_test(test_wake_policy)
+add_host_test(test_wake_flow)
+# Same cases, built as a ParentTesting=y firmware: that flag is a
+# compile-time Kconfig bool, so the two values need two binaries. See the
+# header comment in test_wake_flow_parent.c.
+add_host_test(test_wake_flow_parent EXTRA_DEFS CONFIG_MAGTAG_PARENT_TESTING=1)
+add_host_test(test_status_led)
+# alerts.c reads two alarm-length Kconfig ints straight out of sdkconfig.h,
+# which the host build has no equivalent of. Supplied here rather than as
+# #ifndef fallbacks inside alerts.c, so a renamed or dropped Kconfig symbol
+# still breaks the firmware build loudly instead of silently compiling
+# against a default. The values below merely happened to match
+# Kconfig.projbuild's defaults when written and nothing keeps them in step
+# — that is deliberate and harmless, because no test asserts on either
+# value (the locate pattern's poll cap is a literal); they exist only to
+# make the two pattern initialisers compile.
+add_host_test(test_alerts
+    EXTRA_DEFS CONFIG_MAGTAG_EXPIRY_ALARM_CYCLES=5 CONFIG_MAGTAG_BREAK_ALARM_CYCLES=3)
+add_host_test(test_config_cache)
+add_host_test(test_timer_persist)
+add_host_test(test_time_util)
+add_host_test(test_mock_hal_time)
 add_host_test(test_net_apply)
 add_host_test(test_app_state)
 add_host_test(test_stats_json)

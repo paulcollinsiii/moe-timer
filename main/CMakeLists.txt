@@ -5,7 +5,12 @@ idf_component_register(
         "app_state.c"
         "timer.c"
         "timer_defs.c"
+        "timer_persist.c"
         "wake_policy.c"
+        "buttons_policy.c"
+        "wake_flow.c"
+        "status_led.c"
+        "config_cache.c"
         "display.c"
         "display_screens.c"
         "display_layout.c"
@@ -39,6 +44,7 @@ idf_component_register(
         "quiet_hours.c"
         "bedtime.c"
         "sleep_plan.c"
+        "lock_gate.c"
         "hal_time.c"
         "hal_nvs.c"
     INCLUDE_DIRS
@@ -63,3 +69,27 @@ idf_component_register(
         esp_app_format
         ssd1680
 )
+
+# Re-arm the diagnostic IDF deliberately disarms.
+#
+# IDF passes "-Wall -Werror -Wno-error=unused-function" to every TU
+# (tools/cmake/build.cmake:183), which downgrades an unused static to a
+# warning the build ignores. That matters here because a static with exactly
+# one reference is this project's structural backstop against a dropped
+# install: task 12 replaced the `.on_locate = run_locate_alarm` static
+# initializer -- which could not be forgotten -- with a runtime
+# alerts_set_extend_awake() call from app_main, which can be. Drop that call
+# and extend_awake_failsafe becomes unused; with the diagnostic disarmed the
+# build still exits 0 and the locate alarm silently runs without pushing the
+# awake failsafe out.
+#
+# Scoped to OUR targets rather than set globally: a global re-arm would also
+# apply to IDF's own components and the managed dependencies, which carry
+# unused statics of their own and would need triage that has nothing to do
+# with this project. target_compile_options lands after the global block, and
+# GCC is last-flag-wins, so this wins for these sources only.
+#
+# Two-sided check when touching this: the build must pass as-is, AND deleting
+# the alerts_set_extend_awake() install from app_main must make it FAIL. A
+# re-arm that only satisfies the first half is not doing anything.
+target_compile_options(${COMPONENT_LIB} PRIVATE -Werror=unused-function)

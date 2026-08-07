@@ -363,7 +363,7 @@ void test_row2_a_laundry_run_earns_the_break_and_is_paused_by_it(void) {
 }
 
 /* Row 3 (timer half): the expiry lands and the break is due in the SAME
-   tick. main.c owns the ordering (expiry alert, then maybe_start_break);
+   tick. wake_flow owns the ordering (expiry alert, then the break gate);
    what timer.c must guarantee is that the expiry folds the segment and
    leaves the break genuinely due rather than swallowing it. */
 void test_row3_expiry_and_a_due_break_in_one_tick(void) {

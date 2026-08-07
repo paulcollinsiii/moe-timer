@@ -11,11 +11,36 @@
 
 #include "audio.h"
 #include "buttons.h"
+#include "neopixel.h"
+
+#ifndef NATIVE
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "neopixel.h"
-#include "sdkconfig.h"
+#include "sdkconfig.h" /* the two alarm-length Kconfig ints below */
+#else
+/* The host build has no FreeRTOS and no sdkconfig.h. The three RTOS calls
+   the alert loop makes are declared here and defined by the suite
+   (test/test_alerts), which models them cooperatively; the two Kconfig
+   ints arrive as -D from test/CMakeLists.txt.
+
+   The log macros discard their varargs, so any function call made inside
+   a log argument would be invisible to every host test. All six call
+   sites in this file pass constants or already-computed values — keep it
+   that way, or a side effect smuggled in as a %d argument would run on
+   device and be unobservable here. */
+typedef unsigned int TickType_t;
+typedef void *TaskHandle_t;
+typedef void (*TaskFunction_t)(void *);
+#define pdPASS 1
+#define pdMS_TO_TICKS(ms) (ms)
+int xTaskCreate(TaskFunction_t fn, const char *name, unsigned int stack, void *arg, unsigned int prio,
+                TaskHandle_t *created);
+void vTaskDelay(TickType_t ticks);
+void vTaskDelete(TaskHandle_t task);
+#define ESP_LOGI(tag, ...) ((void)(tag))
+#define ESP_LOGW(tag, ...) ((void)(tag))
+#endif
 
 static const char *TAG = "alerts";
 
@@ -144,10 +169,24 @@ bool alert_run(alert_kind_t kind) {
 
 #define LOCATE_MAX_SEC 600
 
-void alert_run_locate(void (*extend_awake)(int seconds)) {
+/* Installed once at boot by main.c, which owns the esp_timer handle
+   behind it. NULL until then, and NULL for good if the install is ever
+   dropped — hence the guard and the warning below, which is the only
+   trace a forgotten install leaves. */
+static void (*s_extend_awake)(int seconds);
+
+void alerts_set_extend_awake(void (*cb)(int seconds)) {
+    s_extend_awake = cb;
+}
+
+void alert_run_locate(void) {
     ESP_LOGI(TAG, "Locate: alarming until dismissed (<= %d s)", LOCATE_MAX_SEC);
-    if (extend_awake != NULL) {
-        extend_awake(LOCATE_MAX_SEC + 60);
+    /* Before the first pulse, not after: an alarm the failsafe has already
+       cut short cannot be rescued by extending it afterwards. */
+    if (s_extend_awake != NULL) {
+        s_extend_awake(LOCATE_MAX_SEC + 60);
+    } else {
+        ESP_LOGW(TAG, "Locate: no awake extender installed - alarm may be cut short");
     }
     int64_t start = (int64_t)time(NULL);
     bool dismissed = false;

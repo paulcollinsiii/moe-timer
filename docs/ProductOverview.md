@@ -350,16 +350,22 @@ Alternatively, pure ESP-IDF v5.x with `idf.py set-target esp32s2` is fully suppo
 
 ## Module Structure
 
+Abridged. The full module map and the three-layer model live in
+[architecture.md](architecture.md), which is authoritative.
+
 ```
 main/
-  main.c            — app_main: determine wake reason, dispatch to appropriate handler
+  main.c            — composition root: boot ordering, wiring, deep-sleep entry; no decisions
+  wake_flow.c       — the wake orchestration: wake-cause decode, both wake handlers,
+                      button guards, the event watches, the break-end owner
+  lock_gate.c       — the two screen locks (low battery, Bed Time)
   display.c/h       — SSD1680 SPI driver; layout rendering; partial vs full refresh logic
   timer.c/h         — state machine; expiry time calculation; RTC memory persistence
-  ntp.c/h           — WiFi init/deinit; SNTP sync; drift correction helper
+  ntp.c/h           — SNTP sync inside a network window (WiFi lifecycle is wifi_session.c)
   nvs_config.c/h    — typed NVS accessors; first-boot defaults init
   schedule.c/h      — day-type determination (weekday/weekend/holiday); allocation lookup
   buttons.c/h       — wake reason decode; GPIO wakeup config; debounce
-  audio.c/h         — PWM tone generation; beep pattern sequencer
+  audio.c/h         — DAC playback (dac_continuous on CH0/GPIO 17); tones.c renders the audio
   neopixel.c/h      — RMT-based NeoPixel driver; alert pulse pattern
   nvs_defaults.h    — compile-time default holiday list, allocations, WiFi placeholder
 
@@ -367,7 +373,9 @@ components/
   ssd1680/          — standalone SSD1680 e-ink SPI driver component
 ```
 
-**RTC slow memory layout** (persistent across deep sleep):
+**RTC slow memory layout** (persistent across deep sleep) — the v1 single-timer
+shape, kept here as the original design record; the authoritative per-slot
+definition is `include/timer.h` (see architecture.md):
 
 ```c
 typedef struct {
@@ -395,6 +403,12 @@ typedef struct {
 ---
 
 ## Implementation Notes for Coding Agents
+
+> **Superseded — read as the original v1 intent, not as guidance.** Several of
+> these were overtaken during the build: the display stack is LVGL 9 over the
+> custom `components/ssd1680` driver (not LovyanGFX, and there is no C++ TU),
+> and the IDF 6 sleep/SNTP APIs below have been renamed. For what the firmware
+> actually does, use [architecture.md](architecture.md).
 
 1. **TDD required**: write unit tests for `schedule.c` (day-type logic), `timer.c` (state machine + expiry math), and `nvs_config.c` (serialisation round-trips) before implementing those modules.
 2. **Worktrees/branches**: all development on feature branches; never commit directly to main.

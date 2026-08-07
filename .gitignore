@@ -11,3 +11,6 @@ test/build/
 
 # Local secrets (WiFi credentials etc.) — never committed
 *.local.h
+
+# Differential-sweep build artifacts (generators are the source of truth)
+test/difftest/cycles/harness_*.c
