@@ -457,7 +457,8 @@ void test_a_stale_layout_blob_is_overwritten(void) {
 void test_save_uses_the_one_snapshot_key(void) {
     /* Pins the key: the restore path and every previously flashed
        firmware read "timer_snap", so renaming it silently orphans the
-       stored state (docs/planning notes the orphaned-slot case). */
+       stored state (BUG-7 in docs/planning/refactor.bugdiscoveries.md
+       covers the related case of a slot outliving its definition). */
     arm_rich_state(NOON);
     timer_persist_save();
     TEST_ASSERT_EQUAL_INT(1, mock_nvs_write_count("timer_snap"));
