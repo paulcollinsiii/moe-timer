@@ -382,7 +382,7 @@ The re-seed (writer 3) resets the WHOLE table, not just the break flags. Writer
 
 ## BUG-6 — the bulk config document destroys `break_eligible` every time it applies
 
-**Status:** OPEN · **Found:** 2026-08-07, hardware, build `59c3afa`
+**Status:** FIXED 2026-08-07 · **Found:** 2026-08-07, hardware, build `59c3afa`
 **Severity:** user-visible, **recurring** — an HA-set switch silently reverts
 whenever the bulk config document is republished with a new `ver`.
 
@@ -451,7 +451,39 @@ Add `"break": true` to the affected entries of the retained config document:
 
 The key is already parsed; only the documentation omits it.
 
-### Fix constraints
+### Fixed
+
+`apply_timers()` now starts from the **stored** table rather than from zero,
+and the optional keys follow: **absent leaves an existing slot alone**, false
+only for a slot the document defines for the first time. Applied to `reload`
+as well as `break` — identical shape, identical defect; `reload` bites less
+often only because it IS documented.
+
+`docs/home_assistant.md` was the other half and is corrected: `break` appears
+in the bulk `timers` example, the per-timer break switch is listed with the
+other entities, and the optional-key rule is stated with both caveats (a new
+slot has no stored value to keep; "already defined" is by slot, not by name,
+so a repurposed slot must say `"break": false` explicitly).
+
+Pinned by five cases in `test_config_apply`. Two —
+`test_an_absent_break_leaves_an_existing_slot_alone` and
+`test_an_absent_reload_leaves_an_existing_slot_alone` — fail against the old
+semantics, verified by reverting the change. The other three (new-slot
+default, explicit false still clears, a disabled slot does not donate its
+flags) pass either way **by design**: they pin behaviour deliberately
+PRESERVED, so they guard against over-correcting the fix into "ignore the
+key" rather than regression-testing the bug.
+
+**Still open on the design side, deliberately not addressed here:** the two
+channels remain asymmetric. `apply_sets` still consumes the retained set/
+command (`main/mqtt_ha.c:318-323`), so a per-field edit is still one-shot.
+That is now sound for the timer fields, because the document can express all
+of them and no longer overrides them by omission — but the same trap reopens
+for any future entity-settable field the bulk schema does not carry. The
+durable rule is: **anything settable from an HA entity must be expressible in
+the bulk document.**
+
+### Original fix constraints
 
 * **`docs/home_assistant.md` is stale and is part of the defect** — it omits
   `break` from the bulk `timers` schema and omits the break switch from the
