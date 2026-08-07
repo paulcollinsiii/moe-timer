@@ -355,13 +355,28 @@ unused. **That is currently only a warning.** IDF passes
 `-Wall -Werror -Wno-error=unused-function` to every TU, deliberately disarming
 exactly this diagnostic; the build exits 0 with the install deleted (verified).
 
-Appending `-Werror=unused-function` would restore it — verified rather than
-assumed: GCC is last-flag-wins, and IDF appends its own block via
-`idf_build_set_property(COMPILE_OPTIONS ... APPEND)` at
-`tools/cmake/build.cmake:212`, so a later project-level append lands after it
-and wins. IDF even ships `idf_build_replace_options_from_property` for this.
-Not done in task 12 — out of scope, and it will surface unrelated warnings
-elsewhere that need their own triage. Worth its own task.
+**CLOSED 2026-08-07.** `-Werror=unused-function` is re-armed via
+`target_compile_options(${COMPONENT_LIB} PRIVATE ...)` at the foot of
+`main/CMakeLists.txt` and `components/ssd1680/CMakeLists.txt`. Scoped to our
+own targets rather than set globally, because a global re-arm also covers IDF's
+components and the managed dependencies, whose unused statics need triage that
+has nothing to do with this project — that scoping is what made it safe to do
+now rather than "worth its own task".
+
+The last-flag-wins reasoning held: the emitted command line ends
+`... -Wno-error=unused-function ... -Werror=unused-function -MD ...`, ours
+last.
+
+Verified two-sided, which is the only verification that means anything here:
+the build passes as-is, AND deleting the `alerts_set_extend_awake()` install
+from `app_main` now fails with
+
+```
+main/main.c:267:13: error: 'extend_awake_failsafe' defined but not used
+                          [-Werror=unused-function]
+```
+
+at exit 2, where before it exited 0. The backstop is live.
 
 Caveat: the backstop holds only while `extend_awake_failsafe` has exactly one
 reference. A second caller in main.c makes a dropped install silent again.
