@@ -342,6 +342,19 @@ break, but a breaking schema change that silently eats configuration is still a
 defect: v1's fields are a strict prefix of v2's, so a real migration is available
 and would preserve names, minutes and reload while defaulting only the new field.
 
+### CORRECTION 2026-08-07 — the re-seed is not the recurring cause
+
+Follow-up from hardware settled it. The reporter confirmed: the flags did
+**not** come back on a later sync, the timer **names DID update to match the
+HA config**, and a manual re-toggle applies correctly (until it reverts again).
+
+Names updating is the tell: that only happens when `apply_timers()` runs, so
+the **bulk config document is applying**, not merely the Kconfig re-seed. The
+re-seed may have been the first trigger; it is not what makes this recur. See
+**BUG-6**, which is the actual mechanism. This entry stands as a real defect on
+its own — a silent, unlogged reset of user configuration on blob drift — but it
+is not the one the reporter is hitting repeatedly.
+
 ### Distinguishing it from the config-document path — no code needed
 
 The re-seed (writer 3) resets the WHOLE table, not just the break flags. Writer
@@ -364,6 +377,95 @@ The re-seed (writer 3) resets the WHOLE table, not just the break flags. Writer
 * Writer 2's "absent means false" is defensible in isolation but becomes a trap
   next to writer 1's surgical write. Any fix should decide deliberately whether
   a config document that omits `break` is asserting false or asserting nothing.
+
+---
+
+## BUG-6 — the bulk config document destroys `break_eligible` every time it applies
+
+**Status:** OPEN · **Found:** 2026-08-07, hardware, build `59c3afa`
+**Severity:** user-visible, **recurring** — an HA-set switch silently reverts
+whenever the bulk config document is republished with a new `ver`.
+
+### Reported
+
+"Break Eligible" for extra timers 3 and 4 reverts to OFF. It does not come back
+on a later sync. The timer **names DO update** to match the HA config. Manually
+re-toggling the switch applies correctly — until it reverts again.
+
+### Mechanism — every reported fact follows from it
+
+There are two config channels, and the firmware makes the bulk document win by
+consuming the other one:
+
+1. **Per-field sets.** HA's entity commands are retained
+   (`"retain":true`, `main/ha_config.c:358`), so the broker holds each value.
+   `apply_sets()` applies one, then **clears the retained command**
+   (`main/mqtt_ha.c:318-323`). Its comment states the intent: *"stops a stale
+   set from re-overriding the bulk config document every window."* A set is
+   therefore a **one-shot edit**, not a durable store.
+2. **The bulk document.** `apply_timers()` (`main/config_apply.c:126-181`) is a
+   **whole-table replace**: `memset` the blob, refill from the JSON array,
+   write. `break_eligible` comes from `(brk != NULL && cJSON_IsTrue(brk))`
+   (`:177`) — **absent means false**.
+
+The sequence that reproduces the report exactly:
+
+1. User toggles the switch → retained `set/timer3_break=ON`.
+2. Next window: applied (NVS = 1), retained command **cleared**. HA shows ON.
+   Everything looks correct.
+3. Later the bulk document is republished with a new `ver` — e.g. the nightly
+   holidays automation `docs/home_assistant.md` recommends.
+4. `apply_timers` whole-table replaces. **Names update** (they are in the
+   document). `break` is absent → **cleared to 0**.
+5. `apply_sets` runs after `config_apply` in `apply_incoming()`
+   (`main/mqtt_ha.c:433` then `:464`), so a live set WOULD win — but step 2
+   already consumed it. **Nothing is left to restore the flag.**
+6. The device publishes the post-clobber state; HA's switch follows to OFF.
+   It never heals.
+
+### Why only `break_eligible`, and why names were fine
+
+`break_eligible` is **the only timer-def field the documented bulk schema
+cannot express.** `docs/home_assistant.md:185` shows entries of
+`{"name", "min", "reload"}` only. Those three round-trip through the document
+and survive. `break` does not appear there — even though
+`main/config_apply.c:160` parses it — so every application of a
+documentation-shaped document asserts false for it.
+
+Which slots survive is a property of the operator's document: entries carrying
+`break: true` are preserved, entries omitting it are cleared. That is the
+checkable prediction here.
+
+### Immediate workaround — no firmware change
+
+Add `"break": true` to the affected entries of the retained config document:
+
+```json
+"timers": [
+  {"name": "Piano",   "min": 15, "reload": true,  "break": true},
+  {"name": "Violin",  "min": 15, "reload": true,  "break": true},
+  {"name": "Laundry", "min": 45, "reload": false, "break": true},
+  {}
+]
+```
+
+The key is already parsed; only the documentation omits it.
+
+### Fix constraints
+
+* **`docs/home_assistant.md` is stale and is part of the defect** — it omits
+  `break` from the bulk `timers` schema and omits the break switch from the
+  entity list. A field that exists in the firmware, is settable from HA, and is
+  destroyed by an undocumented default is a documentation bug with teeth.
+* **Decide what an absent key means.** Today it asserts false. The safety
+  argument at `main/config_apply.c:157-159` (a wrong `true` lets a screen
+  activity run during a break) justifies false for a slot being defined for the
+  FIRST time; it does not justify overriding a value the user already set. The
+  likely correct rule is *absent = leave unchanged for an existing slot, false
+  for a new one.*
+* **Whichever rule wins, the two channels must agree.** Consuming the retained
+  set (channel 1) is only sound if the document (channel 2) can express
+  everything the entities can. Today it cannot, and that gap is the bug.
 
 ---
 
