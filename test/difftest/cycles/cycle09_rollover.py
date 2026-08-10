@@ -33,9 +33,37 @@ import subprocess
 import sys
 import os
 
-REPO = "/workspaces/magtag-espidf/.claude/worktrees/refactor-main-impl"
+# Derived from this script's own location, never hardcoded. A fixed absolute
+# path sweeps whatever tree it names rather than the one you are working in, so
+# a run from another checkout reports a green control about code that is not in
+# front of you - and the sweep stops working outright the day that tree is
+# deleted. run.sh derives its own copy the same way, from the same file layout.
 OUT = os.path.dirname(os.path.abspath(__file__))
-BASE = "136cb06"
+REPO = os.path.abspath(os.path.join(OUT, os.pardir, os.pardir, os.pardir))
+
+# Pinned to an annotated tag, not a bare short SHA: the tag keeps the baseline
+# commit reachable even if the branch it was made on is deleted or rewritten,
+# and cannot go ambiguous as history grows. The full SHA is recorded so the tag
+# can be recreated if it is ever lost - preflight() prints the command.
+BASE = "difftest-base/cycle09"
+BASE_SHA = "136cb06681ad331776f0569957b6391005f9dd21"
+
+
+def preflight():
+    """Refuse to sweep the wrong tree, or a baseline that no longer resolves."""
+    try:
+        top = subprocess.check_output(
+            ["git", "-C", REPO, "rev-parse", "--show-toplevel"],
+            text=True, stderr=subprocess.DEVNULL).strip()
+    except (subprocess.CalledProcessError, OSError):
+        sys.exit(f"difftest: {REPO} is not a git working tree")
+    if not os.path.samefile(top, REPO):
+        sys.exit(f"difftest: {REPO} is not the root of its working tree ({top}) - "
+                 "this generator must sit three levels below the repo root")
+    if subprocess.call(["git", "-C", REPO, "rev-parse", "--verify", "--quiet",
+                        BASE + "^{commit}"], stdout=subprocess.DEVNULL) != 0:
+        sys.exit(f"difftest: baseline {BASE} is missing from {REPO}. Recreate it:\n"
+                 f"  git -C {REPO} tag -a {BASE} -m 'difftest baseline' {BASE_SHA}")
 
 
 def read_git(rev, path):
@@ -45,6 +73,9 @@ def read_git(rev, path):
 def read_file(path):
     with open(os.path.join(REPO, path)) as f:
         return f.read()
+
+
+preflight()
 
 
 def extract(src, name):
@@ -183,13 +214,22 @@ enum {
     E_TRY_WINDOW, E_RESTORE, E_RESET, E_RECORD_DATE, E_LOGLINE, E_RET,
 };
 
+/* 256 is measured, not guessed: the longest trace this cycle produces over all
+   29592 cases is 18 events, a 14x margin. It stays smaller than cycles 10 and
+   11's 8192 because run_t carries the trace inline rather than malloc'ing it,
+   so the cap is paid on the stack twice per case. g_overflow is what makes the
+   number safe to keep - a cap without a counter truncates silently, and the
+   comparison below tests lengths before contents, so a divergence past the cap
+   would read as agreement. */
 #define TRACE_MAX 256
 typedef struct { int ev; long long a, b, c; } tev_t;
 static tev_t g_tr[TRACE_MAX];
 static int g_tr_n;
+static long g_overflow; /* a truncated trace could hide a divergence */
 static void tr(int ev, long long a, long long b, long long c) {
     if (g_tr_n < TRACE_MAX) { g_tr[g_tr_n].ev = ev; g_tr[g_tr_n].a = a;
         g_tr[g_tr_n].b = b; g_tr[g_tr_n].c = c; g_tr_n++; }
+    else { g_overflow++; }
 }
 static void diff_logv(const char *tag, const char *fmt, ...) {
     /* Evaluates the varargs (that is the point) but records only that a
@@ -431,7 +471,7 @@ int main(void) {
         if (!same(&o, &n)) report("handle_day_rollover", &o, &n);
     }
 
-    printf("cases=%ld divergences=%ld\n", g_cases, g_diverge);
+    printf("cases=%ld divergences=%ld overflow=%ld\n", g_cases, g_diverge, g_overflow);
     if (g_first[0]) printf("first: %s\n", g_first);
     return g_diverge ? 1 : 0;
 }

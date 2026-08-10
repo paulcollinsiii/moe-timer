@@ -28,10 +28,11 @@ before it is consumed.
 | CONDITIONAL | Not a bug today; becomes one if a named change lands |
 | HAZARD | Not wrong today (verified); a named future change makes it wrong |
 
-Two entries are not firmware defects and are marked so: **BUG-4** is a defect in
-the verification harness, and **HAZ-2** a gap in it. They are filed here rather
-than as chores because the sweeps are what every "deliberately preserved" claim
-in this file rests on.
+Two entries were defects in the verification harness rather than the firmware —
+**BUG-4** and **HAZ-2**. They were filed here rather than as chores because the
+sweeps are what every "deliberately preserved" claim in this file rests on. Both
+are now closed; the sweeps run from any checkout and cycle09 reports trace
+overflow, so the rest of this list can be verified by anyone.
 
 ---
 
@@ -43,17 +44,17 @@ freely.
 
 | # | Item | Why here | Blocked by |
 |---|---|---|---|
-| 1 | **BUG-4** + **HAZ-2** — harness portability and the cycle09 trace cap | The sweeps currently point at a worktree that has served its purpose and can be deleted at any time, taking the ability to re-verify anything else in this list with it. Same file family, one commit. | — |
-| 2 | **HAZ-1** — calls inside log-statement arguments | Mechanical, closes a whole class, touches nothing else | — |
-| 3 | **BUG-5** — timer-defs blob drift discards the user's table | User-data policy; independent of the button work | — |
-| 4 | **BUG-7** — a RUNNING slot outliving its own definition | State-machine change to an uncovered path; independent | — |
-| 5 | **BUG-2**, then **BUG-3** | Same latch/mask surface — fix together so each is checked against the other. Both need a re-baselined sweep to show the fix changed *only* the intended cases. | 1 |
+| ~~1~~ | ~~**BUG-4** + **HAZ-2**~~ | **Done** — see Closed. The sweeps now derive the repository from their own location and are pinned to `difftest-base/*` tags, so everything below can be re-verified from any checkout. | — |
+| 1 | **HAZ-1** — calls inside log-statement arguments | Mechanical, closes a whole class, touches nothing else | — |
+| 2 | **BUG-5** — timer-defs blob drift discards the user's table | User-data policy; independent of the button work | — |
+| 3 | **BUG-7** — a RUNNING slot outliving its own definition | State-machine change to an uncovered path; independent | — |
+| 4 | **BUG-2**, then **BUG-3** | Same latch/mask surface — fix together so each is checked against the other. Both need a re-baselined sweep to show the fix changed *only* the intended cases. | — (was blocked on BUG-4) |
 | — | **BUG-1** | **Parked 2026-08-07.** Settling its fork needs an instrumented build run on hardware, which is reporter time rather than engineering time. Revisit after item 5: BUG-2's fix touches the same latch surface and may move the ground under it. | — |
 
-**Constraint 1 — BUG-4 before BUG-2/BUG-3.** Fixing a pinned bug makes the
-sweep's control diverge by design. That is only informative if the sweep can be
-re-baselined and re-run from an arbitrary checkout, which is exactly what BUG-4
-prevents today.
+**Constraint 1 — BUG-4 before BUG-2/BUG-3. Discharged 2026-08-10.** Fixing a
+pinned bug makes the sweep's control diverge by design, which is only
+informative if the sweep can be re-baselined and re-run from an arbitrary
+checkout. BUG-4 prevented that; it is now fixed, so BUG-2/BUG-3 are unblocked.
 
 **Constraint 2 — BUG-2 and BUG-3 together.** They share a root shape and both
 touch button-latch masks; a fix for either must be checked against the other
@@ -240,82 +241,6 @@ arm, which writes `selection_changed = false` and returns false; the only
 residual difference on device is one extra side-effect-free `timer_get_state()`
 read. Both call sites need a deliberate decision and a test when D gains an arm.
 Recorded on `test_a_latched_d_press_is_never_dispatched_by_the_tick_drain`.
-
----
-
-## BUG-4 — the checked-in sweeps test a hardcoded path, not the caller's tree
-
-**Status:** OPEN · **Found:** 2026-08-07, during the stat-gather move
-**Severity:** high, but scoped to the VERIFICATION HARNESS — no firmware
-defect. It makes the sweep report a false PASS, which is worse than a
-crash, because the sweep is the whole behaviour-preservation argument.
-
-`test/difftest/run.sh` derives the repo from its own location
-(`BASH_SOURCE`, line 17-18) and uses it for the include paths and
-`EXTRA_SRC`. The three cycle generators ignore that and pin their own
-absolute constant:
-
-```python
-REPO = "/workspaces/magtag-espidf/.claude/worktrees/refactor-main-impl"
-```
-
-(`cycles/cycle09_rollover.py:36`, `cycle10_watches.py:39`,
-`cycle11_handlers.py:53`.) `REPO` is what supplies both sides of the
-comparison — `git -C REPO show <BASE>:main/main.c` for the baseline and
-`open(REPO/main/wake_flow.c)` for the current code. So the code actually
-swept is whatever lives at that absolute path, regardless of where the
-sweep was invoked from.
-
-### Demonstrated, not inferred
-
-The whole tree was copied to a scratch directory, the COPY's
-`main/wake_flow.c` had `wake_flow_handle_timer_tick` renamed so that
-`extract()` could not possibly find it, and the COPY's `run.sh` was run.
-A sweep reading its own checkout must die with `could not find definition
-of wake_flow_handle_timer_tick`. Instead it completed and reported
-
-```
-harness_control  cases=121504  divergences=0  OK  (identical)
-```
-
-with exit 0 — it had read the worktree's file and never looked at the
-copy's.
-
-### Why this matters now the branch has merged
-
-Two failure modes, and the safe one is the one that goes away:
-
-1. **While this worktree exists** — running the sweep from the main
-   checkout silently sweeps the WORKTREE and reports OK. Anyone
-   re-verifying the refactor from main gets a green result that says
-   nothing about the code in front of them.
-2. **Once the worktree is deleted**, which is the normal end state and is
-   now imminent — the branch merged as `5d837a6` and the worktree has no
-   further purpose — `git -C <gone> show` raises, `run.sh` prints
-   `generate FAILED` and exits 1. Loud, but the sweeps are then permanently
-   unrunnable for everyone, which defeats the point of `a7050d4` checking
-   them in. **This is why the entry is item 1.**
-
-Note the results in the commits on this branch are NOT affected: every
-run was invoked from inside the worktree, where `REPO` and the caller's
-tree are the same directory. The claim they make is sound; what is broken
-is anyone else's ability to re-make it.
-
-### Fix constraint
-
-`REPO` must come from the script's own location the way `run.sh` already
-does it (`os.path.dirname(os.path.abspath(__file__))` walked up two
-levels), not from a constant. Whatever replaces it needs a test that
-*fails* when the sweep is pointed at a tree it did not come from —
-otherwise the next copy of this defect is invisible again.
-
-Related: `BASE` is a bare SHA on this branch (`7aab085` and friends).
-The merge was `--no-ff`, not a squash, so those objects remain reachable
-from `integration` and the baseline read still works — but it survives on
-a merge-strategy accident, not by design. Pin `BASE` to a tag or an
-annotated ref as part of the same fix. The wider generalisation belongs to
-`docs/planning/20260807.propertychecker.plan.md`, which names this entry as
-its prerequisite.
 
 ---
 
@@ -752,26 +677,6 @@ halfway through and quietly revert the rule.
 
 ---
 
-## HAZ-2 — cycle09 cannot report trace truncation
-
-**Status:** HAZARD, measured · **Found:** 2026-08-07 · **Not a firmware defect**
-
-`run.sh` refuses a run whose trace overflowed, because the comparison tests
-lengths before contents and a divergence past the cap would be invisible. Cycles
-10 and 11 supply the counter (`g_overflow`) and a cap of 8192. **Cycle 09 has
-neither** — `TRACE_MAX` is 256 and the recorder drops events with no `else` arm
-— which is why every cycle09 line prints `[overflow not reported]` and its
-control's 0 proves less than the other two cycles' do.
-
-Measured rather than assumed: the control was instrumented with a high-water
-mark, and the longest trace cycle09 produces over all 29592 cases is **18 events
-against a cap of 256** — a 14x margin. So this is a latent gap, not an active
-blind spot, and it is disclosed on every line of output.
-
-Close it alongside **BUG-4** (item 1): same files, same commit.
-
----
-
 ## Standing rules
 
 These are the durable lessons, kept separate because **everything above is meant
@@ -811,6 +716,28 @@ so a side effect placed there is a Kconfig value away from disappearing.
 Kept as one-liners only because source comments name them; delete these once the
 comments are reworded.
 
+* **BUG-4 — the checked-in sweeps tested a hardcoded path, not the caller's
+  tree.** The three cycle generators pinned `REPO` to this branch's worktree, so
+  a sweep run from anywhere else silently swept that tree and reported a green
+  control about code the reader was not looking at — and would have become
+  permanently unrunnable the day the worktree was deleted. Fixed by deriving
+  `REPO` from each generator's own location, the way `run.sh` already did, plus
+  a `preflight()` that refuses to run when the derived path is not the root of a
+  git working tree. Verified two-sided: all three sweeps still pass with
+  unchanged case counts (29592 / 15032 / 121504), and a generator copied outside
+  a repository now exits 1 with `is not a git working tree` where the old code
+  would have swept the hardcoded path regardless. `BASE` is pinned to the
+  annotated tags `difftest-base/cycle09|10|11` rather than bare short SHAs, so
+  the baselines survive a branch deletion or a history rewrite; `preflight()`
+  prints the exact `git tag -a` restore command if one goes missing.
+* **HAZ-2 — cycle09 could not report trace truncation.** Closed in the same
+  commit: cycle09 now carries the `g_overflow` counter cycles 10 and 11 have and
+  prints `overflow=` in its result line, so `run.sh` no longer annotates every
+  cycle09 line with `[overflow not reported]`. `TRACE_MAX` stays at 256 — the
+  measured high-water mark over all 29592 cases is 18 events — and now carries a
+  comment recording that the number is measured, and that the trace lives inline
+  in `run_t` rather than being malloc'd, which is why it is smaller than the
+  other two cycles' 8192.
 * **BUG-6 — the bulk config document destroyed `break_eligible` on every
   apply.** Fixed in `733e86e`: `apply_timers()` starts from the stored table, so
   an absent optional key leaves an existing slot unchanged and means false only
