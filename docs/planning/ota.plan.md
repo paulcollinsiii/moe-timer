@@ -777,6 +777,18 @@ needs to name one of the four residency reasons at review, or move.
 ## Non-goals
 
 - Signed images, secure boot, flash encryption, anti-rollback efuses.
+
+  **Nothing in this design requires image signing.** It was left open in case
+  it turned out to be forced, and it does not: `esp_https_ota` verifies the
+  image header, magic byte and chip target before switching the boot
+  partition, so a corrupt or wrong-target download is rejected without a
+  signature. Transport integrity and server authenticity come from the TLS
+  requirement — a pinned CA already means only the intended host can serve
+  an image. Signing would add authenticity *at rest*, which matters when the
+  hosting itself is untrusted; here the same person controls the host, the
+  manifest and the devices. The one place it would help is a compromised
+  host, and that threat is better answered by the fact that the CA is pinned
+  to a root the attacker would also have to control.
 - Progress reporting on the panel — static screen only, by request.
 - Delta/compressed updates.
 - Automatic rollback on *behavioural* failure (only on boot failure).
