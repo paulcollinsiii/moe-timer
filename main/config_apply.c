@@ -133,37 +133,77 @@ static void apply_timers(const cJSON *root, err_acc_t *e) {
         err_add(e, "timers");
         return;
     }
+    /* The stored table, for the optional-key rule below. A read failure
+       (never written, or version drift) just means "no slot existed", which
+       is the same answer as an empty table — so no error path is needed. */
+    nvs_timer_defs_blob_t prev;
+    bool have_prev = (nvs_config_get_timer_defs(&prev) == ESP_OK);
+
     nvs_timer_defs_blob_t defs;
     memset(&defs, 0, sizeof(defs));
     defs.version = TIMER_DEFS_BLOB_VERSION;
     int slot = 0;
     const cJSON *entry;
+    /* One bad entry rejects the whole array, so the error has to name the
+       entry: "timers" alone reads as "none of your timers applied" with
+       no clue which one to fix, and an over-long name is the easy way to
+       land here. */
+    char where[16];
     cJSON_ArrayForEach(entry, arr) {
         if (slot >= TIMER_EXTRA_SLOTS)
             break;
+        snprintf(where, sizeof(where), "timers[%d]", slot);
         if (!cJSON_IsObject(entry)) {
-            err_add(e, "timers");
+            err_add(e, where);
             return;
         }
         const cJSON *name = cJSON_GetObjectItemCaseSensitive(entry, "name");
         const cJSON *min = cJSON_GetObjectItemCaseSensitive(entry, "min");
         const cJSON *reload = cJSON_GetObjectItemCaseSensitive(entry, "reload");
+        const cJSON *brk = cJSON_GetObjectItemCaseSensitive(entry, "break");
         if (name == NULL) {
             slot++; /* {} = disabled slot */
             continue;
         }
         if (!cJSON_IsString(name) || strlen(name->valuestring) >= sizeof(defs.defs[slot].name)) {
-            err_add(e, "timers");
+            err_add(e, where);
             return; /* whole array rejected — a half-written table is worse */
         }
         if (min == NULL || !cJSON_IsNumber(min) || min->valuedouble < CFG_BOUND_TIMER_MIN_LO ||
             min->valuedouble > CFG_BOUND_TIMER_MIN_HI) {
-            err_add(e, "timers");
+            err_add(e, where);
             return;
         }
         snprintf(defs.defs[slot].name, sizeof(defs.defs[slot].name), "%s", name->valuestring);
         defs.defs[slot].min = min->valueint;
-        defs.defs[slot].reload = (reload != NULL && cJSON_IsTrue(reload)) ? 1 : 0;
+        /* Optional keys: ABSENT MEANS UNCHANGED for a slot that already has
+           a definition, and false for one this document is defining for the
+           first time.
+
+           It used to mean false unconditionally, on the argument that a
+           wrong `break: true` would let a screen activity run during (and
+           drain) a break. That argument is right for a NEW slot and is kept
+           for one — but it does not justify overriding a value the operator
+           already set, and doing so was a live defect: `break` is settable
+           from HA's per-timer switch yet is absent from the documented
+           `timers` schema, so every application of a documentation-shaped
+           document silently cleared it. The retained set/ command that would
+           have restored it is consumed on apply (mqtt_ha.c), so nothing
+           healed it. See BUG-6 in docs/planning/refactor.bugdiscoveries.md.
+
+           Caveat worth knowing: "already has a definition" is by SLOT, not
+           by name, so renaming a slot in the document carries its flags
+           over. Repurposing slot 3 from a chore to a screen activity must
+           therefore say `"break": false` explicitly rather than rely on
+           omission. Stated here because the safe direction for this field is
+           false, and this rule does not always pick it. */
+        bool existed = have_prev && prev.defs[slot].name[0] != '\0';
+        defs.defs[slot].reload = (reload != NULL) ? (cJSON_IsTrue(reload) ? 1 : 0)
+                                 : existed        ? prev.defs[slot].reload
+                                                  : 0;
+        defs.defs[slot].break_eligible = (brk != NULL) ? (cJSON_IsTrue(brk) ? 1 : 0)
+                                         : existed     ? prev.defs[slot].break_eligible
+                                                       : 0;
         slot++;
     }
     nvs_config_set_timer_defs(&defs);

@@ -24,6 +24,18 @@
 #ifndef CONFIG_MAGTAG_TIMER4_RELOADABLE
 #define CONFIG_MAGTAG_TIMER4_RELOADABLE 0
 #endif
+#ifndef CONFIG_MAGTAG_TIMER1_BREAK_ELIGIBLE
+#define CONFIG_MAGTAG_TIMER1_BREAK_ELIGIBLE 0
+#endif
+#ifndef CONFIG_MAGTAG_TIMER2_BREAK_ELIGIBLE
+#define CONFIG_MAGTAG_TIMER2_BREAK_ELIGIBLE 0
+#endif
+#ifndef CONFIG_MAGTAG_TIMER3_BREAK_ELIGIBLE
+#define CONFIG_MAGTAG_TIMER3_BREAK_ELIGIBLE 0
+#endif
+#ifndef CONFIG_MAGTAG_TIMER4_BREAK_ELIGIBLE
+#define CONFIG_MAGTAG_TIMER4_BREAK_ELIGIBLE 0
+#endif
 /* Same for _MIN: "depends on" hides them while the name is empty. */
 #ifndef CONFIG_MAGTAG_TIMER1_MIN
 #define CONFIG_MAGTAG_TIMER1_MIN 0
@@ -38,12 +50,20 @@
 #define CONFIG_MAGTAG_TIMER4_MIN 0
 #endif
 
-#define EXTRA_TIMER_DEF(n) \
-    { CONFIG_MAGTAG_TIMER##n##_NAME, CONFIG_MAGTAG_TIMER##n##_MIN * 60, CONFIG_MAGTAG_TIMER##n##_RELOADABLE }
+#define EXTRA_TIMER_DEF(n)                                                                                     \
+    {                                                                                                          \
+        CONFIG_MAGTAG_TIMER##n##_NAME, CONFIG_MAGTAG_TIMER##n##_MIN * 60, CONFIG_MAGTAG_TIMER##n##_RELOADABLE, \
+            CONFIG_MAGTAG_TIMER##n##_BREAK_ELIGIBLE                                                            \
+    }
+
+/* Slot 0 is permanently break_eligible = false: screen time IS the
+   exposure the break exists to interrupt. Not configurable. */
+#define SCREEN_DEF \
+    { "Screen", 0, false, false }
 
 static const timer_def_t s_kconfig_defs[TIMER_SLOT_COUNT] = {
-    {"Screen", 0, false}, /* slot 0: allocation comes from schedule.c */
-    EXTRA_TIMER_DEF(1),   EXTRA_TIMER_DEF(2), EXTRA_TIMER_DEF(3), EXTRA_TIMER_DEF(4),
+    SCREEN_DEF, /* slot 0: allocation comes from schedule.c */
+    EXTRA_TIMER_DEF(1), EXTRA_TIMER_DEF(2), EXTRA_TIMER_DEF(3), EXTRA_TIMER_DEF(4),
 };
 
 /* NVS-derived table: names live in this static store because timer.c keeps
@@ -66,15 +86,17 @@ void timer_defs_install(void) {
                 snprintf(blob.defs[i].name, sizeof(blob.defs[i].name), "%s", d->name);
             blob.defs[i].min = d->duration_sec / 60;
             blob.defs[i].reload = d->reloadable ? 1 : 0;
+            blob.defs[i].break_eligible = d->break_eligible ? 1 : 0;
         }
         nvs_config_set_timer_defs(&blob);
     }
-    s_nvs_defs[0] = (timer_def_t){"Screen", 0, false};
+    s_nvs_defs[0] = (timer_def_t)SCREEN_DEF;
     for (int i = 0; i < TIMER_EXTRA_SLOTS; i++) {
         snprintf(s_names[i + 1], sizeof(s_names[i + 1]), "%s", blob.defs[i].name);
         s_nvs_defs[i + 1].name = s_names[i + 1];
         s_nvs_defs[i + 1].duration_sec = blob.defs[i].min * 60;
         s_nvs_defs[i + 1].reloadable = blob.defs[i].reload != 0;
+        s_nvs_defs[i + 1].break_eligible = blob.defs[i].break_eligible != 0;
     }
     timer_set_defs(s_nvs_defs, TIMER_SLOT_COUNT);
 }

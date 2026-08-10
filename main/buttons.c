@@ -1,6 +1,7 @@
 #include "buttons.h"
 
 #include "button_latch.h"
+#include "buttons_policy.h"
 #include "driver/gpio.h"
 #include "driver/rtc_io.h"
 #include "esp_log.h"
@@ -52,7 +53,7 @@ static void buttons_watch_begin(void) {
     }
 }
 
-/* Detach before buttons_configure_wakeup() moves the pads to the RTC mux. */
+/* Detach before buttons_configure_wakeup_if() moves the pads to the RTC mux. */
 static void buttons_watch_end(void) {
     for (int i = 0; i < 4; i++) {
         gpio_isr_handler_remove(BTN_GPIOS[i]);
@@ -64,6 +65,13 @@ uint8_t buttons_take_pressed(void) {
     uint8_t mask = button_latch_take();
     portEXIT_CRITICAL(&s_latch_mux);
     return mask;
+}
+
+uint8_t buttons_take_pressed_mask(uint8_t mask) {
+    portENTER_CRITICAL(&s_latch_mux);
+    uint8_t taken = button_latch_take_masked(mask);
+    portEXIT_CRITICAL(&s_latch_mux);
+    return taken;
 }
 
 void buttons_init(void) {
@@ -91,35 +99,33 @@ void buttons_init(void) {
     buttons_watch_begin();
 }
 
-/* Wake policy (UX: prevent button mashing from burning battery/refreshes):
-   C wakes only when a swap would actually succeed — extra timers exist and
-   the active timer is not RUNNING/BREAK (the mask is rebuilt at every
-   sleep entry, so it tracks the state machine); B likewise wakes only
-   when a reset would succeed — a reloadable selected timer or the
-   parent-testing reset, and never while RUNNING. Non-wake buttons are
-   left out of the EXT1 mask AND unconfigured in the RTC domain (an open
-   button on an isolated pad draws nothing; a pull-up would leak ~70 uA
-   while held). */
-static bool is_wake_source(int i) {
-    switch ((button_id_t)i) {
-        case BTN_C:
-            return timer_swap_allowed();
-        case BTN_B:
+/* Which buttons earn a wake is policy and lives in buttons_policy.c; what
+   stays here is the RTC/EXT1 plumbing. That plumbing is not host-tested —
+   nothing compiles this TU without ESP-IDF — so three seams below rest on
+   review alone: that the pad loop indexes BTN_GPIOS with the same bit the
+   policy set, that the timer gates are wired into the right policy
+   fields, and that the early return stays AHEAD of buttons_watch_end().
+   Closing them needs a host suite for this file (stubbed gpio/rtc_io/
+   esp_sleep/FreeRTOS), which is a bigger move than the policy carve. */
+void buttons_configure_wakeup_if(bool enable) {
+    /* A locked sleep arms nothing: leave the RTC domain exactly as the
+       last sleep left it, on a battery that cannot spare the work. */
+    if (!enable)
+        return;
+    buttons_policy_in_t pol = {
+        .enable = enable,
+        .swap_allowed = timer_swap_allowed(),
 #if CONFIG_MAGTAG_PARENT_TESTING
-            return timer_reload_allowed(true);
+        .reload_allowed = timer_reload_allowed(true),
 #else
-            return timer_reload_allowed(false);
+        .reload_allowed = timer_reload_allowed(false),
 #endif
-        default:
-            return true;
-    }
-}
-
-void buttons_configure_wakeup(void) {
+    };
+    uint8_t wake = buttons_policy_wake_mask(&pol);
     buttons_watch_end();
     uint64_t mask = 0;
-    for (int i = 0; i < 4; i++) {
-        if (!is_wake_source(i))
+    for (int i = 0; i < BTN_NONE; i++) {
+        if (!(wake & (1u << i)))
             continue;
         gpio_num_t pin = BTN_GPIOS[i];
         rtc_gpio_init(pin);

@@ -159,6 +159,7 @@ entities:
   - entity: text.kitchen_magtag_timer_1_name
   - entity: number.kitchen_magtag_timer_1_minutes
   - entity: switch.kitchen_magtag_timer_1_reloadable
+  - entity: switch.kitchen_magtag_timer_1_break_eligible
   # ...timers 2-4
 ```
 
@@ -183,9 +184,9 @@ list but never blocks the others.
   "summer_start": "2026-05-29", "school_start": "2026-08-20", "school_end": "2027-05-28",
   "holidays": ["2026-10-16", "2026-11-03"],
   "timers": [
-    {"name": "Piano", "min": 15, "reload": true},
+    {"name": "Piano", "min": 15, "reload": true, "break": true},
     {},
-    {"name": "Meditation", "min": 10, "reload": true},
+    {"name": "Meditation", "min": 10, "reload": true, "break": true},
     {}
   ]
 }
@@ -195,6 +196,21 @@ list but never blocks the others.
   entries; `{}` disables that slot. Timezone and timer-definition changes
   take effect on the device's next boot/operation (the running slot is
   never disturbed mid-run).
+- Within a `timers` entry, `name` and `min` are **required**; `reload` and
+  `break` are optional and **an omitted one leaves the stored value alone**.
+  That matters because both are also settable from the per-timer switches
+  above: omitting them here will not undo a switch you flipped in HA. To
+  turn one off from the document, say so explicitly (`"break": false`) —
+  omission is not an assertion of false.
+  Two caveats. A slot the document is defining for the **first time** has no
+  stored value to keep, so an omitted flag is false there (the safe default:
+  a wrong `break: true` would let a screen activity run during, and drain, a
+  break). And "already defined" is tracked **by slot, not by name** — so
+  repurposing slot 3 from a chore to a screen activity should set
+  `"break": false` rather than rely on the rename.
+- `break` marks a timer as a genuine break activity (music practice,
+  reading): it may be started during a Screen Break and its time does not
+  count against the screen-exposure balance.
 - `holidays` replaces the stored list (rolling ~45-date cap).
 
 The same fields are available here as on the native controls (`name`, `tz`,

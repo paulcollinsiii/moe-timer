@@ -81,11 +81,12 @@ esp_err_t nvs_config_set_cmd_id(const char *id);
 
 /* Extra-timer definitions from HA (timer_defs_install falls back to the
    Kconfig table when absent). Version/size drift reads as stale. */
-#define TIMER_DEFS_BLOB_VERSION 1
+#define TIMER_DEFS_BLOB_VERSION 2 /* v2: + break_eligible */
 typedef struct {
     char name[16]; /* "" = slot disabled */
     int32_t min;
     uint8_t reload;
+    uint8_t break_eligible; /* 1 = a genuine break activity (timer_def_t) */
 } nvs_timer_def_t;
 typedef struct {
     uint8_t version;

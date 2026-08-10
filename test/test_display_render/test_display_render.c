@@ -59,6 +59,7 @@ static display_state_t base_state(void) {
         .battery_pct = 87,
         .break_duration_sec = 900,
         .swap_available = true,
+        .start_available = true,
     };
 }
 
@@ -137,12 +138,141 @@ void test_main_expired(void) {
 }
 
 void test_break_screen(void) {
+    /* Break screen with extras configured: the bottom row offers the swap
+       (Button A stays unlabelled — the break is still enforced). */
     display_state_t st = base_state();
     st.timer_state = TIMER_BREAK;
-    st.remaining_sec = 1800;
+    st.remaining_sec = 5400; /* 1:30:00 of screen time frozen */
     st.break_remaining_sec = 700;
+    st.swap_next_name = "Piano";
     display_screens_build_break(&st);
     assert_matches_golden("break_screen");
+}
+
+void test_break_screen_no_extras(void) {
+    /* No extra timers configured: nothing to swap to, so the screen keeps
+       its centred "Timer paused" footer and no button row. */
+    display_state_t st = base_state();
+    st.timer_state = TIMER_BREAK;
+    st.remaining_sec = 5400;
+    st.break_remaining_sec = 700;
+    st.swap_next_name = NULL;
+    display_screens_build_break(&st);
+    assert_matches_golden("break_screen_no_extras");
+}
+
+/* Landscape rows that must stay empty between the header band (rows 3..17,
+   framebuffer bytes 0..2) and the progress-bar band (rows 26..49, bytes
+   3..6). CLEAN_BANDS in display.c must not share a framebuffer byte — a
+   shared byte is inverted twice by the ghost-cleaning double partial and
+   cancels out — and byte 3 starts at row 24. The chip is the only widget
+   that could grow down into it. */
+static void assert_rows_blank(int row0, int row1) {
+    for (int r = row0; r <= row1; r++) {
+        for (int b = 0; b < HOR / 8; b++) {
+            char msg[64];
+            snprintf(msg, sizeof(msg), "row %d byte %d is not blank", r, b);
+            /* LVGL I1: 1 = white */
+            TEST_ASSERT_EQUAL_HEX8_MESSAGE(0xFF, s_captured[r * (HOR / 8) + b], msg);
+        }
+    }
+}
+
+void test_main_break_chip(void) {
+    /* Break running behind a selected Piano: the header's Last sync is
+       replaced by the inverted BREAK chip. Piano is RUNNING, so the swap
+       is refused and C carries no label (state truth table). */
+    display_state_t st = base_state();
+    st.timer_state = TIMER_RUNNING;
+    st.timer_name = "Piano";
+    st.allocation_sec = 600;
+    st.remaining_sec = 450;
+    st.swap_available = false;
+    st.reload_available = false;
+    st.break_banner = true;
+    st.break_remaining_sec = 754; /* 12:34 */
+    display_screens_build_main(&st);
+    assert_matches_golden("main_break_chip");
+    assert_rows_blank(24, 25); /* chip stays inside the header band's bytes */
+}
+
+void test_main_break_chip_no_start(void) {
+    /* A break running behind a selected chore (not break_eligible):
+       Button A carries no play glyph, because a press would be refused.
+
+       This is a DIFFERENT scenario from test_main_break_chip, not a
+       one-field variant of it — the two states differ in the timer name,
+       state, allocation, remaining and reload label as well, so do not
+       read a diff of the two goldens as "what start_available does".
+       test_start_available_only_changes_button_a below is what isolates
+       that. */
+    display_state_t st = base_state();
+    st.timer_state = TIMER_PAUSED;
+    st.timer_name = "Laundry folding";
+    st.allocation_sec = 1500;
+    st.remaining_sec = 750;
+    st.reload_available = true;
+    st.break_banner = true;
+    st.break_remaining_sec = 372; /* 6:12 */
+    st.start_available = false;
+    display_screens_build_main(&st);
+    assert_matches_golden("main_break_chip_no_start");
+    assert_rows_blank(24, 25);
+}
+
+void test_break_screen_no_eligible(void) {
+    /* Extras exist but none is break-eligible, so the break has nothing
+       to offer: app_state suppresses the hint (swap_next_name NULL) and
+       the screen falls back to the centred footer — the pre-non-blocking
+       locking break, which is the right behaviour here. */
+    display_state_t st = base_state();
+    st.timer_state = TIMER_BREAK;
+    st.remaining_sec = 5400;
+    st.break_remaining_sec = 700;
+    st.swap_next_name = NULL;
+    display_screens_build_break(&st);
+    assert_matches_golden("break_screen_no_eligible");
+}
+
+/* Isolates the flag itself: one state rendered twice, differing only in
+   start_available, must differ only inside Button A's cell. Catches a
+   layout that reflows when the glyph disappears — which a golden pair of
+   two different scenarios cannot. */
+void test_start_available_only_changes_button_a(void) {
+    static uint8_t with_glyph[FB_BYTES];
+    display_state_t st = base_state();
+    st.timer_state = TIMER_PAUSED;
+    st.timer_name = "Laundry folding";
+    st.allocation_sec = 1500;
+    st.remaining_sec = 750;
+    st.reload_available = true;
+    st.break_banner = true;
+    st.break_remaining_sec = 372;
+
+    st.start_available = true;
+    display_screens_build_main(&st);
+    lv_refr_now(s_disp);
+    memcpy(with_glyph, s_captured, FB_BYTES);
+
+    st.start_available = false;
+    display_screens_build_main(&st);
+    lv_refr_now(s_disp);
+
+    /* Button A's label is centred on x=17 (BTN_X0), so it lives in the
+       first four byte columns of the bottom label rows. */
+    int differing = 0;
+    for (int r = 0; r < VER; r++) {
+        for (int b = 0; b < HOR / 8; b++) {
+            int i = r * (HOR / 8) + b;
+            if (with_glyph[i] == s_captured[i])
+                continue;
+            differing++;
+            char msg[80];
+            snprintf(msg, sizeof(msg), "row %d byte %d changed outside Button A's cell", r, b);
+            TEST_ASSERT_TRUE_MESSAGE(r >= 112 && b < 4, msg);
+        }
+    }
+    TEST_ASSERT_TRUE_MESSAGE(differing > 0, "start_available changed nothing at all");
 }
 
 void test_main_low_battery_warn_badge(void) {
@@ -190,6 +320,11 @@ int main(void) {
     RUN_TEST(test_main_paused_reloadable);
     RUN_TEST(test_main_expired);
     RUN_TEST(test_break_screen);
+    RUN_TEST(test_break_screen_no_extras);
+    RUN_TEST(test_main_break_chip);
+    RUN_TEST(test_main_break_chip_no_start);
+    RUN_TEST(test_start_available_only_changes_button_a);
+    RUN_TEST(test_break_screen_no_eligible);
     RUN_TEST(test_main_low_battery_warn_badge);
     RUN_TEST(test_charge_me_screen);
     RUN_TEST(test_timesup_screen);

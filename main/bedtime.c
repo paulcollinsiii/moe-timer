@@ -26,6 +26,9 @@ bool bedtime_break_would_cross(int now_min, int dur_min, int bed_min) {
     return bed_min >= 0 && now_min < bed_min && now_min + dur_min >= bed_min;
 }
 
-bool bedtime_should_alert(timer_state_t state) {
-    return state == TIMER_RUNNING || state == TIMER_BREAK;
+bool bedtime_should_alert(timer_state_t state, bool break_active) {
+    /* break_active is read from slot 0, not from `state`: a Screen Break
+       can run behind any selected timer, so an IDLE/PAUSED active slot
+       still means "we interrupted a break". */
+    return state == TIMER_RUNNING || state == TIMER_BREAK || break_active;
 }

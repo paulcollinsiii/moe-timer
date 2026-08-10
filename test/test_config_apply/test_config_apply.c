@@ -313,7 +313,7 @@ void test_holidays_cap_enforced(void) {
 void test_timers_array_maps_to_blob(void) {
     char ack[256];
     apply(
-        "{\"ver\":\"1\",\"timers\":[{\"name\":\"Piano\",\"min\":20,\"reload\":true},{},"
+        "{\"ver\":\"1\",\"timers\":[{\"name\":\"Piano\",\"min\":20,\"reload\":true,\"break\":true},{},"
         "{\"name\":\"Meditation\",\"min\":10,\"reload\":true},{}]}",
         ack, sizeof(ack));
     nvs_timer_defs_blob_t defs;
@@ -323,8 +323,98 @@ void test_timers_array_maps_to_blob(void) {
     TEST_ASSERT_EQUAL_UINT8(1, defs.defs[0].reload);
     TEST_ASSERT_EQUAL_STRING("", defs.defs[1].name); /* {} = disabled */
     TEST_ASSERT_EQUAL_STRING("Meditation", defs.defs[2].name);
-    TEST_ASSERT_EQUAL_UINT8(1, defs.defs[2].reload); /* reload: true */
-    TEST_ASSERT_EQUAL_STRING("", defs.defs[3].name); /* {} = disabled */
+    TEST_ASSERT_EQUAL_UINT8(1, defs.defs[2].reload);         /* reload: true */
+    TEST_ASSERT_EQUAL_UINT8(1, defs.defs[0].break_eligible); /* break: true */
+    TEST_ASSERT_EQUAL_UINT8(0, defs.defs[2].break_eligible); /* absent on a NEW slot = false */
+    TEST_ASSERT_EQUAL_STRING("", defs.defs[3].name);         /* {} = disabled */
+}
+
+/* ---- optional keys: absent means UNCHANGED for an existing slot --------
+
+   BUG-6: `break` is settable from HA's per-timer switch but is absent from
+   the documented `timers` schema, so a documentation-shaped document used
+   to clear it on every application — and the retained set/ command that
+   would have restored it is consumed on apply, so nothing healed it. The
+   rule is now: absent leaves an existing slot alone, and is false only for
+   a slot the document is defining for the first time. */
+
+/* Seed the stored table the way a device that has been running would have
+   it: HA's switch wrote break_eligible for a slot the document does not
+   describe that field for. */
+static void seed_defs(const char *n1, uint8_t reload1, uint8_t break1) {
+    nvs_timer_defs_blob_t b;
+    memset(&b, 0, sizeof(b));
+    b.version = TIMER_DEFS_BLOB_VERSION;
+    snprintf(b.defs[0].name, sizeof(b.defs[0].name), "%s", n1);
+    b.defs[0].min = 45;
+    b.defs[0].reload = reload1;
+    b.defs[0].break_eligible = break1;
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_set_timer_defs(&b));
+}
+
+/* The regression itself. */
+void test_an_absent_break_leaves_an_existing_slot_alone(void) {
+    seed_defs("Laundry", 0, 1);
+    char ack[256];
+    /* Exactly the documented shape: name, min, reload — no `break`. */
+    apply("{\"ver\":\"1\",\"timers\":[{\"name\":\"Laundry\",\"min\":45,\"reload\":false}]}", ack, sizeof(ack));
+    nvs_timer_defs_blob_t defs;
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_timer_defs(&defs));
+    TEST_ASSERT_EQUAL_UINT8(1, defs.defs[0].break_eligible);
+}
+
+/* The other half of the rule — without this the fix would just be
+   "ignore break", which loses the safe default for a brand-new timer. */
+void test_an_absent_break_is_false_for_a_newly_defined_slot(void) {
+    char ack[256]; /* nothing seeded: slot 0 is new */
+    apply("{\"ver\":\"1\",\"timers\":[{\"name\":\"Minecraft\",\"min\":30}]}", ack, sizeof(ack));
+    nvs_timer_defs_blob_t defs;
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_timer_defs(&defs));
+    TEST_ASSERT_EQUAL_UINT8(0, defs.defs[0].break_eligible);
+}
+
+/* Absent must mean "unchanged", NOT "the key is ignored": an explicit
+   false has to still clear a set flag, or the document loses the ability
+   to turn the thing off. */
+void test_an_explicit_break_false_still_clears_an_existing_slot(void) {
+    seed_defs("Laundry", 0, 1);
+    char ack[256];
+    apply("{\"ver\":\"1\",\"timers\":[{\"name\":\"Laundry\",\"min\":45,\"break\":false}]}", ack, sizeof(ack));
+    nvs_timer_defs_blob_t defs;
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_timer_defs(&defs));
+    TEST_ASSERT_EQUAL_UINT8(0, defs.defs[0].break_eligible);
+}
+
+/* `reload` has the identical shape and the identical defect; the rule is
+   applied to both rather than special-cased to the field that was
+   reported. It bites less often only because `reload` IS documented. */
+void test_an_absent_reload_leaves_an_existing_slot_alone(void) {
+    seed_defs("Laundry", 1, 0);
+    char ack[256];
+    apply("{\"ver\":\"1\",\"timers\":[{\"name\":\"Laundry\",\"min\":45}]}", ack, sizeof(ack));
+    nvs_timer_defs_blob_t defs;
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_timer_defs(&defs));
+    TEST_ASSERT_EQUAL_UINT8(1, defs.defs[0].reload);
+}
+
+/* "Existing" means the slot HAS a definition, not merely that the blob
+   exists. A disabled slot must not donate stale flags to the timer that
+   replaces it — that is the case where the safe default still has to win. */
+void test_a_disabled_slot_does_not_donate_its_flags(void) {
+    nvs_timer_defs_blob_t b;
+    memset(&b, 0, sizeof(b));
+    b.version = TIMER_DEFS_BLOB_VERSION;
+    b.defs[0].name[0] = '\0'; /* disabled... */
+    b.defs[0].break_eligible = 1;
+    b.defs[0].reload = 1; /* ...but carrying stale flags */
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_set_timer_defs(&b));
+
+    char ack[256];
+    apply("{\"ver\":\"1\",\"timers\":[{\"name\":\"Minecraft\",\"min\":30}]}", ack, sizeof(ack));
+    nvs_timer_defs_blob_t defs;
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_timer_defs(&defs));
+    TEST_ASSERT_EQUAL_UINT8(0, defs.defs[0].break_eligible);
+    TEST_ASSERT_EQUAL_UINT8(0, defs.defs[0].reload);
 }
 
 void test_timers_overlong_name_rejected(void) {
@@ -335,6 +425,27 @@ void test_timers_overlong_name_rejected(void) {
     /* Blob not written (whole array rejected on a bad entry) */
     nvs_timer_defs_blob_t defs;
     TEST_ASSERT_EQUAL(ESP_ERR_NVS_NOT_FOUND, nvs_config_get_timer_defs(&defs));
+}
+
+/* One bad entry rejects the whole array, so the ack must say WHICH entry
+   or the edit looks like it silently did nothing to every timer. */
+void test_timers_error_names_the_offending_entry(void) {
+    char ack[256];
+    apply(
+        "{\"ver\":\"1\",\"timers\":[{\"name\":\"Piano\",\"min\":20},"
+        "{\"name\":\"NonEligible Testing\",\"min\":2},{\"name\":\"Violin\",\"min\":30}]}",
+        ack, sizeof(ack));
+    TEST_ASSERT_NOT_NULL(strstr(ack, "timers[1]"));
+    nvs_timer_defs_blob_t defs;
+    TEST_ASSERT_EQUAL(ESP_ERR_NVS_NOT_FOUND, nvs_config_get_timer_defs(&defs));
+}
+
+/* Same for an out-of-range duration — the slot index is the useful part. */
+void test_timers_bad_min_names_the_offending_entry(void) {
+    char ack[256];
+    apply("{\"ver\":\"1\",\"timers\":[{\"name\":\"Piano\",\"min\":20},{\"name\":\"Violin\",\"min\":9999}]}", ack,
+          sizeof(ack));
+    TEST_ASSERT_NOT_NULL(strstr(ack, "timers[1]"));
 }
 
 int main(void) {
@@ -363,6 +474,13 @@ int main(void) {
     RUN_TEST(test_holidays_reject_bad_entries_keep_good);
     RUN_TEST(test_holidays_cap_enforced);
     RUN_TEST(test_timers_array_maps_to_blob);
+    RUN_TEST(test_an_absent_break_leaves_an_existing_slot_alone);
+    RUN_TEST(test_an_absent_break_is_false_for_a_newly_defined_slot);
+    RUN_TEST(test_an_explicit_break_false_still_clears_an_existing_slot);
+    RUN_TEST(test_an_absent_reload_leaves_an_existing_slot_alone);
+    RUN_TEST(test_a_disabled_slot_does_not_donate_its_flags);
     RUN_TEST(test_timers_overlong_name_rejected);
+    RUN_TEST(test_timers_error_names_the_offending_entry);
+    RUN_TEST(test_timers_bad_min_names_the_offending_entry);
     return UNITY_END();
 }

@@ -193,6 +193,8 @@ esp_err_t net_window_ntp_result(void) {
     return s_ntp_result;
 }
 
-int64_t net_window_clock_step(void) {
-    return s_clock_step;
+int64_t net_window_take_clock_step(void) {
+    int64_t step = s_clock_step;
+    s_clock_step = 0;
+    return step;
 }

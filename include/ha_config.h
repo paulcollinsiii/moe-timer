@@ -21,6 +21,7 @@ typedef enum {
     CFG_TNAME,   /* extra-timer name (text)   */
     CFG_TMIN,    /* extra-timer minutes (number) */
     CFG_TRELOAD, /* extra-timer reloadable (switch) */
+    CFG_TBREAK,  /* extra-timer break_eligible (switch) */
     CFG_ENUM,    /* option string stored as u16 index (select) */
 } cfg_kind_t;
 

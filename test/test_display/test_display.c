@@ -213,8 +213,104 @@ void test_mode_line_truncates_cleanly_in_small_buffer(void) {
     TEST_ASSERT_EQUAL_MEMORY("ExtraLongTimerName ", buf, 19);
 }
 
+/* ---- display_format_break_chip: the header chip shown while a Screen
+   Break runs behind another selected timer ---- */
+
+void test_break_chip_is_minutes_and_seconds(void) {
+    char buf[24];
+    display_format_break_chip(buf, sizeof(buf), 754); /* 12 min 34 s */
+    TEST_ASSERT_EQUAL_STRING("BREAK 12:34", buf);
+    display_format_break_chip(buf, sizeof(buf), 59);
+    TEST_ASSERT_EQUAL_STRING("BREAK 0:59", buf);
+}
+
+void test_break_chip_stays_in_minutes_past_an_hour(void) {
+    /* Break durations are bounded (minutes, configured in HA) — rolling
+       over to H:MM:SS would only cost width in a chip that has none. */
+    char buf[24];
+    display_format_break_chip(buf, sizeof(buf), 3600);
+    TEST_ASSERT_EQUAL_STRING("BREAK 60:00", buf);
+    display_format_break_chip(buf, sizeof(buf), 7200); /* the 120 min bound */
+    TEST_ASSERT_EQUAL_STRING("BREAK 120:00", buf);
+}
+
+void test_break_chip_clamps_at_zero(void) {
+    char buf[24];
+    display_format_break_chip(buf, sizeof(buf), 0);
+    TEST_ASSERT_EQUAL_STRING("BREAK 0:00", buf);
+    display_format_break_chip(buf, sizeof(buf), -30);
+    TEST_ASSERT_EQUAL_STRING("BREAK 0:00", buf);
+}
+
+/* ---- display_format_hm: the frozen screen time on the break screen.
+   Seconds are dropped on purpose — the screen timer is frozen for the
+   whole break, so they would never change, and the bottom row has to fit
+   three 16 pt items. ---- */
+
+void test_format_hm_drops_the_seconds(void) {
+    char buf[16];
+    display_format_hm(buf, sizeof(buf), 5400); /* 1 h 30 min */
+    TEST_ASSERT_EQUAL_STRING("1:30", buf);
+    display_format_hm(buf, sizeof(buf), 5459); /* truncates, never rounds up */
+    TEST_ASSERT_EQUAL_STRING("1:30", buf);
+    display_format_hm(buf, sizeof(buf), 600);
+    TEST_ASSERT_EQUAL_STRING("0:10", buf);
+}
+
+void test_format_hm_clamps_at_zero(void) {
+    char buf[16];
+    display_format_hm(buf, sizeof(buf), 0);
+    TEST_ASSERT_EQUAL_STRING("0:00", buf);
+    display_format_hm(buf, sizeof(buf), -90);
+    TEST_ASSERT_EQUAL_STRING("0:00", buf);
+}
+
+/* ---- display_format_swap_hint: Button C's label on the break screen ---- */
+
+void test_swap_hint_truncates_to_the_width_budget(void) {
+    /* The break screen's bottom row packs three 16 pt items; the name
+       gets DISPLAY_SWAP_HINT_MAX chars and no more. */
+    char buf[24];
+    display_format_swap_hint(buf, sizeof(buf), "Meditation");
+    TEST_ASSERT_EQUAL_STRING("Meditati", buf);
+    TEST_ASSERT_EQUAL_UINT(DISPLAY_SWAP_HINT_MAX, strlen(buf));
+}
+
+void test_swap_hint_passes_short_names_through(void) {
+    char buf[24];
+    display_format_swap_hint(buf, sizeof(buf), "Piano");
+    TEST_ASSERT_EQUAL_STRING("Piano", buf);
+    display_format_swap_hint(buf, sizeof(buf), "Exercise"); /* exactly the budget */
+    TEST_ASSERT_EQUAL_STRING("Exercise", buf);
+}
+
+void test_swap_hint_handles_no_name(void) {
+    char buf[24];
+    memset(buf, (char)0xAA, sizeof(buf));
+    display_format_swap_hint(buf, sizeof(buf), NULL);
+    TEST_ASSERT_EQUAL_STRING("", buf);
+    display_format_swap_hint(buf, sizeof(buf), "");
+    TEST_ASSERT_EQUAL_STRING("", buf);
+}
+
+void test_swap_hint_respects_a_small_buffer(void) {
+    char buf[4];
+    memset(buf, (char)0xAA, sizeof(buf));
+    display_format_swap_hint(buf, sizeof(buf), "Meditation");
+    TEST_ASSERT_EQUAL_STRING("Med", buf);
+}
+
 int main(void) {
     UNITY_BEGIN();
+    RUN_TEST(test_break_chip_is_minutes_and_seconds);
+    RUN_TEST(test_break_chip_stays_in_minutes_past_an_hour);
+    RUN_TEST(test_break_chip_clamps_at_zero);
+    RUN_TEST(test_format_hm_drops_the_seconds);
+    RUN_TEST(test_format_hm_clamps_at_zero);
+    RUN_TEST(test_swap_hint_truncates_to_the_width_budget);
+    RUN_TEST(test_swap_hint_passes_short_names_through);
+    RUN_TEST(test_swap_hint_handles_no_name);
+    RUN_TEST(test_swap_hint_respects_a_small_buffer);
     RUN_TEST(test_mode_line_extra_timer_without_completions);
     RUN_TEST(test_mode_line_extra_timer_with_completions);
     RUN_TEST(test_mode_line_non_reloadable_never_shows_counter);

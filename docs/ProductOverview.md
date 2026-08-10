@@ -138,24 +138,88 @@ States: `IDLE` → `RUNNING` → `PAUSED` → `EXPIRED`, plus `BREAK` (eye rest)
 - `RUNNING`: `expiry_wall_time` set. Device deep sleeps between 55-second refresh wakes.
 - `PAUSED`: `remaining_at_pause` saved in RTC memory; `expiry_wall_time` cleared. Deep sleep continues.
 - `EXPIRED`: `remaining = 0`. Alert sequence runs on wake; device skips deep sleep until alert done or dismissed.
-- `BREAK`: enforced eye-rest pause (see 5a). Screen time frozen like PAUSED; break end is an absolute wall time.
+- `BREAK`: enforced eye-rest pause (see 5a). Screen time frozen like PAUSED; break end is an absolute wall time. Lives on the **Screen slot only**, and may be held there while a different timer is selected.
 
 ### 5a · Eye Rest (Screen Break)
 
 Every `CONFIG_MAGTAG_BREAK_INTERVAL_MIN` minutes (default 30, 0 disables) of
-**accumulated RUNNING time** — pauses don't reset the accrual — the timer
-auto-transitions to `BREAK` for `CONFIG_MAGTAG_BREAK_DURATION_MIN` minutes
-(default 15):
+**screen exposure** — see 5b; pauses don't reset it — a `BREAK` starts for
+`CONFIG_MAGTAG_BREAK_DURATION_MIN` minutes (default 15).
 
-- Entry: screen-time frozen (like pause), accrual reset, short break alarm
-  (2 beeps × 3, any button silences), display flips to the **inverted**
-  SCREEN BREAK layout with its own countdown + draining bar.
-- During: Button A is ignored (no early resume); B (parent mode) and D work.
-- End: double-beep chime, display returns to the normal layout in `PAUSED`;
-  Button A resumes the screen timer. Break end within ~1 s of wall time
-  (final-minute stay-awake, same mechanism as expiry).
-- Break state and accrual persist in the NVS snapshot (v2): a power cycle
-  mid-break resumes the break with the same absolute end time.
+The break enforces the **Screen timer**, not the whole device (v1.4). Screen
+time stays frozen, there is no early resume, and the end is an absolute wall
+time — but the other timers stay fully usable, which is the point of a break:
+a kid on a 15 min eye rest can go and run Piano or Violin.
+
+- Entry: whatever is RUNNING is paused, screen time frozen, balance reset,
+  short break alarm (2 beeps × 3, any button silences), display flips to the
+  **inverted** SCREEN BREAK layout with its own countdown + draining bar,
+  plus a swap hint over Button C. The break can be earned entirely by a
+  non-eligible extra timer, with Screen never started that day.
+- During, with Screen selected: Button A is ignored (no early resume); B
+  (parent mode), C and D work.
+- During, with an extra timer selected: the normal layout for that timer,
+  with an inverted `BREAK m:ss` chip in the header where `Last sync`
+  normally sits. A **break-eligible** timer starts, pauses, expires and
+  alerts as usual. A non-eligible one is fully visible and reachable by
+  Button C, but Button A is refused and draws no ▶ — a chore is not a break.
+- The swap hint on the break screen is suppressed when no break-eligible
+  timer is configured: the break has nothing to offer, so it behaves like
+  the older locking break.
+- End: double-beep chime, and the selection returns to whichever timer the
+  break interrupted, with Screen left `PAUSED` if it has banked time or
+  `IDLE` if it never started today. Break end within ~1 s of wall time
+  (stay-awake watch, same mechanism as expiry).
+- **The chime is suppressed when any extra timer is RUNNING** at the moment
+  the break ends — the kid is mid-activity and will get that timer's own
+  alert. The selection is then left alone too (stealing it mid-run would be
+  hostile); the chip simply disappears and Button C gets you back to Screen.
+  `EXPIRED` counts as not-running, so a finished Piano still snaps back.
+- **A late-observed end never chimes and never snaps.** If the transition is
+  first seen more than 75 s after its wall time — a charge lock, a bed-time
+  lock or a power cycle spanning it — it lands silently. The chime is an "it
+  just happened" signal, not a replay.
+- Break state, the balance and the interrupted slot persist in the NVS
+  snapshot: a power cycle mid-break resumes the break with the same absolute
+  end time, even when a different timer was selected and running.
+
+### 5b · Screen exposure (v1.5)
+
+Not every extra timer is a real break from a screen. "Laundry folding" is a
+chore done *with the TV on*: running it during an eye rest defeats the
+break, and running it outside one is real screen exposure the break
+scheduler used to be blind to. So each extra timer declares whether it is a
+genuine break activity (`MAGTAG_TIMER<n>_BREAK_ELIGIBLE`, or the per-timer
+switch in Home Assistant).
+
+Exposure is tracked as a **signed balance**:
+
+- a **non-eligible** timer running (including Screen itself) adds to it 1:1;
+- a **break-eligible** timer running subtracts from it 1:1;
+- nothing running freezes it — idle neither adds nor drains;
+- it never goes below zero, so hours of violin cannot bank hours of TV.
+
+A break is due when the balance reaches the interval. So: fold laundry for
+15 minutes, practise violin for 15, sit down to watch TV, and the break does
+**not** fire immediately — the kid genuinely was off screens. Equally, fold
+laundry for the whole interval without ever starting Screen and the break
+fires anyway, because the eyes do not care which timer was selected.
+
+The exposure balance is published to Home Assistant as the `Screen exposure`
+diagnostic sensor; read against the configured break interval it answers
+"why didn't my break fire?" directly. The panel deliberately does not show
+it.
+
+**Configure non-eligible timers with `RELOADABLE=n`.** One run of a chore
+timer is capped by its own duration, which is the earned-by-the-chore
+intent; but Button B reloads a reloadable timer without ParentTesting, so a
+reloadable chore can be re-earned without doing the chore again.
+
+A kid can of course leave Violin running without touching the violin. That
+is unfixable in principle — the device cannot see the room — and it is the
+same trust the Screen timer already assumes. It is also self-policing: at
+1:1, dodging a 30-minute break costs 30 real minutes of not watching TV,
+which is the outcome the break wanted. Do not harden it.
 
 Pressing Start from PAUSED re-NTP-syncs and sets `expiry_wall_time = now + remaining_at_pause`.
 
@@ -165,23 +229,24 @@ All state is persisted in **RTC slow memory** (survives deep sleep) with an NVS 
 
 | Button | GPIO | Action |
 |--------|------|--------|
-| A | 15 | Start (IDLE/PAUSED → RUNNING, immediate; NTP sync after) / Pause (RUNNING → PAUSED) |
+| A | 15 | Start (IDLE/PAUSED → RUNNING, immediate; NTP sync after) / Pause (RUNNING → PAUSED). During a Screen Break, a **start** is refused on any slot that is not break-eligible — including Screen — and the ▶ label is not drawn (see 5a/5b); pausing is never gated |
 | B | 14 | Reset the **selected** timer to IDLE at full duration — never while RUNNING (pause first): for a reloadable extra timer always, otherwise only when `CONFIG_MAGTAG_PARENT_TESTING=y` |
-| C | 12 | Swap timer type (Screen → extra 1 → … → Screen); refused while RUNNING or in a Screen Break |
+| C | 12 | Swap timer type (Screen → extra 1 → … → Screen); refused while RUNNING (a Screen Break does **not** refuse — see 5a) |
 | D | 11 | Force NTP re-sync + full display refresh |
 
-Wake sources: A and D always; B and C only when their press would succeed, since the EXT1 mask is rebuilt at every sleep entry and a press that could only be refused must not burn battery or a panel refresh. B: the selected timer is reloadable or `CONFIG_MAGTAG_PARENT_TESTING=y`, and never while RUNNING (pause first). C: extra timers configured AND the active timer not RUNNING/in a Screen Break. Buttons are debounced in software (10 ms).
+Wake sources: A and D always; B and C only when their press would succeed, since the EXT1 mask is rebuilt at every sleep entry and a press that could only be refused must not burn battery or a panel refresh. B: the selected timer is reloadable or `CONFIG_MAGTAG_PARENT_TESTING=y`, and never while RUNNING (pause first). C: extra timers configured AND the active timer not RUNNING — a Screen Break leaves C live, so the mask keeps it as a wake source throughout. Buttons are debounced in software (10 ms).
 
 ### 6a · Extra timers (v1.3)
 
-Up to four additional countdown timers (menuconfig: `MAGTAG_TIMER<n>_NAME/_MIN/_RELOADABLE`; an empty name disables the slot) for things like Piano practice or Meditation. They are plain countdowns sharing the Screen timer's alerts, NeoPixel sequences, NTP cadence, and RTC + NVS-snapshot persistence, but:
+Up to four additional countdown timers (menuconfig: `MAGTAG_TIMER<n>_NAME/_MIN/_RELOADABLE/_BREAK_ELIGIBLE`; an empty name disables the slot) for things like Piano practice or Laundry folding. They are plain countdowns sharing the Screen timer's alerts, NeoPixel sequences, NTP cadence, and RTC + NVS-snapshot persistence, but:
 
-- No eye-rest breaks (Screen-only).
+- No eye-rest breaks of *their own* — the break always belongs to the Screen slot — but a **non-eligible** timer feeds the shared screen-exposure balance (5b) and so can earn one, and a **break-eligible** timer stays usable during a break and drains the balance, which is what the break time is for (see 5a).
 - Fixed configured duration instead of the day-schedule allocation.
 - **Reloadable** timers reset to full via Button B on the same day, no ParentTesting needed. The mode line then counts the day's completed runs (reached 00:00): `Meditation (x2) - 10 min`. A mid-run reset does not count; non-reloadable timers never show a counter — once expired they stay depleted until rollover.
+- **Break-eligible** timers are genuine time away from a screen (see 5b). Configure chore timers non-eligible *and* `RELOADABLE=n`.
 - Day rollover resets every timer, clears the counters, and reverts the selection to Screen.
 
-Only the selected timer can be RUNNING — swapping requires a pause, so pause/expiry state of a deselected timer is frozen until you swap back.
+Only the selected timer can be RUNNING — swapping requires a pause, so pause/expiry state of a deselected timer is frozen until you swap back. The one state that is *not* tied to the selection is `BREAK`: it belongs to the Screen slot and keeps counting down whichever timer you are looking at.
 
 ### 7 · Display Layout (296×128 px)
 
@@ -197,6 +262,38 @@ Only the selected timer can be RUNNING — swapping requires a pause, so pause/e
 │     ⏸        Reset                  ⟳            │  ← button labels (A B _ D)
 └──────────────────────────────────────────────────┘
 ```
+
+While a Screen Break runs behind another selected timer, the header's
+`Last sync` is replaced by an inverted **BREAK** chip (16 pt, rows 3–21 —
+inside the header's clean band, so no other widget moves):
+
+```
+┌──────────────────────────────────────────────────┐
+│  Sat May 16  12:34 PM        ██ BREAK 12:34 ██   │  ← chip instead of Last sync
+│  ████████████████████░░░░░░░░░░░░░░░░░░░░░░░░░░  │
+│  ▮85%                       00:07:30             │
+│  Piano - 10 min                      RUNNING     │
+│     ⏸                               ⟳            │  ← C unlabelled: swap refused while RUNNING
+└──────────────────────────────────────────────────┘
+```
+
+The break screen itself (Screen selected) carries a bottom row instead of
+its old centred footer whenever extra timers are configured — the frozen
+screen time on the left, the swap affordance over C, refresh over D.
+Button A stays deliberately unlabelled: the break is still enforced.
+
+```
+┌──────────────────────────────────────────────────┐
+│               SCREEN BREAK                       │  ← 28 pt, white on black
+│  ████████████████████░░░░░░░░░░░░░░░░░░░░░░░░░░  │  ← break bar
+│                  12:34                           │  ← 48 pt break countdown
+│  Screen 1:30            ▶| Piano         ⟳       │  ← 16 pt bottom row
+└──────────────────────────────────────────────────┘
+```
+
+With no extra timers configured there is nothing to swap to, so the break
+screen keeps its original centred `Timer paused - 1:30:00 left` footer and
+no button row.
 
 Button labels sit above the physical buttons: A shows the action a press
 will take (play when IDLE/PAUSED, pause when RUNNING, hidden when EXPIRED),
@@ -253,16 +350,22 @@ Alternatively, pure ESP-IDF v5.x with `idf.py set-target esp32s2` is fully suppo
 
 ## Module Structure
 
+Abridged. The full module map and the three-layer model live in
+[architecture.md](architecture.md), which is authoritative.
+
 ```
 main/
-  main.c            — app_main: determine wake reason, dispatch to appropriate handler
+  main.c            — composition root: boot ordering, wiring, deep-sleep entry; no decisions
+  wake_flow.c       — the wake orchestration: wake-cause decode, both wake handlers,
+                      button guards, the event watches, the break-end owner
+  lock_gate.c       — the two screen locks (low battery, Bed Time)
   display.c/h       — SSD1680 SPI driver; layout rendering; partial vs full refresh logic
   timer.c/h         — state machine; expiry time calculation; RTC memory persistence
-  ntp.c/h           — WiFi init/deinit; SNTP sync; drift correction helper
+  ntp.c/h           — SNTP sync inside a network window (WiFi lifecycle is wifi_session.c)
   nvs_config.c/h    — typed NVS accessors; first-boot defaults init
   schedule.c/h      — day-type determination (weekday/weekend/holiday); allocation lookup
   buttons.c/h       — wake reason decode; GPIO wakeup config; debounce
-  audio.c/h         — PWM tone generation; beep pattern sequencer
+  audio.c/h         — DAC playback (dac_continuous on CH0/GPIO 17); tones.c renders the audio
   neopixel.c/h      — RMT-based NeoPixel driver; alert pulse pattern
   nvs_defaults.h    — compile-time default holiday list, allocations, WiFi placeholder
 
@@ -270,7 +373,9 @@ components/
   ssd1680/          — standalone SSD1680 e-ink SPI driver component
 ```
 
-**RTC slow memory layout** (persistent across deep sleep):
+**RTC slow memory layout** (persistent across deep sleep) — the v1 single-timer
+shape, kept here as the original design record; the authoritative per-slot
+definition is `include/timer.h` (see architecture.md):
 
 ```c
 typedef struct {
@@ -298,6 +403,12 @@ typedef struct {
 ---
 
 ## Implementation Notes for Coding Agents
+
+> **Superseded — read as the original v1 intent, not as guidance.** Several of
+> these were overtaken during the build: the display stack is LVGL 9 over the
+> custom `components/ssd1680` driver (not LovyanGFX, and there is no C++ TU),
+> and the IDF 6 sleep/SNTP APIs below have been renamed. For what the firmware
+> actually does, use [architecture.md](architecture.md).
 
 1. **TDD required**: write unit tests for `schedule.c` (day-type logic), `timer.c` (state machine + expiry math), and `nvs_config.c` (serialisation round-trips) before implementing those modules.
 2. **Worktrees/branches**: all development on feature branches; never commit directly to main.

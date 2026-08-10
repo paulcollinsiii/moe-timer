@@ -5,12 +5,12 @@
   },
   "workspaceFolder": "/workspaces/${localWorkspaceFolderBasename}",
   "runArgs": [
-    "--privileged",
-    "--device=/dev/ttyACM0:/dev/ttyACM0"
+    "--privileged"
   ],
   "mounts": [
     "source=/dev/bus/usb,target=/dev/bus/usb,type=bind",
-    "source=claude-code-config,target=/home/vscode/.claude,type=volume"
+    "source=claude-code-config,target=/home/vscode/.claude,type=volume",
+    "source=/dev,target=/dev,type=bind"
   ],
   "remoteUser": "vscode",
   "containerEnv": {

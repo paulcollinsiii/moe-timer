@@ -1,3 +1,4 @@
+#include <stdio.h>
 #include <string.h>
 #include <unity.h>
 
@@ -176,11 +177,17 @@ void test_state_json_worst_case_fits_firmware_buffer(void) {
         ha_config_set(key, "1440", ack, sizeof(ack));
         snprintf(key, sizeof(key), "timer%d_reload", n);
         ha_config_set(key, "ON", ack, sizeof(ack));
+        snprintf(key, sizeof(key), "timer%d_break", n);
+        ha_config_set(key, "ON", ack, sizeof(ack));
     }
     char buf[HA_CONFIG_STATE_MAX];
     int ret = ha_config_state_json(buf, sizeof(buf));
     TEST_ASSERT_TRUE(ret < HA_CONFIG_STATE_MAX); /* not truncated */
     TEST_ASSERT_EQUAL_INT((int)strlen(buf), ret);
+    /* Headroom the firmware buffer actually has, so a future field
+       addition trips here rather than silently knocking every editable
+       control offline (a truncated doc is never published). */
+    printf("  worst-case cfg state: %d / %d bytes\n", ret, HA_CONFIG_STATE_MAX);
 }
 
 /* ---- ha_config_state_json ---- */
@@ -231,6 +238,47 @@ void test_discovery_text_has_mode(void) {
     TEST_ASSERT_EQUAL_STRING("text", f->component);
     TEST_ASSERT_NOT_NULL(strstr(buf, "\"mode\":\"text\""));
     TEST_ASSERT_NOT_NULL(strstr(buf, "\"cmd_t\":\"magtag/magtag-a1b2c3/set/name\""));
+}
+
+/* Every text entity must advertise its length cap. HA's text platform
+   defaults max to 255, so without this the UI accepts a name the device
+   then rejects with "len" — and the rejection is invisible unless you are
+   watching the ack topic. `hi` is the buffer size, so the longest string
+   that fits is hi - 1. */
+void test_discovery_text_advertises_max_length(void) {
+    char buf[700];
+    const struct {
+        const char *key;
+        const char *max;
+    } cases[] = {
+        {"name", "\"max\":31"},        /* CFG_BOUND_NAME_MAX 32 */
+        {"tz", "\"max\":47"},          /* CFG_BOUND_TZ_MAX 48 */
+        {"timer1_name", "\"max\":15"}, /* blob name field is 16 bytes */
+        {"timer4_name", "\"max\":15"},
+    };
+    for (unsigned i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        const cfg_field_t *f = field_by_key(cases[i].key);
+        TEST_ASSERT_NOT_NULL(f);
+        TEST_ASSERT_EQUAL_STRING("text", f->component);
+        ha_config_discovery(buf, sizeof(buf), "magtag-a1b2c3", "K", "fw", f);
+        TEST_ASSERT_NOT_NULL_MESSAGE(strstr(buf, cases[i].max), cases[i].key);
+    }
+}
+
+/* The advertised max and the device-side check must be the same number:
+   an HA UI that accepts exactly max characters must never produce a
+   value the device rejects. 15 fits, 16 does not. */
+void test_timer_name_max_matches_the_reject_boundary(void) {
+    const cfg_field_t *f = field_by_key("timer1_name");
+    TEST_ASSERT_NOT_NULL(f);
+    char ack[128], name[64];
+    memset(name, 'x', sizeof(name));
+    name[f->hi - 1] = '\0'; /* exactly the advertised max */
+    TEST_ASSERT_EQUAL(HA_CFG_OK, ha_config_set("timer1_name", name, ack, sizeof(ack)));
+    name[f->hi - 1] = 'x';
+    name[f->hi] = '\0'; /* one over */
+    TEST_ASSERT_EQUAL(HA_CFG_REJECTED, ha_config_set("timer1_name", name, ack, sizeof(ack)));
+    TEST_ASSERT_NOT_NULL(strstr(ack, "len"));
 }
 
 void test_discovery_topic(void) {
@@ -385,6 +433,44 @@ void test_set_timer_name_too_long_rejected(void) {
     TEST_ASSERT_EQUAL(HA_CFG_REJECTED, ha_config_set("timer1_name", "SixteenCharsPlus!", ack, sizeof(ack)));
 }
 
+/* Per-timer break-eligible switch: the HA-facing half of the flag. */
+void test_set_timer_break_eligible(void) {
+    char ack[128];
+    TEST_ASSERT_EQUAL(HA_CFG_OK, ha_config_set("timer1_break", "ON", ack, sizeof(ack)));
+    nvs_timer_defs_blob_t b;
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_timer_defs(&b));
+    TEST_ASSERT_EQUAL_UINT8(1, b.defs[0].break_eligible);
+    TEST_ASSERT_EQUAL(HA_CFG_OK, ha_config_set("timer1_break", "OFF", ack, sizeof(ack)));
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_timer_defs(&b));
+    TEST_ASSERT_EQUAL_UINT8(0, b.defs[0].break_eligible);
+}
+
+void test_set_timer_break_eligible_rejects_non_onoff(void) {
+    char ack[128];
+    TEST_ASSERT_EQUAL(HA_CFG_OK, ha_config_set("timer1_break", "ON", ack, sizeof(ack)));
+    TEST_ASSERT_EQUAL(HA_CFG_REJECTED, ha_config_set("timer1_break", "true", ack, sizeof(ack)));
+    TEST_ASSERT_EQUAL(HA_CFG_REJECTED, ha_config_set("timer1_break", "", ack, sizeof(ack)));
+    nvs_timer_defs_blob_t b;
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_timer_defs(&b));
+    TEST_ASSERT_EQUAL_UINT8(1, b.defs[0].break_eligible); /* untouched */
+}
+
+/* Editing one per-slot field must not clobber its siblings: they all
+   read-modify-write the same blob. */
+void test_timer_fields_are_independent(void) {
+    char ack[128];
+    TEST_ASSERT_EQUAL(HA_CFG_OK, ha_config_set("timer1_break", "ON", ack, sizeof(ack)));
+    TEST_ASSERT_EQUAL(HA_CFG_OK, ha_config_set("timer1_reload", "ON", ack, sizeof(ack)));
+    TEST_ASSERT_EQUAL(HA_CFG_OK, ha_config_set("timer1_min", "25", ack, sizeof(ack)));
+    TEST_ASSERT_EQUAL(HA_CFG_OK, ha_config_set("timer1_name", "Violin", ack, sizeof(ack)));
+    nvs_timer_defs_blob_t b;
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_timer_defs(&b));
+    TEST_ASSERT_EQUAL_STRING("Violin", b.defs[0].name);
+    TEST_ASSERT_EQUAL_INT32(25, b.defs[0].min);
+    TEST_ASSERT_EQUAL_UINT8(1, b.defs[0].reload);
+    TEST_ASSERT_EQUAL_UINT8(1, b.defs[0].break_eligible);
+}
+
 void test_set_timer_min_and_reload(void) {
     seed_blob();
     char ack[128];
@@ -409,6 +495,7 @@ void test_state_json_includes_timer_fields(void) {
     TEST_ASSERT_NOT_NULL(strstr(buf, "\"timer1_name\":\"Piano\""));
     TEST_ASSERT_NOT_NULL(strstr(buf, "\"timer1_min\":15"));
     TEST_ASSERT_NOT_NULL(strstr(buf, "\"timer1_reload\":\"ON\""));
+    TEST_ASSERT_NOT_NULL(strstr(buf, "\"timer1_break\":\"OFF\""));
     TEST_ASSERT_NOT_NULL(strstr(buf, "\"timer2_name\":\"\"")); /* empty slot */
 }
 
@@ -432,6 +519,9 @@ int main(void) {
     RUN_TEST(test_set_timer_name_enables_slot);
     RUN_TEST(test_set_timer_name_empty_disables_slot);
     RUN_TEST(test_set_timer_name_too_long_rejected);
+    RUN_TEST(test_set_timer_break_eligible);
+    RUN_TEST(test_set_timer_break_eligible_rejects_non_onoff);
+    RUN_TEST(test_timer_fields_are_independent);
     RUN_TEST(test_set_timer_min_and_reload);
     RUN_TEST(test_set_timer_min_out_of_range_rejected);
     RUN_TEST(test_state_json_includes_timer_fields);
@@ -455,6 +545,8 @@ int main(void) {
     RUN_TEST(test_state_json_reports_current_values);
     RUN_TEST(test_discovery_number_has_command_bounds_and_config_category);
     RUN_TEST(test_discovery_text_has_mode);
+    RUN_TEST(test_discovery_text_advertises_max_length);
+    RUN_TEST(test_timer_name_max_matches_the_reject_boundary);
     RUN_TEST(test_discovery_topic);
     RUN_TEST(test_set_bedtime_accepts_evening_and_zero);
     RUN_TEST(test_set_bedtime_rejects_daytime);

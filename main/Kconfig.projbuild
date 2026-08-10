@@ -97,9 +97,10 @@ menu "MagTag Timer"
             Display name of extra countdown timer 1 (e.g. "Piano"). Keep it
             short (~12 chars) — it renders at 12 pt next to the completion
             counter and duration. Empty disables the slot. Extra timers are
-            plain countdowns: no eye-rest breaks, same alerts and NTP
-            behaviour as the Screen timer. Button C cycles between enabled
-            timers (blocked while one is RUNNING or in a Screen Break).
+            plain countdowns: no eye-rest breaks of their own, same alerts
+            and NTP behaviour as the Screen timer, and usable during a
+            Screen Break. Button C cycles between enabled timers (blocked
+            only while one is RUNNING).
 
     config MAGTAG_TIMER1_MIN
         int "Extra timer 1 duration (minutes)"
@@ -116,6 +117,19 @@ menu "MagTag Timer"
             needed) whenever it is not RUNNING. The mode line then shows how
             often it ran to completion today, e.g. "Piano (x2) - 15 min".
 
+    config MAGTAG_TIMER1_BREAK_ELIGIBLE
+        bool "Extra timer 1 is break-eligible"
+        default n
+        depends on MAGTAG_TIMER1_NAME != ""
+        help
+            This timer is a genuine break from a screen (music practice,
+            reading), so it may be STARTED during a Screen Break and its
+            running time DRAINS the screen-exposure balance 1:1 instead of
+            feeding it. Leave it off for chores done with the TV on
+            (laundry folding): those add exposure and cannot be started
+            during a break. Non-eligible timers should also be
+            RELOADABLE=n, or the chore can be re-earned without doing it.
+
     config MAGTAG_TIMER2_NAME
         string "Extra timer 2 name"
         default ""
@@ -128,6 +142,11 @@ menu "MagTag Timer"
 
     config MAGTAG_TIMER2_RELOADABLE
         bool "Extra timer 2 reloadable"
+        default n
+        depends on MAGTAG_TIMER2_NAME != ""
+
+    config MAGTAG_TIMER2_BREAK_ELIGIBLE
+        bool "Extra timer 2 is break-eligible"
         default n
         depends on MAGTAG_TIMER2_NAME != ""
 
@@ -146,6 +165,11 @@ menu "MagTag Timer"
         default n
         depends on MAGTAG_TIMER3_NAME != ""
 
+    config MAGTAG_TIMER3_BREAK_ELIGIBLE
+        bool "Extra timer 3 is break-eligible"
+        default n
+        depends on MAGTAG_TIMER3_NAME != ""
+
     config MAGTAG_TIMER4_NAME
         string "Extra timer 4 name"
         default ""
@@ -158,6 +182,11 @@ menu "MagTag Timer"
 
     config MAGTAG_TIMER4_RELOADABLE
         bool "Extra timer 4 reloadable"
+        default n
+        depends on MAGTAG_TIMER4_NAME != ""
+
+    config MAGTAG_TIMER4_BREAK_ELIGIBLE
+        bool "Extra timer 4 is break-eligible"
         default n
         depends on MAGTAG_TIMER4_NAME != ""
 
