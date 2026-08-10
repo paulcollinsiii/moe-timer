@@ -15,6 +15,30 @@ test/difftest/run.sh cycle09_rollover
 
 Exit status is 0 only if every check below passes.
 
+Both `run.sh` and every cycle generator work out the repository from their own
+location on disk, so a sweep always compares the tree it was invoked from. This
+is load-bearing rather than tidy: the generators previously carried a hardcoded
+absolute path, which meant a run from any other checkout silently swept a
+different tree and printed a green control about code the reader was not
+looking at. A generator moved out of `<repo>/test/difftest/cycles` now refuses
+to run instead of guessing.
+
+## Baselines are tags, not SHAs
+
+Each cycle's baseline is pinned by an annotated tag:
+
+| cycle | tag | commit |
+|---|---|---|
+| `cycle09_rollover` | `difftest-base/cycle09` | `136cb06` |
+| `cycle10_watches`  | `difftest-base/cycle10` | `a7050d4` |
+| `cycle11_handlers` | `difftest-base/cycle11` | `7aab085` |
+
+The tag is what keeps the baseline commit reachable once the branch it was made
+on is deleted or rewritten — a bare short SHA is neither permanent nor immune to
+going ambiguous as history grows. These tags are local to the repository; if one
+goes missing the generator fails with the exact `git tag -a` command to restore
+it, using the full SHA recorded in its `BASE_SHA`.
+
 ## The two-sided invariant
 
 A sweep that reports "0 divergences" is worthless on its own — a harness that
@@ -77,7 +101,20 @@ mock clock is frozen and nothing downstream could tell reuse from re-read.
 
 Copy `cycles/cycle09_rollover.py` and change:
 
-* `BASE` — the baseline rev, normally the commit before this cycle's work.
+* `BASE` / `BASE_SHA` — the baseline, normally the commit before this cycle's
+  work. Tag it first and name the tag; never a bare rev:
+
+  ```sh
+  git tag -a difftest-base/cycleNN -m 'difftest baseline' <full-sha>
+  ```
+
+  Set `BASE` to the tag and `BASE_SHA` to the full SHA, so `preflight()` can
+  print the restore command if the tag is ever lost.
+* The trace recorder needs a `g_overflow` counter and an `overflow=` field in
+  the result line. A cap without a counter truncates silently, and the trace
+  comparison tests lengths before contents, so a divergence past the cap reads
+  as agreement. `run.sh` prints `[overflow not reported]` on every line of a
+  cycle that omits it — that note means the run proved less than it appears to.
 * `OLD_NAMES` / `NEW_NAMES` — the functions moved, in matching order.
 * `MUTANTS` — at least one perturbation per behaviour the cycle must preserve.
   Bias toward ±1 on every boundary and every operand; off-by-one at equality

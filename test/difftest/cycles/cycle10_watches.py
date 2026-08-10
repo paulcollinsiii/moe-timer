@@ -36,9 +36,37 @@ import subprocess
 import sys
 import os
 
-REPO = "/workspaces/magtag-espidf/.claude/worktrees/refactor-main-impl"
+# Derived from this script's own location, never hardcoded. A fixed absolute
+# path sweeps whatever tree it names rather than the one you are working in, so
+# a run from another checkout reports a green control about code that is not in
+# front of you - and the sweep stops working outright the day that tree is
+# deleted. run.sh derives its own copy the same way, from the same file layout.
 OUT = os.path.dirname(os.path.abspath(__file__))
-BASE = "a7050d4"
+REPO = os.path.abspath(os.path.join(OUT, os.pardir, os.pardir, os.pardir))
+
+# Pinned to an annotated tag, not a bare short SHA: the tag keeps the baseline
+# commit reachable even if the branch it was made on is deleted or rewritten,
+# and cannot go ambiguous as history grows. The full SHA is recorded so the tag
+# can be recreated if it is ever lost - preflight() prints the command.
+BASE = "difftest-base/cycle10"
+BASE_SHA = "a7050d4724c799b092226aac3dfdae0d89e2ef53"
+
+
+def preflight():
+    """Refuse to sweep the wrong tree, or a baseline that no longer resolves."""
+    try:
+        top = subprocess.check_output(
+            ["git", "-C", REPO, "rev-parse", "--show-toplevel"],
+            text=True, stderr=subprocess.DEVNULL).strip()
+    except (subprocess.CalledProcessError, OSError):
+        sys.exit(f"difftest: {REPO} is not a git working tree")
+    if not os.path.samefile(top, REPO):
+        sys.exit(f"difftest: {REPO} is not the root of its working tree ({top}) - "
+                 "this generator must sit three levels below the repo root")
+    if subprocess.call(["git", "-C", REPO, "rev-parse", "--verify", "--quiet",
+                        BASE + "^{commit}"], stdout=subprocess.DEVNULL) != 0:
+        sys.exit(f"difftest: baseline {BASE} is missing from {REPO}. Recreate it:\n"
+                 f"  git -C {REPO} tag -a {BASE} -m 'difftest baseline' {BASE_SHA}")
 
 
 def read_git(rev, path):
@@ -48,6 +76,9 @@ def read_git(rev, path):
 def read_file(path):
     with open(os.path.join(REPO, path)) as f:
         return f.read()
+
+
+preflight()
 
 
 def extract(src, name):
