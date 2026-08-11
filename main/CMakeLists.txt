@@ -24,6 +24,7 @@ idf_component_register(
         "mqtt_topics.c"
         "config_apply.c"
         "config_validate.c"
+        "ota_policy.c"
         "ha_config.c"
         "cmd_apply.c"
         "device_id.c"
