@@ -976,6 +976,13 @@ is what gives the malformed-JSON cases teeth.
 
 ## Tasks
 
+**Status (2026-08-11):** tasks 1-9 are implemented, reviewed and committed on
+`worktree-ota-plan` — `d7e28f6` (partition freeze + `version.txt`), `6f61f50`
+(config surface + the HA `sw`-staleness fix), `b084917` (`ota_policy`),
+`6f5d618` (version on panel + update screen), plus a follow-up fix round on
+the display package. 35/35 host suites green; firmware 1,436,928 B, 22 % free.
+Tasks 10-17 remain.
+
 0. Cut `feature/ota` from `integration`.
 1. **Measure.** Add `esp_http_client`, `esp_https_ota`, `app_update` to
    `main/CMakeLists.txt` `REQUIRES`; build; record the real image growth.
@@ -998,13 +1005,35 @@ is what gives the malformed-JSON cases teeth.
    Regenerate main-screen goldens; `git checkout` the untouched ones.
 9. `display_screens_build_ota(from, to)` + `display_ota(from, to)` + golden.
 10. `test_ota_flow` **first**, then `main/ota_flow.c` with its injected ops.
+    Three constraints the display review surfaced, all of which `test_ota_flow`
+    must pin rather than leave to convention:
+    - **The OTA paint must happen with the radio down.** `display_ota()` carries
+      no `net_window_active()` guard, and its flush blocks for up to
+      `ssd1680_refresh_wait()` plus a full refresh. Called inside an open
+      window it walks straight into the brownout this project already paid for
+      (see `net_window.c:65-79`). Pin the order: window joined →
+      `wifi_session_end()` → paint → new session.
+    - **Paint before `wifi_session_begin()` AND before the failsafe extension**,
+      or ~3 s of panel time is charged to the 180 s `MAX_AWAKE_SEC` budget
+      instead of to `OTA_MAX_SEC`.
+    - **The failure path must force a full refresh.** `display_ota()` zeroes
+      `s_partial_count`, so the next `display_update()` would repaint a
+      full-screen 28 pt takeover with a *partial* refresh. Use the mechanism
+      task 9 left for this; the precedent is `lock_gate.c:49-54`.
 11. `main/ota.c`: manifest GET, then the **incremental** OTA
     (`esp_https_ota_begin` / `_perform` loop / `_finish`) with the deadline
     check in the loop, plus mark-valid. Embed the CA PEM.
 12. Wire the rollover trigger, the Button D trigger, the pre-sleep apply point,
     and the failsafe extender install in `app_main`.
 13. `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y`; call `ota_mark_valid_if_pending()`
-    from the pre-sleep point.
+    from the pre-sleep point. **Measure the bootloader before flipping this
+    symbol**: it is currently 22,640 of 28,672 B (79 %, 6,032 B free), rollback
+    support grows it, and the 2nd-stage bootloader at `0x1000`-`0x8000` is as
+    un-updatable as the partition table.
+    Also promote the **first paint after a successful OTA reboot** to a full
+    refresh: `s_partial_count` is `RTC_DATA_ATTR` and survives `esp_restart()`,
+    so the panel comes back still showing the update screen and would otherwise
+    repaint it partially.
 14. OTA result / target / fail-count / download duration into the stat payload.
 15. Build-size guard (warn at 85 % slot occupancy).
 16. Hardware smoke test (below).
