@@ -18,8 +18,16 @@ typedef enum {
     CONFIG_INVALID,     /* unparseable or missing "ver" — nothing written */
 } config_result_t;
 
-/* Writes an ack JSON document ({"ver":...,"ok":bool[,"errors":[...]]}) into
-   ack for publishing on config_ack. */
+/* Smallest ack buffer config_apply may be given. The worst-case ack (every
+   field present and wrong-typed) must fit WHOLE — a truncated ack is
+   unparseable JSON, and HA then loses every error in it rather than the
+   one that overflowed. config_apply caps its own error list to stay inside
+   this; callers must not pass less. */
+#define CONFIG_ACK_MIN 256
+
+/* Writes an ack JSON document into ack for publishing on config_ack:
+   {"ver":...,"ok":bool[,"errors":[...][,"errors_truncated":true]]}.
+   errors_truncated means more fields failed than the list could name. */
 config_result_t config_apply(const char *json, char *ack, size_t ack_len);
 
 #ifdef __cplusplus

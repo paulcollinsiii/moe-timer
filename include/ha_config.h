@@ -66,6 +66,16 @@ typedef enum { HA_CFG_OK = 0, HA_CFG_REJECTED, HA_CFG_UNKNOWN } ha_cfg_result_t;
    prints the live figure. */
 #define HA_CONFIG_STATE_MAX 1280
 
+/* Set-buffer slots the MQTT window must provide (mqtt_ha.c's SET_MAX).
+   Every registry field can arrive as a retained set/<key> in a single
+   window, plus mqtt_ha's own action entities (screen bonus, locate), plus
+   margin for a field edited live during the window — that edit lands on
+   top of its retained copy, and neither may be dropped. ha_config.c
+   static-asserts the registry against this, so adding a field trips the
+   build instead of silently dropping edits at the far end; the previous
+   hand-maintained count had already gone stale twice. */
+#define HA_CONFIG_SET_SLOTS 48
+
 const cfg_field_t *ha_config_fields(int *count);
 /* Validate `value` (a string from MQTT) for `key` and persist via the
    field's nvs setter; writes an ack ({"key":...,"ok":bool[,"err":...]}). */
@@ -91,6 +101,21 @@ const char *ha_config_json_escape(char *dst, size_t dstlen, const char *src);
    later update leaves the card showing the old version permanently.
    NULL-safe (a NULL argument folds as an empty string). */
 uint16_t ha_config_device_hash(const char *dev_name, const char *fw);
+
+/* The full discovery fingerprint mqtt_ha stores: the dev block (above)
+   PLUS every extra-timer slot name, because those drive the published
+   names of the per-timer stat entities and which of them exist. Reads the
+   timer-defs blob, so it is host-tested over the mock NVS rather than
+   pure. This is the value to compare and to store — ha_config_device_hash
+   alone would leave a rename invisible until the next schema bump. */
+uint16_t ha_config_discovery_hash(const char *dev_name, const char *fw);
+
+/* The discovery-freshness gate itself, lifted out of mqtt_ha.c so it can
+   be tested: discovery is republished when the stored schema version or
+   the stored fingerprint disagrees with the current pair. Kept as a
+   predicate because the wiring around it (compare, publish, then stamp
+   only after a successful drain) is what actually went wrong before. */
+bool ha_config_discovery_stale(uint16_t stored_ver, uint16_t stored_hash, uint16_t schema_ver, uint16_t dev_hash);
 
 #ifdef __cplusplus
 }

@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "config_validate.h" /* CFG_BOUND_OTA_* — setter length caps */
 #include "hal_nvs.h"
 #ifndef NATIVE
 #include "nvs.h"
@@ -83,6 +84,18 @@ static esp_err_t get_str_with_default(const char *key, char *buf, size_t len, co
         return ESP_OK;
     }
     return ret;
+}
+
+/* Reject rather than truncate. Both current callers validate length first
+   (ha_config_set against the field's `hi`, config_apply against the same
+   bound), but ota_flow.c will be the third writer of the state keys and
+   is not on that path — and a silently truncated URL or target version is
+   worse than a failed write: a half-written ota_target never matches, so
+   the retry budget would never converge. */
+static esp_err_t write_str_bounded(const char *key, const char *val, size_t cap) {
+    if (val == NULL || strlen(val) >= cap)
+        return ESP_ERR_INVALID_SIZE;
+    return hal_nvs_write_str(key, val);
 }
 
 esp_err_t nvs_config_get_mqtt_uri(char *buf, size_t len) {
@@ -242,7 +255,10 @@ esp_err_t nvs_config_get_cmd_id(char *buf, size_t len) {
     return get_str_empty_default(NVS_KEY_CMD_ID, buf, len);
 }
 esp_err_t nvs_config_set_cmd_id(const char *id) {
-    return hal_nvs_write_str(NVS_KEY_CMD_ID, id);
+    /* Bounded to cmd_apply.c's dedup buffer. An id longer than that stores
+       fine but can never be read back, so the apply-once compare fails
+       every window and a retained `grant` re-applies forever. */
+    return write_str_bounded(NVS_KEY_CMD_ID, id, CFG_BOUND_CMD_ID_MAX);
 }
 
 /* ---- OTA ----
@@ -253,7 +269,7 @@ esp_err_t nvs_config_get_ota_url(char *buf, size_t len) {
     return get_str_with_default(NVS_KEY_OTA_URL, buf, len, NVS_DEFAULT_OTA_URL);
 }
 esp_err_t nvs_config_set_ota_url(const char *url) {
-    return hal_nvs_write_str(NVS_KEY_OTA_URL, url);
+    return write_str_bounded(NVS_KEY_OTA_URL, url, CFG_BOUND_OTA_URL_MAX);
 }
 esp_err_t nvs_config_get_ota_on_sync(uint16_t *out) {
     return get_u16_with_default(NVS_KEY_OTA_ON_SYNC, out, NVS_DEFAULT_OTA_ON_SYNC);
@@ -266,13 +282,13 @@ esp_err_t nvs_config_get_ota_result(char *buf, size_t len) {
     return get_str_empty_default(NVS_KEY_OTA_RESULT, buf, len);
 }
 esp_err_t nvs_config_set_ota_result(const char *reason) {
-    return hal_nvs_write_str(NVS_KEY_OTA_RESULT, reason);
+    return write_str_bounded(NVS_KEY_OTA_RESULT, reason, CFG_BOUND_OTA_RESULT_MAX);
 }
 esp_err_t nvs_config_get_ota_target(char *buf, size_t len) {
     return get_str_empty_default(NVS_KEY_OTA_TARGET, buf, len);
 }
 esp_err_t nvs_config_set_ota_target(const char *ver) {
-    return hal_nvs_write_str(NVS_KEY_OTA_TARGET, ver);
+    return write_str_bounded(NVS_KEY_OTA_TARGET, ver, CFG_BOUND_OTA_TARGET_MAX);
 }
 esp_err_t nvs_config_get_ota_fails(uint16_t *out) {
     return get_u16_with_default(NVS_KEY_OTA_FAILS, out, 0);

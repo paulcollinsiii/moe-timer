@@ -67,3 +67,12 @@ bool config_is_ota_url(const char *s) {
         return false;
     return (*s == '\0') || config_is_https_url(s);
 }
+
+bool config_is_clean_str(const char *s) {
+    if (s == NULL)
+        return false;
+    for (; *s != '\0'; s++)
+        if (*s == '"' || *s == '\\' || (unsigned char)*s < 0x20)
+            return false;
+    return true;
+}

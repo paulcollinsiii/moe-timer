@@ -14,14 +14,35 @@
 
 /* ---- error accumulator: builds the ack "errors" list ---- */
 
+/* Capacity budget: the finished ack must fit CONFIG_ACK_MIN whole, or the
+   ack itself is truncated into unparseable JSON — the very failure this
+   accumulator exists to prevent, one level up. Worst case is
+   {"ver":"<=23"},"ok":false,"errors":[<errors>],"errors_truncated":true}
+   = 80 B of envelope, so the list gets the rest with margin. */
+#define ERR_LIST_CAP 160
+
 typedef struct {
-    char errors[192];
+    char errors[ERR_LIST_CAP];
     int count;
+    bool truncated;
 } err_acc_t;
 
+/* Append a field name to the ack's "errors" array.
+   snprintf alone was not enough: it truncates mid-name and still reports
+   the would-be length, so `count` kept incrementing and the list ended in
+   an unterminated JSON string (a document with every field wrong-typed
+   produced ...,"tone_bed","alert_v]}). HA then fails to parse the whole
+   ack, so EVERY error is lost — including the ones that fitted, and
+   including the OTA fields, which sort last and were dropped first.
+   An entry that does not fit WHOLE is therefore dropped and flagged. */
 static void err_add(err_acc_t *e, const char *field) {
-    int n = snprintf(e->errors + strlen(e->errors), sizeof(e->errors) - strlen(e->errors), "%s\"%s\"",
-                     e->count ? "," : "", field);
+    size_t used = strlen(e->errors);
+    size_t need = strlen(field) + 2 + (e->count ? 1u : 0u); /* quotes + separator */
+    if (used + need + 1 > sizeof(e->errors)) {
+        e->truncated = true;
+        return;
+    }
+    int n = snprintf(e->errors + used, sizeof(e->errors) - used, "%s\"%s\"", e->count ? "," : "", field);
     if (n > 0)
         e->count++;
 }
@@ -37,7 +58,8 @@ static void apply_u16(const cJSON *root, const char *field, int lo, int hi, esp_
         err_add(e, field);
         return;
     }
-    setter((uint16_t)item->valueint);
+    if (setter((uint16_t)item->valueint) != ESP_OK)
+        err_add(e, field);
 }
 
 /* HHMM time-of-day field: real-time validity (hour<=23, minute<=59) via
@@ -51,7 +73,8 @@ static void apply_hhmm(const cJSON *root, const char *field, bool (*valid)(int),
         err_add(e, field);
         return;
     }
-    setter((uint16_t)item->valueint);
+    if (setter((uint16_t)item->valueint) != ESP_OK)
+        err_add(e, field);
 }
 
 static void apply_date(const cJSON *root, const char *field, esp_err_t (*setter)(const char *), err_acc_t *e) {
@@ -62,7 +85,8 @@ static void apply_date(const cJSON *root, const char *field, esp_err_t (*setter)
         err_add(e, field);
         return;
     }
-    setter(item->valuestring);
+    if (setter(item->valuestring) != ESP_OK)
+        err_add(e, field);
 }
 
 /* Enum-as-option-string field (mirrors the HA select): the string must
@@ -75,7 +99,8 @@ static void apply_enum(const cJSON *root, const char *field, const char *const *
     if (cJSON_IsString(item)) {
         for (int i = 0; i < n_options; i++) {
             if (strcmp(item->valuestring, options[i]) == 0) {
-                setter((uint16_t)i);
+                if (setter((uint16_t)i) != ESP_OK)
+                    err_add(e, field);
                 return;
             }
         }
@@ -96,7 +121,8 @@ static void apply_str(const cJSON *root, const char *field, size_t maxlen, bool 
         err_add(e, field);
         return;
     }
-    setter(item->valuestring);
+    if (setter(item->valuestring) != ESP_OK)
+        err_add(e, field);
 }
 
 /* JSON boolean -> u16 0/1 (the CFG_BOOL entities). Strictly a boolean:
@@ -112,7 +138,8 @@ static void apply_bool(const cJSON *root, const char *field, esp_err_t (*setter)
         err_add(e, field);
         return;
     }
-    setter(cJSON_IsTrue(item) ? 1 : 0);
+    if (setter(cJSON_IsTrue(item) ? 1 : 0) != ESP_OK)
+        err_add(e, field);
 }
 
 #define HOLIDAY_BLOB_CAP 512
@@ -142,7 +169,8 @@ static void apply_holidays(const cJSON *root, err_acc_t *e) {
     }
     if (had_bad)
         err_add(e, "holidays");
-    nvs_config_set_holidays(blob, pos);
+    if (nvs_config_set_holidays(blob, pos) != ESP_OK)
+        err_add(e, "holidays");
 }
 
 static void apply_timers(const cJSON *root, err_acc_t *e) {
@@ -226,7 +254,8 @@ static void apply_timers(const cJSON *root, err_acc_t *e) {
                                                        : 0;
         slot++;
     }
-    nvs_config_set_timer_defs(&defs);
+    if (nvs_config_set_timer_defs(&defs) != ESP_OK)
+        err_add(e, "timers");
 }
 
 config_result_t config_apply(const char *json, char *ack, size_t ack_len) {
@@ -248,6 +277,18 @@ config_result_t config_apply(const char *json, char *ack, size_t ack_len) {
         cJSON_Delete(root);
         return CONFIG_INVALID;
     }
+    /* ver is interpolated raw into ALL THREE ack emissions below, so a
+       quote, backslash or control character in it produces unparseable
+       JSON ({"ver":"a"b","ok":true}) — the same defect class the errors[]
+       cap fixes, but reachable with one mistyped ver instead of twelve
+       simultaneously invalid fields. Rejected rather than escaped: ver is
+       also strcmp'd against and stored in NVS as cfg_ver, and one
+       representation is the only way those two stay in agreement. */
+    if (!config_is_clean_str(ver_str)) {
+        snprintf(ack, ack_len, "{\"ok\":false,\"err\":\"ver\"}");
+        cJSON_Delete(root);
+        return CONFIG_INVALID;
+    }
 
     char stored[24];
     nvs_config_get_cfg_ver(stored, sizeof(stored));
@@ -257,7 +298,7 @@ config_result_t config_apply(const char *json, char *ack, size_t ack_len) {
         return CONFIG_SKIPPED;
     }
 
-    err_acc_t e = {.errors = {0}, .count = 0};
+    err_acc_t e = {.errors = {0}, .count = 0, .truncated = false};
 
     apply_str(root, "name", CFG_BOUND_NAME_MAX, NULL, nvs_config_set_dev_name, &e);
     apply_str(root, "tz", CFG_BOUND_TZ_MAX, NULL, nvs_config_set_tz, &e);
@@ -297,8 +338,11 @@ config_result_t config_apply(const char *json, char *ack, size_t ack_len) {
        so the (idempotent) document simply re-applies next window. */
     nvs_config_set_cfg_ver(ver_str);
 
-    if (e.count > 0) {
-        snprintf(ack, ack_len, "{\"ver\":\"%s\",\"ok\":false,\"errors\":[%s]}", ver_str, e.errors);
+    if (e.count > 0 || e.truncated) {
+        /* errors_truncated says "there were more" — without it a dropped
+           entry is indistinguishable from a field that applied cleanly. */
+        snprintf(ack, ack_len, "{\"ver\":\"%s\",\"ok\":false,\"errors\":[%s]%s}", ver_str, e.errors,
+                 e.truncated ? ",\"errors_truncated\":true" : "");
     } else {
         snprintf(ack, ack_len, "{\"ver\":\"%s\",\"ok\":true}", ver_str);
     }

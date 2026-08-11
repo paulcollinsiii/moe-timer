@@ -87,6 +87,23 @@ void test_ota_url_otherwise_matches_the_https_rule(void) {
     TEST_ASSERT_FALSE(config_is_ota_url(NULL));
 }
 
+/* ---- JSON-safety rule shared by the set path and the bulk `ver` ---- */
+
+void test_clean_str_accepts_ordinary_values(void) {
+    TEST_ASSERT_TRUE(config_is_clean_str("")); /* empty disables a slot */
+    TEST_ASSERT_TRUE(config_is_clean_str("20260811"));
+    TEST_ASSERT_TRUE(config_is_clean_str("Kitchen MagTag"));
+    TEST_ASSERT_TRUE(config_is_clean_str("EST5EDT,M3.2.0,M11.1.0"));
+}
+
+void test_clean_str_rejects_json_breaking_characters(void) {
+    TEST_ASSERT_FALSE(config_is_clean_str(NULL));
+    TEST_ASSERT_FALSE(config_is_clean_str("a\"b")); /* would end the string early */
+    TEST_ASSERT_FALSE(config_is_clean_str("a\\b"));
+    TEST_ASSERT_FALSE(config_is_clean_str("a\nb"));
+    TEST_ASSERT_FALSE(config_is_clean_str("a\tb"));
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_accepts_valid_dates);
@@ -98,5 +115,7 @@ int main(void) {
     RUN_TEST(test_https_url_rejects_unsafe_characters);
     RUN_TEST(test_ota_url_allows_empty_as_the_off_switch);
     RUN_TEST(test_ota_url_otherwise_matches_the_https_rule);
+    RUN_TEST(test_clean_str_accepts_ordinary_values);
+    RUN_TEST(test_clean_str_rejects_json_breaking_characters);
     return UNITY_END();
 }

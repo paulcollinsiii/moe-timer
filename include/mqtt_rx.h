@@ -2,6 +2,8 @@
 #include <stdbool.h>
 #include <stddef.h>
 
+#include "config_validate.h" /* CFG_STR_MAX — sizes the set value slot */
+
 #ifdef __cplusplus
 extern "C" {
 #endif
@@ -13,9 +15,14 @@ extern "C" {
    offset. Routing is by topic CONTENT first, not length: magtag/<id>/set/tz
    is the same length as magtag/<id>/config, so the set/+ check must win. */
 
+/* The value slot is sized from the shared string-field ceiling, not a
+   local literal: this transport has to be able to deliver the longest
+   value any editable field advertises to HA. When the two were
+   independent numbers the OTA manifest URL advertised 127 and was
+   rejected here at 80 — silently, every window. */
 typedef struct {
     char key[24];
-    char value[80];
+    char value[CFG_STR_MAX];
 } mqtt_set_kv_t;
 
 typedef struct {

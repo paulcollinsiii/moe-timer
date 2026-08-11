@@ -115,8 +115,8 @@ confirmed value to `magtag/<id>/cfg` so the control reflects reality.
   other non-`https://` value is rejected. Plain `http://` is refused by
   both this control and the bulk document: an unauthenticated firmware
   endpoint is an arbitrary-code-execution channel. A rejected value shows
-  up as `{"ok":false,"err":"value"}` on the ack topic and the control
-  snaps back at the next `cfg` republish.
+  up as `{"key":"ota_url","ok":false,"err":"value"}` on the ack topic and
+  the control snaps back at the next `cfg` republish.
 
   These override `CONFIG_MAGTAG_OTA_URL` / `CONFIG_MAGTAG_OTA_CHECK_ON_SYNC`
   permanently: unlike the allocation defaults, the OTA keys are excluded
@@ -186,7 +186,9 @@ applies it and republishes the applied version to
 `magtag/<id>/config_ack`. Every field is optional except `ver` — applied
 only when `ver` differs from the last one, so a retained message is safe
 to leave on the topic. A rejected field is named in the ack's `errors`
-list but never blocks the others.
+list but never blocks the others. If more fields fail than the ack can
+name, it carries `"errors_truncated": true` alongside the ones it did —
+so a shortened list never reads as "everything else was fine".
 
 ```json
 {

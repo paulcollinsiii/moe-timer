@@ -36,17 +36,20 @@ static volatile int s_pub_acks;
 
 #define CONFIG_BUF_MAX 1024
 #define CMD_BUF_MAX 256
-/* 31 registry fields + screen_bonus + locate = 33 distinct keys; headroom
-   so a duplicate (retained + a fresh in-window edit) can't silently drop.
-   The count was already stale at 25 before the per-timer break_eligible
-   switches took it past the old cap of 32 — keep it in step with
-   ha_config's FIELDS or edits are dropped with a "set buffer full" log. */
-#define SET_MAX 48
+/* Registry fields + screen_bonus + locate, with headroom so a duplicate
+   (retained + a fresh in-window edit) can't silently drop. No longer a
+   hand-counted number: ha_config.c static-asserts its own FIELDS array
+   against HA_CONFIG_SET_SLOTS, so adding a field breaks the build rather
+   than dropping edits with a "set buffer full" log nobody reads. The old
+   hand-maintained count had gone stale twice (25 while the real count was
+   past 32). */
+#define SET_MAX HA_CONFIG_SET_SLOTS
 
 /* Window-scoped buffers: allocated at window start, freed at teardown —
    the radio is off (and none of this is needed) for the vast majority of
-   every wake, so these ~8.4 KB (sizeof(window_mem_t), which SET_MAX dominates) no longer sit in .bss permanently. The
-   pointer doubles as the "window open" flag for the event handler. */
+   every wake, so these ~11 KB (sizeof(window_mem_t), which SET_MAX
+   dominates) no longer sit in .bss permanently. The pointer doubles as
+   the "window open" flag for the event handler. */
 typedef struct {
     char topic[128];
     char payload[768]; /* stat/summary/discovery payloads (largest: 600-768) */
@@ -56,6 +59,16 @@ typedef struct {
     char cmd_buf[CMD_BUF_MAX];       /* retained command document */
     mqtt_set_kv_t sets[SET_MAX];     /* editable-config sets (set/<key>) */
 } window_mem_t;
+
+/* Per-window heap budget. CFG_STR_MAX multiplies through the sets array
+   (x SET_MAX), so the ceiling silently controls this figure: at 128 the
+   struct is ~11 KB, at 512 it would be ~29 KB with nothing else failing.
+   Allocation failure here disables the whole MQTT window, so the growth
+   has to be a deliberate edit rather than a side effect. */
+_Static_assert(sizeof(window_mem_t) <= 12288, "window_mem_t outgrew its per-window heap budget");
+/* config_apply.h says callers must not pass less than CONFIG_ACK_MIN; this
+   is the only caller, and it was exactly 256 by coincidence. */
+_Static_assert(sizeof(((window_mem_t *)0)->ack) >= CONFIG_ACK_MIN, "ack buffer is below CONFIG_ACK_MIN");
 
 static window_mem_t *s_mem;
 static mqtt_rx_t s_rx; /* routing/reassembly context; buffers point into s_mem */
@@ -199,8 +212,19 @@ static int publish_discovery(esp_mqtt_client_handle_t client, const char *dev_na
         }
         if (suffix != NULL) {
             const timer_def_t *def = timer_slot_def(slot);
-            if (def == NULL)
-                continue; /* slot disabled: no entity */
+            if (def == NULL) {
+                /* Slot disabled: RETIRE the entity rather than just
+                   skipping it. Skipping leaves the previous occupant's
+                   retained discovery config on the broker, so clearing
+                   timer2_name left `Reading remaining/limit/runs` in HA
+                   forever-unavailable. An empty retained payload on the
+                   discovery topic is how MQTT discovery deletes. The
+                   RETIRED[] loop below only covers three legacy keys and
+                   never covered these. */
+                stats_json_discovery_topic(topic, sizeof(s_mem->topic), device_id(), &ents[i]);
+                published += publish(client, topic, "", 1);
+                continue;
+            }
             snprintf(named, sizeof(named), "%s %s", def->name, suffix);
             name_override = named;
         }
@@ -389,15 +413,18 @@ static int publish_states(esp_mqtt_client_handle_t client, const stats_snapshot_
        update. With only the name in the hash, a schema bump refreshes the
        version exactly once and every subsequent update leaves the card
        showing the old version permanently — the sw field would go stale
-       and stay stale. The fingerprint lives in ha_config.c, beside the
-       code that writes the block, and is pinned there by host tests. */
+       and stay stale. The slot-name leg does the same job for the
+       per-timer stat entities below, whose published names come from the
+       HA-editable timerN_name. Both the fingerprint and this gate live in
+       ha_config.c, beside the code that writes the block, and are pinned
+       there by host tests. */
     char dev_name[64];
     device_name(dev_name, sizeof(dev_name));
-    uint16_t dev_hash = ha_config_device_hash(dev_name, snap->fw);
+    uint16_t dev_hash = ha_config_discovery_hash(dev_name, snap->fw);
     uint16_t disc_ver = 0, disc_dev = 0;
     hal_nvs_read_u16(NVS_KEY_DISC_VER, &disc_ver);
     hal_nvs_read_u16(NVS_KEY_DISC_NAME, &disc_dev);
-    *fresh_discovery = (disc_ver != DISC_SCHEMA_VER) || (disc_dev != dev_hash);
+    *fresh_discovery = ha_config_discovery_stale(disc_ver, disc_dev, DISC_SCHEMA_VER, dev_hash);
     *dev_hash_out = dev_hash;
     if (*fresh_discovery) {
         published += publish_discovery(client, dev_name, snap->fw);
@@ -472,7 +499,11 @@ static int apply_incoming(esp_mqtt_client_handle_t client, const stats_snapshot_
 }
 
 void mqtt_ha_window(const stats_snapshot_t *snap) {
-    char uri[128], user[64], pass[64];
+    /* Zero-initialised because a value longer than these buffers makes
+       nvs_get_str return ESP_ERR_NVS_INVALID_LENGTH and leave them
+       UNTOUCHED, and neither call below checks the return. Uninitialised
+       stack would reach esp_mqtt_client_config_t.broker.address.uri. */
+    char uri[128] = {0}, user[64] = {0}, pass[64] = {0};
     nvs_config_get_mqtt_uri(uri, sizeof(uri));
     if (uri[0] == '\0') {
         /* Was silent — the #1 reason "nothing shows up in HA": the broker

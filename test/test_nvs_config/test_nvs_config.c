@@ -514,6 +514,80 @@ void test_fingerprint_ignores_ota_values(void) {
     TEST_ASSERT_EQUAL_UINT16(before, nvs_config_defaults_fingerprint());
 }
 
+/* An undersized read buffer is an ERROR that writes nothing — it is not a
+   truncating read. get_str_empty_default maps only NOT_FOUND to "", so a
+   caller that guesses low keeps whatever junk it started with. This is
+   what the declared CFG_BOUND_OTA_* minimums on the getters are for, and
+   it is why ota_target must be read at full width: a short read leaves the
+   retry-budget comparison matching nothing, so a doomed version is retried
+   forever. */
+void test_short_read_buffer_errors_and_leaves_the_buffer_untouched(void) {
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_set_ota_target("1.6.0-a-fairly-long-version"));
+    char small[8];
+    memset(small, 'Z', sizeof(small));
+    TEST_ASSERT_EQUAL(ESP_ERR_NVS_INVALID_LENGTH, nvs_config_get_ota_target(small, sizeof(small)));
+    TEST_ASSERT_EQUAL_CHAR('Z', small[0]); /* untouched, not truncated */
+}
+
+void test_declared_buffer_size_reads_the_whole_value(void) {
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_set_ota_target("1.6.0-a-fairly-long-version"));
+    char buf[CFG_BOUND_OTA_TARGET_MAX];
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_ota_target(buf, sizeof(buf)));
+    TEST_ASSERT_EQUAL_STRING("1.6.0-a-fairly-long-version", buf);
+}
+
+/* Setters reject rather than truncate: ota_flow.c will be a third writer
+   that is not on either validating path. */
+void test_ota_string_setters_reject_overlong_values(void) {
+    char big[CFG_BOUND_OTA_URL_MAX + 16];
+    memset(big, 'u', sizeof(big) - 1);
+    memcpy(big, "https://", 8);
+    big[sizeof(big) - 1] = '\0';
+    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_SIZE, nvs_config_set_ota_url(big));
+    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_SIZE, nvs_config_set_ota_target(big));
+    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_SIZE, nvs_config_set_ota_result(big));
+    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_SIZE, nvs_config_set_ota_url(NULL));
+    /* A rejected write must not have stored a partial value */
+    char buf[CFG_BOUND_OTA_URL_MAX];
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_ota_url(buf, sizeof(buf)));
+    TEST_ASSERT_EQUAL_STRING(NVS_DEFAULT_OTA_URL, buf);
+}
+
+void test_ota_string_setters_accept_the_declared_maximum(void) {
+    char url[CFG_BOUND_OTA_URL_MAX];
+    memset(url, 'u', sizeof(url) - 1);
+    memcpy(url, "https://", 8);
+    url[sizeof(url) - 1] = '\0';
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_set_ota_url(url));
+    char buf[CFG_BOUND_OTA_URL_MAX];
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_ota_url(buf, sizeof(buf)));
+    TEST_ASSERT_EQUAL_STRING(url, buf);
+}
+
+/* cmd_apply.c reads the stored id into a 40-byte buffer and does not check
+   the return. A longer id would store fine but never read back, so the
+   apply-once compare would fail every window and a retained `grant` would
+   re-apply forever. Bound the write instead. */
+void test_cmd_id_is_bounded_to_the_dedup_buffer(void) {
+    char big[CFG_BOUND_CMD_ID_MAX + 8];
+    memset(big, 'i', sizeof(big) - 1);
+    big[sizeof(big) - 1] = '\0';
+    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_SIZE, nvs_config_set_cmd_id(big));
+    char buf[CFG_BOUND_CMD_ID_MAX];
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_cmd_id(buf, sizeof(buf)));
+    TEST_ASSERT_EQUAL_STRING("", buf); /* nothing stored */
+}
+
+void test_cmd_id_at_the_bound_round_trips(void) {
+    char id[CFG_BOUND_CMD_ID_MAX];
+    memset(id, 'i', sizeof(id) - 1);
+    id[sizeof(id) - 1] = '\0';
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_set_cmd_id(id));
+    char buf[CFG_BOUND_CMD_ID_MAX];
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_cmd_id(buf, sizeof(buf)));
+    TEST_ASSERT_EQUAL_STRING(id, buf);
+}
+
 /* ------------------------------------------------------------------ */
 /* timer snapshot (crash/reset recovery)                               */
 /* ------------------------------------------------------------------ */
@@ -635,6 +709,12 @@ int main(void) {
     RUN_TEST(test_init_defaults_does_not_seed_ota_keys);
     RUN_TEST(test_reseed_does_not_revert_ha_set_ota_values);
     RUN_TEST(test_fingerprint_ignores_ota_values);
+    RUN_TEST(test_short_read_buffer_errors_and_leaves_the_buffer_untouched);
+    RUN_TEST(test_declared_buffer_size_reads_the_whole_value);
+    RUN_TEST(test_ota_string_setters_reject_overlong_values);
+    RUN_TEST(test_ota_string_setters_accept_the_declared_maximum);
+    RUN_TEST(test_cmd_id_is_bounded_to_the_dedup_buffer);
+    RUN_TEST(test_cmd_id_at_the_bound_round_trips);
     RUN_TEST(test_timer_snapshot_save_propagates_write_failure);
     RUN_TEST(test_set_weekday_min_propagates_write_failure);
     RUN_TEST(test_timer_snapshot_round_trip);

@@ -148,10 +148,20 @@ esp_err_t hal_nvs_read_str(const char *key, char *buf, size_t *len) {
         *len = e->len + 1; /* report required size including NUL */
         return ESP_OK;
     }
-    size_t copy = (e->len < *len) ? e->len : *len - 1;
-    memcpy(buf, e->data, copy);
-    buf[copy] = '\0';
-    *len = copy + 1; /* match ESP-IDF: *len includes NUL byte */
+    /* Match nvs_get_str: a buffer too small to hold the value plus its NUL
+       is an ERROR, and the buffer is left UNTOUCHED. The mock used to
+       truncate instead, which is a materially different failure — a short
+       reader saw a shortened string here but would see an uninitialised
+       buffer on device, and a caller that only maps NOT_FOUND to "" (which
+       is all get_str_empty_default does) never notices either way. That
+       divergence hid the real consequence of an undersized read buffer. */
+    if (e->len + 1 > *len) {
+        *len = e->len + 1; /* required size, as ESP-IDF reports it */
+        return ESP_ERR_NVS_INVALID_LENGTH;
+    }
+    memcpy(buf, e->data, e->len);
+    buf[e->len] = '\0';
+    *len = e->len + 1; /* match ESP-IDF: *len includes NUL byte */
     return ESP_OK;
 }
 
