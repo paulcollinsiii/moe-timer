@@ -977,11 +977,53 @@ is what gives the malformed-JSON cases teeth.
 ## Tasks
 
 **Status (2026-08-11):** tasks 1-9 are implemented, reviewed and committed on
-`worktree-ota-plan` — `d7e28f6` (partition freeze + `version.txt`), `6f61f50`
+`worktree-ota-plan` -- `d7e28f6` (partition freeze + `version.txt`), `6f61f50`
 (config surface + the HA `sw`-staleness fix), `b084917` (`ota_policy`),
-`6f5d618` (version on panel + update screen), plus a follow-up fix round on
-the display package. 35/35 host suites green; firmware 1,436,928 B, 22 % free.
-Tasks 10-17 remain.
+`6f5d618` (version on panel + update screen).
+
+Each package then went through an adversarial review round, and two of those
+rounds are now committed on top: `c22d2dc` (config surface) and `ff83d2a`
+(`ota_policy`). Those rounds were not cosmetic. The config surface could not
+actually carry the OTA URL it advertised -- a 127-character bound against a
+79-character transport, failing silently every window -- and the discovery
+fingerprint missed slot enablement, so the ordinary two-window way of enabling
+a timer from HA never published its entities. `ota_policy` accepted a
+fractional schema number and could index its reason table out of range. None
+of these were visible from the packages' own passing tests; all were found by
+review and are now pinned.
+
+35/35 host suites green, verified from a clean build directory with
+ASan/UBSan over the combined tree, and each commit re-verified standalone so
+no intermediate is broken. The display package's own review round is still in
+flight. Tasks 10-17 remain.
+
+### Follow-ups the reviews surfaced (none blocking)
+
+These are real but deliberately not folded into the OTA packages, because
+they are either pre-existing hazards outside this surface or refactors that
+deserve their own commit and their own review:
+
+- **Bound the remaining `hal_nvs_write_str` callers.** `write_str_bounded`
+  now covers the three OTA setters and `cmd_id`; nine others still write
+  unbounded. The pattern is only a hazard where a reader's buffer is
+  narrower than what a writer accepts, since a short read returns
+  `ESP_ERR_NVS_INVALID_LENGTH` and writes nothing -- but that is a property
+  of each pair, not of the write, so it needs a sweep rather than a rule.
+- **Pin the discovery retirement publish.** Clearing a removed slot's
+  retained discovery config is currently untested: `mqtt_ha.c` has no host
+  suite and the code sits in a static function taking a live client handle.
+  Extracting the entity-key-to-action decision into `stats_json.c` would pin
+  the decision (and the untested single-digit slot parsing with it), but not
+  the publish itself -- that needs an injected sink. Shipped untested
+  deliberately: it shares its topic builder with the publish path, so
+  retiring a topic that was never published is structurally impossible, and
+  it is counted in the ack drain, so a failure retries next window rather
+  than half-applying. A test asserting the enum would read as coverage it
+  does not provide.
+- **Two zero-init nits.** `main/main.c`'s `tz` buffer fits exactly today
+  with zero margin, and `cmd_apply.c` hardcodes `char last[40]` where
+  `CFG_BOUND_CMD_ID_MAX` would tie it by construction. Worth doing when
+  those functions are next touched, not on their own.
 
 0. Cut `feature/ota` from `integration`.
 1. **Measure.** Add `esp_http_client`, `esp_https_ota`, `app_update` to
@@ -1023,6 +1065,25 @@ Tasks 10-17 remain.
 11. `main/ota.c`: manifest GET, then the **incremental** OTA
     (`esp_https_ota_begin` / `_perform` loop / `_finish`) with the deadline
     check in the loop, plus mark-valid. Embed the CA PEM.
+    Two constraints the policy review surfaced, both of which `ota.c` has to
+    honour because nothing below it can:
+    - **The https guarantee does not survive the transport.**
+      `esp_http_client_set_redirection()` is `esp_http_client_set_url(client,
+      client->location)` with **no scheme check**, and `esp_https_ota.c:104-111`
+      calls it for any 3xx. So a URL `config_is_https_url()` blesses, whose host
+      answers `302 Location: http://...`, is fetched in the clear -- an
+      arbitrary-code-execution channel reopened one redirect after it was
+      closed. Set `disable_auto_redirect = true` and re-validate each redirect
+      target with `config_is_https_url()`, and assert that
+      `CONFIG_ESP_HTTPS_OTA_ALLOW_HTTP` stays unset.
+    - **Read the NVS strings with the declared widths.** `hal_nvs_read_str` ->
+      `nvs_get_str` (`main/hal_nvs.c:62-68`) returns
+      `ESP_ERR_NVS_INVALID_LENGTH` on a short buffer and writes **nothing**, and
+      `get_str_empty_default` (`main/nvs_config.c:69-76`) only maps `NOT_FOUND`
+      to `""` -- so an undersized read leaves the caller's buffer
+      *uninitialised*. `ota_result` needs `char[OTA_REASON_TEXT_MAX]` and
+      `ota_target` `char[OTA_VERSION_MAX]`; a short `ota_target` buffer makes
+      the retry-budget comparison never match and the device retries forever.
 12. Wire the rollover trigger, the Button D trigger, the pre-sleep apply point,
     and the failsafe extender install in `app_main`.
 13. `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y`; call `ota_mark_valid_if_pending()`
