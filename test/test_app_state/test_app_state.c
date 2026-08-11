@@ -97,6 +97,16 @@ void test_display_charge_warn_tracks_battery_band(void) {
     TEST_ASSERT_TRUE(app_state_display(&IN_LOW_BATT, 0, T0).charge_warn);
 }
 
+void test_display_fw_version_passes_through(void) {
+    /* The battery row renders it; app_state is the only place the injected
+       app-descriptor string reaches display_state_t, so a dropped
+       assignment would silently blank the version on the panel. */
+    TEST_ASSERT_EQUAL_STRING("1.2.3", app_state_display(&IN_HEALTHY, 0, T0).fw_version);
+    app_state_in_t other = IN_HEALTHY;
+    other.fw_version = "9.9.9-rc4";
+    TEST_ASSERT_EQUAL_STRING("9.9.9-rc4", app_state_display(&other, 0, T0).fw_version);
+}
+
 void test_display_break_duration_from_nvs(void) {
     hal_nvs_write_u16("break_dur", 20);
     display_state_t st = app_state_display(&IN_HEALTHY, 0, T0);
@@ -285,6 +295,7 @@ int main(void) {
     RUN_TEST(test_display_running_passes_remaining_through);
     RUN_TEST(test_display_extra_timer_uses_def_duration_and_name);
     RUN_TEST(test_display_charge_warn_tracks_battery_band);
+    RUN_TEST(test_display_fw_version_passes_through);
     RUN_TEST(test_display_break_duration_from_nvs);
     RUN_TEST(test_display_swap_blocked_while_running);
     RUN_TEST(test_display_reload_follows_parent_testing_gate);

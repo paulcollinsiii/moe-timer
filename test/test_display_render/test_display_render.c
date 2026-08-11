@@ -60,6 +60,9 @@ static display_state_t base_state(void) {
         .break_duration_sec = 900,
         .swap_available = true,
         .start_available = true,
+        /* Fixed injected version — display_screens.c never reads the app
+           descriptor, which is what keeps these goldens deterministic. */
+        .fw_version = "1.5.0",
     };
 }
 
@@ -284,6 +287,106 @@ void test_main_low_battery_warn_badge(void) {
     assert_matches_golden("main_warn_badge");
 }
 
+/* The version rides the battery label, so the only two things that can go
+   wrong are a buffer overflow (bounded by the format's own arithmetic) and
+   a collision with the 28 pt remaining-time label sharing the {58,87}
+   band. Measure both labels' real extents rather than eyeballing the
+   golden. The battery label is the one aligned at y=66, the remaining time
+   the one at y=58 — unambiguous within this screen. */
+static void measure_battery_row(const display_state_t *st, int32_t *batt_right, int32_t *rem_left) {
+    display_screens_build_main(st);
+    lv_obj_t *scr = lv_screen_active();
+    lv_obj_update_layout(scr);
+    *batt_right = -1;
+    *rem_left = -1;
+    uint32_t n = lv_obj_get_child_count(scr);
+    for (uint32_t i = 0; i < n; i++) {
+        lv_obj_t *o = lv_obj_get_child(scr, i);
+        if (!lv_obj_check_type(o, &lv_label_class))
+            continue;
+        if (lv_obj_get_y(o) == 66)
+            *batt_right = lv_obj_get_x(o) + lv_obj_get_width(o);
+        else if (lv_obj_get_y(o) == 58)
+            *rem_left = lv_obj_get_x(o);
+    }
+    TEST_ASSERT_NOT_EQUAL_MESSAGE(-1, *batt_right, "battery label (y=66) not found");
+    TEST_ASSERT_NOT_EQUAL_MESSAGE(-1, *rem_left, "remaining-time label (y=58) not found");
+}
+
+void test_version_fits_the_battery_row(void) {
+    /* Worst realistic case on both sides: 100% (three digits, full-battery
+       glyph) against the widest remaining time the panel renders
+       (99:59:59), and a version string longer than any this project has
+       shipped. If this ever fails the version wants truncating, not the
+       band re-cutting. */
+    display_state_t st = base_state();
+    st.battery_pct = 100;
+    st.remaining_sec = 359999; /* 99:59:59 */
+    st.fw_version = "1.10.10-rc1";
+    int32_t batt_right, rem_left;
+    measure_battery_row(&st, &batt_right, &rem_left);
+    printf("battery row: label ends x=%d, remaining time starts x=%d, gap=%d px\n", (int)batt_right, (int)rem_left,
+           (int)(rem_left - batt_right));
+    TEST_ASSERT_TRUE_MESSAGE(batt_right < rem_left, "battery+version label overlaps the remaining-time label");
+    TEST_ASSERT_TRUE_MESSAGE(batt_right <= HOR, "battery+version label runs off the right edge");
+}
+
+void test_no_version_renders_the_row_unchanged(void) {
+    /* NULL (nothing injected) and "" must both drop the separator
+       entirely — no trailing whitespace widening the label, and no %s on a
+       null pointer. */
+    static uint8_t with_null[FB_BYTES];
+    display_state_t st = base_state();
+    st.fw_version = NULL;
+    display_screens_build_main(&st);
+    lv_refr_now(s_disp);
+    memcpy(with_null, s_captured, FB_BYTES);
+
+    st.fw_version = "";
+    display_screens_build_main(&st);
+    lv_refr_now(s_disp);
+    TEST_ASSERT_EQUAL_MEMORY_MESSAGE(with_null, s_captured, FB_BYTES, "NULL and empty version render differently");
+
+    int32_t batt_right, rem_left;
+    st.fw_version = NULL;
+    measure_battery_row(&st, &batt_right, &rem_left);
+    int32_t bare = batt_right;
+    st.fw_version = "1.5.0";
+    measure_battery_row(&st, &batt_right, &rem_left);
+    TEST_ASSERT_TRUE_MESSAGE(batt_right > bare, "the version added no width - it is not being rendered");
+}
+
+void test_ota_screen(void) {
+    /* Firmware update, full refresh: both versions, direction-neutral verb
+       (the policy deliberately supports downgrades). */
+    display_screens_build_ota("1.5.0", "1.6.0");
+    assert_matches_golden("ota");
+}
+
+void test_ota_screen_lines_fit_the_panel(void) {
+    /* 28 pt "UPDATING FIRMWARE" is the widest fixed string on any screen
+       in this tree; if it outgrew 296 px LVGL would silently wrap it and
+       shove the rest of the layout down. Assert every line stays on one
+       row, inside the panel width, and above the bottom edge. */
+    display_screens_build_ota("1.10.10-rc1", "1.10.11-rc2");
+    lv_obj_t *scr = lv_screen_active();
+    lv_obj_update_layout(scr);
+    uint32_t n = lv_obj_get_child_count(scr);
+    TEST_ASSERT_EQUAL_UINT32(4, n);
+    for (uint32_t i = 0; i < n; i++) {
+        lv_obj_t *o = lv_obj_get_child(scr, i);
+        char msg[128];
+        printf("ota line %u: \"%s\" w=%d h=%d y=%d\n", i, lv_label_get_text(o), (int)lv_obj_get_width(o),
+               (int)lv_obj_get_height(o), (int)lv_obj_get_y(o));
+        snprintf(msg, sizeof(msg), "\"%s\" is %d px wide, panel is %d", lv_label_get_text(o), (int)lv_obj_get_width(o),
+                 HOR);
+        TEST_ASSERT_TRUE_MESSAGE(lv_obj_get_width(o) <= HOR, msg);
+        /* A wrapped label is taller than one line of its font. */
+        TEST_ASSERT_TRUE_MESSAGE(lv_obj_get_height(o) < 40, "label wrapped onto a second line");
+        TEST_ASSERT_TRUE_MESSAGE(lv_obj_get_y(o) + lv_obj_get_height(o) <= VER, "label runs off the bottom edge");
+    }
+}
+
 void test_charge_me_screen(void) {
     /* <= 10%: full stop — the panel says only Charge Me! */
     display_screens_build_charge_me();
@@ -326,6 +429,10 @@ int main(void) {
     RUN_TEST(test_start_available_only_changes_button_a);
     RUN_TEST(test_break_screen_no_eligible);
     RUN_TEST(test_main_low_battery_warn_badge);
+    RUN_TEST(test_version_fits_the_battery_row);
+    RUN_TEST(test_no_version_renders_the_row_unchanged);
+    RUN_TEST(test_ota_screen);
+    RUN_TEST(test_ota_screen_lines_fit_the_panel);
     RUN_TEST(test_charge_me_screen);
     RUN_TEST(test_timesup_screen);
     RUN_TEST(test_sync_failed_screen);

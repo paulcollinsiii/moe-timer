@@ -233,3 +233,15 @@ void display_bedtime(void) {
     s_partial_count = 0;
     render(SSD1680_REFRESH_FULL);
 }
+
+/* Painted between the OTA check window and the download window, with the
+   radio down: net_window.c documents that a panel refresh coinciding with
+   a WiFi TX burst browns out the rail. Full refresh only, so it needs no
+   CLEAN_BANDS entry (the bands exist for partial-refresh ghosting). */
+void display_ota(const char *from_version, const char *to_version) {
+    if (!s_initialized)
+        display_init();
+    display_screens_build_ota(from_version, to_version);
+    s_partial_count = 0;
+    render(SSD1680_REFRESH_FULL);
+}

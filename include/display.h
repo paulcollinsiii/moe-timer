@@ -46,6 +46,14 @@ typedef struct {
        work" convention as the two above. */
     bool start_available;
     bool charge_warn; /* battery <= 15%: Charge Me!!! badge on the bar */
+    /* Running firmware version, folded into the battery row's label
+       ("[batt] 87%   v1.5.0") — the {58,87} clean band already covers it,
+       so no new geometry and no risk of straddling a framebuffer byte.
+       NULL or "" renders the row exactly as it did before the field
+       existed. Injected as a string: display_screens.c never calls
+       esp_app_get_description(), which is what keeps the golden
+       deterministic. */
+    const char *fw_version;
 } display_state_t;
 
 #ifdef __cplusplus
@@ -59,6 +67,9 @@ void display_timesup(void);                              /* TIME'S UP layout, fu
 void display_sync_failed(void);                          /* "No sync - check WiFi" layout */
 void display_charge_me(void);                            /* battery lock layout, full refresh */
 void display_bedtime(void);                              /* bed-time lock layout, full refresh */
+/* Firmware update in progress, full refresh. Version strings are bare
+   ("1.5.0"); the screen adds the "v". */
+void display_ota(const char *from_version, const char *to_version);
 
 /* Button A label: the action a press will take in the given state.
    display.c maps these to LV_SYMBOL_PLAY/PAUSE (layout code stays LVGL-free). */

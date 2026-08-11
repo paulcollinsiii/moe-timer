@@ -160,8 +160,22 @@ static void build_main_status(lv_obj_t *scr, const display_state_t *st) {
     char buf[64];
     static const char *BATT_SYMS[] = {LV_SYMBOL_BATTERY_EMPTY, LV_SYMBOL_BATTERY_1, LV_SYMBOL_BATTERY_2,
                                       LV_SYMBOL_BATTERY_3, LV_SYMBOL_BATTERY_FULL};
-    snprintf(buf, sizeof(buf), "%s %u%%", BATT_SYMS[display_battery_icon_level(st->battery_pct)],
-             (unsigned)st->battery_pct);
+    /* The firmware version rides this label rather than getting one of
+       its own: the {58,87} clean band already covers it, so there is no
+       new geometry to calibrate and no chance of straddling a
+       framebuffer byte (see the band comments in display.c). Three spaces
+       are the gap; the 'v' is presentation only, and deliberately not
+       part of the stored string — ota_policy compares the bare version
+       against the manifest, so a prefix must never leak upstream of the
+       render. Worst case is 3 (symbol, a 3-byte UTF-8 private-use
+       codepoint) + 1 + 3 ("100") + 1 ('%') + 4 (gap + 'v') + 31
+       (esp_app_desc_t::version is char[32]) = 43 bytes + NUL, inside buf.
+       Widest render is x=4..123 against the 28 pt remaining time starting
+       at x=180 — 57 px of clearance; test_version_fits_the_battery_row
+       pins it. */
+    const char *fw = (st->fw_version != NULL) ? st->fw_version : "";
+    snprintf(buf, sizeof(buf), "%s %u%%%s%s", BATT_SYMS[display_battery_icon_level(st->battery_pct)],
+             (unsigned)st->battery_pct, (fw[0] != '\0') ? "   v" : "", fw);
     make_label(scr, buf, &lv_font_montserrat_12, LV_ALIGN_TOP_LEFT, 4, 66);
 
     display_format_remaining(buf, sizeof(buf), st->remaining_sec);
@@ -309,4 +323,42 @@ void display_screens_build_bedtime(void) {
        and 20 pt overruns the 296 px panel. */
     make_label(scr, "Brush teeth | Get water bottles", &lv_font_montserrat_18, LV_ALIGN_CENTER, 0, 4);
     make_label(scr, "Goodnight!", &lv_font_montserrat_28, LV_ALIGN_BOTTOM_MID, 0, -2);
+}
+
+/* Firmware update, full refresh only (display_ota): static, no progress
+   bar. Both versions render — the one being left and the one being
+   installed — so a device that gets stuck says which transition it was
+   attempting without needing the logs or HA.
+
+   No CLEAN_BANDS entry in display.c is needed or wanted: the bands drive
+   partial-refresh content inverse->true to stop ghosting, and this
+   screen (like charge_me / bedtime / timesup) only ever renders as a
+   full refresh, which clears the panel by itself. */
+void display_screens_build_ota(const char *from_version, const char *to_version) {
+    lv_obj_t *scr = fresh_screen(false);
+    char buf[64];
+
+    /* Title case, not the plan's "UPDATING FIRMWARE": all caps at 28 pt
+       measures 327 px against a 296 px panel, so LVGL would clip the tail
+       off "FIRMWARE" (a content-sized label does not wrap). Title case is
+       279 px — 8 px of margin each side — and matches the other big
+       headlines in this tree ("Charge Me!", "Bed Time"). The render test
+       pins the width. */
+    make_label(scr, "Updating Firmware", &lv_font_montserrat_28, LV_ALIGN_TOP_MID, 0, 6);
+
+    snprintf(buf, sizeof(buf), "Current: v%s", (from_version != NULL) ? from_version : "?");
+    make_label(scr, buf, &lv_font_montserrat_12, LV_ALIGN_TOP_MID, 0, 46);
+
+    /* "Installing", not "Upgrading to": the OTA policy deliberately
+       treats a *different* published version as an update, downgrades
+       included, so the directional verb would be actively wrong on a
+       rollback. The "Current:" line above already supplies the
+       direction. */
+    snprintf(buf, sizeof(buf), "Installing v%s", (to_version != NULL) ? to_version : "?");
+    make_label(scr, buf, &lv_font_montserrat_18, LV_ALIGN_TOP_MID, 0, 66);
+
+    /* Honest rather than strictly necessary — the write goes to the
+       inactive slot and the boot partition only flips after the image
+       verifies — but a yanked cable still wastes the download. */
+    make_label(scr, "Do not remove power", &lv_font_montserrat_12, LV_ALIGN_TOP_MID, 0, 98);
 }
