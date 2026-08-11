@@ -24,11 +24,14 @@ CONFIG_ESP_SYSTEM_PANIC_REBOOT_DELAY_SECONDS=3
 # in mqtt_ha.c, not on this stack.)
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=7168
 
-# 4 MB flash; custom table: two 1.5 MB OTA app slots (OTA plumbing is
-# future work — empty otadata boots ota_0, which sits at the old factory
-# offset) + a raw 952 KB "assets" partition for the alert WAV. nvs/phy
-# offsets match the previous SINGLE_APP_LARGE layout so reflashing keeps
-# device config.
+# 4 MB flash; custom table: two 1.75 MB (0x1C0000) OTA app slots + a raw
+# 440 KB "assets" partition for the alert WAV. Grown from this project's
+# previous custom table (0x180000 slots, otadata at 0x310000); nvs/phy/ota_0
+# keep their offsets from it so reflashing keeps device config, and an empty
+# otadata still boots ota_0 at the old factory offset. The
+# slot size is frozen — OTA cannot rewrite the partition table. Growing the
+# slots moved ota_1/otadata/assets, so a flashed WAV needs re-writing with
+# tools/flash_assets.sh. See partitions.csv.
 CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
 CONFIG_PARTITION_TABLE_CUSTOM=y
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"

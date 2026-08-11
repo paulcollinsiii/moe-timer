@@ -1,17 +1,29 @@
 # MagTag timer partition table (4 MB flash).
 #
-# nvs / phy_init / first-app offsets are identical to the stock
-# partitions_singleapp_large.csv this project used before, so reflashing
-# over an in-service device preserves its NVS (WiFi/MQTT creds, config).
-# ota_0 sits at the old factory offset; with otadata erased the bootloader
-# boots ota_0, so behavior is unchanged until OTA plumbing ever lands.
+# The predecessor is this project's own custom table (two 0x180000 slots,
+# otadata at 0x310000, a 0xEE000 assets partition) -- not a stock IDF one.
+# nvs / phy_init / ota_0 keep their offsets from it, so reflashing over an
+# in-service device preserves its NVS (WiFi/MQTT creds, config) and ota_0
+# still sits at the old factory offset. Those three offsets trace back to
+# the stock partitions_singleapp_large.csv the project started from.
+#
+# The app slots are 0x1C0000 (1.75 MB) each. That size is FROZEN: an OTA
+# update cannot rewrite the partition table, so the layout shipped with the
+# first OTA-capable firmware is the layout those devices keep short of a
+# serial cable. Sized from the measured OTA image (1,479,728 B) to leave
+# ~19 % headroom for the project's own OTA code, a future font and drift.
+#
 # assets is a raw data partition (custom type 0x40) holding the optional
-# user-supplied alert WAV — see tools/flash_assets.sh.
+# user-supplied alert WAV — see tools/flash_assets.sh. It is 0x6E000 =
+# 450,560 B (440 KB) ≈ 14 s of 16-bit mono PCM at 16 kHz, ~28 s at 8 kHz.
+# ota_1, otadata and assets all moved when the slots grew, so a device with
+# a flashed WAV must have tools/flash_assets.sh re-run after reflashing
+# this table.
 #
 # Name,     Type, SubType, Offset,   Size
 nvs,        data, nvs,     0x9000,   0x6000
 phy_init,   data, phy,     0xf000,   0x1000
-ota_0,      app,  ota_0,   0x10000,  0x180000
-ota_1,      app,  ota_1,   0x190000, 0x180000
-otadata,    data, ota,     0x310000, 0x2000
-assets,     data, 0x40,    0x312000, 0xEE000
+ota_0,      app,  ota_0,   0x10000,  0x1C0000
+ota_1,      app,  ota_1,   0x1D0000, 0x1C0000
+otadata,    data, ota,     0x390000, 0x2000
+assets,     data, 0x40,    0x392000, 0x6E000

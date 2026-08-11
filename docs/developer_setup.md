@@ -104,9 +104,10 @@ See [hardware_smoke_test.md](hardware_smoke_test.md) for the on-device validatio
 
 ### Custom alert WAV (assets partition)
 
-The partition table reserves a raw 952 KB `assets` partition for an optional
+The partition table reserves a raw 440 KB `assets` partition for an optional
 alert sound, selectable in Home Assistant as the "Custom WAV" tone. The file
-must be 16-bit mono PCM WAV at 8–22.05 kHz (952 KB ≈ 30 s at 16 kHz):
+must be 16-bit mono PCM WAV at 8–22.05 kHz (440 KB ≈ 14 s at 16 kHz, ≈ 28 s
+at 8 kHz):
 
 ```bash
 source ~/esp/esp-idf/export.sh
@@ -116,6 +117,14 @@ tools/flash_assets.sh -p /dev/ttyACM0 --erase            # wipe (falls back to c
 
 An empty or invalid partition is harmless — the firmware plays the Gentle
 chime instead.
+
+**Re-partitioning invalidates a flashed WAV.** `assets` is addressed by name,
+but its *offset* changed when the OTA app slots grew to 0x1C0000, and any
+future table change can move it again. Flashing a new partition table leaves
+whatever bytes were there at the old offset, so the partition reads as
+empty/invalid and the tone silently falls back to the chime. Re-run
+`tools/flash_assets.sh` on every device that has a custom alert tone after
+reflashing the table.
 
 ---
 
