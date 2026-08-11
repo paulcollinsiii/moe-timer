@@ -1,7 +1,9 @@
 # OTA updates — HTTPS manifest, per-device targeting, on-panel feedback
 
 Status: **plan only, nothing implemented.** Written 2026-08-10 against
-`integration` (`bad81d8`).
+`integration` (`bad81d8`); **reviewed 2026-08-11** — see "Settled in review"
+at the end for what that pass decided, and the shortened "Open decisions"
+list for what it left.
 Branch to cut: `feature/ota`, from **`integration`**.
 Motivation: ship firmware to the MagTags without a USB cable, and be able to
 put a build on the test device before it becomes everyone's build.
@@ -96,30 +98,35 @@ candidate layouts:
 | Layout | Slot size | Headroom after OTA (~1.49 MB) | `assets` | WAV @16 kHz |
 | --- | --- | --- | --- | --- |
 | Keep as-is `0x180000` | 1,572,864 | ~81 KB (5.3 % free) | 952 KB | ~30 s |
-| **`0x1A0000` (recommended)** | **1,703,936** | **~209 KB (12.6 % free)** | **696 KB** | **~22 s** |
-| `0x1C0000` (aggressive) | 1,835,008 | ~337 KB (18.8 % free) | 440 KB | ~14 s |
+| `0x1A0000` | 1,703,936 | ~209 KB (12.6 % free) | 696 KB | ~22 s |
+| **`0x1C0000` — CHOSEN** | **1,835,008** | **~337 KB (18.8 % free)** | **440 KB** | **~14 s** |
 
 (Headroom assumes the +55 KB midpoint of the estimate above. Task 1 replaces
 the estimate with a measurement before the table is frozen.)
 
-Recommended table (`0x1A0000`). `nvs`, `phy_init` and `ota_0` keep their
-current offsets, so an existing device's NVS and running app survive the
-reflash exactly as the current file's comment promises; only `ota_1`,
-`otadata` and `assets` move:
+**Decided (2026-08-11): the aggressive layout.** 14 s of WAV is ample for an
+alert tone, and the app slot is the resource that cannot be renegotiated later.
+`nvs`, `phy_init` and `ota_0` keep their current offsets, so an existing
+device's NVS and running app survive the reflash exactly as the current file's
+comment promises; only `ota_1`, `otadata` and `assets` move:
 
 ```
 # Name,     Type, SubType, Offset,   Size
 nvs,        data, nvs,     0x9000,   0x6000
 phy_init,   data, phy,     0xf000,   0x1000
-ota_0,      app,  ota_0,   0x10000,  0x1A0000
-ota_1,      app,  ota_1,   0x1B0000, 0x1A0000
-otadata,    data, ota,     0x350000, 0x2000
-assets,     data, 0x40,    0x352000, 0xAE000
+ota_0,      app,  ota_0,   0x10000,  0x1C0000
+ota_1,      app,  ota_1,   0x1D0000, 0x1C0000
+otadata,    data, ota,     0x390000, 0x2000
+assets,     data, 0x40,    0x392000, 0x6E000
 ```
 
 Alignment checks: app partitions land on 64 KB boundaries
-(`0x10000`, `0x1B0000`), data partitions on 4 KB (`0x350000`, `0x352000`),
-and the table ends exactly at `0x400000`.
+(`0x10000`, `0x1D0000`), data partitions on 4 KB (`0x390000`, `0x392000`),
+and the table ends exactly at `0x400000`. `assets` is 450,560 B — ~14 s at
+16 kHz, ~28 s at 8 kHz, 16-bit mono.
+
+Update `tools/flash_assets.sh`'s header comment (it currently advertises
+"952 KB ~= 30 s at 16 kHz") along with the table.
 
 Consequence to accept: **a re-partition invalidates the flashed WAV** — the
 `assets` partition moves, so `tools/flash_assets.sh` must be re-run on any
@@ -202,7 +209,7 @@ The `{58,87}` band is the one with slack: the battery label ends around x≈55
 and the 28 pt remaining-time is right-aligned from roughly x≈180. **~120 px of
 empty row.** A 12 pt `v1.5.0` needs ~45 px.
 
-**Recommendation: extend the existing battery label's string.**
+**Decided: extend the existing battery label's string.**
 
 ```c
 snprintf(buf, sizeof(buf), "%s %u%%   %s",
@@ -250,19 +257,37 @@ New screen, full refresh, static, no progress bar:
 
 ```
         ┌──────────────────────────────────┐
+        │     UPDATING FIRMWARE            │   28 pt   y=6
         │                                  │
-        │      UPDATING FIRMWARE           │   28 pt
+        │       Current: v1.5.0            │   12 pt   y=46
         │                                  │
-        │         v1.5.0                   │   18 pt
+        │     Upgrading to v1.6.0          │   18 pt   y=66
         │                                  │
-        │   Do not remove power            │   12 pt
-        │                                  │
+        │      Do not remove power         │   12 pt   y=98
         └──────────────────────────────────┘
+                    296 x 128
 ```
 
-- `display_screens_build_ota(const char *version)` — pure LVGL, golden-tested.
-- `display_ota(const char *version)` in `display.h`/`display.c` — full refresh,
-  same shape as `display_charge_me()` / `display_bedtime()`.
+Both versions are shown: the one being left and the one being installed. That
+makes the panel self-diagnosing — if a device gets stuck, the screen alone says
+which transition it was attempting, without needing the logs or HA.
+
+- `display_screens_build_ota(const char *from_version, const char *to_version)`
+  — pure LVGL, golden-tested.
+- `display_ota(const char *from, const char *to)` in `display.h`/`display.c` —
+  full refresh, same shape as `display_charge_me()` / `display_bedtime()`.
+
+Row budget: 34 + 15 + 22 + 15 px of text plus gaps fits 128 px with room to
+spare. Unlike the main screen this needs **no clean-band entry** — the clean
+bands exist to stop partial-refresh ghosting, and this screen only ever renders
+as a full refresh.
+
+One wrinkle worth naming rather than discovering on hardware: this plan
+deliberately supports downgrades (see "different, not newer"), and on a
+rollback the word "Upgrading" is wrong. Options are to keep it and accept that
+the rare downgrade reads oddly, or use the direction-neutral **"Installing
+v1.6.0"**. Recommend the neutral wording; the "Current:" line above it already
+supplies the direction for anyone who cares.
 
 "Do not remove power" is honest here: the write goes to the *inactive* slot
 and the boot partition only flips after the image verifies, so a power cut is
@@ -282,6 +307,7 @@ normal screen — carrying the new version string, which is the confirmation.
 No separate "update complete" screen is needed.
 
 On failure: log, publish the reason to HA, repaint the normal screen, sleep.
+
 
 ---
 
@@ -305,11 +331,35 @@ it and it needs no extra scheduling.
 `wake_flow_handle_button_wake()`'s `BTN_D` arm (`main/wake_flow.c:1059`) opens
 a window and waits for NTP. Gate the check on a runtime flag.
 
-**Make the flag runtime, not build-time.** A Kconfig symbol would mean
-reflashing over USB to toggle a testing convenience — which defeats the
-purpose of the feature it is testing. Use an NVS-backed boolean surfaced as an
-HA switch (`ota_on_sync`, default off), matching how every other operational
-knob in this tree is exposed.
+**Runtime-settable, with a build-time default — both, which is already the
+house pattern.** A Kconfig symbol *alone* would mean reflashing over USB to
+toggle a testing convenience, which defeats the purpose of the feature it is
+testing. But Kconfig is not thereby redundant: in this tree Kconfig supplies
+the **seed** and HA supplies the **override**, exactly as
+`CONFIG_MAGTAG_MQTT_URI` → `NVS_DEFAULT_MQTT_URI` → NVS → HA text entity works
+today.
+
+So `ota_on_sync` gets all three layers:
+
+```
+CONFIG_MAGTAG_OTA_CHECK_ON_SYNC (bool, default n)
+        │  seeds
+        ▼
+NVS_DEFAULT_OTA_ON_SYNC  →  NVS "ota_on_sync"  ←  HA switch (runtime override)
+```
+
+Same for the endpoint (`CONFIG_MAGTAG_OTA_URL`) and the battery floor
+(`CONFIG_MAGTAG_OTA_MIN_BATT_PCT`). A production build can therefore ship with
+the flag off and no endpoint compiled in, while the test device is flipped from
+Home Assistant without touching a cable.
+
+**Decide explicitly whether these join the defaults fingerprint.**
+`nvs_config_defaults_fingerprint()` reseeds NVS whenever the compile-time
+allocation defaults change. If the OTA defaults participate, changing the
+Kconfig default silently overwrites an HA-set value on the next boot — which is
+surprising for `ota_on_sync` specifically, since the whole point is that HA
+owns it at runtime. **Recommend: keep the OTA keys out of the fingerprint**,
+seeded once on first boot and owned by HA thereafter.
 
 ### What must gate the check
 
@@ -318,10 +368,15 @@ All pure, all in `ota_policy.c`, all host-tested:
 - **NTP settled this window.** X.509 validity checking needs a correct clock.
   A device with a bad clock will fail the handshake, so checking is wasted
   radio time — and it is the failure mode that looks like a broken server.
-- **Battery above a floor** (suggest 30 %) and not charge-locked. A sustained
-  radio burst on a weak cell risks a brownout reset.
+- **Battery at or above 30 %** (`CONFIG_MAGTAG_OTA_MIN_BATT_PCT`, default 30)
+  and not charge-locked. A sustained radio burst on a weak cell risks a
+  brownout reset, and a brownout part-way through a flash write is the one
+  interruption worth actively avoiding. Settled at 30 %; it sits well above
+  the 15 % warn tier and the 10 % charge lock in `battery_policy.c`, so the
+  three thresholds stay ordered and independently meaningful.
 - **Endpoint configured.** Empty URL = OTA disabled entirely, exactly as an
   empty `mqtt_uri` disables the MQTT session.
+
 - **Not already pending.** One attempt per wake.
 
 ---
@@ -338,9 +393,11 @@ task**. OTA follows the same pattern rather than inventing a new one.
 
 ```
   ┌─ window 1 (the existing one) ──────────────────────────────┐
-  │  wifi_session_begin → SNTP → snapshot rendezvous → MQTT    │
+  │  wifi_session_begin → SNTP                                 │
+  │  → snapshot rendezvous          ← blocks until paint done  │
   │  → OTA CHECK: one HTTPS GET of the manifest (~300 B)       │
-  │    parse, decide, BUFFER {version, url}                    │
+  │    parse, decide, BUFFER {version, url}, record result     │
+  │  → MQTT               ← publishes THIS check's result      │
   │  → wifi_session_end                                        │  radio down
   └────────────────────────────────────────────────────────────┘
                               │
@@ -362,6 +419,14 @@ The second association costs a few seconds **only on a day when an update
 actually exists** — once per release, not once per day. The common path (no
 update) adds one small HTTPS GET to a window that was already happening.
 
+**The check sits between the rendezvous and MQTT, and that placement is
+deliberate.** The rendezvous already blocks until the wake's paint has
+finished, so by the time the check transmits, the panel is idle — the brownout
+condition is satisfied without any new mechanism. And running before
+`mqtt_ha_window()` means the check's outcome is in hand when the stat payload
+is built, so **a failed check is reported to Home Assistant in the same window
+that produced it**, not a day later.
+
 ### Where the apply happens in the wake
 
 Not inside the rollover. `wake_flow_handle_day_rollover()` calls
@@ -375,6 +440,64 @@ and the snapshot save, immediately before sleep** — the same place
 indistinguishable from a power cut at sleep entry, which
 `timer_persist_try_restore()` already handles correctly. This is a property
 the tree has already paid for; the plan just needs to not step outside it.
+
+### The timeout problem, and the sad loop
+
+Yes — and there are **two** independent timers that can kill a download, which
+is worth separating because they need different answers:
+
+| Timer | Setting | Effect if it fires |
+| --- | --- | --- |
+| Project awake failsafe | `CONFIG_MAGTAG_MAX_AWAKE_SEC` = 180 s | Forces deep sleep mid-download |
+| ESP task watchdog | `CONFIG_ESP_TASK_WDT_TIMEOUT_S` = 5 s, idle-task checked on CPU0 | Panic + reboot if idle starves |
+
+The failure mode identified in review is the important one and it is not
+hypothetical: **a download that reliably exceeds the cap never completes.** The
+device wakes at every rollover, opens a window, paints the update screen, gets
+part-way, is forced to sleep, and does it all again tomorrow — forever. That is
+strictly worse than having no OTA at all, because it is a daily battery cost
+that produces nothing and looks, from the outside, like nothing is happening.
+
+Three mitigations, and all three are needed:
+
+**1. Extend the failsafe before the download window opens, not during it.**
+A dedicated `CONFIG_MAGTAG_OTA_MAX_SEC` (default 300, ≤ 600 to stay consistent
+with `MAX_AWAKE_SEC`'s own Kconfig range) applied via the injected extender at
+the top of the OTA phase, and restored afterwards. The extension must be
+unconditional and must precede `wifi_session_begin()` — an extension applied
+"once we see it's taking a while" is an extension that races the thing it is
+protecting against.
+
+**2. Use the incremental `esp_https_ota` API, not the one-shot call.**
+`esp_https_ota_begin()` → loop on `esp_https_ota_perform()` →
+`esp_https_ota_finish()`, rather than the single blocking `esp_https_ota()`.
+This matters for both timers:
+
+- Each `perform()` returns after one chunk, so the task yields and the **idle
+  task runs** — which is what keeps the 5 s TWDT satisfied on a slow link.
+- The loop is where a **deadline check** goes. The download aborts *cleanly*
+  when it runs past its own budget, discarding the partial image, instead of
+  being killed mid-write by the failsafe.
+
+A clean abort is not cosmetic: it is what guarantees the boot partition is
+never switched to a partial image, and it is what makes the failure reportable
+rather than silent.
+
+**3. A retry budget — this is the actual fix for the sad loop.**
+Persist `ota_fails` (a count) and `ota_target` (the version it is counting
+against) in NVS. After **3 consecutive failures against the same target
+version**, stop attempting that version and publish the give-up to HA. A
+*different* target version resets the counter to zero.
+
+So a genuinely un-downloadable build costs three windows and then goes quiet,
+instead of one window per day indefinitely. Publishing a new version — or
+republishing the same one under a new version string — re-arms it. This is
+pure, sits in `ota_policy.c`, and is host-tested with the rest of the decision
+logic.
+
+Alongside it, record the **download duration** in the stat payload. A link that
+is trending toward the cap is then visible in Home Assistant *before* it
+becomes chronic, rather than being discovered as a stuck fleet.
 
 ---
 
@@ -427,23 +550,73 @@ is rewritten.
 A single static JSON file, fetched over HTTPS. The device does the matching,
 so hosting stays a static file with no server-side logic.
 
+**The top level is an array of schema-versioned blocks**, each carrying a
+distinct `schema` integer. A device reads the newest block it understands and
+ignores the rest.
+
 ```json
-{
-  "schema": 1,
-  "default": {
-    "version": "1.5.0",
-    "url": "https://ota.example.com/magtag/magtag_timer-1.5.0.bin"
-  },
-  "devices": {
-    "magtag-a1b2c3": {
-      "version": "1.6.0-rc1",
-      "url": "https://ota.example.com/magtag/magtag_timer-1.6.0-rc1.bin"
+[
+  {
+    "schema": 1,
+    "default": {
+      "version": "1.5.0",
+      "url": "https://ota.example.com/magtag/magtag_timer-1.5.0.bin"
+    },
+    "devices": {
+      "magtag-a1b2c3": {
+        "version": "1.6.0-rc1",
+        "url": "https://ota.example.com/magtag/magtag_timer-1.6.0-rc1.bin"
+      }
     }
+  },
+  {
+    "schema": 2,
+    "default": { "version": "1.9.0", "url": "https://ota.example.com/..." },
+    "channels": {
+      "beta": { "version": "2.0.0-rc1", "url": "https://ota.example.com/..." }
+    },
+    "devices": { "magtag-a1b2c3": { "channel": "beta" } }
   }
-}
+]
 ```
 
-Resolution order, pure and host-tested:
+### Why the array, and what it buys
+
+This is what makes a **rolling fleet upgrade** work from one static file. When
+the format needs to change, schema 2 is added alongside schema 1 rather than
+replacing it:
+
+- Firmware that only understands schema 1 keeps reading the schema-1 block and
+  keeps updating — so laggards are still reachable, and the schema-1 block is
+  precisely the lever that drags them forward.
+- Firmware that understands schema 2 reads schema 2 and gets the newer
+  capabilities (channels, in the sketch above).
+- Once every device is on firmware that understands schema 2, the schema-1
+  block is deleted. Nothing coordinates that moment — it is just a file edit
+  made when HA shows the fleet has caught up.
+
+Without this, introducing any format change means every device that has not yet
+updated is stranded, which is the one failure OTA is supposed to eliminate.
+
+### Block selection, then resolution — both pure and host-tested
+
+Selecting the block:
+
+1. The top level must be an array. Anything else = do nothing.
+2. Discard blocks whose `schema` exceeds `OTA_SCHEMA_MAX` — a compile-time
+   constant in `ota_policy.c`, bumped when the parser learns a new format.
+3. Of what remains, take the **highest** `schema`.
+4. Duplicate `schema` values are malformed; take the first and log it. (The
+   schemas are meant to be non-overlapping — this is defensive, not a feature.)
+5. No compatible block = do nothing, and report the reason to HA. This is the
+   fails-safe case, and it is now *reportable* rather than silent.
+
+**Unknown keys inside a compatible block are ignored, never fatal.** This is
+load-bearing and easy to get wrong: if a schema-1 parser rejects a block
+because it contains a key added for schema 1.x readers, the forward
+compatibility the array is meant to provide evaporates.
+
+Resolving within the selected block (schema 1):
 
 1. Look up `devices[device_id()]`. `device_id()` already returns
    `magtag-xxxxxx` derived from the WiFi STA MAC — a stable, zero-config
@@ -452,9 +625,6 @@ Resolution order, pure and host-tested:
 3. Update iff the resolved `version` differs from the running version.
 4. A resolved entry with `"version"` absent or `null` means **pinned** — do
    nothing. This is how a device is frozen without deleting its entry.
-
-`schema` exists so a future format change is detectable rather than silently
-misparsed; an unrecognised `schema` means "do nothing", which fails safe.
 
 ### Other targeting mechanisms considered
 
@@ -468,12 +638,14 @@ misparsed; an unrecognised `schema` means "do nothing", which fails safe.
   one-time HA toggle, after which no manifest edit is ever needed to ship a
   release candidate. It costs one more config field and one more indirection.
 
-  **Verdict: start with `devices` + `default`.** It directly expresses the
-  stated use case ("override a default") with zero new config plumbing, and
-  `ota_policy_resolve()` can grow a channel lookup between steps 1 and 2 later
-  without disturbing anything around it. This is the plan's one genuinely
-  arguable call, and it is cheap to revisit because it lives behind a pure
-  function.
+  **Verdict: ship `devices` + `default` as schema 1; channels become schema 2
+  if and when manifest edits per release start to grate.** Schema 1 directly
+  expresses the stated use case ("override a default") with zero new config
+  plumbing. And the array structure above means the eventual move costs
+  nothing at the fleet level — schema 2 is added beside schema 1, devices pick
+  up channels as they update, and schema 1 is deleted once nothing reads it.
+  The sketch in the manifest example shows the shape that migration would
+  take.
 
 ---
 
@@ -520,7 +692,7 @@ With rollback enabled a freshly-OTA'd app boots in `PENDING_VERIFY`. If it
 does not call `esp_ota_mark_app_valid_cancel_rollback()`, the bootloader
 reverts to the previous slot. Without this, one bad build that boot-loops
 means a serial visit to every device — precisely the outcome OTA exists to
-prevent. Strongly recommended.
+prevent. **Decided: enabled.**
 
 **Where the mark-valid call lives.** Per the residency rule,
 `esp_ota_mark_app_valid_cancel_rollback()` is a *bare call*, not a handle, so
@@ -536,18 +708,49 @@ smoke-test item, not something to assume from the docs.
 
 ## Failure modes
 
-| Failure | Behaviour | Recovery |
-| --- | --- | --- |
-| No WiFi / no NTP | Check skipped | Next rollover |
-| Manifest 404 / malformed / unknown `schema` | Logged, published to HA, no update | Next rollover |
-| Cert validation fails | `esp_https_ota` errors out, screen repaints | Next rollover; if permanent, serial reflash |
-| Download interrupted (power, failsafe) | Inactive slot holds a partial image; boot partition **not** switched | Next rollover retries from scratch |
-| Image header invalid / wrong chip | `esp_https_ota` rejects before switching | Next rollover |
-| New app boots and crashes | Bootloader rolls back (if enabled) | Automatic |
-| New app boots but is broken (no crash) | Not detected | Republish the old version in the manifest |
-| Manifest points at a downgrade | Applied — this is deliberate | Republish |
+**Every failure reports to Home Assistant.** Nothing in this list fails
+silently — the USB console is unreachable when these happen (overnight, on
+battery, mid-sleep-cycle), so MQTT is the only channel that can tell you what
+died. This tree already treats it that way for `reset_reason`; OTA gets the
+same treatment.
 
-The last row is the accepted cost of the "different, not newer" test.
+| Failure | `ota_result` | Behaviour | Recovery |
+| --- | --- | --- | --- |
+| No WiFi / no NTP | *(not set — no check ran)* | Check skipped | Next rollover |
+| Manifest fetch failed | `http_404`, `http_500`, … | No update | Next rollover |
+| Manifest malformed JSON | `bad_manifest` | No update | Next rollover |
+| No compatible schema block | `no_schema` | No update | Fix the manifest |
+| **Cert validation fails** | **`tls_cert`** | Errors out, screen repaints | Next rollover; if permanent, serial reflash |
+| Other TLS failure | `tls` | Errors out, screen repaints | Next rollover |
+| Deadline abort (download too slow) | `timeout` | Clean abort, partial image discarded | Retry budget, then gives up |
+| Download interrupted (power) | *(persisted at next boot)* | Boot partition **not** switched | Next rollover retries from scratch |
+| Image header invalid / wrong chip | `bad_image` | Rejected before switching | Next rollover |
+| Battery below floor | `low_batt` | Check skipped | Next rollover |
+| Free heap too low | `low_heap` | Download skipped | Next rollover |
+| Retry budget exhausted | `gave_up` | Stops attempting this version | Publish a new version |
+| New app boots and crashes | *(previous value survives)* | Bootloader rolls back | Automatic |
+| New app boots but is broken (no crash) | — | Not detected | Republish the old version |
+| Manifest points at a downgrade | — | Applied — deliberate | Republish |
+
+`tls_cert` being distinguishable from `tls` is the difference between "my cert
+expired / I pinned the wrong thing" and "the network flaked", and those have
+completely different fixes. `esp_https_ota` surfaces enough error detail to
+separate them (`ESP_ERR_ESP_TLS_*` and the HTTP status), so the mapping is a
+small pure function in `ota_policy.c` rather than a lossy "it failed".
+
+**Reporting mechanics — the two windows report differently.** A *check* failure
+(window 1) publishes in the same window, because the check runs before the MQTT
+phase. A *download* failure (window 2) cannot: MQTT is already closed and
+reopening it would cost another association. So the download result is
+persisted to NVS (`ota_result`) and published on the **next** window.
+
+That asymmetry is acceptable precisely where it lands: a successful download
+reboots immediately and announces itself by the new version appearing on the
+panel and in the `fw` sensor, so success needs no report. Only failures take
+the deferred path, and a failure that is visible tomorrow morning is visible
+enough.
+
+The downgrade row is the accepted cost of the "different, not newer" test.
 
 ---
 
@@ -559,7 +762,7 @@ Three new modules, placed by the layer model in `docs/architecture.md`:
 | --- | --- | --- | --- |
 | `main/ota_policy.c` | **1 — pure** | Manifest parse, device targeting, "should update?" decision, precondition gating. Total function over its arguments; no clock, no NVS, no ESP includes. Uses cJSON, as `config_apply.c` already does. | `test_ota_policy` — host, direct |
 | `main/ota_flow.c` | **2 — orchestration** | Sequences check → buffer → paint → download → reboot. Device effects injected via an ops struct, exactly like `net_apply_ops_t`. | `test_ota_flow` — host, single-TU with stubs |
-| `main/ota.c` | **3 — driver** | `esp_http_client` manifest GET, `esp_https_ota` download, `esp_ota_mark_app_valid_cancel_rollback`. Thin — every decision is already made upstream. | Hardware smoke test |
+| `main/ota.c` | **3 — driver** | `esp_http_client` manifest GET; the **incremental** download (`esp_https_ota_begin` / `_perform` loop / `_finish`) with the deadline check in the loop; `esp_ota_mark_app_valid_cancel_rollback`. Thin — every decision is already made upstream, including when to abort. | Hardware smoke test |
 
 `main/main.c` gains **nothing**. Under the residency rule the only candidate
 would be an awake-failsafe extension for the download, and that is handled by
@@ -571,13 +774,19 @@ branch-free line, and the `esp_timer` handle stays where it already lives.
 
 `CONFIG_MAGTAG_MAX_AWAKE_SEC` is 180 s. A ~1.5 MB HTTPS download on an
 ESP32-S2, with TLS and flash writes, should run 15–30 s — comfortably inside
-the cap. But a slow link would have the failsafe fire mid-download, forcing
-deep sleep with a partial image (harmless, but a wasted download).
+the cap. But a slow link would have the failsafe fire mid-download, and the
+consequence is worse than one wasted download: see **"The timeout problem, and
+the sad loop"** above for the full treatment, which is where the failsafe
+extension, the incremental-API deadline check and the retry budget are
+specified together. They are one mechanism and should be implemented as one.
 
-Extend the failsafe to ~300 s for the duration of the download window via the
-injected extender, and restore it afterwards. Note that `MAX_AWAKE_SEC`'s
-Kconfig `range` is 30–600 — the extender writes the timer directly and is not
-bound by it, but staying inside 600 s keeps the two consistent.
+The piece that belongs *here*, in the architecture: the extension is delivered
+through the same injected-function-pointer pattern as
+`alerts_set_extend_awake()`, so `main.c` gains one branch-free install line and
+the `esp_timer` handle stays where it already lives. `MAX_AWAKE_SEC`'s Kconfig
+`range` is 30–600; the extender writes the timer directly and is not bound by
+it, but keeping `CONFIG_MAGTAG_OTA_MAX_SEC` inside 600 keeps the two
+consistent.
 
 ### Task and stack sizing
 
@@ -612,18 +821,41 @@ so none of the above may *depend* on PSRAM being present.
 
 New NVS keys (`include/nvs_keys.h`; NVS caps keys at 15 chars):
 
-| Key | Type | Default | Purpose |
-| --- | --- | --- | --- |
-| `ota_url` | str | `CONFIG_MAGTAG_OTA_URL` | Manifest endpoint. Empty = OTA disabled. |
-| `ota_on_sync` | u16 (0/1) | 0 | Also check on every Button D full sync. |
-| `ota_result` | str | `""` | Last attempt outcome, for HA visibility. |
+| Key | Type | Default | HA-settable | Purpose |
+| --- | --- | --- | --- | --- |
+| `ota_url` | str | `CONFIG_MAGTAG_OTA_URL` | yes (text) | Manifest endpoint. Empty = OTA disabled. |
+| `ota_on_sync` | u16 (0/1) | `CONFIG_MAGTAG_OTA_CHECK_ON_SYNC` | yes (switch) | Also check on every Button D full sync. |
+| `ota_result` | str | `""` | no | Last attempt outcome (reason code). |
+| `ota_target` | str | `""` | no | Version the retry budget is counting against. |
+| `ota_fails` | u16 | 0 | no | Consecutive failures against `ota_target`. |
+
+The last three are device-owned state, not config — they are written by the
+firmware and read by the stat payload, so they get accessors but no HA entity
+and no bulk-document key.
+
+New Kconfig symbols (`main/Kconfig.projbuild`), each seeding the NVS default
+above or configuring behaviour that has no runtime override:
+
+| Symbol | Default | Purpose |
+| --- | --- | --- |
+| `MAGTAG_OTA_URL` | `""` | Seeds `ota_url`; prefer `credentials.local.h` |
+| `MAGTAG_OTA_CHECK_ON_SYNC` | `n` | Seeds `ota_on_sync` |
+| `MAGTAG_OTA_MIN_BATT_PCT` | `30` | Battery floor for a check |
+| `MAGTAG_OTA_MAX_SEC` | `300` | Failsafe budget for the download window |
+| `MAGTAG_OTA_MAX_FAILS` | `3` | Retry budget before giving up on a version |
 
 Accessors in `nvs_config.c`/`.h` following the existing shape, plus defaults in
 `include/nvs_defaults.h` and a `credentials.local.h` slot for the URL — same
 treatment `MAGTAG_MQTT_URI` gets, so an endpoint never lands in a committed
 `sdkconfig.defaults`.
 
-**Both new settable fields must go in three places, not one.** This is the
+**Keep the OTA keys out of the defaults fingerprint.**
+`nvs_config_defaults_fingerprint()` reseeds NVS when the compile-time defaults
+change; including `ota_on_sync` there would let a Kconfig edit silently
+overwrite an HA-set value on the next boot, which is the opposite of what the
+runtime override is for.
+
+**Both HA-settable fields must go in three places, not one.** This is the
 durability rule from `docs/architecture.md`, and it has already bitten this
 project once — `break_eligible` shipped with an HA entity and a parser but no
 bulk-document schema, so every application of the retained config document
@@ -642,10 +874,18 @@ to `ha_config.c`.
 **`DISC_SCHEMA_VER` in `main/mqtt_ha.c` must be bumped (16 → 17).** New
 entities do not appear in Home Assistant otherwise.
 
-Also worth adding to the stat payload (`stats_json.c`): the OTA result string,
-alongside the existing `fw` and `reset_reason` fields. This tree already treats
-MQTT as the channel that survives when the USB console does not — a failed
-overnight update is exactly the kind of event that is otherwise invisible.
+Add to the stat payload (`stats_json.c`), alongside the existing `fw` and
+`reset_reason` fields:
+
+- `ota_result` — the reason code from the failure table.
+- `ota_target` + `ota_fails` — what it is retrying and how close it is to
+  giving up.
+- `ota_dl_ms` — last download duration, so a link trending toward the
+  deadline is visible before it becomes chronic.
+
+This tree already treats MQTT as the channel that survives when the USB console
+does not; a failed overnight update is exactly the kind of event that is
+otherwise invisible.
 
 `sdkconfig.defaults` gains `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y` and the
 OTA URL default. Note the standing hazard: `sdkconfig` is gitignored and
@@ -659,27 +899,57 @@ carries hand-set values, so the regenerated config must be diffed against
 Per the project's process rules, tests come first. The pure module carries the
 weight.
 
-**`test_ota_policy`** — resolution and decision:
+**`test_ota_policy`** — schema selection, resolution and decision:
+
+*Block selection (the array):*
+- single block, schema 1 = selected
+- two blocks, both supported = **highest** schema wins
+- two blocks, newest unsupported = falls back to the older supported one
+  (this is the rolling-fleet property; it is the reason the array exists and
+  it must be pinned by a test)
+- no supported block = no update, reports `no_schema`
+- duplicate `schema` values = first wins, no crash
+- unknown keys inside a supported block are **ignored, not fatal** — the
+  forward-compatibility guarantee, and the easiest one to regress
+- top level not an array = no update
+
+*Resolution:*
 - default entry applies when the device is not listed
 - device entry overrides the default
 - device entry with `version` null/absent = pinned, no update
 - version equal to running = no update
 - version different (higher **and lower**) = update — the downgrade case is
   deliberate and must be pinned by a test, not left to be "fixed" later
-- unknown / missing `schema` = no update
 - malformed JSON, truncated JSON, empty body = no update, no crash
 - missing `url`, empty `url`, non-`https://` `url` = rejected
 - oversized version string (> 31 chars) = rejected
-- preconditions: no NTP → skip; battery below floor → skip; charge-locked →
-  skip; empty endpoint → skip
+
+*Preconditions and the retry budget:*
+- no NTP → skip; battery below 30 % → skip; charge-locked → skip; empty
+  endpoint → skip
+- `ota_fails` below the budget → attempt
+- `ota_fails` at the budget for the **same** target → give up, report
+  `gave_up`
+- `ota_fails` at the budget but a **different** target → counter resets,
+  attempt
+- error-to-reason-code mapping: a TLS cert error yields `tls_cert` and not
+  the generic `tls` (the two have different fixes, so the distinction is
+  behaviour, not logging detail)
 
 **`test_ota_flow`** — sequencing, with injected effects:
 - check runs at rollover; does not run on a plain tick wake
 - check runs on Button D iff `ota_on_sync` is set
+- the check runs **after** the snapshot rendezvous and **before** the MQTT
+  phase, so its result reaches the same window's stat payload
 - paint happens **after** the check window closes and **before** the download
   window opens — assert the ordering, since it is the brownout contract
+- the failsafe extender is called **before** the download window opens, not
+  during it
+- a download that exceeds the deadline aborts cleanly: no set-boot-partition,
+  no restart, `ota_fails` incremented
 - download failure repaints the normal screen and does not reboot
 - download success calls set-boot-partition then restart, in that order
+- a failure result persists to NVS and appears in the *next* window's payload
 - no OTA pending = no extra window opened (the common path costs nothing)
 
 **`test_display_render`** — golden for `display_screens_build_ota()`, plus
@@ -700,31 +970,37 @@ is what gives the malformed-JSON cases teeth.
 1. **Measure.** Add `esp_http_client`, `esp_https_ota`, `app_update` to
    `main/CMakeLists.txt` `REQUIRES`; build; record the real image growth.
    *Nothing else in this list is safe to order before this one.*
-2. **Freeze the partition table** against that measurement. Update
-   `partitions.csv` and the `sdkconfig.defaults` comment; note the WAV
-   re-flash requirement in `docs/developer_setup.md`.
+2. **Freeze the partition table** at the chosen `0x1C0000` layout (confirm the
+   measurement leaves it comfortable). Update `partitions.csv`, the
+   `sdkconfig.defaults` comment, and `tools/flash_assets.sh`'s size/duration
+   header; note the WAV re-flash requirement in `docs/developer_setup.md`.
 3. Add `version.txt`; verify `esp_app_get_description()->version` reads
    `1.5.0` and the HA `fw` sensor agrees.
-4. `test_ota_policy` **first**, then `main/ota_policy.c`.
-5. NVS keys + accessors + defaults + `credentials.local.h` slot.
-6. `CFG_BOOL` kind in `ha_config.c`; register both fields; add them to
-   `config_apply.c`'s bulk parser; bump `DISC_SCHEMA_VER` to 17; update
-   `docs/home_assistant.md`.
+4. `test_ota_policy` **first**, then `main/ota_policy.c` — schema-array
+   selection, resolution, preconditions, retry budget, reason-code mapping.
+5. NVS keys + accessors + defaults + `credentials.local.h` slot; the five new
+   Kconfig symbols. Keep the OTA keys out of the defaults fingerprint.
+6. `CFG_BOOL` kind in `ha_config.c`; register `ota_url` + `ota_on_sync`; add
+   them to `config_apply.c`'s bulk parser; bump `DISC_SCHEMA_VER` to 17;
+   update `docs/home_assistant.md`.
 7. `https://` validator in `config_validate.c`, with tests.
 8. `display_state_t.fw_version` → `app_state_display()` → battery row.
    Regenerate main-screen goldens; `git checkout` the untouched ones.
-9. `display_screens_build_ota()` + `display_ota()` + golden.
+9. `display_screens_build_ota(from, to)` + `display_ota(from, to)` + golden.
 10. `test_ota_flow` **first**, then `main/ota_flow.c` with its injected ops.
-11. `main/ota.c`: manifest GET, `esp_https_ota`, mark-valid. Embed the CA PEM.
+11. `main/ota.c`: manifest GET, then the **incremental** OTA
+    (`esp_https_ota_begin` / `_perform` loop / `_finish`) with the deadline
+    check in the loop, plus mark-valid. Embed the CA PEM.
 12. Wire the rollover trigger, the Button D trigger, the pre-sleep apply point,
     and the failsafe extender install in `app_main`.
 13. `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y`; call `ota_mark_valid_if_pending()`
     from the pre-sleep point.
-14. OTA result into the stat payload.
+14. OTA result / target / fail-count / download duration into the stat payload.
 15. Build-size guard (warn at 85 % slot occupancy).
 16. Hardware smoke test (below).
 17. Update `docs/architecture.md`: module table, layer lists, a subsystem note
-    for the two-window design, and the OTA-result stat field.
+    for the two-window design and the timeout/retry mechanism, and the new
+    stat fields.
 
 Task 12 is the one that touches `main.c`, and it should be a **single
 branch-free line** installing the extender. Anything more than that in `main.c`
@@ -740,19 +1016,35 @@ needs to name one of the four residency reasons at review, or move.
    12 pt next to the battery percentage.
 3. Point `ota_url` at a manifest whose version equals the running version →
    confirm **no** second window opens and the wake is no longer than usual.
-4. Publish a different version → confirm the update screen paints, the download
-   runs with the panel idle, and the device reboots into the new version.
+4. Publish a different version → confirm the update screen paints (both
+   versions legible), the download runs with the panel idle, and the device
+   reboots into the new version.
 5. Confirm the post-reboot main screen shows the new version.
 6. **Rollback:** deliberately publish a build that panics early; confirm the
    bootloader reverts and the device comes back on the previous version.
+   Also confirm a normal deep-sleep wake does **not** consume the
+   pending-verify state before the first full wake marks it valid.
 7. **Targeting:** add the test device to `devices` with a distinct version;
    confirm it updates and a second device does not.
 8. **Downgrade:** publish the older version; confirm it applies.
-9. Pull WiFi mid-download; confirm the device recovers, repaints, sleeps, and
-   retries at the next rollover.
-10. Confirm `ota_on_sync=0` means Button D does not check, and `=1` means it
-    does.
-11. Check the `net_win` and OTA task stack watermarks in the logs.
+9. **Schema array:** publish a manifest carrying a schema-1 block and a
+   fabricated schema-99 block; confirm the device reads schema 1 and ignores
+   the unknown block rather than failing. Add an unknown key inside the
+   schema-1 block and confirm it is still accepted.
+10. **Timeout + retry budget:** throttle the host (or set
+    `MAGTAG_OTA_MAX_SEC` very low) so the download cannot finish; confirm the
+    abort is clean, `ota_fails` increments, and after 3 attempts the device
+    reports `gave_up` and stops trying. Then publish a new version and confirm
+    the counter resets and it attempts again.
+11. **Failure reporting:** point at a host with a cert the device does not
+    trust; confirm HA shows `tls_cert` and not a generic failure.
+12. Pull WiFi mid-download; confirm the device recovers, repaints, sleeps, and
+    retries at the next rollover.
+13. Confirm `ota_on_sync=0` means Button D does not check, and `=1` means it
+    does; confirm the Kconfig default seeds a fresh device correctly.
+14. Confirm a check is skipped below 30 % battery.
+15. Check the `net_win` and OTA task stack watermarks, and the reported
+    download duration, in the logs.
 
 ---
 
@@ -773,6 +1065,15 @@ needs to name one of the four residency reasons at review, or move.
   incidentally-rewritten goldens.
 - **Heap during TLS on a PSRAM-less board.** Mitigated by the free-heap
   precondition check and by running the download with MQTT closed.
+- **A download that never fits the budget.** Raised in review: a device that
+  cannot finish inside the failsafe retries daily forever, costing a window
+  and a full refresh each time and achieving nothing. Mitigated by the
+  three-part mechanism above — extend, deadline-abort, retry budget — and made
+  visible by publishing the download duration before it becomes chronic.
+- **Task watchdog during the download.** `CONFIG_ESP_TASK_WDT_TIMEOUT_S` is
+  5 s with idle-task checking on CPU0. Mitigated by the incremental OTA API,
+  which yields between chunks; the one-shot `esp_https_ota()` call is the
+  shape that risks it.
 
 ## Non-goals
 
@@ -794,16 +1095,32 @@ needs to name one of the four residency reasons at review, or move.
 - Automatic rollback on *behavioural* failure (only on boot failure).
 - Semver ordering. "Different means apply" is the deliberate choice; see above.
 
+## Settled in review (2026-08-11)
+
+- **Partition layout: `0x1C0000`**, the aggressive option. 1.75 MB per app
+  slot, `assets` down to 440 KB (~14 s of WAV at 16 kHz).
+- **Version on the battery row**, folded into the existing label's string.
+- **Update screen shows both versions** — current and the one being installed.
+- **`ota_on_sync` is HA-settable *and* Kconfig-seeded**, along with the URL,
+  battery floor, timeout and retry budget. Kconfig seeds, HA overrides.
+- **Battery floor: 30 %.**
+- **Rollback on failed boot: enabled.**
+- **Manifest is an array of schema-versioned blocks**, so a fleet mid-upgrade
+  reads one file and laggards stay reachable.
+- **Every failure reports to HA**, with `tls_cert` distinguishable from a
+  generic TLS or network error.
+- **The timeout mechanism is three parts, not one**: extend the failsafe before
+  the download, deadline-abort cleanly inside the incremental OTA loop, and
+  give up after 3 failures against the same target version.
+
 ## Open decisions
 
-1. **Partition layout** — `0x1A0000` recommended, pending task 1's
-   measurement. Confirm the shortened WAV budget (~22 s @16 kHz) is acceptable.
-2. **Targeting shape** — `devices` map recommended for v1; channels are the
-   documented upgrade path if manifest edits per release become tedious.
-3. **Manifest transport** — HTTPS for v1; the retained-MQTT variant is
+1. **"Upgrading to" vs "Installing"** on the update screen. The plan supports
+   downgrades, so the neutral wording is recommended — but it is your screen.
+2. **Manifest transport** — HTTPS for v1; the retained-MQTT variant is
    strictly cheaper on the wire and the policy module is designed to accept
    either. Worth revisiting after the first few releases.
-4. **Version placement** — combined with the battery label vs. a separate
-   label on the same row. Settle by looking at it on hardware.
-5. **CA rotation escape hatch** (`ota_ca` in NVS) — deferred; confirm that is
+3. **CA rotation escape hatch** (`ota_ca` in NVS) — deferred; confirm that is
    acceptable given the chosen root's expiry date.
+4. **Channels as schema 2** — not needed for v1, and now cheap to add later
+   because of the array. No action unless per-release manifest edits grate.
