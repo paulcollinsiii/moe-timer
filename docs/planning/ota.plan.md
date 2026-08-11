@@ -95,14 +95,25 @@ Flash is fully allocated, so bigger app slots come out of `assets` (the raw
 partition holding the optional alert WAV — `tools/flash_assets.sh`). Three
 candidate layouts:
 
-| Layout | Slot size | Headroom after OTA (~1.49 MB) | `assets` | WAV @16 kHz |
+| Layout | Slot size | Headroom after OTA (1,479,728 B) | `assets` | WAV @16 kHz |
 | --- | --- | --- | --- | --- |
-| Keep as-is `0x180000` | 1,572,864 | ~81 KB (5.3 % free) | 952 KB | ~30 s |
-| `0x1A0000` | 1,703,936 | ~209 KB (12.6 % free) | 696 KB | ~22 s |
-| **`0x1C0000` — CHOSEN** | **1,835,008** | **~337 KB (18.8 % free)** | **440 KB** | **~14 s** |
+| Keep as-is `0x180000` | 1,572,864 | 91 KB (5.9 % free) | 952 KB | ~30 s |
+| `0x1A0000` | 1,703,936 | 219 KB (13.2 % free) | 696 KB | ~22 s |
+| **`0x1C0000` — CHOSEN** | **1,835,008** | **347 KB (19.4 % free)** | **440 KB** | **~14 s** |
 
-(Headroom assumes the +55 KB midpoint of the estimate above. Task 1 replaces
-the estimate with a measurement before the table is frozen.)
+**Measured, not estimated (task 1, 2026-08-11).** Baseline image 1,435,232 B
+(`0x15e660`); with `esp_http_client` + `esp_https_ota` + `app_update` linked
+and referenced, 1,479,728 B (`0x169430`) — **+44,496 B (43.5 KB)**, the bottom
+of the 40–60 KB estimate. Measured with a throwaway TU referencing the real
+API surface and held by `-u`, because IDF builds with `--gc-sections`: adding
+the components to `REQUIRES` alone changes the image by zero bytes and would
+have measured nothing.
+
+That figure covers the ESP-IDF side only. Still to come: `ota_policy.c` /
+`ota_flow.c` / `ota.c`, the CA PEM (~1.5 KB), the update screen and the new
+NVS/HA fields — call it another 15–25 KB. Even at the top of that range the
+chosen layout lands near 18 % free, while the existing `0x180000` layout would
+land near 4 % and trip the 85 % guard of task 15 immediately.
 
 **Decided (2026-08-11): the aggressive layout.** 14 s of WAV is ample for an
 alert tone, and the app slot is the resource that cannot be renegotiated later.
@@ -133,10 +144,10 @@ Consequence to accept: **a re-partition invalidates the flashed WAV** — the
 device that has a custom alert tone. That is a one-time cost paid during the
 same serial session that installs OTA support.
 
-**Task 1 measures before this is committed.** Add the three components to
-`REQUIRES`, build, and read the real number off `idf.py size` / the linked
-`.bin`. The +40–60 KB above is an estimate; the layout choice should be made
-against the measurement, not the estimate.
+**Task 1 measured before this was committed** — see the table above. The
+measurement confirms the choice rather than changing it: 43.5 KB of ESP-IDF
+OTA machinery leaves the current layout at 5.9 % free, which is not enough to
+absorb the project's own OTA code, let alone a future font.
 
 ### Guard the headroom afterwards
 

@@ -67,6 +67,9 @@ idf_component_register(
         lwip
         espressif__mqtt
         esp_app_format
+        esp_http_client
+        esp_https_ota
+        app_update
         ssd1680
 )
 
