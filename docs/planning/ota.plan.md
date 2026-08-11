@@ -261,7 +261,7 @@ New screen, full refresh, static, no progress bar:
         │                                  │
         │       Current: v1.5.0            │   12 pt   y=46
         │                                  │
-        │     Upgrading to v1.6.0          │   18 pt   y=66
+        │     Installing v1.6.0            │   18 pt   y=66
         │                                  │
         │      Do not remove power         │   12 pt   y=98
         └──────────────────────────────────┘
@@ -282,12 +282,11 @@ spare. Unlike the main screen this needs **no clean-band entry** — the clean
 bands exist to stop partial-refresh ghosting, and this screen only ever renders
 as a full refresh.
 
-One wrinkle worth naming rather than discovering on hardware: this plan
-deliberately supports downgrades (see "different, not newer"), and on a
-rollback the word "Upgrading" is wrong. Options are to keep it and accept that
-the rare downgrade reads oddly, or use the direction-neutral **"Installing
-v1.6.0"**. Recommend the neutral wording; the "Current:" line above it already
-supplies the direction for anyone who cares.
+The wording is **"Installing v1.6.0"**, not "Upgrading to" — settled in
+review. This plan deliberately supports downgrades (see "different, not
+newer"), and on a rollback "Upgrading" would be actively wrong; the direction-
+neutral verb is correct in both directions and the "Current:" line above it
+already supplies the direction for anyone who cares.
 
 "Do not remove power" is honest here: the write goes to the *inactive* slot
 and the boot partition only flips after the image verifies, so a power cut is
@@ -1113,14 +1112,20 @@ needs to name one of the four residency reasons at review, or move.
   the download, deadline-abort cleanly inside the incremental OTA loop, and
   give up after 3 failures against the same target version.
 
-## Open decisions
+## Open decisions — all closed (2026-08-11)
 
-1. **"Upgrading to" vs "Installing"** on the update screen. The plan supports
-   downgrades, so the neutral wording is recommended — but it is your screen.
-2. **Manifest transport** — HTTPS for v1; the retained-MQTT variant is
-   strictly cheaper on the wire and the policy module is designed to accept
-   either. Worth revisiting after the first few releases.
-3. **CA rotation escape hatch** (`ota_ca` in NVS) — deferred; confirm that is
-   acceptable given the chosen root's expiry date.
-4. **Channels as schema 2** — not needed for v1, and now cheap to add later
-   because of the array. No action unless per-release manifest edits grate.
+1. **Wording: "Installing", not "Upgrading to".** The only one of these four
+   that changed the design; folded into "The update screen" above and into the
+   golden for `display_screens_build_ota`.
+2. **Manifest transport: HTTPS for v1.** The retained-MQTT variant is deferred,
+   not rejected. `ota_policy.c` still takes the manifest as a caller-supplied
+   buffer, so switching transports later touches `ota.c` only.
+3. **CA rotation escape hatch: not needed.** The chosen root is valid to 2035,
+   so the embedded PEM outlives any plausible life of this firmware. `ota_ca`
+   in NVS stays off the list.
+4. **Channels: not schema 2.** The likelier use for a second schema is pushing
+   **asset payloads (WAV files)** to the device rather than release channels —
+   the manifest would carry an asset URL and the flow would write the `assets`
+   partition instead of an app slot. Out of scope for v1, and the array is what
+   makes it additive later. Note the interaction: the frozen `0x1C0000` layout
+   leaves `assets` at 440 KB, which bounds anything that feature could push.
