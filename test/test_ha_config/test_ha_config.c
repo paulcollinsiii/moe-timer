@@ -180,6 +180,14 @@ void test_state_json_worst_case_fits_firmware_buffer(void) {
         snprintf(key, sizeof(key), "timer%d_break", n);
         ha_config_set(key, "ON", ack, sizeof(ack));
     }
+    /* The OTA endpoint is the longest CFG_STR in the registry, so the
+       worst case has to include a maxed-out one. */
+    char url[CFG_BOUND_OTA_URL_MAX];
+    memset(url, 'u', sizeof(url) - 1);
+    memcpy(url, "https://", 8);
+    url[sizeof(url) - 1] = '\0';
+    ha_config_set("ota_url", url, ack, sizeof(ack));
+    ha_config_set("ota_on_sync", "ON", ack, sizeof(ack));
     char buf[HA_CONFIG_STATE_MAX];
     int ret = ha_config_state_json(buf, sizeof(buf));
     TEST_ASSERT_TRUE(ret < HA_CONFIG_STATE_MAX); /* not truncated */
@@ -514,6 +522,161 @@ void test_discovery_timer_reload_is_switch(void) {
     TEST_ASSERT_NOT_NULL(strstr(buf, "value_json.timer1_reload"));
 }
 
+/* ---- OTA fields: generic CFG_BOOL switch + validated text ---- */
+
+void test_set_ota_url_https_persists(void) {
+    char ack[128];
+    TEST_ASSERT_EQUAL(HA_CFG_OK, ha_config_set("ota_url", "https://example.com/ota.json", ack, sizeof(ack)));
+    char s[CFG_BOUND_OTA_URL_MAX];
+    nvs_config_get_ota_url(s, sizeof(s));
+    TEST_ASSERT_EQUAL_STRING("https://example.com/ota.json", s);
+    TEST_ASSERT_NOT_NULL(strstr(ack, "\"ok\":true"));
+}
+
+void test_set_ota_url_rejects_non_https(void) {
+    char ack[128];
+    TEST_ASSERT_EQUAL(HA_CFG_OK, ha_config_set("ota_url", "https://good.example/ota.json", ack, sizeof(ack)));
+    /* http:// would make the update channel unauthenticated */
+    TEST_ASSERT_EQUAL(HA_CFG_REJECTED, ha_config_set("ota_url", "http://evil.example/ota.json", ack, sizeof(ack)));
+    TEST_ASSERT_EQUAL(HA_CFG_REJECTED, ha_config_set("ota_url", "evil.example/ota.json", ack, sizeof(ack)));
+    TEST_ASSERT_NOT_NULL(strstr(ack, "\"ok\":false"));
+    /* the good value is still there — a rejected set writes nothing */
+    char s[CFG_BOUND_OTA_URL_MAX];
+    nvs_config_get_ota_url(s, sizeof(s));
+    TEST_ASSERT_EQUAL_STRING("https://good.example/ota.json", s);
+}
+
+void test_set_ota_url_empty_disables_ota(void) {
+    char ack[128];
+    ha_config_set("ota_url", "https://example.com/ota.json", ack, sizeof(ack));
+    TEST_ASSERT_EQUAL(HA_CFG_OK, ha_config_set("ota_url", "", ack, sizeof(ack)));
+    char s[CFG_BOUND_OTA_URL_MAX];
+    nvs_config_get_ota_url(s, sizeof(s));
+    TEST_ASSERT_EQUAL_STRING("", s);
+}
+
+void test_set_ota_url_too_long_rejected(void) {
+    char ack[128];
+    char url[CFG_BOUND_OTA_URL_MAX + 8];
+    memset(url, 'u', sizeof(url) - 1);
+    memcpy(url, "https://", 8);
+    url[sizeof(url) - 1] = '\0';
+    TEST_ASSERT_EQUAL(HA_CFG_REJECTED, ha_config_set("ota_url", url, ack, sizeof(ack)));
+    TEST_ASSERT_NOT_NULL(strstr(ack, "\"err\":\"len\""));
+}
+
+void test_set_ota_on_sync_switch_round_trip(void) {
+    char ack[128];
+    uint16_t v;
+    TEST_ASSERT_EQUAL(HA_CFG_OK, ha_config_set("ota_on_sync", "ON", ack, sizeof(ack)));
+    nvs_config_get_ota_on_sync(&v);
+    TEST_ASSERT_EQUAL_UINT16(1, v);
+    TEST_ASSERT_EQUAL(HA_CFG_OK, ha_config_set("ota_on_sync", "OFF", ack, sizeof(ack)));
+    nvs_config_get_ota_on_sync(&v);
+    TEST_ASSERT_EQUAL_UINT16(0, v);
+}
+
+void test_set_ota_on_sync_rejects_non_onoff(void) {
+    char ack[128];
+    TEST_ASSERT_EQUAL(HA_CFG_REJECTED, ha_config_set("ota_on_sync", "1", ack, sizeof(ack)));
+    TEST_ASSERT_EQUAL(HA_CFG_REJECTED, ha_config_set("ota_on_sync", "on", ack, sizeof(ack)));
+    TEST_ASSERT_EQUAL(HA_CFG_REJECTED, ha_config_set("ota_on_sync", "", ack, sizeof(ack)));
+    TEST_ASSERT_NOT_NULL(strstr(ack, "\"err\":\"onoff\""));
+}
+
+void test_set_ota_on_sync_nvs_failure_rejected(void) {
+    char ack[128];
+    mock_nvs_fail_writes(1);
+    TEST_ASSERT_EQUAL(HA_CFG_REJECTED, ha_config_set("ota_on_sync", "ON", ack, sizeof(ack)));
+    TEST_ASSERT_NOT_NULL(strstr(ack, "\"err\":\"nvs\""));
+}
+
+void test_state_json_includes_ota_fields(void) {
+    char ack[128];
+    ha_config_set("ota_url", "https://example.com/ota.json", ack, sizeof(ack));
+    ha_config_set("ota_on_sync", "ON", ack, sizeof(ack));
+    char buf[HA_CONFIG_STATE_MAX];
+    ha_config_state_json(buf, sizeof(buf));
+    TEST_ASSERT_NOT_NULL(strstr(buf, "\"ota_url\":\"https://example.com/ota.json\""));
+    /* CFG_BOOL renders as the discovery pl_on/pl_off strings, like the
+       slot-bound switches — not as 0/1. */
+    TEST_ASSERT_NOT_NULL(strstr(buf, "\"ota_on_sync\":\"ON\""));
+    ha_config_set("ota_on_sync", "OFF", ack, sizeof(ack));
+    ha_config_state_json(buf, sizeof(buf));
+    TEST_ASSERT_NOT_NULL(strstr(buf, "\"ota_on_sync\":\"OFF\""));
+}
+
+/* A stored value from another firmware (or a corrupt one) must still
+   render as a legal HA switch state. */
+void test_state_json_ota_on_sync_nonzero_reads_as_on(void) {
+    nvs_config_set_ota_on_sync(7);
+    char buf[HA_CONFIG_STATE_MAX];
+    ha_config_state_json(buf, sizeof(buf));
+    TEST_ASSERT_NOT_NULL(strstr(buf, "\"ota_on_sync\":\"ON\""));
+}
+
+void test_discovery_ota_on_sync_is_switch(void) {
+    const cfg_field_t *f = field_by_key("ota_on_sync");
+    TEST_ASSERT_NOT_NULL(f);
+    TEST_ASSERT_EQUAL_STRING("switch", f->component);
+    TEST_ASSERT_EQUAL(0, f->slot); /* generic, not slot-bound */
+    char buf[700];
+    ha_config_discovery(buf, sizeof(buf), "magtag-a1b2c3", "K", "fw", f);
+    TEST_ASSERT_NOT_NULL(strstr(buf, "\"pl_on\":\"ON\""));
+    TEST_ASSERT_NOT_NULL(strstr(buf, "\"pl_off\":\"OFF\""));
+    TEST_ASSERT_NOT_NULL(strstr(buf, "\"optimistic\":true"));
+    TEST_ASSERT_NOT_NULL(strstr(buf, "\"cmd_t\":\"magtag/magtag-a1b2c3/set/ota_on_sync\""));
+    TEST_ASSERT_NOT_NULL(strstr(buf, "value_json.ota_on_sync"));
+    TEST_ASSERT_NOT_NULL(strstr(buf, "\"ent_cat\":\"config\""));
+}
+
+void test_discovery_ota_url_is_text_with_max(void) {
+    const cfg_field_t *f = field_by_key("ota_url");
+    TEST_ASSERT_NOT_NULL(f);
+    TEST_ASSERT_EQUAL_STRING("text", f->component);
+    char buf[700];
+    ha_config_discovery(buf, sizeof(buf), "magtag-a1b2c3", "K", "fw", f);
+    char expect[32];
+    snprintf(expect, sizeof(expect), "\"max\":%d", CFG_BOUND_OTA_URL_MAX - 1);
+    TEST_ASSERT_NOT_NULL(strstr(buf, expect));
+    TEST_ASSERT_NOT_NULL(strstr(buf, "\"cmd_t\":\"magtag/magtag-a1b2c3/set/ota_url\""));
+}
+
+/* ---- discovery freshness fingerprint ----
+   mqtt_ha.c republishes discovery only when the schema version or this
+   fingerprint changed. Discovery carries BOTH dev.name and dev.sw, so
+   both have to be in it. */
+
+void test_device_hash_is_deterministic(void) {
+    TEST_ASSERT_EQUAL_UINT16(ha_config_device_hash("Kitchen", "1.5.0"), ha_config_device_hash("Kitchen", "1.5.0"));
+}
+
+/* THE regression: without fw in the fingerprint, an OTA update leaves the
+   HA device card showing the version it was first discovered with,
+   forever — a DISC_SCHEMA_VER bump masks it exactly once. */
+void test_device_hash_changes_when_firmware_version_changes(void) {
+    TEST_ASSERT_NOT_EQUAL(ha_config_device_hash("Kitchen", "1.5.0"), ha_config_device_hash("Kitchen", "1.6.0"));
+    /* a build-metadata-only difference still has to republish */
+    TEST_ASSERT_NOT_EQUAL(ha_config_device_hash("Kitchen", "1.5.0"), ha_config_device_hash("Kitchen", "1.5.0-dirty"));
+}
+
+void test_device_hash_changes_when_name_changes(void) {
+    TEST_ASSERT_NOT_EQUAL(ha_config_device_hash("Kitchen", "1.5.0"), ha_config_device_hash("Playroom", "1.5.0"));
+}
+
+/* The two strings are fingerprinted together, so the boundary between
+   them must be marked or a rename could cancel a version bump out. */
+void test_device_hash_does_not_confuse_the_field_boundary(void) {
+    TEST_ASSERT_NOT_EQUAL(ha_config_device_hash("ab", "c"), ha_config_device_hash("a", "bc"));
+}
+
+void test_device_hash_tolerates_null(void) {
+    /* fw is a pointer off the stat snapshot; a NULL must not crash the
+       window (ASan would catch a deref here). */
+    ha_config_device_hash(NULL, NULL);
+    TEST_ASSERT_NOT_EQUAL(ha_config_device_hash("Kitchen", NULL), ha_config_device_hash("Kitchen", "1.5.0"));
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_set_timer_name_enables_slot);
@@ -558,5 +721,21 @@ int main(void) {
     RUN_TEST(test_set_alert_volume_valid_persists);
     RUN_TEST(test_set_alert_volume_out_of_range_rejected);
     RUN_TEST(test_alert_volume_discovery_and_state);
+    RUN_TEST(test_set_ota_url_https_persists);
+    RUN_TEST(test_set_ota_url_rejects_non_https);
+    RUN_TEST(test_set_ota_url_empty_disables_ota);
+    RUN_TEST(test_set_ota_url_too_long_rejected);
+    RUN_TEST(test_set_ota_on_sync_switch_round_trip);
+    RUN_TEST(test_set_ota_on_sync_rejects_non_onoff);
+    RUN_TEST(test_set_ota_on_sync_nvs_failure_rejected);
+    RUN_TEST(test_state_json_includes_ota_fields);
+    RUN_TEST(test_state_json_ota_on_sync_nonzero_reads_as_on);
+    RUN_TEST(test_discovery_ota_on_sync_is_switch);
+    RUN_TEST(test_discovery_ota_url_is_text_with_max);
+    RUN_TEST(test_device_hash_is_deterministic);
+    RUN_TEST(test_device_hash_changes_when_firmware_version_changes);
+    RUN_TEST(test_device_hash_changes_when_name_changes);
+    RUN_TEST(test_device_hash_does_not_confuse_the_field_boundary);
+    RUN_TEST(test_device_hash_tolerates_null);
     return UNITY_END();
 }

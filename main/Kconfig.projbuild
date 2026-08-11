@@ -291,4 +291,86 @@ menu "MagTag Timer"
             device out for the whole day). Also editable from Home
             Assistant, which is the only remote fix path while locked.
 
+    comment "Over-the-air firmware updates"
+
+    config MAGTAG_OTA_URL
+        string "OTA manifest URL (empty = OTA disabled)"
+        default ""
+        help
+            HTTPS endpoint serving the update manifest (the JSON listing
+            the available firmware version and image URL). Plain http is
+            rejected at every entry point — an unauthenticated firmware
+            endpoint is an arbitrary-code-execution channel, and TLS is
+            what makes the manifest trustworthy.
+
+            Prefer setting NVS_DEFAULT_OTA_URL in
+            include/credentials.local.h (gitignored) so a hosting
+            endpoint never lands in a committed sdkconfig.defaults —
+            the same treatment MAGTAG_MQTT_URI gets.
+
+            This is only the fallback the device uses while NVS holds no
+            endpoint of its own. It is deliberately NOT part of the
+            defaults fingerprint, so once Home Assistant has set an
+            endpoint (the "OTA manifest URL" text entity, or the bulk
+            config document's ota_url), changing this value no longer
+            affects that device. Empty disables update checks entirely.
+
+    config MAGTAG_OTA_CHECK_ON_SYNC
+        bool "Also check for updates on a Button D full sync"
+        default n
+        help
+            By default an update check runs only at the day rollover,
+            when the device is already awake and nobody is waiting on it.
+            Enable this to also check during the manual full sync Button D
+            forces — useful while testing an update, at the cost of a
+            slower Button D and the extra radio time on every press.
+
+            Like the URL, this only seeds the runtime value: the "OTA
+            check on sync" switch in Home Assistant overrides it, and a
+            menuconfig change here will not revert that.
+
+    config MAGTAG_OTA_MIN_BATT_PCT
+        int "Battery floor for an update check (percent)"
+        default 30
+        range 0 100
+        help
+            Skip the update check when the battery is below this. A
+            download is the longest radio session the device ever runs,
+            and a brownout partway through a flash write is the one
+            failure this design cannot recover from cheaply — so the
+            check does not even start on a low battery. It simply runs at
+            the next rollover after a charge. 0 disables the check
+            (not recommended on battery power).
+
+    config MAGTAG_OTA_MAX_SEC
+        int "Download window budget (seconds)"
+        default 300
+        range 60 600
+        help
+            Awake-failsafe extension applied before the download window
+            opens, and the deadline the download loop checks itself
+            against. Exceeding it aborts cleanly — the partial image is
+            discarded and the boot partition is never switched — instead
+            of the awake failsafe killing the write mid-flight.
+
+            Kept at or below 600 to stay consistent with
+            MAGTAG_MAX_AWAKE_SEC's own range: this value temporarily
+            replaces that failsafe, so a budget beyond its ceiling would
+            mean OTA quietly runs with weaker battery protection than the
+            rest of the firmware is allowed to.
+
+    config MAGTAG_OTA_MAX_FAILS
+        int "Consecutive failures before giving up on a version"
+        default 3
+        range 1 10
+        help
+            Retry budget, counted per target version. An image that
+            reliably fails to download (too slow a link, a bad host)
+            would otherwise be re-attempted at every rollover forever —
+            a daily battery cost that produces nothing and looks, from
+            the outside, like nothing is happening. After this many
+            consecutive failures against the SAME version the device
+            stops trying and reports it to Home Assistant. Publishing a
+            different version string resets the counter and re-arms it.
+
 endmenu

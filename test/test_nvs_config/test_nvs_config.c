@@ -419,6 +419,102 @@ void test_reseed_clears_cfg_ver(void) {
 }
 
 /* ------------------------------------------------------------------ */
+/* OTA keys                                                            */
+/* ------------------------------------------------------------------ */
+
+void test_ota_url_defaults_and_round_trip(void) {
+    char buf[160] = "junk";
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_ota_url(buf, sizeof(buf)));
+    TEST_ASSERT_EQUAL_STRING(NVS_DEFAULT_OTA_URL, buf);
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_set_ota_url("https://example.com/ota.json"));
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_ota_url(buf, sizeof(buf)));
+    TEST_ASSERT_EQUAL_STRING("https://example.com/ota.json", buf);
+    /* Empty is a real stored value (OTA off), not "unset" — it must not
+       fall back to the compile-time default. */
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_set_ota_url(""));
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_ota_url(buf, sizeof(buf)));
+    TEST_ASSERT_EQUAL_STRING("", buf);
+}
+
+void test_ota_on_sync_defaults_and_round_trip(void) {
+    uint16_t v = 0xFFFF;
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_ota_on_sync(&v));
+    TEST_ASSERT_EQUAL_UINT16(NVS_DEFAULT_OTA_ON_SYNC, v);
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_set_ota_on_sync(1));
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_ota_on_sync(&v));
+    TEST_ASSERT_EQUAL_UINT16(1, v);
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_set_ota_on_sync(0));
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_ota_on_sync(&v));
+    TEST_ASSERT_EQUAL_UINT16(0, v);
+}
+
+/* Device-owned state: written by the firmware, read by the stat payload.
+   No HA entity, no bulk-document key — just accessors. */
+void test_ota_state_keys_default_empty_and_round_trip(void) {
+    char buf[40] = "junk";
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_ota_result(buf, sizeof(buf)));
+    TEST_ASSERT_EQUAL_STRING("", buf);
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_ota_target(buf, sizeof(buf)));
+    TEST_ASSERT_EQUAL_STRING("", buf);
+    uint16_t fails = 0xFFFF;
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_ota_fails(&fails));
+    TEST_ASSERT_EQUAL_UINT16(0, fails);
+
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_set_ota_result("tls_cert"));
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_set_ota_target("1.6.0"));
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_set_ota_fails(2));
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_ota_result(buf, sizeof(buf)));
+    TEST_ASSERT_EQUAL_STRING("tls_cert", buf);
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_ota_target(buf, sizeof(buf)));
+    TEST_ASSERT_EQUAL_STRING("1.6.0", buf);
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_ota_fails(&fails));
+    TEST_ASSERT_EQUAL_UINT16(2, fails);
+}
+
+/* The OTA keys are deliberately NOT in the seeded-defaults registry, so
+   init_defaults never materializes them; the getters supply the
+   compile-time default lazily instead. */
+void test_init_defaults_does_not_seed_ota_keys(void) {
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_init_defaults());
+    char buf[160];
+    size_t len = sizeof(buf);
+    TEST_ASSERT_EQUAL(ESP_ERR_NVS_NOT_FOUND, hal_nvs_read_str("ota_url", buf, &len));
+    uint16_t v;
+    TEST_ASSERT_EQUAL(ESP_ERR_NVS_NOT_FOUND, hal_nvs_read_u16("ota_on_sync", &v));
+}
+
+/* THE regression this exclusion exists for: a menuconfig edit anywhere in
+   the allocation defaults changes the fingerprint and reseeds NVS. If the
+   OTA keys were fingerprinted (or seeded), that reseed would silently
+   revert an HA-set endpoint and check-on-sync flag on the next boot —
+   the opposite of what a runtime override is for. */
+void test_reseed_does_not_revert_ha_set_ota_values(void) {
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_init_defaults());
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_set_ota_url("https://ha.example/ota.json"));
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_set_ota_on_sync(1));
+    /* Force a reseed the way a changed Kconfig default would */
+    hal_nvs_write_u16("defaults_ver", 0x5555);
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_init_defaults());
+
+    char buf[160];
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_ota_url(buf, sizeof(buf)));
+    TEST_ASSERT_EQUAL_STRING("https://ha.example/ota.json", buf);
+    uint16_t v;
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_ota_on_sync(&v));
+    TEST_ASSERT_EQUAL_UINT16(1, v);
+}
+
+/* Guards the "no HA-managed key in the fold" rule from the other side: if
+   someone adds an OTA row to NVS_SEEDED_*, the fingerprint changes and
+   this pin fails alongside test_defaults_fingerprint_algorithm_pinned. */
+void test_fingerprint_ignores_ota_values(void) {
+    uint16_t before = nvs_config_defaults_fingerprint();
+    nvs_config_set_ota_url("https://elsewhere.example/ota.json");
+    nvs_config_set_ota_on_sync(1);
+    TEST_ASSERT_EQUAL_UINT16(before, nvs_config_defaults_fingerprint());
+}
+
+/* ------------------------------------------------------------------ */
 /* timer snapshot (crash/reset recovery)                               */
 /* ------------------------------------------------------------------ */
 
@@ -533,6 +629,12 @@ int main(void) {
     RUN_TEST(test_mqtt_settings_round_trip);
     RUN_TEST(test_mqtt_settings_missing_read_as_empty);
     RUN_TEST(test_init_defaults_seeds_mqtt_keys);
+    RUN_TEST(test_ota_url_defaults_and_round_trip);
+    RUN_TEST(test_ota_on_sync_defaults_and_round_trip);
+    RUN_TEST(test_ota_state_keys_default_empty_and_round_trip);
+    RUN_TEST(test_init_defaults_does_not_seed_ota_keys);
+    RUN_TEST(test_reseed_does_not_revert_ha_set_ota_values);
+    RUN_TEST(test_fingerprint_ignores_ota_values);
     RUN_TEST(test_timer_snapshot_save_propagates_write_failure);
     RUN_TEST(test_set_weekday_min_propagates_write_failure);
     RUN_TEST(test_timer_snapshot_round_trip);

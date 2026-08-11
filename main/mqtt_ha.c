@@ -22,7 +22,7 @@
 static const char *TAG = "mqtt_ha";
 
 /* Bump when entities are added/renamed — discovery configs republish once. */
-#define DISC_SCHEMA_VER 16 /* v16: text entities advertise their max length */
+#define DISC_SCHEMA_VER 17 /* v17: + OTA manifest URL / check-on-sync entities */
 
 #define CONNECT_TIMEOUT_MS 5000
 #define PUBLISH_DRAIN_TIMEOUT_MS 3000
@@ -375,24 +375,30 @@ static void subscribe_incoming(esp_mqtt_client_handle_t client) {
 }
 
 /* Discovery gate + stat + summary. Returns publishes enqueued;
- *fresh_discovery / *name_hash feed the post-drain stamp write. */
+ *fresh_discovery / *dev_hash feed the post-drain stamp write. */
 static int publish_states(esp_mqtt_client_handle_t client, const stats_snapshot_t *snap, bool *fresh_discovery,
-                          uint16_t *name_hash_out) {
+                          uint16_t *dev_hash_out) {
     int published = 0;
     /* Discovery: once per schema bump (covers new entities and renames), OR
-       when the editable device name changed — discovery carries dev.name, so
-       renaming from HA otherwise wouldn't update the device card until the
-       next schema bump. A 16-bit name fingerprint tracks that cheaply. */
+       when the discovery `dev` block's mutable fields changed. That block
+       carries dev.name (editable from HA) and dev.sw (the running firmware
+       version), and NEITHER is covered by DISC_SCHEMA_VER — so both are
+       folded into one 16-bit fingerprint, cheaply.
+
+       The fw leg is what keeps the HA device card honest across an OTA
+       update. With only the name in the hash, a schema bump refreshes the
+       version exactly once and every subsequent update leaves the card
+       showing the old version permanently — the sw field would go stale
+       and stay stale. The fingerprint lives in ha_config.c, beside the
+       code that writes the block, and is pinned there by host tests. */
     char dev_name[64];
     device_name(dev_name, sizeof(dev_name));
-    uint16_t name_hash = 5381;
-    for (const char *p = dev_name; *p; p++)
-        name_hash = (uint16_t)(name_hash * 33u + (unsigned char)*p);
-    uint16_t disc_ver = 0, disc_name = 0;
+    uint16_t dev_hash = ha_config_device_hash(dev_name, snap->fw);
+    uint16_t disc_ver = 0, disc_dev = 0;
     hal_nvs_read_u16(NVS_KEY_DISC_VER, &disc_ver);
-    hal_nvs_read_u16(NVS_KEY_DISC_NAME, &disc_name);
-    *fresh_discovery = (disc_ver != DISC_SCHEMA_VER) || (disc_name != name_hash);
-    *name_hash_out = name_hash;
+    hal_nvs_read_u16(NVS_KEY_DISC_NAME, &disc_dev);
+    *fresh_discovery = (disc_ver != DISC_SCHEMA_VER) || (disc_dev != dev_hash);
+    *dev_hash_out = dev_hash;
     if (*fresh_discovery) {
         published += publish_discovery(client, dev_name, snap->fw);
         published += publish_config_discovery(client, dev_name, snap->fw);
@@ -512,15 +518,15 @@ void mqtt_ha_window(const stats_snapshot_t *snap) {
     subscribe_incoming(client);
 
     bool fresh_discovery = false;
-    uint16_t name_hash = 0;
-    int published = publish_states(client, snap, &fresh_discovery, &name_hash);
+    uint16_t dev_hash = 0;
+    int published = publish_states(client, snap, &fresh_discovery, &dev_hash);
 
     /* Drain: wait for the QoS-1 acks so the disconnect doesn't drop them */
     if (drain_acks(published, PUBLISH_DRAIN_TIMEOUT_MS)) {
         s_summary.pending = false;
         if (fresh_discovery) {
             hal_nvs_write_u16(NVS_KEY_DISC_VER, DISC_SCHEMA_VER);
-            hal_nvs_write_u16(NVS_KEY_DISC_NAME, name_hash);
+            hal_nvs_write_u16(NVS_KEY_DISC_NAME, dev_hash);
         }
         ESP_LOGI(TAG, "published %d messages", published);
     } else {

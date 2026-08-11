@@ -245,6 +245,42 @@ esp_err_t nvs_config_set_cmd_id(const char *id) {
     return hal_nvs_write_str(NVS_KEY_CMD_ID, id);
 }
 
+/* ---- OTA ----
+   Lazy defaults, no registry row: these must survive a defaults reseed
+   (see the NVS_DEFAULT_OTA_URL comment in nvs_defaults.h). */
+
+esp_err_t nvs_config_get_ota_url(char *buf, size_t len) {
+    return get_str_with_default(NVS_KEY_OTA_URL, buf, len, NVS_DEFAULT_OTA_URL);
+}
+esp_err_t nvs_config_set_ota_url(const char *url) {
+    return hal_nvs_write_str(NVS_KEY_OTA_URL, url);
+}
+esp_err_t nvs_config_get_ota_on_sync(uint16_t *out) {
+    return get_u16_with_default(NVS_KEY_OTA_ON_SYNC, out, NVS_DEFAULT_OTA_ON_SYNC);
+}
+esp_err_t nvs_config_set_ota_on_sync(uint16_t on) {
+    return hal_nvs_write_u16(NVS_KEY_OTA_ON_SYNC, on ? 1 : 0);
+}
+
+esp_err_t nvs_config_get_ota_result(char *buf, size_t len) {
+    return get_str_empty_default(NVS_KEY_OTA_RESULT, buf, len);
+}
+esp_err_t nvs_config_set_ota_result(const char *reason) {
+    return hal_nvs_write_str(NVS_KEY_OTA_RESULT, reason);
+}
+esp_err_t nvs_config_get_ota_target(char *buf, size_t len) {
+    return get_str_empty_default(NVS_KEY_OTA_TARGET, buf, len);
+}
+esp_err_t nvs_config_set_ota_target(const char *ver) {
+    return hal_nvs_write_str(NVS_KEY_OTA_TARGET, ver);
+}
+esp_err_t nvs_config_get_ota_fails(uint16_t *out) {
+    return get_u16_with_default(NVS_KEY_OTA_FAILS, out, 0);
+}
+esp_err_t nvs_config_set_ota_fails(uint16_t fails) {
+    return hal_nvs_write_u16(NVS_KEY_OTA_FAILS, fails);
+}
+
 esp_err_t nvs_config_get_timer_defs(nvs_timer_defs_blob_t *out) {
     size_t len = sizeof(*out);
     esp_err_t ret = hal_nvs_read_blob(NVS_KEY_TIMER_DEFS, out, &len);

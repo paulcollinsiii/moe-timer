@@ -35,4 +35,17 @@
 #define NVS_KEY_ALERT_VOL "alert_vol"
 #define NVS_KEY_DEFAULTS_VER "defaults_ver"
 #define NVS_KEY_DISC_VER "disc_ver"
+/* Stored ha_config_device_hash(): fingerprints the discovery `dev` block's
+   mutable fields — the device name AND the firmware version. The key name
+   predates the fw leg and is kept as-is deliberately: renaming it would
+   read as missing on every deployed device and force one pointless
+   discovery republish. */
 #define NVS_KEY_DISC_NAME "disc_name"
+/* OTA. The first two are settings (HA-editable); the last three are
+   device-owned state written by the update flow and read by the stat
+   payload — accessors only, no HA entity and no bulk-document key. */
+#define NVS_KEY_OTA_URL "ota_url"
+#define NVS_KEY_OTA_ON_SYNC "ota_on_sync"
+#define NVS_KEY_OTA_RESULT "ota_result"
+#define NVS_KEY_OTA_TARGET "ota_target"
+#define NVS_KEY_OTA_FAILS "ota_fails"

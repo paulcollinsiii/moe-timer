@@ -83,16 +83,36 @@ static void apply_enum(const cJSON *root, const char *field, const char *const *
     err_add(e, field);
 }
 
-static void apply_str(const cJSON *root, const char *field, size_t maxlen, esp_err_t (*setter)(const char *),
-                      err_acc_t *e) {
+/* `valid` is the optional field-specific content rule — the same predicate
+   ha_config.c's registry attaches to the field, so the bulk document and
+   the per-entity set path accept exactly the same values. NULL = length is
+   the whole rule. Absent field = no-op. */
+static void apply_str(const cJSON *root, const char *field, size_t maxlen, bool (*valid)(const char *),
+                      esp_err_t (*setter)(const char *), err_acc_t *e) {
     const cJSON *item = cJSON_GetObjectItemCaseSensitive(root, field);
     if (item == NULL)
         return;
-    if (!cJSON_IsString(item) || strlen(item->valuestring) >= maxlen) {
+    if (!cJSON_IsString(item) || strlen(item->valuestring) >= maxlen || (valid != NULL && !valid(item->valuestring))) {
         err_add(e, field);
         return;
     }
     setter(item->valuestring);
+}
+
+/* JSON boolean -> u16 0/1 (the CFG_BOOL entities). Strictly a boolean:
+   `1` and `"ON"` are named as errors rather than guessed at, so a
+   mistyped document is visible in the ack instead of half-applying.
+   Absent = no-op, which is what keeps a document that says nothing about
+   the field from clearing it. */
+static void apply_bool(const cJSON *root, const char *field, esp_err_t (*setter)(uint16_t), err_acc_t *e) {
+    const cJSON *item = cJSON_GetObjectItemCaseSensitive(root, field);
+    if (item == NULL)
+        return;
+    if (!cJSON_IsBool(item)) {
+        err_add(e, field);
+        return;
+    }
+    setter(cJSON_IsTrue(item) ? 1 : 0);
 }
 
 #define HOLIDAY_BLOB_CAP 512
@@ -239,8 +259,8 @@ config_result_t config_apply(const char *json, char *ack, size_t ack_len) {
 
     err_acc_t e = {.errors = {0}, .count = 0};
 
-    apply_str(root, "name", CFG_BOUND_NAME_MAX, nvs_config_set_dev_name, &e);
-    apply_str(root, "tz", CFG_BOUND_TZ_MAX, nvs_config_set_tz, &e);
+    apply_str(root, "name", CFG_BOUND_NAME_MAX, NULL, nvs_config_set_dev_name, &e);
+    apply_str(root, "tz", CFG_BOUND_TZ_MAX, NULL, nvs_config_set_tz, &e);
     apply_u16(root, "weekday_min", CFG_BOUND_ALLOC_LO, CFG_BOUND_ALLOC_HI, nvs_config_set_weekday_min, &e);
     apply_u16(root, "weekend_min", CFG_BOUND_ALLOC_LO, CFG_BOUND_ALLOC_HI, nvs_config_set_weekend_min, &e);
     apply_u16(root, "holiday_min", CFG_BOUND_ALLOC_LO, CFG_BOUND_ALLOC_HI, nvs_config_set_holiday_min, &e);
@@ -259,6 +279,17 @@ config_result_t config_apply(const char *json, char *ack, size_t ack_len) {
     apply_date(root, "summer_start", nvs_config_set_summer_start, &e);
     apply_date(root, "school_start", nvs_config_set_school_start, &e);
     apply_date(root, "school_end", nvs_config_set_school_end, &e);
+    /* OTA. These are HA-settable, so they MUST be parsed here as well as
+       in ha_config.c's registry — a field with an entity but no
+       bulk-document key is silently cleared by every application of the
+       retained document. That is exactly how break_eligible was lost
+       (BUG-6 in docs/planning/refactor.bugdiscoveries.md); the third
+       place is docs/home_assistant.md. Absent = unchanged, so a document
+       that predates OTA leaves an HA-set endpoint alone.
+       config_is_ota_url is the shared rule: empty (OTA off) or https —
+       plain http would make the update channel unauthenticated. */
+    apply_str(root, "ota_url", CFG_BOUND_OTA_URL_MAX, config_is_ota_url, nvs_config_set_ota_url, &e);
+    apply_bool(root, "ota_on_sync", nvs_config_set_ota_on_sync, &e);
     apply_holidays(root, &e);
     apply_timers(root, &e);
 

@@ -79,6 +79,27 @@ esp_err_t nvs_config_set_cfg_ver(const char *ver);
 esp_err_t nvs_config_get_cmd_id(char *buf, size_t len);
 esp_err_t nvs_config_set_cmd_id(const char *id);
 
+/* ---- OTA ------------------------------------------------------------
+   None of these are seeded by nvs_config_init_defaults and none are in
+   the defaults fingerprint (see nvs_defaults.h) — a menuconfig change
+   must not revert an HA-set endpoint. */
+/* Manifest endpoint; "" = OTA disabled. Buffer >= CFG_BOUND_OTA_URL_MAX. */
+esp_err_t nvs_config_get_ota_url(char *buf, size_t len);
+esp_err_t nvs_config_set_ota_url(const char *url);
+/* Also check for an update on every Button D full sync (0/1). */
+esp_err_t nvs_config_get_ota_on_sync(uint16_t *out);
+esp_err_t nvs_config_set_ota_on_sync(uint16_t on);
+/* Device-owned state (no HA entity, no bulk-document key): last attempt's
+   reason code, the version the retry budget is counting against, and the
+   consecutive-failure count for that target. All three feed the stat
+   payload; a different target resets the count. */
+esp_err_t nvs_config_get_ota_result(char *buf, size_t len);
+esp_err_t nvs_config_set_ota_result(const char *reason);
+esp_err_t nvs_config_get_ota_target(char *buf, size_t len);
+esp_err_t nvs_config_set_ota_target(const char *ver);
+esp_err_t nvs_config_get_ota_fails(uint16_t *out);
+esp_err_t nvs_config_set_ota_fails(uint16_t fails);
+
 /* Extra-timer definitions from HA (timer_defs_install falls back to the
    Kconfig table when absent). Version/size drift reads as stale. */
 #define TIMER_DEFS_BLOB_VERSION 2 /* v2: + break_eligible */

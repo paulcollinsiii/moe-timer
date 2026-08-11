@@ -448,6 +448,97 @@ void test_timers_bad_min_names_the_offending_entry(void) {
     TEST_ASSERT_NOT_NULL(strstr(ack, "timers[1]"));
 }
 
+/* ---- OTA fields (the "three places" rule) ----------------------------
+   Both HA-settable OTA fields must be parsed from the bulk retained
+   document as well as the per-entity set path. `break_eligible` shipped
+   with an entity and no bulk-document key, and every application of the
+   retained document silently cleared it (BUG-6). These pin the same
+   shape for ota_url / ota_on_sync so it cannot happen again. */
+
+void test_ota_fields_apply_from_bulk_document(void) {
+    char ack[256];
+    const char *doc = "{\"ver\":\"1\",\"ota_url\":\"https://example.com/ota.json\",\"ota_on_sync\":true}";
+    TEST_ASSERT_EQUAL(CONFIG_APPLIED, apply(doc, ack, sizeof(ack)));
+    char s[CFG_BOUND_OTA_URL_MAX];
+    nvs_config_get_ota_url(s, sizeof(s));
+    TEST_ASSERT_EQUAL_STRING("https://example.com/ota.json", s);
+    uint16_t v;
+    nvs_config_get_ota_on_sync(&v);
+    TEST_ASSERT_EQUAL_UINT16(1, v);
+    TEST_ASSERT_NOT_NULL(strstr(ack, "\"ok\":true"));
+}
+
+void test_ota_on_sync_false_applies(void) {
+    char ack[256];
+    nvs_config_set_ota_on_sync(1);
+    TEST_ASSERT_EQUAL(CONFIG_APPLIED, apply("{\"ver\":\"1\",\"ota_on_sync\":false}", ack, sizeof(ack)));
+    uint16_t v;
+    nvs_config_get_ota_on_sync(&v);
+    TEST_ASSERT_EQUAL_UINT16(0, v);
+}
+
+/* The BUG-6 shape: a document that says nothing about the OTA fields must
+   leave an HA-set value alone, not clear it. */
+void test_document_omitting_ota_fields_leaves_them_alone(void) {
+    char ack[256];
+    nvs_config_set_ota_url("https://ha.example/ota.json");
+    nvs_config_set_ota_on_sync(1);
+    TEST_ASSERT_EQUAL(CONFIG_APPLIED, apply("{\"ver\":\"1\",\"weekday_min\":45}", ack, sizeof(ack)));
+    char s[CFG_BOUND_OTA_URL_MAX];
+    nvs_config_get_ota_url(s, sizeof(s));
+    TEST_ASSERT_EQUAL_STRING("https://ha.example/ota.json", s);
+    uint16_t v;
+    nvs_config_get_ota_on_sync(&v);
+    TEST_ASSERT_EQUAL_UINT16(1, v);
+}
+
+void test_bulk_ota_url_rejects_non_https(void) {
+    char ack[256];
+    nvs_config_set_ota_url("https://good.example/ota.json");
+    TEST_ASSERT_EQUAL(CONFIG_APPLIED,
+                      apply("{\"ver\":\"1\",\"ota_url\":\"http://evil.example/ota.json\"}", ack, sizeof(ack)));
+    TEST_ASSERT_NOT_NULL(strstr(ack, "\"ota_url\""));
+    TEST_ASSERT_NOT_NULL(strstr(ack, "\"ok\":false"));
+    char s[CFG_BOUND_OTA_URL_MAX];
+    nvs_config_get_ota_url(s, sizeof(s));
+    TEST_ASSERT_EQUAL_STRING("https://good.example/ota.json", s); /* unchanged */
+}
+
+void test_bulk_ota_url_empty_disables_and_is_valid(void) {
+    char ack[256];
+    nvs_config_set_ota_url("https://good.example/ota.json");
+    TEST_ASSERT_EQUAL(CONFIG_APPLIED, apply("{\"ver\":\"1\",\"ota_url\":\"\"}", ack, sizeof(ack)));
+    TEST_ASSERT_NOT_NULL(strstr(ack, "\"ok\":true"));
+    char s[CFG_BOUND_OTA_URL_MAX];
+    nvs_config_get_ota_url(s, sizeof(s));
+    TEST_ASSERT_EQUAL_STRING("", s);
+}
+
+void test_bulk_ota_url_overlong_rejected(void) {
+    char ack[256];
+    char doc[CFG_BOUND_OTA_URL_MAX + 64];
+    char url[CFG_BOUND_OTA_URL_MAX + 8];
+    memset(url, 'u', sizeof(url) - 1);
+    memcpy(url, "https://", 8);
+    url[sizeof(url) - 1] = '\0';
+    snprintf(doc, sizeof(doc), "{\"ver\":\"1\",\"ota_url\":\"%s\"}", url);
+    apply(doc, ack, sizeof(ack));
+    TEST_ASSERT_NOT_NULL(strstr(ack, "\"ota_url\""));
+    char s[CFG_BOUND_OTA_URL_MAX];
+    nvs_config_get_ota_url(s, sizeof(s));
+    TEST_ASSERT_EQUAL_STRING(NVS_DEFAULT_OTA_URL, s); /* never written */
+}
+
+void test_bulk_ota_fields_reject_wrong_types(void) {
+    char ack[256];
+    apply("{\"ver\":\"1\",\"ota_on_sync\":1,\"ota_url\":42}", ack, sizeof(ack));
+    TEST_ASSERT_NOT_NULL(strstr(ack, "\"ota_on_sync\""));
+    TEST_ASSERT_NOT_NULL(strstr(ack, "\"ota_url\""));
+    uint16_t v;
+    nvs_config_get_ota_on_sync(&v);
+    TEST_ASSERT_EQUAL_UINT16(NVS_DEFAULT_OTA_ON_SYNC, v);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_full_document_applies_and_stores_ver);
@@ -482,5 +573,12 @@ int main(void) {
     RUN_TEST(test_timers_overlong_name_rejected);
     RUN_TEST(test_timers_error_names_the_offending_entry);
     RUN_TEST(test_timers_bad_min_names_the_offending_entry);
+    RUN_TEST(test_ota_fields_apply_from_bulk_document);
+    RUN_TEST(test_ota_on_sync_false_applies);
+    RUN_TEST(test_document_omitting_ota_fields_leaves_them_alone);
+    RUN_TEST(test_bulk_ota_url_rejects_non_https);
+    RUN_TEST(test_bulk_ota_url_empty_disables_and_is_valid);
+    RUN_TEST(test_bulk_ota_url_overlong_rejected);
+    RUN_TEST(test_bulk_ota_fields_reject_wrong_types);
     return UNITY_END();
 }
