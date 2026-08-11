@@ -677,6 +677,137 @@ halfway through and quietly revert the rule.
 
 ---
 
+## BUG-8 — losing the timer-defs blob resets `break_eligible` permanently, and only `break_eligible`
+
+**Status:** OPEN · **Found:** 2026-08-11, investigating a recurring hardware
+report · **Severity:** user-visible, silent, self-perpetuating; BUG-6's fix does
+not cover it and in this path actively cements the wrong value
+
+Reported from hardware *after* BUG-6 shipped: two timers' break-eligible
+switches reverted to OFF when the device resumed from a panic at ~01:00. Same
+symptom seen earlier on a second device. BUG-6 fixed the case where the stored
+table is **intact**; this is the case where it is **gone**.
+
+### The defect
+
+`timer_defs_install()` (`main/timer_defs.c:75`) treats any non-`ESP_OK` read of
+the defs blob as "no HA table yet", materializes one from the Kconfig table —
+where `MAGTAG_TIMER<n>_BREAK_ELIGIBLE` defaults to `n` for all four slots —
+and **writes it back to NVS**:
+
+```c
+if (nvs_config_get_timer_defs(&blob) != ESP_OK) {
+    memset(&blob, 0, sizeof(blob));
+    ...
+    blob.defs[i].break_eligible = d->break_eligible ? 1 : 0;   /* Kconfig: 0 */
+    nvs_config_set_timer_defs(&blob);                          /* persisted */
+}
+```
+
+This runs at `main/main.c:315`, **before** the network window applies the
+retained HA config document. So by the time `apply_timers()` runs, the stored
+table exists and has non-empty names — `have_prev` is true and `existed` is
+true. BUG-6's rule ("absent means unchanged for a slot that already has a
+definition") then faithfully preserves *the Kconfig zero* that
+`timer_defs_install()` just invented, mistaking it for an operator setting.
+
+The result is a field that cannot heal:
+
+| Field | In retained config doc? | Restored after blob loss? |
+| --- | --- | --- |
+| `name`, `min` | required | yes |
+| `reload` | documented, usually present | yes |
+| **`break`** | **optional, absent from pre-BUG-6 documents** | **no — silently Kconfig `n`** |
+
+Every other HA-settable value is restored either by `reseed_all_defaults()`
+(from Kconfig, including the WiFi/MQTT credential strings) or by the retained
+config document. `break_eligible` is the only field that is HA-settable, absent
+from older config documents, and whose Kconfig default is not the operator's
+choice. **It is therefore the canary for NVS loss on this device: a full NVS
+erase is otherwise nearly invisible here.**
+
+Nothing else heals it. The retained `set/<key>` command that would restore the
+switch is cleared once applied (`main/mqtt_ha.c:312-323`), and HA holds no
+independent copy — `ha_config_state_json()` publishes the device's NVS value, so
+the device *pushes* the reset into HA rather than being corrected by it. That is
+exactly the "device is pushing the flag values regardless of the HA config"
+behaviour in the report.
+
+### Repro
+
+Verified end-to-end against the real `nvs_config.c` and `config_apply.c` over
+the mock NVS (three cases: intact blob, lost blob, lost blob + explicit
+`break`). With the blob lost and a documentation-shaped retained document:
+
+```
+boot, before timer_defs_install:   <no blob>
+after timer_defs_install:          [Piano … break=0] [Meditation … break=0]
+after retained doc applies:        [Piano min=15 reload=1 break=0] [Meditation min=10 reload=1 break=0]
+```
+
+`reload`, `min` and `name` all come back; `break` does not. With `"break":true`
+present in the document, all three cases hold the value.
+
+### What loses the blob
+
+The mechanism above is confirmed; *which* trigger fires on the reporter's device
+is not, and the three candidates are not mutually exclusive:
+
+1. **`nvs_flash_erase()` from the NVS init idiom** (`main/main.c:299-303`) on
+   `ESP_ERR_NVS_NO_FREE_PAGES` / `ESP_ERR_NVS_NEW_VERSION_FOUND`. The `nvs`
+   partition is `0x6000` — **six 4 KB pages** — shared with the WiFi stack, and
+   `timer_persist_save()` rewrites a blob from four call sites
+   (`main/main.c:107`, `main/wake_flow.c:499,511`, `main/lock_gate.c:91`) on a
+   device that wakes many times a day. Churn in a six-page partition is the
+   most plausible recurring source.
+2. **Blob version/size drift** — any reflash changing `nvs_timer_def_t`'s layout
+   or bumping `TIMER_DEFS_BLOB_VERSION` reads as stale (`nvs_config.c:252`).
+   Explains one-off occurrences, not a recurring one.
+3. **A panic during `nvs_config_set_timer_defs()`** leaving the entry
+   unreadable. Directly explains the panic correlation.
+
+`ha_config.c`'s `load_defs()` (`main/ha_config.c:187`) has the same shape — a
+failed read becomes a zeroed blob that is then written back, so a single
+transient read failure during any HA edit clears *every* slot, not just the one
+being edited.
+
+### Why nothing caught it
+
+`timer_defs_install()` logs nothing when it materializes. The device silently
+overwrites the HA-managed table with compile-time defaults and reports success.
+There is no counter, no warning, and no HA-visible signal — the only published
+diagnostic that correlates is the never-expiring `last_reset` sensor
+(`main/stats_json.c:140`).
+
+### Fix constraints
+
+Any fix must keep BUG-6's guarantee (an omitted flag does not clear an
+operator's value) while distinguishing **"the operator set this to false"** from
+**"nobody has ever set this"**. The current representation cannot express that
+difference, which is the root cause — `existed` is doing two jobs. Candidate
+directions, roughly in order of confidence:
+
+- **Do not write the materialized table.** Install the Kconfig defs in RAM for
+  this boot, but leave NVS empty until something authoritative writes it. Then
+  `have_prev` is false when the retained document applies, and a first-time
+  definition is correctly recognised. Smallest change; needs a check that
+  nothing else depends on the blob existing after boot.
+- **Version the provenance.** Add a per-slot "seeded from Kconfig" bit so
+  `apply_timers()` can treat a seeded slot as never-defined. Explicit, but bumps
+  the blob version — see BUG-5's layout-guard constraints.
+- **Log and surface it.** Independent of the above and worth doing regardless:
+  `ESP_LOGW` on materialization, and consider a diagnostic sensor, so the next
+  occurrence is visible rather than inferred.
+- **Stop the loss.** Audit NVS headroom with `nvs_get_stats()`; the six-page
+  partition and the snapshot write rate deserve a measurement either way.
+
+Explicitly **not** a fix: telling operators to add `"break"` to their config
+document. It works (case C above) and is worth doing as an immediate mitigation,
+but it makes correctness depend on every operator having updated a document
+after BUG-6, and leaves the silent-overwrite behaviour in place.
+
+---
+
 ## Standing rules
 
 These are the durable lessons, kept separate because **everything above is meant
