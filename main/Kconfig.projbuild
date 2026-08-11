@@ -373,4 +373,13 @@ menu "MagTag Timer"
             stops trying and reports it to Home Assistant. Publishing a
             different version string resets the counter and re-arms it.
 
+            The range floor of 1 is deliberate: it makes 0 unreachable
+            from configuration, which is what lets ota_policy treat a
+            zero budget as "the caller forgot to set the field" and fall
+            back to OTA_MAX_FAILS_DEFAULT rather than as "no retries" or
+            "unlimited retries". Both of those readings are defensible in
+            the abstract, which is exactly why the value must never
+            arrive ambiguous. Widening this to 0 would silently change
+            the meaning of a config nobody edited.
+
 endmenu

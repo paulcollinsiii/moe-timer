@@ -66,27 +66,86 @@ void test_single_schema1_block_is_selected(void) {
     TEST_ASSERT_EQUAL(OTA_REASON_NONE, d.reason);
 }
 
-/* Two supported blocks: the HIGHEST schema wins, regardless of order in
+/* Parse, select with an explicit cap, and hand back the chosen block's
+   url so nothing outlives the cJSON tree. "" when no block was chosen. */
+static const char *select_url(const char *json, int cap, int *schema, bool *dup) {
+    static char picked[64];
+    picked[0] = '\0';
+    cJSON *root = cJSON_Parse(json);
+    TEST_ASSERT_NOT_NULL(root);
+    const cJSON *b = select_block(root, cap, schema, dup);
+    if (b != NULL) {
+        const cJSON *def = cJSON_GetObjectItemCaseSensitive(b, "default");
+        const cJSON *url = cJSON_GetObjectItemCaseSensitive(def, "url");
+        TEST_ASSERT_TRUE(cJSON_IsString(url));
+        snprintf(picked, sizeof(picked), "%s", url->valuestring);
+    }
+    cJSON_Delete(root);
+    return picked;
+}
+
+/* Two SUPPORTED blocks: the HIGHEST schema wins, regardless of order in
    the file. Both orderings, so "highest" cannot be satisfied by "last".
 
-   Uses 0 and 1 because 1 is OTA_SCHEMA_MAX today and this rule has to be
-   pinned before schema 2 exists, not after — the point of the array is
-   that the selection is already right when the second schema lands. Move
-   this to 1 vs 2 when OTA_SCHEMA_MAX is bumped. */
+   Driven through select_block with a cap of 2 rather than through
+   decide(), because at OTA_SCHEMA_MAX 1 two supported blocks cannot
+   exist — the rule would otherwise sit untested until the day schema 2
+   ships, which is precisely the day it has to already work. */
 void test_highest_supported_schema_wins(void) {
-    ota_decision_t d;
+    int schema = -1;
+    bool dup = true;
     const char *ascending =
-        "[{\"schema\":0,\"default\":{\"version\":\"0.0.1\",\"url\":\"https://h/old.bin\"}},"
-        "{\"schema\":1,\"default\":{\"version\":\"1.6.0\",\"url\":\"https://h/new.bin\"}}]";
+        "[{\"schema\":1,\"default\":{\"version\":\"1.6.0\",\"url\":\"https://h/old.bin\"}},"
+        "{\"schema\":2,\"default\":{\"version\":\"2.0.0\",\"url\":\"https://h/new.bin\"}}]";
     const char *descending =
-        "[{\"schema\":1,\"default\":{\"version\":\"1.6.0\",\"url\":\"https://h/new.bin\"}},"
-        "{\"schema\":0,\"default\":{\"version\":\"0.0.1\",\"url\":\"https://h/old.bin\"}}]";
-    decide(ascending, DEV, RUNNING, &d);
+        "[{\"schema\":2,\"default\":{\"version\":\"2.0.0\",\"url\":\"https://h/new.bin\"}},"
+        "{\"schema\":1,\"default\":{\"version\":\"1.6.0\",\"url\":\"https://h/old.bin\"}}]";
+
+    TEST_ASSERT_EQUAL_STRING("https://h/new.bin", select_url(ascending, 2, &schema, &dup));
+    TEST_ASSERT_EQUAL(2, schema);
+    TEST_ASSERT_FALSE(dup);
+    TEST_ASSERT_EQUAL_STRING("https://h/new.bin", select_url(descending, 2, &schema, &dup));
+    TEST_ASSERT_EQUAL(2, schema);
+
+    /* The same array read by THIS build, whose cap is 1, takes the
+       schema-1 block instead: the rolling-fleet property, seen from the
+       selector rather than from decide(). */
+    TEST_ASSERT_EQUAL_STRING("https://h/old.bin", select_url(ascending, 1, &schema, &dup));
+    TEST_ASSERT_EQUAL(1, schema);
+}
+
+/* Schema 0 is not a schema. It used to be reachable — the best_schema
+   seed of -1 excludes negatives only — so a {"schema":0} block was
+   selected and then handed to the schema-1 resolver. A typo, or 0
+   reserved to mean "do not read this", would have been installed. */
+void test_schema_zero_is_not_selected(void) {
+    ota_decision_t d;
+    decide("[{\"schema\":0,\"default\":{\"version\":\"1.6.0\",\"url\":\"https://h/f.bin\"}}]", DEV, RUNNING, &d);
+    TEST_ASSERT_FALSE(d.update);
+    TEST_ASSERT_EQUAL(OTA_REASON_NO_SCHEMA, d.reason);
+    TEST_ASSERT_EQUAL(-1, d.schema);
+}
+
+/* Non-integral schemas: cJSON derives valueint from valuedouble by
+   saturating truncation, so 0.5 reads as 0, 1.9 as 1 and 1e300 as
+   INT_MAX — a malformed value silently reinterpreted as a schema this
+   build claims to understand. */
+void test_non_integral_schema_is_skipped(void) {
+    ota_decision_t d;
+    const char *cases[] = {"0.5", "1.9", "1e300", "-0.5"};
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        char m[192];
+        snprintf(m, sizeof(m), "[{\"schema\":%s,\"default\":{\"version\":\"1.6.0\",\"url\":\"https://h/f.bin\"}}]",
+                 cases[i]);
+        decide(m, DEV, RUNNING, &d);
+        TEST_ASSERT_FALSE(d.update);
+        TEST_ASSERT_EQUAL(OTA_REASON_NO_SCHEMA, d.reason);
+        TEST_ASSERT_EQUAL(-1, d.schema);
+    }
+    /* 1.0 IS integral and must still read as schema 1 */
+    decide("[{\"schema\":1.0,\"default\":{\"version\":\"1.6.0\",\"url\":\"https://h/f.bin\"}}]", DEV, RUNNING, &d);
+    TEST_ASSERT_TRUE(d.update);
     TEST_ASSERT_EQUAL(1, d.schema);
-    TEST_ASSERT_EQUAL_STRING("https://h/new.bin", d.url);
-    decide(descending, DEV, RUNNING, &d);
-    TEST_ASSERT_EQUAL(1, d.schema);
-    TEST_ASSERT_EQUAL_STRING("https://h/new.bin", d.url);
 }
 
 /* THE rolling-fleet property, and the whole reason the top level is an
@@ -200,6 +259,26 @@ void test_empty_array_reports_no_schema(void) {
     decide("[]", DEV, RUNNING, &d);
     TEST_ASSERT_FALSE(d.update);
     TEST_ASSERT_EQUAL(OTA_REASON_NO_SCHEMA, d.reason);
+}
+
+/* duplicate_schema is only meaningful once a block has been selected;
+   on the paths where none was, it must not carry a stale true. */
+void test_duplicate_schema_flag_is_false_when_no_block_was_selected(void) {
+    ota_decision_t d;
+    decide("not json at all", DEV, RUNNING, &d);
+    TEST_ASSERT_EQUAL(OTA_REASON_BAD_MANIFEST, d.reason);
+    TEST_ASSERT_EQUAL(-1, d.schema);
+    TEST_ASSERT_FALSE(d.duplicate_schema);
+
+    /* two duplicate blocks, both above this build's cap: nothing is
+       selected, so there is nothing for the flag to be about */
+    const char *dup_but_unsupported =
+        "[{\"schema\":99,\"default\":{\"version\":\"9.9\",\"url\":\"https://h/a.bin\"}},"
+        "{\"schema\":99,\"default\":{\"version\":\"9.9\",\"url\":\"https://h/b.bin\"}}]";
+    decide(dup_but_unsupported, DEV, RUNNING, &d);
+    TEST_ASSERT_EQUAL(OTA_REASON_NO_SCHEMA, d.reason);
+    TEST_ASSERT_EQUAL(-1, d.schema);
+    TEST_ASSERT_FALSE(d.duplicate_schema);
 }
 
 /* ================= resolution ================= */
@@ -391,13 +470,39 @@ void test_non_string_or_empty_version_is_rejected(void) {
 
 /* A URL that cannot be stored is a rejection, never a truncation: half a
    URL is a download that fails in a way nobody can diagnose. */
-void test_oversized_url_is_rejected(void) {
+static void url_of_len(char *buf, size_t buflen, size_t len) {
+    static const char prefix[] = "https://h/";
+    TEST_ASSERT_TRUE(len > sizeof(prefix) - 1);
+    TEST_ASSERT_TRUE(len < buflen);
+    memcpy(buf, prefix, sizeof(prefix) - 1);
+    memset(buf + sizeof(prefix) - 1, 'x', len - (sizeof(prefix) - 1));
+    buf[len] = '\0';
+}
+
+/* Both sides of the bound, exactly — mirroring test_version_length_bound.
+   The longest storable URL must round-trip byte-identical, and one more
+   must be REJECTED rather than snprintf-truncated into a URL that is
+   silently one character short and fails in a way nobody can diagnose. */
+void test_url_length_bound(void) {
     ota_decision_t d;
     char url[OTA_URL_MAX + 32];
     char m[OTA_URL_MAX + 128];
-    snprintf(url, sizeof(url), "https://h/");
-    memset(url + strlen(url), 'x', OTA_URL_MAX);
-    url[OTA_URL_MAX + 10] = '\0';
+
+    url_of_len(url, sizeof(url), OTA_URL_MAX - 1); /* 191: the longest that fits */
+    snprintf(m, sizeof(m), "[{\"schema\":1,\"default\":{\"version\":\"1.6.0\",\"url\":\"%s\"}}]", url);
+    decide(m, DEV, RUNNING, &d);
+    TEST_ASSERT_TRUE(d.update);
+    TEST_ASSERT_EQUAL_STRING(url, d.url);
+    TEST_ASSERT_EQUAL_UINT(OTA_URL_MAX - 1, strlen(d.url));
+
+    url_of_len(url, sizeof(url), OTA_URL_MAX); /* 192: one too many */
+    snprintf(m, sizeof(m), "[{\"schema\":1,\"default\":{\"version\":\"1.6.0\",\"url\":\"%s\"}}]", url);
+    decide(m, DEV, RUNNING, &d);
+    TEST_ASSERT_FALSE(d.update);
+    TEST_ASSERT_EQUAL(OTA_REASON_BAD_URL, d.reason);
+    TEST_ASSERT_EQUAL_STRING("", d.url);
+
+    url_of_len(url, sizeof(url), OTA_URL_MAX + 10);
     snprintf(m, sizeof(m), "[{\"schema\":1,\"default\":{\"version\":\"1.6.0\",\"url\":\"%s\"}}]", url);
     decide(m, DEV, RUNNING, &d);
     TEST_ASSERT_FALSE(d.update);
@@ -429,6 +534,33 @@ void test_malformed_device_targeting_falls_back_to_default(void) {
     decide(bad_map, DEV, RUNNING, &d);
     TEST_ASSERT_TRUE(d.update);
     TEST_ASSERT_EQUAL_STRING("1.6.0", d.version);
+}
+
+/* An entry that IS an object is a deliberate statement about this
+   device, so a fault inside it is reported rather than quietly resolved
+   to the fleet default — installing a version the publisher explicitly
+   did not target here is worse than not updating. The non-object case
+   above is the only fallback. Both directions pinned, because the
+   asymmetry is the kind of thing a later reader "tidies up". */
+void test_an_object_device_entry_is_binding_and_does_not_fall_back(void) {
+    ota_decision_t d;
+    const char *bad_url =
+        "[{\"schema\":1,\"default\":{\"version\":\"1.6.0\",\"url\":\"https://h/default.bin\"},"
+        "\"devices\":{\"" DEV "\":{\"version\":\"1.7.0\",\"url\":\"http://h/rc.bin\"}}}]";
+    const char *bad_version =
+        "[{\"schema\":1,\"default\":{\"version\":\"1.6.0\",\"url\":\"https://h/default.bin\"},"
+        "\"devices\":{\"" DEV "\":{\"version\":42,\"url\":\"https://h/rc.bin\"}}}]";
+    decide(bad_url, DEV, RUNNING, &d);
+    TEST_ASSERT_FALSE(d.update);
+    TEST_ASSERT_EQUAL(OTA_REASON_BAD_URL, d.reason);
+    TEST_ASSERT_EQUAL_STRING("", d.url);
+    decide(bad_version, DEV, RUNNING, &d);
+    TEST_ASSERT_FALSE(d.update);
+    TEST_ASSERT_EQUAL(OTA_REASON_BAD_VERSION, d.reason);
+    /* and the other device on the same manifest still gets the default */
+    decide(bad_url, OTHER_DEV, RUNNING, &d);
+    TEST_ASSERT_TRUE(d.update);
+    TEST_ASSERT_EQUAL_STRING("https://h/default.bin", d.url);
 }
 
 /* ================= preconditions ================= */
@@ -560,6 +692,20 @@ void test_budget_at_the_limit_for_a_different_target_attempts(void) {
     TEST_ASSERT_EQUAL_STRING("1.7.0", d.version);
 }
 
+/* A caller that forgets .max_fails must not get unlimited retries: that
+   is the daily sad loop the budget exists to prevent, and Kconfig's
+   range of 1..10 means 0 can only ever be a caller bug. */
+void test_zero_max_fails_falls_back_to_the_compiled_default(void) {
+    TEST_ASSERT_FALSE(ota_policy_budget_exhausted("1.6.0", "1.6.0", OTA_MAX_FAILS_DEFAULT - 1, 0));
+    TEST_ASSERT_TRUE(ota_policy_budget_exhausted("1.6.0", "1.6.0", OTA_MAX_FAILS_DEFAULT, 0));
+    TEST_ASSERT_TRUE(ota_policy_budget_exhausted("1.6.0", "1.6.0", 99, 0));
+    /* and end to end, through the decision */
+    ota_decision_t d;
+    decide_budget("1.6.0", "1.6.0", OTA_MAX_FAILS_DEFAULT, 0, &d);
+    TEST_ASSERT_FALSE(d.update);
+    TEST_ASSERT_EQUAL(OTA_REASON_GAVE_UP, d.reason);
+}
+
 void test_budget_helper_rules(void) {
     TEST_ASSERT_FALSE(ota_policy_budget_exhausted("1.6.0", "1.6.0", 2, 3));
     TEST_ASSERT_TRUE(ota_policy_budget_exhausted("1.6.0", "1.6.0", 3, 3));
@@ -567,8 +713,6 @@ void test_budget_helper_rules(void) {
     TEST_ASSERT_FALSE(ota_policy_budget_exhausted("1.7.0", "1.6.0", 9, 3));
     /* never counted anything yet */
     TEST_ASSERT_FALSE(ota_policy_budget_exhausted("1.6.0", "", 9, 3));
-    /* max_fails 0 disables the budget rather than bricking OTA outright */
-    TEST_ASSERT_FALSE(ota_policy_budget_exhausted("1.6.0", "1.6.0", 9, 0));
     TEST_ASSERT_FALSE(ota_policy_budget_exhausted(NULL, NULL, 9, 3));
 }
 
@@ -660,15 +804,67 @@ void test_every_reason_has_a_distinct_string(void) {
     TEST_ASSERT_EQUAL_STRING("", ota_policy_reason_str((ota_reason_t)OTA_REASON_COUNT));
 }
 
+/* ================= persistability ================= */
+
+/* The plan's failure table leaves ota_result ALONE for the rows where no
+   check ran, so a download failure from the previous window is still
+   there to be published in the next one — a download failure cannot
+   publish itself, because MQTT is already closed by the time it happens.
+   Keeping that rule here means a test can catch getting it wrong;
+   in the orchestrator it would be an unwritten convention. */
+void test_reason_persistability_matches_the_failure_table(void) {
+    /* no check ran, or the check ran and there was nothing to do */
+    TEST_ASSERT_FALSE(ota_policy_reason_is_persistable(OTA_REASON_NONE));
+    TEST_ASSERT_FALSE(ota_policy_reason_is_persistable(OTA_REASON_NO_URL));
+    TEST_ASSERT_FALSE(ota_policy_reason_is_persistable(OTA_REASON_NO_TIME));
+    TEST_ASSERT_FALSE(ota_policy_reason_is_persistable(OTA_REASON_LOCKED));
+    TEST_ASSERT_FALSE(ota_policy_reason_is_persistable(OTA_REASON_UP_TO_DATE));
+    TEST_ASSERT_FALSE(ota_policy_reason_is_persistable(OTA_REASON_PINNED));
+    /* the two skips the failure table still names an ota_result for */
+    TEST_ASSERT_TRUE(ota_policy_reason_is_persistable(OTA_REASON_LOW_BATT));
+    TEST_ASSERT_TRUE(ota_policy_reason_is_persistable(OTA_REASON_LOW_HEAP));
+    /* genuine outcomes */
+    TEST_ASSERT_TRUE(ota_policy_reason_is_persistable(OTA_REASON_GAVE_UP));
+    TEST_ASSERT_TRUE(ota_policy_reason_is_persistable(OTA_REASON_BAD_MANIFEST));
+    TEST_ASSERT_TRUE(ota_policy_reason_is_persistable(OTA_REASON_NO_SCHEMA));
+    TEST_ASSERT_TRUE(ota_policy_reason_is_persistable(OTA_REASON_NO_ENTRY));
+    TEST_ASSERT_TRUE(ota_policy_reason_is_persistable(OTA_REASON_BAD_VERSION));
+    TEST_ASSERT_TRUE(ota_policy_reason_is_persistable(OTA_REASON_BAD_URL));
+    TEST_ASSERT_TRUE(ota_policy_reason_is_persistable(OTA_REASON_HTTP));
+    TEST_ASSERT_TRUE(ota_policy_reason_is_persistable(OTA_REASON_NET));
+    TEST_ASSERT_TRUE(ota_policy_reason_is_persistable(OTA_REASON_TLS));
+    TEST_ASSERT_TRUE(ota_policy_reason_is_persistable(OTA_REASON_TLS_CERT));
+    TEST_ASSERT_TRUE(ota_policy_reason_is_persistable(OTA_REASON_TIMEOUT));
+    TEST_ASSERT_TRUE(ota_policy_reason_is_persistable(OTA_REASON_BAD_IMAGE));
+    /* out of range is not an outcome */
+    TEST_ASSERT_FALSE(ota_policy_reason_is_persistable(OTA_REASON_COUNT));
+}
+
+/* Every reason must be classified by the switch, so a code added later
+   cannot slip through as a default-false and silently stop being
+   reported. Paired with the -Wswitch build diagnostic, which is the
+   compile-time half of the same guarantee. */
+void test_every_persistable_reason_has_a_string(void) {
+    for (int r = 0; r < OTA_REASON_COUNT; r++) {
+        if (ota_policy_reason_is_persistable((ota_reason_t)r)) {
+            TEST_ASSERT_TRUE_MESSAGE(ota_policy_reason_str((ota_reason_t)r)[0] != '\0',
+                                     "a persistable reason must have a code to persist");
+        }
+    }
+}
+
 int main(void) {
     UNITY_BEGIN();
     /* block selection */
     RUN_TEST(test_single_schema1_block_is_selected);
     RUN_TEST(test_highest_supported_schema_wins);
+    RUN_TEST(test_schema_zero_is_not_selected);
+    RUN_TEST(test_non_integral_schema_is_skipped);
     RUN_TEST(test_unsupported_newest_block_falls_back_to_the_supported_one);
     RUN_TEST(test_no_supported_block_reports_no_schema);
     RUN_TEST(test_duplicate_schema_first_wins_and_is_reported);
     RUN_TEST(test_duplicate_schema_flag_is_clear_on_a_clean_manifest);
+    RUN_TEST(test_duplicate_schema_flag_is_false_when_no_block_was_selected);
     RUN_TEST(test_unknown_keys_inside_a_supported_block_are_ignored);
     RUN_TEST(test_top_level_not_an_array_is_no_update);
     RUN_TEST(test_non_object_and_schemaless_elements_are_skipped);
@@ -689,9 +885,10 @@ int main(void) {
     RUN_TEST(test_non_https_url_is_rejected);
     RUN_TEST(test_version_length_bound);
     RUN_TEST(test_non_string_or_empty_version_is_rejected);
-    RUN_TEST(test_oversized_url_is_rejected);
+    RUN_TEST(test_url_length_bound);
     RUN_TEST(test_block_with_no_entry_for_this_device_and_no_default);
     RUN_TEST(test_malformed_device_targeting_falls_back_to_default);
+    RUN_TEST(test_an_object_device_entry_is_binding_and_does_not_fall_back);
     /* preconditions */
     RUN_TEST(test_gate_passes_when_all_clear);
     RUN_TEST(test_gate_skips_with_an_empty_endpoint);
@@ -706,6 +903,7 @@ int main(void) {
     RUN_TEST(test_budget_below_the_limit_attempts);
     RUN_TEST(test_budget_at_the_limit_for_the_same_target_gives_up);
     RUN_TEST(test_budget_at_the_limit_for_a_different_target_attempts);
+    RUN_TEST(test_zero_max_fails_falls_back_to_the_compiled_default);
     RUN_TEST(test_budget_helper_rules);
     RUN_TEST(test_next_fail_count_increments_for_the_same_target_and_resets_otherwise);
     /* reason codes */
@@ -714,5 +912,7 @@ int main(void) {
     RUN_TEST(test_deadline_outranks_the_transport_error);
     RUN_TEST(test_reason_text_carries_the_http_status);
     RUN_TEST(test_every_reason_has_a_distinct_string);
+    RUN_TEST(test_reason_persistability_matches_the_failure_table);
+    RUN_TEST(test_every_persistable_reason_has_a_string);
     return UNITY_END();
 }

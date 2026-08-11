@@ -3,6 +3,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "config_validate.h" /* CFG_BOUND_OTA_RESULT_MAX / _TARGET_MAX */
+
 /* OTA decision logic — layer 1, pure. Every function here is a total
    function over its arguments: no clock, no NVS, no ESP-IDF includes, no
    I/O. It parses the manifest (with cJSON, as config_apply.c does),
@@ -36,7 +38,13 @@ extern "C" {
 /* Version strings are bounded by esp_app_desc_t.version, which is a
    32-byte field: 31 chars is the longest value that can ever match a
    running version, so a longer one in the manifest is a publishing
-   mistake and is rejected rather than truncated into a false compare. */
+   mistake and is rejected rather than stored truncated.
+
+   The bound is on LENGTH only. Comparison is by C string, so a version
+   carrying an escaped NUL ("1.5.0\u0000x") compares as "1.5.0" and reads
+   as up_to_date. That is memory-safe, and it is not worth parser surgery
+   to reject: the app descriptor cannot hold such a string either, so no
+   device could ever be running the version it appears to name. */
 #define OTA_VERSION_MAX 32
 
 /* Binary-image URL from the manifest. More generous than
@@ -45,9 +53,36 @@ extern "C" {
    is never echoed back, and carries a filename on top of the host path. */
 #define OTA_URL_MAX 192
 
-/* Longest reason text, including the "http_<status>" form. Sized to the
-   ota_result NVS string. */
+/* Retry budget used when max_fails arrives as 0. Mirrors
+   CONFIG_MAGTAG_OTA_MAX_FAILS's Kconfig default; see
+   ota_policy_budget_exhausted for why 0 is treated as "the caller forgot
+   the field" rather than "no budget". */
+#define OTA_MAX_FAILS_DEFAULT 3
+
+/* Longest reason text, including the "http_<status>" form.
+
+   This is a REQUIREMENT ON CONSUMERS, not a description of an existing
+   constraint. Whatever buffer ota_result is read into must be at least
+   this wide, and ota_target's must be at least OTA_VERSION_MAX.
+   hal_nvs_read_str returns ESP_ERR_NVS_INVALID_LENGTH on a short buffer
+   and writes NOTHING, so a narrow one leaves the caller's buffer
+   uninitialised rather than truncating; for ota_target a failed read
+   also means the budget comparison never matches and the device retries
+   that version forever. */
 #define OTA_REASON_TEXT_MAX 16
+
+/* The reciprocal of that requirement, now that the storage widths exist.
+   Asserting against this module's own strings would only prove they fit
+   their own constant, so these tie the two independent declarations
+   together instead: config_validate.h owns how wide the stored NVS values
+   are, ota_policy.h owns how wide the text can get, and neither can be
+   narrowed past the other without failing the build. Direction matters --
+   storage must be >= text, not equal, so RESULT_MAX 24 carrying a 16-byte
+   maximum is headroom, not a violation. */
+_Static_assert(OTA_REASON_TEXT_MAX <= CFG_BOUND_OTA_RESULT_MAX,
+               "ota_result storage is narrower than the longest reason text");
+_Static_assert(OTA_VERSION_MAX <= CFG_BOUND_OTA_TARGET_MAX,
+               "ota_target storage is narrower than the longest manifest version");
 
 /* Why nothing happened — or, after an attempt, what went wrong. The
    failure-table codes (docs/planning/ota.plan.md) plus the "we decided
@@ -93,6 +128,21 @@ const char *ota_policy_reason_str(ota_reason_t reason);
    http_404 and http_500 are different answers with different fixes.
    http_status is ignored for every other reason. Always NUL-terminates. */
 void ota_policy_reason_text(ota_reason_t reason, int http_status, char *out, size_t out_len);
+
+/* May this reason be written to ota_result?
+
+   The plan's failure table wants ota_result LEFT ALONE for the rows
+   where no check ran, so that a download failure from the previous
+   window is still there to be published in the next one — a download
+   failure cannot publish itself, because MQTT is already closed when it
+   happens. That rule is behaviour, so it lives here and is host-tested,
+   rather than becoming an unwritten convention in the orchestrator.
+
+   False for: nothing happened, no check ran (no_url / no_time / locked),
+   and the check ran with correctly nothing to do (up_to_date / pinned).
+   True for every genuine outcome, including the low_batt and low_heap
+   skips, which the failure table does name an ota_result for. */
+bool ota_policy_reason_is_persistable(ota_reason_t reason);
 
 /* Everything a precondition can be decided from. Sampled by the caller;
    nothing in here is read by this module from anywhere else.
@@ -142,7 +192,10 @@ typedef struct {
    non-overlapping), the first block wins, and the run continues. It is
    reported rather than logged here because this module cannot log —
    ota_flow.c owns the ESP_LOGW, which is the plan's "take the first and
-   log it" split across the layer boundary. */
+   log it" split across the layer boundary. Only meaningful when
+   schema >= 0: on the bad_manifest and no_schema paths no block was
+   selected, so there is nothing for it to be about and it is always
+   false. */
 typedef struct {
     bool update;
     ota_reason_t reason;
@@ -164,8 +217,13 @@ void ota_policy_decide(const ota_decide_in_t *in, ota_decision_t *out);
    target. A different target, or a counter that has never been armed,
    means the count is stale and does not apply — that is the escape from
    the sad loop: publishing a new version re-arms the device with no
-   reset from anywhere else. max_fails == 0 disables the budget, so a
-   mis-set config cannot switch OTA off permanently. */
+   reset from anywhere else.
+
+   max_fails == 0 falls back to OTA_MAX_FAILS_DEFAULT. It does NOT mean
+   "no budget": the Kconfig range is 1..10 so menuconfig cannot produce a
+   0, which leaves a caller that forgot the field as the only realistic
+   source — and reading that as "unlimited retries" would silently
+   reinstate the daily sad loop the budget exists to prevent. */
 bool ota_policy_budget_exhausted(const char *target, const char *counted_target, uint16_t fails, uint16_t max_fails);
 
 /* What ota_fails should become after a failed attempt against `target`:
