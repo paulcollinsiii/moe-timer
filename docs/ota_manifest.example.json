@@ -1,0 +1,18 @@
+[
+  {
+    "schema": 1,
+    "default": {
+      "version": "1.5.1",
+      "url": "https://ota.example.lan/magtag/magtag_timer-1.5.1.bin"
+    },
+    "devices": {
+      "magtag-a1b2c3": {
+        "version": "1.6.0-rc1",
+        "url": "https://ota.example.lan/magtag/magtag_timer-1.6.0-rc1.bin"
+      },
+      "magtag-d4e5f6": {
+        "version": null
+      }
+    }
+  }
+]

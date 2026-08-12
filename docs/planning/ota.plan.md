@@ -663,7 +663,16 @@ Resolving within the selected block (schema 1):
 
 **Embed the supplied PEM at build time** via `EMBED_TXTFILES` in
 `main/CMakeLists.txt` (`certs/ota_ca.pem`), and pass it as `cert_pem` in the
-`esp_http_client_config_t`. ~1–2 KB of rodata. `CONFIG_ESP_TLS_INSECURE` stays
+`esp_http_client_config_t`. ~1–2 KB of rodata.
+
+**Landed.** The operator supplied a self-signed root
+(`CN=bladerunner-homelab-system`, `CA:TRUE`, `notAfter` 2035-07-18), now at
+`main/certs/ota_ca.pem` and embedded via `EMBED_TXTFILES`; 1131 bytes, plus the
+NUL that `EMBED_TXTFILES` appends and `cert_pem` requires. A root rather than a
+leaf or intermediate, which is what the paragraph below asks for, and the 2035
+expiry means no near-term rotation. What remains is task 11's wiring: nothing
+references `_binary_ota_ca_pem_start` yet. **Not verified by a firmware build**
+-- no `idf.py` in the agent environment. `CONFIG_ESP_TLS_INSECURE` stays
 off; `CONFIG_ESP_HTTPS_OTA_ALLOW_HTTP` is already `not set` in `sdkconfig` and
 must stay that way.
 
@@ -1080,7 +1089,9 @@ deserve their own commit and their own review:
       task 9 left for this; the precedent is `lock_gate.c:49-54`.
 11. `main/ota.c`: manifest GET, then the **incremental** OTA
     (`esp_https_ota_begin` / `_perform` loop / `_finish`) with the deadline
-    check in the loop, plus mark-valid. Embed the CA PEM.
+    check in the loop, plus mark-valid. The CA PEM is already embedded
+    (`main/certs/ota_ca.pem`); what is left is passing
+    `_binary_ota_ca_pem_start` as `cert_pem`.
     Two constraints the policy review surfaced, both of which `ota.c` has to
     honour because nothing below it can:
     - **The https guarantee does not survive the transport.**

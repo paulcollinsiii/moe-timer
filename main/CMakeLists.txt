@@ -72,6 +72,33 @@ idf_component_register(
         esp_https_ota
         app_update
         ssd1680
+    # Root CA for the OTA endpoint, pinned into the image.
+    #
+    # TXTFILES, not BINFILES: esp_http_client_config_t::cert_pem takes a
+    # NUL-TERMINATED PEM string, and TXTFILES is the variant that appends
+    # the NUL. Embedding this as a binary blob yields a buffer that is not
+    # a C string, and the failure is a TLS handshake error at runtime
+    # rather than anything the build would catch.
+    #
+    # Referenced from ota.c (plan task 11) as:
+    #     extern const uint8_t ota_ca_pem_start[] asm("_binary_ota_ca_pem_start");
+    # The symbol is derived from the FILENAME, so renaming this file
+    # renames the symbol and breaks the link -- which is the intended
+    # behaviour, not a trap to work around.
+    #
+    # This is a self-signed ROOT (CN=bladerunner-homelab-system, CA:TRUE,
+    # notAfter 2035-07-18), which is the only safe thing to pin: a leaf or
+    # an intermediate rotates and takes the whole fleet's ability to
+    # update with it, recoverable only with a serial cable. When this root
+    # is eventually rotated, every device must be updated BEFORE the
+    # server stops serving a chain to it -- the last OTA under the old CA
+    # is the one that has to carry the new one.
+    #
+    # A certificate is public by construction: this holds no private key
+    # and is committed deliberately, so a build from a clean checkout
+    # produces an image that can actually reach the endpoint.
+    EMBED_TXTFILES
+        "certs/ota_ca.pem"
 )
 
 # Re-arm the diagnostic IDF deliberately disarms.
