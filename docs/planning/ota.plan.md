@@ -670,11 +670,14 @@ Resolving within the selected block (schema 1):
 `main/certs/ota_ca.pem` and embedded via `EMBED_TXTFILES`; 1131 bytes, plus the
 NUL that `EMBED_TXTFILES` appends and `cert_pem` requires. A root rather than a
 leaf or intermediate, which is what the paragraph below asks for, and the 2035
-expiry means no near-term rotation. What remains is task 11's wiring: nothing
-references `_binary_ota_ca_pem_start` yet. **Not verified by a firmware build**
--- no `idf.py` in the agent environment. `CONFIG_ESP_TLS_INSECURE` stays
-off; `CONFIG_ESP_HTTPS_OTA_ALLOW_HTTP` is already `not set` in `sdkconfig` and
-must stay that way.
+expiry means no near-term rotation. **Wired by task 11**, which passes
+`_binary_ota_ca_pem_start` as `cert_pem` on both the manifest client and the
+`esp_https_ota` config, and **verified by a firmware build** — the link
+resolves, so the symbol name and the `EMBED_TXTFILES` entry agree. What is
+still unverified is the handshake itself, which needs the real host.
+`CONFIG_ESP_TLS_INSECURE` and `CONFIG_ESP_HTTPS_OTA_ALLOW_HTTP` both stay off,
+and `ota.c` now carries an `#error` on each so that turning either on fails the
+build rather than silently disarming the pin.
 
 Two things to get right, because both of them brick OTA in a way that requires
 a physical visit:
@@ -775,13 +778,16 @@ The downgrade row is the accepted cost of the "different, not newer" test.
 
 ## Architecture
 
-Three new modules, placed by the layer model in `docs/architecture.md`:
+Four new modules, placed by the layer model in `docs/architecture.md`. Three
+were planned; `ota_url.c` was split out during task 11 when the redirect rule
+turned out to be a decision rather than plumbing (see that task's entry).
 
 | Module | Layer | Responsibility | Test |
 | --- | --- | --- | --- |
 | `main/ota_policy.c` | **1 — pure** | Manifest parse, device targeting, "should update?" decision, precondition gating. Total function over its arguments; no clock, no NVS, no ESP includes. Uses cJSON, as `config_apply.c` already does. | `test_ota_policy` — host, direct |
+| `main/ota_url.c` | **1 — pure** | May this redirect be followed? Composes `config_is_https_url` with a hop budget and the `OTA_URL_MAX` bound. The one thing in the transport's job that does not need a radio, and the one the `https` guarantee depends on. | `test_ota_url` — host, direct |
 | `main/ota_flow.c` | **2 — orchestration** | Sequences check → buffer → paint → download → reboot. Device effects injected via an ops struct, exactly like `net_apply_ops_t`. | `test_ota_flow` — host, single-TU with stubs |
-| `main/ota.c` | **3 — driver** | `esp_http_client` manifest GET; the four incremental-download primitives (`esp_https_ota_begin` / one `_perform` / `_finish` / `_abort`) and `esp_ota_mark_app_valid_cancel_rollback`. Thin — every decision is already made upstream, **including the deadline**: the loop that drives these lives in `ota_flow.c`, so that "aborted, never committed" is a host assertion rather than a comment. | Hardware smoke test |
+| `main/ota.c` | **3 — driver** | `esp_http_client` manifest GET; the four incremental-download primitives (`esp_https_ota_begin` / one `_perform` / `_finish` / `_abort`) and `esp_ota_mark_app_valid_cancel_rollback`. Thin — every decision is already made upstream, **including the deadline**: the loop that drives these lives in `ota_flow.c`, so that "aborted, never committed" is a host assertion rather than a comment. | Hardware smoke test — its one testable decision was moved to `ota_url.c` |
 
 `main/main.c` gains **nothing**. Under the residency rule the only candidate
 would be an awake-failsafe extension for the download, and that is handled by
@@ -1111,36 +1117,84 @@ deserve their own commit and their own review:
       `s_partial_count`, so the next `display_update()` would repaint a
       full-screen 28 pt takeover with a *partial* refresh. Use the mechanism
       task 9 left for this; the precedent is `lock_gate.c:49-54`.
-11. `main/ota.c`: manifest GET, plus the four download primitives
-    `ota_flow.c` now drives (`esp_https_ota_begin`, one `esp_https_ota_perform`
-    per `dl_step`, `esp_https_ota_finish`, `esp_https_ota_abort`) and
-    mark-valid. **The deadline is not this module's** — task 10 moved the loop
-    up; `ota.c` only has to make each primitive return promptly and fill
-    `ota_error_facts_t` honestly, including the mbedtls cert-verify flags that
-    drive the `tls_cert` / `tls` split. Two contracts `ota_flow.h` states and
-    this module must honour: a `dl_begin` that fails has already cleaned up
-    (no abort will follow), and `dl_finish` frees its handle either way.
-    The CA PEM is already embedded (`main/certs/ota_ca.pem`); what is left is
-    passing `_binary_ota_ca_pem_start` as `cert_pem`.
-    Two constraints the policy review surfaced, both of which `ota.c` has to
-    honour because nothing below it can:
+11. **Landed.** `main/ota.c` + `include/ota.h`: `ota_manifest_get`, the four
+    download primitives `ota_flow.c` drives (`esp_https_ota_begin`, one
+    `esp_https_ota_perform` per step, `esp_https_ota_finish`,
+    `esp_https_ota_abort`) and `ota_mark_valid_if_pending`. The CA PEM is wired
+    (`_binary_ota_ca_pem_start` as `cert_pem`); `CONFIG_ESP_HTTPS_OTA_ALLOW_HTTP`
+    and `CONFIG_ESP_TLS_INSECURE` are held down by `#error` guards rather than
+    by convention. **Firmware build verified** (the first OTA task where that
+    was possible): 1,437,088 B app in the 0x1C0000 slot, 22 % free;
+    bootloader unchanged at 22,640 B. Both `ota_flow.h` contracts are honoured
+    — every partial-failure path inside `dl_begin` aborts or relies on
+    `esp_https_ota_begin`'s own cleanup before answering false, and `dl_finish`
+    drops the handle whichever way it answers. **The deadline is not this
+    module's**; each primitive is bounded instead by a 10 s `timeout_ms`, which
+    is the granularity at which `ota_flow` can check its own budget and the
+    most that budget can overshoot.
+
+    **Deviation 1 — a fourth module, `main/ota_url.c` (+ `include/ota_url.h`,
+    `test_ota_url`, 11 cases).** The plan named three OTA modules. The redirect
+    rule — "given this Location and this hop count, do I follow it?" — is pure,
+    and it is the single decision standing between the config-time `https`
+    guarantee and a plaintext firmware fetch. Left inside `ota.c` it would have
+    been reachable only from a hardware smoke test, which is to say never
+    asserted. It is not in `ota_policy.c` (whose header states the transport is
+    deliberately absent) nor in `config_validate.c` (whose subject is config
+    *fields*), so it got its own thirty-line layer-1 module. All seven
+    mutations of it are caught, including the precedence one.
+
+    **Deviation 2 — redirect targets must be ABSOLUTE https.** A relative
+    target would in fact be safe to follow (the client inherits the scheme, so
+    the hop stays https and the pinned root still authenticates it), but
+    accepting one means re-implementing `config_is_https_url`'s character rule
+    for the schemeless case, and a security rule with two implementations
+    drifts. Every common server emits an absolute `Location`.
+
+    **Deviation 3 — chip-id validation cannot happen in `dl_begin`.**
+    `esp_https_ota_begin` does not read the image; `esp_https_ota_get_img_desc`
+    (called from `dl_begin`) reads the header and checks the app-descriptor
+    magic, but the chip id and chip revision are verified inside the FIRST
+    `esp_https_ota_perform` and there is no API to pull that forward. So
+    `dl_step` maps `ESP_ERR_INVALID_VERSION` onto `image_rejected` and the
+    operator reads `bad_image` either way.
+
+    How the two constraints the policy review surfaced were actually met:
     - **The https guarantee does not survive the transport.**
       `esp_http_client_set_redirection()` is `esp_http_client_set_url(client,
       client->location)` with **no scheme check**, and `esp_https_ota.c:104-111`
-      calls it for any 3xx. So a URL `config_is_https_url()` blesses, whose host
-      answers `302 Location: http://...`, is fetched in the clear -- an
-      arbitrary-code-execution channel reopened one redirect after it was
-      closed. Set `disable_auto_redirect = true` and re-validate each redirect
-      target with `config_is_https_url()`, and assert that
-      `CONFIG_ESP_HTTPS_OTA_ALLOW_HTTP` stays unset.
-    - **Read the NVS strings with the declared widths.** `hal_nvs_read_str` ->
-      `nvs_get_str` (`main/hal_nvs.c:62-68`) returns
-      `ESP_ERR_NVS_INVALID_LENGTH` on a short buffer and writes **nothing**, and
-      `get_str_empty_default` (`main/nvs_config.c:69-76`) only maps `NOT_FOUND`
-      to `""` -- so an undersized read leaves the caller's buffer
-      *uninitialised*. `ota_result` needs `char[OTA_REASON_TEXT_MAX]` and
-      `ota_target` `char[OTA_VERSION_MAX]`; a short `ota_target` buffer makes
-      the retry-budget comparison never match and the device retries forever.
+      calls it for any 3xx. Note that `disable_auto_redirect` does **not** stop
+      it: that flag is only consulted by `esp_http_client_perform`, and
+      `esp_https_ota` drives `open`/`fetch_headers` and does its own
+      redirecting. It is set anyway, as a statement of policy, but the
+      enforcement is three other things: (a) the manifest GET builds a **fresh
+      client per hop** and never calls `perform`, so it is structurally
+      incapable of following a redirect it did not choose; (b) an
+      `HTTP_EVENT_ON_HEADER` handler runs `ota_url_redirect_check` on every
+      `Location` seen on a 3xx, and an `HTTP_EVENT_ON_CONNECTED` backstop
+      re-reads the connected URL — the last point at which a plaintext hop has
+      cost nothing but a TCP handshake; (c) on the download path, where
+      `esp_https_ota` has already followed the hop internally by the time
+      control returns, `dl_begin` checks the poison flag and **aborts**, so the
+      cost is one connection and the 1 KB image header and the commit never
+      happens. `esp_https_ota`'s own connect loop has no redirect cap at all
+      (it never consults `max_redirection_count`), which is the second reason
+      the hop budget lives here.
+    - **Read the NVS strings with the declared widths.** Not `ota.c`'s to do
+      after all: `ota_flow.c` owns every OTA NVS read (`ota_url` into
+      `char[CFG_BOUND_OTA_URL_MAX]`, `ota_target` via `read_counted_target`)
+      and already substitutes `""` explicitly on a failed read. `ota.c` reads
+      no NVS. Verified rather than duplicated.
+
+    **Known gap, deliberately not fixed here.** A refused redirect reports to
+    Home Assistant as `net`. `ota_error_facts_t` has no fact for "the transport
+    refused to follow a redirect", and `ota_policy_reason` only folds
+    `http_status` into a code at >= 400, so a refused 302 cannot surface as
+    itself. The refusal is logged at `ESP_LOGE` with the specific reason
+    (`not_https` / `too_many` / `too_long` / `no_target`), but that log is
+    unreachable overnight on battery — which is the whole premise of the
+    failure table. Fixing it means a new fact and a new reason code in
+    `ota_policy`, which is task 4's file and a separate change.
 12. Wire the rollover trigger, the Button D trigger, the pre-sleep apply point,
     and the failsafe extender install in `app_main`. Four call sites, and the
     module's own tests cannot reach any of them:

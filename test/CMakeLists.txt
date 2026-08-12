@@ -89,6 +89,10 @@ add_host_test(test_stats_json)
 add_host_test(test_mqtt_topics)
 add_host_test(test_mqtt_rx)
 add_host_test(test_config_validate)
+# The one decision inside the OTA driver that needs no radio: whether a
+# Location header may be followed. It compiles config_validate.c beside
+# ota_url.c so the https rule under test is the real one, not a restatement.
+add_host_test(test_ota_url)
 add_host_test(test_ha_config EXTRA_LIBS m) # m: tones.c sine LUT
 add_host_test(test_tones EXTRA_LIBS m)
 add_host_test(test_wav_header)
