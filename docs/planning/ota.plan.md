@@ -781,7 +781,7 @@ Three new modules, placed by the layer model in `docs/architecture.md`:
 | --- | --- | --- | --- |
 | `main/ota_policy.c` | **1 — pure** | Manifest parse, device targeting, "should update?" decision, precondition gating. Total function over its arguments; no clock, no NVS, no ESP includes. Uses cJSON, as `config_apply.c` already does. | `test_ota_policy` — host, direct |
 | `main/ota_flow.c` | **2 — orchestration** | Sequences check → buffer → paint → download → reboot. Device effects injected via an ops struct, exactly like `net_apply_ops_t`. | `test_ota_flow` — host, single-TU with stubs |
-| `main/ota.c` | **3 — driver** | `esp_http_client` manifest GET; the **incremental** download (`esp_https_ota_begin` / `_perform` loop / `_finish`) with the deadline check in the loop; `esp_ota_mark_app_valid_cancel_rollback`. Thin — every decision is already made upstream, including when to abort. | Hardware smoke test |
+| `main/ota.c` | **3 — driver** | `esp_http_client` manifest GET; the four incremental-download primitives (`esp_https_ota_begin` / one `_perform` / `_finish` / `_abort`) and `esp_ota_mark_app_valid_cancel_rollback`. Thin — every decision is already made upstream, **including the deadline**: the loop that drives these lives in `ota_flow.c`, so that "aborted, never committed" is a host assertion rather than a comment. | Hardware smoke test |
 
 `main/main.c` gains **nothing**. Under the residency rule the only candidate
 would be an awake-failsafe extension for the download, and that is handled by
@@ -1019,7 +1019,25 @@ to a full refresh -- that is the mechanism tasks 10 and 13 refer to, and it
 already survives `esp_restart()`, so task 13's post-reboot clause is satisfied
 by construction rather than needing its own code.
 
-Tasks 10-17 remain, plus task 18 -- the BUG-8 fix, added at the operator's
+**Task 10 has landed** (`ota_flow.c` + `test_ota_flow`, 31 cases, taking the
+tree to 36/36 suites). It changed one thing the plan had specified differently,
+and the change is worth stating because task 11 inherits it: **the deadline
+loop moved up a layer, from `ota.c` into `ota_flow.c`.**
+
+The architecture table below put the `_begin` / `_perform` / `_finish` loop in
+the driver. But two of the TDD contract's own bullets -- "no set-boot-partition"
+on the deadline path, and "set-boot-partition then restart, in that order" on
+the success path -- are *unobservable* from a layer above a single
+`download()` call. They would have become comments rather than tests, in the
+one place where a wrong answer points the boot partition at half an image. So
+the driver now exposes four calls (`dl_begin` / `dl_step` / `dl_finish` /
+`dl_abort`), the loop and its deadline sit in `ota_flow.c`, and both bullets
+are asserted on the host: mutation confirms it (deleting the deadline check,
+and swapping `dl_abort` for `dl_finish`, each fail exactly the test that names
+them). `ota.c` gets *thinner* as a result, which is the direction the layer
+model wants anyway.
+
+Tasks 11-17 remain, plus task 18 -- the BUG-8 fix, added at the operator's
 request to be shipped as the first real OTA payload.
 
 ### Follow-ups the reviews surfaced (none blocking)
@@ -1071,7 +1089,13 @@ deserve their own commit and their own review:
 8. `display_state_t.fw_version` → `app_state_display()` → battery row.
    Regenerate main-screen goldens; `git checkout` the untouched ones.
 9. `display_screens_build_ota(from, to)` + `display_ota(from, to)` + golden.
-10. `test_ota_flow` **first**, then `main/ota_flow.c` with its injected ops.
+10. **Landed.** `test_ota_flow` (31 cases) first, then `main/ota_flow.c` with
+    its injected ops. All three constraints below are asserted as *call-order
+    strings* rather than counters, because each one is a sequence: a counter
+    can only say each step happened, not that it happened before the step that
+    makes it safe. Mutation confirms the ordering is load-bearing — moving the
+    paint inside the open window fails six of the thirty-one.
+
     Three constraints the display review surfaced, all of which `test_ota_flow`
     must pin rather than leave to convention:
     - **The OTA paint must happen with the radio down.** `display_ota()` carries
@@ -1087,11 +1111,17 @@ deserve their own commit and their own review:
       `s_partial_count`, so the next `display_update()` would repaint a
       full-screen 28 pt takeover with a *partial* refresh. Use the mechanism
       task 9 left for this; the precedent is `lock_gate.c:49-54`.
-11. `main/ota.c`: manifest GET, then the **incremental** OTA
-    (`esp_https_ota_begin` / `_perform` loop / `_finish`) with the deadline
-    check in the loop, plus mark-valid. The CA PEM is already embedded
-    (`main/certs/ota_ca.pem`); what is left is passing
-    `_binary_ota_ca_pem_start` as `cert_pem`.
+11. `main/ota.c`: manifest GET, plus the four download primitives
+    `ota_flow.c` now drives (`esp_https_ota_begin`, one `esp_https_ota_perform`
+    per `dl_step`, `esp_https_ota_finish`, `esp_https_ota_abort`) and
+    mark-valid. **The deadline is not this module's** — task 10 moved the loop
+    up; `ota.c` only has to make each primitive return promptly and fill
+    `ota_error_facts_t` honestly, including the mbedtls cert-verify flags that
+    drive the `tls_cert` / `tls` split. Two contracts `ota_flow.h` states and
+    this module must honour: a `dl_begin` that fails has already cleaned up
+    (no abort will follow), and `dl_finish` frees its handle either way.
+    The CA PEM is already embedded (`main/certs/ota_ca.pem`); what is left is
+    passing `_binary_ota_ca_pem_start` as `cert_pem`.
     Two constraints the policy review surfaced, both of which `ota.c` has to
     honour because nothing below it can:
     - **The https guarantee does not survive the transport.**
@@ -1112,7 +1142,20 @@ deserve their own commit and their own review:
       `ota_target` `char[OTA_VERSION_MAX]`; a short `ota_target` buffer makes
       the retry-budget comparison never match and the device retries forever.
 12. Wire the rollover trigger, the Button D trigger, the pre-sleep apply point,
-    and the failsafe extender install in `app_main`.
+    and the failsafe extender install in `app_main`. Four call sites, and the
+    module's own tests cannot reach any of them:
+    - `ota_flow_init(&ops, &cfg)` at boot, where the `CONFIG_MAGTAG_OTA_*`
+      symbols are read (task 10 deliberately kept `sdkconfig.h` out of
+      `ota_flow.c` so the host suite asserts against its own numbers).
+    - `ota_flow_arm(trigger, batt_pct, charge_locked)` on the main task
+      **before** `net_apply_open()`, since the check reads what it samples.
+    - `ota_flow_check(ntp_ok)` inside `net_window_task`, **after** the
+      snapshot rendezvous and **before** `mqtt_ha_window()`. This placement is
+      the half of the TDD contract's third bullet that is a call-site property:
+      `test_ota_flow` pins that the result is in NVS before the call returns,
+      but only this ordering makes it reach the same window's payload.
+    - `ota_flow_apply(batt_pct, charge_locked)` at the late pre-sleep point,
+      with the battery facts **re-sampled**, not carried over from arming.
 13. `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y`; call `ota_mark_valid_if_pending()`
     from the pre-sleep point. **Measure the bootloader before flipping this
     symbol**: it is currently 22,640 of 28,672 B (79 %, 6,032 B free), rollback

@@ -25,6 +25,7 @@ idf_component_register(
         "config_apply.c"
         "config_validate.c"
         "ota_policy.c"
+        "ota_flow.c"
         "ha_config.c"
         "cmd_apply.c"
         "device_id.c"

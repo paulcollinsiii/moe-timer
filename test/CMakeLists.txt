@@ -106,3 +106,10 @@ add_host_test(test_ota_policy
     EXTRA_SRCS ${CMAKE_CURRENT_SOURCE_DIR}/../lib/cJSON/cJSON.c
     EXTRA_INCLUDES ${CMAKE_CURRENT_SOURCE_DIR}/../lib/cJSON
     EXTRA_LIBS m)
+# The flow suite carries cJSON for the same reason: it runs the REAL
+# ota_policy under the sequencing rather than a mock of it, so the
+# decisions driving the order are the ones the firmware will make.
+add_host_test(test_ota_flow
+    EXTRA_SRCS ${CMAKE_CURRENT_SOURCE_DIR}/../lib/cJSON/cJSON.c
+    EXTRA_INCLUDES ${CMAKE_CURRENT_SOURCE_DIR}/../lib/cJSON
+    EXTRA_LIBS m)
