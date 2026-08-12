@@ -1154,8 +1154,27 @@ deserve their own commit and their own review:
       the half of the TDD contract's third bullet that is a call-site property:
       `test_ota_flow` pins that the result is in NVS before the call returns,
       but only this ordering makes it reach the same window's payload.
+      **Verification debt, and it is explicit so it does not quietly become
+      permanent:** this ordering has *no* host test anywhere and cannot get
+      one — `net_window_task` has no suite, and `test_ota_flow` can only see
+      as far as "the result is in NVS by the time the call returns". Until
+      `net_window` grows a suite, the only evidence is the hardware smoke
+      test: confirm the first stat payload after a rollover carries the
+      `ota_result` that rollover produced, rather than the previous day's.
     - `ota_flow_apply(batt_pct, charge_locked)` at the late pre-sleep point,
       with the battery facts **re-sampled**, not carried over from arming.
+      **On its own task, ~16 KB, not the main task.** The deadline loop moved
+      into `ota_flow_apply` (see task 10), so `esp_https_ota_perform()` — the
+      mbedTLS record buffers plus the flash write path — now runs on whatever
+      stack calls `ota_flow_apply`. `CONFIG_ESP_MAIN_TASK_STACK_SIZE` is
+      7168 B and "Task and stack sizing" above says plainly that this does not
+      fit; `net_window.c` already spawns a dedicated 10240 B task for a
+      smaller job. Spawn, join, and log `uxTaskGetStackHighWaterMark()` the
+      way `net_window.c` does, so the 16 KB can be tuned from a measurement
+      instead of a guess. Getting this wrong does not fail the build or the
+      host suite — it presents as an unexplained reboot on the bench, with
+      the panic swallowed by USB CDC. `ota_flow.h`'s threading section states
+      the same requirement at the point of use.
 13. `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y`; call `ota_mark_valid_if_pending()`
     from the pre-sleep point. **Measure the bootloader before flipping this
     symbol**: it is currently 22,640 of 28,672 B (79 %, 6,032 B free), rollback

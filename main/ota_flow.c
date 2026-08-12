@@ -37,6 +37,13 @@ static const char *TAG = "ota_flow";
 #define OTA_MANIFEST_MAX 2048
 static char s_manifest[OTA_MANIFEST_MAX];
 
+/* How much longer than the download's own budget the awake failsafe is
+   armed for. It is not slack: it is the abort tail — dl_abort discards
+   the partial image, then session_end brings the radio down and waits up
+   to a second for the stack to answer. The failsafe firing inside that
+   tail is the same outcome as it firing mid-transfer. */
+#define OTA_ABORT_TAIL_MS 5000
+
 static ota_flow_ops_t s_ops;
 static ota_flow_cfg_t s_cfg;
 
@@ -119,15 +126,6 @@ void ota_flow_init(const ota_flow_ops_t *ops, const ota_flow_cfg_t *cfg) {
 }
 
 void ota_flow_arm(ota_trigger_t trigger, int batt_pct, bool charge_locked) {
-    /* Cleared FIRST and unconditionally, including on the triggers that
-       will not check. A buffered update surviving into a later wake would
-       be applied from facts that are a day old — against a manifest entry
-       the publisher may since have withdrawn, which is the one case where
-       targeting silently does the opposite of what it says. */
-    s_pending = false;
-    s_target[0] = '\0';
-    s_image_url[0] = '\0';
-
     s_batt_pct = batt_pct;
     s_charge_locked = charge_locked;
     s_armed = false;
@@ -146,6 +144,33 @@ void ota_flow_arm(ota_trigger_t trigger, int batt_pct, bool charge_locked) {
         }
         default:
             break;
+    }
+
+    /* Cleared only when this call is actually going to run a check. A
+       check may legitimately replace what it finds; an arm that will not
+       check has nothing to replace it WITH, and throwing the buffer away
+       there loses a real update for the day.
+
+       That is not a corner case. Two network sessions in one wake is the
+       ordinary path, not the exotic one — wifi_session.c:95 names "day
+       rollover + mandatory start sync" as the routine example, and
+       net_apply_open() has two call sites (wake_flow.c:349, :1068). The
+       rollover window finds 1.6.0 and buffers it, the operator presses
+       Button A, the second window arms with a trigger that does not
+       check, and the update vanishes silently until tomorrow.
+
+       This used to clear unconditionally, justified by keeping a buffer
+       out of a LATER WAKE. That threat is mostly imaginary: these are
+       plain statics with no RTC_DATA_ATTR, so deep sleep does not
+       preserve them, and a reboot certainly does not. The staleness that
+       IS real — minutes and a full-panel repaint between the two windows
+       of one wake — is handled where it can actually be measured, by
+       ota_flow_apply's second gate re-sampling battery, charge lock and
+       heap immediately before the download. */
+    if (s_armed) {
+        s_pending = false;
+        s_target[0] = '\0';
+        s_image_url[0] = '\0';
     }
 }
 
@@ -176,8 +201,14 @@ void ota_flow_check(bool time_valid) {
     int n = s_ops.manifest_get(url, s_manifest, sizeof(s_manifest), &facts);
     if (n < 0) {
         reason = ota_policy_reason(&facts);
-        if (reason == OTA_REASON_NONE)
-            reason = OTA_REASON_NET; /* the driver failed and named nothing */
+        if (reason == OTA_REASON_NONE) {
+            /* Loud on purpose. The fallback keeps the outcome reportable,
+               but a driver that fails without filling a single fact is a
+               bug in ota.c, and "net" would otherwise hide it behind the
+               most ordinary reason there is. */
+            ESP_LOGE(TAG, "manifest_get failed but named no fact; reporting net");
+            reason = OTA_REASON_NET;
+        }
         ESP_LOGW(TAG, "manifest fetch failed: %s", ota_policy_reason_str(reason));
         /* Deliberately NOT counted against the retry budget. A manifest
            that never arrived names no version, and the counter is keyed
@@ -186,6 +217,12 @@ void ota_flow_check(bool time_valid) {
         record(reason, facts.http_status);
         return;
     }
+
+    /* A buffer's owner enforces its own bound: ota.c is trusted to
+       honour sizeof(s_manifest), and this is what happens if it does
+       not. */
+    if (n > (int)sizeof(s_manifest))
+        n = (int)sizeof(s_manifest);
 
     char counted[CFG_BOUND_OTA_TARGET_MAX];
     read_counted_target(counted, sizeof(counted));
@@ -236,7 +273,15 @@ static void stop_clock(void) {
     if (!s_dl_running)
         return;
     s_dl_running = false;
-    s_dl_ms = (uint32_t)(s_ops.mono_ms() - s_dl_started_ms);
+    /* Clamped because the subtraction is unsigned once it lands in
+       s_dl_ms: a clock that went backwards would publish ~4e9 ms in the
+       stat payload, which reads as a catastrophic link rather than as
+       the clock fault it is. esp_timer_get_time() cannot do that, but
+       mono_ms is injected and the next implementation might. */
+    int64_t elapsed = s_ops.mono_ms() - s_dl_started_ms;
+    if (elapsed < 0)
+        elapsed = 0;
+    s_dl_ms = (uint32_t)elapsed;
 }
 
 /* Everything a failed attempt owes the next window.
@@ -244,10 +289,13 @@ static void stop_clock(void) {
    The radio comes down BEFORE the repaint, which is the same rule the
    paint at the top of the sequence follows and for the same reason. Then
    the reason and the target go to NVS, where the next window's stat
-   payload is the only thing that can publish them. Then the ordinary
-   awake budget is restored, so the ~3 s repaint below is charged to a
-   freshly armed failsafe rather than to whatever is left of a 300 s
-   download budget that has just been spent.
+   payload is the only thing that can publish them. Then the failsafe is
+   re-armed for awake_sec — not "restored", because the re-arm is
+   absolute from now and a wake that has already burned time walks away
+   with a fresh full budget. What it buys is that the ~3 s repaint below
+   is charged to a freshly armed failsafe rather than to whatever is left
+   of a download budget that has just been spent. Harmless in practice:
+   everything after this point is repaint-then-sleep.
 
    session_up is false only for a session that never came up: net_window.c
    does not call wifi_session_end() after a failed begin either, and
@@ -256,8 +304,15 @@ static void stop_clock(void) {
 static void fail_attempt(const ota_error_facts_t *facts, bool session_up) {
     stop_clock();
     ota_reason_t reason = ota_policy_reason(facts);
-    if (reason == OTA_REASON_NONE)
+    if (reason == OTA_REASON_NONE) {
+        /* Same reasoning as the manifest path: the fallback keeps the
+           attempt reportable and countable, but a download primitive
+           that failed while naming nothing is an ota.c defect, and the
+           log line is the only way to tell it apart from a genuinely
+           flaky link. */
+        ESP_LOGE(TAG, "download failed but named no fact; reporting net");
         reason = OTA_REASON_NET;
+    }
 
     if (session_up)
         s_ops.session_end();
@@ -308,7 +363,30 @@ void ota_flow_apply(int batt_pct, bool charge_locked) {
        panel time charged to the download's own budget is 3 s the
        download does not get. */
     s_ops.paint_update(s_cfg.running_version, s_target);
-    s_ops.extend_awake(s_cfg.max_sec);
+
+    /* The failsafe and the loop's deadline are two numbers on purpose,
+       and a future reader must not fold them back into one.
+
+       extend_awake re-arms the failsafe ABSOLUTELY, from now — main.c's
+       extend_awake_failsafe is an esp_timer_stop followed by a
+       start_once — so both clocks start at budget_start, on this line.
+       They must not start at the same value: if the failsafe wins, the
+       device deep-sleeps in the middle of dl_step. dl_abort never runs,
+       nothing is recorded, the retry budget never advances, and the same
+       doomed download is attempted again at every rollover forever,
+       which is exactly the sad loop the budget exists to end. So the
+       failsafe is given max_sec PLUS the abort tail, the loop is given
+       max_sec exactly, and the loop is therefore guaranteed to stop the
+       transfer first with room left to tear it down.
+
+       Anchoring both here also matters. Anchoring the deadline after
+       session_begin instead would hand the download the association time
+       for free — up to WIFI_CONNECT_TIMEOUT_MS (15 s, wifi_session.c) —
+       while the failsafe had already been counting it, which makes the
+       deadline unreachable and hands the kill back to the failsafe. */
+    int64_t budget_start = s_ops.mono_ms();
+    s_ops.extend_awake(s_cfg.max_sec + OTA_ABORT_TAIL_MS / 1000);
+    int64_t deadline_ms = budget_start + (int64_t)s_cfg.max_sec * 1000;
 
     ota_error_facts_t facts;
     memset(&facts, 0, sizeof(facts));
@@ -317,9 +395,11 @@ void ota_flow_apply(int batt_pct, bool charge_locked) {
         fail_attempt(&facts, false);
         return;
     }
+    /* The duration METRIC, not the deadline: what the stat payload
+       publishes is the transfer's own wall time, so it starts once the
+       link is up. The budget above already covers the association. */
     s_dl_started_ms = s_ops.mono_ms();
     s_dl_running = true;
-    int64_t deadline_ms = s_dl_started_ms + (int64_t)s_cfg.max_sec * 1000;
 
     memset(&facts, 0, sizeof(facts));
     if (!s_ops.dl_begin(s_image_url, &facts)) {

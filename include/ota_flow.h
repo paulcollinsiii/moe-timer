@@ -32,12 +32,25 @@
    ota_flow_apply enforces that ordering rather than leaving it to the
    call site, and test_ota_flow asserts it.
 
-   ---- threading ----
+   ---- threading, and the stack the download needs ----
 
-   ota_flow_check runs on the network task; everything else runs on the
-   main task. The handover is the same one every other network->device
-   effect in this tree uses: the check BUFFERS its result, and the main
-   task reads it only after net_window_join(), which is the barrier. */
+   ota_flow_init, ota_flow_arm and ota_flow_pending run on the main task.
+   ota_flow_check runs on the network task. The handover between them is
+   the same one every other network->device effect in this tree uses: the
+   check BUFFERS its result, and the main task reads it only after
+   net_window_join(), which is the barrier.
+
+   ota_flow_apply is the exception, and it is a hardware requirement
+   rather than a preference: it MUST be called from its own task with a
+   stack of roughly 16 KB, NOT from the main task. The download loop now
+   lives inside this function, so esp_https_ota_perform() — mbedTLS
+   record buffers plus the flash write path — runs on whatever stack
+   calls it. CONFIG_ESP_MAIN_TASK_STACK_SIZE is 7168 B
+   (sdkconfig.defaults), which does not fit; net_window.c already spawns
+   a dedicated 10240 B task for a strictly smaller job. Overflowing here
+   presents on the bench as an unexplained reboot, because USB CDC eats
+   the panic output. See docs/planning/ota.plan.md, "Task and stack
+   sizing", and task 12, which owns the call site. */
 
 #ifdef __cplusplus
 extern "C" {
@@ -110,7 +123,7 @@ typedef struct {
    not necessarily use. app_main passes the real symbols in one line. */
 typedef struct {
     int max_sec;                 /* CONFIG_MAGTAG_OTA_MAX_SEC: the download's own budget */
-    int awake_sec;               /* CONFIG_MAGTAG_MAX_AWAKE_SEC: restored after a failure */
+    int awake_sec;               /* CONFIG_MAGTAG_MAX_AWAKE_SEC: re-armed after a failure */
     int min_batt_pct;            /* CONFIG_MAGTAG_OTA_MIN_BATT_PCT */
     uint16_t max_fails;          /* CONFIG_MAGTAG_OTA_MAX_FAILS */
     uint32_t min_free_heap;      /* headroom the TLS session needs */
@@ -120,11 +133,17 @@ typedef struct {
 /* Install the effects and the budgets. Once, before any other call. */
 void ota_flow_init(const ota_flow_ops_t *ops, const ota_flow_cfg_t *cfg);
 
-/* Main task, before the window opens: clear last wake's buffered result
-   and decide whether this wake's trigger earns a check. batt_pct < 0
-   means "unreadable", which does not gate (see ota_gate_in_t). The
+/* Main task, before the window opens: decide whether this wake's trigger
+   earns a check, and sample the facts the check will gate on. batt_pct <
+   0 means "unreadable", which does not gate (see ota_gate_in_t). The
    battery and charge-lock facts are sampled HERE, on the main task,
-   because the network task must not touch the ADC or the lock gate. */
+   because the network task must not touch the ADC or the lock gate.
+
+   A buffered update is discarded only when this call arms a check, since
+   a check may replace it. Arming for a trigger that will NOT check
+   leaves any buffer alone: two windows in one wake is a routine path
+   (day rollover plus a Button A sync), and the second arm must not throw
+   away what the first window found. */
 void ota_flow_arm(ota_trigger_t trigger, int batt_pct, bool charge_locked);
 
 /* Network task, inside the window: gate, GET the manifest, decide, and

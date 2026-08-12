@@ -100,6 +100,13 @@ static bool m_session_ok;
 static uint32_t m_heap;
 static int64_t m_mono;
 
+/* When the awake failsafe would fire, on the same clock as m_mono. The
+   extension is not merely logged, it is MODELLED, because "the failsafe
+   outlasts the download's own deadline" is a relationship between two
+   numbers and a pure logger cannot see one — which is exactly how a
+   deadline that could never be reached shipped. */
+static int64_t m_failsafe_at;
+
 static int64_t mock_mono_ms(void) {
     return m_mono;
 }
@@ -139,12 +146,30 @@ static bool mock_dl_finish(ota_error_facts_t *facts) {
     return true;
 }
 
+/* Captured AT the abort, not read afterwards: fail_attempt() re-arms the
+   failsafe for the ordinary awake budget a few lines later, which would
+   erase the very relationship under test. */
+static int64_t m_abort_mono;
+static int64_t m_abort_failsafe_at;
+
 static void mock_dl_abort(void) {
     note("abort");
+    m_abort_mono = m_mono;
+    m_abort_failsafe_at = m_failsafe_at;
 }
+
+/* Association is not free, and the mock has to say so. The awake failsafe
+   is re-armed BEFORE the session opens and the loop's deadline is
+   measured against the same clock, so a mock whose session_begin cost
+   nothing cannot express the one relationship that matters between them:
+   on the device wifi_session_begin() blocks for up to
+   WIFI_CONNECT_TIMEOUT_MS (15 s) and every millisecond of it is already
+   burning against the failsafe. 5 s is a healthy association. */
+#define ASSOCIATION_MS 5000
 
 static bool mock_session_begin(void) {
     note("net_on");
+    m_mono += ASSOCIATION_MS;
     return m_session_ok;
 }
 
@@ -164,8 +189,13 @@ static void mock_repaint(void) {
     note("repaint");
 }
 
+/* main.c's extend_awake_failsafe() is an esp_timer_stop followed by a
+   start_once(seconds): the failsafe is re-armed ABSOLUTELY, from the
+   moment of the call. The mock models exactly that, so a test can ask
+   whether the download's own deadline still fits inside it. */
 static void mock_extend_awake(int seconds) {
     note_int("extend", seconds);
+    m_failsafe_at = m_mono + (int64_t)seconds * 1000;
 }
 
 static void mock_restart(void) {
@@ -228,6 +258,9 @@ void setUp(void) {
     m_session_ok = true;
     m_heap = 120000;
     m_mono = 1000;
+    m_failsafe_at = 0;
+    m_abort_mono = 0;
+    m_abort_failsafe_at = 0;
     s_dev_id = "magtag-a1b2c3";
     ota_flow_init(&OPS, &CFG);
     TEST_ASSERT_EQUAL(ESP_OK, nvs_config_set_ota_url(MANIFEST_URL));
@@ -292,14 +325,50 @@ static void test_button_d_checks_only_when_ota_on_sync_is_set(void) {
     TEST_ASSERT_TRUE(ota_flow_pending());
 }
 
-/* Arming is what clears last wake's decision. Without it a buffered
-   update would survive into a wake that never checked and get applied
-   from stale facts. */
-static void test_arming_clears_the_previous_wake_s_pending_update(void) {
+/* Arming for a check is what clears the previous decision — the check
+   about to run is entitled to replace it. Without the clear, a manifest
+   that has since withdrawn the offer would leave yesterday's answer
+   standing. */
+static void test_arming_a_check_clears_the_previous_buffered_update(void) {
     check_at_rollover();
     TEST_ASSERT_TRUE(ota_flow_pending());
-    ota_flow_arm(OTA_TRIGGER_NONE, 90, false);
+
+    m_body = MANIFEST_SAME; /* the offer is withdrawn */
+    check_at_rollover();
     TEST_ASSERT_FALSE(ota_flow_pending());
+}
+
+/* The other half, and the one that costs a real update if it regresses.
+   TWO network sessions in one wake is the routine path, not the exotic
+   one — wifi_session.c:95 names "day rollover + mandatory start sync" as
+   the ordinary example, and net_apply_open() has two call sites
+   (wake_flow.c:349, :1068). The rollover window buffers 1.6.0, the
+   operator presses Button A, and the second window arms with a trigger
+   that will not check. An arm that clears unconditionally would drop the
+   update on the floor and the device would sit a day behind for no
+   reason anybody could see. Nothing is lost by keeping it: s_armed is
+   already false, so no second check can run either way. */
+static void test_a_second_window_in_the_same_wake_keeps_the_buffered_update(void) {
+    check_at_rollover();
+    TEST_ASSERT_TRUE(ota_flow_pending());
+
+    ota_flow_arm(OTA_TRIGGER_NONE, 90, false);
+    TEST_ASSERT_TRUE(ota_flow_pending());
+
+    /* And it is still the whole buffer, not just the flag. */
+    ota_flow_apply(90, false);
+    TEST_ASSERT_EQUAL_STRING(TARGET, m_paint_to);
+    TEST_ASSERT_EQUAL_STRING(IMAGE_URL, m_image_url_seen);
+}
+
+/* Whatever happens below the arm, exactly one check runs per wake: the
+   check spends a TLS handshake, and a second window in the same wake
+   must not spend another. */
+static void test_only_one_check_runs_per_wake(void) {
+    ota_flow_arm(OTA_TRIGGER_ROLLOVER, 90, false);
+    ota_flow_check(true);
+    ota_flow_check(true);
+    TEST_ASSERT_EQUAL_STRING("get", g_log);
 }
 
 /* ---- the check gate ----------------------------------------------------- */
@@ -407,6 +476,56 @@ static void test_a_malformed_manifest_is_recorded(void) {
     TEST_ASSERT_EQUAL_STRING("bad_manifest", stored_result());
 }
 
+/* A body that overruns the reader, built so the copy fills every byte of
+   s_manifest and the LAST one is not a NUL. That is the whole contract
+   between ota_flow.c and ota_policy.c: the byte count is authoritative
+   and the buffer is never terminated on the caller's behalf. A version
+   of this module that reached for strlen() instead would read straight
+   off the end of the static — invisible in every other case here,
+   because every other manifest happens to leave a zero behind it, and a
+   global-buffer-overflow under ASan in this one.
+
+   The truncation itself must be reported, not silently half-parsed: the
+   cut lands mid-string, cJSON refuses it, and bad_manifest is a loud,
+   published failure rather than a targeting table read halfway. */
+static char m_big[4096];
+
+static void fill_the_manifest_buffer(void) {
+    int n = snprintf(m_big, sizeof(m_big), "[{\"schema\":1,\"default\":{\"version\":\"%s\",\"url\":\"%s\"},\"pad\":\"",
+                     TARGET, IMAGE_URL);
+    TEST_ASSERT_TRUE(n > 0 && (size_t)n < sizeof(m_big));
+    memset(m_big + n, 'x', 3000);
+    m_big[n + 3000] = '\0';
+    m_body = m_big;
+}
+
+static void test_a_manifest_that_exactly_fills_the_buffer_is_rejected(void) {
+    fill_the_manifest_buffer();
+    check_at_rollover();
+    TEST_ASSERT_EQUAL_STRING("bad_manifest", stored_result());
+    TEST_ASSERT_FALSE(ota_flow_pending());
+}
+
+/* s_manifest is a static and nothing clears it between fetches, so a
+   short manifest is always read out of a buffer still holding the tail
+   of a longer one. That is safe only because the length is honoured, and
+   "only because" is the kind of thing that should be pinned rather than
+   left to luck: the second decision here must come from the second body
+   alone, and a strlen-shaped reader would run past the end of a static
+   the previous fetch filled to the last byte. */
+static void test_a_shorter_manifest_after_a_full_one_is_read_at_its_own_length(void) {
+    fill_the_manifest_buffer();
+    check_at_rollover();
+    TEST_ASSERT_EQUAL_STRING("bad_manifest", stored_result());
+
+    m_body = MANIFEST_UPDATE; /* ~90 bytes into a buffer holding 2048 */
+    check_at_rollover();
+    TEST_ASSERT_TRUE(ota_flow_pending());
+    ota_flow_apply(90, false);
+    TEST_ASSERT_EQUAL_STRING(TARGET, m_paint_to);
+    TEST_ASSERT_EQUAL_STRING(IMAGE_URL, m_image_url_seen);
+}
+
 /* ---- the apply sequence ------------------------------------------------- */
 
 /* The common path: nothing pending costs one comparison. No window, no
@@ -425,7 +544,7 @@ static void test_no_pending_update_opens_no_window(void) {
      paint      before the radio comes up — display_ota() blocks on a full
                 refresh and has no net_window_active() guard, so painting
                 inside an open window is the brownout in net_window.c:65-79
-     extend:300 after the paint, before the window: an extension applied
+     extend:305 after the paint, before the window: an extension applied
                 once the download "looks slow" races the thing it protects
                 against, and a paint charged to the download budget is 3 s
                 the download does not get
@@ -434,7 +553,7 @@ static void test_no_pending_update_opens_no_window(void) {
 static void test_a_successful_update_paints_extends_downloads_commits_reboots(void) {
     check_at_rollover();
     ota_flow_apply(90, false);
-    TEST_ASSERT_EQUAL_STRING("get paint extend:300 net_on dl_begin step step finish net_off restart", g_log);
+    TEST_ASSERT_EQUAL_STRING("get paint extend:305 net_on dl_begin step step finish net_off restart", g_log);
     TEST_ASSERT_EQUAL_STRING(IMAGE_URL, m_image_url_seen);
 }
 
@@ -514,10 +633,75 @@ static void test_the_deadline_aborts_cleanly_and_never_commits(void) {
     m_step_advance_ms = 200000; /* 200 s a chunk against a 300 s budget */
     check_at_rollover();
     ota_flow_apply(90, false);
-    TEST_ASSERT_EQUAL_STRING("get paint extend:300 net_on dl_begin step step abort net_off extend:180 repaint", g_log);
+    TEST_ASSERT_EQUAL_STRING("get paint extend:305 net_on dl_begin step step abort net_off extend:180 repaint", g_log);
     TEST_ASSERT_EQUAL_STRING("timeout", stored_result());
     TEST_ASSERT_EQUAL_STRING(TARGET, stored_target());
     TEST_ASSERT_EQUAL_UINT16(1, stored_fails());
+}
+
+/* The relationship the abort depends on, and the reason the two numbers
+   at the top of ota_flow_apply are deliberately different.
+
+   extend_awake re-arms the failsafe ABSOLUTELY from the moment of the
+   call, so the failsafe and the loop's deadline are measured from the
+   same instant against the same clock. If the deadline is anchored any
+   LATER than the extension — after session_begin, say, which blocks for
+   the whole association — the failsafe fires first and the device deep
+   sleeps in the middle of dl_step: no abort, no ota_result, no fail
+   count, and tomorrow it attempts the identical doomed download again.
+   Forever. The retry budget never learns anything, which is precisely
+   the sad loop it exists to end.
+
+   So: the abort must happen while there is still failsafe left, with
+   room for the tail behind it (dl_abort, then session_end, which itself
+   waits up to a second for the stack). A realistic chunk here rather
+   than the coarse one the deadline test uses, because the deadline is
+   checked AFTER a chunk and the overshoot has to fit in that room too. */
+static void test_the_deadline_fires_while_the_failsafe_still_has_room(void) {
+    m_steps_to_done = 9999;
+    m_step_advance_ms = 1000; /* a chunk a second against a 300 s budget */
+    check_at_rollover();
+    ota_flow_apply(90, false);
+
+    TEST_ASSERT_EQUAL_STRING("timeout", stored_result());
+    TEST_ASSERT_TRUE_MESSAGE(m_abort_failsafe_at > 0, "the download never reached dl_abort");
+    TEST_ASSERT_TRUE_MESSAGE(m_abort_mono < m_abort_failsafe_at,
+                             "the awake failsafe fired before the download's own deadline");
+    /* And the tail fits: session_end can block for ~1 s behind the
+       abort, so "just barely first" is not good enough. */
+    TEST_ASSERT_TRUE(m_abort_failsafe_at - m_abort_mono >= 1000);
+}
+
+/* Only the success path recorded a duration before, which is the wrong
+   way round: the number exists so a link trending toward the cap is
+   visible in Home Assistant BEFORE it becomes chronic, and by definition
+   that link is the one that is failing. */
+static void test_a_failed_download_still_records_its_duration(void) {
+    m_step_advance_ms = 7000;
+    m_step_fails = true;
+    m_step_facts.transport_failed = true;
+    check_at_rollover();
+    ota_flow_apply(90, false);
+    TEST_ASSERT_EQUAL_STRING("net", stored_result());
+    TEST_ASSERT_EQUAL_UINT32(7000, ota_flow_last_dl_ms());
+}
+
+/* Two ways for ota.c to misbehave identically: fail while filling no
+   facts at all. The reason must still be reportable — an outcome with no
+   ota_result is invisible to Home Assistant and, worse, leaves an older
+   unrelated failure standing as though it were current. */
+static void test_a_begin_that_fails_without_facts_is_still_reported(void) {
+    m_begin_ok = false; /* m_begin_facts is all zero from setUp */
+    check_at_rollover();
+    ota_flow_apply(90, false);
+    TEST_ASSERT_EQUAL_STRING("net", stored_result());
+}
+
+static void test_a_step_that_fails_without_facts_is_still_reported(void) {
+    m_step_fails = true; /* m_step_facts is all zero from setUp */
+    check_at_rollover();
+    ota_flow_apply(90, false);
+    TEST_ASSERT_EQUAL_STRING("net", stored_result());
 }
 
 static void test_a_transport_failure_repaints_and_does_not_reboot(void) {
@@ -525,7 +709,7 @@ static void test_a_transport_failure_repaints_and_does_not_reboot(void) {
     m_step_facts.transport_failed = true;
     check_at_rollover();
     ota_flow_apply(90, false);
-    TEST_ASSERT_EQUAL_STRING("get paint extend:300 net_on dl_begin step abort net_off extend:180 repaint", g_log);
+    TEST_ASSERT_EQUAL_STRING("get paint extend:305 net_on dl_begin step abort net_off extend:180 repaint", g_log);
     TEST_ASSERT_EQUAL_STRING("net", stored_result());
 }
 
@@ -542,7 +726,7 @@ static void test_a_rejected_certificate_is_reported_as_tls_cert(void) {
     m_begin_facts.tls_cert_flags = 0x08;
     check_at_rollover();
     ota_flow_apply(90, false);
-    TEST_ASSERT_EQUAL_STRING("get paint extend:300 net_on dl_begin net_off extend:180 repaint", g_log);
+    TEST_ASSERT_EQUAL_STRING("get paint extend:305 net_on dl_begin net_off extend:180 repaint", g_log);
     TEST_ASSERT_EQUAL_STRING("tls_cert", stored_result());
 }
 
@@ -551,7 +735,7 @@ static void test_a_failed_commit_is_recorded_and_does_not_reboot(void) {
     m_finish_facts.image_rejected = true;
     check_at_rollover();
     ota_flow_apply(90, false);
-    TEST_ASSERT_EQUAL_STRING("get paint extend:300 net_on dl_begin step step finish net_off extend:180 repaint", g_log);
+    TEST_ASSERT_EQUAL_STRING("get paint extend:305 net_on dl_begin step step finish net_off extend:180 repaint", g_log);
     TEST_ASSERT_EQUAL_STRING("bad_image", stored_result());
 }
 
@@ -561,7 +745,7 @@ static void test_a_failed_association_repaints_without_tearing_down(void) {
     m_session_ok = false;
     check_at_rollover();
     ota_flow_apply(90, false);
-    TEST_ASSERT_EQUAL_STRING("get paint extend:300 net_on extend:180 repaint", g_log);
+    TEST_ASSERT_EQUAL_STRING("get paint extend:305 net_on extend:180 repaint", g_log);
     TEST_ASSERT_EQUAL_STRING("net", stored_result());
 }
 
@@ -603,6 +787,29 @@ static void test_a_new_target_version_rearms_a_given_up_device(void) {
     TEST_ASSERT_TRUE(ota_flow_pending());
 }
 
+/* The read-before-write inside fail_attempt, which is invisible unless
+   the two versions differ. A device that already has two failures
+   against 1.6.0 and is now attempting 1.6.1 must come out of a failed
+   attempt with ONE failure against 1.6.1 — the count is keyed on the
+   target precisely so a new version re-arms it. Store the new target
+   before reading the old one and the comparison matches itself: the
+   device inherits the old count, reaches max_fails after a single
+   attempt, and gives up on a build it has tried exactly once. */
+static void test_a_failure_against_a_new_target_starts_its_count_at_one(void) {
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_set_ota_target(TARGET)); /* 1.6.0 */
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_set_ota_fails(2));
+    m_body = "[{\"schema\":1,\"default\":{\"version\":\"1.6.1\",\"url\":\"" IMAGE_URL "\"}}]";
+    m_step_fails = true;
+    m_step_facts.transport_failed = true;
+
+    check_at_rollover();
+    TEST_ASSERT_TRUE(ota_flow_pending());
+    ota_flow_apply(90, false);
+
+    TEST_ASSERT_EQUAL_STRING("1.6.1", stored_target());
+    TEST_ASSERT_EQUAL_UINT16(1, stored_fails());
+}
+
 /* Bullet nine: the failure has to still be there in the next window, and
    arming a new wake must not wipe it. It is the only channel the failure
    has — MQTT was already closed when the download died. */
@@ -624,7 +831,9 @@ int main(void) {
     RUN_TEST(test_rollover_always_checks);
     RUN_TEST(test_plain_tick_wake_never_checks);
     RUN_TEST(test_button_d_checks_only_when_ota_on_sync_is_set);
-    RUN_TEST(test_arming_clears_the_previous_wake_s_pending_update);
+    RUN_TEST(test_arming_a_check_clears_the_previous_buffered_update);
+    RUN_TEST(test_a_second_window_in_the_same_wake_keeps_the_buffered_update);
+    RUN_TEST(test_only_one_check_runs_per_wake);
 
     RUN_TEST(test_empty_endpoint_disables_the_check_entirely);
     RUN_TEST(test_no_ntp_skips_the_check_and_leaves_an_earlier_failure_alone);
@@ -638,6 +847,8 @@ int main(void) {
     RUN_TEST(test_up_to_date_buffers_nothing_and_records_nothing);
     RUN_TEST(test_a_pinned_device_buffers_nothing);
     RUN_TEST(test_a_malformed_manifest_is_recorded);
+    RUN_TEST(test_a_manifest_that_exactly_fills_the_buffer_is_rejected);
+    RUN_TEST(test_a_shorter_manifest_after_a_full_one_is_read_at_its_own_length);
 
     RUN_TEST(test_no_pending_update_opens_no_window);
     RUN_TEST(test_a_successful_update_paints_extends_downloads_commits_reboots);
@@ -650,6 +861,10 @@ int main(void) {
     RUN_TEST(test_a_charge_lock_engaging_between_the_windows_cancels_the_download);
 
     RUN_TEST(test_the_deadline_aborts_cleanly_and_never_commits);
+    RUN_TEST(test_the_deadline_fires_while_the_failsafe_still_has_room);
+    RUN_TEST(test_a_failed_download_still_records_its_duration);
+    RUN_TEST(test_a_begin_that_fails_without_facts_is_still_reported);
+    RUN_TEST(test_a_step_that_fails_without_facts_is_still_reported);
     RUN_TEST(test_a_transport_failure_repaints_and_does_not_reboot);
     RUN_TEST(test_a_rejected_certificate_is_reported_as_tls_cert);
     RUN_TEST(test_a_failed_commit_is_recorded_and_does_not_reboot);
@@ -657,6 +872,7 @@ int main(void) {
 
     RUN_TEST(test_three_failed_wakes_then_the_device_gives_up);
     RUN_TEST(test_a_new_target_version_rearms_a_given_up_device);
+    RUN_TEST(test_a_failure_against_a_new_target_starts_its_count_at_one);
     RUN_TEST(test_a_failure_survives_into_the_next_window);
     return UNITY_END();
 }
