@@ -17,7 +17,10 @@ void display_screens_build_sync_failed(void);
 void display_screens_build_charge_me(void);
 void display_screens_build_bedtime(void);
 /* Firmware update in progress. Version strings are bare ("1.5.0"); the
-   screen prefixes the "v". NULL renders as "?". */
+   screen prefixes the "v" at draw time, so callers pass — and ota_policy
+   keeps comparing — the unprefixed string. NULL or "" renders that line
+   as "Current: v?" / "Installing v?"; anything longer than the screen's
+   display budget is truncated. */
 void display_screens_build_ota(const char *from_version, const char *to_version);
 
 #ifdef __cplusplus

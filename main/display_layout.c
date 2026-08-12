@@ -97,20 +97,32 @@ void display_format_break_chip(char *buf, size_t len, int32_t break_remaining_se
     snprintf(buf, len, "BREAK %ld:%02ld", (long)(break_remaining_sec / 60), (long)(break_remaining_sec % 60));
 }
 
-void display_format_swap_hint(char *buf, size_t len, const char *name) {
+/* Copy at most `max` bytes, never more than the buffer holds, always
+   NUL-terminating; NULL in yields "" out so callers can test buf[0]
+   rather than the pointer. Shared by the two width-budgeted strings
+   below — they differ only in which constant seeds the budget. Bytes,
+   not codepoints (see the header note on DISPLAY_VERSION_MAX). */
+static void copy_bounded(char *buf, size_t len, const char *src, size_t max) {
     if (len == 0)
         return;
-    if (name == NULL) {
+    if (src == NULL) {
         buf[0] = '\0';
         return;
     }
-    size_t max = DISPLAY_SWAP_HINT_MAX;
     if (max > len - 1)
         max = len - 1;
     size_t i = 0;
-    for (; i < max && name[i] != '\0'; i++)
-        buf[i] = name[i];
+    for (; i < max && src[i] != '\0'; i++)
+        buf[i] = src[i];
     buf[i] = '\0';
+}
+
+void display_format_swap_hint(char *buf, size_t len, const char *name) {
+    copy_bounded(buf, len, name, DISPLAY_SWAP_HINT_MAX);
+}
+
+void display_format_version(char *buf, size_t len, const char *version) {
+    copy_bounded(buf, len, version, DISPLAY_VERSION_MAX);
 }
 
 void display_format_remaining(char *buf, size_t len, int32_t remaining_sec) {

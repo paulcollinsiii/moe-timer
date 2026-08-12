@@ -65,6 +65,28 @@ static lv_obj_t *make_label(lv_obj_t *parent, const char *text, const lv_font_t 
     return lbl;
 }
 
+/* Cap geometry — the geometric half of the version-width defence, the
+   other half being DISPLAY_VERSION_MAX (see display.h for why a character
+   budget alone cannot bound rendered width). The battery label is
+   left-aligned at x=4 and must stay clear of the 28 pt remaining time,
+   whose left edge bottoms out at x=180: 4 + 168 = 172, 8 px clear. The
+   OTA screen's two version lines are centred on a 296 px panel: 280
+   leaves 8 px each side, matching the margin the 28 pt title already
+   renders with. */
+#define BATT_ROW_MAX_W 168
+#define OTA_LINE_MAX_W 280
+
+/* Hard geometric backstop for a label carrying caller-supplied text.
+   LV_SIZE_CONTENT keeps auto-sizing below the cap (so ordinary strings
+   render byte-identically and the goldens do not move); at the cap the
+   label stops growing. LONG_CLIP rather than LONG_DOT because DOT wraps
+   a content-sized label onto extra lines (measured: h=15 -> 45), which
+   would push it out of its clean band and into the row below. */
+static void cap_width(lv_obj_t *lbl, int32_t max_w) {
+    lv_obj_set_style_max_width(lbl, max_w, 0);
+    lv_label_set_long_mode(lbl, LV_LABEL_LONG_CLIP);
+}
+
 /* newlib's C locale renders strftime %p empty — format 12h time manually. */
 static void format_time_12h(char *buf, size_t len, const struct tm *tm) {
     int h12 = tm->tm_hour % 12;
@@ -161,22 +183,26 @@ static void build_main_status(lv_obj_t *scr, const display_state_t *st) {
     static const char *BATT_SYMS[] = {LV_SYMBOL_BATTERY_EMPTY, LV_SYMBOL_BATTERY_1, LV_SYMBOL_BATTERY_2,
                                       LV_SYMBOL_BATTERY_3, LV_SYMBOL_BATTERY_FULL};
     /* The firmware version rides this label rather than getting one of
-       its own: the {58,87} clean band already covers it, so there is no
-       new geometry to calibrate and no chance of straddling a
-       framebuffer byte (see the band comments in display.c). Three spaces
-       are the gap; the 'v' is presentation only, and deliberately not
-       part of the stored string — ota_policy compares the bare version
-       against the manifest, so a prefix must never leak upstream of the
-       render. Worst case is 3 (symbol, a 3-byte UTF-8 private-use
-       codepoint) + 1 + 3 ("100") + 1 ('%') + 4 (gap + 'v') + 31
-       (esp_app_desc_t::version is char[32]) = 43 bytes + NUL, inside buf.
-       Widest render is x=4..123 against the 28 pt remaining time starting
-       at x=180 — 57 px of clearance; test_version_fits_the_battery_row
-       pins it. */
-    const char *fw = (st->fw_version != NULL) ? st->fw_version : "";
+       its own: it adds no rows, so the clean-band table in display.c is
+       unchanged (that table already tiles every byte of every row — see
+       the comment there). Three spaces are the gap; the 'v' is
+       presentation only and deliberately not part of the stored string,
+       because ota_policy compares the BARE version against the manifest
+       and a prefix must never leak upstream of the render.
+
+       Two independent limits keep this off the 28 pt remaining time,
+       which starts at x=180 in the worst case: the DISPLAY_VERSION_MAX
+       budget (12 digits -> ends x=164, 16 px clear) and cap_width()'s
+       geometric backstop at 168 px, which holds for any glyph mix.
+       Buffer: 3 (symbol, a 3-byte UTF-8 private-use codepoint) + 1 + 3
+       ("100") + 1 ('%') + 4 (gap + 'v') + 12 (budget) = 24 bytes + NUL,
+       inside buf. test_version_fits_the_battery_row pins all of it. */
+    char ver[DISPLAY_VERSION_MAX + 1];
+    display_format_version(ver, sizeof(ver), st->fw_version);
     snprintf(buf, sizeof(buf), "%s %u%%%s%s", BATT_SYMS[display_battery_icon_level(st->battery_pct)],
-             (unsigned)st->battery_pct, (fw[0] != '\0') ? "   v" : "", fw);
-    make_label(scr, buf, &lv_font_montserrat_12, LV_ALIGN_TOP_LEFT, 4, 66);
+             (unsigned)st->battery_pct, (ver[0] != '\0') ? "   v" : "", ver);
+    lv_obj_t *batt = make_label(scr, buf, &lv_font_montserrat_12, LV_ALIGN_TOP_LEFT, 4, 66);
+    cap_width(batt, BATT_ROW_MAX_W);
 
     display_format_remaining(buf, sizeof(buf), st->remaining_sec);
     make_label(scr, buf, &lv_font_montserrat_28, LV_ALIGN_TOP_RIGHT, -4, 58);
@@ -330,13 +356,14 @@ void display_screens_build_bedtime(void) {
    installed — so a device that gets stuck says which transition it was
    attempting without needing the logs or HA.
 
-   No CLEAN_BANDS entry in display.c is needed or wanted: the bands drive
-   partial-refresh content inverse->true to stop ghosting, and this
-   screen (like charge_me / bedtime / timesup) only ever renders as a
-   full refresh, which clears the panel by itself. */
+   No CLEAN_BANDS entry in display.c is needed: the bands are consulted
+   only on the PARTIAL path, and this screen (like charge_me / bedtime /
+   timesup) only ever renders as a full refresh, which drives the whole
+   panel and clears ghosting by itself. */
 void display_screens_build_ota(const char *from_version, const char *to_version) {
     lv_obj_t *scr = fresh_screen(false);
     char buf[64];
+    char ver[DISPLAY_VERSION_MAX + 1];
 
     /* Title case, not the plan's "UPDATING FIRMWARE": all caps at 28 pt
        measures 327 px against a 296 px panel, so LVGL would clip the tail
@@ -346,16 +373,20 @@ void display_screens_build_ota(const char *from_version, const char *to_version)
        pins the width. */
     make_label(scr, "Updating Firmware", &lv_font_montserrat_28, LV_ALIGN_TOP_MID, 0, 6);
 
-    snprintf(buf, sizeof(buf), "Current: v%s", (from_version != NULL) ? from_version : "?");
-    make_label(scr, buf, &lv_font_montserrat_12, LV_ALIGN_TOP_MID, 0, 46);
+    display_format_version(ver, sizeof(ver), from_version);
+    snprintf(buf, sizeof(buf), "Current: v%s", (ver[0] != '\0') ? ver : "?");
+    cap_width(make_label(scr, buf, &lv_font_montserrat_12, LV_ALIGN_TOP_MID, 0, 46), OTA_LINE_MAX_W);
 
     /* "Installing", not "Upgrading to": the OTA policy deliberately
        treats a *different* published version as an update, downgrades
        included, so the directional verb would be actively wrong on a
        rollback. The "Current:" line above already supplies the
        direction. */
-    snprintf(buf, sizeof(buf), "Installing v%s", (to_version != NULL) ? to_version : "?");
-    make_label(scr, buf, &lv_font_montserrat_18, LV_ALIGN_TOP_MID, 0, 66);
+    display_format_version(ver, sizeof(ver), to_version);
+    snprintf(buf, sizeof(buf), "Installing v%s", (ver[0] != '\0') ? ver : "?");
+    /* 18 pt is the binding line: untruncated it clips off the panel at 21
+       characters (measured 303 px against 296). */
+    cap_width(make_label(scr, buf, &lv_font_montserrat_18, LV_ALIGN_TOP_MID, 0, 66), OTA_LINE_MAX_W);
 
     /* Honest rather than strictly necessary — the write goes to the
        inactive slot and the boot partition only flips after the image

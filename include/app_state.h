@@ -17,7 +17,7 @@ typedef struct {
     int light_mv;             /* stats only; display never reads light */
     bool charge_locked;       /* stats only */
     bool parent_testing;      /* Button B reload gate (Kconfig) */
-    const char *fw_version;   /* stats only */
+    const char *fw_version;   /* stats AND the main screen's battery row */
     const char *reset_reason; /* stats only */
 } app_state_in_t;
 

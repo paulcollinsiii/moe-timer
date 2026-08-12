@@ -300,6 +300,44 @@ void test_swap_hint_respects_a_small_buffer(void) {
     TEST_ASSERT_EQUAL_STRING("Med", buf);
 }
 
+/* ---- display_format_version: the battery row and the update screen ---- */
+
+/* Shares copy_bounded() with the swap hint, so these four cases mirror the
+   four above deliberately: they are what would catch the shared helper
+   being changed for one caller's benefit at the other's expense. */
+void test_version_truncates_to_the_display_budget(void) {
+    char buf[64];
+    /* A real build-id version: 28 characters, well past the budget. */
+    display_format_version(buf, sizeof(buf), "1.5.0-dirty-20260811-abcdef0");
+    TEST_ASSERT_EQUAL_STRING("1.5.0-dirty-", buf);
+    TEST_ASSERT_EQUAL_size_t(DISPLAY_VERSION_MAX, strlen(buf));
+}
+
+void test_version_passes_short_strings_through(void) {
+    char buf[64];
+    display_format_version(buf, sizeof(buf), "1.5.0");
+    TEST_ASSERT_EQUAL_STRING("1.5.0", buf);
+    display_format_version(buf, sizeof(buf), "10.20.30-rc4"); /* exactly the budget */
+    TEST_ASSERT_EQUAL_STRING("10.20.30-rc4", buf);
+}
+
+void test_version_handles_no_version(void) {
+    char buf[64];
+    memset(buf, (char)0xAA, sizeof(buf));
+    display_format_version(buf, sizeof(buf), NULL);
+    TEST_ASSERT_EQUAL_STRING("", buf);
+    display_format_version(buf, sizeof(buf), "");
+    TEST_ASSERT_EQUAL_STRING("", buf);
+}
+
+void test_version_respects_a_small_buffer(void) {
+    /* The buffer wins over the budget when it is the tighter of the two. */
+    char buf[4];
+    memset(buf, (char)0xAA, sizeof(buf));
+    display_format_version(buf, sizeof(buf), "1.5.0-rc1");
+    TEST_ASSERT_EQUAL_STRING("1.5", buf);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_break_chip_is_minutes_and_seconds);
@@ -311,6 +349,10 @@ int main(void) {
     RUN_TEST(test_swap_hint_passes_short_names_through);
     RUN_TEST(test_swap_hint_handles_no_name);
     RUN_TEST(test_swap_hint_respects_a_small_buffer);
+    RUN_TEST(test_version_truncates_to_the_display_budget);
+    RUN_TEST(test_version_passes_short_strings_through);
+    RUN_TEST(test_version_handles_no_version);
+    RUN_TEST(test_version_respects_a_small_buffer);
     RUN_TEST(test_mode_line_extra_timer_without_completions);
     RUN_TEST(test_mode_line_extra_timer_with_completions);
     RUN_TEST(test_mode_line_non_reloadable_never_shows_counter);

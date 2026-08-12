@@ -47,12 +47,14 @@ typedef struct {
     bool start_available;
     bool charge_warn; /* battery <= 15%: Charge Me!!! badge on the bar */
     /* Running firmware version, folded into the battery row's label
-       ("[batt] 87%   v1.5.0") — the {58,87} clean band already covers it,
-       so no new geometry and no risk of straddling a framebuffer byte.
-       NULL or "" renders the row exactly as it did before the field
-       existed. Injected as a string: display_screens.c never calls
-       esp_app_get_description(), which is what keeps the golden
-       deterministic. */
+       ("[batt] 87%   v1.5.0") rather than given a label of its own: it
+       adds no rows, so display.c's clean-band table is untouched. NULL or
+       "" renders the row exactly as it did before the field existed.
+       Rendered bare — the "v" is added at draw time, so nothing that
+       compares versions ever sees it — and truncated to a display budget,
+       since a manifest may publish up to 31 characters. Injected as a
+       string: display_screens.c never calls esp_app_get_description(),
+       which is what keeps the goldens deterministic. */
     const char *fw_version;
 } display_state_t;
 
@@ -99,6 +101,26 @@ void display_format_break_chip(char *buf, size_t len, int32_t break_remaining_se
    free). */
 #define DISPLAY_SWAP_HINT_MAX 8
 void display_format_swap_hint(char *buf, size_t len, const char *name);
+/* Firmware version as rendered on the main screen's battery row and on
+   both lines of the update screen. NULL/"" writes an empty string; the
+   "v" prefix is added by the caller at draw time, so what round-trips
+   through ota_policy stays unprefixed.
+
+   The budget counts BYTES, not codepoints: a multi-byte UTF-8 sequence
+   straddling the cut would be truncated mid-character. Version strings
+   are ASCII in practice and the length is enforced upstream
+   (OTA_VERSION_MAX), so this is documented rather than handled.
+
+   12 is measured, not guessed. A manifest may publish up to 31
+   characters, and the digit curve is the realistic worst case for a
+   version: at 12 digits the battery row ends at x=164 against the 28 pt
+   remaining time starting at x=180, and "Installing v" renders 243 px on
+   a 296 px panel. Note a character budget CANNOT bound rendered width on
+   its own — a 12 pt digit advances ~8 px but 'W' ~14, so an all-'W'
+   version overstrikes at 8 characters — which is why the labels also
+   carry a geometric cap in display_screens.c. */
+#define DISPLAY_VERSION_MAX 12
+void display_format_version(char *buf, size_t len, const char *version);
 /* Mode line for an extra timer: "Meditation - 10 min", or with the day's
    completed-run counter ("Meditation (x2) - 10 min") when reloadable.
    Screen (slot 0) keeps the day-type line rendered by display.c. */

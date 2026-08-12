@@ -948,6 +948,11 @@ static int32_t flow_made_break_remaining;
    ParentTesting twin binary is what proves both values of. */
 static int flow_assembled_mv;
 static bool flow_assembled_parent;
+/* The version string the assembly handed over. The main screen renders it
+   on the battery row, so a paint that leaves it NULL blanks the version on
+   hardware — which is exactly what shipped once, because this stub used to
+   drop the field on the floor. */
+static const char *flow_assembled_fw;
 
 /* Cases inject a percentage; the pair below is a FAKE CURVE and not an
    identity, following test_lock_gate. A read that got dropped or an mv
@@ -967,6 +972,7 @@ display_state_t app_state_display(const app_state_in_t *in, int32_t remaining, t
     flow_log_push(EV_MAKE_STATE);
     flow_assembled_mv = in->batt_mv;
     flow_assembled_parent = in->parent_testing;
+    flow_assembled_fw = in->fw_version;
     /* Row 3's pair: the slot the selection was on when the state was
        assembled, and the number that went with it. A paint that runs
        before the drain records the PRE-snap slot and the row-3 case
@@ -1339,6 +1345,7 @@ void setUp(void) {
     flow_batt_pct = 67;
     flow_assembled_mv = -1;
     flow_assembled_parent = true; /* poisoned: the shipping build is false */
+    flow_assembled_fw = "poison"; /* not the descriptor's string */
     /* Wake-sticky on device (one wake is one boot), so the suite zeroes it
        directly — as test_lock_gate does with the lock flags — rather than
        making wake_flow carry a reset entry point production never calls. */
@@ -1854,6 +1861,36 @@ void test_the_state_assembly_hands_the_battery_read_to_app_state(void) {
 void test_the_state_assembly_carries_the_parent_testing_flag(void) {
     (void)make_display_state(0, flow_at(15, 0));
     TEST_ASSERT_EQUAL_INT(PARENT_TESTING ? 1 : 0, flow_assembled_parent ? 1 : 0);
+}
+
+/* The third field, and the one with no compile-time excuse. The main
+   screen renders the running version on the battery row, so it has to
+   travel on the PAINT path, not just the stats path — and it did not:
+   make_display_state() left .fw_version implicitly NULL while
+   stats_collect() set it, so every main-screen paint on device took the
+   empty-version branch and rendered exactly as it had before the feature
+   existed. Nothing caught it because this stub recorded only batt_mv and
+   parent_testing.
+
+   Asserted against the descriptor stub's string rather than merely
+   non-NULL, so substituting some other string on the way in fails too. */
+void test_the_state_assembly_carries_the_firmware_version(void) {
+    (void)make_display_state(0, flow_at(15, 0));
+    TEST_ASSERT_NOT_NULL(flow_assembled_fw);
+    TEST_ASSERT_EQUAL_STRING(esp_app_get_description()->version, flow_assembled_fw);
+}
+
+/* ...and the same through a real paint rather than the assembly called
+   directly, because make_display_state() is the funnel every render site
+   goes through and this is the cheapest one to drive end to end. */
+void test_paint_carries_the_firmware_version(void) {
+    flow_arm_break(flow_at(16, 0), FLOW_SCREEN, FLOW_PIANO);
+    mock_time_set(flow_at(16, 0) + 3);
+
+    TEST_ASSERT_TRUE(wake_flow_break_end_repaint());
+
+    TEST_ASSERT_EQUAL_INT(1, flow_repaint_count());
+    TEST_ASSERT_EQUAL_STRING(esp_app_get_description()->version, flow_assembled_fw);
 }
 
 /* Nothing but the assembly: a stat read must never transition the state
@@ -6234,6 +6271,8 @@ int main(void) {
     RUN_TEST(test_a_silent_break_end_still_repaints);
     RUN_TEST(test_the_state_assembly_hands_the_battery_read_to_app_state);
     RUN_TEST(test_the_state_assembly_carries_the_parent_testing_flag);
+    RUN_TEST(test_the_state_assembly_carries_the_firmware_version);
+    RUN_TEST(test_paint_carries_the_firmware_version);
     RUN_TEST(test_the_state_assembly_neither_ticks_nor_paints);
     RUN_TEST(test_the_full_repaint_ticks_then_assembles_then_flushes);
     RUN_TEST(test_the_full_repaint_never_goes_partial);

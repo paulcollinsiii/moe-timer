@@ -151,8 +151,14 @@ static void render_action_result(button_id_t btn, timer_state_t before, time_t n
    side the thunk collapses into the body it wrapped.
 
    Only the battery ADC read is device-side — the assembly rules are
-   app_state.c's and are host-tested there. Light/fw/reset are stats-only
-   and deliberately not read here: no extra ADC work per paint.
+   app_state.c's and are host-tested there. Light and reset reason are
+   stats-only and deliberately not read here: no extra ADC work per paint.
+   fw_version is NOT in that category — the main screen renders it on the
+   battery row, so it must be read on the paint path too. It is a cheap
+   pointer into the app descriptor in flash, not a device read, so the
+   "no extra work per paint" argument never applied to it. It was omitted
+   here when the field was added and the version silently rendered blank
+   on hardware; test_paint_carries_the_firmware_version pins it.
 
    Unchanged by the move APART FROM THE LOG TAG: the debug line below used
    to print under main.c's TAG="main" and now prints under "wake_flow".
@@ -165,6 +171,7 @@ static display_state_t make_display_state(int32_t remaining, time_t now) {
     app_state_in_t in = {
         .batt_mv = mv,
         .parent_testing = PARENT_TESTING,
+        .fw_version = esp_app_get_description()->version,
     };
     return app_state_display(&in, remaining, now);
 }
