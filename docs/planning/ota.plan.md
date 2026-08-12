@@ -976,26 +976,42 @@ is what gives the malformed-JSON cases teeth.
 
 ## Tasks
 
-**Status (2026-08-11):** tasks 1-9 are implemented, reviewed and committed on
+**Status (2026-08-12):** tasks 1-9 are implemented, reviewed and committed on
 `worktree-ota-plan` -- `d7e28f6` (partition freeze + `version.txt`), `6f61f50`
 (config surface + the HA `sw`-staleness fix), `b084917` (`ota_policy`),
 `6f5d618` (version on panel + update screen).
 
-Each package then went through an adversarial review round, and two of those
-rounds are now committed on top: `c22d2dc` (config surface) and `ff83d2a`
-(`ota_policy`). Those rounds were not cosmetic. The config surface could not
+Each package then went through an adversarial review round, and all three are
+now committed on top: `c22d2dc` (config surface), `ff83d2a` (`ota_policy`) and
+`5cdcdf6` (display). Those rounds were not cosmetic. The config surface could not
 actually carry the OTA URL it advertised -- a 127-character bound against a
 79-character transport, failing silently every window -- and the discovery
 fingerprint missed slot enablement, so the ordinary two-window way of enabling
 a timer from HA never published its entities. `ota_policy` accepted a
-fractional schema number and could index its reason table out of range. None
-of these were visible from the packages' own passing tests; all were found by
-review and are now pinned.
+fractional schema number and could index its reason table out of range. The
+display package would have shipped a **blank** version to hardware: the field
+was wired through `app_state.c` and `display_screens.c` but never set by
+`make_display_state()` in `wake_flow.c`, the one call site that populates it on
+the device -- invisible on host because every display test injects a
+`display_state_t` directly. None of these were visible from the packages' own
+passing tests; all were found by review and are now pinned.
 
 35/35 host suites green, verified from a clean build directory with
 ASan/UBSan over the combined tree, and each commit re-verified standalone so
-no intermediate is broken. The display package's own review round is still in
-flight. Tasks 10-17 remain.
+no intermediate is broken.
+
+Two things the display round settled that later tasks were going to have to
+assume. `lv_obj_set_style_max_width` + `LV_LABEL_LONG_CLIP` is **confirmed on
+host** against real LVGL 9.5.0 and is no longer a hardware-smoke-test risk;
+mutation shows the clip half is load-bearing, because `max_width` alone stops
+the object growing but LVGL *wraps* the overflow into the row below. And
+`display_ota()` now sets an `RTC_DATA_ATTR` flag that promotes the next paint
+to a full refresh -- that is the mechanism tasks 10 and 13 refer to, and it
+already survives `esp_restart()`, so task 13's post-reboot clause is satisfied
+by construction rather than needing its own code.
+
+Tasks 10-17 remain, plus task 18 -- the BUG-8 fix, added at the operator's
+request to be shipped as the first real OTA payload.
 
 ### Follow-ups the reviews surfaced (none blocking)
 
@@ -1101,6 +1117,34 @@ deserve their own commit and their own review:
 17. Update `docs/architecture.md`: module table, layer lists, a subsystem note
     for the two-window design and the timeout/retry mechanism, and the new
     stat fields.
+18. **Fix BUG-8** (`ef3af99`, `docs/planning/refactor.bugdiscoveries.md`):
+    losing the timer-defs blob resets `break_eligible` to the Kconfig `n`
+    permanently, and BUG-6's rule cements it. `timer_defs_install()`
+    (`main/timer_defs.c:75`) materializes a Kconfig table on any failed blob
+    read and **writes it back** at `main/main.c:315`, before the network window
+    applies the retained HA document -- so `apply_timers()` sees `have_prev` and
+    `existed` true and preserves an invented zero as though it were an operator
+    setting. `break_eligible` is the only field that cannot heal: it is
+    HA-settable, absent from pre-BUG-6 config documents, and its Kconfig default
+    is not the operator's choice. The retained `set/` command is cleared on
+    apply and HA holds no independent copy, so the device *pushes* the reset
+    into HA. Preferred direction (smallest, per the entry): install the Kconfig
+    defs in RAM for the boot but do **not** write them to NVS, so `have_prev` is
+    correctly false for a first-time definition -- subject to a check that
+    nothing depends on the blob existing after boot. `ha_config.c`'s
+    `load_defs()` (`main/ha_config.c:187`) has the same zero-and-write-back
+    shape and needs the same treatment. Add the `ESP_LOGW` on materialization
+    regardless: the reason this was inferred rather than observed is that the
+    silent overwrite emits nothing.
+
+**Task 18 is deliberately last, and deliberately not part of the OTA work.**
+It is a behaviour fix in the timer-defs path with no OTA dependency, and
+sequencing it after task 16 makes it the **first real payload** the OTA channel
+carries to the devices -- an end-to-end exercise of the mechanism on a change
+that is worth deploying on its own merits, rather than a contrived one. That
+also means task 18 must not be folded into any earlier package: the whole point
+is that it ships as a *separate build*, after the fleet is already running an
+OTA-capable image.
 
 Task 12 is the one that touches `main.c`, and it should be a **single
 branch-free line** installing the extender. Anything more than that in `main.c`
