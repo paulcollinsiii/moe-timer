@@ -1484,25 +1484,57 @@ deserve their own commit and their own review:
 
     | | bootloader | of 28,672 B | free | app | of 0x1c0000 |
     |---|---|---|---|---|---|
-    | rollback **off** | `0x5870` = 22,640 B | 78.96 % | 6,032 B | `0x16c5b0` = 1,492,400 B | 81.33 % |
-    | rollback **on** | `0x58c0` = 22,720 B | 79.24 % | 5,952 B | `0x16c7a0` = 1,492,896 B | 81.36 % |
-    | delta | **+80 B** | +0.28 pp | -80 B | **+496 B** | +0.03 pp |
+    | rollback **off** | `0x5870` = 22,640 B | 78.96 % | 6,032 B | `0x16ca40` = 1,493,568 B | 81.39 % |
+    | rollback **on** | `0x58c0` = 22,720 B | 79.24 % | 5,952 B | `0x16cbc0` = 1,493,952 B | 81.41 % |
+    | delta | **+80 B** | +0.28 pp | -80 B | **+384 B** | +0.02 pp |
 
     80 bytes of the 6,032 free. The blocking risk this entry was written to
-    guard against does not materialise. The +496 B in the app is the
+    guard against does not materialise. The +384 B in the app is the
     IDF-side rollback bookkeeping that the symbol switches on
-    (`esp_ota_ops` / `bootloader_common` rollback paths); it is *not* our
-    call site, which was still absent from both of those builds.
+    (`esp_ota_ops` / `bootloader_common` rollback paths), not our call site.
 
-    **A measurement trap worth recording**, because it silently produces the
-    wrong answer: `sdkconfig` is gitignored and **overrides** `sdkconfig.defaults`,
-    so adding the symbol to `sdkconfig.defaults` and rebuilding in a tree that
-    already has an `sdkconfig` leaves the symbol at `n` -- the bootloader does
-    not change size and the measurement reads "free". The numbers above were
-    taken by editing a *copy* of `sdkconfig` instead, which is also the only
-    way to take them without regenerating the real one (see task 2's
-    `sdkconfig.defaults` note: the hand-set MQTT credentials, timer names and
-    `CONFIG_MAGTAG_PARENT_TESTING=n` exist nowhere else).
+    **These app figures were re-measured at HEAD.** The first pass took them
+    at `9dfa9c1`, before `1ebf669` added the `ota_mark_valid_if_pending()`
+    call site, and reported **+496 B** -- a number taken against a tree in
+    which the feature was still `--gc-sections` fodder. The re-measurement
+    uses a genuine rollback-off control at the same HEAD, so both rows now
+    contain the call site and the delta is the symbol alone. The bootloader
+    row was unaffected and stands as first measured.
+
+    **A measurement trap worth recording**, because assuming either way
+    silently produces the wrong answer: precedence between the gitignored
+    `sdkconfig` and `sdkconfig.defaults` is **symbol-dependent**, and the
+    mechanism deciding it has not been identified. Measured in one isolated
+    reconfigure run, same defaults file:
+
+    | symbol | Kconfig default | in `sdkconfig` | in defaults | result | winner |
+    |---|---|---|---|---|---|
+    | `BOOTLOADER_APP_ROLLBACK_ENABLE` | n | not set | =y | **y** | defaults |
+    | `MAGTAG_PARENT_TESTING` | y | not set | =y | **n** | sdkconfig |
+    | `MAGTAG_PARENT_TESTING` | y | =y | =n | **y** | sdkconfig |
+
+    A control run with an empty defaults file left the rollback symbol "not
+    set", so the defaults line is genuinely the cause for that symbol; it is
+    a plain `bool default n` with no `select` and no `depends`. An earlier
+    note here claimed the flat rule "`sdkconfig` overrides `sdkconfig.defaults`,
+    so the symbol stays at `n`" -- that is **wrong for this symbol** and was
+    disproved by the runs above. Measure the symbol you care about, without
+    touching the real config:
+
+    ```
+    cp sdkconfig /tmp/sdkconfig.probe
+    idf.py -B /tmp/build.probe -D SDKCONFIG=/tmp/sdkconfig.probe reconfigure
+    ```
+
+    The numbers above were taken the same way. That isolation is still
+    mandatory for a different reason: a plain `idf.py build` regenerates the
+    real `sdkconfig`, and the hand-set MQTT credentials, timer names and
+    `CONFIG_MAGTAG_PARENT_TESTING=n` exist nowhere else (see task 2's
+    `sdkconfig.defaults` note). For the record, the regeneration itself is
+    benign here -- diffing it shows exactly 4 changed lines: this symbol, the
+    newly-visible `CONFIG_BOOTLOADER_APP_ANTI_ROLLBACK` at `n`, and the two
+    deprecated aliases `CONFIG_APP_ROLLBACK_ENABLE` / `CONFIG_APP_ANTI_ROLLBACK`.
+    No credential, timer name or `PARENT_TESTING` line moves.
 
     Enabling `BOOTLOADER_APP_ROLLBACK_ENABLE` also makes
     `CONFIG_BOOTLOADER_APP_ANTI_ROLLBACK` *visible* in menuconfig; it stays

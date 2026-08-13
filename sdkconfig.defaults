@@ -45,21 +45,32 @@ CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
 # IN_DEEP_SLEEP stays off, so a deep-sleep wake re-runs the bootloader and is
 # therefore a rollback opportunity — the device gets exactly one wake to mark
 # the image good. Costs 80 B of bootloader (22,640 -> 22,720 of 28,672, so
-# 5,952 B still free) and 496 B of app; measured, see docs/planning/ota.plan.md
-# task 13. Deliberately NOT paired with CONFIG_BOOTLOADER_APP_ANTI_ROLLBACK,
-# which this symbol merely makes visible: that one is downgrade prevention,
-# burns efuses, and is irreversible — out of scope for this feature.
+# 5,952 B still free) and 384 B of app; measured at HEAD against a genuine
+# rollback-off control, see docs/planning/ota.plan.md task 13. Deliberately
+# NOT paired with CONFIG_BOOTLOADER_APP_ANTI_ROLLBACK, which this symbol
+# merely makes visible: that one is downgrade prevention, burns efuses, and
+# is irreversible — out of scope for this feature.
 #
-# CAUTION: an existing (gitignored) sdkconfig overrides this file, so on a
-# device or worktree that already has one the symbol stays at whatever
-# sdkconfig says and the flag has no effect — set it there too, by hand.
-# The documented way to pick up new defaults is deleting sdkconfig, and here
-# that DESTROYS the hand-set values that live only in sdkconfig (MQTT
-# credentials, timer names, CONFIG_MAGTAG_PARENT_TESTING=n). Edit the line
-# in place instead:
-#   # CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE is not set
-# becomes
-#   CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
+# This line IS picked up on a tree that already has a gitignored sdkconfig —
+# measured, not assumed: an isolated reconfigure against a copy of the real
+# sdkconfig (which had the symbol "not set") came back =y, and the same run
+# with an empty defaults file left it "not set". No hand-editing of sdkconfig
+# is needed for this symbol.
+#
+# Do not generalise that into a rule. Precedence between sdkconfig and
+# sdkconfig.defaults is symbol-dependent, and the mechanism deciding it was
+# not identified. In the same measured run CONFIG_MAGTAG_PARENT_TESTING went
+# the other way twice: sdkconfig won over defaults in both directions, while
+# this symbol had defaults win. Measure the symbol you care about rather than
+# assuming either way, without touching the real config:
+#   cp sdkconfig /tmp/sdkconfig.probe
+#   idf.py -B /tmp/build.probe -D SDKCONFIG=/tmp/sdkconfig.probe reconfigure
+#
+# The next real build rewrites sdkconfig in place, changing exactly 4 lines:
+# this symbol, the newly-visible CONFIG_BOOTLOADER_APP_ANTI_ROLLBACK at n,
+# and the two deprecated aliases CONFIG_APP_ROLLBACK_ENABLE and
+# CONFIG_APP_ANTI_ROLLBACK. Verified by diffing the regenerated file: no MQTT
+# credential, timer name or PARENT_TESTING line changes.
 CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
 
 # MagTag 2025 revision carries 2 MB PSRAM; auto-detect, and keep booting
