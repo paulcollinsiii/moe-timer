@@ -36,6 +36,32 @@ CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
 CONFIG_PARTITION_TABLE_CUSTOM=y
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
 
+# OTA rollback-on-failure. A freshly written slot boots as PENDING_VERIFY;
+# unless the app calls esp_ota_mark_app_valid_cancel_rollback() during that
+# boot, the bootloader marks it ABORTED and boots the previous slot. Without
+# this symbol a bad update is permanent and the device is a brick on a shelf
+# with no UART bridge chip to recover it. main.c's enter_deep_sleep() makes
+# the call via ota_mark_valid_if_pending(); CONFIG_BOOTLOADER_SKIP_VALIDATE_
+# IN_DEEP_SLEEP stays off, so a deep-sleep wake re-runs the bootloader and is
+# therefore a rollback opportunity — the device gets exactly one wake to mark
+# the image good. Costs 80 B of bootloader (22,640 -> 22,720 of 28,672, so
+# 5,952 B still free) and 496 B of app; measured, see docs/planning/ota.plan.md
+# task 13. Deliberately NOT paired with CONFIG_BOOTLOADER_APP_ANTI_ROLLBACK,
+# which this symbol merely makes visible: that one is downgrade prevention,
+# burns efuses, and is irreversible — out of scope for this feature.
+#
+# CAUTION: an existing (gitignored) sdkconfig overrides this file, so on a
+# device or worktree that already has one the symbol stays at whatever
+# sdkconfig says and the flag has no effect — set it there too, by hand.
+# The documented way to pick up new defaults is deleting sdkconfig, and here
+# that DESTROYS the hand-set values that live only in sdkconfig (MQTT
+# credentials, timer names, CONFIG_MAGTAG_PARENT_TESTING=n). Edit the line
+# in place instead:
+#   # CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE is not set
+# becomes
+#   CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
+CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
+
 # MagTag 2025 revision carries 2 MB PSRAM; auto-detect, and keep booting
 # on older PSRAM-less boards instead of aborting.
 CONFIG_SPIRAM=y
