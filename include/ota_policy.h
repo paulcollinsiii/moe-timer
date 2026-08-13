@@ -111,6 +111,7 @@ typedef enum {
     OTA_REASON_BAD_VERSION,  /* version wrong type, empty, or over the bound */
     OTA_REASON_BAD_URL,      /* url missing, wrong type, not https, or too long */
     OTA_REASON_GAVE_UP,      /* retry budget exhausted for this target */
+    OTA_REASON_BAD_REDIRECT, /* the transport refused to follow a 3xx */
     OTA_REASON_HTTP,         /* HTTP status >= 400; the status rides alongside */
     OTA_REASON_NET,          /* transport failed with no more detail */
     OTA_REASON_TLS,          /* TLS failed, but the chain verified */
@@ -237,17 +238,28 @@ uint16_t ota_policy_next_fail_count(const char *target, const char *counted_targ
    esp_tls_get_and_clear_last_error() reports; non-zero means the chain
    was rejected, which is the whole point of the tls_cert / tls split. */
 typedef struct {
-    bool deadline_hit;     /* our own budget aborted the transfer */
-    bool image_rejected;   /* the image header or chip id was refused */
-    bool tls_failed;       /* the TLS layer reported a failure */
-    int tls_cert_flags;    /* mbedtls X509 verify flags; 0 = chain was fine */
-    int http_status;       /* last HTTP status seen, 0 if none */
+    bool deadline_hit;   /* our own budget aborted the transfer */
+    bool image_rejected; /* the image header or chip id was refused */
+    bool tls_failed;     /* the TLS layer reported a failure */
+    int tls_cert_flags;  /* mbedtls X509 verify flags; 0 = chain was fine */
+    int http_status;     /* last HTTP status seen, 0 if none */
+    /* The transport refused to follow a redirect: not https, over
+       OTA_URL_MAX, out of hops, or a 3xx naming nowhere. Its own fact
+       because a refused 3xx folds nowhere else — the status is under 400
+       so http_status will not carry it, and calling it a transport
+       failure hides the one shape that can NEVER succeed by itself: a
+       host emitting a relative `Location`, which fails identically every
+       rollover until the budget caps and reports `net` throughout, with
+       a fix (point the manifest at the final URL) that is not guessable
+       from `net`. */
+    bool redirect_refused;
     bool transport_failed; /* any other transport error */
 } ota_error_facts_t;
 
 /* Facts to reason code. Precedence: our deadline first (the abort is the
    cause, whatever the socket says on the way out), then cert, then TLS,
-   then the image, then HTTP, then a bare transport error. */
+   then the image, then a refused redirect, then HTTP, then a bare
+   transport error. */
 ota_reason_t ota_policy_reason(const ota_error_facts_t *facts);
 
 #ifdef __cplusplus

@@ -22,13 +22,47 @@
        esp_https_ota handle is a module-static and one transfer is in
        flight at a time.
 
-   ---- what this module is NOT tested by ----
+   ---- CALLERS MUST ZERO `facts` BEFORE EVERY CALL ----
 
-   Hardware smoke test only. Everything below needs a radio, a TLS peer
-   and a flash partition. The one decision that did NOT need any of those
-   -- "may I follow this redirect" -- was extracted to ota_url.c, which is
-   pure and has a suite, precisely because it is the security-load-bearing
-   half and would otherwise have shipped unasserted. */
+   Not a style preference. Facts are OR-ed in, so a struct reused across
+   two calls accumulates — except `http_status`, which is written
+   UNCONDITIONALLY (ota_facts_apply_ctx). Reusing one struct for the
+   manifest fetch and then the download would let the second call reset a
+   404 the first one recorded to 0, and the operator would read `net` for
+   a missing manifest. ota_flow.c memsets before every call today; this
+   line is here so that stays true by requirement rather than by luck.
+
+   ---- what this module IS and IS NOT tested by ----
+
+   Hardware smoke test for everything that touches the radio, the TLS
+   peer or the flash partition. The decisions that touch none of those
+   were extracted and DO have suites:
+
+     - ota_url.c   -- "may I follow this redirect", the security-
+                      load-bearing half (test_ota_url);
+     - ota_facts.c -- which esp-tls codes are TLS, which esp_err_t values
+                      mean "not a firmware image", the fallback-fact
+                      rule, and manifest completeness (test_ota_facts).
+
+   The second of those was added after review pointed out that this
+   header's earlier claim -- that ota_url.c was the ONE testable decision
+   in here -- was simply false; roughly a fifth of ota.c was pure
+   judgement reachable only from hardware.
+
+   ---- what bounds a download, and what does not ----
+
+   The dl_step LOOP is bounded by ota_flow's deadline, and the awake
+   failsafe outlasts it by an abort tail whose arithmetic is asserted in
+   ota_timing.h.
+
+   dl_begin is NOT bounded. esp_https_ota's connect loop has no hop
+   counter, and its read_header retries EAGAIN forever, so a wedged peer
+   can hold it past the failsafe. Closing the client from the event
+   handler bounds the redirect case; nothing bounds the stalled-header
+   case. What covers both -- and brownout and battery pull with them --
+   is ota_flow charging the retry budget BEFORE the attempt rather than
+   after an observed failure, so an attempt killed mid-flight is still
+   counted on the next boot. */
 
 #ifdef __cplusplus
 extern "C" {

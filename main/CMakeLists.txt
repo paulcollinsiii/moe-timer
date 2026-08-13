@@ -27,6 +27,7 @@ idf_component_register(
         "ota_policy.c"
         "ota_flow.c"
         "ota_url.c"
+        "ota_facts.c"
         "ota.c"
         "ha_config.c"
         "cmd_apply.c"

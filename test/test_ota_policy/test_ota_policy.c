@@ -758,6 +758,66 @@ void test_reason_mapping_covers_the_failure_table(void) {
     TEST_ASSERT_EQUAL(OTA_REASON_NONE, ota_policy_reason(NULL));
 }
 
+/* A refused redirect could not surface as itself before: there was no
+   fact for it, so ota.c folded it into transport_failed and the operator
+   read `net`.
+   The case that makes it worth a code of its own is the relative
+   `Location`. A host emitting "Location: /firmware/x.bin" produces a
+   download that can NEVER succeed, fails identically at every rollover
+   until the retry budget caps, and reported `net` throughout —
+   indistinguishable from a flaky link, with a fix (point the manifest at
+   the final URL) that nobody could guess from `net`. */
+void test_a_refused_redirect_reports_as_itself(void) {
+    ota_error_facts_t f;
+    memset(&f, 0, sizeof(f));
+    f.redirect_refused = true;
+    TEST_ASSERT_EQUAL(OTA_REASON_BAD_REDIRECT, ota_policy_reason(&f));
+    TEST_ASSERT_EQUAL_STRING("bad_redirect", ota_policy_reason_str(ota_policy_reason(&f)));
+}
+
+/* Where it sits in the precedence, in both directions.
+
+   ABOVE http_status, because the status a refused hop carries is the 3xx
+   itself — under 400, so the status fold would never claim it — and
+   above transport_failed, because "the transport refused this hop" is
+   strictly more informative than "the transport failed".
+
+   BELOW the image and TLS facts, because those name something about the
+   bytes or the peer that a refusal does not supersede: a chain that was
+   rejected still needs a serial visit whatever the redirect did. */
+void test_a_refused_redirect_ranks_between_the_image_and_the_status(void) {
+    ota_error_facts_t f;
+
+    memset(&f, 0, sizeof(f));
+    f.redirect_refused = true;
+    f.transport_failed = true;
+    f.http_status = 302;
+    TEST_ASSERT_EQUAL(OTA_REASON_BAD_REDIRECT, ota_policy_reason(&f));
+
+    /* Even against a 4xx, which is the fold it is placed in front of. */
+    memset(&f, 0, sizeof(f));
+    f.redirect_refused = true;
+    f.http_status = 404;
+    TEST_ASSERT_EQUAL(OTA_REASON_BAD_REDIRECT, ota_policy_reason(&f));
+
+    /* But a rejected chain still wins. */
+    memset(&f, 0, sizeof(f));
+    f.redirect_refused = true;
+    f.tls_cert_flags = 0x08;
+    TEST_ASSERT_EQUAL(OTA_REASON_TLS_CERT, ota_policy_reason(&f));
+
+    memset(&f, 0, sizeof(f));
+    f.redirect_refused = true;
+    f.image_rejected = true;
+    TEST_ASSERT_EQUAL(OTA_REASON_BAD_IMAGE, ota_policy_reason(&f));
+
+    /* And our own deadline outranks everything, as ever. */
+    memset(&f, 0, sizeof(f));
+    f.redirect_refused = true;
+    f.deadline_hit = true;
+    TEST_ASSERT_EQUAL(OTA_REASON_TIMEOUT, ota_policy_reason(&f));
+}
+
 /* Our own deadline outranks whatever the transport reports on the way
    out: the abort is the cause, the socket error is the symptom. */
 void test_deadline_outranks_the_transport_error(void) {
@@ -830,6 +890,9 @@ void test_reason_persistability_matches_the_failure_table(void) {
     TEST_ASSERT_TRUE(ota_policy_reason_is_persistable(OTA_REASON_NO_ENTRY));
     TEST_ASSERT_TRUE(ota_policy_reason_is_persistable(OTA_REASON_BAD_VERSION));
     TEST_ASSERT_TRUE(ota_policy_reason_is_persistable(OTA_REASON_BAD_URL));
+    /* A refusal is an outcome, and the misconfigured-host case behind it
+       never fixes itself, so it has to reach a human. */
+    TEST_ASSERT_TRUE(ota_policy_reason_is_persistable(OTA_REASON_BAD_REDIRECT));
     TEST_ASSERT_TRUE(ota_policy_reason_is_persistable(OTA_REASON_HTTP));
     TEST_ASSERT_TRUE(ota_policy_reason_is_persistable(OTA_REASON_NET));
     TEST_ASSERT_TRUE(ota_policy_reason_is_persistable(OTA_REASON_TLS));
@@ -909,6 +972,8 @@ int main(void) {
     /* reason codes */
     RUN_TEST(test_a_cert_failure_maps_to_tls_cert_not_tls);
     RUN_TEST(test_reason_mapping_covers_the_failure_table);
+    RUN_TEST(test_a_refused_redirect_reports_as_itself);
+    RUN_TEST(test_a_refused_redirect_ranks_between_the_image_and_the_status);
     RUN_TEST(test_deadline_outranks_the_transport_error);
     RUN_TEST(test_reason_text_carries_the_http_status);
     RUN_TEST(test_every_reason_has_a_distinct_string);

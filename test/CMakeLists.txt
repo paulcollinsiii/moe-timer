@@ -110,6 +110,16 @@ add_host_test(test_ota_policy
     EXTRA_SRCS ${CMAKE_CURRENT_SOURCE_DIR}/../lib/cJSON/cJSON.c
     EXTRA_INCLUDES ${CMAKE_CURRENT_SOURCE_DIR}/../lib/cJSON
     EXTRA_LIBS m)
+# The decisions that were buried in the OTA driver: esp-tls vs socket
+# classification, image-vs-transport errors, the fallback-fact rule and
+# manifest completeness. It carries ota_policy.c (and therefore cJSON)
+# because the fallback rule's guarantee is stated in terms of
+# ota_policy_reason, and asserting it against the real classifier rather
+# than a restatement is the whole point.
+add_host_test(test_ota_facts
+    EXTRA_SRCS ${CMAKE_CURRENT_SOURCE_DIR}/../lib/cJSON/cJSON.c
+    EXTRA_INCLUDES ${CMAKE_CURRENT_SOURCE_DIR}/../lib/cJSON
+    EXTRA_LIBS m)
 # The flow suite carries cJSON for the same reason: it runs the REAL
 # ota_policy under the sequencing rather than a mock of it, so the
 # decisions driving the order are the ones the firmware will make.

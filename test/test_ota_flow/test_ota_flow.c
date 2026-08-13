@@ -1,3 +1,4 @@
+#include <setjmp.h>
 #include <stdio.h>
 #include <string.h>
 #include <unity.h>
@@ -111,9 +112,25 @@ static int64_t mock_mono_ms(void) {
     return m_mono;
 }
 
+/* The awake failsafe firing inside dl_begin, modelled honestly: main.c's
+   awake_failsafe_cb calls esp_deep_sleep_start(), which DOES NOT RETURN.
+   A mock that returned false instead would be modelling an observed
+   failure, which is the one case that was never in question.
+
+   dl_begin is where this belongs. It sits outside the loop ota_flow
+   bounds, and two verified paths inside it run without any bound of
+   their own: esp_https_ota's connect loop has no hop counter
+   (esp_https_ota.c:166-218), and its read_header retries EAGAIN forever
+   against a peer that sends headers and then stalls
+   (esp_https_ota.c:591-617). */
+static jmp_buf m_wake_killed;
+static bool m_kill_in_dl_begin;
+
 static bool mock_dl_begin(const char *url, ota_error_facts_t *facts) {
     note("dl_begin");
     snprintf(m_image_url_seen, sizeof(m_image_url_seen), "%s", url);
+    if (m_kill_in_dl_begin)
+        longjmp(m_wake_killed, 1);
     if (!m_begin_ok) {
         *facts = m_begin_facts;
         return false;
@@ -179,8 +196,17 @@ static void mock_session_end(void) {
 
 static char m_paint_from[32], m_paint_to[32];
 
+/* The instant the download's budget is anchored at. ota_flow_apply takes
+   budget_start immediately after this paint returns and nothing advances
+   the clock in between, so capturing it here reconstructs the deadline
+   exactly — which is what lets a test assert against the WORST case
+   overshoot rather than whatever the chunk alignment happened to
+   produce. */
+static int64_t m_budget_start;
+
 static void mock_paint_update(const char *from, const char *to) {
     note("paint");
+    m_budget_start = m_mono;
     snprintf(m_paint_from, sizeof(m_paint_from), "%s", from != NULL ? from : "(null)");
     snprintf(m_paint_to, sizeof(m_paint_to), "%s", to != NULL ? to : "(null)");
 }
@@ -261,6 +287,8 @@ void setUp(void) {
     m_failsafe_at = 0;
     m_abort_mono = 0;
     m_abort_failsafe_at = 0;
+    m_budget_start = 0;
+    m_kill_in_dl_begin = false;
     s_dev_id = "magtag-a1b2c3";
     ota_flow_init(&OPS, &CFG);
     TEST_ASSERT_EQUAL(ESP_OK, nvs_config_set_ota_url(MANIFEST_URL));
@@ -292,6 +320,15 @@ static uint16_t stored_fails(void) {
     uint16_t n = 0;
     TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_ota_fails(&n));
     return n;
+}
+
+/* Run an apply that the awake failsafe kills part-way. The setjmp frame
+   stands in for "the device deep-slept and this call never returned" —
+   nothing after the kill point in ota_flow_apply runs, which is exactly
+   the situation the pre-charge exists to survive. */
+static void apply_and_let_the_failsafe_kill_it(void) {
+    if (setjmp(m_wake_killed) == 0)
+        ota_flow_apply(90, false);
 }
 
 /* ---- triggers ----------------------------------------------------------- */
@@ -544,7 +581,7 @@ static void test_no_pending_update_opens_no_window(void) {
      paint      before the radio comes up — display_ota() blocks on a full
                 refresh and has no net_window_active() guard, so painting
                 inside an open window is the brownout in net_window.c:65-79
-     extend:305 after the paint, before the window: an extension applied
+     extend:310 after the paint, before the window: an extension applied
                 once the download "looks slow" races the thing it protects
                 against, and a paint charged to the download budget is 3 s
                 the download does not get
@@ -553,7 +590,7 @@ static void test_no_pending_update_opens_no_window(void) {
 static void test_a_successful_update_paints_extends_downloads_commits_reboots(void) {
     check_at_rollover();
     ota_flow_apply(90, false);
-    TEST_ASSERT_EQUAL_STRING("get paint extend:305 net_on dl_begin step step finish net_off restart", g_log);
+    TEST_ASSERT_EQUAL_STRING("get paint extend:310 net_on dl_begin step step finish net_off restart", g_log);
     TEST_ASSERT_EQUAL_STRING(IMAGE_URL, m_image_url_seen);
 }
 
@@ -633,7 +670,7 @@ static void test_the_deadline_aborts_cleanly_and_never_commits(void) {
     m_step_advance_ms = 200000; /* 200 s a chunk against a 300 s budget */
     check_at_rollover();
     ota_flow_apply(90, false);
-    TEST_ASSERT_EQUAL_STRING("get paint extend:305 net_on dl_begin step step abort net_off extend:180 repaint", g_log);
+    TEST_ASSERT_EQUAL_STRING("get paint extend:310 net_on dl_begin step step abort net_off extend:180 repaint", g_log);
     TEST_ASSERT_EQUAL_STRING("timeout", stored_result());
     TEST_ASSERT_EQUAL_STRING(TARGET, stored_target());
     TEST_ASSERT_EQUAL_UINT16(1, stored_fails());
@@ -670,6 +707,52 @@ static void test_the_deadline_fires_while_the_failsafe_still_has_room(void) {
     /* And the tail fits: session_end can block for ~1 s behind the
        abort, so "just barely first" is not good enough. */
     TEST_ASSERT_TRUE(m_abort_failsafe_at - m_abort_mono >= 1000);
+}
+
+/* F1: the arithmetic, not the anecdote.
+ *
+ * The test above uses whatever chunk size it happens to use and asserts
+ * the failsafe had "room". That is not the property. The property is
+ * that the failsafe outlasts the deadline plus the WORST case overshoot
+ * — and the worst case is a number, OTA_DL_STEP_WORST_MS, derived in
+ * ota_timing.h from the socket timeout and the read-buffer arithmetic.
+ *
+ * The defect this pins: ota.c set a 10 s timeout_ms while ota_flow armed
+ * a 5 s tail, and because `.buffer_size` was left unset the OTA buffer
+ * (1024) was twice the per-iteration transport read cap (512), so one
+ * dl_step could block for TWO full timeout periods. Twenty seconds of
+ * possible overshoot behind a five second tail: the failsafe could beat
+ * the deadline outright, and then nothing is aborted, nothing recorded.
+ *
+ * Both constants now live in one header with a _Static_assert tying
+ * them together, so the compiler catches the incompatible pair. This
+ * catches the other half — that ota_flow actually ARMS the tail it was
+ * given. */
+static void test_the_failsafe_outlasts_the_worst_case_deadline_overshoot(void) {
+    m_steps_to_done = 9999;
+    /* A chunk costing exactly the longest a dl_step can block. */
+    m_step_advance_ms = OTA_DL_STEP_WORST_MS;
+    check_at_rollover();
+    ota_flow_apply(90, false);
+
+    TEST_ASSERT_EQUAL_STRING("timeout", stored_result());
+    TEST_ASSERT_TRUE_MESSAGE(m_abort_failsafe_at > 0, "the download never reached dl_abort");
+
+    /* Both clocks are anchored at budget_start, which is the instant
+       after the paint. */
+    int64_t deadline = m_budget_start + (int64_t)CFG.max_sec * 1000;
+    /* The latest the loop can POSSIBLY notice the deadline: it is
+       checked after a chunk, so a chunk that began one millisecond
+       before the deadline still runs to completion first. */
+    int64_t latest_abort = deadline + OTA_DL_STEP_WORST_MS;
+
+    TEST_ASSERT_TRUE_MESSAGE(m_abort_mono <= latest_abort, "a chunk overshot the deadline by more than one dl_step");
+    /* And behind even that latest abort there is still enough failsafe
+       left to discard the partial image and bring the radio down. If
+       there is not, the device deep-sleeps mid-teardown and the whole
+       clean-abort guarantee is decoration. */
+    TEST_ASSERT_TRUE_MESSAGE(latest_abort + OTA_DL_ABORT_MS + OTA_SESSION_END_MS < m_abort_failsafe_at,
+                             "the awake failsafe can fire before the abort tail has been paid for");
 }
 
 /* Only the success path recorded a duration before, which is the wrong
@@ -709,7 +792,7 @@ static void test_a_transport_failure_repaints_and_does_not_reboot(void) {
     m_step_facts.transport_failed = true;
     check_at_rollover();
     ota_flow_apply(90, false);
-    TEST_ASSERT_EQUAL_STRING("get paint extend:305 net_on dl_begin step abort net_off extend:180 repaint", g_log);
+    TEST_ASSERT_EQUAL_STRING("get paint extend:310 net_on dl_begin step abort net_off extend:180 repaint", g_log);
     TEST_ASSERT_EQUAL_STRING("net", stored_result());
 }
 
@@ -726,7 +809,7 @@ static void test_a_rejected_certificate_is_reported_as_tls_cert(void) {
     m_begin_facts.tls_cert_flags = 0x08;
     check_at_rollover();
     ota_flow_apply(90, false);
-    TEST_ASSERT_EQUAL_STRING("get paint extend:305 net_on dl_begin net_off extend:180 repaint", g_log);
+    TEST_ASSERT_EQUAL_STRING("get paint extend:310 net_on dl_begin net_off extend:180 repaint", g_log);
     TEST_ASSERT_EQUAL_STRING("tls_cert", stored_result());
 }
 
@@ -735,7 +818,7 @@ static void test_a_failed_commit_is_recorded_and_does_not_reboot(void) {
     m_finish_facts.image_rejected = true;
     check_at_rollover();
     ota_flow_apply(90, false);
-    TEST_ASSERT_EQUAL_STRING("get paint extend:305 net_on dl_begin step step finish net_off extend:180 repaint", g_log);
+    TEST_ASSERT_EQUAL_STRING("get paint extend:310 net_on dl_begin step step finish net_off extend:180 repaint", g_log);
     TEST_ASSERT_EQUAL_STRING("bad_image", stored_result());
 }
 
@@ -745,7 +828,7 @@ static void test_a_failed_association_repaints_without_tearing_down(void) {
     m_session_ok = false;
     check_at_rollover();
     ota_flow_apply(90, false);
-    TEST_ASSERT_EQUAL_STRING("get paint extend:305 net_on extend:180 repaint", g_log);
+    TEST_ASSERT_EQUAL_STRING("get paint extend:310 net_on extend:180 repaint", g_log);
     TEST_ASSERT_EQUAL_STRING("net", stored_result());
 }
 
@@ -810,6 +893,115 @@ static void test_a_failure_against_a_new_target_starts_its_count_at_one(void) {
     TEST_ASSERT_EQUAL_UINT16(1, stored_fails());
 }
 
+/* ---- the budget is charged BEFORE the attempt, not after it ------------- */
+
+/* F2, and the test that would have caught the whole defect class.
+ *
+ * The budget used to be charged at the end of fail_attempt — that is,
+ * only for a failure this module actually OBSERVED. An attempt killed
+ * mid-flight is observed by nobody: the awake failsafe fires, main.c
+ * deep-sleeps immediately, dl_abort never runs and record() never
+ * happens. So the counter stayed put, the budget never engaged, and the
+ * identical doomed attempt burned MAX_AWAKE_SEC of radio-on time at
+ * every rollover forever, on a battery device.
+ *
+ * That is not hypothetical. dl_begin sits OUTSIDE the loop ota_flow
+ * bounds and has two verified unbounded paths of its own, and neither a
+ * brownout nor a battery pull is bounded by anything at all.
+ *
+ * The fix is to write the attempt down before making it. */
+static void test_an_attempt_killed_before_any_record_still_costs_the_budget(void) {
+    m_kill_in_dl_begin = true;
+    check_at_rollover();
+    apply_and_let_the_failsafe_kill_it();
+
+    /* Nothing was recorded — by construction, the wake died before any
+       code that could record anything. */
+    TEST_ASSERT_EQUAL_STRING("", stored_result());
+    /* But the attempt is on the books, so the next boot knows it
+       happened. */
+    TEST_ASSERT_EQUAL_STRING(TARGET, stored_target());
+    TEST_ASSERT_EQUAL_UINT16(1, stored_fails());
+}
+
+/* The consequence that matters: a device dying inside dl_begin every
+   single wake still converges. Without the pre-charge this loop runs
+   until the battery is flat. */
+static void test_a_wake_killed_mid_attempt_still_converges_on_gave_up(void) {
+    m_kill_in_dl_begin = true;
+    for (int wake = 1; wake <= 3; wake++) {
+        check_at_rollover();
+        TEST_ASSERT_TRUE(ota_flow_pending());
+        apply_and_let_the_failsafe_kill_it();
+        TEST_ASSERT_EQUAL_UINT16(wake, stored_fails());
+    }
+    /* Fourth rollover: the check runs, and the answer is now no. */
+    check_at_rollover();
+    TEST_ASSERT_FALSE(ota_flow_pending());
+    TEST_ASSERT_EQUAL_STRING("gave_up", stored_result());
+}
+
+/* The other side of "this is a MOVE, not an addition". Charging up front
+   AND on the observed failure would double-count, halving every budget
+   silently: a max_fails of 3 would give up after two attempts. */
+static void test_an_observed_failure_is_charged_exactly_once(void) {
+    m_step_fails = true;
+    m_step_facts.transport_failed = true;
+    check_at_rollover();
+    ota_flow_apply(90, false);
+    TEST_ASSERT_EQUAL_STRING("net", stored_result());
+    TEST_ASSERT_EQUAL_UINT16_MESSAGE(1, stored_fails(),
+                                     "the attempt was charged twice: once up front and once on failure");
+}
+
+/* A gate that declined is not an attempt and must not be charged. Both
+   second-gate refusals return before the charge, and the update is
+   simply re-found at the next rollover with the budget untouched. */
+static void test_a_gate_that_declines_costs_no_budget(void) {
+    check_at_rollover();
+    m_heap = 1000; /* low_heap at the download gate */
+    ota_flow_apply(90, false);
+    TEST_ASSERT_EQUAL_STRING("low_heap", stored_result());
+    TEST_ASSERT_EQUAL_UINT16(0, stored_fails());
+    TEST_ASSERT_EQUAL_STRING("", stored_target());
+
+    check_at_rollover();
+    ota_flow_apply(90, true); /* charge lock at the download gate */
+    TEST_ASSERT_EQUAL_UINT16(0, stored_fails());
+    TEST_ASSERT_EQUAL_STRING("", stored_target());
+}
+
+/* The success case, and the reason the pre-charge costs nothing. The
+   counter is elevated the moment the attempt starts and cleared outright
+   the moment it commits, so a successful update walks away at zero.
+   Even a death between the commit and that clear is harmless: the device
+   reboots into the new image, and ota_policy answers up_to_date before
+   it ever consults the budget — which the next case pins directly. */
+static void test_a_successful_update_leaves_no_charge_behind(void) {
+    check_at_rollover();
+    ota_flow_apply(90, false);
+    TEST_ASSERT_EQUAL_STRING("restart", g_log + strlen(g_log) - strlen("restart"));
+    TEST_ASSERT_EQUAL_UINT16(0, stored_fails());
+    TEST_ASSERT_EQUAL_STRING("", stored_target());
+}
+
+/* The claim the pre-charge's safety rests on, asserted against the real
+   ota_policy rather than assumed: once the device is RUNNING the version
+   the counter was charged against, the version compare answers
+   up_to_date and the budget is never consulted. So an elevated counter
+   that somehow survived a commit cannot strand the device.
+   Driven here by running a check whose manifest offers exactly the
+   running version, with the counter already at max_fails. */
+static void test_an_elevated_counter_against_the_running_version_is_never_consulted(void) {
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_set_ota_target(RUNNING));
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_set_ota_fails(3)); /* at the cap */
+    m_body = MANIFEST_SAME;
+    check_at_rollover();
+    TEST_ASSERT_FALSE(ota_flow_pending());
+    /* up_to_date, NOT gave_up: the budget never got a look in. */
+    TEST_ASSERT_EQUAL_STRING("", stored_result());
+}
+
 /* Bullet nine: the failure has to still be there in the next window, and
    arming a new wake must not wipe it. It is the only channel the failure
    has — MQTT was already closed when the download died. */
@@ -862,6 +1054,7 @@ int main(void) {
 
     RUN_TEST(test_the_deadline_aborts_cleanly_and_never_commits);
     RUN_TEST(test_the_deadline_fires_while_the_failsafe_still_has_room);
+    RUN_TEST(test_the_failsafe_outlasts_the_worst_case_deadline_overshoot);
     RUN_TEST(test_a_failed_download_still_records_its_duration);
     RUN_TEST(test_a_begin_that_fails_without_facts_is_still_reported);
     RUN_TEST(test_a_step_that_fails_without_facts_is_still_reported);
@@ -874,5 +1067,12 @@ int main(void) {
     RUN_TEST(test_a_new_target_version_rearms_a_given_up_device);
     RUN_TEST(test_a_failure_against_a_new_target_starts_its_count_at_one);
     RUN_TEST(test_a_failure_survives_into_the_next_window);
+
+    RUN_TEST(test_an_attempt_killed_before_any_record_still_costs_the_budget);
+    RUN_TEST(test_a_wake_killed_mid_attempt_still_converges_on_gave_up);
+    RUN_TEST(test_an_observed_failure_is_charged_exactly_once);
+    RUN_TEST(test_a_gate_that_declines_costs_no_budget);
+    RUN_TEST(test_a_successful_update_leaves_no_charge_behind);
+    RUN_TEST(test_an_elevated_counter_against_the_running_version_is_never_consulted);
     return UNITY_END();
 }

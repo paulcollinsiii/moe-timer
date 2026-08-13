@@ -16,6 +16,7 @@
 #include "config_validate.h" /* CFG_BOUND_OTA_* — the reader buffer widths */
 #include "device_id.h"
 #include "nvs_config.h"
+#include "ota_timing.h" /* OTA_ABORT_TAIL_MS and the arithmetic behind it */
 
 #ifndef NATIVE
 #include "esp_log.h"
@@ -37,12 +38,13 @@ static const char *TAG = "ota_flow";
 #define OTA_MANIFEST_MAX 2048
 static char s_manifest[OTA_MANIFEST_MAX];
 
-/* How much longer than the download's own budget the awake failsafe is
-   armed for. It is not slack: it is the abort tail — dl_abort discards
-   the partial image, then session_end brings the radio down and waits up
-   to a second for the stack to answer. The failsafe firing inside that
-   tail is the same outcome as it firing mid-transfer. */
-#define OTA_ABORT_TAIL_MS 5000
+/* OTA_ABORT_TAIL_MS — how much longer than the download's own budget the
+   awake failsafe is armed for — now lives in ota_timing.h, next to the
+   socket timeout it has to outlast. It was a bare 5000 here while ota.c
+   independently set a 10 s timeout_ms, which made the worst-case
+   deadline overshoot four times the tail meant to absorb it. The two are
+   one decision, so they are one header with a _Static_assert tying them
+   together. Read that header before touching either number. */
 
 static ota_flow_ops_t s_ops;
 static ota_flow_cfg_t s_cfg;
@@ -284,13 +286,71 @@ static void stop_clock(void) {
     s_dl_ms = (uint32_t)elapsed;
 }
 
+/* Charge the retry budget for an attempt that is ABOUT TO HAPPEN.
+
+   This is the durable half of the fix for "nothing counts an attempt
+   that was killed mid-flight", and it is a MOVE: this write used to live
+   at the end of fail_attempt, where it only ran for a failure this
+   module actually observed.
+
+   Everything that can kill a wake between here and the commit is
+   invisible from inside the flow. Two of them are ordinary rather than
+   exotic:
+
+     - dl_begin is UNBOUNDED IN TIME. esp_https_ota's _http_connect is
+       `do { open; fetch_headers; handle_response } while (redirect)`
+       with no hop counter of any kind (esp_https_ota.c:166-218), and its
+       read_header does `if (data_read == -ESP_ERR_HTTP_EAGAIN) continue;`
+       inside a loop with no bound (esp_https_ota.c:591-617) — a wedged
+       reverse proxy that sends headers and then stalls spins there at
+       one socket timeout per turn. The loop that ota_flow bounds starts
+       AFTER dl_begin returns, so neither is covered by the deadline.
+     - a brownout or a battery pull, which no in-flight bound can ever
+       cover.
+
+   In every one of those the awake failsafe fires, main.c deep-sleeps
+   immediately, dl_abort never runs and record() never happens. Charging
+   AFTER an observed failure therefore learns nothing from exactly the
+   failures that repeat: the counter stays put, the budget never engages,
+   and the identical doomed attempt burns MAX_AWAKE_SEC of radio-on time
+   at every rollover forever, on a battery device. Charging BEFORE makes
+   the attempt countable on the next boot whatever kills it.
+
+   The cost is one over-count for an attempt that would have succeeded
+   had it been allowed to finish — and there is no such thing, because
+   the successful path clears the counter outright a few lines below.
+   A death between the commit and that clear is harmless too: the device
+   reboots into the new image, running_version then equals the target, and
+   ota_policy's resolve() answers up_to_date BEFORE it ever consults the
+   budget (ota_policy.c — the version compare precedes
+   ota_policy_budget_exhausted), so the elevated counter for that target
+   is never read again.
+
+   Order matters between the two writes. fails is written FIRST because
+   the value was computed against the OLD counted target: a crash between
+   them then leaves a count that does not match the target, which reads
+   as stale, re-arms, and is recomputed correctly on the next wake. The
+   other order leaves the NEW target wearing the OLD target's count,
+   which can give up on a build that was never attempted. */
+static void charge_the_attempt(void) {
+    char counted[CFG_BOUND_OTA_TARGET_MAX];
+    read_counted_target(counted, sizeof(counted));
+    uint16_t fails = 0;
+    (void)nvs_config_get_ota_fails(&fails); /* getter leaves 0 on any error */
+
+    (void)nvs_config_set_ota_fails(ota_policy_next_fail_count(s_target, counted, fails));
+    (void)nvs_config_set_ota_target(s_target);
+}
+
 /* Everything a failed attempt owes the next window.
 
    The radio comes down BEFORE the repaint, which is the same rule the
    paint at the top of the sequence follows and for the same reason. Then
-   the reason and the target go to NVS, where the next window's stat
-   payload is the only thing that can publish them. Then the failsafe is
-   re-armed for awake_sec — not "restored", because the re-arm is
+   the reason goes to NVS, where the next window's stat payload is the
+   only thing that can publish it. The retry budget is NOT touched here —
+   charge_the_attempt already did that before the attempt started, and
+   charging again would double-count and halve the effective budget.
+   Then the failsafe is re-armed for awake_sec — not "restored", because the re-arm is
    absolute from now and a wake that has already burned time walks away
    with a fresh full budget. What it buys is that the ~3 s repaint below
    is charged to a freshly armed failsafe rather than to whatever is left
@@ -317,14 +377,7 @@ static void fail_attempt(const ota_error_facts_t *facts, bool session_up) {
     if (session_up)
         s_ops.session_end();
 
-    char counted[CFG_BOUND_OTA_TARGET_MAX];
-    read_counted_target(counted, sizeof(counted));
-    uint16_t fails = 0;
-    (void)nvs_config_get_ota_fails(&fails);
-
     record(reason, facts->http_status);
-    (void)nvs_config_set_ota_target(s_target);
-    (void)nvs_config_set_ota_fails(ota_policy_next_fail_count(s_target, counted, fails));
 
     s_ops.extend_awake(s_cfg.awake_sec);
     s_ops.repaint();
@@ -361,7 +414,16 @@ void ota_flow_apply(int batt_pct, bool charge_locked) {
        because an extension applied once a download "looks slow" races
        the failsafe it is protecting against. After, because ~3 s of
        panel time charged to the download's own budget is 3 s the
-       download does not get. */
+       download does not get.
+
+       CHARGE FIRST, ahead of both. From this line on the wake can be
+       killed without this module ever hearing about it, and the paint
+       is already one of the ways: display_ota() blocks on a full refresh
+       and a full refresh is a current draw. Everything before this line
+       is a gate that declined, which is not an attempt and must not be
+       charged. See charge_the_attempt. */
+    charge_the_attempt();
+
     s_ops.paint_update(s_cfg.running_version, s_target);
 
     /* The failsafe and the loop's deadline are two numbers on purpose,
@@ -371,13 +433,23 @@ void ota_flow_apply(int batt_pct, bool charge_locked) {
        extend_awake_failsafe is an esp_timer_stop followed by a
        start_once — so both clocks start at budget_start, on this line.
        They must not start at the same value: if the failsafe wins, the
-       device deep-sleeps in the middle of dl_step. dl_abort never runs,
-       nothing is recorded, the retry budget never advances, and the same
-       doomed download is attempted again at every rollover forever,
-       which is exactly the sad loop the budget exists to end. So the
-       failsafe is given max_sec PLUS the abort tail, the loop is given
-       max_sec exactly, and the loop is therefore guaranteed to stop the
-       transfer first with room left to tear it down.
+       device deep-sleeps in the middle of dl_step. dl_abort never runs
+       and nothing is recorded. So the failsafe is given max_sec PLUS the
+       abort tail, the loop is given max_sec exactly, and the loop is
+       therefore guaranteed to stop the transfer first with room left to
+       tear it down.
+
+       "Room left to tear it down" is arithmetic, not a hope, and it is
+       checked by a _Static_assert in ota_timing.h: the tail has to
+       exceed the worst-case overshoot of one dl_step plus dl_abort plus
+       session_end. The overshoot term is the socket timeout ota.c sets,
+       which is why that number and this one now live in the same header.
+
+       Note what this ordering does NOT cover, so that nobody reads more
+       into it than it says: it bounds the LOOP. dl_begin runs before the
+       loop and is unbounded, and a brownout is unbounded everywhere.
+       Those are covered by charge_the_attempt above, which is why the
+       budget is charged up front rather than on an observed failure.
 
        Anchoring both here also matters. Anchoring the deadline after
        session_begin instead would hand the download the association time

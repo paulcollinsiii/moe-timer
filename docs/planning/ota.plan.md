@@ -747,6 +747,7 @@ same treatment.
 | Deadline abort (download too slow) | `timeout` | Clean abort, partial image discarded | Retry budget, then gives up |
 | Download interrupted (power) | *(persisted at next boot)* | Boot partition **not** switched | Next rollover retries from scratch |
 | Image header invalid / wrong chip | `bad_image` | Rejected before switching | Next rollover |
+| Redirect refused (plain http, relative `Location`, too long, out of hops) | `bad_redirect` | Transfer stopped, nothing committed | Point the manifest at the final URL |
 | Battery below floor | `low_batt` | Check skipped | Next rollover |
 | Free heap too low | `low_heap` | Download skipped | Next rollover |
 | Retry budget exhausted | `gave_up` | Stops attempting this version | Publish a new version |
@@ -778,16 +779,19 @@ The downgrade row is the accepted cost of the "different, not newer" test.
 
 ## Architecture
 
-Four new modules, placed by the layer model in `docs/architecture.md`. Three
+Five new modules, placed by the layer model in `docs/architecture.md`. Three
 were planned; `ota_url.c` was split out during task 11 when the redirect rule
-turned out to be a decision rather than plumbing (see that task's entry).
+turned out to be a decision rather than plumbing, and `ota_facts.c` was split
+out during task 11's review round when the claim that `ota_url.c` was the only
+such decision turned out to be false (see that task's entry).
 
 | Module | Layer | Responsibility | Test |
 | --- | --- | --- | --- |
 | `main/ota_policy.c` | **1 — pure** | Manifest parse, device targeting, "should update?" decision, precondition gating. Total function over its arguments; no clock, no NVS, no ESP includes. Uses cJSON, as `config_apply.c` already does. | `test_ota_policy` — host, direct |
 | `main/ota_url.c` | **1 — pure** | May this redirect be followed? Composes `config_is_https_url` with a hop budget and the `OTA_URL_MAX` bound. The one thing in the transport's job that does not need a radio, and the one the `https` guarantee depends on. | `test_ota_url` — host, direct |
 | `main/ota_flow.c` | **2 — orchestration** | Sequences check → buffer → paint → download → reboot. Device effects injected via an ops struct, exactly like `net_apply_ops_t`. | `test_ota_flow` — host, single-TU with stubs |
-| `main/ota.c` | **3 — driver** | `esp_http_client` manifest GET; the four incremental-download primitives (`esp_https_ota_begin` / one `_perform` / `_finish` / `_abort`) and `esp_ota_mark_app_valid_cancel_rollback`. Thin — every decision is already made upstream, **including the deadline**: the loop that drives these lives in `ota_flow.c`, so that "aborted, never committed" is a host assertion rather than a comment. | Hardware smoke test — its one testable decision was moved to `ota_url.c` |
+| `main/ota_facts.c` | **1 — pure** | Transport classification: which esp-tls codes are the TLS layer vs a socket that never came up, which `esp_err_t` values mean "not a firmware image", the fallback-fact rule, whether the transport was clean, and manifest completeness. Split out of `ota.c` in task 11's review round. | `test_ota_facts` — host, direct |
+| `main/ota.c` | **3 — driver** | `esp_http_client` manifest GET; the four incremental-download primitives (`esp_https_ota_begin` / one `_perform` / `_finish` / `_abort`) and `esp_ota_mark_app_valid_cancel_rollback`. Thin — every decision is made upstream or in `ota_url.c` / `ota_facts.c`, **including the deadline**: the loop that drives these lives in `ota_flow.c`, so that "aborted, never committed" is a host assertion rather than a comment. | Hardware smoke test for the I/O; every decision it used to hold is now in `ota_url.c` / `ota_facts.c` |
 
 `main/main.c` gains **nothing**. Under the residency rule the only candidate
 would be an awake-failsafe extension for the download, and that is handled by
@@ -1043,7 +1047,13 @@ and swapping `dl_abort` for `dl_finish`, each fail exactly the test that names
 them). `ota.c` gets *thinner* as a result, which is the direction the layer
 model wants anyway.
 
-Tasks 11-17 remain, plus task 18 -- the BUG-8 fix, added at the operator's
+**Task 11 has landed**, and so has its adversarial review round, taking the
+tree to **38/38 suites** (`test_ota_url` 12 cases, `test_ota_facts` 22,
+`test_ota_flow` 47, `test_ota_policy` 56). Firmware builds at 1,437,088 B in
+the 0x1C0000 slot, 22 % free. See task 11's entry for what the review round
+changed and why.
+
+Tasks 12-17 remain, plus task 18 -- the BUG-8 fix, added at the operator's
 request to be shipped as the first real OTA payload.
 
 ### Follow-ups the reviews surfaced (none blocking)
@@ -1129,9 +1139,12 @@ deserve their own commit and their own review:
     — every partial-failure path inside `dl_begin` aborts or relies on
     `esp_https_ota_begin`'s own cleanup before answering false, and `dl_finish`
     drops the handle whichever way it answers. **The deadline is not this
-    module's**; each primitive is bounded instead by a 10 s `timeout_ms`, which
-    is the granularity at which `ota_flow` can check its own budget and the
-    most that budget can overshoot.
+    module's**; the `dl_step` loop is bounded instead by a 3 s `timeout_ms`,
+    which is the granularity at which `ota_flow` can check its own budget and
+    the most that budget can overshoot. That number and `ota_flow`'s abort
+    tail now live together in `include/ota_timing.h` with a `_Static_assert`
+    tying them — see the review round below, which is where the pair stopped
+    being merely compatible-by-coincidence.
 
     **Deviation 1 — a fourth module, `main/ota_url.c` (+ `include/ota_url.h`,
     `test_ota_url`, 11 cases).** The plan named three OTA modules. The redirect
@@ -1141,8 +1154,11 @@ deserve their own commit and their own review:
     been reachable only from a hardware smoke test, which is to say never
     asserted. It is not in `ota_policy.c` (whose header states the transport is
     deliberately absent) nor in `config_validate.c` (whose subject is config
-    *fields*), so it got its own thirty-line layer-1 module. All seven
-    mutations of it are caught, including the precedence one.
+    *fields*), so it got its own thirty-line layer-1 module. All eight
+    mutations of it are now caught, including both precedence ones — the
+    review round found that the original "seven mutations, no survivors"
+    overstated things: the relative order of `TOO_LONG` and `TOO_MANY` was
+    never pinned, and swapping them survived all eleven cases.
 
     **Deviation 2 — redirect targets must be ABSOLUTE https.** A relative
     target would in fact be safe to follow (the client inherits the scheme, so
@@ -1180,21 +1196,86 @@ deserve their own commit and their own review:
       happens. `esp_https_ota`'s own connect loop has no redirect cap at all
       (it never consults `max_redirection_count`), which is the second reason
       the hop budget lives here.
+
+      **Correction from the review round:** the hop budget bounds the
+      *manifest* path only, where `ota.c`'s own `for (hop = 0; hop <=
+      OTA_MAX_REDIRECTS; hop++)` is the real bound. It does **not** bound
+      `esp_https_ota`'s connect loop, because the verdict is only readable
+      after `esp_https_ota_begin` has returned — it cannot terminate the loop
+      it was written to terminate. What bounds that loop is `ota.c` closing
+      the client from inside the `ON_HEADER` handler once a hop is refused,
+      which makes the in-flight `fetch_headers` fail. `include/ota_url.h` and
+      the bullet above previously implied otherwise.
     - **Read the NVS strings with the declared widths.** Not `ota.c`'s to do
       after all: `ota_flow.c` owns every OTA NVS read (`ota_url` into
       `char[CFG_BOUND_OTA_URL_MAX]`, `ota_target` via `read_counted_target`)
       and already substitutes `""` explicitly on a failed read. `ota.c` reads
       no NVS. Verified rather than duplicated.
 
-    **Known gap, deliberately not fixed here.** A refused redirect reports to
-    Home Assistant as `net`. `ota_error_facts_t` has no fact for "the transport
-    refused to follow a redirect", and `ota_policy_reason` only folds
-    `http_status` into a code at >= 400, so a refused 302 cannot surface as
-    itself. The refusal is logged at `ESP_LOGE` with the specific reason
-    (`not_https` / `too_many` / `too_long` / `no_target`), but that log is
-    unreachable overnight on battery — which is the whole premise of the
-    failure table. Fixing it means a new fact and a new reason code in
-    `ota_policy`, which is task 4's file and a separate change.
+    **Task 11's adversarial review round landed on top** (38/38 host suites,
+    up from 37; firmware unchanged at 1,437,088 B). Two MAJOR findings and six
+    smaller ones. The two majors are worth stating in full because both were
+    invisible from the package's own passing tests:
+
+    - **The socket timeout was larger than the abort tail.** `ota.c` set
+      `timeout_ms` to 10 s; `ota_flow.c` armed the awake failsafe for
+      `max_sec + 5 s` while the loop's deadline was `max_sec` exactly. The
+      tail has to absorb the deadline overshoot *plus* `dl_abort` *plus*
+      `session_end`, and the overshoot alone was twice it. Worse, one
+      `dl_step` could block for **two** timeout periods, not one:
+      `esp_https_ota` reads into `MAX(buffer_size, DEFAULT_OTA_BUF_SIZE)` =
+      1024, while `esp_http_client_read` caps each inner
+      `esp_transport_read` at `buffer_size_rx` — which defaults to 512 when
+      `.buffer_size` is left unset, as it was. Twenty seconds of possible
+      overshoot behind a five second tail, so the failsafe could beat the
+      deadline outright and the device would deep-sleep mid-transfer with
+      nothing aborted and nothing recorded. Fixed by moving both constants
+      into `include/ota_timing.h`, setting `.buffer_size` explicitly so the
+      iteration count is a constant this tree owns rather than an inherited
+      IDF default, lowering the timeout to 3 s, raising the tail to 10 s, and
+      adding a `_Static_assert` that the tail exceeds
+      `OTA_DL_STEP_WORST_MS + OTA_DL_ABORT_MS + OTA_SESSION_END_MS`. The
+      original pair now fails the build.
+
+    - **`dl_begin` is unbounded, and nothing counted an attempt killed inside
+      it.** `esp_https_ota`'s `_http_connect` is a `do { ... } while
+      (process_again(status))` with no hop counter of any kind, and its
+      `read_header` does `if (data_read == -ESP_ERR_HTTP_EAGAIN) continue;`
+      inside a loop with no cap — a wedged reverse proxy that sends headers
+      and then stalls spins there at one socket timeout per turn. Both sit
+      *outside* the loop `ota_flow` bounds. When the failsafe wins, `dl_abort`
+      never runs, `ota_result` is never written, and `ota_fails` never
+      increments, so the budget never engages and the identical doomed
+      attempt burns `MAX_AWAKE_SEC` of radio-on time at every rollover
+      forever. The durable fix is in `ota_flow.c` and is a **move, not an
+      addition**: the retry budget is now charged BEFORE the attempt rather
+      than on a failure the flow happened to observe, which makes any
+      mid-attempt death countable on the next boot — including brownout and
+      battery pull, which no in-flight bound can ever cover. Defence in depth
+      in `ota.c` closes the redirect half by closing the client from the event
+      handler; the stalled-header half is explicitly **not** closed, and the
+      comment says so rather than implying otherwise.
+
+    The panel is fine after such a kill, which was checked rather than
+    assumed: `display_ota()` sets `s_takeover_on_panel`, which is
+    `RTC_DATA_ATTR` and therefore survives deep sleep, so the next wake's
+    `display_update()` promotes its paint to a full refresh and clears the
+    flag. No extra code needed.
+
+    The six smaller findings: a dropped connection in the first 1 KB reported
+    as `bad_image` (`esp_https_ota` returns a bare `ESP_FAIL` for both a wrong
+    app-descriptor magic and a socket that closed before the header arrived —
+    now discriminated on whether the transport complained);
+    `ESP_ERR_OTA_ROLLBACK_INVALID_STATE` unclassified, which would start
+    reporting as `net` the moment task 13 turns rollback on; a refused
+    redirect reporting as `net`, now its own fact and its own
+    **`bad_redirect`** reason code — the case that earns it is a host emitting
+    a *relative* `Location`, which can never succeed and fails identically
+    every rollover with a fix nobody could guess from `net`; the untested
+    decisions in `ota.c` extracted to `ota_facts.c` with a 22-case suite; one
+    surviving mutation in `test_ota_url` (the relative order of `TOO_LONG` and
+    `TOO_MANY` was never pinned); and the documentation corrections recorded
+    above and in the headers.
 12. Wire the rollover trigger, the Button D trigger, the pre-sleep apply point,
     and the failsafe extender install in `app_main`. Four call sites, and the
     module's own tests cannot reach any of them:
@@ -1316,6 +1397,18 @@ needs to name one of the four residency reasons at review, or move.
 14. Confirm a check is skipped below 30 % battery.
 15. Check the `net_win` and OTA task stack watermarks, and the reported
     download duration, in the logs.
+16. **`net_win` stack headroom on the first real manifest GET — UNVERIFIED,
+    and only hardware can settle it.** `ota_manifest_get` runs a full mbedTLS
+    handshake on the 10240 B `net_win` task (`net_window.c:127`), which has
+    never carried a TLS handshake before this feature: `grep -c "mqtts://"
+    sdkconfig` is 0, so the existing MQTT session is plaintext. `ota.c` adds
+    roughly 650 B of its own frames on top. `net_window.c:89` already logs
+    `uxTaskGetStackHighWaterMark(NULL)` once per window — read that number on
+    the first wake that performs a real manifest GET, not on a wake that
+    skips the check. This path runs at **every rollover**, so an overflow is
+    a daily reboot, and a `net_win` overflow presents as an unexplained
+    reboot with the panic swallowed by USB CDC. If the watermark is tight,
+    raise the `net_win` stack rather than moving the GET.
 
 ---
 

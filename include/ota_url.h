@@ -37,10 +37,25 @@
    OTA_URL_MAX is rejected outright: silently following a truncated URL is
    how you end up fetching something nobody named.
 
-   BOUNDED HOPS. esp_https_ota's own connect loop has no redirect cap at
-   all (it loops while the status says "redirect", and never consults
-   esp_http_client's max_redirection_count), so a host answering 302 with
-   a Location pointing at itself would spin until the awake failsafe fired.
+   BOUNDED HOPS — and be precise about WHICH loop this bounds, because
+   an earlier version of this comment was not.
+
+   It bounds the MANIFEST path. There, ota.c drives open/fetch_headers
+   itself in its own `for (hop = 0; hop <= OTA_MAX_REDIRECTS; hop++)`,
+   and that `for` is the real bound; this budget is the second of two,
+   kept so the loop stays finite even if the check is ever loosened.
+
+   It does NOT bound esp_https_ota's connect loop on the DOWNLOAD path.
+   That loop is `do { open; fetch_headers; handle_response } while
+   (process_again(status))` with no hop counter of any kind
+   (esp_https_ota.c:166-218), it never consults
+   max_redirection_count, and a verdict returned from this function
+   cannot terminate it — ota.c can only read the verdict after
+   esp_https_ota_begin has RETURNED. What actually stops that loop is
+   ota.c closing the client from inside the event handler once a hop is
+   refused, which makes the in-flight fetch_headers fail. This module
+   supplies the judgement; the enforcement is over there.
+
    The count is the caller's to keep — this module only judges it. */
 
 #ifdef __cplusplus

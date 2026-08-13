@@ -32,6 +32,7 @@ static const char *const REASON_STR[OTA_REASON_COUNT] = {
     [OTA_REASON_BAD_VERSION] = "bad_version",
     [OTA_REASON_BAD_URL] = "bad_url",
     [OTA_REASON_GAVE_UP] = "gave_up",
+    [OTA_REASON_BAD_REDIRECT] = "bad_redirect",
     [OTA_REASON_HTTP] = "http",
     [OTA_REASON_NET] = "net",
     [OTA_REASON_TLS] = "tls",
@@ -97,6 +98,10 @@ bool ota_policy_reason_is_persistable(ota_reason_t reason) {
         case OTA_REASON_NO_ENTRY:
         case OTA_REASON_BAD_VERSION:
         case OTA_REASON_BAD_URL:
+        /* A refusal IS an outcome, and the one it most needs to reach a
+           human for is the misconfigured-host case, which never fixes
+           itself. */
+        case OTA_REASON_BAD_REDIRECT:
         case OTA_REASON_HTTP:
         case OTA_REASON_NET:
         case OTA_REASON_TLS:
@@ -125,6 +130,12 @@ ota_reason_t ota_policy_reason(const ota_error_facts_t *facts) {
         return OTA_REASON_TLS;
     if (facts->image_rejected)
         return OTA_REASON_BAD_IMAGE;
+    /* Above the status fold, because a refused hop carries a 3xx status
+       that the >= 400 test below will never claim, and above the bare
+       transport error, because "the transport refused this hop" is
+       strictly more informative than "the transport failed". */
+    if (facts->redirect_refused)
+        return OTA_REASON_BAD_REDIRECT;
     if (facts->http_status >= 400)
         return OTA_REASON_HTTP;
     if (facts->transport_failed)

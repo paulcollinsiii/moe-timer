@@ -108,6 +108,31 @@ void test_refuses_a_target_that_would_not_fit(void) {
     TEST_ASSERT_EQUAL(OTA_REDIRECT_TOO_LONG, ota_url_redirect_check(url, 0, 3));
 }
 
+/* The order of the OTHER two, which the suite claimed to pin and did
+   not: swapping the length and budget checks (while leaving the scheme
+   check first) survived all eleven cases. No security consequence —
+   both mutants still refuse — but "seven mutations, no survivors"
+   overstated what was actually asserted, and an unasserted ordering is
+   an ordering that will drift.
+   TOO_LONG wins because it names the TARGET, which the operator can go
+   and look at; TOO_MANY names only a limit this firmware chose. */
+void test_length_beats_the_budget(void) {
+    char url[OTA_URL_MAX + 64];
+    size_t prefix = strlen("https://host/");
+    memset(url, 'a', sizeof(url));
+    memcpy(url, "https://host/", prefix);
+    url[sizeof(url) - 1] = '\0';
+
+    /* Over-long AND out of hops: the length is the answer. */
+    TEST_ASSERT_EQUAL(OTA_REDIRECT_TOO_LONG, ota_url_redirect_check(url, 3, 3));
+    TEST_ASSERT_EQUAL(OTA_REDIRECT_TOO_LONG, ota_url_redirect_check(url, 9, 3));
+    /* Over-long against a budget that follows nothing at all. */
+    TEST_ASSERT_EQUAL(OTA_REDIRECT_TOO_LONG, ota_url_redirect_check(url, 0, 0));
+    /* And a corrupt hop count still loses to it, so the precedence is
+       about the checks rather than about the sign of the counter. */
+    TEST_ASSERT_EQUAL(OTA_REDIRECT_TOO_LONG, ota_url_redirect_check(url, -1, 3));
+}
+
 void test_scheme_beats_length_and_budget(void) {
     /* Precedence is a decision, not an accident: "your host redirected
        firmware to plain http" is the refusal that names something the
@@ -153,6 +178,7 @@ int main(void) {
     RUN_TEST(test_a_zero_budget_follows_nothing);
     RUN_TEST(test_a_corrupt_hop_count_fails_closed);
     RUN_TEST(test_refuses_a_target_that_would_not_fit);
+    RUN_TEST(test_length_beats_the_budget);
     RUN_TEST(test_scheme_beats_length_and_budget);
     RUN_TEST(test_refuses_a_redirect_with_no_target);
     RUN_TEST(test_every_outcome_has_a_distinct_code);

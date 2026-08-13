@@ -35,6 +35,8 @@
 #include "esp_log.h"
 #include "esp_ota_ops.h"
 #include "esp_tls.h"
+#include "ota_facts.h"  /* the pure classification this file used to inline */
+#include "ota_timing.h" /* the socket timeout, coupled to ota_flow's abort tail */
 #include "ota_url.h"
 #include "sdkconfig.h"
 
@@ -59,62 +61,17 @@ static const char *TAG = "ota";
    is the intended behaviour. */
 extern const uint8_t ota_ca_pem_start[] asm("_binary_ota_ca_pem_start");
 
-/* Per-socket network timeout. Two jobs, and the second is the one that
-   picked the number: it is the longest a single esp_https_ota_perform can
-   block, so it is the granularity of ota_flow's deadline check and the
-   most that deadline can overshoot. Ten seconds is generous for a TLS
-   handshake over a marginal link and small against
-   CONFIG_MAGTAG_OTA_MAX_SEC (300 by default). */
-#define OTA_HTTP_TIMEOUT_MS 10000
-
 /* ---- what the HTTP layer told us -------------------------------------- */
 
-/* Filled by the event handler, drained into ota_error_facts_t at the
-   point of failure. It exists because the interesting facts are only
-   observable from inside the callback: esp_https_ota owns its
-   esp_http_client and frees it before returning, so by the time a failed
-   esp_https_ota_begin hands control back there is no handle left to ask.
+/* ota_http_ctx_t — filled by the event handler, drained into
+   ota_error_facts_t at the point of failure — now lives in
+   include/ota_facts.h, along with the four decisions that used to be
+   inlined here (which esp-tls codes are TLS, which esp_err_t values mean
+   "not a firmware image", the fallback-fact rule, and manifest
+   completeness). All four are pure, all four needed no radio, and all
+   four were unasserted while they sat in this file. See ota_facts.h.
 
-   One instance per transfer, addressed through esp_http_client_config_t's
-   user_data rather than a file-static, so the manifest GET (a stack local)
-   and the image download (the module-static below, because the transfer
-   outlives the call) share one handler with no possibility of crosstalk. */
-typedef struct {
-    int status;                 /* last HTTP status line seen; 0 if none */
-    int redirects;              /* hops followed so far, this transfer */
-    char location[OTA_URL_MAX]; /* last ACCEPTED redirect target */
-    bool have_location;
-    bool blocked; /* a redirect was refused: this transfer is poisoned */
-    bool tls_failed;
-    int tls_cert_flags;
-    bool transport_failed;
-} ota_http_ctx_t;
-
-/* Which esp-tls failures are TLS failures and which are just a socket
-   that never came up. Getting this wrong is not cosmetic: everything in
-   the second column reports as `tls`, and an operator who reads `tls`
-   goes looking at certificates. DNS and connect failures belong in the
-   first. The boundary cases are deliberate — CONNECTION_TIMEOUT covers
-   the whole low-level connect and reads as "the network flaked", while
-   SERVER_HANDSHAKE_TIMEOUT is unambiguously the TLS exchange. */
-static bool tls_layer_failure(esp_err_t err) {
-    switch (err) {
-        case ESP_ERR_ESP_TLS_CANNOT_RESOLVE_HOSTNAME:
-        case ESP_ERR_ESP_TLS_CANNOT_CREATE_SOCKET:
-        case ESP_ERR_ESP_TLS_UNSUPPORTED_PROTOCOL_FAMILY:
-        case ESP_ERR_ESP_TLS_FAILED_CONNECT_TO_HOST:
-        case ESP_ERR_ESP_TLS_SOCKET_SETOPT_FAILED:
-        case ESP_ERR_ESP_TLS_CONNECTION_TIMEOUT:
-        case ESP_ERR_ESP_TLS_TCP_CLOSED_FIN:
-            return false;
-        default:
-            break;
-    }
-    /* Everything else esp-tls defines is the TLS layer itself: handshake,
-       certificate parsing, session setup. Anything outside the range is
-       not esp-tls's to claim. */
-    return err >= ESP_ERR_ESP_TLS_BASE && err <= ESP_ERR_MBEDTLS_SSL_READ_FAILED;
-}
+   What is left below is the part only hardware can check. */
 
 /* The "and clear" in esp_tls_get_and_clear_last_error is why this is read
    here and not later: the record is zeroed by the read, and the handle
@@ -142,7 +99,7 @@ static void note_tls_error(ota_http_ctx_t *ctx, esp_tls_error_handle_t handle) {
         ctx->tls_cert_flags = flags;
         ESP_LOGE(TAG, "TLS cert verify flags 0x%08x: the pinned root does not accept this host", (unsigned)flags);
     }
-    if (tls_layer_failure(last)) {
+    if (ota_facts_tls_layer_failure(last)) {
         ctx->tls_failed = true;
         ESP_LOGW(TAG, "TLS failure 0x%x (detail 0x%x)", (unsigned)last, (unsigned)code);
     } else {
@@ -161,8 +118,12 @@ static void note_location(ota_http_ctx_t *ctx, const char *location) {
     ota_redirect_t verdict = ota_url_redirect_check(location, ctx->redirects, OTA_MAX_REDIRECTS);
     if (verdict != OTA_REDIRECT_FOLLOW) {
         /* Loud, and at error level, because this is the shape of an
-           attack as well as the shape of a misconfiguration, and the
-           reason code it eventually reports (net) cannot say which. */
+           attack as well as the shape of a misconfiguration. The log
+           names WHICH rule refused it (not_https / too_many / too_long /
+           no_target); the reason code that reaches Home Assistant is
+           bad_redirect, which says a refusal happened but not which
+           kind. That is the split on purpose: the code has to fit an NVS
+           field and a stat payload, the detail belongs in the log. */
         ESP_LOGE(TAG, "refusing %d redirect: %s", ctx->status, ota_url_redirect_str(verdict));
         ctx->blocked = true;
         ctx->have_location = false;
@@ -171,6 +132,40 @@ static void note_location(ota_http_ctx_t *ctx, const char *location) {
     ctx->redirects++;
     snprintf(ctx->location, sizeof(ctx->location), "%s", location);
     ctx->have_location = true;
+}
+
+/* Stop a transfer from INSIDE the callback. The only lever there is, and
+   it exists because the obvious one does not work: returning non-ESP_OK
+   from an event handler is discarded. Neither http_on_header_event
+   (esp_http_client.c:246-277) nor the ON_CONNECTED dispatch
+   (esp_http_client.c:1705) propagates a handler error to anything that
+   would act on it.
+
+   What this bounds, and it is the whole reason it is here:
+   esp_https_ota's _http_connect is
+   `do { open; fetch_headers; handle_response } while (process_again(status))`
+   with NO hop counter of any kind (esp_https_ota.c:166-218) — the only
+   exits are error returns. A host answering 302 with a Location pointing
+   at itself would spin there until the awake failsafe fired. The refusal
+   verdict cannot terminate that loop from where ota_download_begin reads
+   it, because it is only readable after esp_https_ota_begin RETURNS.
+   Closing the client here makes the in-flight fetch_headers fail, so
+   _http_connect returns an error on this turn rather than looping.
+
+   esp_http_client_close is idempotent (it early-returns unless
+   state > HTTP_STATE_INIT, esp_http_client.c:1907-1916), so the close
+   manifest_hop does on its way out is still safe.
+
+   IT DOES NOT bound the other unbounded path, and saying so is the
+   point: read_header (esp_https_ota.c:591-617) does
+   `if (data_read == -ESP_ERR_HTTP_EAGAIN) continue;` inside a loop with
+   no cap, so a server that sends headers and then stalls spins there at
+   one socket timeout per turn with no redirect involved and nothing here
+   to notice. Only ota_flow's up-front budget charge covers that one. */
+static void kill_this_transfer(esp_http_client_handle_t client) {
+    if (client == NULL)
+        return;
+    (void)esp_http_client_close(client);
 }
 
 static esp_err_t http_event(esp_http_client_event_t *evt) {
@@ -209,8 +204,11 @@ static esp_err_t http_event(esp_http_client_event_t *evt) {
                 ctx->status = *(const int *)evt->data;
             break;
         case HTTP_EVENT_ON_HEADER:
-            if (evt->header_key != NULL && strcasecmp(evt->header_key, "Location") == 0)
+            if (evt->header_key != NULL && strcasecmp(evt->header_key, "Location") == 0) {
                 note_location(ctx, evt->header_value);
+                if (ctx->blocked)
+                    kill_this_transfer(evt->client);
+            }
             break;
         default:
             break;
@@ -218,32 +216,39 @@ static esp_err_t http_event(esp_http_client_event_t *evt) {
     return ESP_OK;
 }
 
-/* Drain the context into the struct ota_policy will classify. Never sets
-   deadline_hit: that fact is ota_flow's, and this module cannot see it. */
-static void apply_ctx_facts(const ota_http_ctx_t *ctx, ota_error_facts_t *facts) {
-    facts->http_status = ctx->status;
-    if (ctx->tls_cert_flags != 0)
-        facts->tls_cert_flags = ctx->tls_cert_flags;
-    if (ctx->tls_failed)
-        facts->tls_failed = true;
-    if (ctx->transport_failed)
-        facts->transport_failed = true;
-}
+/* Every failure path that got as far as opening a socket ends in
+   ota_facts_fail (ota_facts.c), so that "the driver failed but named no
+   fact" — which ota_flow logs as a bug in this file — is unreachable
+   from any of them.
 
-/* Every failure path ends here, so that "the driver failed but named no
-   fact" — which ota_flow logs as a bug in this file — is unreachable by
-   construction rather than by review. */
-static void fail_facts(const ota_http_ctx_t *ctx, ota_error_facts_t *facts) {
-    apply_ctx_facts(ctx, facts);
-    if (!facts->tls_failed && facts->tls_cert_flags == 0 && !facts->image_rejected && facts->http_status < 400)
-        facts->transport_failed = true;
-}
+   The claim is worth QUALIFYING rather than stating flat, which is how
+   it read before. Three argument-validation early returns below
+   (ota_manifest_get, ota_download_step and ota_download_finish each
+   reject a NULL facts pointer) return failure without calling it. They
+   are unreachable through ota_flow as written — it passes the address of
+   a stack local every time — so the guarantee holds in practice; it is
+   just not a property of the control flow alone. */
 
 static esp_http_client_config_t client_config(const char *url, ota_http_ctx_t *ctx) {
     esp_http_client_config_t cfg = {
         .url = url,
         .cert_pem = (const char *)ota_ca_pem_start,
+        /* Coupled to ota_flow's abort tail; ota_timing.h holds both and
+           the _Static_assert that keeps them compatible. Do not raise
+           this here. */
         .timeout_ms = OTA_HTTP_TIMEOUT_MS,
+        /* Set EXPLICITLY, and this is load-bearing rather than tidy.
+           esp_http_client_init takes client->buffer_size_rx straight
+           from this field (esp_http_client.c:574) and falls back to 512
+           when it is 0, while esp_https_ota allocates
+           MAX(buffer_size, DEFAULT_OTA_BUF_SIZE) = 1024
+           (esp_https_ota.c:561). Leaving it unset therefore made one
+           esp_http_client_read take TWO inner esp_transport_read
+           iterations, each with its own full timeout — doubling the
+           worst-case overshoot of ota_flow's deadline, silently, via a
+           default neither file names. Matching the two makes it one.
+           See ota_timing.h. */
+        .buffer_size = OTA_DL_BUF_SIZE,
         .event_handler = http_event,
         .user_data = ctx,
         .method = HTTP_METHOD_GET,
@@ -296,17 +301,21 @@ static int manifest_hop(const char *url, char *buf, size_t len, ota_http_ctx_t *
     }
 
     content_len = esp_http_client_fetch_headers(client);
+    /* Checked BEFORE the header result, not after, and the order is
+       load-bearing now: note_location closes the client from inside the
+       handler (see kill_this_transfer), so a refused redirect makes this
+       very fetch_headers report a broken read. Testing content_len first
+       would relabel every refusal as a bare transport failure and shadow
+       the fact below. note_location has already logged which rule
+       refused it; the fact it becomes is redirect_refused, which
+       ota_policy reports as bad_redirect. */
+    if (ctx->blocked)
+        goto done;
     if (content_len < 0) {
         ESP_LOGW(TAG, "manifest headers failed: %d", (int)content_len);
         ctx->transport_failed = true;
         goto done;
     }
-    /* A refused redirect. note_location has already logged the specific
-       reason; the fact it becomes is fail_facts's transport_failed,
-       because ota_error_facts_t has no way to say "the transport refused
-       to follow this" — see the plan's task 11 entry. */
-    if (ctx->blocked)
-        goto done;
     if (ctx->status >= 300 && ctx->status <= 399) {
         if (ctx->have_location) {
             *follow = true;
@@ -324,31 +333,34 @@ static int manifest_hop(const char *url, char *buf, size_t len, ota_http_ctx_t *
         goto done;
     }
 
+    /* Never negative: esp_http_client_read_response returns a running
+       count that starts at 0 and only grows (esp_http_client.c:2070-2081),
+       so there is no error return to test for. It used to be tested
+       anyway; the branch was dead and is gone. ota_facts_body answers
+       for the values it CAN produce. */
     n_read = esp_http_client_read_response(client, buf, (int)len);
-    if (n_read < 0) {
-        ctx->transport_failed = true;
-        goto done;
-    }
+
     /* read_response stops at the buffer end OR at a socket that died,
-       and reports both as "this is what I got". Content-Length is the
-       only thing that separates them, so a body that promised a length
-       and did not deliver it is a transport failure rather than a short
-       manifest. A chunked response reports 0 here and is checked against
-       the parser's own completeness flag instead. */
-    if (content_len > 0 && (int64_t)n_read < content_len && (size_t)n_read < len) {
-        ESP_LOGW(TAG, "manifest truncated: %d of %d bytes", n_read, (int)content_len);
-        ctx->transport_failed = true;
-        goto done;
-    }
-    if (content_len == 0 && (size_t)n_read < len && !esp_http_client_is_complete_data_received(client)) {
-        ESP_LOGW(TAG, "chunked manifest ended early after %d bytes", n_read);
-        ctx->transport_failed = true;
-        goto done;
-    }
-    if ((size_t)n_read == len) {
-        /* Returned anyway, not failed: cJSON will refuse it and the
-           operator reads bad_manifest, which names the real problem. */
-        ESP_LOGW(TAG, "manifest filled the %u-byte buffer; it will not parse", (unsigned)len);
+       and reports both as "this is what I got". Separating those is a
+       decision over four numbers and no I/O, so it lives in ota_facts.c
+       where test_ota_facts walks the whole matrix. */
+    switch (ota_facts_body(n_read, content_len, len, esp_http_client_is_complete_data_received(client))) {
+        case OTA_BODY_TRUNCATED:
+            ESP_LOGW(TAG, "manifest truncated: %d of %d bytes", n_read, (int)content_len);
+            ctx->transport_failed = true;
+            goto done;
+        case OTA_BODY_SHORT_CHUNKED:
+            ESP_LOGW(TAG, "chunked manifest ended early after %d bytes", n_read);
+            ctx->transport_failed = true;
+            goto done;
+        case OTA_BODY_OVERSIZE:
+            /* Returned anyway, not failed: cJSON refuses the cut-off
+               array and the operator reads bad_manifest, which names the
+               real problem where `net` would misdirect them. */
+            ESP_LOGW(TAG, "manifest is larger than the %u-byte buffer; it will not parse", (unsigned)len);
+            break;
+        case OTA_BODY_OK:
+            break;
     }
     out = n_read;
 
@@ -368,7 +380,7 @@ int ota_manifest_get(const char *url, char *buf, size_t len, ota_error_facts_t *
     char current[OTA_URL_MAX];
     if (snprintf(current, sizeof(current), "%s", url) >= (int)sizeof(current)) {
         ESP_LOGE(TAG, "manifest endpoint longer than %u bytes", (unsigned)sizeof(current));
-        fail_facts(&ctx, facts);
+        ota_facts_fail(&ctx, facts);
         return -1;
     }
     /* The endpoint passed config_is_ota_url on the way into NVS, but this
@@ -377,7 +389,7 @@ int ota_manifest_get(const char *url, char *buf, size_t len, ota_error_facts_t *
        forgets the validator, stops here rather than at the peer. */
     if (!config_is_https_url(current)) {
         ESP_LOGE(TAG, "manifest endpoint is not https: refusing to fetch");
-        fail_facts(&ctx, facts);
+        ota_facts_fail(&ctx, facts);
         return -1;
     }
 
@@ -398,7 +410,7 @@ int ota_manifest_get(const char *url, char *buf, size_t len, ota_error_facts_t *
         snprintf(current, sizeof(current), "%s", ctx.location);
     }
 
-    fail_facts(&ctx, facts);
+    ota_facts_fail(&ctx, facts);
     return -1;
 }
 
@@ -409,16 +421,6 @@ int ota_manifest_get(const char *url, char *buf, size_t len, ota_error_facts_t *
    and holds no handle of its own. */
 static esp_https_ota_handle_t s_dl;
 static ota_http_ctx_t s_dl_ctx;
-
-/* Errors that mean "the bytes are not a firmware image for this device",
-   as opposed to "the bytes did not arrive". esp_https_ota reports a chip
-   id or chip revision mismatch as ESP_ERR_INVALID_VERSION from the FIRST
-   perform, and a failed image validation as ESP_ERR_OTA_VALIDATE_FAILED
-   from finish. Both must land on bad_image, not net, or an operator who
-   published an ESP32-S3 build goes looking at their wifi. */
-static bool image_error(esp_err_t err) {
-    return err == ESP_ERR_INVALID_VERSION || err == ESP_ERR_OTA_VALIDATE_FAILED || err == ESP_ERR_IMAGE_INVALID;
-}
 
 static void drop_handle(void) {
     s_dl = NULL;
@@ -443,7 +445,7 @@ bool ota_download_begin(const char *url, ota_error_facts_t *facts) {
        this is the frame before the socket. */
     if (!config_is_https_url(url)) {
         ESP_LOGE(TAG, "image URL is not https: refusing to download");
-        fail_facts(&s_dl_ctx, facts);
+        ota_facts_fail(&s_dl_ctx, facts);
         return false;
     }
 
@@ -467,23 +469,24 @@ bool ota_download_begin(const char *url, ota_error_facts_t *facts) {
            false answer here means. */
         ESP_LOGE(TAG, "https_ota begin failed: %s", esp_err_to_name(err));
         s_dl = NULL;
-        if (image_error(err))
+        if (ota_facts_image_error(err))
             facts->image_rejected = true;
-        fail_facts(&s_dl_ctx, facts);
+        ota_facts_fail(&s_dl_ctx, facts);
         return false;
     }
     if (s_dl_ctx.blocked) {
-        /* A redirect was refused after esp_https_ota had already followed
-           it. This is the one part of the defence that is after the fact,
-           and it is after the fact because esp_https_ota's redirect is
-           internal to begin(): the flag cannot be consulted until begin
-           returns. What it costs is one connection and the 1 KB image
-           header; what it prevents is the commit, which is the only thing
-           that matters. Abort here rather than returning false with the
-           handle live — a false begin means nothing is in flight. */
+        /* A redirect was refused inside begin(). Reached only when
+           kill_this_transfer's close did NOT already make
+           esp_https_ota_begin fail above — belt to that braces. The flag
+           cannot be consulted any earlier than this, because
+           esp_https_ota's redirect handling is internal to begin(). What
+           it costs is one connection and the image header; what it
+           prevents is the commit, which is the only thing that matters.
+           Abort here rather than returning false with the handle live —
+           a false begin means nothing is in flight. */
         ESP_LOGE(TAG, "aborting: the transfer followed a redirect this device refuses");
         (void)esp_https_ota_abort(s_dl);
-        fail_facts(&s_dl_ctx, facts);
+        ota_facts_fail(&s_dl_ctx, facts);
         drop_handle();
         return false;
     }
@@ -496,14 +499,40 @@ bool ota_download_begin(const char *url, ota_error_facts_t *facts) {
        inside the first perform() and there is no API to pull that
        forward — so ota_download_step maps ESP_ERR_INVALID_VERSION onto
        the same image_rejected fact. Either way the operator reads
-       bad_image. */
+       bad_image.
+
+       The header it reads is IMAGE_HEADER_SIZE, which is 1024 bytes —
+       but the descriptor itself sits in the first ~288 (an
+       esp_image_header_t plus an esp_image_segment_header_t plus an
+       esp_app_desc_t). The 1 KB figure is what the transfer costs, not
+       what the check needs. */
     esp_app_desc_t desc;
     memset(&desc, 0, sizeof(desc));
     err = esp_https_ota_get_img_desc(s_dl, &desc);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "image header rejected: %s", esp_err_to_name(err));
-        facts->image_rejected = true;
-        fail_facts(&s_dl_ctx, facts);
+        /* ONLY when the transport was clean. get_description_from_image
+           returns a bare ESP_FAIL for two unrelated causes
+           (esp_https_ota.c:663-666 and :672-675): a wrong app-descriptor
+           magic, which is a genuinely bad image, and read_header failing
+           because the socket closed before 1024 bytes arrived
+           (esp_https_ota.c:618-621). Since ota_policy ranks
+           image_rejected above transport_failed, treating both as
+           bad_image tells an operator whose link drops in the first 1 KB
+           of a 1.44 MB download to go rebuild and republish a binary
+           that was never the problem.
+
+           The discriminator is sound: esp_http_client_read dispatches
+           HTTP_EVENT_ERROR on a hard read failure
+           (esp_http_client.c:1443-1446), so a dropped socket has already
+           set one of these three. A short-but-CLEAN body — an HTML error
+           page served with a valid Content-Length — produces no error
+           event and correctly stays bad_image. The rule itself is
+           ota_facts_transport_was_clean, where test_ota_facts can reach
+           it. */
+        if (ota_facts_transport_was_clean(&s_dl_ctx))
+            facts->image_rejected = true;
+        ota_facts_fail(&s_dl_ctx, facts);
         (void)esp_https_ota_abort(s_dl);
         drop_handle();
         return false;
@@ -528,7 +557,7 @@ ota_step_t ota_download_step(ota_error_facts_t *facts) {
            begin. If a future IDF changes that, the transfer stops here
            rather than at the commit. */
         ESP_LOGE(TAG, "refused redirect mid-transfer");
-        fail_facts(&s_dl_ctx, facts);
+        ota_facts_fail(&s_dl_ctx, facts);
         return OTA_STEP_FAIL;
     }
 
@@ -539,9 +568,9 @@ ota_step_t ota_download_step(ota_error_facts_t *facts) {
         return OTA_STEP_DONE;
 
     ESP_LOGE(TAG, "download step failed: %s", esp_err_to_name(err));
-    if (image_error(err))
+    if (ota_facts_image_error(err))
         facts->image_rejected = true;
-    fail_facts(&s_dl_ctx, facts);
+    ota_facts_fail(&s_dl_ctx, facts);
     return OTA_STEP_FAIL;
 }
 
@@ -563,7 +592,7 @@ bool ota_download_finish(ota_error_facts_t *facts) {
     if (!esp_https_ota_is_complete_data_received(s_dl)) {
         ESP_LOGE(TAG, "refusing to commit: the image is incomplete");
         (void)esp_https_ota_abort(s_dl);
-        fail_facts(&s_dl_ctx, facts);
+        ota_facts_fail(&s_dl_ctx, facts);
         drop_handle();
         return false;
     }
@@ -575,9 +604,9 @@ bool ota_download_finish(ota_error_facts_t *facts) {
     drop_handle();
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "commit failed: %s", esp_err_to_name(err));
-        if (image_error(err))
+        if (ota_facts_image_error(err))
             facts->image_rejected = true;
-        fail_facts(&ctx, facts);
+        ota_facts_fail(&ctx, facts);
         return false;
     }
     ESP_LOGI(TAG, "image committed; the boot partition now points at it");
