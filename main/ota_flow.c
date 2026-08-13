@@ -347,15 +347,16 @@ static void stop_clock(void) {
    at every rollover forever, on a battery device. Charging BEFORE makes
    the attempt countable on the next boot whatever kills it.
 
-   The cost is one over-count for an attempt that would have succeeded
-   had it been allowed to finish — and there is no such thing, because
-   the successful path clears the counter outright a few lines below.
-   A death between the commit and that clear is harmless too: the device
-   reboots into the new image, running_version then equals the target, and
-   ota_policy's resolve() answers up_to_date BEFORE it ever consults the
-   budget (ota_policy.c — the version compare precedes
+   The cost is one over-count for an attempt that succeeds, and it is
+   left standing on purpose — the commit path below no longer clears it,
+   because that clear is what would let a rollback loop run unbounded.
+   It costs nothing on the healthy path: the device reboots into the new
+   image, running_version then equals the target, and ota_policy's
+   resolve() answers up_to_date BEFORE it ever consults the budget
+   (ota_policy.c — the version compare precedes
    ota_policy_budget_exhausted), so the elevated counter for that target
-   is never read again.
+   is never read again. A death between the commit and the reboot lands
+   in the same place for the same reason.
 
    Order matters between the two writes. fails is written FIRST because
    the value was computed against the OLD counted target: a crash between
@@ -621,12 +622,36 @@ void ota_flow_apply(int batt_pct, bool charge_locked) {
     }
     stop_clock();
 
-    /* Cleared before the reboot, not after: the image about to run is a
-       different version, so a counter left behind would be counting
-       against a target that is no longer in this device's future. */
+    /* ota_result is cleared, the retry counter and its target are NOT,
+       and the asymmetry is the whole point.
+
+       ota_result has to go: the string in it belongs to the image that is
+       about to be replaced, and task 14 reads it back inside the
+       mqtt_ha_window that runs BEFORE the next enter_deep_sleep. Left
+       standing, the new image's first stat publish would report a failure
+       that no longer describes anything.
+
+       The counter is the opposite case. With
+       CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y this reboot is not the end
+       of the story: if the new image never reaches
+       ota_flow_confirm_image(), the bootloader marks it ABORTED and boots
+       the OLD slot again. Clearing here would hand that old image a fresh
+       budget -- fails=0, no counted target -- so it would re-find the same
+       manifest, re-download the same ~1.5 MB, and roll back again, every
+       day, with nothing in NVS ever showing why. The retry budget is
+       supposed to bound exactly that, and clearing it here is what would
+       make it unbounded.
+
+       So the charge raised by charge_the_attempt() when this attempt
+       started is deliberately left standing, charged against s_target. Nothing on the
+       healthy path needs it gone: ota_policy_evaluate() answers up_to_date
+       ahead of the budget check once the device is RUNNING the counted
+       version (ota_policy.c: the up_to_date return precedes the budget
+       test), a genuinely new target re-arms the budget by itself
+       (budget_exhausted() compares target against the counted target, and
+       next_fail_count() restarts at 1), and a rolled-back device instead
+       walks the counter to max_fails and stops with a visible gave_up. */
     (void)nvs_config_set_ota_result("");
-    (void)nvs_config_set_ota_target("");
-    (void)nvs_config_set_ota_fails(0);
 
     ESP_LOGI(TAG, "update to %s committed in %u ms; restarting", s_target, (unsigned)s_dl_ms);
     s_ops.session_end();
@@ -663,7 +688,30 @@ void ota_flow_apply(int batt_pct, bool charge_locked) {
        Safe from this task for the same reason .repaint is: the main task
        is blocked in ota_task_run_apply's join and the network window was
        joined before the apply point was reached. After session_end, so
-       the flash write is not competing with the radio. */
+       the flash write is not competing with the radio.
+
+       One more load this save carries, added after the fact and easy to
+       miss: it is also what keeps a ROLLBACK loop down to one attempt a
+       day instead of a continuous one. Do not "simplify" it away.
+
+       The chain is the same zeroed g_rtc_state as above, read from the
+       other end. wake_flow.c arms the OTA check inside the rollover
+       branch, and does so BEFORE the in-rollover
+       timer_persist_try_restore(). So the question "is this a new day?"
+       is answered off whatever last_date is in RTC at that moment — and
+       after a rollback reboot that is empty, which timer_is_new_day()
+       reads as yes. Without a valid same-day snapshot to restore,
+       EVERY post-rollback boot would arm a fresh check, re-download, roll
+       back, and come straight back round with no sleep in between.
+
+       It only works because the wall clock outlives the restart that
+       zeroes .rtc.data: with CONFIG_ESP_TIME_FUNCS_USE_RTC_TIMER=y,
+       ESP-IDF keeps boot time in the RTC retention REGISTERS
+       (RTC_BOOT_TIME_LOW/HIGH_REG, esp_libc's esp_time_impl.c), not in
+       the .rtc.data segment. time(NULL) is therefore correct on the next
+       boot, the snapshot written here is recognised as today's, and the
+       loop is damped to the ordinary daily cadence — which is what makes
+       the retry budget above a bound anyone would live to see reached. */
     s_ops.persist_state();
     s_ops.restart();
 }

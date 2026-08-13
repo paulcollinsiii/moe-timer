@@ -676,14 +676,26 @@ static void test_one_attempt_per_wake(void) {
     TEST_ASSERT_EQUAL_STRING("", g_log);
 }
 
-static void test_a_successful_update_clears_the_retry_state(void) {
-    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_set_ota_target(TARGET));
-    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_set_ota_fails(2));
+/* What a commit clears, and what it deliberately does not.
+ *
+ * ota_result must go: task 14 reads it back in the mqtt_ha_window that
+ * runs before the next sleep, and the string in it describes the image
+ * being replaced.
+ *
+ * The counter and its target must STAY. With rollback enabled the reboot
+ * below is not the end of the attempt — if the new image never certifies
+ * itself, the bootloader boots the old slot back. Clearing here would
+ * hand that returning image a fresh budget, and the same bad build would
+ * be downloaded again every day forever. This asserts the asymmetry
+ * directly, so reinstating either clear fails here.
+ */
+static void test_a_successful_update_clears_the_result_but_not_the_retry_counter(void) {
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_set_ota_result("net"));
     check_at_rollover();
     ota_flow_apply(90, false);
-    TEST_ASSERT_EQUAL_UINT16(0, stored_fails());
-    TEST_ASSERT_EQUAL_STRING("", stored_target());
     TEST_ASSERT_EQUAL_STRING("", stored_result());
+    TEST_ASSERT_EQUAL_STRING(TARGET, stored_target());
+    TEST_ASSERT_EQUAL_UINT16(1, stored_fails());
 }
 
 static void test_the_download_duration_is_recorded(void) {
@@ -1228,18 +1240,20 @@ static void test_a_gate_that_declines_costs_no_budget(void) {
     TEST_ASSERT_EQUAL_STRING("", stored_target());
 }
 
-/* The success case, and the reason the pre-charge costs nothing. The
-   counter is elevated the moment the attempt starts and cleared outright
-   the moment it commits, so a successful update walks away at zero.
-   Even a death between the commit and that clear is harmless: the device
-   reboots into the new image, and ota_policy answers up_to_date before
-   it ever consults the budget — which the next case pins directly. */
-static void test_a_successful_update_leaves_no_charge_behind(void) {
+/* The success case, and the reason the pre-charge costs nothing even
+   though it is never cleared. The counter is elevated the moment the
+   attempt starts and is still standing when the device reboots — but the
+   image it reboots into IS the counted target, and ota_policy answers
+   up_to_date before it ever consults the budget, which the next case
+   pins directly. The charge is only ever read again by a device that
+   came back on the OLD image, which is precisely the rollback this
+   counter is there to bound. */
+static void test_a_successful_update_leaves_its_charge_standing(void) {
     check_at_rollover();
     ota_flow_apply(90, false);
     TEST_ASSERT_EQUAL_STRING("restart", g_log + strlen(g_log) - strlen("restart"));
-    TEST_ASSERT_EQUAL_UINT16(0, stored_fails());
-    TEST_ASSERT_EQUAL_STRING("", stored_target());
+    TEST_ASSERT_EQUAL_UINT16(1, stored_fails());
+    TEST_ASSERT_EQUAL_STRING(TARGET, stored_target());
 }
 
 /* The claim the pre-charge's safety rests on, asserted against the real
@@ -1257,6 +1271,54 @@ static void test_an_elevated_counter_against_the_running_version_is_never_consul
     TEST_ASSERT_FALSE(ota_flow_pending());
     /* up_to_date, NOT gave_up: the budget never got a look in. */
     TEST_ASSERT_EQUAL_STRING("", stored_result());
+}
+
+/* THE ROLLBACK LOOP, and the reason the commit path clears ota_result
+   and nothing else.
+ *
+ * CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE turns a successful commit into a
+ * conditional one: the new image has to reach ota_flow_confirm_image()
+ * or the bootloader marks it ABORTED and boots the old slot back. From
+ * this module's side that is invisible — the old image simply wakes up
+ * again, still on RUNNING, and finds the same manifest offering the same
+ * TARGET. Nothing in the check gate can tell that apart from a first
+ * look at a new build.
+ *
+ * So the only thing standing between a bad build and a device that
+ * downloads ~1.5 MB every single day until the battery is flat is the
+ * retry counter surviving the reboot. Each turn of the loop is charged
+ * by charge_the_attempt() before the download; the fourth wake finds the
+ * budget spent and stops, permanently and visibly.
+ *
+ * This is the case that fails if either clear comes back to the commit
+ * path: with the counter wiped at every commit the loop below never
+ * advances past one, and the last two assertions never come true.
+ *
+ * The escape hatch is unchanged and is not a bug: publishing a different
+ * version string re-arms the device with no reset needed from anywhere
+ * else (test_a_new_target_version_rearms_a_given_up_device).
+ */
+static void test_a_rollback_loop_is_bounded_by_the_retry_budget(void) {
+    for (int boot = 1; boot <= 3; boot++) {
+        ota_flow_init(&OPS, &CFG); /* the old image, back from a rollback */
+        check_at_rollover();
+        TEST_ASSERT_TRUE(ota_flow_pending());
+        ota_flow_apply(90, false);
+        /* It really did commit and reboot on every turn — this is a loop
+           of SUCCESSFUL updates, undone underneath us. */
+        TEST_ASSERT_EQUAL_STRING("restart", g_log + strlen(g_log) - strlen("restart"));
+        TEST_ASSERT_EQUAL_UINT16(boot, stored_fails());
+        TEST_ASSERT_EQUAL_STRING(TARGET, stored_target());
+    }
+
+    /* Fourth boot: the budget is spent and the loop stops for good. */
+    ota_flow_init(&OPS, &CFG);
+    g_log[0] = '\0';
+    check_at_rollover();
+    TEST_ASSERT_FALSE(ota_flow_pending());
+    TEST_ASSERT_EQUAL_STRING("gave_up", stored_result());
+    ota_flow_apply(90, false);
+    TEST_ASSERT_EQUAL_STRING("get", g_log); /* no paint, no radio, no download */
 }
 
 /* Bullet nine: the failure has to still be there in the next window, and
@@ -1292,6 +1354,27 @@ static void test_a_failure_survives_into_the_next_window(void) {
 static void test_an_ordinary_sleep_certifies_the_running_image(void) {
     ota_flow_confirm_image();
     TEST_ASSERT_EQUAL_INT(1, m_marks_valid);
+}
+
+/* The pre-init boot, which is not a hypothetical: main.c arms the awake
+   failsafe as app_main's SECOND call and only reaches ota_flow_init()
+   some seventy lines later, so every boot spends a real window in which
+   the failsafe can fire into a funnel whose ops table is still all
+   zeroes. enter_deep_sleep() calls confirm_image() unconditionally, and
+   without the guard that is a call through a NULL function pointer on a
+   path taken by a device that is already in trouble.
+
+   Nothing is lost by declining: a boot that wedged before init is
+   exactly a boot that should not be certifying anything.
+
+   Modelled by zeroing s_ops rather than by skipping setUp, because s_ops
+   is a file-static and zero is genuinely the state it is in before the
+   first ota_flow_init() of the process. */
+static void test_confirm_before_init_marks_nothing_and_does_not_crash(void) {
+    memset(&s_ops, 0, sizeof(s_ops));
+    ota_flow_confirm_image();
+    TEST_ASSERT_EQUAL_INT(0, m_marks_valid);
+    TEST_ASSERT_EQUAL_STRING("", g_log);
 }
 
 /* The substantive decision. The awake failsafe fires when a wake is
@@ -1361,7 +1444,7 @@ int main(void) {
     RUN_TEST(test_a_successful_update_paints_extends_downloads_commits_reboots);
     RUN_TEST(test_the_update_screen_names_both_versions);
     RUN_TEST(test_one_attempt_per_wake);
-    RUN_TEST(test_a_successful_update_clears_the_retry_state);
+    RUN_TEST(test_a_successful_update_clears_the_result_but_not_the_retry_counter);
     RUN_TEST(test_the_download_duration_is_recorded);
 
     RUN_TEST(test_low_heap_at_the_download_skips_without_painting);
@@ -1401,10 +1484,12 @@ int main(void) {
     RUN_TEST(test_a_wake_killed_mid_attempt_still_converges_on_gave_up);
     RUN_TEST(test_an_observed_failure_is_charged_exactly_once);
     RUN_TEST(test_a_gate_that_declines_costs_no_budget);
-    RUN_TEST(test_a_successful_update_leaves_no_charge_behind);
+    RUN_TEST(test_a_successful_update_leaves_its_charge_standing);
     RUN_TEST(test_an_elevated_counter_against_the_running_version_is_never_consulted);
+    RUN_TEST(test_a_rollback_loop_is_bounded_by_the_retry_budget);
 
     RUN_TEST(test_an_ordinary_sleep_certifies_the_running_image);
+    RUN_TEST(test_confirm_before_init_marks_nothing_and_does_not_crash);
     RUN_TEST(test_the_awake_failsafe_path_does_not_certify_the_image);
     RUN_TEST(test_a_wake_that_ran_a_download_still_certifies_at_sleep);
     RUN_TEST(test_the_failsafe_flag_does_not_outlive_its_boot);
