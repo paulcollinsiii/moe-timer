@@ -378,6 +378,28 @@ static uint16_t stored_fails(void) {
     return n;
 }
 
+static uint32_t stored_dl_ms(void) {
+    uint32_t n = 0;
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_ota_dl_ms(&n));
+    return n;
+}
+
+static uint16_t stored_pend(void) {
+    uint16_t n = 0;
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_ota_pend(&n));
+    return n;
+}
+
+/* A boot of the firmware whose app descriptor says `ver`. Everything
+   about a rollback is a disagreement between the version that was
+   committed and the version that came up, so the tests below need to
+   choose the latter. */
+static void boot_running(const char *ver) {
+    ota_flow_cfg_t cfg = CFG;
+    cfg.running_version = ver;
+    ota_flow_init(&OPS, &cfg);
+}
+
 /* Run an apply that the awake failsafe kills part-way. The setjmp frame
    stands in for "the device deep-slept and this call never returned" —
    nothing after the kill point in ota_flow_apply runs, which is exactly
@@ -703,6 +725,109 @@ static void test_the_download_duration_is_recorded(void) {
     check_at_rollover();
     ota_flow_apply(90, false);
     TEST_ASSERT_EQUAL_UINT32(8000, ota_flow_last_dl_ms());
+}
+
+/* THE DURATION HAS TO REACH FLASH, or it is a sensor that reads zero
+   forever.
+ *
+ * ota_flow_last_dl_ms() above is a plain static, and the download that
+ * sets it runs in the SECOND window — after net_window.c has closed MQTT
+ * — and then either restarts the chip or deep-sleeps. Both discard RAM.
+ * So the value the stat payload would find by calling that function at
+ * publish time is 0 on the success path (RAM gone with the reboot), 0 on
+ * the failure path (RAM gone with the sleep), and 0 on the next wake
+ * (nothing ran). The NVS copy is the only one anything can publish.
+ */
+static void test_the_download_duration_reaches_nvs(void) {
+    m_step_advance_ms = 4000;
+    check_at_rollover();
+    ota_flow_apply(90, false);
+    TEST_ASSERT_EQUAL_UINT32(8000, stored_dl_ms());
+}
+
+/* And on the timeout, which is the sample that matters most: the field
+   exists so a link creeping toward the deadline is visible BEFORE it
+   becomes chronic, and the download that hit the deadline is the last
+   data point in that trend. */
+static void test_a_timed_out_download_records_its_duration_in_nvs(void) {
+    m_steps_to_done = 99;
+    m_step_advance_ms = 200000; /* 200 s a chunk against a 300 s budget */
+    check_at_rollover();
+    ota_flow_apply(90, false);
+    TEST_ASSERT_EQUAL_STRING("timeout", stored_result());
+    TEST_ASSERT_EQUAL_UINT32(400000, stored_dl_ms());
+}
+
+/* An ordinary transport failure too — every path through fail_attempt. */
+static void test_a_failed_download_records_its_duration_in_nvs(void) {
+    m_step_advance_ms = 7000;
+    m_step_fails = true;
+    m_step_facts.transport_failed = true;
+    check_at_rollover();
+    ota_flow_apply(90, false);
+    TEST_ASSERT_EQUAL_UINT32(7000, stored_dl_ms());
+}
+
+/* But an attempt that never opened a transfer must not overwrite the
+   last real measurement with a zero: there was no download to time, and
+   publishing 0 would read as an instant one. */
+static void test_an_attempt_that_never_started_leaves_the_last_duration_alone(void) {
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_set_ota_dl_ms(12345));
+    m_session_ok = false;
+    check_at_rollover();
+    ota_flow_apply(90, false);
+    TEST_ASSERT_EQUAL_UINT32(12345, stored_dl_ms());
+}
+
+/* ---- what the stat payload reads, and WHEN ------------------------------ */
+
+/* The publish-time property, pinned directly.
+ *
+ * mqtt_ha.c calls this from inside the MQTT window, two statements after
+ * net_window.c has run ota_flow_check(). If the four fields were instead
+ * carried in stats_snapshot_t they would have been frozen on the main
+ * task before the check ran, and the payload would publish the PREVIOUS
+ * wake's result forever. The sequence below is that exact race: an old
+ * result is in NVS, this wake's check overwrites it, and the read has to
+ * see the new one. A cached or early-filled implementation returns
+ * "timeout" here.
+ */
+static void test_the_stat_read_sees_what_this_wake_just_wrote(void) {
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_set_ota_result("timeout"));
+    m_body = "not a manifest at all";
+    check_at_rollover();
+
+    ota_stat_t stat;
+    ota_flow_stat(&stat);
+    TEST_ASSERT_EQUAL_STRING("bad_manifest", stat.result);
+}
+
+static void test_the_stat_read_reports_every_ota_field(void) {
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_set_ota_result("gave_up"));
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_set_ota_target("9.9.9"));
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_set_ota_fails(3));
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_set_ota_dl_ms(41250));
+
+    ota_stat_t stat;
+    ota_flow_stat(&stat);
+    TEST_ASSERT_EQUAL_STRING("gave_up", stat.result);
+    TEST_ASSERT_EQUAL_STRING("9.9.9", stat.target);
+    TEST_ASSERT_EQUAL_UINT16(3, stat.fails);
+    TEST_ASSERT_EQUAL_UINT32(41250, stat.dl_ms);
+}
+
+/* A device that has never attempted an update publishes ""/0 rather than
+   whatever was on the caller's stack — hal_nvs_read_str writes NOTHING
+   into a buffer on a miss, which is the same trap read_counted_target
+   exists for. */
+static void test_the_stat_read_of_a_virgin_device_is_empty(void) {
+    ota_stat_t stat;
+    memset(&stat, 0xAB, sizeof(stat));
+    ota_flow_stat(&stat);
+    TEST_ASSERT_EQUAL_STRING("", stat.result);
+    TEST_ASSERT_EQUAL_STRING("", stat.target);
+    TEST_ASSERT_EQUAL_UINT16(0, stat.fails);
+    TEST_ASSERT_EQUAL_UINT32(0, stat.dl_ms);
 }
 
 /* ---- the second gate ---------------------------------------------------- */
@@ -1416,6 +1541,159 @@ static void test_the_failsafe_flag_does_not_outlive_its_boot(void) {
     TEST_ASSERT_EQUAL_INT(1, m_marks_valid);
 }
 
+/* ---- rollback: making the revert visible to the operator ----------------
+
+   The gap these close: the commit path clears ota_result (task 13
+   requires it), so a device whose new image fails to certify comes back
+   reporting an EMPTY result. `fw` and the status screen both read the app
+   descriptor and agree on the old version, and nothing anywhere says the
+   device tried. The only evidence was indirect and took three ~1.5 MB
+   downloads to become a gave_up.
+
+   The token these turn on is ota_pend, written by the commit at the one
+   instant that is unambiguous and consumed by whichever future arrives:
+   certification, or a boot that came up on something else. */
+
+/* The commit arms the token. Nothing else in the flow does — see the
+   failure cases below. */
+static void test_a_commit_arms_the_certification_token(void) {
+    check_at_rollover();
+    ota_flow_apply(90, false);
+    TEST_ASSERT_EQUAL_UINT16(1, stored_pend());
+}
+
+/* THE HEADLINE CASE. The update committed, the new image never certified
+   itself, and the bootloader booted the old slot back — so this boot is
+   running RUNNING while the token says TARGET was committed. That
+   disagreement is what a revert looks like from inside the firmware, and
+   it has to reach ota_result before the network window opens. */
+static void test_a_revert_is_reported_on_the_boot_that_comes_back(void) {
+    check_at_rollover();
+    ota_flow_apply(90, false);
+    TEST_ASSERT_EQUAL_STRING("", stored_result()); /* the commit cleared it */
+
+    boot_running(RUNNING); /* the old image, back again */
+    TEST_ASSERT_EQUAL_STRING("rolled_back", stored_result());
+}
+
+/* AND IT MUST NOT LATCH. This is the whole reason the detector is a
+   consumed token rather than a read of ESP_OTA_IMG_ABORTED on the other
+   slot: that marker stays set until the slot is rewritten, so "the other
+   slot is aborted" is just as true on the tenth boot after a revert as
+   on the first. A detector built on it reports a month-old rollback over
+   every later result, forever.
+ *
+ * The second half is the one with teeth: something else writes a genuine
+ * result, and the boot after that must leave it alone. */
+static void test_a_revert_is_reported_once_and_never_again(void) {
+    check_at_rollover();
+    ota_flow_apply(90, false);
+    boot_running(RUNNING);
+    TEST_ASSERT_EQUAL_STRING("rolled_back", stored_result());
+    TEST_ASSERT_EQUAL_UINT16(0, stored_pend()); /* consumed */
+
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_set_ota_result("tls_cert"));
+    boot_running(RUNNING);
+    TEST_ASSERT_EQUAL_STRING("tls_cert", stored_result());
+    boot_running(RUNNING);
+    TEST_ASSERT_EQUAL_STRING("tls_cert", stored_result());
+}
+
+/* The boot right after a SUCCESSFUL update also finds the token set —
+   the difference is that the committed version is the one running. That
+   is not a revert, it is an image awaiting certification, and reporting
+   a rollback here would fire on every healthy update this device ever
+   performs. */
+static void test_the_boot_that_came_up_on_the_new_image_reports_nothing(void) {
+    check_at_rollover();
+    ota_flow_apply(90, false);
+
+    boot_running(TARGET); /* the new image, running */
+    TEST_ASSERT_EQUAL_STRING("", stored_result());
+    TEST_ASSERT_EQUAL_UINT16(1, stored_pend()); /* left for the certification */
+}
+
+/* ...and the certification retires it. After that the device is on an
+   ordinary footing again: a later boot on a different version (a
+   downgrade, a reflash) is not a rollback and must not be reported as
+   one. */
+static void test_certifying_the_image_retires_the_token(void) {
+    check_at_rollover();
+    ota_flow_apply(90, false);
+    boot_running(TARGET);
+    ota_flow_confirm_image();
+    TEST_ASSERT_EQUAL_UINT16(0, stored_pend());
+
+    boot_running(RUNNING);
+    TEST_ASSERT_EQUAL_STRING("", stored_result());
+}
+
+/* The failsafe path declines to certify on purpose — that wake was
+   already wedged and the pending image is exactly what is suspected. It
+   must equally decline to retire the token, or the revert that follows
+   would be invisible again. */
+static void test_a_failsafe_sleep_leaves_the_revert_detectable(void) {
+    check_at_rollover();
+    ota_flow_apply(90, false);
+
+    boot_running(TARGET);
+    ota_flow_note_failsafe_sleep();
+    ota_flow_confirm_image();
+    TEST_ASSERT_EQUAL_UINT16(1, stored_pend());
+
+    boot_running(RUNNING);
+    TEST_ASSERT_EQUAL_STRING("rolled_back", stored_result());
+}
+
+/* A download that FAILED never moved the boot partition, so the next
+   boot is running the old image for an entirely ordinary reason. Arming
+   the token before the commit (rather than after it) would turn every
+   such failure into a false rollback report written over the genuine
+   reason — which is the one thing worse than no report at all. */
+static void test_a_failed_download_never_reports_a_rollback(void) {
+    m_finish_ok = false;
+    m_finish_facts.transport_failed = true;
+    check_at_rollover();
+    ota_flow_apply(90, false);
+    TEST_ASSERT_EQUAL_STRING("net", stored_result());
+    TEST_ASSERT_EQUAL_UINT16(0, stored_pend());
+
+    boot_running(RUNNING);
+    TEST_ASSERT_EQUAL_STRING("net", stored_result());
+}
+
+/* A device that has never run an OTA has no token and no story. */
+static void test_a_virgin_boot_reports_no_rollback(void) {
+    boot_running(RUNNING);
+    TEST_ASSERT_EQUAL_STRING("", stored_result());
+}
+
+/* EVERY revert in the loop, not just the first. The rollback loop task
+   13 bounded runs the commit path once per turn, so the token is
+   re-armed each time; a detector that only ever fired once per device
+   would report the first revert and then go quiet for the two turns that
+   follow, which is the same invisibility in a smaller box. */
+static void test_every_revert_in_a_rollback_loop_is_reported(void) {
+    for (int turn = 1; turn <= 2; turn++) {
+        check_at_rollover();
+        ota_flow_apply(90, false);
+        TEST_ASSERT_EQUAL_STRING("", stored_result());
+
+        boot_running(RUNNING);
+        TEST_ASSERT_EQUAL_STRING("rolled_back", stored_result());
+        TEST_ASSERT_EQUAL_UINT16(turn, stored_fails());
+    }
+}
+
+/* The reason string is stored and published like any other, so it has to
+   fit the same widths — and it is persistable, because the boot that
+   writes it is a boot on which nothing else runs at all. */
+static void test_the_rollback_reason_is_a_persistable_code_that_fits(void) {
+    TEST_ASSERT_TRUE(ota_policy_reason_is_persistable(OTA_REASON_ROLLED_BACK));
+    TEST_ASSERT_EQUAL_STRING("rolled_back", ota_policy_reason_str(OTA_REASON_ROLLED_BACK));
+    TEST_ASSERT_LESS_THAN_UINT(OTA_REASON_TEXT_MAX, strlen(ota_policy_reason_str(OTA_REASON_ROLLED_BACK)) + 1);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_rollover_always_checks);
@@ -1493,5 +1771,24 @@ int main(void) {
     RUN_TEST(test_the_awake_failsafe_path_does_not_certify_the_image);
     RUN_TEST(test_a_wake_that_ran_a_download_still_certifies_at_sleep);
     RUN_TEST(test_the_failsafe_flag_does_not_outlive_its_boot);
+
+    RUN_TEST(test_the_download_duration_reaches_nvs);
+    RUN_TEST(test_a_timed_out_download_records_its_duration_in_nvs);
+    RUN_TEST(test_a_failed_download_records_its_duration_in_nvs);
+    RUN_TEST(test_an_attempt_that_never_started_leaves_the_last_duration_alone);
+    RUN_TEST(test_the_stat_read_sees_what_this_wake_just_wrote);
+    RUN_TEST(test_the_stat_read_reports_every_ota_field);
+    RUN_TEST(test_the_stat_read_of_a_virgin_device_is_empty);
+
+    RUN_TEST(test_a_commit_arms_the_certification_token);
+    RUN_TEST(test_a_revert_is_reported_on_the_boot_that_comes_back);
+    RUN_TEST(test_a_revert_is_reported_once_and_never_again);
+    RUN_TEST(test_the_boot_that_came_up_on_the_new_image_reports_nothing);
+    RUN_TEST(test_certifying_the_image_retires_the_token);
+    RUN_TEST(test_a_failsafe_sleep_leaves_the_revert_detectable);
+    RUN_TEST(test_a_failed_download_never_reports_a_rollback);
+    RUN_TEST(test_a_virgin_boot_reports_no_rollback);
+    RUN_TEST(test_every_revert_in_a_rollback_loop_is_reported);
+    RUN_TEST(test_the_rollback_reason_is_a_persistable_code_that_fits);
     return UNITY_END();
 }

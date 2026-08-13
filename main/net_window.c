@@ -89,9 +89,13 @@ static void net_window_task(void *arg) {
                task 12 of docs/planning/ota.plan.md: this ordering is
                NECESSARY for a check result to reach the same window, but
                it is not on its own SUFFICIENT — `snap` was filled on the
-               main task before the post above, so whatever publishes
-               ota_result must read it from NVS at publish time rather
-               than out of this snapshot (task 14 owns that field).
+               main task before the post above, so the publisher has to
+               read ota_result from NVS rather than out of this snapshot.
+               It does: mqtt_ha.c's publish_states() calls
+               ota_flow_stat() on the line that builds the payload, and
+               stats_snapshot_t deliberately carries no OTA fields at all
+               so that the other arrangement cannot be written by
+               accident.
 
                s_ntp_result rather than a wider "the clock looks set":
                ota_gate_in_t::time_valid means "NTP has set the clock

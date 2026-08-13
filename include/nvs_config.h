@@ -97,10 +97,12 @@ esp_err_t nvs_config_set_ota_url(const char *url);
 /* Also check for an update on every Button D full sync (0/1). */
 esp_err_t nvs_config_get_ota_on_sync(uint16_t *out);
 esp_err_t nvs_config_set_ota_on_sync(uint16_t on);
-/* Device-owned state (no HA entity, no bulk-document key): last attempt's
-   reason code, the version the retry budget is counting against, and the
-   consecutive-failure count for that target. All three feed the stat
-   payload; a different target resets the count.
+/* Device-owned state (no bulk-document key): last attempt's reason code,
+   the version the retry budget is counting against, the consecutive-
+   failure count for that target, the last download's wall time, and
+   whether a committed image is still awaiting certification. The first
+   four feed the stat payload (ota_flow_stat reads them at PUBLISH time);
+   a different target resets the count.
 
    Buffer >= CFG_BOUND_OTA_RESULT_MAX. */
 esp_err_t nvs_config_get_ota_result(char *buf, size_t len);
@@ -112,6 +114,17 @@ esp_err_t nvs_config_get_ota_target(char *buf, size_t len);
 esp_err_t nvs_config_set_ota_target(const char *ver);
 esp_err_t nvs_config_get_ota_fails(uint16_t *out);
 esp_err_t nvs_config_set_ota_fails(uint16_t fails);
+/* Milliseconds, so u32: a u16 saturates at 65.5 s and the download budget
+   is CONFIG_MAGTAG_OTA_MAX_SEC. 0 = no download has ever completed a
+   timing. */
+esp_err_t nvs_config_get_ota_dl_ms(uint32_t *out);
+esp_err_t nvs_config_set_ota_dl_ms(uint32_t ms);
+/* 1 = an image was committed and has not yet been certified. The ONLY
+   durable trace an OTA reboot leaves behind, and the signal a rollback is
+   detected from — see ota_flow.c. Not published; the reason string it
+   produces is. */
+esp_err_t nvs_config_get_ota_pend(uint16_t *out);
+esp_err_t nvs_config_set_ota_pend(uint16_t pending);
 
 /* Extra-timer definitions from HA (timer_defs_install falls back to the
    Kconfig table when absent). Version/size drift reads as stale. */

@@ -22,6 +22,16 @@ static esp_err_t get_u16_with_default(const char *key, uint16_t *out, uint16_t d
     return ret;
 }
 
+static esp_err_t get_u32_with_default(const char *key, uint32_t *out, uint32_t default_val) {
+    *out = default_val; /* safe value on any error path */
+    esp_err_t ret = hal_nvs_read_u32(key, out);
+    if (ret == ESP_ERR_NVS_NOT_FOUND) {
+        *out = default_val;
+        return ESP_OK;
+    }
+    return ret;
+}
+
 static esp_err_t init_u16_if_missing(const char *key, uint16_t default_val) {
     uint16_t tmp;
     esp_err_t ret = hal_nvs_read_u16(key, &tmp);
@@ -295,6 +305,18 @@ esp_err_t nvs_config_get_ota_fails(uint16_t *out) {
 }
 esp_err_t nvs_config_set_ota_fails(uint16_t fails) {
     return hal_nvs_write_u16(NVS_KEY_OTA_FAILS, fails);
+}
+esp_err_t nvs_config_get_ota_dl_ms(uint32_t *out) {
+    return get_u32_with_default(NVS_KEY_OTA_DL_MS, out, 0);
+}
+esp_err_t nvs_config_set_ota_dl_ms(uint32_t ms) {
+    return hal_nvs_write_u32(NVS_KEY_OTA_DL_MS, ms);
+}
+esp_err_t nvs_config_get_ota_pend(uint16_t *out) {
+    return get_u16_with_default(NVS_KEY_OTA_PEND, out, 0);
+}
+esp_err_t nvs_config_set_ota_pend(uint16_t pending) {
+    return hal_nvs_write_u16(NVS_KEY_OTA_PEND, pending ? 1 : 0);
 }
 
 esp_err_t nvs_config_get_timer_defs(nvs_timer_defs_blob_t *out) {

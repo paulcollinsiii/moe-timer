@@ -139,6 +139,31 @@ esp_err_t hal_nvs_write_u16(const char *key, uint16_t val) {
     return ESP_OK;
 }
 
+/* Width-checked exactly like the u16 pair: a key written as one type and
+   read as the other must MISS, because ESP-IDF's nvs_get_u32 does the
+   same. Sharing a key between widths would otherwise pass here and fail
+   on the device. */
+esp_err_t hal_nvs_read_u32(const char *key, uint32_t *out) {
+    count_read(key);
+    const Entry *e = find_entry(key);
+    if (!e || e->len != sizeof(uint32_t))
+        return ESP_ERR_NVS_NOT_FOUND;
+    memcpy(out, e->data, sizeof(uint32_t));
+    return ESP_OK;
+}
+
+esp_err_t hal_nvs_write_u32(const char *key, uint32_t val) {
+    count_write(key);
+    if (take_write_failure())
+        return ESP_FAIL;
+    Entry *e = alloc_entry(key);
+    if (!e)
+        return ESP_FAIL;
+    memcpy(e->data, &val, sizeof(uint32_t));
+    e->len = sizeof(uint32_t);
+    return ESP_OK;
+}
+
 esp_err_t hal_nvs_read_str(const char *key, char *buf, size_t *len) {
     count_read(key);
     const Entry *e = find_entry(key);

@@ -118,6 +118,14 @@ typedef enum {
     OTA_REASON_TLS_CERT,     /* the chain was REJECTED — a different fix entirely */
     OTA_REASON_TIMEOUT,      /* our own deadline aborted the download */
     OTA_REASON_BAD_IMAGE,    /* image header invalid / wrong chip */
+    /* The download SUCCEEDED and the new image still is not running: it
+       was committed, failed to certify itself, and the bootloader booted
+       the old slot again. Nothing else in the enum covers it — every
+       other code describes something the flow observed going wrong, and
+       this one describes an outcome that happens after the flow's own
+       process has been replaced. ota_flow.c detects it on the boot that
+       comes back. */
+    OTA_REASON_ROLLED_BACK,
     OTA_REASON_COUNT,
 } ota_reason_t;
 

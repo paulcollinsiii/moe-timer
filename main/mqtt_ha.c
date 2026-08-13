@@ -17,12 +17,17 @@
 #include "mqtt_topics.h"
 #include "nvs_config.h"
 #include "nvs_keys.h"
+#include "ota_flow.h"
 #include "timer.h"
 
 static const char *TAG = "mqtt_ha";
 
 /* Bump when entities are added/renamed — discovery configs republish once. */
-#define DISC_SCHEMA_VER 17 /* v17: + OTA manifest URL / check-on-sync entities */
+/* STATS_JSON_DISC_SCHEMA_VER lives in stats_json.h, beside the entity
+   table it versions, so that adding a row cannot miss the bump -- the
+   number and the table are pinned to each other by test_stats_json. It
+   was here until v18 and nothing else changed about how it is used. */
+#define DISC_SCHEMA_VER STATS_JSON_DISC_SCHEMA_VER
 
 #define CONNECT_TIMEOUT_MS 5000
 #define PUBLISH_DRAIN_TIMEOUT_MS 3000
@@ -52,7 +57,7 @@ static volatile int s_pub_acks;
    the "window open" flag for the event handler. */
 typedef struct {
     char topic[128];
-    char payload[768]; /* stat/summary/discovery payloads (largest: 600-768) */
+    char payload[STATS_JSON_PAYLOAD_MAX]; /* stat/summary/discovery payloads */
     char ack[256];
     char cfg_state[HA_CONFIG_STATE_MAX];
     char config_buf[CONFIG_BUF_MAX]; /* retained config document (HA→device) */
@@ -432,8 +437,20 @@ static int publish_states(esp_mqtt_client_handle_t client, const stats_snapshot_
         published += publish_action_discovery(client, dev_name, snap->fw);
     }
 
+    /* PUBLISH TIME, and it has to be here rather than in the snapshot.
+
+       `snap` was filled by stats_collect() on the main task and posted by
+       value; net_window_task copied it off the queue BEFORE it called
+       ota_flow_check(), so any OTA field carried in it would be this
+       wake's snapshot of the PREVIOUS wake's result. Reading NVS on this
+       line instead picks up the verdict the check wrote two statements
+       earlier at net_window.c:103. See ota_flow.h's ota_flow_stat() and
+       task 12 of docs/planning/ota.plan.md. */
+    ota_stat_t ota;
+    ota_flow_stat(&ota);
+
     mqtt_topic(s_mem->topic, sizeof(s_mem->topic), device_id(), "stat");
-    if (stats_json_stat(s_mem->payload, sizeof(s_mem->payload), snap) < (int)sizeof(s_mem->payload)) {
+    if (stats_json_stat(s_mem->payload, sizeof(s_mem->payload), snap, &ota) < (int)sizeof(s_mem->payload)) {
         published += publish(client, s_mem->topic, s_mem->payload, 1);
     }
 

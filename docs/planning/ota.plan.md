@@ -1714,35 +1714,163 @@ deserve their own commit and their own review:
     promoted to full: no valid previous frame this power cycle". Verify that
     log line on the smoke test rather than adding a promotion that would
     duplicate it, and do not remove the driver guard.
-14. OTA result / target / fail-count / download duration into the stat payload.
-    **Read `ota_result` from NVS inside `mqtt_ha_window`, at publish time --
-    not as a `stats_snapshot_t` field.** Task 12's entry above works the
-    constraint out in full (see "A correction to this entry's own third
-    bullet"): `wake_flow_post_stats_snapshot()` runs `stats_collect()` on the
-    main task and posts the struct **by value**, `net_window_task` copies it
-    out of the queue before `ota_flow_check` runs, so a snapshot field filled
-    at collection time can only ever carry the **previous** wake's result.
-    Also bump `DISC_SCHEMA_VER` in `mqtt_ha.c` in the same commit: new or
-    renamed Home Assistant entities do not appear at all until it changes,
-    and four new fields is four entities.
+14. **DONE.** OTA result / target / fail-count / download duration in the
+    stat payload, and a rollback made visible.
 
-    **A rollback is currently invisible to the operator, and closing that
-    is task-14 work.** `ota_flow.c` clears `ota_result` on the success path
-    just before the OTA reboot (it must -- see task 13), so a device whose
-    new image then fails to certify and gets reverted comes back reporting
-    an **empty** OTA result. Everything the operator can see says the update
-    simply did not happen: the `fw` stat and the status screen both read the
-    app descriptor and agree on the old version, and nothing anywhere says
-    "this device tried and reverted". The only surviving evidence is
-    indirect -- `ota_target` and a non-zero `ota_fails` against a version the
-    device is not running -- and after three turns the device does surface a
-    `gave_up`, but only after ~4.48 MB of downloads.
+    Four fields (`ota_result`, `ota_target`, `ota_fails`, `ota_dl_ms`) and
+    four HA entities, `DISC_SCHEMA_VER` 17 -> 18 in the same commit, and a
+    distinct `rolled_back` reason so a revert is reported on its FIRST
+    occurrence instead of after ~4.48 MB of downloads.
 
-    Surfacing a distinct reason string for the reverted case (the natural
-    read of `esp_ota_get_state_partition()` on the boot after a revert)
-    would give the operator the signal on the **first** occurrence. It needs
-    a `DISC_SCHEMA_VER` bump like everything else here. Recorded, **not**
-    implemented.
+    **Read at publish time, and now structurally so.** The four values are
+    read from NVS by `ota_flow_stat()` (`ota_flow.c`, which owns all the
+    keys) called from `publish_states()` in `mqtt_ha.c`, on the line that
+    builds the payload. They are passed to the pure builder as a second
+    argument, `ota_stat_t`, so `stats_json.c` keeps its no-ESP-dependency
+    property and stays host-tested. `stats_snapshot_t` deliberately gained
+    NO OTA fields: the constraint this entry used to state as a rule is
+    now enforced by the type, because there is no snapshot field to fill
+    early. `net_window.c`'s forward reference to "task 14 owns that field"
+    was replaced with what actually happens.
+
+    **`ota_dl_ms` as originally specified was dead on arrival, and the fix
+    is a fifth NVS key.** `ota_flow_last_dl_ms()` returns a plain
+    `static uint32_t` assigned in the SECOND window -- which opens after
+    `net_window.c` has closed MQTT, so nothing in it can publish -- and
+    that window ends in `esp_restart()` on success and deep sleep on
+    failure. Both discard RAM. Read from `mqtt_ha_window` the function was
+    therefore 0 on every path that has ever existed: a sensor guaranteed
+    to read zero forever, which is worse than no sensor. RTC is not the
+    fix either -- `RTC_DATA_ATTR` survives only a deep-sleep wake on the
+    S2, and the success path is a restart. So `stop_clock()` writes the
+    value to `NVS_KEY_OTA_DL_MS` (u32: milliseconds against a 300 s budget
+    overflow a u16 at 65.5 s, i.e. a u16 would clip exactly the slow
+    transfers the field exists to expose -- `hal_nvs_read_u32`/`write_u32`
+    were added for it). Written inside `stop_clock()` rather than at its
+    call sites so BOTH get it: the commit path, and every failure through
+    `fail_attempt` including the deadline abort, which is the single most
+    interesting sample the field can carry. An attempt that never opened a
+    transfer does not reach the write (`s_dl_running` is still false), so
+    no zero lands on top of a real earlier measurement. The number is one
+    wake late by construction, which is what a "is this link getting
+    slower?" number is for. `ota_flow_last_dl_ms()` survives for the
+    commit log line only, and its header comment now says so.
+
+    **The rollback detector is a consumed token, not a level.** The
+    obvious detector -- `esp_ota_get_state_partition()` on the other slot
+    returning `ESP_OTA_IMG_ABORTED` -- is unusable as stated, and so is
+    the `ota_target != running` pair task 13 made available: both are
+    STATES, not events. The ABORTED marker persists until that slot is
+    rewritten, so "we rolled back" stays true on every boot afterwards,
+    forever, overwriting each later wake's genuine `ota_result` with a
+    rollback that happened last month.
+
+    So `NVS_KEY_OTA_PEND` is written by the commit path at the one instant
+    that is unambiguous -- the boot partition has just moved and nothing
+    has certified anything -- and CONSUMED by whichever future arrives
+    first: `ota_flow_confirm_image()` retires it when the new image
+    certifies, or `note_rollback_if_reverted()` (run from
+    `ota_flow_init`) finds a boot running something other than the
+    committed version, clears the token and records `rolled_back`. A latch
+    is then not merely avoided but unrepresentable, and because every
+    commit re-arms the token, each turn of a rollback loop is reported
+    rather than only the first.
+
+    Three placements are load-bearing and each has a test:
+
+    * The token is armed AFTER `dl_finish`, not before. Armed before, a
+      failed commit would have the next boot see "committed, not running
+      the target" and write a false `rolled_back` over the genuine failure
+      reason -- worse than silence.
+    * It is armed BEFORE the `ota_result` clear, so a death between the
+      two leaves the recoverable state (the next boot either certifies or
+      converts the token into a `rolled_back` that overwrites the stale
+      string anyway); the other order leaves no token and the revert is as
+      invisible as before.
+    * The token is consumed BEFORE the reason is written. If the clear
+      lands and the record does not, one revert goes unreported and the
+      budget still walks to a visible `gave_up`; the other order
+      reintroduces the latch through the back door.
+
+    `note_rollback_if_reverted()` lives in `ota_flow_init` because that is
+    the only function a post-revert boot is guaranteed to reach --
+    `ota_flow_check()` is a no-op unless the wake armed a check, and the
+    wake after a revert usually did not -- and because running it there
+    puts the verdict in NVS before app_main opens the network window,
+    which is what gets it into the SAME wake's payload.
+
+    **This is not the clear task 13 ruled out.** That entry says "do not
+    defer the clears to the confirmation", because `mark_valid` is `void`
+    and an unconditional clear there could not tell "I just certified"
+    from "there was nothing to certify" and would wipe the retry budget on
+    every ordinary sleep. The token IS that discriminator: it is set only
+    by a commit, so on an ordinary sleep there is nothing to clear, and
+    the budget keys are not touched by any of this. `ota_result` is still
+    cleared at the commit exactly as task 13 requires, and the token is
+    invisible to HA -- the first publish after a successful update still
+    reports an empty `ota_result`.
+
+    `OTA_REASON_ROLLED_BACK` -> `"rolled_back"` (11 chars, inside
+    `OTA_REASON_TEXT_MAX` 16) and is persistable: the boot that writes it
+    is a boot on which nothing else runs, so a non-persistable code would
+    leave the revert as the empty string that made it invisible.
+
+    **Entity table.** All four carry `expire_after` 0, following
+    `last_reset` rather than the `STAT_EXPIRE_SEC` neighbours. That
+    constant exists so a device that stopped checking in reads
+    "unavailable" instead of showing stale live telemetry, which is right
+    for a battery reading; these four are not telemetry but the record of
+    the last update attempt, and an expiry blanks them on exactly the
+    device this entry exists to make legible -- one that tried to update,
+    rolled back, and is now failing to check in. A live device republishes
+    them every window regardless. `ota_result` is the one PRIMARY entity:
+    "did my update work?" is the operator's question. The other three are
+    the supporting detail and sit in the Diagnostic group. `ota_dl_ms` is
+    published in unconverted milliseconds with `dev_cla: duration`,
+    because the number is read against `CONFIG_MAGTAG_OTA_MAX_SEC`.
+
+    **`DISC_SCHEMA_VER` moved to `stats_json.h`** as
+    `STATS_JSON_DISC_SCHEMA_VER`, beside the table it versions, and
+    `test_stats_json` now pins it against the row count. It was in
+    `mqtt_ha.c`, where nothing host-testable could see it and where the
+    known failure mode is that a new entity simply never appears in HA. It
+    is now caught in both directions: adding a row without bumping fails
+    two cases, and bumping without adding fails one. `mqtt_ha.c` keeps
+    `#define DISC_SCHEMA_VER STATS_JSON_DISC_SCHEMA_VER` so its two call
+    sites did not churn. The payload buffer was named at the same time
+    (`STATS_JSON_PAYLOAD_MAX` 768) because this change added ~110 bytes to
+    a payload `publish_states` DROPS silently if it ever reaches the
+    buffer size; a worst-case case now pins the headroom.
+
+    **Verification.** Host suite 38/38. `test_stats_json` 23 -> 32,
+    `test_ota_flow` 63 -> 80, `test_nvs_config` 53 -> 55, `test_ota_policy`
+    56 unchanged (its exhaustive walk absorbed the new code). Firmware
+    builds clean at 0x16cf90 (1,494,928 B), 81.5 % of the 0x1c0000 slot.
+
+    Eleven mutations, 22 case-kills, all caught: the `ota_dl_ms` write deleted (3 cases, all
+    reading "Was 0" -- the original defect exactly); the stat read cached
+    at init instead of read at publish time (2, including the one that
+    models the H10 constraint); `STATS_JSON_DISC_SCHEMA_VER` left at 17
+    (1); an entity added without bumping it (2); the rollback token never
+    consumed (1); the detector rewritten to read a LEVEL rather than
+    consume a token, i.e. the naive ABORTED design (3, each showing
+    `rolled_back` overwriting a genuine result); the token armed before
+    the commit instead of after (1); the certification's retirement of the
+    token removed (1); the running-version compare dropped (3); the OTA
+    entities given an `expire_after` (1); and the pure builder ignoring
+    its `ota` argument (4).
+
+    **Known gaps, left deliberately.** A device that dies between
+    `dl_finish` and the token write loses that one revert's report -- the
+    window is two adjacent NVS writes and nothing can cover it from
+    inside. If `ota_target` is unreadable at detection time the token is
+    consumed and NOTHING is reported, on purpose: naming a rollback we
+    cannot attribute would blame whatever the operator last saw. Neither
+    affects the retry budget, which still converges on a visible
+    `gave_up`. `ota.c` was not touched at all -- no
+    `esp_ota_get_state_partition()` read was added, because the token
+    makes one unnecessary.
+
 15. Build-size guard (warn at 85 % slot occupancy).
 16. Hardware smoke test (below).
 17. Update `docs/architecture.md`: module table, layer lists, a subsystem note

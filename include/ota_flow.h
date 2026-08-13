@@ -4,6 +4,7 @@
 #include <stdint.h>
 
 #include "ota_policy.h"
+#include "stats_json.h" /* ota_stat_t — this module owns the keys behind it */
 
 /* OTA sequencing — layer 2. Owns the ORDER of an update: when a check may
    run, where the manifest fetch sits inside the existing network window,
@@ -163,7 +164,17 @@ typedef struct {
     const char *running_version; /* esp_app_get_description()->version */
 } ota_flow_cfg_t;
 
-/* Install the effects and the budgets. Once, before any other call. */
+/* Install the effects and the budgets. Once, before any other call.
+
+   NOT purely an installer: it also runs this boot's rollback check, and
+   that placement is load-bearing. A revert is only visible from the boot
+   that comes back on the old image, and that boot has no other reason to
+   enter this module at all -- ota_flow_check() is a no-op unless the wake
+   armed one, and the wake after a rollback usually did not. Running the
+   check from init puts the verdict in NVS before app_main has opened
+   anything, which is the only way it reaches the stat payload of the same
+   wake. Requires NVS: main.c calls nvs_flash_init() and
+   nvs_config_init_defaults() well ahead of this. */
 void ota_flow_init(const ota_flow_ops_t *ops, const ota_flow_cfg_t *cfg);
 
 /* Main task, before the window opens: decide whether this wake's trigger
@@ -243,10 +254,41 @@ void ota_flow_apply(int batt_pct, bool charge_locked);
    stays a single rule (ota_policy_reason_is_persistable). */
 void ota_flow_note_spawn_failed(void);
 
-/* Last download's wall time, 0 if none this boot. The stat payload
-   publishes it so a link trending toward the deadline is visible before
-   it becomes chronic. */
+/* Last download's wall time THIS BOOT, 0 if none. RAM only, and for
+   logging only -- what the stat payload publishes is the NVS copy, via
+   ota_flow_stat() below.
+
+   The distinction is not pedantry, it is the whole reason the NVS copy
+   exists. Every download runs in the SECOND window, which opens after
+   net_window.c has already closed MQTT, so nothing can publish from
+   inside it; its success path then ends in restart() and its failure
+   path in deep sleep, and both discard this variable. Read from
+   mqtt_ha_window, this function is therefore 0 on every path that has
+   ever existed -- a sensor that is structurally always zero. stop_clock()
+   writes the value to NVS instead, on the failure path as well as the
+   success one, because a link creeping toward the deadline is exactly
+   the trend the field is for and a timeout is its last data point. */
 uint32_t ota_flow_last_dl_ms(void);
+
+/* The four OTA fields for the stat payload, read from NVS at the moment
+   of the call.
+
+   CALL IT AT PUBLISH TIME, from inside mqtt_ha_window -- not at snapshot
+   collection. net_window.c runs ota_flow_check() and then
+   mqtt_ha_window(), so the check's verdict is in NVS by the time this
+   runs; a copy taken any earlier (a stats_snapshot_t field, say) is a
+   copy of the PREVIOUS wake's result, because the snapshot is filled on
+   the main task and posted by value before the check happens. See
+   stats_json.h's ota_stat_t comment and task 12 of the plan.
+
+   Lives here rather than in mqtt_ha.c because this module is the only
+   writer of all four keys, and because that keeps the read testable:
+   test_ota_flow drives the real NVS accessors over the mock store and
+   can therefore assert the publish-time property directly.
+
+   Never fails: an unreadable field reads as ""/0, which is what a device
+   that has never attempted an update reports anyway. */
+void ota_flow_stat(ota_stat_t *out);
 
 /* ---- rollback: certifying the image this boot came up on ----------------
 
@@ -324,7 +366,19 @@ void ota_flow_note_failsafe_sleep(void);
 
    Null-safe before ota_flow_init: main.c arms the failsafe as the second
    call in app_main, well before ota_flow_init, so the one boot where
-   init never happens must not fault on a NULL op pointer. */
+   init never happens must not fault on a NULL op pointer.
+
+   Also retires the "an image is awaiting certification" flag that the
+   commit path set, and only on the path that actually certifies -- the
+   failsafe decline above leaves it standing so the next boot can still
+   tell a revert from a normal wake. Note that this is NOT the clear task
+   13 ruled out ("do not defer the clears to the confirmation"): that
+   objection was that mark_valid() is void, so an unconditional clear here
+   could not tell "I just certified" from "there was nothing to certify"
+   and would wipe the retry budget on every ordinary sleep. The flag is
+   the discriminator mark_valid's return could not provide -- it is set
+   only by a commit, so on an ordinary sleep there is nothing here to
+   clear, and the budget keys are not touched by any of this. */
 void ota_flow_confirm_image(void);
 
 #ifdef __cplusplus

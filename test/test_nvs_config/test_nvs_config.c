@@ -471,6 +471,47 @@ void test_ota_state_keys_default_empty_and_round_trip(void) {
     TEST_ASSERT_EQUAL_UINT16(2, fails);
 }
 
+/* The download duration is a u32 and that is the point of it: the
+   download budget is CONFIG_MAGTAG_OTA_MAX_SEC (300 s in the shipped
+   Kconfig), and a u16 stops counting at 65.5 s — it would saturate on
+   exactly the slow transfers the field exists to expose. */
+void test_ota_dl_ms_defaults_to_zero_and_holds_a_full_download(void) {
+    uint32_t ms = 0xDEADBEEF;
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_ota_dl_ms(&ms));
+    TEST_ASSERT_EQUAL_UINT32(0, ms);
+
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_set_ota_dl_ms(298000));
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_ota_dl_ms(&ms));
+    TEST_ASSERT_EQUAL_UINT32(298000, ms);
+
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_set_ota_dl_ms(4294967295u));
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_ota_dl_ms(&ms));
+    TEST_ASSERT_EQUAL_UINT32(4294967295u, ms);
+}
+
+/* The certification token. Absent means "no image is awaiting
+   certification", which is the state of every device that has never run
+   an OTA — so the default has to be 0 rather than an error, or every
+   virgin boot would take the unreadable branch. Normalised to 0/1 like
+   ota_on_sync so a stray value cannot read as a third state. */
+void test_ota_pend_defaults_to_zero_and_normalises(void) {
+    uint16_t pend = 0xFFFF;
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_ota_pend(&pend));
+    TEST_ASSERT_EQUAL_UINT16(0, pend);
+
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_set_ota_pend(1));
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_ota_pend(&pend));
+    TEST_ASSERT_EQUAL_UINT16(1, pend);
+
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_set_ota_pend(99));
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_ota_pend(&pend));
+    TEST_ASSERT_EQUAL_UINT16(1, pend);
+
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_set_ota_pend(0));
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_ota_pend(&pend));
+    TEST_ASSERT_EQUAL_UINT16(0, pend);
+}
+
 /* The OTA keys are deliberately NOT in the seeded-defaults registry, so
    init_defaults never materializes them; the getters supply the
    compile-time default lazily instead. */
@@ -706,6 +747,8 @@ int main(void) {
     RUN_TEST(test_ota_url_defaults_and_round_trip);
     RUN_TEST(test_ota_on_sync_defaults_and_round_trip);
     RUN_TEST(test_ota_state_keys_default_empty_and_round_trip);
+    RUN_TEST(test_ota_dl_ms_defaults_to_zero_and_holds_a_full_download);
+    RUN_TEST(test_ota_pend_defaults_to_zero_and_normalises);
     RUN_TEST(test_init_defaults_does_not_seed_ota_keys);
     RUN_TEST(test_reseed_does_not_revert_ha_set_ota_values);
     RUN_TEST(test_fingerprint_ignores_ota_values);

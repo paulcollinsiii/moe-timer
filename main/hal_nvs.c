@@ -69,6 +69,25 @@ esp_err_t hal_nvs_write_u16(const char *key, uint16_t val) {
     return ret;
 }
 
+esp_err_t hal_nvs_read_u32(const char *key, uint32_t *out) {
+    nvs_handle_t h;
+    esp_err_t ret = open_nvs(&h);
+    if (ret != ESP_OK)
+        return ret;
+    return nvs_get_u32(h, key, out);
+}
+
+esp_err_t hal_nvs_write_u32(const char *key, uint32_t val) {
+    nvs_handle_t h;
+    esp_err_t ret = open_nvs(&h);
+    if (ret != ESP_OK)
+        return ret;
+    ret = nvs_set_u32(h, key, val);
+    if (ret == ESP_OK)
+        ret = nvs_commit(h);
+    return ret;
+}
+
 esp_err_t hal_nvs_read_str(const char *key, char *buf, size_t *len) {
     nvs_handle_t h;
     esp_err_t ret = open_nvs(&h);

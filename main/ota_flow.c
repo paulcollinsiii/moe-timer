@@ -107,6 +107,79 @@ static void read_counted_target(char *buf, size_t len) {
     }
 }
 
+/* ---- rollback detection, once per boot ---------------------------------
+
+   The problem this solves: a device that updates, fails to certify the
+   new image and gets reverted by the bootloader comes back reporting an
+   EMPTY ota_result -- the commit path cleared it (task 13 requires that)
+   and the reverted image never got to write anything. Every surface the
+   operator has then agrees the update simply did not happen: `fw` and the
+   status screen both read the app descriptor and name the old version.
+
+   Why not read esp_ota_get_state_partition() on the other slot, which is
+   the obvious detector. Because ESP_OTA_IMG_ABORTED is not an event, it
+   is a STATE, and it persists until that slot is rewritten. "The other
+   slot is aborted, therefore we rolled back" is true on the boot after
+   the revert and equally true on every boot after that, forever -- it
+   would latch, and the latch would overwrite each subsequent wake's
+   genuine ota_result with a rollback that happened last month. Pairing it
+   with "ota_target names a version we are not running" (which task 13
+   made available by no longer clearing ota_target) narrows it but does
+   not fix it: both halves are states, and both stay true.
+
+   So the detector is a one-shot token instead of a pair of levels.
+   ota_pend is written by the commit path, at the one instant that is
+   unambiguous -- the boot partition has just moved and nothing has
+   certified anything yet -- and it is CONSUMED by whichever of the two
+   possible futures arrives first:
+
+     - the new image runs and reaches a clean sleep, so
+       ota_flow_confirm_image() certifies it and clears the flag; or
+     - a boot comes up on something that is NOT the committed version,
+       which is what a revert looks like from in here, and this function
+       clears the flag and records the reason.
+
+   A latch is then not merely avoided, it is unrepresentable: the second
+   boot after a revert finds no flag. And because the flag is re-armed by
+   every commit, a device stuck in the rollback loop that task 13 bounded
+   reports EACH revert once, rather than one and then silence.
+
+   The version compare is what separates a revert from the ordinary boot
+   right after a successful update, when the flag is also set: there, the
+   committed version IS the running one, and the flag is left for the
+   certification at this wake's sleep. */
+static void note_rollback_if_reverted(void) {
+    uint16_t pending = 0;
+    if (nvs_config_get_ota_pend(&pending) != ESP_OK || pending == 0)
+        return;
+
+    char target[CFG_BOUND_OTA_TARGET_MAX];
+    read_counted_target(target, sizeof(target));
+    const char *running = (s_cfg.running_version != NULL) ? s_cfg.running_version : "";
+    if (target[0] != '\0' && strcmp(target, running) == 0)
+        return; /* it IS running; certification is this wake's job */
+
+    /* CONSUMED BEFORE THE REPORT IS WRITTEN, and the order is deliberate.
+       If the clear lands and the record does not, one revert goes
+       unreported and the retry budget still walks to a visible gave_up.
+       If the record landed first and the clear did not, every boot from
+       here on would re-report this rollback over whatever ota_result had
+       come to hold -- the latch, reintroduced through the back door. The
+       cheaper failure is the one that loses a message, not the one that
+       corrupts every later message. */
+    (void)nvs_config_set_ota_pend(0);
+
+    if (target[0] == '\0') {
+        /* Nothing to attribute it to, and read_counted_target has already
+           warned. Reporting a rollback we cannot name would be worse than
+           silence: it would blame whatever the operator last saw. */
+        ESP_LOGW(TAG, "an uncertified image is no longer running, but ota_target is empty: not reporting a rollback");
+        return;
+    }
+    record(OTA_REASON_ROLLED_BACK, 0);
+    ESP_LOGW(TAG, "rolled back: %s was committed but never certified; %s is running", target, running);
+}
+
 static void fill_gate(ota_gate_in_t *g, bool url_set, bool time_valid, int batt_pct, bool charge_locked) {
     *g = (ota_gate_in_t){
         .url_set = url_set,
@@ -132,6 +205,16 @@ void ota_flow_init(const ota_flow_ops_t *ops, const ota_flow_cfg_t *cfg) {
     s_dl_running = false;
     s_dl_ms = 0;
     s_failsafe_sleep = false;
+
+    /* Last, because it reads s_cfg.running_version and may write NVS.
+       Here rather than at a call site of its own because this is the only
+       function in this module that a post-rollback boot is guaranteed to
+       reach: ota_flow_check() does nothing unless the wake armed a check,
+       and the wake that comes back from a revert usually did not arm one.
+       Running it from init also puts the verdict in NVS before app_main
+       opens the network window, which is what gets it into the SAME
+       wake's stat payload rather than tomorrow's. */
+    note_rollback_if_reverted();
 }
 
 void ota_flow_arm(ota_trigger_t trigger, int batt_pct, bool charge_locked) {
@@ -276,6 +359,22 @@ uint32_t ota_flow_last_dl_ms(void) {
     return s_dl_ms;
 }
 
+void ota_flow_stat(ota_stat_t *out) {
+    if (out == NULL)
+        return;
+    /* Zeroed first for the reason read_counted_target() spells out:
+       hal_nvs_read_str writes NOTHING into a buffer it judges too small
+       or a key it cannot find, so without this an unreadable field would
+       publish whatever was on the caller's stack. */
+    memset(out, 0, sizeof(*out));
+    if (nvs_config_get_ota_result(out->result, sizeof(out->result)) != ESP_OK)
+        out->result[0] = '\0';
+    if (nvs_config_get_ota_target(out->target, sizeof(out->target)) != ESP_OK)
+        out->target[0] = '\0';
+    (void)nvs_config_get_ota_fails(&out->fails); /* getters leave 0 on any error */
+    (void)nvs_config_get_ota_dl_ms(&out->dl_ms);
+}
+
 /* ---- rollback: certifying the image this boot came up on ----------------
    ota_flow.h carries the argument for declining on the failsafe path,
    including what it costs and what the user sees. This is only the
@@ -298,6 +397,16 @@ void ota_flow_confirm_image(void) {
         return;
     }
     s_ops.mark_valid();
+    /* The image is certified, so the token the commit path left behind has
+       done its job. Retiring it here is what keeps the detector honest
+       for the update AFTER this one: left standing, the flag would still
+       be set when a later commit fails somewhere it cannot re-arm, and a
+       boot on a different version would then read a rollback that had
+       already been certified away. Only reached on the certifying path --
+       the failsafe decline above leaves the flag standing on purpose,
+       because that wake genuinely did not certify anything and the next
+       boot has to be able to tell. */
+    (void)nvs_config_set_ota_pend(0);
 }
 
 /* ---- the apply (main task, window 2) ------------------------------------ */
@@ -315,6 +424,33 @@ static void stop_clock(void) {
     if (elapsed < 0)
         elapsed = 0;
     s_dl_ms = (uint32_t)elapsed;
+
+    /* And to NVS, because s_dl_ms itself can never be published.
+
+       This is the same argument ota_result makes at the top of the file,
+       one step further. The download is the SECOND window: it opens after
+       net_window.c has closed MQTT, so nothing inside it can publish
+       anything. But where a failure at least survives to the next wake in
+       RAM-free form, a duration in a plain static does not survive at
+       all: the success path ends in restart() (which discards RAM) and
+       the failure path ends in deep sleep (which discards it too, this
+       being an ordinary static and not RTC-backed -- and RTC would not
+       help, since only a deep-sleep wake preserves the RTC segments on
+       the S2 and the success path is a restart). Read back in
+       mqtt_ha_window it was therefore 0 on every path, always. Off flash
+       it reports the last download, one wake late, which is what a
+       "is the link getting slower?" number is for.
+
+       Written HERE rather than at the two call sites so that both of them
+       get it: the success path, and every failure that goes through
+       fail_attempt -- including the deadline abort, which is the single
+       most interesting sample the field can carry. A download that never
+       started (session_begin failed) does not reach this line at all,
+       because s_dl_running is still false, so no zero is written over a
+       real earlier measurement. */
+    esp_err_t ret = nvs_config_set_ota_dl_ms(s_dl_ms);
+    if (ret != ESP_OK)
+        ESP_LOGW(TAG, "ota_dl_ms write failed (%d): this download's duration will not reach HA", (int)ret);
 }
 
 /* Charge the retry budget for an attempt that is ABOUT TO HAPPEN.
@@ -651,6 +787,22 @@ void ota_flow_apply(int batt_pct, bool charge_locked) {
        (budget_exhausted() compares target against the counted target, and
        next_fail_count() restarts at 1), and a rolled-back device instead
        walks the counter to max_fails and stops with a visible gave_up. */
+    /* The one durable trace this reboot leaves, and the ONLY moment it can
+       be written: the boot partition has just moved, and from the next
+       line onward this process may cease to exist at any point. Set
+       BEFORE the ota_result clear below so that a death between the two
+       leaves the recoverable state -- the next boot either certifies the
+       new image and clears this, or converts it into a rolled_back that
+       overwrites the stale string anyway. The other order would leave no
+       flag at all, and the revert it was meant to catch would be exactly
+       as invisible as it was before task 14.
+
+       It is set AFTER dl_finish rather than before it for the same reason
+       in reverse: a flag armed ahead of a commit that then FAILS would
+       have the next boot see "committed, not running the target" -- a
+       false rollback report, written over the genuine failure reason
+       fail_attempt just recorded. */
+    (void)nvs_config_set_ota_pend(1);
     (void)nvs_config_set_ota_result("");
 
     ESP_LOGI(TAG, "update to %s committed in %u ms; restarting", s_target, (unsigned)s_dl_ms);

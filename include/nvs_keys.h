@@ -41,11 +41,23 @@
    read as missing on every deployed device and force one pointless
    discovery republish. */
 #define NVS_KEY_DISC_NAME "disc_name"
-/* OTA. The first two are settings (HA-editable); the last three are
+/* OTA. The first two are settings (HA-editable); the rest are
    device-owned state written by the update flow and read by the stat
-   payload — accessors only, no HA entity and no bulk-document key. */
+   payload — accessors only, no bulk-document key. */
 #define NVS_KEY_OTA_URL "ota_url"
 #define NVS_KEY_OTA_ON_SYNC "ota_on_sync"
 #define NVS_KEY_OTA_RESULT "ota_result"
 #define NVS_KEY_OTA_TARGET "ota_target"
 #define NVS_KEY_OTA_FAILS "ota_fails"
+/* Last download's wall time, ms. In NVS rather than RAM because the
+   download runs in the SECOND window, after MQTT has closed, and its
+   success path ends in esp_restart() — so a RAM copy is discarded before
+   anything can publish it and reads back 0 forever. See ota_flow.c's
+   stop_clock(). Published one wake later, like ota_result. */
+#define NVS_KEY_OTA_DL_MS "ota_dl_ms"
+/* 1 = an image was committed and has NOT yet been certified. Written just
+   before the OTA reboot, cleared either by the certification that follows
+   it or by the boot that finds the device running something else — which
+   is what a rollback looks like from inside the firmware. Consumed on
+   read, so it reports one revert once and cannot latch. */
+#define NVS_KEY_OTA_PEND "ota_pend"

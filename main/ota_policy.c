@@ -39,6 +39,7 @@ static const char *const REASON_STR[OTA_REASON_COUNT] = {
     [OTA_REASON_TLS_CERT] = "tls_cert",
     [OTA_REASON_TIMEOUT] = "timeout",
     [OTA_REASON_BAD_IMAGE] = "bad_image",
+    [OTA_REASON_ROLLED_BACK] = "rolled_back",
 };
 
 const char *ota_policy_reason_str(ota_reason_t reason) {
@@ -108,6 +109,12 @@ bool ota_policy_reason_is_persistable(ota_reason_t reason) {
         case OTA_REASON_TLS_CERT:
         case OTA_REASON_TIMEOUT:
         case OTA_REASON_BAD_IMAGE:
+        /* The most persistable of the lot. It is written on a boot where
+           NOTHING else will run — no check is necessarily armed and no
+           attempt happens — so if it did not survive in ota_result the
+           revert would reach Home Assistant as the empty string that
+           made it invisible in the first place. */
+        case OTA_REASON_ROLLED_BACK:
             return true;
     }
     return false; /* not reachable for a valid enum value */
