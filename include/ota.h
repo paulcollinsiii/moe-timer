@@ -97,17 +97,34 @@ void ota_download_abort(void);
 
 /* Cancel the pending-verify rollback, if this boot is one.
 
-   Called from wake_flow's pre-sleep point (task 13 owns the call site,
-   together with the CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE flip that
-   makes it do anything; task 12 wired the rest of the flow but not this)
-   once the wake has demonstrably worked. Lives here rather than in main.c
-   because esp_ota_mark_app_valid_cancel_rollback() is a bare call, not a
-   handle, and the residency rule keeps those out of main.c.
+   NOT called directly. It is installed as ota_flow_ops_t.mark_valid
+   (main.c) and reached through ota_flow_confirm_image(), which
+   enter_deep_sleep() calls early in the sleep funnel — after the network
+   task is joined, before the first thing that can block. That funnel is
+   the guarantee: every path to sleep passes through it, including the
+   lock gates and the early-out sleeps, so a wake that ends normally
+   always certifies. The one path that deliberately does not is the awake
+   failsafe, which announces itself with ota_flow_note_failsafe_sleep()
+   on its way in; ota_flow.h carries the argument for that and what it
+   costs.
 
-   A no-op on every boot that is not PENDING_VERIFY, which is all of them
-   until CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE is turned on (plan task
-   13). Checking the state first is what makes the "_if_pending" in the
-   name true, and what keeps the log line meaningful. */
+   Position matters because CONFIG_BOOTLOADER_SKIP_VALIDATE_IN_DEEP_SLEEP
+   is off: a deep-sleep wake re-runs the bootloader, so the image gets
+   exactly ONE wake in which to be certified, and a sleep path that
+   skipped this would silently revert a working update rather than merely
+   delay one.
+
+   Lives here rather than in main.c because
+   esp_ota_mark_app_valid_cancel_rollback() is a bare call, not a handle,
+   and the residency rule keeps those out of main.c. It writes the
+   ota_data partition through the esp_ota APIs, not through hal_nvs, so
+   hal_nvs_close() at the bottom of the funnel does not bound it.
+
+   A no-op on every boot that is not PENDING_VERIFY, which is every boot
+   until an OTA has actually run. Checking the state first is what makes
+   the "_if_pending" in the name true, and what keeps the log line
+   meaningful: "first wake on the new image completed; rollback cancelled"
+   appears once per update and nowhere else. */
 void ota_mark_valid_if_pending(void);
 
 #ifdef __cplusplus

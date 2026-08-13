@@ -719,8 +719,15 @@ prevent. **Decided: enabled.**
 **Where the mark-valid call lives.** Per the residency rule,
 `esp_ota_mark_app_valid_cancel_rollback()` is a *bare call*, not a handle, so
 it may not live in `main.c` — it goes in `ota.c` behind
-`ota_mark_valid_if_pending()`, called from `wake_flow`'s pre-sleep point once
-the wake has demonstrably worked (NVS read, panel painted).
+`ota_mark_valid_if_pending()`.
+
+**Superseded by what task 13 actually built**, and the change is not
+cosmetic: the call is NOT at `wake_flow`'s pre-sleep point. It is
+`enter_deep_sleep()`'s, reached through `ota_flow_confirm_image()`, because a
+deep-sleep wake re-runs the bootloader and so the image gets exactly one wake
+to be certified -- an early-out sleep that skipped the call would revert a
+working update, not merely delay one. The awake-failsafe path deliberately
+declines. Task 13's entry carries the full argument.
 
 **Verify on hardware:** confirm that a deep-sleep wake does not itself consume
 the pending-verify state before the first full wake completes. This is a
@@ -1402,6 +1409,8 @@ deserve their own commit and their own review:
       the function is a no-op until `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE` is
       on, and turning that on is task 13's measured decision. Left as-is rather
       than half-wired; the header comment should be corrected when 13 lands.
+      **Done:** 13 landed the call on `enter_deep_sleep()` rather than the
+      pre-sleep point, and rewrote the `ota.h` comment to match.
 
     **A correction to this entry's own third bullet, found while placing the
     call.** It says the check goes before `mqtt_ha_window()` "so a failure
@@ -1500,6 +1509,93 @@ deserve their own commit and their own review:
     `n`, and it stays out of scope. Rollback-on-failure is a reliability
     feature; anti-rollback is a downgrade-prevention *security* feature that
     burns efuses and is irreversible.
+
+    **WHAT LANDED, and where the call site actually is.** Not the
+    "pre-sleep point" this entry originally said, and the reasoning is the
+    exact inverse of task 12's. `esp_ota_set_boot_partition` leaves the new
+    image `PENDING_VERIFY`; on the next boot the bootloader marks it
+    `ABORTED` and boots the other slot unless the app has cancelled the
+    rollback. `CONFIG_BOOTLOADER_SKIP_VALIDATE_IN_DEEP_SLEEP` is **off**, so
+    a deep-sleep wake re-runs the 2nd-stage bootloader and is a rollback
+    opportunity like any other reset. **The device therefore gets exactly
+    ONE wake to certify the image**, and any path to sleep that skips the
+    call silently reverts a working update.
+
+    Task 12 put `maybe_apply_update()` in the two wake-handler tails and
+    accepted that three early-out sleep paths skip it, because skipping an
+    apply only defers an update to the next check. Skipping the
+    *confirmation* undoes one. So this call goes on `enter_deep_sleep()`
+    (`main/main.c`), the single funnel every sleep passes through --
+    immediately after `net_window_join`/`net_window_log_last` and before
+    `timer_persist_save`, i.e. ahead of everything below it that can block
+    (the 3 s release wait, `neopixel_stop_sync`'s 500 ms ack, the break-end
+    repaint). It does not need to precede `hal_nvs_close()` -- the mark
+    writes `ota_data` through the `esp_ota` APIs, not `hal_nvs` -- but it
+    does anyway, for the reason above.
+
+    Shape, so `main.c` stays a composition root with no decision in it:
+
+    - `ota_flow_ops_t` gains `.mark_valid = ota_mark_valid_if_pending`.
+    - `ota_flow_confirm_image()` -- unconditional one-line call from
+      `enter_deep_sleep()`; null-safe before `ota_flow_init`, because
+      `arm_awake_failsafe()` is app_main's *second* call.
+    - `ota_flow_note_failsafe_sleep()` -- one line at the top of
+      `awake_failsafe_cb`, no branch.
+
+    **THE FAILSAFE DECISION: the failsafe path does NOT certify.**
+    `enter_deep_sleep()` is also `awake_failsafe_cb`'s path, and that
+    callback fires precisely when something is wedged. Certifying there
+    would cancel the rollback on the strength of a wake that had to be
+    killed after 180 s -- deleting the single best piece of evidence that
+    the new image is bad, in exactly the scenario rollback exists for. So
+    the failsafe announces itself first and the funnel declines.
+
+    The argument for the side NOT taken, stated so it can be re-litigated:
+    a wedge on the first wake is often nothing to do with the new firmware
+    (a hung WiFi driver, an AP that vanished mid-window), and declining
+    throws away a perfectly good update and re-downloads ~1.5 MB. That is a
+    real battery cost on a wrong guess. It loses anyway, because the two
+    failure directions are not symmetric: declining fails back to
+    known-good firmware, which is recoverable over the air, while
+    certifying can leave a bad image on a board with no UART bridge chip.
+    One property falls out for free -- the failsafe can fire while
+    `ota_task` is still mid-attempt (`hal_nvs.c` records the same overlap),
+    and declining means the funnel never issues a competing `ota_data`
+    write from the esp_timer task while `esp_https_ota_finish` is in
+    flight.
+
+    **What the user observes** when the failsafe declines: the panel comes
+    back on the OLD version (the `fw` stat and the status screen both read
+    the app descriptor, so they agree), the log carries "Awake failsafe:
+    still awake after 180 s" and "awake failsafe ended this wake: leaving
+    the image unverified", and **no** "first wake on the new image
+    completed; rollback cancelled" line. The update reappears at a later
+    check.
+
+    Host tests: four in `test_ota_flow` (61 cases, suite 38/38). Both
+    branches mutation-checked -- suppressing the failsafe guard fails two
+    cases, dropping the `s_failsafe_sleep = false` in `ota_flow_init` fails
+    two others. The `main.c` wiring itself (the two call sites) is **not**
+    host-tested: the host suite does not compile `main.c`, and inventing a
+    test for one unconditional call would only test the mock.
+
+    **A DEFECT THIS TASK EXPOSES BUT DOES NOT FIX -- follow-up.** Enabling
+    rollback invalidates the premise written at `ota_flow.c`'s
+    clear-the-counters block ("the image about to run is a different
+    version, so a counter left behind would be counting against a target
+    that is no longer in this device's future"). `ota_result`, `ota_target`
+    and `ota_fails` are all cleared **before** the reboot, on a successful
+    commit. If that image is then rolled back, the reverted firmware finds
+    `ota_fails = 0` and `ota_target = ""` -- a fully re-armed budget -- and
+    downloads the same version again at the next check. **The retry budget
+    does not bound a rollback loop**, so a build that wedges its first wake
+    every time costs ~1.5 MB per check, indefinitely. The fix is to defer
+    those three clears from the commit to the confirmation (clear them
+    where the rollback is cancelled, so a reverted image comes back with
+    `ota_fails = 1` against that target and converges on `gave_up` in
+    three); deliberately not done here because `ota_result` is also what
+    task 14 publishes, and moving its clear changes what HA sees.
+
     The **first paint after a successful OTA reboot** needs **no code here** --
     it is already full. The premise this entry used to carry (`s_partial_count`
     is `RTC_DATA_ATTR` and "survives `esp_restart()`") is false: only a
@@ -1574,10 +1670,29 @@ needs to name one of the four residency reasons at review, or move.
    versions legible), the download runs with the panel idle, and the device
    reboots into the new version.
 5. Confirm the post-reboot main screen shows the new version.
-6. **Rollback:** deliberately publish a build that panics early; confirm the
-   bootloader reverts and the device comes back on the previous version.
+6. **Rollback -- the happy path first, because it is the one that can fail
+   silently.** On the first wake after a real OTA (item 4 above), confirm the
+   log carries **"first wake on the new image completed; rollback
+   cancelled"** -- `ota_mark_valid_if_pending` only logs that when the state
+   really was `PENDING_VERIFY`, so its absence means either the symbol did
+   not take (check `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE` in the *device's*
+   `sdkconfig`, not just `sdkconfig.defaults`) or the wake never reached
+   `enter_deep_sleep`. Then let the device sleep and wake a **second** time
+   and confirm it is still running the **new** version: that is the only
+   evidence that the mark stuck and the bootloader did not revert. Also
+   confirm the paint on that first post-OTA wake is FULL, via
+   `ssd1680.c`'s "partial promoted to full: no valid previous frame this
+   power cycle" line -- no code makes it full, the reboot does.
+   Then the sad path: deliberately publish a build that panics early;
+   confirm the bootloader reverts and the device comes back on the previous
+   version.
    Also confirm a normal deep-sleep wake does **not** consume the
    pending-verify state before the first full wake marks it valid.
+   If you can provoke the awake failsafe on a post-OTA wake (e.g. an
+   unreachable AP with a long association timeout), confirm the
+   **"awake failsafe ended this wake: leaving the image unverified"** line
+   and that the next boot is on the OLD version -- that is the deliberate
+   decline, not a bug.
 7. **Targeting:** add the test device to `devices` with a distinct version;
    confirm it updates and a second device does not.
 8. **Downgrade:** publish the older version; confirm it applies.
