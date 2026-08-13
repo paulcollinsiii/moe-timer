@@ -1604,29 +1604,104 @@ deserve their own commit and their own review:
     completed; rollback cancelled" line. The update reappears at a later
     check.
 
-    Host tests: four in `test_ota_flow` (61 cases, suite 38/38). Both
+    Host tests: five in `test_ota_flow` (63 cases, suite 38/38). All three
     branches mutation-checked -- suppressing the failsafe guard fails two
     cases, dropping the `s_failsafe_sleep = false` in `ota_flow_init` fails
-    two others. The `main.c` wiring itself (the two call sites) is **not**
-    host-tested: the host suite does not compile `main.c`, and inventing a
-    test for one unconditional call would only test the mock.
+    two others, and replacing the pre-init `s_ops.mark_valid == NULL` guard
+    with `if (0)` **SEGVs** on
+    `test_confirm_before_init_marks_nothing_and_does_not_crash`. That guard
+    had been carrying no test at all: every case runs `ota_flow_init()` in
+    `setUp` with a full ops table, so `if (0)` left all 62 other cases
+    passing. It is not dead code -- `arm_awake_failsafe()` is app_main's
+    second call at `main.c:393` and `ota_flow_init()` is at `:469`, so every
+    boot spends ~76 lines in a window where the failsafe can fire into a
+    zeroed ops table, and `enter_deep_sleep()` calls `confirm_image()`
+    unconditionally. The `main.c` wiring itself (the two call sites) is
+    **not** host-tested: the host suite does not compile `main.c`, and
+    inventing a test for one unconditional call would only test the mock.
 
-    **A DEFECT THIS TASK EXPOSES BUT DOES NOT FIX -- follow-up.** Enabling
-    rollback invalidates the premise written at `ota_flow.c`'s
-    clear-the-counters block ("the image about to run is a different
-    version, so a counter left behind would be counting against a target
-    that is no longer in this device's future"). `ota_result`, `ota_target`
-    and `ota_fails` are all cleared **before** the reboot, on a successful
-    commit. If that image is then rolled back, the reverted firmware finds
-    `ota_fails = 0` and `ota_target = ""` -- a fully re-armed budget -- and
-    downloads the same version again at the next check. **The retry budget
-    does not bound a rollback loop**, so a build that wedges its first wake
-    every time costs ~1.5 MB per check, indefinitely. The fix is to defer
-    those three clears from the commit to the confirmation (clear them
-    where the rollback is cancelled, so a reverted image comes back with
-    `ota_fails = 1` against that target and converges on `gave_up` in
-    three); deliberately not done here because `ota_result` is also what
-    task 14 publishes, and moving its clear changes what HA sees.
+    **A headroom observation, not a change.** `CONFIG_MAGTAG_MAX_AWAKE_SEC`
+    is 180 s and `net_window.h`'s `NET_JOIN_TIMEOUT_MS` is 90,000, so the
+    routine two-window wake (day rollover + mandatory start sync) can
+    consume **exactly** the whole 180 s cap on its joins alone. A wake that
+    is healthy but slow can therefore reach the failsafe with nothing
+    actually wrong -- and, with rollback enabled, decline to certify a
+    perfectly good image, which costs a rollback and a re-download rather
+    than anything worse. Single-window post-OTA wakes are the comfortable
+    case, with roughly 80 s of headroom. Recorded because the two constants
+    were set independently and their sum was never the subject of a
+    decision; **no timing constant is changed here**, and any change to
+    either belongs in its own task with its own measurement.
+
+    **A DEFECT THIS TASK EXPOSED -- now fixed.** Enabling rollback
+    invalidated the premise written at `ota_flow.c`'s clear-the-counters
+    block ("the image about to run is a different version, so a counter
+    left behind would be counting against a target that is no longer in
+    this device's future"). `ota_result`, `ota_target` and `ota_fails` were
+    all cleared **before** the reboot, on a successful commit. If that
+    image is then rolled back, the reverted firmware found `ota_fails = 0`
+    and `ota_target = ""` -- a fully re-armed budget -- and downloaded the
+    same version again at the next check. **The retry budget did not bound
+    a rollback loop**: a build that wedges its first wake every time cost
+    ~1.5 MB per check, indefinitely.
+
+    **The fix: `ota_target` and `ota_fails` are no longer cleared here;
+    `ota_result` still is.** The charge raised by `charge_the_attempt()`
+    before the download now survives the reboot, so a rollback loop walks
+    the counter to `max_fails` and stops after 3 attempts (~4.48 MB total)
+    with a permanent, visible `gave_up` -- `OTA_REASON_GAVE_UP` is
+    persistable. Nothing on the healthy path needed the clears:
+    `ota_policy`'s `up_to_date` return **precedes** the budget check, so a
+    device running the counted target never consults the budget;
+    `budget_exhausted()` compares the offered target against the counted
+    one, and `next_fail_count()` restarts at 1, so a genuinely new version
+    re-arms the budget by itself. **That is also the operator's escape
+    hatch: bump the version string in the manifest to re-arm a device that
+    has given up.** No reset, reflash or NVS surgery is needed.
+
+    Three cases pin it (`test_a_rollback_loop_is_bounded_by_the_retry_budget`
+    plus the two commit-path cases). Mutation-verified: reinstating the
+    `ota_fails` clear fails 3 cases, reinstating the `ota_target` clear
+    fails 3 cases, reinstating both -- i.e. the exact pre-fix source -- fails
+    3 cases.
+
+    **What was NOT done, and why: do not "defer the clears to the
+    confirmation".** That was this entry's original proposal and it is
+    broken. `ota_flow_ops_t.mark_valid` is `void (*)(void)` and
+    `ota_mark_valid_if_pending()` (`main/ota.c`) returns silently when the
+    partition is not `PENDING_VERIFY` -- which is every ordinary boot. So
+    `ota_flow_confirm_image()` cannot distinguish "I just certified a new
+    image" from "there was nothing to certify", and an unconditional clear
+    there would wipe the budget on **every** normal sleep, including the
+    very wake that just incremented it. Making it work would mean widening
+    the ops contract to return the certification outcome, which is a larger
+    change than the defect warrants.
+
+    `ota_result` must still be cleared at the commit, and must not move:
+    task 14 reads it from NVS inside `mqtt_ha_window`, which runs **before**
+    `enter_deep_sleep()`, so a string left standing would have the new
+    image's first stat publish report a failure belonging to the image it
+    replaced.
+
+    **The cost, stated plainly:** three innocent failures against one
+    version string blacklist that version until a new one is published.
+    That is **pre-existing** -- it is task 11's designed sad-loop bound, not
+    something this change introduces -- and it is left alone.
+
+    **What keeps the loop daily rather than continuous** is task 12's
+    `persist_state()` call before the OTA reboot, and this is worth knowing
+    before anyone "simplifies" it away. `RTC_DATA_ATTR` state is zeroed on a
+    non-deep-sleep reset and `timer_is_new_day()` answers true on an empty
+    `last_date`; `wake_flow.c`'s `ota_flow_arm(OTA_TRIGGER_ROLLOVER, ...)`
+    deliberately **precedes** the in-rollover `timer_persist_try_restore()`.
+    So without a valid same-day snapshot every post-rollback boot would arm
+    a fresh check immediately -- a sleepless download loop. It works only
+    because the wall clock survives `esp_restart()` where `.rtc.data` does
+    not: with `CONFIG_ESP_TIME_FUNCS_USE_RTC_TIMER=y`, ESP-IDF keeps boot
+    time in the RTC retention **registers** (`RTC_BOOT_TIME_LOW/HIGH_REG`,
+    `esp_libc`'s `esp_time_impl.c`), so `time(NULL)` is correct on the next
+    boot and the same-day snapshot restores. A comment at the call site now
+    records this.
 
     The **first paint after a successful OTA reboot** needs **no code here** --
     it is already full. The premise this entry used to carry (`s_partial_count`
@@ -1650,6 +1725,24 @@ deserve their own commit and their own review:
     Also bump `DISC_SCHEMA_VER` in `mqtt_ha.c` in the same commit: new or
     renamed Home Assistant entities do not appear at all until it changes,
     and four new fields is four entities.
+
+    **A rollback is currently invisible to the operator, and closing that
+    is task-14 work.** `ota_flow.c` clears `ota_result` on the success path
+    just before the OTA reboot (it must -- see task 13), so a device whose
+    new image then fails to certify and gets reverted comes back reporting
+    an **empty** OTA result. Everything the operator can see says the update
+    simply did not happen: the `fw` stat and the status screen both read the
+    app descriptor and agree on the old version, and nothing anywhere says
+    "this device tried and reverted". The only surviving evidence is
+    indirect -- `ota_target` and a non-zero `ota_fails` against a version the
+    device is not running -- and after three turns the device does surface a
+    `gave_up`, but only after ~4.48 MB of downloads.
+
+    Surfacing a distinct reason string for the reverted case (the natural
+    read of `esp_ota_get_state_partition()` on the boot after a revert)
+    would give the operator the signal on the **first** occurrence. It needs
+    a `DISC_SCHEMA_VER` bump like everything else here. Recorded, **not**
+    implemented.
 15. Build-size guard (warn at 85 % slot occupancy).
 16. Hardware smoke test (below).
 17. Update `docs/architecture.md`: module table, layer lists, a subsystem note
