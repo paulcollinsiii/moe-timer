@@ -8,6 +8,7 @@
 #include "config_cache.h"
 #include "display.h"
 #include "driver/gpio.h"
+#include "esp_app_desc.h" /* esp_app_get_description(): the running version */
 #include "esp_log.h"
 #include "esp_sleep.h"
 #include "esp_system.h"
@@ -21,20 +22,24 @@
 #include "net_window.h"
 #include "nvs_config.h"
 #include "nvs_flash.h"
+#include "ota.h"
+#include "ota_flow.h"
 #include "sleep_plan.h"
 #include "timer.h"
 #include "timer_persist.h"
 #include "wake_flow.h"
+#include "wifi_session.h"
 
 /* This file is the composition root and nothing else. The rule it is held
    to (.claude/CLAUDE.md) is that it may contain wiring and device calls
    but may not contain a DECISION. Every symbol below with an executable
    statement names the numbered reason that admits it; the rest — the log
-   TAG, the PARENT_TESTING macro and the NET_APPLY_OPS table — are pure
-   wiring, admitted by the headline rule rather than by a number, because
-   a construct with nothing to execute has nothing to decide. The
-   numbered reasons, quoted from the rule rather than paraphrased — the
-   rule is not negotiable against the code that has to satisfy it:
+   TAG, the PARENT_TESTING macro and the NET_APPLY_OPS and OTA_FLOW_OPS
+   tables — are pure wiring, admitted by the headline rule rather than by
+   a number, because a construct with nothing to execute has nothing to
+   decide. The numbered reasons, quoted from the rule rather than
+   paraphrased — the rule is not negotiable against the code that has to
+   satisfy it:
 
      1. Boot ordering is a hardware contract.
      2. It runs in an ISR or esp_timer context where a module API is not
@@ -271,6 +276,54 @@ static void extend_awake_failsafe(int seconds) {
     }
 }
 
+/* ---- OTA ---------------------------------------------------------------
+   Same shape as the network window above: the sequence is ota_flow.c's
+   (host-tested against injected counters), the transport is ota.c's, and
+   what belongs here is only the binding between them plus the budgets.
+
+   Note where the call sites are NOT: this file does not call
+   ota_flow_arm, ota_flow_check or ota_flow_apply. Arming and applying are
+   wake_flow.c's, checking is net_window.c's, and the apply is
+   deliberately kept off enter_deep_sleep() — awake_failsafe_cb reaches
+   that funnel from the esp_timer task, and a wedged wake is the last one
+   that should start a 1.5 MB download. The reasoning is written out at
+   maybe_apply_update() in wake_flow.c. */
+
+/* Residency 4. wifi_session_begin answers esp_err_t; ota_flow_ops_t wants
+   a bool, because the host suite has no esp_err_t. One line, no branch. */
+static bool ota_session_begin(void) {
+    return wifi_session_begin() == ESP_OK;
+}
+
+/* Residency 4. esp_timer counts microseconds; ota_flow measures its
+   download deadline in milliseconds. One line, no branch. */
+static int64_t ota_mono_ms(void) {
+    return esp_timer_get_time() / 1000;
+}
+
+/* Wiring, no executable statement — the same standing as NET_APPLY_OPS
+   above, and admitted by the headline rule for the same reason: a
+   construct with nothing to execute has nothing to decide.
+
+   .repaint is wake_flow's public entry point rather than main.c
+   implementing the paint itself; wake_flow.h records why that direction
+   is the one the residency audit landed on. */
+static const ota_flow_ops_t OTA_FLOW_OPS = {
+    .manifest_get = ota_manifest_get,
+    .dl_begin = ota_download_begin,
+    .dl_step = ota_download_step,
+    .dl_finish = ota_download_finish,
+    .dl_abort = ota_download_abort,
+    .session_begin = ota_session_begin,
+    .session_end = wifi_session_end,
+    .paint_update = display_ota,
+    .repaint = wake_flow_repaint_current_state,
+    .extend_awake = extend_awake_failsafe,
+    .restart = esp_restart,
+    .free_heap = esp_get_free_heap_size,
+    .mono_ms = ota_mono_ms,
+};
+
 /* Residency 1, whole-function: this is the boot sequence, and the order
    of it is a hardware contract at every step — the NeoPixel gate before
    any peripheral touches GPIO 21, NVS before anything reads config, TZ
@@ -323,6 +376,33 @@ void app_main(void) {
        against arm_awake_failsafe is free — the extender null-guards. */
     alerts_set_extend_awake(extend_awake_failsafe);
     net_apply_init(&NET_APPLY_OPS);
+    /* Before wake_flow_handle_wake at the bottom of this function, which
+       is where the first ota_flow_arm() happens — the module's contract
+       is "once, before any other call", and this is the only point that
+       satisfies it on every wake path.
+
+       The CONFIG_MAGTAG_* symbols are READ HERE and passed in rather than
+       included by ota_flow.c, which is the arrangement ota_flow.h asks
+       for: the host suite asserts on the deadline and the retry budget
+       against its own numbers, and a host build that supplied its own
+       CONFIG_ defines would be asserting against values this firmware
+       does not necessarily use.
+
+       running_version is the app descriptor's, which version.txt at the
+       project root stamps (1.5.0). It is the SAME string the panel and
+       the `fw` stat publish, and that is the point: it is also the OTA
+       comparison key, so the two cannot disagree. Without version.txt IDF
+       falls back to `git describe`, which yields something no manifest
+       could ever match and very nearly overflows the 32-byte field. */
+    const ota_flow_cfg_t ota_cfg = {
+        .max_sec = CONFIG_MAGTAG_OTA_MAX_SEC,
+        .awake_sec = CONFIG_MAGTAG_MAX_AWAKE_SEC,
+        .min_batt_pct = CONFIG_MAGTAG_OTA_MIN_BATT_PCT,
+        .max_fails = CONFIG_MAGTAG_OTA_MAX_FAILS,
+        .min_free_heap = CONFIG_MAGTAG_OTA_MIN_FREE_HEAP,
+        .running_version = esp_app_get_description()->version,
+    };
+    ota_flow_init(&OTA_FLOW_OPS, &ota_cfg);
     buttons_init();
     battery_init();
     /* audio + light init lazily on first use (most wakes need neither);

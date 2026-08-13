@@ -15,6 +15,7 @@
 #include "mqtt_ha.h"
 #include "neopixel.h"
 #include "ntp.h"
+#include "ota_flow.h"
 #include "sdkconfig.h"
 #include "timer.h"
 #include "wifi_session.h"
@@ -73,6 +74,33 @@ static void net_window_task(void *arg) {
            so this receive cannot starve. The radio just idles associated
            while the panel refreshes. */
         if (xQueueReceive(s_snapshot_q, &snap, portMAX_DELAY) == pdTRUE) {
+            /* The update check RIDES this window: one small HTTPS GET,
+               placed here for two reasons and constrained by a third.
+
+               AFTER the rendezvous, because the rendezvous is the point
+               at which the panel is known to be idle — the same brownout
+               condition the receive above exists for. A manifest GET is
+               a TX burst like any other.
+
+               BEFORE mqtt_ha_window, because the second window (the
+               download) runs after MQTT has closed and cannot publish
+               its own outcome; ota_result has to be in NVS before the
+               payload is built or it waits a whole day. See the note in
+               task 12 of docs/planning/ota.plan.md: this ordering is
+               NECESSARY for a check result to reach the same window, but
+               it is not on its own SUFFICIENT — `snap` was filled on the
+               main task before the post above, so whatever publishes
+               ota_result must read it from NVS at publish time rather
+               than out of this snapshot (task 14 owns that field).
+
+               s_ntp_result rather than a wider "the clock looks set":
+               ota_gate_in_t::time_valid means "NTP has set the clock
+               this session", and TLS certificate validity is exactly
+               what it is protecting.
+
+               A no-op unless ota_flow_arm() armed this wake, so the
+               ordinary window pays one comparison for it. */
+            ota_flow_check(s_ntp_result == ESP_OK);
             int64_t t = esp_timer_get_time();
             mqtt_ha_window(&snap);
             mqtt_ms = (esp_timer_get_time() - t) / 1000;

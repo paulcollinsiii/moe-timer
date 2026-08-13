@@ -382,4 +382,28 @@ menu "MagTag Timer"
             arrive ambiguous. Widening this to 0 would silently change
             the meaning of a config nobody edited.
 
+    config MAGTAG_OTA_MIN_FREE_HEAP
+        int "Free-heap floor for an update check or download (bytes)"
+        default 40960
+        range 16384 131072
+        help
+            Both OTA gates refuse below this. The download needs roughly
+            40 KB free during the TLS handshake and transfer (mbedTLS
+            record buffers plus the http client), and a handshake that
+            runs out of heap fails in a way that reads like a
+            certificate problem — so the gate turns it into a logged
+            low_heap instead.
+
+            In bytes rather than KB so app_main can pass the symbol
+            straight into ota_flow_cfg_t without arithmetic: main.c is
+            the composition root and a unit conversion there is a policy
+            number wearing a cast.
+
+            Board-tunable on purpose. The 2025 MagTag has 2 MB PSRAM,
+            but CONFIG_SPIRAM_IGNORE_NOTFOUND=y means a PSRAM-less board
+            must still boot, and that board has the tighter headroom.
+            Raise this if a download reports low_heap on a board that
+            has the memory; lower it only with a measurement of
+            esp_get_minimum_free_heap_size() across a real download.
+
 endmenu

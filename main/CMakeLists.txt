@@ -26,6 +26,7 @@ idf_component_register(
         "config_validate.c"
         "ota_policy.c"
         "ota_flow.c"
+        "ota_task.c"
         "ota_url.c"
         "ota_facts.c"
         "ota.c"

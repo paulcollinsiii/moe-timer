@@ -872,6 +872,7 @@ above or configuring behaviour that has no runtime override:
 | `MAGTAG_OTA_MIN_BATT_PCT` | `30` | Battery floor for a check |
 | `MAGTAG_OTA_MAX_SEC` | `300` | Failsafe budget for the download window |
 | `MAGTAG_OTA_MAX_FAILS` | `3` | Retry budget before giving up on a version |
+| `MAGTAG_OTA_MIN_FREE_HEAP` | `40960` | Free-heap floor for both gates (task 12) |
 
 Accessors in `nvs_config.c`/`.h` following the existing shape, plus defaults in
 `include/nvs_defaults.h` and a `credentials.local.h` slot for the URL — same
@@ -1276,40 +1277,168 @@ deserve their own commit and their own review:
     surviving mutation in `test_ota_url` (the relative order of `TOO_LONG` and
     `TOO_MANY` was never pinned); and the documentation corrections recorded
     above and in the headers.
-12. Wire the rollover trigger, the Button D trigger, the pre-sleep apply point,
-    and the failsafe extender install in `app_main`. Four call sites, and the
-    module's own tests cannot reach any of them:
-    - `ota_flow_init(&ops, &cfg)` at boot, where the `CONFIG_MAGTAG_OTA_*`
+12. **Landed.** The four call sites, which is the task that makes the whole
+    feature exist as far as the linker is concerned. Everything tasks 10 and
+    11 built was **dead code** until this commit: ESP-IDF builds with
+    `-ffunction-sections -Wl,--gc-sections`, nothing called any of it, and
+    `xtensa-esp32s2-elf-nm --defined-only build/magtag_timer.elf | grep ota_`
+    returned only the three `nvs_config` accessors. The app image had been
+    byte-identical at 1,437,088 B for four commits. That is why the size and
+    reachability numbers below are part of this task's deliverable rather than
+    an afterthought — they are the first honest measurement of what OTA costs.
+    - `ota_flow_init(&ops, &cfg)` in `app_main`, where the `CONFIG_MAGTAG_OTA_*`
       symbols are read (task 10 deliberately kept `sdkconfig.h` out of
       `ota_flow.c` so the host suite asserts against its own numbers).
+      `OTA_FLOW_OPS` is a static table with no executable statement, the same
+      standing `NET_APPLY_OPS` has; the only two new statements in the file are
+      `ota_session_begin` (esp_err_t → bool) and `ota_mono_ms` (µs → ms), both
+      one-line branch-free thunks under residency reason 4.
     - `ota_flow_arm(trigger, batt_pct, charge_locked)` on the main task
-      **before** `net_apply_open()`, since the check reads what it samples.
+      **before** the window opens, since the check reads what it samples. Two
+      sites, both in `wake_flow.c`: the day rollover arms `OTA_TRIGGER_ROLLOVER`
+      immediately before `net_apply_try_window()`, and Button D arms
+      `OTA_TRIGGER_SYNC` immediately before its `net_apply_open()`.
     - `ota_flow_check(ntp_ok)` inside `net_window_task`, **after** the
-      snapshot rendezvous and **before** `mqtt_ha_window()`. This placement is
-      the half of the TDD contract's third bullet that is a call-site property:
-      `test_ota_flow` pins that the result is in NVS before the call returns,
-      but only this ordering makes it reach the same window's payload.
-      **Verification debt, and it is explicit so it does not quietly become
-      permanent:** this ordering has *no* host test anywhere and cannot get
-      one — `net_window_task` has no suite, and `test_ota_flow` can only see
-      as far as "the result is in NVS by the time the call returns". Until
-      `net_window` grows a suite, the only evidence is the hardware smoke
-      test: confirm the first stat payload after a rollover carries the
-      `ota_result` that rollover produced, rather than the previous day's.
+      snapshot rendezvous and **before** `mqtt_ha_window()`, as
+      `ota_flow_check(s_ntp_result == ESP_OK)`. Still verification debt: this
+      ordering has *no* host test anywhere and cannot get one — `net_window.c`
+      has no suite. The hardware smoke test is the only evidence, and see the
+      correction below for what that test can and cannot show.
     - `ota_flow_apply(batt_pct, charge_locked)` at the late pre-sleep point,
-      with the battery facts **re-sampled**, not carried over from arming.
-      **On its own task, ~16 KB, not the main task.** The deadline loop moved
-      into `ota_flow_apply` (see task 10), so `esp_https_ota_perform()` — the
-      mbedTLS record buffers plus the flash write path — now runs on whatever
-      stack calls `ota_flow_apply`. `CONFIG_ESP_MAIN_TASK_STACK_SIZE` is
-      7168 B and "Task and stack sizing" above says plainly that this does not
-      fit; `net_window.c` already spawns a dedicated 10240 B task for a
-      smaller job. Spawn, join, and log `uxTaskGetStackHighWaterMark()` the
-      way `net_window.c` does, so the 16 KB can be tuned from a measurement
-      instead of a guess. Getting this wrong does not fail the build or the
-      host suite — it presents as an unexplained reboot on the bench, with
-      the panic swallowed by USB CDC. `ota_flow.h`'s threading section states
-      the same requirement at the point of use.
+      on its own 16 KB task, with the battery facts re-sampled there.
+
+    **The apply point is NOT inside `enter_deep_sleep()`, and that is the
+    single most load-bearing decision in this commit.** The funnel is the
+    obvious home — every sleep goes through it, it sits after
+    `net_window_join()` and before `hal_nvs_close()`, which is exactly the
+    window `ota_flow_apply` needs — and it is the wrong one, because
+    `awake_failsafe_cb` reaches it from the **esp_timer task**. That callback
+    exists precisely because something is already wedged and the battery needs
+    protecting; painting the panel, opening a WiFi session and pulling ~1.5 MB
+    from there is the exact inversion of its purpose. `lock_gate.c` reaches the
+    same funnel while the device is refusing to do work at all. A runtime "am I
+    on the main task?" test would be a check, not a guarantee. The call
+    therefore sits in a `maybe_apply_update()` static reached from the tail of
+    `wake_flow_handle_timer_tick` and `wake_flow_handle_button_wake` and from
+    nowhere else, which makes the failsafe **structurally** incapable of
+    starting a download: the esp_timer task never enters a wake handler. All
+    three ordering properties the funnel would have given are preserved and
+    checked — the window is joined (both tails reach the point only through
+    `net_apply_try_window()` or `net_apply_finish()`), NVS is still open
+    (`hal_nvs_close()` is later, inside the funnel), and the panel work is
+    finished (`maybe_wait_for_event()` has run). The cost is that the early-out
+    sleeps — a break starting mid-wake, the still-held-button continuation —
+    skip the apply; a pending update is simply found again by the next check,
+    since `s_pending` is a plain static that deep sleep discards.
+
+    **Deviations from this entry as written, each with its reason:**
+    - **A new module, `main/ota_task.c` + `include/ota_task.h`.** The plan said
+      "spawn, join, and log the watermark the way `net_window.c` does" without
+      saying where. Not `main.c`: task mechanics plus a create-failure branch
+      in the composition root is what its own rule exists to prevent. Not
+      `ota_flow.c`: an `xTaskCreate` there would put FreeRTOS inside the one
+      module whose entire value is being host-testable without it. So the
+      mechanics sit beside the flow in the same relationship `net_window.c` has
+      to `net_apply.c`, and `ota_task.h` carries the stack rationale at the
+      point of use. Like `net_window.c` it has no host suite, because there is
+      nothing in it that is not FreeRTOS.
+    - **The join is unbounded (`portMAX_DELAY`), not timed out.** A timeout
+      would let the main task run ahead into `esp_deep_sleep_start()` while the
+      spawned task was still writing flash, which is strictly worse than the
+      alternative. The awake failsafe is the layer that owns "this wake has
+      gone on too long", and task 11 already made a failsafe kill survivable by
+      charging the retry budget before the attempt.
+    - **`.repaint` is a new public `wake_flow_repaint_current_state()`, not a
+      re-export of `paint_current_state_full()`.** `wake_flow.h` records that
+      the static was deliberately made private and that main.c implements none
+      of these seams any more; un-privatising it would reverse that. The header
+      already describes the pattern that fits: `wake_flow_fire_expiry_alert`
+      and `wake_flow_post_stats_snapshot` are public **because they are
+      address-taken by a composition-root ops table**. This is a third one. The
+      static keeps its name and stays private; `main.c` gets a name, not a
+      paint.
+    - **`min_free_heap` got a Kconfig symbol,** `MAGTAG_OTA_MIN_FREE_HEAP`,
+      default 40960, range 16384–131072. It had none, and the alternative was a
+      bare `40960` in `app_main` — a policy number in the composition root,
+      which is exactly what that file's rule forbids. In bytes rather than KB
+      so `app_main` passes the symbol straight through without arithmetic. The
+      value is the "Heap" section's ~40 KB; the range and the help text exist
+      because `CONFIG_SPIRAM_IGNORE_NOTFOUND=y` means a PSRAM-less board must
+      still work and that board has the tighter headroom.
+    - **A failed ADC read is passed as `-1`, not as 0 %.** `battery.h`
+      documents `<= 0 mV` as a failed read and `battery_percent_from_mv` clamps
+      it to 0 %, which the gate would read as "below the floor" — refusing
+      every update check forever, silently, on a device whose ADC broke.
+      `ota_gate_in_t` already distinguishes the two: `batt_pct < 0` means
+      unreadable and does not gate. `ota_batt_pct()` in `wake_flow.c` is the
+      one-line conversion, and it has a test and a mutation.
+    - **Only checking triggers arm; Button A and the periodic sync do not.**
+      The alternative — arm every window, with `OTA_TRIGGER_NONE` where
+      appropriate — reads tidier and is worse. Trace what `ota_flow_arm` does
+      with a non-checking trigger: it stores battery facts that `ota_flow_check`
+      returns before reading, sets `s_armed = false`, and skips the buffer
+      clear. Every one of those is a no-op **except** in one state — a wake
+      whose first window never ran the check (no WiFi, or a spawn that failed),
+      where the arm is still live and the second window of the same wake would
+      pick it up. An `arm(NONE)` there silently discards a legitimate
+      carry-over. Two negative tests pin the choice so a later tidy-up cannot
+      "complete the set" without failing.
+    - **`ota_mark_valid_if_pending()` is still uncalled.** `include/ota.h`
+      says "task 12 owns the call site"; that is wrong, and task 13 owns it —
+      the function is a no-op until `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE` is
+      on, and turning that on is task 13's measured decision. Left as-is rather
+      than half-wired; the header comment should be corrected when 13 lands.
+
+    **A correction to this entry's own third bullet, found while placing the
+    call.** It says the check goes before `mqtt_ha_window()` "so a failure
+    reaches Home Assistant in the same window that produced it". That ordering
+    is **necessary but not sufficient**, and as task 14 is currently described
+    it would not be enough. `net_window_task` receives the snapshot **by
+    value**: `wake_flow`'s `stats_collect()` runs on the main task and the
+    struct is complete before `xQueueReceive` returns. A check that writes
+    `ota_result` to NVS *after* that receive cannot change a copy that was
+    already made — so if task 14 adds `ota_result` as a `stats_snapshot_t`
+    field filled at collection time, the payload publishes the **previous**
+    wake's result and the ordering buys nothing. The placement is still correct
+    and still required (a check *after* `mqtt_ha_window` could not be rescued
+    by anything), but task 14 has to read `ota_result` from NVS at **publish**
+    time rather than out of the snapshot. Task 12 does not touch the field;
+    this is recorded so task 14 does not inherit a false assumption.
+
+    **Verification.** Host suite 38/38 from a clean build directory (`test/build`
+    removed and reconfigured), with `test_wake_flow` growing from 307 to 321
+    cases and `test_wake_flow_parent` running the same fourteen again on the
+    ParentTesting=y build. Firmware builds clean. Twelve mutations, all caught:
+    the rollover trigger swapped to a non-checking one; Button D's likewise;
+    the unreadable-battery guard dropped; the pending guard inverted; the
+    rollover arm moved *after* the window it feeds; the apply call deleted from
+    each of the two tails separately; the apply's battery frozen to a constant;
+    the apply's and the arm's charge lock negated; the apply hoisted above the
+    pre-sleep event watch; and the repaint seam gutted to a no-op. The last two
+    survived the first round and are why two more cases exist — the pre-sleep
+    ordering is asserted against a wake whose event watch actually fires
+    something, since with an empty watch the two orderings are
+    indistinguishable.
+
+    **What is still structurally untestable on the host,** stated so it does
+    not quietly become permanent: `ota_flow_check`'s position inside
+    `net_window_task` (no suite for that file, and it is FreeRTOS all the way
+    down); `OTA_FLOW_OPS` and `ota_flow_init` in `app_main` (the composition
+    root has no suite by construction); and all of `ota_task.c`. The
+    `-Werror=unused-function` re-arm in `main/CMakeLists.txt` is what catches a
+    dropped `.repaint` or thunk install, not a test.
+
+    **Measurements.** App image **1,437,088 B → 1,492,016 B**, a **+54,928 B**
+    (53.6 KB) increase; **78.32 % → 81.31 %** of the 1,835,008 B slot, leaving
+    342,992 B free. That figure is what task 15's build-size guard should be
+    calibrated against — it is the first one that includes the OTA feature at
+    all. The bootloader is **unchanged at 22,640 B of 28,672 (79 %, 6,032 B
+    free)**, as expected: task 13's `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE` is
+    what grows it, and it is still off. Thirty-six `ota_*` symbols now survive
+    the link, including `ota_flow_apply`, `ota_flow_check`, `ota_manifest_get`
+    and all four download primitives. Two are still absent and both are
+    expected: `ota_mark_valid_if_pending` (task 13) and `ota_flow_last_dl_ms`,
+    whose only caller is the stat payload (task 14).
 13. `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y`; call `ota_mark_valid_if_pending()`
     from the pre-sleep point. **Measure the bootloader before flipping this
     symbol**: it is currently 22,640 of 28,672 B (79 %, 6,032 B free), rollback

@@ -348,6 +348,23 @@ void wake_flow_note_sleep_entry(void);
    the same collection. Same reason as wake_flow_fire_expiry_alert above. */
 void wake_flow_post_stats_snapshot(void);
 
+/* Tick the timer and full-refresh the panel with the result: the normal
+   screen, restored. A failed OTA download owes the panel this, because the
+   last thing it painted was the update screen — so app_main hands this
+   function to ota_flow_ops_t's `repaint` seam.
+
+   Exposed for exactly the reason the two entry points above are, and no
+   further: it is ADDRESS-TAKEN by a composition-root ops table, so it
+   needs external linkage. It is NOT a re-export of the wake_flow static
+   named in the section below — that one keeps its own name and stays
+   private; this is a public entry point that happens to share its body,
+   the same relationship wake_flow_break_end_repaint already has with it.
+
+   Runs on the OTA task (ota_task.c) with the main task blocked in the
+   join, so the tick and the panel flush inside it are serialised against
+   everything else in this module rather than concurrent with it. */
+void wake_flow_repaint_current_state(void);
+
 /* ---- nothing here is implemented by main.c any more ---------------------- */
 
 /* Four seams used to be declared here and implemented in main.c:

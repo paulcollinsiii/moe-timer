@@ -22,6 +22,8 @@
 #include "net_window.h"
 #include "nvs_config.h"
 #include "nvs_defaults.h"
+#include "ota_flow.h"
+#include "ota_task.h"
 #include "sleep_plan.h"
 #include "status_led.h"
 #include "time_util.h"
@@ -193,6 +195,48 @@ static void paint_current_state_full(void) {
     time_t now = hal_time_now();
     display_state_t st = make_display_state(timer_tick(now), now);
     display_full_refresh(&st);
+}
+
+/* ---- the OTA seams ------------------------------------------------------ */
+
+/* ota_flow_ops_t's `repaint`: a failed download owes the panel the normal
+   screen back, and this is the same body the break-end and expiry-alert
+   tails already reach.
+
+   Exposed, and that is NOT a reversal of the residency decision recorded
+   at the bottom of wake_flow.h. What that decision says is that main.c no
+   longer IMPLEMENTS these seams — the four it names moved here and stay
+   here. This is the other pattern that header already describes, for
+   wake_flow_fire_expiry_alert and wake_flow_post_stats_snapshot: an entry
+   point that is ADDRESS-TAKEN by a composition-root ops table and
+   therefore has to have external linkage. paint_current_state_full stays
+   static; main.c gets a name, not the paint.
+
+   Runs on the OTA task rather than the main task (ota_task.c). Serialised
+   rather than concurrent: the main task is blocked inside
+   ota_task_run_apply for the whole attempt, so the tick, the ADC read and
+   the panel flush underneath have the same single-owner guarantees they
+   have everywhere else in this file. The timer_tick() is safe to repeat —
+   it ticks to now — and enter_deep_sleep's timer_persist_save() still runs
+   afterwards, on the main task, once the join has returned. */
+void wake_flow_repaint_current_state(void) {
+    paint_current_state_full();
+}
+
+/* State of charge for the OTA gates, with a failed ADC read kept distinct
+   from a flat cell.
+
+   battery.h documents <= 0 mV as a failed read, and battery_percent_from_mv
+   maps everything at or below 3300 mV to 0 %. Passing that 0 to the gate
+   would read as "below the battery floor" and would refuse every update
+   check forever, silently, on a device whose ADC broke. ota_gate_in_t
+   spells out the alternative it wants instead: batt_pct < 0 means
+   "unreadable" and does NOT gate, because the charge lock is the real
+   protection and a gate that cannot tell the two apart reports the wrong
+   reason to Home Assistant. */
+static int ota_batt_pct(void) {
+    int mv = battery_read_mv();
+    return (mv <= 0) ? -1 : battery_percent_from_mv(mv);
 }
 
 const char *wake_flow_reset_reason_str(esp_reset_reason_t reason) {
@@ -550,6 +594,16 @@ void wake_flow_handle_day_rollover(time_t *now) {
     ESP_LOGW(TAG, "Day rollover (last_date='%s', now=%lld)", timer_current_date(), (long long)*now);
     queue_rollover_summary();    /* yesterday's stats, before any reset */
     mqtt_ha_queue_bonus_clear(); /* clear the retained HA bonus target this window */
+    /* The update check rides the window opened on the next line, so the
+       arm has to precede it: ota_flow_check runs on the network task and
+       reads what is sampled here. The rollover is THE checking trigger —
+       the device is already awake, already opening a radio session, and
+       nobody is waiting on the panel.
+
+       Battery and charge-lock are sampled on this (the main) task
+       because the network task must not touch the ADC or the lock gate.
+       They gate the check only; the download re-samples its own. */
+    ota_flow_arm(OTA_TRIGGER_ROLLOVER, ota_batt_pct(), lock_gate_charge_locked());
     /* Fail-open: reset to IDLE with today's allocation even if sync fails */
     net_apply_try_window();
     *now = hal_time_now();
@@ -872,6 +926,63 @@ static void maybe_wait_for_event(void) {
     wake_flow_break_end_repaint();
 }
 
+/* ---- the OTA apply point ------------------------------------------------ */
+
+/* The late pre-sleep point: paint, extend the failsafe, open the second
+   window, download, commit, reboot — all of it inside ota_flow_apply,
+   which owns that order. Reached from the tail of both wake handlers and
+   from nowhere else, and the "nowhere else" is the design.
+
+   WHY THIS IS NOT INSIDE enter_deep_sleep(). That function is the single
+   funnel every sleep goes through, which makes it the obvious home and
+   the wrong one: it is also awake_failsafe_cb's path (main.c). That
+   callback runs in the esp_timer task and exists precisely because
+   something is ALREADY wedged and the battery needs protecting — painting
+   the panel, opening a WiFi session and pulling ~1.5 MB from there is the
+   exact opposite of what it is for. The same funnel is lock_gate.c's exit
+   too, where the device is refusing to do work at all. A runtime "am I on
+   the main task?" test would be a check, not a guarantee. Calling from
+   here instead makes the failsafe STRUCTURALLY incapable of reaching a
+   download: the esp_timer task never enters a wake handler.
+
+   Three properties hold at this point, and they are why it is this point
+   rather than any other spot in the tail:
+
+     - the network window is JOINED. Both tails reach here only through
+       net_apply_try_window() or net_apply_finish(), each of which joins,
+       and ota_flow.h requires the pending flag to be read after that
+       barrier.
+     - NVS is still OPEN. hal_nvs_close() is inside enter_deep_sleep and
+       therefore after this; ota_flow_apply charges the retry budget —
+       ota_fails and ota_target — BEFORE it attempts anything, and those
+       writes are the whole reason the budget engages after a wake that
+       was killed mid-download.
+     - the wake's panel work is finished. maybe_wait_for_event() has run,
+       so nothing is left to repaint over the update screen.
+
+   What it deliberately does NOT cover: the early-out sleeps (a break
+   starting mid-wake, the still-held-button continuation). A pending
+   update is left for the next check there rather than painting an update
+   screen over a break screen the device has just decided to sleep
+   through. The cost is bounded — s_pending is a plain static that deep
+   sleep discards, so the next rollover simply finds the update again.
+
+   The pending test lives here rather than inside ota_task_run_apply so
+   the ordinary wake pays one comparison instead of a 16 KB stack
+   allocation, and so the two facts below are sampled only when they are
+   going to be used. */
+static void maybe_apply_update(void) {
+    if (!ota_flow_pending())
+        return;
+    /* Sampled HERE, not carried over from ota_flow_arm. The first window
+       closed minutes and a full-panel repaint ago, and a cell that has
+       crossed into the charge lock in between is exactly the one that
+       must not be asked for a sustained radio burst followed by a flash
+       write. Sampled on THIS task, because the ADC and the lock gate are
+       main-task concerns while the download is not. */
+    ota_task_run_apply(ota_batt_pct(), lock_gate_charge_locked());
+}
+
 /* ---- the wake handlers --------------------------------------------------- */
 
 /* Held-through-sleep guard: EXT1 ANY_LOW is level-triggered, so a button
@@ -1023,6 +1134,7 @@ void wake_flow_handle_timer_tick(void) {
         }
     }
     maybe_wait_for_event();
+    maybe_apply_update(); /* second window; does not return when it commits */
     enter_deep_sleep(lock_gate_sleep_mode());
 }
 
@@ -1064,6 +1176,18 @@ void wake_flow_handle_button_wake(void) {
             wake_flow_dispatch_button_action(btn, &now, before, true, &swapped);
             break;
         case BTN_D:
+            /* The second checking trigger, and the only one a person can
+               reach on purpose — which is what makes it the one you use
+               while testing an update. Whether it ACTUALLY checks is
+               ota_flow_arm's answer, not this call site's: it depends on
+               the ota_on_sync runtime flag, which only NVS knows.
+
+               Deliberately before net_apply_open, for the same reason as
+               the rollover, and deliberately NOT on Button A: A is the
+               start/resume path, where the user is waiting on the panel
+               and a manifest GET would sit between the press and the
+               render. */
+            ota_flow_arm(OTA_TRIGGER_SYNC, ota_batt_pct(), lock_gate_charge_locked());
             /* NTP-gated paint, same as BTN A: sync now, MQTT after paint */
             if (net_apply_open()) {
                 net_window_wait_ntp();
@@ -1084,6 +1208,7 @@ void wake_flow_handle_button_wake(void) {
 
     finish_or_break(btn, before, now, swapped); /* e.g. resume with accrual already past the interval */
     maybe_wait_for_event();
+    maybe_apply_update(); /* second window; does not return when it commits */
     enter_deep_sleep(lock_gate_sleep_mode());
 }
 
