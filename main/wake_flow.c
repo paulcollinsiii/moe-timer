@@ -980,7 +980,21 @@ static void maybe_apply_update(void) {
        must not be asked for a sustained radio burst followed by a flash
        write. Sampled on THIS task, because the ADC and the lock gate are
        main-task concerns while the download is not. */
-    ota_task_run_apply(ota_batt_pct(), lock_gate_charge_locked());
+    if (!ota_task_run_apply(ota_batt_pct(), lock_gate_charge_locked())) {
+        /* The spawn itself failed — a 16 KB stack is the largest single
+           allocation this firmware makes, so a fragmented heap really can
+           refuse it. ota_flow_apply never ran, which means NOTHING was
+           recorded: an update was found, announced to Home Assistant by
+           the check, and then the device would say nothing about it on
+           this wake or any wake after, forever.
+
+           Reported, not charged. ota_task.c's reasoning for leaving the
+           retry budget alone here is right and stays: giving up on a
+           perfectly good image because the heap was tight one evening is
+           the wrong failure. What was missing was only the observability,
+           and that is all this adds. */
+        ota_flow_note_spawn_failed();
+    }
 }
 
 /* ---- the wake handlers --------------------------------------------------- */

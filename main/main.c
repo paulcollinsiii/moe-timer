@@ -264,16 +264,35 @@ static void arm_awake_failsafe(void) {
 }
 
 /* Push the awake failsafe out so a long deliberate awake stretch (the
-   locate alarm) isn't cut short by it. Installed into alerts.c at boot;
-   HOW LONG to push is the caller's, and this only applies it. Keep this
-   to exactly one reference — it is `static`, so the unused-function
-   warning is the only thing left that would notice a dropped install
-   (see refactor.bugdiscoveries.md). */
-static void extend_awake_failsafe(int seconds) {
+   locate alarm) isn't cut short by it. HOW LONG to push is the caller's,
+   and this only applies it.
+
+   ANSWERS WHETHER THERE WAS A FAILSAFE TO PUSH, which used to be
+   swallowed. arm_awake_failsafe above only logs a create/start failure,
+   so on such a boot s_failsafe_timer stays NULL and this is a silent
+   no-op for the rest of the wake. Harmless for the locate alarm — with
+   no failsafe there is nothing to cut it short — but not for OTA:
+   ota_task_run_apply blocks on portMAX_DELAY and names this failsafe as
+   its only bound, so ota_flow_apply has to be able to ask, and declines
+   the download when the answer is no. */
+static bool extend_awake_failsafe(int seconds) {
     if (s_failsafe_timer != NULL) {
         esp_timer_stop(s_failsafe_timer);
         esp_timer_start_once(s_failsafe_timer, (uint64_t)seconds * 1000000ULL);
+        return true;
     }
+    return false;
+}
+
+/* Residency 4. alerts.c's extender callback is void(int) — it has no use
+   for the answer, and widening its ABI to carry one nobody reads would
+   be the tail wagging the dog. One line, no branch.
+   This also keeps the property the note above used to ask for by hand:
+   each of the two installs still has exactly one static symbol behind
+   it, so -Werror=unused-function is what notices a dropped install
+   (see refactor.bugdiscoveries.md). */
+static void alerts_extend_awake_cb(int seconds) {
+    (void)extend_awake_failsafe(seconds);
 }
 
 /* ---- OTA ---------------------------------------------------------------
@@ -319,6 +338,11 @@ static const ota_flow_ops_t OTA_FLOW_OPS = {
     .paint_update = display_ota,
     .repaint = wake_flow_repaint_current_state,
     .extend_awake = extend_awake_failsafe,
+    /* The OTA reboot skips enter_deep_sleep() entirely — maybe_apply_update
+       sits ahead of it in both wake tails — so this is the only thing
+       that flushes the timer snapshot before esp_restart() wipes RTC
+       memory. ota_flow.h says what the stale snapshot would cost. */
+    .persist_state = timer_persist_save,
     .restart = esp_restart,
     .free_heap = esp_get_free_heap_size,
     .mono_ms = ota_mono_ms,
@@ -363,6 +387,15 @@ void app_main(void) {
     setenv("TZ", tz, 1);
     tzset();
 
+    /* Before anything reads the timer state, and in particular before the
+       restore below: g_rtc_state now carries a magic and a version, and
+       zeroing a struct that fails them is what makes last_date empty and
+       so hands the boot to the NVS snapshot. Answers whether it fired;
+       nothing here acts on that, because on a cold boot and on every
+       esp_restart the answer is yes by construction. The one case it is
+       actually defending against is written out above rtc_state_t. */
+    (void)timer_rtc_state_guard();
+
     /* Slot definitions live in rodata, not RTC memory — install them
        before the first timer_* call on every boot/wake. */
     timer_defs_install();
@@ -374,7 +407,7 @@ void app_main(void) {
     /* Paired with the line below: net_apply_init is what makes .on_locate
        dispatchable, so this is where a missing install would bite. Order
        against arm_awake_failsafe is free — the extender null-guards. */
-    alerts_set_extend_awake(extend_awake_failsafe);
+    alerts_set_extend_awake(alerts_extend_awake_cb);
     net_apply_init(&NET_APPLY_OPS);
     /* Before wake_flow_handle_wake at the bottom of this function, which
        is where the first ota_flow_arm() happens — the module's contract

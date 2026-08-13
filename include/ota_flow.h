@@ -109,8 +109,33 @@ typedef struct {
     void (*paint_update)(const char *from, const char *to); /* display_ota */
     void (*repaint)(void);                                  /* back to the normal screen */
 
-    /* Push the awake failsafe out (main.c's extend_awake_failsafe). */
-    void (*extend_awake)(int seconds);
+    /* Push the awake failsafe out (main.c's extend_awake_failsafe).
+       ABSOLUTE, from the moment of the call — an esp_timer_stop followed
+       by a start_once — so an extension applied to a wake that has
+       already burned time hands it a fresh full budget rather than
+       adding to what is left.
+
+       Answers FALSE when there is no failsafe to push. main.c creates
+       the timer once, at the top of app_main, and only LOGS a create or
+       start failure; the extender then null-guards and silently does
+       nothing for the rest of the boot. That is harmless everywhere
+       else and not here: ota_task_run_apply blocks on portMAX_DELAY and
+       names this failsafe as its only bound, while dl_begin is
+       unbounded in time by construction (see ota_flow.c). A no-op
+       extender therefore turns a wedged server into a device that stays
+       awake until the battery is flat. ota_flow_apply refuses to start
+       an attempt nothing can end. */
+    bool (*extend_awake)(int seconds);
+
+    /* Flush volatile state to durable storage (timer_persist_save).
+       Called once, immediately before restart() and after the radio is
+       down, because the OTA reboot bypasses enter_deep_sleep() — which
+       is the ONLY other caller of timer_persist_save on the rollover and
+       button paths — and RTC memory does not survive esp_restart() on
+       the ESP32-S2 (only a deep-sleep wake preserves the RTC segments;
+       every other reset reloads them from the image, i.e. zeroed). See
+       ota_flow_apply for what the stale snapshot would otherwise cost. */
+    void (*persist_state)(void);
     void (*restart)(void); /* esp_restart */
     uint32_t (*free_heap)(void);
     int64_t (*mono_ms)(void); /* monotonic; only differences are read */
@@ -143,7 +168,17 @@ void ota_flow_init(const ota_flow_ops_t *ops, const ota_flow_cfg_t *cfg);
    a check may replace it. Arming for a trigger that will NOT check
    leaves any buffer alone: two windows in one wake is a routine path
    (day rollover plus a Button A sync), and the second arm must not throw
-   away what the first window found. */
+   away what the first window found.
+
+   KNOWN, ACCEPTED, AND DELIBERATELY NOT FIXED: the one wake that hits
+   day rollover AND Button D with ota_on_sync=1 arms twice for a check,
+   so the second arm clears what the rollover window buffered. It
+   self-heals — that second arm is followed by a second CHECK, which
+   re-finds the same update — and only a wake where the second check
+   also fails (a manifest fetch that times out, say) loses the update,
+   for one day, until the next rollover. The clear-on-arm rule is not
+   worth loosening for that: it is what stops a withdrawn offer standing
+   after a check has replaced it, which is the hazard with teeth. */
 void ota_flow_arm(ota_trigger_t trigger, int batt_pct, bool charge_locked);
 
 /* Network task, inside the window: gate, GET the manifest, decide, and
@@ -169,8 +204,36 @@ bool ota_flow_pending(void);
    a pending update implies the check gate passed, and a clock, once
    set, stays set for the boot.
 
+   THREE WAYS THIS RETURNS WITHOUT ATTEMPTING ANYTHING, and all three
+   FORFEIT the buffered update for this wake — s_pending is cleared on
+   entry, so nothing re-offers it until the next check finds it again:
+
+     - the second gate answers low_heap. Recorded to ota_result (a
+       human acts on it), nothing painted, retry budget untouched.
+     - the second gate answers locked (the cell crossed into the charge
+       lock between the windows). Deliberately NOT recorded: a
+       non-attempt must not overwrite the only copy of a real failure.
+     - extend_awake answers false, i.e. there is no awake failsafe to
+       arm. Logged, not recorded, budget untouched — see ota_flow_ops_t.
+
+   The forfeit is cheap by construction: the buffer is a plain static
+   that neither deep sleep nor a reboot preserves, so "lost" means "found
+   again at the next rollover check", which is at most a day.
+
    Does not return on success — the device reboots into the new image. */
 void ota_flow_apply(int batt_pct, bool charge_locked);
+
+/* The caller could not even START the apply — ota_task_run_apply failed
+   to create the download task or its semaphore, so ota_flow_apply never
+   ran. Records the outcome so an update that WAS found and announced
+   does not then vanish without trace on every wake, forever.
+
+   Deliberately does not touch the retry budget: nothing was attempted,
+   and charging a heap condition against a target would eventually give
+   up on a perfectly good image. Routed through this module rather than
+   written by the caller so that which outcomes may overwrite ota_result
+   stays a single rule (ota_policy_reason_is_persistable). */
+void ota_flow_note_spawn_failed(void);
 
 /* Last download's wall time, 0 if none this boot. The stat payload
    publishes it so a link trending toward the deadline is visible before

@@ -1027,8 +1027,22 @@ mutation shows the clip half is load-bearing, because `max_width` alone stops
 the object growing but LVGL *wraps* the overflow into the row below. And
 `display_ota()` now sets an `RTC_DATA_ATTR` flag that promotes the next paint
 to a full refresh -- that is the mechanism tasks 10 and 13 refer to, and it
-already survives `esp_restart()`, so task 13's post-reboot clause is satisfied
-by construction rather than needing its own code.
+covers the same-wake repaint and the deep-sleep case.
+
+**Corrected during task 12's review.** An earlier version of this paragraph
+said the flag "already survives `esp_restart()`". It does not:
+`RTC_DATA_ATTR` survives a **deep-sleep wake only**. The bootloader loads the
+`.rtc.data` segment on every reset except that one
+(`bootloader_support/src/esp_image_format.c`: `load_rtc_memory =
+esp_rom_get_reset_reason(0) != RESET_REASON_CORE_DEEP_SLEEP`), so after an OTA
+reboot every `RTC_DATA_ATTR` variable in this tree comes back at its
+initialiser -- zeroed, not garbage. Task 13's post-reboot clause is **still
+satisfied by construction and still needs no code**, but by a different
+mechanism: `ssd1680.c`'s `s_prev_frame_valid` is `RTC_DATA_ATTR` too and is
+wiped by the same reboot, so `ssd1680_resolve_refresh_mode()` promotes the
+requested PARTIAL to FULL and logs "partial promoted to full: no valid
+previous frame this power cycle". The driver guard is what makes the first
+post-OTA paint full -- do not simplify it away on the strength of the flag.
 
 **Task 10 has landed** (`ota_flow.c` + `test_ota_flow`, 31 cases, taking the
 tree to 36/36 suites). It changed one thing the plan had specified differently,
@@ -1432,23 +1446,50 @@ deserve their own commit and their own review:
     (53.6 KB) increase; **78.32 % → 81.31 %** of the 1,835,008 B slot, leaving
     342,992 B free. That figure is what task 15's build-size guard should be
     calibrated against — it is the first one that includes the OTA feature at
-    all. The bootloader is **unchanged at 22,640 B of 28,672 (79 %, 6,032 B
+    all. **The review round that followed added 384 B**: the image is now
+    **1,492,400 B, 81.33 % of the slot, 342,608 B free**, and `.rtc.data` grew
+    by exactly 8 (`0x13f0` → `0x13f8`) for `rtc_state_t`'s new magic and
+    version. Calibrate against the later number. The bootloader is **unchanged at 22,640 B of 28,672 (79 %, 6,032 B
     free)**, as expected: task 13's `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE` is
-    what grows it, and it is still off. Thirty-six `ota_*` symbols now survive
-    the link, including `ota_flow_apply`, `ota_flow_check`, `ota_manifest_get`
-    and all four download primitives. Two are still absent and both are
-    expected: `ota_mark_valid_if_pending` (task 13) and `ota_flow_last_dl_ms`,
+    what grows it, and it is still off. Thirty-six `ota_*`-prefixed **link-map
+    entries** now survive the link, including `ota_flow_apply`,
+    `ota_flow_check`, `ota_manifest_get` and all four download primitives.
+    Read that as a symbol count, not a function count: three of the thirty-six
+    are embedded data objects (`ota_ca_pem`, `ota_ca_pem_length`,
+    `ota_event_name_table`) rather than code, which leaves thirty-three
+    functions, and one of *those* is ESP-IDF's own static
+    (`ota_verify_partition`) rather than ours. Both 36 and 33 are correct
+    against different denominators; neither is a count of the functions this
+    project wrote. Two are still absent and both are expected:
+    `ota_mark_valid_if_pending` (task 13) and `ota_flow_last_dl_ms`,
     whose only caller is the stat payload (task 14).
 13. `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y`; call `ota_mark_valid_if_pending()`
     from the pre-sleep point. **Measure the bootloader before flipping this
     symbol**: it is currently 22,640 of 28,672 B (79 %, 6,032 B free), rollback
     support grows it, and the 2nd-stage bootloader at `0x1000`-`0x8000` is as
     un-updatable as the partition table.
-    Also promote the **first paint after a successful OTA reboot** to a full
-    refresh: `s_partial_count` is `RTC_DATA_ATTR` and survives `esp_restart()`,
-    so the panel comes back still showing the update screen and would otherwise
-    repaint it partially.
+    The **first paint after a successful OTA reboot** needs **no code here** --
+    it is already full. The premise this entry used to carry (`s_partial_count`
+    is `RTC_DATA_ATTR` and "survives `esp_restart()`") is false: only a
+    deep-sleep wake preserves RTC segments on the S2, so after the OTA reboot
+    `s_partial_count` and `s_takeover_on_panel` are both **zero**, and
+    `display_update()` duly asks for a PARTIAL. What makes the paint full is
+    one layer down -- `ssd1680.c`'s `s_prev_frame_valid` was wiped by the same
+    reboot, so `ssd1680_resolve_refresh_mode()` promotes it and logs "partial
+    promoted to full: no valid previous frame this power cycle". Verify that
+    log line on the smoke test rather than adding a promotion that would
+    duplicate it, and do not remove the driver guard.
 14. OTA result / target / fail-count / download duration into the stat payload.
+    **Read `ota_result` from NVS inside `mqtt_ha_window`, at publish time --
+    not as a `stats_snapshot_t` field.** Task 12's entry above works the
+    constraint out in full (see "A correction to this entry's own third
+    bullet"): `wake_flow_post_stats_snapshot()` runs `stats_collect()` on the
+    main task and posts the struct **by value**, `net_window_task` copies it
+    out of the queue before `ota_flow_check` runs, so a snapshot field filled
+    at collection time can only ever carry the **previous** wake's result.
+    Also bump `DISC_SCHEMA_VER` in `mqtt_ha.c` in the same commit: new or
+    renamed Home Assistant entities do not appear at all until it changes,
+    and four new fields is four entities.
 15. Build-size guard (warn at 85 % slot occupancy).
 16. Hardware smoke test (below).
 17. Update `docs/architecture.md`: module table, layer lists, a subsystem note

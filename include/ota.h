@@ -97,7 +97,9 @@ void ota_download_abort(void);
 
 /* Cancel the pending-verify rollback, if this boot is one.
 
-   Called from wake_flow's pre-sleep point (task 12 owns the call site)
+   Called from wake_flow's pre-sleep point (task 13 owns the call site,
+   together with the CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE flip that
+   makes it do anything; task 12 wired the rest of the flow but not this)
    once the wake has demonstrably worked. Lives here rather than in main.c
    because esp_ota_mark_app_valid_cancel_rollback() is a bare call, not a
    handle, and the residency rule keeps those out of main.c.

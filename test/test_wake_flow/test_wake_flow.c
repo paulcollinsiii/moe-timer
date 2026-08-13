@@ -1162,12 +1162,23 @@ bool ota_flow_pending(void) {
     return flow_ota_pending;
 }
 
+/* false = the spawn itself failed: no semaphore, or xTaskCreate refused
+   the 16 KB stack on a fragmented heap. ota_flow_apply never runs at all
+   in that case, which is why the outcome has to be reported from HERE —
+   the flow module cannot report what it never saw. */
+static bool flow_ota_spawn_ok = true;
+static int flow_ota_spawn_failures_noted;
+
 bool ota_task_run_apply(int batt_pct, bool charge_locked) {
     flow_log_push(EV_OTA_APPLY);
     flow_ota_applies++;
     flow_ota_apply_batt = batt_pct;
     flow_ota_apply_locked = charge_locked;
-    return true;
+    return flow_ota_spawn_ok;
+}
+
+void ota_flow_note_spawn_failed(void) {
+    flow_ota_spawn_failures_noted++;
 }
 
 /* Distinctive enough that a version arriving from anywhere else — a
@@ -1534,6 +1545,8 @@ void setUp(void) {
     flow_ota_applies = 0;
     flow_ota_apply_batt = -424242;
     flow_ota_apply_locked = true;
+    flow_ota_spawn_ok = true;
+    flow_ota_spawn_failures_noted = 0;
     memset(&flow_stats_in, 0, sizeof flow_stats_in);
     flow_stats_now = 0;
     flow_net_finish = NET_FINISH_IDLE;
@@ -6507,6 +6520,39 @@ void test_a_wake_with_nothing_pending_opens_no_second_window(void) {
     TEST_ASSERT_EQUAL_INT(0, flow_ota_applies);
 }
 
+/* A spawn that fails is the one outcome ota_flow.c can never report,
+   because ota_flow_apply does not run at all: xTaskCreate refused the
+   16 KB stack (the largest single allocation this firmware makes) or the
+   semaphore could not be allocated. s_pending had been true, so an update
+   WAS found and announced by the check — and before this the device then
+   said nothing about it, on this wake and on every wake after it. */
+void test_a_download_task_that_cannot_be_spawned_is_reported(void) {
+    mock_time_set(flow_at(0, 5));
+    flow_new_day = true;
+    flow_ota_pending = true;
+    flow_ota_spawn_ok = false;
+
+    TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_tick());
+
+    TEST_ASSERT_EQUAL_INT(1, flow_ota_applies);
+    TEST_ASSERT_EQUAL_INT(1, flow_ota_spawn_failures_noted);
+}
+
+/* And the ordinary path stays silent: a spawn that worked hands the
+   reporting to ota_flow_apply, which knows what actually happened. Two
+   notes for one wake would overwrite a real download failure with a
+   heap excuse. */
+void test_a_download_task_that_spawns_reports_nothing_from_here(void) {
+    mock_time_set(flow_at(0, 5));
+    flow_new_day = true;
+    flow_ota_pending = true;
+
+    TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_tick());
+
+    TEST_ASSERT_EQUAL_INT(1, flow_ota_applies);
+    TEST_ASSERT_EQUAL_INT(0, flow_ota_spawn_failures_noted);
+}
+
 /* The button handler's tail is the second call site, and it is a separate
    statement: deleting either one leaves the other's cases green. */
 void test_the_button_handler_applies_a_pending_update_too(void) {
@@ -6906,6 +6952,8 @@ int main(void) {
     RUN_TEST(test_the_ota_repaint_seam_paints_the_normal_screen);
     RUN_TEST(test_a_pending_update_is_applied_after_the_join_and_before_the_sleep);
     RUN_TEST(test_a_wake_with_nothing_pending_opens_no_second_window);
+    RUN_TEST(test_a_download_task_that_cannot_be_spawned_is_reported);
+    RUN_TEST(test_a_download_task_that_spawns_reports_nothing_from_here);
     RUN_TEST(test_the_button_handler_applies_a_pending_update_too);
     RUN_TEST(test_the_apply_samples_the_battery_again_instead_of_reusing_the_arms);
     RUN_TEST(test_the_apply_runs_after_the_pre_sleep_event_watch);

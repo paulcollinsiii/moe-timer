@@ -385,7 +385,7 @@ menu "MagTag Timer"
     config MAGTAG_OTA_MIN_FREE_HEAP
         int "Free-heap floor for an update check or download (bytes)"
         default 40960
-        range 16384 131072
+        range 32768 131072
         help
             Both OTA gates refuse below this. The download needs roughly
             40 KB free during the TLS handshake and transfer (mbedTLS
@@ -393,6 +393,18 @@ menu "MagTag Timer"
             runs out of heap fails in a way that reads like a
             certificate problem — so the gate turns it into a logged
             low_heap instead.
+
+            The floor of 32 KB is structural, not taste. With
+            CONFIG_MBEDTLS_DYNAMIC_BUFFER unset, the record buffers alone
+            are CONFIG_MBEDTLS_SSL_IN_CONTENT_LEN (16384) plus
+            CONFIG_MBEDTLS_SSL_OUT_CONTENT_LEN (4096) = 20 KB, before the
+            SSL context, the pinned CA, the peer chain and the http
+            client's 1 KB rx buffer. A floor below that would configure a
+            gate that PASSES at a heap level where the handshake is
+            guaranteed to fail — the exact outcome this symbol exists to
+            prevent — so the range stops short of it rather than trusting
+            the operator not to go there. Widening it again means turning
+            the dynamic-buffer option on first.
 
             In bytes rather than KB so app_main can pass the symbol
             straight into ota_flow_cfg_t without arithmetic: main.c is

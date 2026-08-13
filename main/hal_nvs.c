@@ -16,7 +16,17 @@ static const char *TAG = "hal_nvs";
    run — the LED task's first pixel command (quiet-hours read) and the
    network task's spawn both happen after that, so by the time any other
    task calls in, s_open is already true. The NVS API itself is internally
-   synchronized for the concurrent reads/writes that follow. */
+   synchronized for the concurrent reads/writes that follow.
+
+   One case qualifies that "already true", recorded so the invariant is
+   not quietly stale: the OTA download task (ota_task.c) can outlive
+   hal_nvs_close() on the awake-failsafe path — the failsafe runs
+   enter_deep_sleep() from the esp_timer task while `ota_dl` is still
+   mid-attempt — so a write from it afterwards re-enters here with s_open
+   false. The outcome is benign (the handle is simply reopened, and NVS
+   is internally synchronised) and the window is a few microseconds wide,
+   which is why this stays a note rather than a lock on the hot path of
+   every accessor. */
 static nvs_handle_t s_handle;
 static bool s_open;
 

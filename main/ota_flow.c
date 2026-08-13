@@ -379,7 +379,10 @@ static void fail_attempt(const ota_error_facts_t *facts, bool session_up) {
 
     record(reason, facts->http_status);
 
-    s_ops.extend_awake(s_cfg.awake_sec);
+    /* Answer ignored here on purpose: ota_flow_apply already refused to
+       start the attempt if the failsafe was unarmable, so reaching this
+       line means it was armable. */
+    (void)s_ops.extend_awake(s_cfg.awake_sec);
     s_ops.repaint();
     ESP_LOGW(TAG, "update to %s failed: %s", s_target, ota_policy_reason_str(reason));
 }
@@ -421,7 +424,31 @@ void ota_flow_apply(int batt_pct, bool charge_locked) {
        is already one of the ways: display_ota() blocks on a full refresh
        and a full refresh is a current draw. Everything before this line
        is a gate that declined, which is not an attempt and must not be
-       charged. See charge_the_attempt. */
+       charged. See charge_the_attempt.
+
+       THE FAILSAFE GATE, ahead of even that. Everything below leans on
+       the awake failsafe being the thing that ends a wake nothing else
+       can end: ota_task_run_apply blocks on portMAX_DELAY, dl_begin is
+       unbounded in time, and the deadline loop only starts after it. But
+       main.c's arm_awake_failsafe merely LOGS a create/start failure and
+       extend_awake_failsafe then null-guards, so on a boot where the
+       timer was never created every extension below is a silent no-op
+       and the "bounded by the failsafe" argument evaporates — a wedged
+       server would hold the radio on until the battery is flat.
+
+       So the extension is asked for FIRST and its answer is believed. It
+       is a real re-arm, not a probe: awake_sec absolute-from-now, the
+       same bound every ordinary wake gets, which also stops the ~3 s
+       paint below being charged to whatever is left of a wake that has
+       already run for minutes. And it sits BEFORE charge_the_attempt
+       because a refusal is not an attempt: burning retry budget for a
+       device that never opened a socket would eventually give up on a
+       perfectly good image. */
+    if (!s_ops.extend_awake(s_cfg.awake_sec)) {
+        ESP_LOGE(TAG, "no awake failsafe to arm: declining the download (nothing would bound it)");
+        return; /* nothing painted, nothing charged, nothing to repaint */
+    }
+
     charge_the_attempt();
 
     s_ops.paint_update(s_cfg.running_version, s_target);
@@ -457,7 +484,8 @@ void ota_flow_apply(int batt_pct, bool charge_locked) {
        while the failsafe had already been counting it, which makes the
        deadline unreachable and hands the kill back to the failsafe. */
     int64_t budget_start = s_ops.mono_ms();
-    s_ops.extend_awake(s_cfg.max_sec + OTA_ABORT_TAIL_MS / 1000);
+    /* Armable was established at the gate above; this is the value. */
+    (void)s_ops.extend_awake(s_cfg.max_sec + OTA_ABORT_TAIL_MS / 1000);
     int64_t deadline_ms = budget_start + (int64_t)s_cfg.max_sec * 1000;
 
     ota_error_facts_t facts;
@@ -512,6 +540,46 @@ void ota_flow_apply(int batt_pct, bool charge_locked) {
         }
     }
 
+    /* THE COMMIT TAIL GETS ITS OWN BUDGET, and this line is the only
+       thing that gives it one.
+
+       The failsafe was armed for max_sec + OTA_ABORT_TAIL_MS above, and
+       ota_timing.h's _Static_assert justifies that tail entirely in
+       ABORT-path terms: one worst-case dl_step, plus dl_abort, plus
+       session_end. Nothing in it budgets the COMMIT path, which is much
+       the more expensive of the two — esp_https_ota_finish runs
+       esp_ota_end -> ota_verify_partition (a full ~1.5 MB SHA-256), then
+       esp_ota_set_boot_partition runs image_validate() (a SECOND full
+       ~1.5 MB SHA-256) plus an ota_data erase-and-write, and three NVS
+       writes and a session_end follow. Neither SHA pass has ever been
+       pinned to a number without hardware in front of it.
+
+       Losing that race is the single worst outcome in this file, and it
+       is worth spelling out because it is the ONLY path in the system
+       that yields garbage rather than zeros. If the failsafe fires after
+       esp_ota_set_boot_partition has succeeded but before restart(),
+       main.c's callback deep-sleeps. The next boot is then a DEEP-SLEEP
+       WAKE of the NEW image, and deep-sleep wake is the one reset the
+       bootloader does not reload the RTC segments for
+       (esp_image_format.c: load_rtc_memory is false only for
+       RESET_REASON_CORE_DEEP_SLEEP). The new image would read the OLD
+       image's .rtc.data bytes at its own offsets. Every other reset path
+       reloads .rtc.data from the image and therefore yields zeros.
+
+       Note what this re-arm does NOT do: it does not EXTEND. It is
+       absolute-from-now, so a download that finished quickly walks away
+       with 180 s where it had 300 s left. That is deliberate and must
+       not be "fixed" back. The commit tail is a handful of seconds
+       against 180, and 180 s is the same bound every ordinary wake in
+       this firmware already runs under.
+
+       The abort path is untouched by this: fail_attempt re-arms for
+       awake_sec itself, so a dl_finish that answers false lands on the
+       same budget it would have had. ota_timing.h's assertion is
+       likewise unaffected — it says what it always said about the abort
+       path, and stays exactly as sound. */
+    (void)s_ops.extend_awake(s_cfg.awake_sec);
+
     memset(&facts, 0, sizeof(facts));
     if (!s_ops.dl_finish(&facts)) {
         /* dl_finish frees its handle whichever way it answers, so this
@@ -531,5 +599,60 @@ void ota_flow_apply(int batt_pct, bool charge_locked) {
 
     ESP_LOGI(TAG, "update to %s committed in %u ms; restarting", s_target, (unsigned)s_dl_ms);
     s_ops.session_end();
+
+    /* The timer snapshot, and the reason this reboot needs one when no
+       other path in the firmware does.
+
+       timer_persist_save() runs at exactly four places: enter_deep_sleep,
+       the charge lock, a break start and the expiry alert. NOT on a day
+       rollover, NOT on a button action, NOT on an HA grant. Every one of
+       those relies on enter_deep_sleep to flush eventually — and this
+       reboot never reaches it, because maybe_apply_update() sits ahead
+       of the sleep in both wake tails.
+
+       That would not matter if RTC memory survived the restart. It does
+       not: on the ESP32-S2 only a deep-sleep wake preserves the RTC
+       segments, so g_rtc_state comes back ZEROED and the NVS snapshot is
+       the sole survivor — up to a whole wake stale.
+
+       The sharp case is the primary trigger. On a rollover wake the
+       snapshot still carries YESTERDAY'S date, so timer_restore_snapshot
+       refuses it; g_rtc_state stays zeroed, last_date is empty, and
+       timer_is_new_day() answers true on an empty last_date. The new
+       firmware then runs the day rollover a SECOND time and publishes
+       yesterday's screen-time summary computed from all-zero slots,
+       permanently overwriting Home Assistant's record with zeros.
+
+       Saving HERE fixes that outright rather than papering over it:
+       timer_make_snapshot copies g_rtc_state.last_date, the rollover has
+       already run by this point, so the blob carries TODAY'S date. The
+       post-OTA boot restores it cleanly and timer_is_new_day() answers
+       false — no second rollover, and no lost completions or pause.
+
+       Safe from this task for the same reason .repaint is: the main task
+       is blocked in ota_task_run_apply's join and the network window was
+       joined before the apply point was reached. After session_end, so
+       the flash write is not competing with the radio. */
+    s_ops.persist_state();
     s_ops.restart();
+}
+
+/* ---- outcomes the flow itself never saw --------------------------------- */
+
+void ota_flow_note_spawn_failed(void) {
+    /* low_heap, and not a new code of its own. What actually failed is
+       xTaskCreate on a 16 KB stack (or the semaphore before it) — the
+       largest single allocation this firmware ever asks for — which is a
+       heap condition by any reading, presents to the operator exactly as
+       the download gate's own low_heap does, and already has a row in
+       the plan's failure table ("Free heap too low / low_heap / download
+       skipped / next rollover"). Inventing a second string for the same
+       physical condition would buy Home Assistant nothing and cost a
+       discovery-schema bump.
+
+       Through record() rather than nvs_config_set_ota_result() directly,
+       so the "may this overwrite an earlier failure?" question keeps one
+       owner (ota_policy_reason_is_persistable) instead of two. */
+    ESP_LOGW(TAG, "download task could not be started: reporting low_heap");
+    record(OTA_REASON_LOW_HEAP, 0);
 }

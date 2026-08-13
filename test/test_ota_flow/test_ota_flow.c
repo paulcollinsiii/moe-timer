@@ -154,8 +154,18 @@ static ota_step_t mock_dl_step(ota_error_facts_t *facts) {
     return OTA_STEP_MORE;
 }
 
+/* Captured AT the commit, not read afterwards, for the same reason the
+   abort captures its pair below: the commit tail re-arms the failsafe on
+   the way in and fail_attempt re-arms it again on the way out, so a
+   reading taken after ota_flow_apply returns says nothing about the
+   headroom the two SHA-256 passes inside dl_finish actually ran with. */
+static int64_t m_finish_mono;
+static int64_t m_finish_failsafe_at;
+
 static bool mock_dl_finish(ota_error_facts_t *facts) {
     note("finish");
+    m_finish_mono = m_mono;
+    m_finish_failsafe_at = m_failsafe_at;
     if (!m_finish_ok) {
         *facts = m_finish_facts;
         return false;
@@ -218,14 +228,40 @@ static void mock_repaint(void) {
 /* main.c's extend_awake_failsafe() is an esp_timer_stop followed by a
    start_once(seconds): the failsafe is re-armed ABSOLUTELY, from the
    moment of the call. The mock models exactly that, so a test can ask
-   whether the download's own deadline still fits inside it. */
-static void mock_extend_awake(int seconds) {
+   whether the download's own deadline still fits inside it.
+
+   m_extend_ok models the OTHER outcome main.c can produce: the failsafe
+   timer was never created (esp_timer_create or start_once failed at
+   boot, which arm_awake_failsafe only logs), so the extender null-guards
+   and does nothing at all. Modelled as "returns false AND moves no
+   clock", because that is the point — a device in that state has no
+   bound on the wake whatsoever. */
+static bool m_extend_ok;
+
+static bool mock_extend_awake(int seconds) {
     note_int("extend", seconds);
+    if (!m_extend_ok)
+        return false;
     m_failsafe_at = m_mono + (int64_t)seconds * 1000;
+    return true;
+}
+
+/* The pre-reboot snapshot flush (timer_persist_save on the device). Its
+   ORDER is the whole property — after the radio is down, before the
+   restart that wipes RTC memory — so it goes in the call log like every
+   other effect, and the counter is only here to keep "exactly once"
+   honest. */
+static int m_persists;
+static bool m_persisted_before_restart;
+
+static void mock_persist_state(void) {
+    note("persist");
+    m_persists++;
 }
 
 static void mock_restart(void) {
     note("restart");
+    m_persisted_before_restart = (m_persists > 0);
 }
 
 static uint32_t mock_free_heap(void) {
@@ -247,6 +283,7 @@ static const ota_flow_ops_t OPS = {
     .paint_update = mock_paint_update,
     .repaint = mock_repaint,
     .extend_awake = mock_extend_awake,
+    .persist_state = mock_persist_state,
     .restart = mock_restart,
     .free_heap = mock_free_heap,
     .mono_ms = mock_mono_ms,
@@ -288,6 +325,11 @@ void setUp(void) {
     m_abort_mono = 0;
     m_abort_failsafe_at = 0;
     m_budget_start = 0;
+    m_finish_mono = 0;
+    m_finish_failsafe_at = 0;
+    m_extend_ok = true;
+    m_persists = 0;
+    m_persisted_before_restart = false;
     m_kill_in_dl_begin = false;
     s_dev_id = "magtag-a1b2c3";
     ota_flow_init(&OPS, &CFG);
@@ -578,6 +620,9 @@ static void test_no_pending_update_opens_no_window(void) {
 
 /* The whole sequence in one assertion. Every element of it is load
    bearing:
+     extend:180 FIRST, before anything is charged or painted: it doubles as
+                the check that there IS a failsafe to arm, and the whole
+                attempt below is bounded by nothing else
      paint      before the radio comes up — display_ota() blocks on a full
                 refresh and has no net_window_active() guard, so painting
                 inside an open window is the brownout in net_window.c:65-79
@@ -585,12 +630,20 @@ static void test_no_pending_update_opens_no_window(void) {
                 once the download "looks slow" races the thing it protects
                 against, and a paint charged to the download budget is 3 s
                 the download does not get
+     extend:180 after the last chunk, before the commit: the commit tail
+                runs two full-image SHA-256 passes that the 310 s arming
+                never budgeted for (ota_timing.h's assertion covers the
+                ABORT tail only)
      finish     before restart: the commit is what switches the boot
-                partition, and it must be the last thing that can fail */
+                partition, and it must be the last thing that can fail
+     persist    between the radio coming down and the reboot: RTC memory
+                does not survive esp_restart, so this is the only thing
+                that saves the day's timer state */
 static void test_a_successful_update_paints_extends_downloads_commits_reboots(void) {
     check_at_rollover();
     ota_flow_apply(90, false);
-    TEST_ASSERT_EQUAL_STRING("get paint extend:310 net_on dl_begin step step finish net_off restart", g_log);
+    TEST_ASSERT_EQUAL_STRING(
+        "get extend:180 paint extend:310 net_on dl_begin step step extend:180 finish net_off persist restart", g_log);
     TEST_ASSERT_EQUAL_STRING(IMAGE_URL, m_image_url_seen);
 }
 
@@ -659,6 +712,192 @@ static void test_a_charge_lock_engaging_between_the_windows_cancels_the_download
     TEST_ASSERT_EQUAL_STRING("tls_cert", stored_result());
 }
 
+/* ---- the failsafe gate -------------------------------------------------- */
+
+/* The hole in "the unbounded join is bounded by the failsafe".
+ *
+ * ota_task_run_apply blocks on xSemaphoreTake(done, portMAX_DELAY) and
+ * names the awake failsafe as its only bound. But main.c's
+ * arm_awake_failsafe merely LOGS an esp_timer_create/start_once failure,
+ * and extend_awake_failsafe then null-guards on the NULL handle and
+ * silently does nothing. On such a boot every extension in this file is a
+ * no-op, dl_begin is unbounded in time by construction, and a wedged
+ * server holds the radio on until the battery is flat — the exact
+ * outcome the failsafe exists to make impossible.
+ *
+ * So the extension is asked for before anything else and its answer is
+ * believed. Nothing is painted, no window opens, and — the half that is
+ * easy to get wrong — no retry budget is spent, because a refusal to
+ * start is not a failed attempt. */
+static void test_no_awake_failsafe_to_arm_declines_the_download(void) {
+    check_at_rollover();
+    m_extend_ok = false;
+    g_log[0] = '\0';
+    ota_flow_apply(90, false);
+
+    /* The refusal is visible as the asked-for extension and nothing
+       after it: no paint, no radio, no download. */
+    TEST_ASSERT_EQUAL_STRING("extend:180", g_log);
+    TEST_ASSERT_EQUAL_STRING("", m_paint_to);
+}
+
+/* Which is why the gate sits AHEAD of charge_the_attempt and not behind
+   it. A device that cannot arm its failsafe would otherwise spend a
+   retry every wake without ever opening a socket, and would "give up" on
+   a perfectly good image after three of them. */
+static void test_a_declined_download_costs_no_retry_budget(void) {
+    check_at_rollover();
+    m_extend_ok = false;
+    ota_flow_apply(90, false);
+    TEST_ASSERT_EQUAL_UINT16(0, stored_fails());
+    TEST_ASSERT_EQUAL_STRING("", stored_target());
+}
+
+/* ---- the commit tail ---------------------------------------------------- */
+
+/* The commit path was never budgeted for, and it is the more expensive
+ * of the two.
+ *
+ * The failsafe is armed for max_sec + OTA_ABORT_TAIL_MS, and the
+ * _Static_assert in ota_timing.h justifies that tail entirely in ABORT
+ * terms: one worst-case dl_step, plus dl_abort, plus session_end. The
+ * commit does none of those. It runs esp_https_ota_finish ->
+ * esp_ota_end -> ota_verify_partition, a full ~1.5 MB SHA-256, then
+ * esp_ota_set_boot_partition -> image_validate, a SECOND full ~1.5 MB
+ * SHA-256, plus an ota_data erase and write, three NVS writes and a
+ * session_end.
+ *
+ * Losing that race is the worst outcome in the whole feature, and the
+ * only one in the system that yields GARBAGE rather than zeros: the
+ * failsafe fires after set_boot_partition succeeded but before restart,
+ * main.c deep-sleeps, and the next boot is a deep-sleep wake OF THE NEW
+ * IMAGE — the one reset for which the bootloader skips loading the RTC
+ * segments — so the new image reads the old image's .rtc.data at its own
+ * offsets.
+ *
+ * The download here is deliberately slow enough that the 310 s arming
+ * has almost nothing left by the time the last chunk lands, which is
+ * precisely the case a fast-download test would never notice. */
+static void test_the_commit_tail_is_given_a_budget_of_its_own(void) {
+    m_steps_to_done = 2;
+    m_step_advance_ms = 140000; /* 280 s of download inside a 300 s budget */
+    check_at_rollover();
+    ota_flow_apply(90, false);
+
+    TEST_ASSERT_TRUE_MESSAGE(m_finish_failsafe_at > 0, "the download never reached dl_finish");
+    /* EQUAL, not merely "enough": the re-arm is ABSOLUTE from the moment
+       of the call, so the commit tail must run with the full ordinary
+       awake budget rather than with whatever the download left behind
+       (25 s here) or with the download's own 300 s. */
+    TEST_ASSERT_EQUAL_INT64_MESSAGE((int64_t)CFG.awake_sec * 1000, m_finish_failsafe_at - m_finish_mono,
+                                    "the commit ran on the download's leftover failsafe");
+}
+
+/* And the flip side, stated so nobody "fixes" the shortening: on a FAST
+   download the same line takes the remaining budget DOWN — 300 s left
+   becomes 180 s — because it re-arms absolutely rather than extending.
+   That is deliberate. The commit tail is seconds against 180, and 180 s
+   is the bound every ordinary wake in this firmware already runs under. */
+static void test_the_commit_rearm_is_absolute_and_may_shorten_the_budget(void) {
+    m_steps_to_done = 2;
+    m_step_advance_ms = 10; /* a download that finishes almost instantly */
+    check_at_rollover();
+    ota_flow_apply(90, false);
+
+    TEST_ASSERT_EQUAL_INT64((int64_t)CFG.awake_sec * 1000, m_finish_failsafe_at - m_finish_mono);
+    /* Which is genuinely LESS than what the download arming had left. */
+    TEST_ASSERT_TRUE(m_finish_failsafe_at < m_budget_start + (int64_t)(CFG.max_sec * 1000 + OTA_ABORT_TAIL_MS));
+}
+
+/* The abort path must be untouched by all of the above: fail_attempt
+   re-arms for awake_sec itself, so a dl_finish that answers false lands
+   on exactly the budget it always had, and ota_timing.h's assertion
+   keeps saying what it always said. */
+static void test_a_failed_commit_still_lands_on_the_ordinary_awake_budget(void) {
+    m_finish_ok = false;
+    m_finish_facts.image_rejected = true;
+    check_at_rollover();
+    ota_flow_apply(90, false);
+    TEST_ASSERT_EQUAL_STRING("bad_image", stored_result());
+    TEST_ASSERT_EQUAL_INT64((int64_t)CFG.awake_sec * 1000, m_failsafe_at - m_mono);
+}
+
+/* ---- the pre-reboot snapshot -------------------------------------------- */
+
+/* MAJOR-2: the OTA reboot is the one sleep-less exit in the firmware.
+ *
+ * timer_persist_save() is called from exactly four places — enter_deep_sleep,
+ * the charge lock, a break start and the expiry alert. NOT on a day
+ * rollover, NOT on a button action, NOT on an HA grant; those all rely on
+ * enter_deep_sleep to flush eventually. This reboot never reaches it,
+ * because maybe_apply_update() sits ahead of the sleep in both wake
+ * tails, and RTC memory does not survive esp_restart on the S2 — only a
+ * deep-sleep wake preserves the RTC segments.
+ *
+ * The sharp case is the primary trigger: on a rollover wake the stale
+ * snapshot still carries YESTERDAY'S date, timer_restore_snapshot refuses
+ * it, g_rtc_state stays zeroed, timer_is_new_day() answers true on an
+ * empty last_date, and the new firmware runs the rollover a SECOND time —
+ * publishing yesterday's screen-time summary from all-zero slots and
+ * overwriting Home Assistant's record with zeros. */
+static void test_the_state_is_persisted_before_the_reboot(void) {
+    check_at_rollover();
+    ota_flow_apply(90, false);
+    TEST_ASSERT_EQUAL_INT(1, m_persists);
+    TEST_ASSERT_TRUE_MESSAGE(m_persisted_before_restart, "the device rebooted before the snapshot was written");
+}
+
+/* After the radio is down, not before: the flash write should not be
+   competing with a TX burst for the rail, and session_end is the last
+   thing that can block. The full-sequence test pins the whole order;
+   this one names the pair so a reordering says which pair broke. */
+static void test_the_snapshot_is_written_after_the_radio_comes_down(void) {
+    check_at_rollover();
+    ota_flow_apply(90, false);
+    const char *tail = "net_off persist restart";
+    TEST_ASSERT_EQUAL_STRING(tail, g_log + strlen(g_log) - strlen(tail));
+}
+
+/* A failed attempt does NOT persist, and that is not an oversight: it
+   returns to wake_flow, which sleeps through enter_deep_sleep() as
+   usual, and that is where the save belongs. Persisting here as well
+   would write the same blob twice per wake for nothing — flash wear on a
+   path that already has an owner. */
+static void test_a_failed_attempt_leaves_the_snapshot_to_the_ordinary_sleep(void) {
+    m_step_fails = true;
+    m_step_facts.transport_failed = true;
+    check_at_rollover();
+    ota_flow_apply(90, false);
+    TEST_ASSERT_EQUAL_INT(0, m_persists);
+}
+
+/* ---- outcomes the flow never saw ---------------------------------------- */
+
+/* MINOR-2: ota_task_run_apply can fail to spawn — a 16 KB stack is the
+   largest single allocation this firmware makes — and ota_flow_apply
+   then never runs at all. Before this, s_pending had been true (so an
+   update was found AND announced by the check) and then nothing was ever
+   reported, on that wake or any wake after it.
+
+   Reported as low_heap rather than as a code of its own: what failed IS
+   a heap condition, it presents to the operator exactly as the download
+   gate's own low_heap does, and it already has a row in the plan's
+   failure table. */
+static void test_a_spawn_failure_is_reported_to_home_assistant(void) {
+    ota_flow_note_spawn_failed();
+    TEST_ASSERT_EQUAL_STRING("low_heap", stored_result());
+}
+
+/* And it is a REPORT, not an attempt. ota_task.c's reasoning for leaving
+   the budget alone is right and stays: giving up on a good image because
+   the heap was tight one evening is the wrong failure. */
+static void test_a_spawn_failure_costs_no_retry_budget(void) {
+    check_at_rollover();
+    ota_flow_note_spawn_failed();
+    TEST_ASSERT_EQUAL_UINT16(0, stored_fails());
+    TEST_ASSERT_EQUAL_STRING("", stored_target());
+}
+
 /* ---- failure paths ------------------------------------------------------ */
 
 /* The guarantee the four-call download API exists to make observable: a
@@ -670,7 +909,8 @@ static void test_the_deadline_aborts_cleanly_and_never_commits(void) {
     m_step_advance_ms = 200000; /* 200 s a chunk against a 300 s budget */
     check_at_rollover();
     ota_flow_apply(90, false);
-    TEST_ASSERT_EQUAL_STRING("get paint extend:310 net_on dl_begin step step abort net_off extend:180 repaint", g_log);
+    TEST_ASSERT_EQUAL_STRING(
+        "get extend:180 paint extend:310 net_on dl_begin step step abort net_off extend:180 repaint", g_log);
     TEST_ASSERT_EQUAL_STRING("timeout", stored_result());
     TEST_ASSERT_EQUAL_STRING(TARGET, stored_target());
     TEST_ASSERT_EQUAL_UINT16(1, stored_fails());
@@ -792,7 +1032,8 @@ static void test_a_transport_failure_repaints_and_does_not_reboot(void) {
     m_step_facts.transport_failed = true;
     check_at_rollover();
     ota_flow_apply(90, false);
-    TEST_ASSERT_EQUAL_STRING("get paint extend:310 net_on dl_begin step abort net_off extend:180 repaint", g_log);
+    TEST_ASSERT_EQUAL_STRING("get extend:180 paint extend:310 net_on dl_begin step abort net_off extend:180 repaint",
+                             g_log);
     TEST_ASSERT_EQUAL_STRING("net", stored_result());
 }
 
@@ -809,7 +1050,7 @@ static void test_a_rejected_certificate_is_reported_as_tls_cert(void) {
     m_begin_facts.tls_cert_flags = 0x08;
     check_at_rollover();
     ota_flow_apply(90, false);
-    TEST_ASSERT_EQUAL_STRING("get paint extend:310 net_on dl_begin net_off extend:180 repaint", g_log);
+    TEST_ASSERT_EQUAL_STRING("get extend:180 paint extend:310 net_on dl_begin net_off extend:180 repaint", g_log);
     TEST_ASSERT_EQUAL_STRING("tls_cert", stored_result());
 }
 
@@ -818,7 +1059,9 @@ static void test_a_failed_commit_is_recorded_and_does_not_reboot(void) {
     m_finish_facts.image_rejected = true;
     check_at_rollover();
     ota_flow_apply(90, false);
-    TEST_ASSERT_EQUAL_STRING("get paint extend:310 net_on dl_begin step step finish net_off extend:180 repaint", g_log);
+    TEST_ASSERT_EQUAL_STRING(
+        "get extend:180 paint extend:310 net_on dl_begin step step extend:180 finish net_off extend:180 repaint",
+        g_log);
     TEST_ASSERT_EQUAL_STRING("bad_image", stored_result());
 }
 
@@ -828,7 +1071,7 @@ static void test_a_failed_association_repaints_without_tearing_down(void) {
     m_session_ok = false;
     check_at_rollover();
     ota_flow_apply(90, false);
-    TEST_ASSERT_EQUAL_STRING("get paint extend:310 net_on extend:180 repaint", g_log);
+    TEST_ASSERT_EQUAL_STRING("get extend:180 paint extend:310 net_on extend:180 repaint", g_log);
     TEST_ASSERT_EQUAL_STRING("net", stored_result());
 }
 
@@ -1051,6 +1294,20 @@ int main(void) {
 
     RUN_TEST(test_low_heap_at_the_download_skips_without_painting);
     RUN_TEST(test_a_charge_lock_engaging_between_the_windows_cancels_the_download);
+
+    RUN_TEST(test_no_awake_failsafe_to_arm_declines_the_download);
+    RUN_TEST(test_a_declined_download_costs_no_retry_budget);
+
+    RUN_TEST(test_the_commit_tail_is_given_a_budget_of_its_own);
+    RUN_TEST(test_the_commit_rearm_is_absolute_and_may_shorten_the_budget);
+    RUN_TEST(test_a_failed_commit_still_lands_on_the_ordinary_awake_budget);
+
+    RUN_TEST(test_the_state_is_persisted_before_the_reboot);
+    RUN_TEST(test_the_snapshot_is_written_after_the_radio_comes_down);
+    RUN_TEST(test_a_failed_attempt_leaves_the_snapshot_to_the_ordinary_sleep);
+
+    RUN_TEST(test_a_spawn_failure_is_reported_to_home_assistant);
+    RUN_TEST(test_a_spawn_failure_costs_no_retry_budget);
 
     RUN_TEST(test_the_deadline_aborts_cleanly_and_never_commits);
     RUN_TEST(test_the_deadline_fires_while_the_failsafe_still_has_room);

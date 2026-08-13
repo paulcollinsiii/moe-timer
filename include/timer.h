@@ -90,7 +90,44 @@ typedef struct {
     int32_t bonus_applied;     /* total HA "bonus today" reconciled (idempotent target tracking) */
 } timer_slot_state_t;
 
+/* Self-validation for rtc_state_t, and the one path it exists for.
+ *
+ * RTC memory normally comes back one of two ways, and BOTH are already
+ * safe. A deep-sleep wake preserves the .rtc.data segment intact. Every
+ * other reset — panic, EN, esp_restart — RELOADS that segment from the
+ * image, so the struct comes back zeroed, `last_date` is empty, and
+ * timer_persist_try_restore() takes over from NVS. Neither needs a magic.
+ *
+ * The path that does is the OTA commit's worst case, and it is the only
+ * one in the firmware that can hand this struct GARBAGE rather than
+ * zeros. If the awake failsafe fires between esp_ota_set_boot_partition()
+ * and esp_restart(), the device deep-sleeps and the NEXT boot is a
+ * deep-sleep wake OF THE NEW IMAGE — and deep-sleep wake is precisely the
+ * reset for which the bootloader SKIPS loading the RTC segments
+ * (esp_image_format.c: load_rtc_memory is false only for
+ * RESET_REASON_CORE_DEEP_SLEEP). The new image then reads the old
+ * image's .rtc.data bytes at its own offsets: a plausible-looking
+ * `last_date`, a running slot with a nonsense expiry, whatever the layout
+ * drift produces.
+ *
+ * ota_flow.c closes that race by re-arming the failsafe before the
+ * commit. This is the belt to that braces: cheap (8 bytes of the 3 KB
+ * free in RTC slow), and the only validation this struct has at all —
+ * the NVS snapshot has a version, a checksum AND range checks, and this
+ * had nothing.
+ *
+ * BUMP THE VERSION on any layout change to rtc_state_t, for the same
+ * reason TIMER_SNAPSHOT_VERSION is bumped: two builds that agree on the
+ * magic but disagree on the offsets behind it are exactly the case the
+ * magic alone cannot catch. */
+#define RTC_STATE_MAGIC 0x4D414754u /* "MAGT", legible in a memory dump */
+#define RTC_STATE_VERSION 1
+
 typedef struct {
+    /* First two fields, deliberately: a struct whose head is its own
+       identity is the one that survives being read by the wrong build. */
+    uint32_t magic;
+    uint16_t version;
     timer_slot_state_t slots[TIMER_SLOT_COUNT];
     uint8_t active_slot; /* 0 = Screen */
     /* Slot that was selected when the current break started. The selection
@@ -113,6 +150,21 @@ typedef struct {
 } rtc_state_t;
 
 extern rtc_state_t g_rtc_state;
+
+/* Validate g_rtc_state's magic and version, zeroing and re-stamping the
+   struct when either is wrong. Answers whether it had to.
+
+   Call once per boot, before anything reads the timer state and in
+   particular before timer_persist_try_restore() — zeroing is what makes
+   `last_date` empty, which is that function's entire cue to fall back to
+   the NVS snapshot. So a wiped or foreign RTC image degrades to the
+   already-tested "restore from NVS" path rather than to a garbage day.
+
+   Answering TRUE is NOT an anomaly by itself: it is the normal answer on
+   a cold boot and on every esp_restart, where the segment is reloaded
+   from the image as zeros. It is only interesting on a deep-sleep wake,
+   which is the case described above rtc_state_t. */
+bool timer_rtc_state_guard(void);
 
 /* Persisted-to-NVS snapshot of the timer for crash/reset recovery: a panic
    or external reset wipes RTC memory, which would otherwise refund the
