@@ -1468,6 +1468,38 @@ deserve their own commit and their own review:
     symbol**: it is currently 22,640 of 28,672 B (79 %, 6,032 B free), rollback
     support grows it, and the 2nd-stage bootloader at `0x1000`-`0x8000` is as
     un-updatable as the partition table.
+    **Measured -- it fits, with room to spare.** Two isolated builds off
+    throwaway copies of the real `sdkconfig` (`idf.py -B <dir> -D SDKCONFIG=<copy>`,
+    same source tree, same everything else, so the delta is the symbol and
+    nothing but the symbol):
+
+    | | bootloader | of 28,672 B | free | app | of 0x1c0000 |
+    |---|---|---|---|---|---|
+    | rollback **off** | `0x5870` = 22,640 B | 78.96 % | 6,032 B | `0x16c5b0` = 1,492,400 B | 81.33 % |
+    | rollback **on** | `0x58c0` = 22,720 B | 79.24 % | 5,952 B | `0x16c7a0` = 1,492,896 B | 81.36 % |
+    | delta | **+80 B** | +0.28 pp | -80 B | **+496 B** | +0.03 pp |
+
+    80 bytes of the 6,032 free. The blocking risk this entry was written to
+    guard against does not materialise. The +496 B in the app is the
+    IDF-side rollback bookkeeping that the symbol switches on
+    (`esp_ota_ops` / `bootloader_common` rollback paths); it is *not* our
+    call site, which was still absent from both of those builds.
+
+    **A measurement trap worth recording**, because it silently produces the
+    wrong answer: `sdkconfig` is gitignored and **overrides** `sdkconfig.defaults`,
+    so adding the symbol to `sdkconfig.defaults` and rebuilding in a tree that
+    already has an `sdkconfig` leaves the symbol at `n` -- the bootloader does
+    not change size and the measurement reads "free". The numbers above were
+    taken by editing a *copy* of `sdkconfig` instead, which is also the only
+    way to take them without regenerating the real one (see task 2's
+    `sdkconfig.defaults` note: the hand-set MQTT credentials, timer names and
+    `CONFIG_MAGTAG_PARENT_TESTING=n` exist nowhere else).
+
+    Enabling `BOOTLOADER_APP_ROLLBACK_ENABLE` also makes
+    `CONFIG_BOOTLOADER_APP_ANTI_ROLLBACK` *visible* in menuconfig; it stays
+    `n`, and it stays out of scope. Rollback-on-failure is a reliability
+    feature; anti-rollback is a downgrade-prevention *security* feature that
+    burns efuses and is irreversible.
     The **first paint after a successful OTA reboot** needs **no code here** --
     it is already full. The premise this entry used to carry (`s_partial_count`
     is `RTC_DATA_ATTR` and "survives `esp_restart()`") is false: only a
