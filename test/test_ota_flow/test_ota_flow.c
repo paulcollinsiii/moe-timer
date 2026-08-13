@@ -268,6 +268,18 @@ static uint32_t mock_free_heap(void) {
     return m_heap;
 }
 
+/* The rollback confirmation (esp_ota_mark_app_valid_cancel_rollback on
+   the device, via ota.c's ota_mark_valid_if_pending). Counted rather than
+   logged: the cases below are about whether it happened at all, and it
+   never shares a sequence with the download effects — it runs on the
+   NEXT boot, the one that came up on what the download wrote. */
+static int m_marks_valid;
+
+static void mock_mark_valid(void) {
+    note("mark_valid");
+    m_marks_valid++;
+}
+
 // clang-format off
 #include "../../main/ota_flow.c"
 // clang-format on
@@ -287,6 +299,7 @@ static const ota_flow_ops_t OPS = {
     .restart = mock_restart,
     .free_heap = mock_free_heap,
     .mono_ms = mock_mono_ms,
+    .mark_valid = mock_mark_valid,
 };
 
 /* Mirrors the Kconfig defaults, but nothing keeps them in step and
@@ -331,6 +344,7 @@ void setUp(void) {
     m_persists = 0;
     m_persisted_before_restart = false;
     m_kill_in_dl_begin = false;
+    m_marks_valid = 0;
     s_dev_id = "magtag-a1b2c3";
     ota_flow_init(&OPS, &CFG);
     TEST_ASSERT_EQUAL(ESP_OK, nvs_config_set_ota_url(MANIFEST_URL));
@@ -1261,6 +1275,64 @@ static void test_a_failure_survives_into_the_next_window(void) {
     TEST_ASSERT_EQUAL_UINT16(1, stored_fails());
 }
 
+/* ---- rollback: certifying the image this boot came up on ----------------
+
+   These are about the NEXT boot, not this one: enter_deep_sleep() calls
+   ota_flow_confirm_image() on the wake that came up on a freshly written
+   image, and whether that call reaches the device is the whole question
+   — with CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y a wake that ends
+   without it reverts the update.
+
+   Note what is NOT tested here: whether the image is actually pending
+   verify. That test is inside ota.c's ota_mark_valid_if_pending (a bare
+   esp_ota_get_state_partition read, no branch of ours), and the mock
+   below stands in for the whole of it. What is ours is which wakes get
+   to call it at all. */
+
+static void test_an_ordinary_sleep_certifies_the_running_image(void) {
+    ota_flow_confirm_image();
+    TEST_ASSERT_EQUAL_INT(1, m_marks_valid);
+}
+
+/* The substantive decision. The awake failsafe fires when a wake is
+   already wedged; certifying there would cancel the rollback on the one
+   piece of evidence anyone has that the new image is bad. */
+static void test_the_awake_failsafe_path_does_not_certify_the_image(void) {
+    ota_flow_note_failsafe_sleep();
+    ota_flow_confirm_image();
+    TEST_ASSERT_EQUAL_INT(0, m_marks_valid);
+}
+
+/* Every other way into enter_deep_sleep() — the lock gates, the early-out
+   sleeps, the ordinary tails — is an ordinary sleep and must certify. A
+   check-based implementation ("was I on the main task?") could get this
+   wrong; an announced fact cannot, so the property worth pinning is that
+   nothing but the announcement suppresses the call. Downloading in the
+   same wake does not suppress it either. */
+static void test_a_wake_that_ran_a_download_still_certifies_at_sleep(void) {
+    m_step_fails = true;
+    m_step_facts.transport_failed = true;
+    check_at_rollover();
+    ota_flow_apply(90, false);
+    ota_flow_confirm_image();
+    TEST_ASSERT_EQUAL_INT(1, m_marks_valid);
+}
+
+/* The flag is per-boot, and init is what clears it. Without this, a
+   failsafe on one wake would poison the confirmation on every wake after
+   it — which on a device that deep-sleeps is not reachable, but on the
+   host (and after any future esp_restart path) it is exactly the kind of
+   sticky static that outlives its wake. */
+static void test_the_failsafe_flag_does_not_outlive_its_boot(void) {
+    ota_flow_note_failsafe_sleep();
+    ota_flow_confirm_image();
+    TEST_ASSERT_EQUAL_INT(0, m_marks_valid);
+
+    ota_flow_init(&OPS, &CFG); /* the next boot */
+    ota_flow_confirm_image();
+    TEST_ASSERT_EQUAL_INT(1, m_marks_valid);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_rollover_always_checks);
@@ -1331,5 +1403,10 @@ int main(void) {
     RUN_TEST(test_a_gate_that_declines_costs_no_budget);
     RUN_TEST(test_a_successful_update_leaves_no_charge_behind);
     RUN_TEST(test_an_elevated_counter_against_the_running_version_is_never_consulted);
+
+    RUN_TEST(test_an_ordinary_sleep_certifies_the_running_image);
+    RUN_TEST(test_the_awake_failsafe_path_does_not_certify_the_image);
+    RUN_TEST(test_a_wake_that_ran_a_download_still_certifies_at_sleep);
+    RUN_TEST(test_the_failsafe_flag_does_not_outlive_its_boot);
     return UNITY_END();
 }

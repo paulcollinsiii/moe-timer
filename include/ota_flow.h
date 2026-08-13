@@ -139,6 +139,14 @@ typedef struct {
     void (*restart)(void); /* esp_restart */
     uint32_t (*free_heap)(void);
     int64_t (*mono_ms)(void); /* monotonic; only differences are read */
+
+    /* Certify the running image (ota.c's ota_mark_valid_if_pending, which
+       cancels the pending-verify rollback). Not part of the download
+       sequence above — it runs on the NEXT boot, the one that came up on
+       what the sequence wrote — and injected here for the same reason
+       everything else is: ota_flow_confirm_image() below decides whether
+       to call it, and that decision needs a host test. */
+    void (*mark_valid)(void);
 } ota_flow_ops_t;
 
 /* The numbers the sequence is measured against. Passed in rather than
@@ -239,6 +247,85 @@ void ota_flow_note_spawn_failed(void);
    publishes it so a link trending toward the deadline is visible before
    it becomes chronic. */
 uint32_t ota_flow_last_dl_ms(void);
+
+/* ---- rollback: certifying the image this boot came up on ----------------
+
+   With CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y (sdkconfig.defaults),
+   ota_flow_apply's commit leaves the new slot in PENDING_VERIFY. On the
+   NEXT boot the bootloader looks at that state: if the app has not called
+   esp_ota_mark_app_valid_cancel_rollback() by the time it reboots, the
+   image is marked ABORTED and the OTHER slot — the old firmware — boots
+   instead.
+
+   CONFIG_BOOTLOADER_SKIP_VALIDATE_IN_DEEP_SLEEP is OFF, so a deep-sleep
+   wake re-runs the 2nd-stage bootloader like any other reset. That makes
+   a deep-sleep wake a rollback opportunity, which in turn means the
+   device gets EXACTLY ONE WAKE to certify a new image. Any path to sleep
+   that skips the call silently undoes a successful update.
+
+   That is why the call site is enter_deep_sleep() (main.c) — the single
+   funnel every sleep passes through — and not the two wake-handler tails
+   where ota_flow_apply lives. The two placements answer to opposite
+   pressures and both are right: the tails deliberately let the early-out
+   sleeps (a break starting mid-wake, a still-held button) skip the
+   APPLY, because skipping merely defers an update to the next check;
+   letting those same paths skip the CONFIRM would revert one. */
+
+/* Record that this sleep is the awake failsafe's, not an ordinary one.
+   Called by main.c's awake_failsafe_cb before it enters the funnel.
+
+   Its only effect is on ota_flow_confirm_image() below. Kept as a fact
+   the failsafe ANNOUNCES rather than something the funnel infers: a
+   runtime "am I on the esp_timer task?" test would be a check, not a
+   guarantee (the same reasoning maybe_apply_update() in wake_flow.c uses
+   to stay off this funnel entirely). */
+void ota_flow_note_failsafe_sleep(void);
+
+/* Main task, early in enter_deep_sleep(): this wake worked, so cancel the
+   pending-verify rollback and keep the image. A no-op on every boot that
+   is not PENDING_VERIFY, which is all of them until an OTA has actually
+   run.
+
+   DECLINES on the awake-failsafe path, and this is the substantive
+   decision in the rollback wiring, so the argument is here rather than
+   in a commit message.
+
+   The failsafe fires when a wake has burned CONFIG_MAGTAG_MAX_AWAKE_SEC
+   (180 s) without reaching sleep — i.e. when something is already
+   wedged. If that happens on the first wake of a new image, then the
+   only evidence anyone has about that image is that its first wake had
+   to be killed. Certifying it there would cancel the rollback in exactly
+   the scenario the rollback was built for, and would delete the single
+   strongest signal available that the update is bad. So the failsafe
+   path certifies nothing, the next boot reverts, and the device comes up
+   on firmware that is known to work.
+
+   THE COST, stated plainly because it is real: a one-off wedge that had
+   nothing to do with the new firmware — a hung WiFi driver, an AP that
+   went away mid-window — throws away a perfectly good update. The device
+   reverts, re-finds the same version at the next check and downloads
+   ~1.5 MB again. That is a battery cost on a wrong guess, and it is the
+   direction to be wrong in: it fails back to known-good firmware, which
+   is recoverable over the air, rather than certifying an image that may
+   need a USB cable and a board with no UART bridge chip to recover.
+
+   WHAT THE USER SEES when it happens: the panel comes back showing the
+   OLD version (the `fw` stat and the status screen both read the app
+   descriptor, so they agree), an "Awake failsafe: still awake after
+   180 s" line in the log, and no "first wake on the new image completed"
+   line. The update then reappears on a later check.
+
+   One more property falls out of declining, rather than being designed
+   in: the failsafe can fire while ota_task is still mid-attempt (see
+   hal_nvs.c, which records the same overlap), and esp_https_ota_finish
+   writes ota_data. Declining here means the funnel never issues a
+   competing ota_data write from the esp_timer task while that is in
+   flight.
+
+   Null-safe before ota_flow_init: main.c arms the failsafe as the second
+   call in app_main, well before ota_flow_init, so the one boot where
+   init never happens must not fault on a NULL op pointer. */
+void ota_flow_confirm_image(void);
 
 #ifdef __cplusplus
 }

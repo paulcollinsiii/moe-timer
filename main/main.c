@@ -109,6 +109,15 @@ void enter_deep_sleep(wake_sleep_mode_t mode) {
        context. */
     net_window_join(15000, NULL);
     net_window_log_last(); /* timing repeat: the boot-time line is often lost to CDC */
+    /* Rollback: this wake reached sleep, so keep the image it came up on.
+       Early in the funnel on purpose — every step below it can block (the
+       3 s release wait, neopixel_stop_sync's 500 ms ack, the break-end
+       repaint) and this wake is the image's only chance to be certified.
+       It does not need to be above hal_nvs_close() at the bottom, though
+       it also is: the mark writes the ota_data partition through the
+       esp_ota APIs, not through hal_nvs. Whether it certifies or declines
+       is ota_flow's, host-tested; the funnel decides nothing. */
+    ota_flow_confirm_image();
     timer_persist_save();
     /* EXT1 ANY_LOW is level-triggered: a still-held button would re-wake
        instantly and re-fire its action. Wait (bounded) for release before
@@ -240,6 +249,13 @@ static const net_apply_ops_t NET_APPLY_OPS = {
 static void awake_failsafe_cb(void *arg) {
     (void)arg;
     ESP_LOGE(TAG, "Awake failsafe: still awake after %d s - forcing deep sleep", CONFIG_MAGTAG_MAX_AWAKE_SEC);
+    /* Announce the path before entering the funnel: this sleep must not
+       certify a pending image. A wake that had to be killed is the worst
+       possible evidence for the firmware running it, and the funnel's
+       ota_flow_confirm_image() has no other way to tell this caller from
+       the healthy ones. One line, no branch — ota_flow.h owns the
+       argument and ota_flow.c the decision. */
+    ota_flow_note_failsafe_sleep();
     enter_deep_sleep(lock_gate_sleep_mode());
 }
 
@@ -306,7 +322,16 @@ static void alerts_extend_awake_cb(int seconds) {
    deliberately kept off enter_deep_sleep() — awake_failsafe_cb reaches
    that funnel from the esp_timer task, and a wedged wake is the last one
    that should start a 1.5 MB download. The reasoning is written out at
-   maybe_apply_update() in wake_flow.c. */
+   maybe_apply_update() in wake_flow.c.
+
+   The rollback confirmation goes the OTHER way, and the contrast is the
+   point rather than an inconsistency. ota_flow_confirm_image() IS on
+   enter_deep_sleep(), because skipping the apply defers an update by a
+   day while skipping the confirmation REVERTS one — so it has to sit on
+   the funnel every sleep passes through, early-outs included. The
+   failsafe still must not certify anything, which is why
+   awake_failsafe_cb announces itself first; ota_flow.h argues that
+   choice out in full. */
 
 /* Residency 4. wifi_session_begin answers esp_err_t; ota_flow_ops_t wants
    a bool, because the host suite has no esp_err_t. One line, no branch. */
@@ -346,6 +371,12 @@ static const ota_flow_ops_t OTA_FLOW_OPS = {
     .restart = esp_restart,
     .free_heap = esp_get_free_heap_size,
     .mono_ms = ota_mono_ms,
+    /* Cancels the pending-verify rollback. In ota.c rather than here
+       because esp_ota_mark_app_valid_cancel_rollback() is a bare call
+       with no handle, which the residency rule keeps out of this file;
+       reached through the ops table so the "should this wake certify?"
+       decision stays in host-tested ota_flow.c. */
+    .mark_valid = ota_mark_valid_if_pending,
 };
 
 /* Residency 1, whole-function: this is the boot sequence, and the order

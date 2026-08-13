@@ -68,6 +68,12 @@ static int64_t s_dl_started_ms;
 static bool s_dl_running;
 static uint32_t s_dl_ms;
 
+/* Set by the awake failsafe on its way into enter_deep_sleep(); read only
+   by ota_flow_confirm_image(). Both run on whichever task is ending the
+   wake, and the failsafe is the only writer, so no barrier is needed —
+   the write strictly precedes the read on the one path that sets it. */
+static bool s_failsafe_sleep;
+
 /* ---- shared helpers ----------------------------------------------------- */
 
 /* ota_result is the ONLY channel a download failure has. The second
@@ -125,6 +131,7 @@ void ota_flow_init(const ota_flow_ops_t *ops, const ota_flow_cfg_t *cfg) {
     s_dl_started_ms = 0;
     s_dl_running = false;
     s_dl_ms = 0;
+    s_failsafe_sleep = false;
 }
 
 void ota_flow_arm(ota_trigger_t trigger, int batt_pct, bool charge_locked) {
@@ -267,6 +274,30 @@ bool ota_flow_pending(void) {
 
 uint32_t ota_flow_last_dl_ms(void) {
     return s_dl_ms;
+}
+
+/* ---- rollback: certifying the image this boot came up on ----------------
+   ota_flow.h carries the argument for declining on the failsafe path,
+   including what it costs and what the user sees. This is only the
+   mechanism. */
+
+void ota_flow_note_failsafe_sleep(void) {
+    s_failsafe_sleep = true;
+}
+
+void ota_flow_confirm_image(void) {
+    if (s_ops.mark_valid == NULL) {
+        /* Before ota_flow_init: the failsafe is armed as app_main's
+           second call, so a boot that wedges ahead of init reaches the
+           funnel with an empty ops table. Nothing to certify anyway —
+           that boot would decline below in any case. */
+        return;
+    }
+    if (s_failsafe_sleep) {
+        ESP_LOGW(TAG, "awake failsafe ended this wake: leaving the image unverified, the next boot decides");
+        return;
+    }
+    s_ops.mark_valid();
 }
 
 /* ---- the apply (main task, window 2) ------------------------------------ */
