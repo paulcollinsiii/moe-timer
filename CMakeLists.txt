@@ -13,12 +13,16 @@ project(magtag_timer)
 # the decision that mattered: at 5 % free there is nothing left to give back.
 #
 # This FAILS the build rather than warning, deliberately, and the plan text
-# at docs/planning/ota.plan.md:152 says "warn". A printed warning has one
+# at docs/planning/ota.plan.md:157 says "warn". A printed warning has one
 # reader -- whoever happens to be watching that build -- and this repo has no
 # CI to catch what they miss. A threshold you must raise in a commit, with a
-# reason, converts silent erosion into a reviewed decision. 85 % leaves
-# 63 KB: one more Montserrat font (~20-40 KB) fits, two do not, which is the
-# conversation this is meant to force.
+# reason, converts silent erosion into a reviewed decision. 85 % reserves the
+# top 15 % of the slot -- 269 KB -- and the guard fires when the image crosses
+# into it. How much room that actually leaves is a property of the image, not
+# of the threshold, so it moves with every build: when this landed it was
+# ~63 KB, which is the granularity that makes the guard bite (one more
+# Montserrat font at ~20-40 KB fitted, two did not). The pass line printed on
+# every build carries the live figure; this comment cannot.
 #
 # MAGTAG_MAX_SLOT_PCT is the documented override. Raising it is a legitimate
 # act -- it accepts a new floor -- and it belongs in its own commit whose
@@ -42,6 +46,30 @@ project(magtag_timer)
 # repeated here either -- check_slot_size.py reads it out of the generated
 # partition-table binary, so partitions.csv stays the only place it is
 # stated.
+#
+# The threshold is a plain (non-CACHE) variable on purpose, so that a
+# -D MAGTAG_MAX_SLOT_PCT=99 on the command line cannot move it: the whole
+# point is that raising it costs a commit. But a shadowed cache entry is
+# discarded in *silence* -- the flag lands in CMakeCache.txt, the build still
+# runs with 85, and the guard fails again with no hint that the flag did
+# nothing. That is the trap this catches, because "raise
+# MAGTAG_MAX_SLOT_PCT" is exactly what the failure message says and -D is
+# the obvious first attempt. Refuse loudly instead; the policy is unchanged.
+if(DEFINED CACHE{MAGTAG_MAX_SLOT_PCT})
+    message(FATAL_ERROR
+        "MAGTAG_MAX_SLOT_PCT cannot be set with -D (got "
+        "'$CACHE{MAGTAG_MAX_SLOT_PCT}'). The build-size guard's threshold is "
+        "deliberately not a cache variable: the line below shadows any cache "
+        "entry, so the flag would be ignored without warning and the build "
+        "would fail at the same threshold as before.\n"
+        "Raising the guard is meant to cost a commit. Edit "
+        "set(MAGTAG_MAX_SLOT_PCT ...) in CMakeLists.txt (project root) as its "
+        "own commit, saying in the message what the bytes bought.\n"
+        "Nothing to clean up under idf.py: it deletes CMakeCache.txt "
+        "whenever a configure fails, so just re-run without the flag. "
+        "Driving cmake directly, the entry does persist -- clear it with "
+        "cmake -U MAGTAG_MAX_SLOT_PCT -B <build dir>.")
+endif()
 set(MAGTAG_MAX_SLOT_PCT 85)
 
 idf_build_get_property(magtag_python PYTHON)

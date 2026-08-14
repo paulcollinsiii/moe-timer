@@ -1992,20 +1992,77 @@ deserve their own commit and their own review:
     7.000000000000001, so the float form fails a build sitting exactly on its
     own threshold. The slot size is read from the generated partition-table
     binary rather than restated, so `partitions.csv` stays the only place it
-    is written down. `test/test_check_slot_size/` (29 cases) drives both
+    is written down. `test/test_check_slot_size/` (35 cases) drives both
     sides of the boundary with synthetic sizes — the failure branch is
     otherwise unreachable without growing the image by tens of KB.
 
+    There are two failure branches, not one. Over the policy while still
+    fitting the slot, the message says to raise `MAGTAG_MAX_SLOT_PCT`; over
+    the *slot*, it must not, because the tool caps `--max-pct` at 100 and
+    100 % is the slot — that advice would send the reader to a flag the
+    guard itself rejects. The second branch says the bytes have to be given
+    back and names both overages. `fits()` draws the line, at the slot
+    rather than at a rounded percentage.
+
     **Measured at landing:** app image **1,495,552 B**, **81.5 %** of the
     1,835,008 B slot, **64,204 B** left under the guard (IDF's own check
-    still reads 18 % free). That is **+320 B** over task 14's recorded
-    1,495,232 B, and all of it is task 13's
-    `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE`: no source changed, and this is
-    the first build after `sdkconfig.defaults` gained the symbol. Task 13
-    measured that flag at +384 B against its own baseline; the difference is
-    which code it is compiled against, not a discrepancy. The bootloader
-    confirms it independently at 0x58c0 = 22,720 B, exactly the rollback-**on**
-    figure in the table above.
+    still reads 18 % free). That is **+320 B** over the task-14 *cycle's*
+    final figure — the 1,495,232 B recorded by its fix commit `4ac0701`;
+    against the 1,494,928 B recorded by its feature commit `1653479` the
+    same image is **+624 B**. Name the commit whenever quoting a task's
+    size: a cycle that landed a fix has two recorded figures and they are
+    300-odd bytes apart. All of the +320 B is task 13's
+    `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE`; no source changed between the
+    two. Task 13 measured that flag at +384 B against its own baseline; the
+    difference is which code it is compiled against, not a discrepancy. The
+    bootloader confirms it independently at 0x58c0 = 22,720 B, exactly the
+    rollback-**on** figure in the table above.
+
+    **Why the flag only shows up here, and the trap in it.** *Not* because
+    this was the first build after `sdkconfig.defaults` gained the symbol.
+    It was not, and that explanation — which this paragraph originally
+    carried — is false. `2d3a44c` added
+    `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y` to `sdkconfig.defaults` on
+    13 Aug 14:02 (the file was touched again by `fcbf5d8` at 18:57), and
+    firmware builds ran after that commit *without* the symbol. The repo's
+    own `build/` still holds the proof:
+
+    - `build/config/sdkconfig.h` was generated **13 Aug 01:53**, *before*
+      the defaults commit, and contains no rollback symbol at all
+      (`build/config/sdkconfig.json` carries it explicitly as `false`);
+    - `build/magtag_timer.bin` was relinked **14 Aug 00:40** — ten hours
+      *after* that commit — against exactly that header;
+    - `build/bootloader/bootloader.bin` is 22,640 B, the rollback-**off**
+      row of the table above, not the 22,720 B rollback-**on** row.
+
+    The live `sdkconfig` still reads
+    `# CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE is not set` (line 583).
+
+    The actual mechanism: **a `sdkconfig.defaults` change is not picked up
+    by an incremental build in an already-configured build directory.** It
+    lands only when a configure step re-runs the kconfig merge — a fresh
+    build directory, or an explicit `reconfigure`. Task 15's figures came
+    from a fresh build directory, which is the entire reason the symbol is
+    in them and the +320 B appeared when it did.
+
+    **`build/config/sdkconfig.h` is the only ground truth for what was
+    actually compiled** — not `sdkconfig`, not `sdkconfig.defaults`. Those
+    two are *inputs* to a merge that may not have run since either of them
+    last changed; only the generated header (and its sibling
+    `sdkconfig.json`, which records `n` symbols explicitly rather than
+    omitting them) records the merge's result. Reading `sdkconfig` to answer
+    "is rollback protection active in the image we shipped?" produced a
+    wrong answer once, and it was this size delta that exposed it.
+
+    This is a *separate* trap from the precedence one recorded under task 13
+    above, and neither subsumes the other. That one says which of
+    `sdkconfig` and `sdkconfig.defaults` wins is **symbol-dependent and must
+    be measured per symbol, never assumed** — there is no general rule, and
+    the table there shows the same defaults file losing to `sdkconfig` for
+    one symbol and beating it for another. This one says that before
+    precedence can decide anything, the merge has to have run: a build
+    directory configured last week is answering from last week's inputs, and
+    nothing in `sdkconfig` or `sdkconfig.defaults` tells you which it is.
 16. Hardware smoke test (below).
 17. Update `docs/architecture.md`: module table, layer lists, a subsystem note
     for the two-window design and the timeout/retry mechanism, and the new

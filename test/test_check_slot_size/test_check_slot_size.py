@@ -45,6 +45,13 @@ def _entry(ptype, subtype, offset, size, name):
     )
 
 
+# Partition type bytes. Only TYPE_APP is a constant of the guard -- it is
+# the only type the parse asks about -- so the others are stated here, the
+# same way the 0x40 of the `assets` partition below already is.
+TYPE_DATA = 0x01
+TYPE_APP = g.TYPE_APP
+
+
 def _table(entries, pad_to=0x1000):
     """A partition-table image: entries, the md5 record, then 0xFF padding."""
     blob = b"".join(entries)
@@ -54,11 +61,11 @@ def _table(entries, pad_to=0x1000):
 
 REAL_TABLE = _table(
     [
-        _entry(g.TYPE_DATA, 0x02, 0x009000, 0x6000, "nvs"),
-        _entry(g.TYPE_DATA, 0x01, 0x00F000, 0x1000, "phy_init"),
-        _entry(g.TYPE_APP, 0x10, 0x010000, SLOT, "ota_0"),
-        _entry(g.TYPE_APP, 0x11, 0x1D0000, SLOT, "ota_1"),
-        _entry(g.TYPE_DATA, 0x00, 0x390000, 0x2000, "otadata"),
+        _entry(TYPE_DATA, 0x02, 0x009000, 0x6000, "nvs"),
+        _entry(TYPE_DATA, 0x01, 0x00F000, 0x1000, "phy_init"),
+        _entry(TYPE_APP, 0x10, 0x010000, SLOT, "ota_0"),
+        _entry(TYPE_APP, 0x11, 0x1D0000, SLOT, "ota_1"),
+        _entry(TYPE_DATA, 0x00, 0x390000, 0x2000, "otadata"),
         _entry(0x40, 0x00, 0x392000, 0x6E000, "assets"),
     ]
 )
@@ -118,6 +125,18 @@ class TestThresholdArithmetic(unittest.TestCase):
         self.assertFalse(g.exceeds(SLOT, SLOT, 100))
         self.assertTrue(g.exceeds(SLOT + 1, SLOT, 100))
 
+    def test_fits_is_the_line_between_the_two_failures(self):
+        # fits() decides which remedy the failure message may offer, so its
+        # boundary matters as much as the guard's. Exactly filling the slot
+        # still fits: --max-pct 100 is a value the tool accepts and it lets
+        # that image through, so "raise the threshold" is followable there.
+        # One byte more and no accepted value can.
+        self.assertTrue(g.fits(SLOT - 1, SLOT))
+        self.assertTrue(g.fits(SLOT, SLOT))
+        self.assertFalse(g.fits(SLOT + 1, SLOT))
+        self.assertFalse(g.exceeds(SLOT, SLOT, 100))  # the escape works
+        self.assertTrue(g.exceeds(SLOT + 1, SLOT, 100))  # and here it cannot
+
 
 class TestGuardLimitAgreesWithDecision(unittest.TestCase):
     """guard_limit() is what the message quotes; exceeds() is what decides.
@@ -168,8 +187,8 @@ class TestPartitionTableParsing(unittest.TestCase):
         # which is what IDF's own check_sizes.py uses.
         table = _table(
             [
-                _entry(g.TYPE_APP, 0x10, 0x010000, 0x200000, "ota_0"),
-                _entry(g.TYPE_APP, 0x11, 0x210000, 0x180000, "ota_1"),
+                _entry(TYPE_APP, 0x10, 0x010000, 0x200000, "ota_0"),
+                _entry(TYPE_APP, 0x11, 0x210000, 0x180000, "ota_1"),
             ]
         )
         self.assertEqual(g.smallest_app_partition(table), ("ota_1", 0x180000))
@@ -177,14 +196,14 @@ class TestPartitionTableParsing(unittest.TestCase):
     def test_ignores_data_partitions(self):
         table = _table(
             [
-                _entry(g.TYPE_DATA, 0x02, 0x009000, 0x100, "nvs"),
-                _entry(g.TYPE_APP, 0x10, 0x010000, 0x180000, "ota_0"),
+                _entry(TYPE_DATA, 0x02, 0x009000, 0x100, "nvs"),
+                _entry(TYPE_APP, 0x10, 0x010000, 0x180000, "ota_0"),
             ]
         )
         self.assertEqual(g.smallest_app_partition(table), ("ota_0", 0x180000))
 
     def test_table_with_no_app_partition_is_an_error(self):
-        table = _table([_entry(g.TYPE_DATA, 0x02, 0x009000, 0x6000, "nvs")])
+        table = _table([_entry(TYPE_DATA, 0x02, 0x009000, 0x6000, "nvs")])
         with self.assertRaises(g.GuardError):
             g.smallest_app_partition(table)
 
@@ -223,6 +242,46 @@ class TestMessages(unittest.TestCase):
         self.assertIn("85.0", msg)
         self.assertIn("1,559,757", msg)
         self.assertIn("over by 1 B", msg)
+
+    def test_overflow_message_does_not_advise_raising_the_threshold(self):
+        # The bug this branch exists for: at 109 % the message used to say
+        # "raise MAGTAG_MAX_SLOT_PCT", which main() then refuses to accept
+        # (--max-pct is capped at 100). A remedy the reader cannot follow is
+        # worse than none -- it costs them a build cycle to discover.
+        msg = g.format_failure(2_000_000, SLOT, PCT, "ota_0")
+        self.assertNotIn("raise MAGTAG_MAX_SLOT_PCT in CMakeLists.txt", msg)
+        self.assertIn("DOES NOT FIT", msg)
+        self.assertIn("cannot help here", msg)
+        self.assertIn("100 % is the ceiling", msg)
+        self.assertIn("given back", msg)
+
+    def test_overflow_message_still_carries_every_byte_figure(self):
+        # Losing the threshold advice must not lose the arithmetic with it:
+        # the reader still needs to know how far over, and over what.
+        msg = g.format_failure(2_000_000, SLOT, PCT, "ota_0")
+        self.assertIn("109.0", msg)  # the measured percentage
+        self.assertIn("2,000,000", msg)  # the image
+        self.assertIn("1,835,008", msg)  # the slot
+        self.assertIn("1,559,756", msg)  # what the guard allows
+        self.assertIn("440,244", msg)  # over the guard
+        self.assertIn("164,992", msg)  # over the slot itself
+        self.assertIn("FROZEN", msg)
+        self.assertIn("ota_0", msg)
+
+    def test_exactly_filling_the_slot_keeps_the_override_advice(self):
+        # 100 % is over the 85 % guard but not over the slot, and
+        # --max-pct 100 would genuinely let it through, so this is the
+        # branch that must still point at MAGTAG_MAX_SLOT_PCT.
+        msg = g.format_failure(SLOT, SLOT, PCT, "ota_0")
+        self.assertIn("raise MAGTAG_MAX_SLOT_PCT in CMakeLists.txt", msg)
+        self.assertNotIn("DOES NOT FIT", msg)
+
+    def test_one_byte_past_the_slot_switches_branch(self):
+        # The switch happens at the slot, not at some rounded percentage.
+        msg = g.format_failure(SLOT + 1, SLOT, PCT, "ota_0")
+        self.assertIn("DOES NOT FIT", msg)
+        self.assertIn("1 B over the slot itself", msg)
+        self.assertNotIn("raise MAGTAG_MAX_SLOT_PCT in CMakeLists.txt", msg)
 
     def test_pass_message_reports_the_percentage_and_the_headroom(self):
         msg = g.format_pass(1_495_232, SLOT, PCT, "ota_0")
@@ -285,6 +344,17 @@ class TestCommandLine(unittest.TestCase):
         image = self._image(LIMIT + 1)
         self.assertEqual(self._run(image, pct=PCT).returncode, 1)
         self.assertEqual(self._run(image, pct=90).returncode, 0)
+
+    def test_image_that_cannot_fit_exits_one_and_says_so(self):
+        # Still exit 1, not exit 2: the guard reached a verdict, and the
+        # verdict is that the build must fail. Only the remedy differs.
+        r = self._run(self._image(2_000_000))
+        self.assertEqual(r.returncode, 1)
+        self.assertIn("DOES NOT FIT", r.stderr)
+        self.assertNotIn("raise MAGTAG_MAX_SLOT_PCT in CMakeLists.txt", r.stderr)
+        # And the flag it declines to recommend is genuinely unavailable.
+        self.assertEqual(self._run(self._image(2_000_000), pct=100).returncode, 1)
+        self.assertEqual(self._run(self._image(2_000_000), pct=101).returncode, 2)
 
     def test_missing_image_is_an_error_not_a_pass(self):
         # The worst failure mode a size guard has: silently succeeding

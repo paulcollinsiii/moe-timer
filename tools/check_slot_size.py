@@ -19,7 +19,9 @@ test/test_check_slot_size/ can drive both sides of the boundary.
 
 Exit codes:
     0  image is at or under the guard
-    1  image is over the guard (the build must fail)
+    1  image is over the guard (the build must fail) -- either over the
+       policy while still fitting the slot, or over the slot itself, which
+       is a different message because no threshold can permit it
     2  the guard could not run -- bad arguments, missing or malformed
        inputs. Never confuse this with a pass: a size guard that cannot
        find the image and exits 0 is worse than no guard at all.
@@ -38,7 +40,6 @@ MD5_MAGIC = b"\xeb\xeb"
 PADDING = b"\xff\xff"
 
 TYPE_APP = 0x00
-TYPE_DATA = 0x01
 
 
 class GuardError(Exception):
@@ -54,6 +55,10 @@ def smallest_app_partition(table):
     image must fit in every slot it may be written to, and the smallest is
     the binding one. (Both of this project's slots are 0x1C0000 today; the
     rule is what keeps that assumption from becoming load-bearing.)
+
+    Type, not subtype: a `test` app partition (subtype 0x20) would bind the
+    guard if one were ever added, which is not what anyone would want. There
+    is none today and partitions.csv is frozen, so this stays a note.
     """
     apps = []
     for pos in range(0, len(table) - ENTRY_SIZE + 1, ENTRY_SIZE):
@@ -114,37 +119,83 @@ def format_pass(image_bytes, slot_bytes, max_pct, slot_name):
     )
 
 
+def fits(image_bytes, slot_bytes):
+    """True iff the image physically fits the slot, the guard aside.
+
+    Over the slot is a different failure from over the policy and needs a
+    different message. main() rejects --max-pct above 100, and 100 % *is*
+    the slot, so no threshold this tool will accept can let an oversized
+    image through. Printing "raise MAGTAG_MAX_SLOT_PCT" at 109 % sends the
+    reader to a flag that cannot work -- the one remedy a guard must never
+    offer is the one that is impossible to follow.
+    """
+    return image_bytes <= slot_bytes
+
+
 def format_failure(image_bytes, slot_bytes, max_pct, slot_name):
     limit = guard_limit(slot_bytes, max_pct)
     over = image_bytes - limit
-    return "\n".join(
-        [
-            "",
-            "  ================ BUILD-SIZE GUARD: FAIL ================",
-            "",
+    overflows = not fits(image_bytes, slot_bytes)
+    lines = [
+        "",
+        "  ================ BUILD-SIZE GUARD: FAIL ================",
+        "",
+    ]
+    if overflows:
+        lines += [
+            f"  Image is {_pct(image_bytes, slot_bytes):.1f} % of the "
+            f"{slot_bytes:,} B {slot_name} slot:",
+            "  it DOES NOT FIT. Past the guard, and past the slot.",
+        ]
+    else:
+        lines += [
             f"  Image is {_pct(image_bytes, slot_bytes):.1f} % of the "
             f"{slot_bytes:,} B {slot_name} slot,",
             f"  over the {max_pct} % guard (MAGTAG_MAX_SLOT_PCT).",
+        ]
+    lines += [
+        "",
+        f"    image  {image_bytes:>12,} B",
+        f"    guard  {limit:>12,} B   ({max_pct} % of the slot)",
+        f"    slot   {slot_bytes:>12,} B   FROZEN",
+        "",
+    ]
+    if overflows:
+        lines.append(
+            f"  That is {over:,} B over the guard, and "
+            f"{image_bytes - slot_bytes:,} B over the slot itself."
+        )
+    else:
+        lines.append(f"  That is over by {over:,} B.")
+    lines += [
+        "",
+        "  The slot size is FROZEN: deployed devices keep it forever.",
+        "  An OTA cannot rewrite the partition table, so no later",
+        "  update can hand this image more room -- only a serial cable",
+        "  can, on every device individually.",
+        "",
+    ]
+    if overflows:
+        lines += [
+            "  Raising MAGTAG_MAX_SLOT_PCT cannot help here, and this tool",
+            "  will not accept a value that could: 100 % is the ceiling and",
+            "  the image is already past it. No threshold makes an image fit",
+            "  a slot smaller than itself.",
             "",
-            f"    image  {image_bytes:>12,} B",
-            f"    guard  {limit:>12,} B   ({max_pct} % of the slot)",
-            f"    slot   {slot_bytes:>12,} B   FROZEN",
-            "",
-            f"  That is over by {over:,} B.",
-            "",
-            "  The slot size is FROZEN: deployed devices keep it forever.",
-            "  An OTA cannot rewrite the partition table, so no later",
-            "  update can hand this image more room -- only a serial cable",
-            "  can, on every device individually.",
-            "",
+            "  The bytes have to be given back. There is no other move.",
+        ]
+    else:
+        lines += [
             "  Give the bytes back, or -- if you accept the new floor --",
             "  raise MAGTAG_MAX_SLOT_PCT in CMakeLists.txt (project root)",
             "  as its own commit, stating the reason in the message.",
-            "",
-            "  ========================================================",
-            "",
         ]
-    )
+    lines += [
+        "",
+        "  ========================================================",
+        "",
+    ]
+    return "\n".join(lines)
 
 
 def _read(path, what):
