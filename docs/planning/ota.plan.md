@@ -1765,39 +1765,112 @@ deserve their own commit and their own review:
     forever, overwriting each later wake's genuine `ota_result` with a
     rollback that happened last month.
 
-    So `NVS_KEY_OTA_PEND` is written by the commit path at the one instant
-    that is unambiguous -- the boot partition has just moved and nothing
-    has certified anything -- and CONSUMED by whichever future arrives
-    first: `ota_flow_confirm_image()` retires it when the new image
-    certifies, or `note_rollback_if_reverted()` (run from
+    So `NVS_KEY_OTA_PEND_VER` is written by the commit path at the one
+    instant that is unambiguous -- the boot partition has just moved and
+    nothing has certified anything -- and CONSUMED by whichever future
+    arrives first: `ota_flow_confirm_image()` retires it when the new
+    image certifies, or `note_rollback_if_reverted()` (run from
     `ota_flow_init`) finds a boot running something other than the
-    committed version, clears the token and records `rolled_back`. A latch
-    is then not merely avoided but unrepresentable, and because every
-    commit re-arms the token, each turn of a rollback loop is reported
-    rather than only the first.
+    committed version, consumes the token and records `rolled_back`. A
+    latch is then not merely avoided but unrepresentable, and because
+    every commit re-arms the token, each turn of a rollback loop is
+    reported rather than only the first.
 
-    Three placements are load-bearing and each has a test:
+    **The token IS the committed version, in a key of its own.** The first
+    implementation stored a `u16` flag and compared the running version
+    against `ota_target` -- and `ota_target` is the RETRY BUDGET's key,
+    which `charge_the_attempt()` re-points BEFORE every download by task
+    11/13's deliberate design. The two meanings diverge the moment any
+    attempt happens between a commit and its revert, which is the ordinary
+    case rather than the exotic one: an image bad enough to be reverted
+    usually wedges (watchdog, brownout, panic) and never certifies, so the
+    uncertified wake is exactly where an attempt is likely. Both
+    directions were reachable and both are now fixed:
+
+    * **Misattribution.** An attempt on the uncertified boot re-points
+      `ota_target` at a version that was never committed, so the detector
+      reported a rollback of a build the device never downloaded (and the
+      log line said it "was committed", which was false), written over the
+      genuine failure the attempt had just recorded.
+    * **The inverse, worse.** `ota_policy` allows downgrades on purpose --
+      *"a downgrade is how a rollback is published"* -- so the operator's
+      designed recovery is to re-point the manifest at the known-good
+      build. That attempt sets `ota_target` to the version the device is
+      about to revert TO, the `strcmp(target, running) == 0` early return
+      then matched, and the genuine revert was swallowed while the token
+      stayed armed.
+
+    Folding the flag into the version **removes** a state rather than
+    adding one: "armed but unnamed" and "named but not armed" are both
+    unrepresentable, because the arming write is the name. Which also
+    means every early return in the detector now happens BEFORE the
+    consume, so no path can reach a report having skipped it -- a property
+    the old ordering could only assert in prose (see the mutation notes
+    below: the old placement's load-bearingness was in fact untested, and
+    the original entry claimed otherwise).
+
+    What is actually load-bearing, and pinned:
 
     * The token is armed AFTER `dl_finish`, not before. Armed before, a
       failed commit would have the next boot see "committed, not running
       the target" and write a false `rolled_back` over the genuine failure
       reason -- worse than silence.
+      (`test_a_failed_download_never_reports_a_rollback`.)
     * It is armed BEFORE the `ota_result` clear, so a death between the
       two leaves the recoverable state (the next boot either certifies or
       converts the token into a `rolled_back` that overwrites the stale
       string anyway); the other order leaves no token and the revert is as
       invisible as before.
-    * The token is consumed BEFORE the reason is written. If the clear
-      lands and the record does not, one revert goes unreported and the
-      budget still walks to a visible `gave_up`; the other order
-      reintroduces the latch through the back door.
+    * The token is consumed BEFORE the reason is written, **and the
+      consume's answer is believed.** The order alone is only the crash
+      argument; it says nothing about a consume that FAILS, which would
+      leave the token armed under a report already written -- the latch,
+      once per boot until the store recovers. So a failed consume returns
+      without recording: the boot ends exactly as it began, the next boot
+      detects the same revert and reports it then. Deferred, never
+      doubled, and never written against an armed token
+      (`test_a_token_that_cannot_be_consumed_is_left_for_the_next_boot`,
+      which is what makes the placement testable at all).
+    * An **unreadable** committed version is consumed and NOTHING is
+      reported -- naming a rollback we cannot attribute would blame
+      whatever version the operator last saw, and leaving it armed would
+      re-ask an unanswerable question on every boot forever
+      (`test_an_unreadable_committed_version_is_consumed_unreported`).
+    * An **empty** token is simply "no commit outstanding", costs no
+      flash, and is not a state that has to be reasoned about
+      (`test_a_boot_with_nothing_committed_reports_nothing_and_writes_nothing`).
 
-    `note_rollback_if_reverted()` lives in `ota_flow_init` because that is
-    the only function a post-revert boot is guaranteed to reach --
-    `ota_flow_check()` is a no-op unless the wake armed a check, and the
-    wake after a revert usually did not -- and because running it there
-    puts the verdict in NVS before app_main opens the network window,
-    which is what gets it into the SAME wake's payload.
+    **A revert reported at init keeps `ota_result` for the rest of the
+    boot,** and without that rule the detector's placement destroys the
+    thing it exists to report. `note_rollback_if_reverted()` lives in
+    `ota_flow_init` because that is the only function a post-revert boot
+    is guaranteed to reach -- `ota_flow_check()` is a no-op unless the
+    wake armed a check, and the wake after a revert usually did not.
+    Running it there also puts the verdict in NVS before app_main opens
+    the network window, which is NECESSARY for it to reach this wake's
+    payload and on its own the exact opposite of sufficient: being first
+    means every persistable outcome the wake produces afterwards --
+    `ota_flow_check()`'s gate or budget verdict at `net_window.c:107`,
+    two lines before the publish -- overwrites the single-slot
+    `ota_result` before the payload is built, and the token has already
+    been consumed, so no later wake can say it again. `low_batt` and
+    `gave_up` are both persistable and both are what a device thrashing
+    downloads reports, i.e. the collision was likeliest in exactly the
+    situation the report exists for.
+
+    So `record()` refuses to write while a revert reported on this boot is
+    standing (a plain boot-scoped static, cleared by `ota_flow_init`).
+    What that sacrifices is the check's own reason, deliberately: a gate
+    or budget verdict is a LEVEL and the next daily check records it
+    again, one day late, whereas a revert is an EVENT whose evidence has
+    been spent. The retry budget is untouched by the rule, so the sad-loop
+    bound still converges regardless of which string is on display.
+    Scoped to the boot rather than to the publish because lifting it
+    inside `ota_flow_stat()` would save one more message (the second
+    window's download failure, recorded after the payload is built) at the
+    cost of hiding a state change in a getter and making the rule depend
+    on how many times, and whether, a payload is ever built -- and that
+    message is a level too.
 
     **This is not the clear task 13 ruled out.** That entry says "do not
     defer the clears to the confirmation", because `mark_valid` is `void`
@@ -1842,12 +1915,14 @@ deserve their own commit and their own review:
     a payload `publish_states` DROPS silently if it ever reaches the
     buffer size; a worst-case case now pins the headroom.
 
-    **Verification.** Host suite 38/38. `test_stats_json` 23 -> 32,
-    `test_ota_flow` 63 -> 80, `test_nvs_config` 53 -> 55, `test_ota_policy`
-    56 unchanged (its exhaustive walk absorbed the new code). Firmware
-    builds clean at 0x16cf90 (1,494,928 B), 81.5 % of the 0x1c0000 slot.
+    **Verification.** Host suite 38/38 from a clean build dir.
+    `test_stats_json` 23 -> 32, `test_ota_flow` 63 -> 88, `test_nvs_config`
+    53 -> 56, `test_ota_policy` 56 unchanged (its exhaustive walk absorbed
+    the new code). Firmware builds clean at 0x16d0c0 (1,495,232 B),
+    81.48 % of the 0x1c0000 slot.
 
-    Eleven mutations, 22 case-kills, all caught: the `ota_dl_ms` write deleted (3 cases, all
+    Eleven mutations from the first implementation, 22 case-kills, all
+    caught: the `ota_dl_ms` write deleted (3 cases, all
     reading "Was 0" -- the original defect exactly); the stat read cached
     at init instead of read at publish time (2, including the one that
     models the H10 constraint); `STATS_JSON_DISC_SCHEMA_VER` left at 17
@@ -1860,16 +1935,36 @@ deserve their own commit and their own review:
     entities given an `expire_after` (1); and the pure builder ignoring
     its `ota` argument (4).
 
+    Six more for the fixes above, 13 case-kills, all caught: the same-wake
+    overwrite reintroduced, i.e. `record()`'s guard deleted (4 -- one each
+    showing `low_batt`, `net` and `gave_up` twice landing on top of the
+    rollback); the detector reading `ota_target` again instead of the
+    committed-version key (2 -- one forged revert, one swallowed revert);
+    the consume moved to AFTER the report is written, the M4 mutation that
+    used to survive the whole suite (1); the consume's answer ignored
+    rather than believed (1); the consume deleted outright (4); and an
+    unreadable committed version left armed instead of consumed (1).
+
     **Known gaps, left deliberately.** A device that dies between
     `dl_finish` and the token write loses that one revert's report -- the
     window is two adjacent NVS writes and nothing can cover it from
-    inside. If `ota_target` is unreadable at detection time the token is
-    consumed and NOTHING is reported, on purpose: naming a rollback we
-    cannot attribute would blame whatever the operator last saw. Neither
-    affects the retry budget, which still converges on a visible
-    `gave_up`. `ota.c` was not touched at all -- no
+    inside. A revert detected on a wake that also produces a check or
+    download failure costs that failure's string for the day, by design:
+    the level recurs at the next check, the event would not. And an
+    unreadable `ota_pend_ver` at detection consumes the token and reports
+    nothing, on purpose -- now a pinned behaviour rather than a reasoned
+    assumption. None of the three affects the retry budget, which still
+    converges on a visible `gave_up`. `ota.c` was not touched at all -- no
     `esp_ota_get_state_partition()` read was added, because the token
     makes one unnecessary.
+
+    **Field note.** `NVS_KEY_OTA_PEND` (the `u16` flag) is gone and no
+    code reads it. A dev unit flashed with the first implementation may
+    still carry the orphaned key; it is inert, and the device's first
+    commit after this change arms the new one. Nothing migrates it,
+    because a token that was armed under the old scheme names no version
+    and could only produce the unattributable report the detector already
+    declines to write.
 
 15. Build-size guard (warn at 85 % slot occupancy).
 16. Hardware smoke test (below).

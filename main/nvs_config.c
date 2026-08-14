@@ -312,11 +312,11 @@ esp_err_t nvs_config_get_ota_dl_ms(uint32_t *out) {
 esp_err_t nvs_config_set_ota_dl_ms(uint32_t ms) {
     return hal_nvs_write_u32(NVS_KEY_OTA_DL_MS, ms);
 }
-esp_err_t nvs_config_get_ota_pend(uint16_t *out) {
-    return get_u16_with_default(NVS_KEY_OTA_PEND, out, 0);
+esp_err_t nvs_config_get_ota_pend_ver(char *buf, size_t len) {
+    return get_str_empty_default(NVS_KEY_OTA_PEND_VER, buf, len);
 }
-esp_err_t nvs_config_set_ota_pend(uint16_t pending) {
-    return hal_nvs_write_u16(NVS_KEY_OTA_PEND, pending ? 1 : 0);
+esp_err_t nvs_config_set_ota_pend_ver(const char *ver) {
+    return write_str_bounded(NVS_KEY_OTA_PEND_VER, ver, CFG_BOUND_OTA_TARGET_MAX);
 }
 
 esp_err_t nvs_config_get_timer_defs(nvs_timer_defs_blob_t *out) {

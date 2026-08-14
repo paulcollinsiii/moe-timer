@@ -489,27 +489,36 @@ void test_ota_dl_ms_defaults_to_zero_and_holds_a_full_download(void) {
     TEST_ASSERT_EQUAL_UINT32(4294967295u, ms);
 }
 
-/* The certification token. Absent means "no image is awaiting
-   certification", which is the state of every device that has never run
-   an OTA — so the default has to be 0 rather than an error, or every
-   virgin boot would take the unreadable branch. Normalised to 0/1 like
-   ota_on_sync so a stray value cannot read as a third state. */
-void test_ota_pend_defaults_to_zero_and_normalises(void) {
-    uint16_t pend = 0xFFFF;
-    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_ota_pend(&pend));
-    TEST_ASSERT_EQUAL_UINT16(0, pend);
+/* The certification token, which is the committed VERSION and not a flag
+   beside it — one key, so "armed" and "which image" cannot disagree.
+   Absent means "no image is awaiting certification", the state of every
+   device that has never run an OTA, so it must read as "" and ESP_OK
+   rather than an error or every virgin boot would take the unreadable
+   branch. Cleared by writing "", which is how both consumers retire it. */
+void test_ota_pend_ver_defaults_to_empty_and_round_trips(void) {
+    char buf[CFG_BOUND_OTA_TARGET_MAX];
+    memset(buf, 'x', sizeof(buf));
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_ota_pend_ver(buf, sizeof(buf)));
+    TEST_ASSERT_EQUAL_STRING("", buf);
 
-    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_set_ota_pend(1));
-    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_ota_pend(&pend));
-    TEST_ASSERT_EQUAL_UINT16(1, pend);
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_set_ota_pend_ver("1.6.0"));
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_ota_pend_ver(buf, sizeof(buf)));
+    TEST_ASSERT_EQUAL_STRING("1.6.0", buf);
 
-    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_set_ota_pend(99));
-    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_ota_pend(&pend));
-    TEST_ASSERT_EQUAL_UINT16(1, pend);
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_set_ota_pend_ver(""));
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_ota_pend_ver(buf, sizeof(buf)));
+    TEST_ASSERT_EQUAL_STRING("", buf);
+}
 
-    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_set_ota_pend(0));
-    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_ota_pend(&pend));
-    TEST_ASSERT_EQUAL_UINT16(0, pend);
+/* Same bound as ota_target, and for a sharper reason: the detector
+   compares this against the running version, so a value it cannot store
+   whole would either miss a revert or invent one. Rejected, never
+   truncated. */
+void test_ota_pend_ver_rejects_a_version_it_could_not_compare(void) {
+    char big[CFG_BOUND_OTA_TARGET_MAX + 1];
+    memset(big, 'v', sizeof(big) - 1);
+    big[sizeof(big) - 1] = '\0';
+    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_SIZE, nvs_config_set_ota_pend_ver(big));
 }
 
 /* The OTA keys are deliberately NOT in the seeded-defaults registry, so
@@ -748,7 +757,8 @@ int main(void) {
     RUN_TEST(test_ota_on_sync_defaults_and_round_trip);
     RUN_TEST(test_ota_state_keys_default_empty_and_round_trip);
     RUN_TEST(test_ota_dl_ms_defaults_to_zero_and_holds_a_full_download);
-    RUN_TEST(test_ota_pend_defaults_to_zero_and_normalises);
+    RUN_TEST(test_ota_pend_ver_defaults_to_empty_and_round_trips);
+    RUN_TEST(test_ota_pend_ver_rejects_a_version_it_could_not_compare);
     RUN_TEST(test_init_defaults_does_not_seed_ota_keys);
     RUN_TEST(test_reseed_does_not_revert_ha_set_ota_values);
     RUN_TEST(test_fingerprint_ignores_ota_values);

@@ -74,6 +74,13 @@ static uint32_t s_dl_ms;
    the write strictly precedes the read on the one path that sets it. */
 static bool s_failsafe_sleep;
 
+/* This boot has reported a revert, so ota_result is spoken for. Set by
+   note_rollback_if_reverted() and cleared by ota_flow_init(), which makes
+   it strictly boot-scoped: a plain static, zeroed by every reset and not
+   preserved across deep sleep either. See record() for what it protects
+   and what it costs. */
+static bool s_revert_reported;
+
 /* ---- shared helpers ----------------------------------------------------- */
 
 /* ota_result is the ONLY channel a download failure has. The second
@@ -82,16 +89,58 @@ static bool s_failsafe_sleep;
    picks it up. Which reasons may be written is ota_policy's rule rather
    than a convention here, precisely so that the "leave an earlier
    failure alone" cases cannot drift — see
-   ota_policy_reason_is_persistable. */
-static void record(ota_reason_t reason, int http_status) {
+   ota_policy_reason_is_persistable.
+
+   Answers whether ota_result now holds this reason, which only the
+   rollback detector reads: it must not claim the channel on the strength
+   of a write that did not land. */
+static bool record(ota_reason_t reason, int http_status) {
     if (!ota_policy_reason_is_persistable(reason))
-        return;
+        return false;
+
+    /* A REVERT REPORTED ON THIS BOOT OUTRANKS EVERYTHING AFTER IT, and
+       this guard is the whole of that rule.
+
+       note_rollback_if_reverted() runs from ota_flow_init(), well before
+       app_main opens the network window. That window then runs
+       ota_flow_check() and publishes, in that order (net_window.c:107,
+       :109) — so without this guard ANY persistable check reason lands on
+       top of the rollback in the seconds before the payload is built.
+       And the token that proved the revert was consumed at detection, so
+       no later wake can say it again: the report is not delayed, it is
+       destroyed.
+
+       Not a corner case. low_batt and gave_up are both persistable and
+       both are what a device that has been thrashing downloads reports —
+       the collision is likeliest in exactly the situation this report
+       exists for.
+
+       What gets sacrificed is the check's own reason, deliberately. A
+       gate or budget verdict is a LEVEL: the condition is still there
+       tomorrow, the next daily check records it again, and it reaches HA
+       one day late. A revert is an EVENT and its evidence is spent. The
+       cheaper loss is the one that repeats itself.
+
+       Scoped to the BOOT rather than to the publish. Lifting it inside
+       ota_flow_stat() would save one more message — the second window's
+       download failure, recorded after the payload is built — at the cost
+       of hiding a state change in a getter and making the rule depend on
+       how many times, and whether, a payload is ever built. That message
+       is a level too, and it also recurs. */
+    if (s_revert_reported) {
+        ESP_LOGI(TAG, "%s not recorded: this boot reported a rollback and that verdict keeps ota_result",
+                 ota_policy_reason_str(reason));
+        return false;
+    }
+
     char text[OTA_REASON_TEXT_MAX];
     ota_policy_reason_text(reason, http_status, text, sizeof(text));
     esp_err_t ret = nvs_config_set_ota_result(text);
     if (ret != ESP_OK) {
         ESP_LOGW(TAG, "ota_result write failed (%d): this outcome will not reach HA", (int)ret);
+        return false;
     }
+    return true;
 }
 
 /* hal_nvs_read_str writes NOTHING into a buffer it judges too small, so a
@@ -128,7 +177,7 @@ static void read_counted_target(char *buf, size_t len) {
    not fix it: both halves are states, and both stay true.
 
    So the detector is a one-shot token instead of a pair of levels.
-   ota_pend is written by the commit path, at the one instant that is
+   ota_pend_ver is written by the commit path, at the one instant that is
    unambiguous -- the boot partition has just moved and nothing has
    certified anything yet -- and it is CONSUMED by whichever of the two
    possible futures arrives first:
@@ -145,39 +194,91 @@ static void read_counted_target(char *buf, size_t len) {
    reports EACH revert once, rather than one and then silence.
 
    The version compare is what separates a revert from the ordinary boot
-   right after a successful update, when the flag is also set: there, the
-   committed version IS the running one, and the flag is left for the
-   certification at this wake's sleep. */
+   right after a successful update, when the token is also set: there, the
+   committed version IS the running one, and the token is left for the
+   certification at this wake's sleep.
+
+   THE TOKEN IS THE COMMITTED VERSION ITSELF, not a flag beside
+   ota_target, and that is a correction rather than a flourish. This
+   detector originally compared the running version against ota_target,
+   which is the RETRY BUDGET's key: charge_the_attempt() re-points it
+   BEFORE every download, by design (task 11/13 — an attempt has to be
+   countable even when the wake is killed mid-flight). The two meanings
+   diverge the moment any attempt happens between a commit and its
+   revert, and an image bad enough to be reverted usually wedges before
+   it certifies, so that is the ordinary case rather than the exotic one.
+   Both directions were wrong and both were reachable:
+
+     - MISATTRIBUTION. The uncertified boot attempts 1.7.0, so ota_target
+       becomes 1.7.0 while 1.6.0 is what was committed. A boot on 1.6.0
+       then LOOKS reverted, and a boot on 1.5.0 reports a rollback of a
+       version that was never downloaded.
+     - THE INVERSE, worse. ota_policy allows downgrades on purpose ("a
+       downgrade is how a rollback is published"), so the operator's
+       designed recovery is to re-point the manifest at the known-good
+       build. That attempt sets ota_target to the version the device is
+       about to revert TO, the compare below then matches, and the genuine
+       revert is swallowed while the token stays armed.
+
+   Storing the committed version in its own key ends both, and folding
+   the flag into it removes a state rather than adding one: there is no
+   "armed but unnamed" to reason about, because the arming write IS the
+   name. Which also means that every early return below happens BEFORE
+   the consume, so no path can skip the consume on its way to a report —
+   the property the old ordering had to assert in prose. */
 static void note_rollback_if_reverted(void) {
-    uint16_t pending = 0;
-    if (nvs_config_get_ota_pend(&pending) != ESP_OK || pending == 0)
-        return;
-
-    char target[CFG_BOUND_OTA_TARGET_MAX];
-    read_counted_target(target, sizeof(target));
-    const char *running = (s_cfg.running_version != NULL) ? s_cfg.running_version : "";
-    if (target[0] != '\0' && strcmp(target, running) == 0)
-        return; /* it IS running; certification is this wake's job */
-
-    /* CONSUMED BEFORE THE REPORT IS WRITTEN, and the order is deliberate.
-       If the clear lands and the record does not, one revert goes
-       unreported and the retry budget still walks to a visible gave_up.
-       If the record landed first and the clear did not, every boot from
-       here on would re-report this rollback over whatever ota_result had
-       come to hold -- the latch, reintroduced through the back door. The
-       cheaper failure is the one that loses a message, not the one that
-       corrupts every later message. */
-    (void)nvs_config_set_ota_pend(0);
-
-    if (target[0] == '\0') {
-        /* Nothing to attribute it to, and read_counted_target has already
-           warned. Reporting a rollback we cannot name would be worse than
-           silence: it would blame whatever the operator last saw. */
-        ESP_LOGW(TAG, "an uncertified image is no longer running, but ota_target is empty: not reporting a rollback");
+    char committed[CFG_BOUND_OTA_TARGET_MAX];
+    esp_err_t ret = nvs_config_get_ota_pend_ver(committed, sizeof(committed));
+    if (ret != ESP_OK) {
+        /* Unreadable, which for a str read means a stored value wider
+           than this buffer or a store that is failing. Consumed anyway
+           and NOTHING is reported: naming a rollback we cannot attribute
+           would blame whatever version the operator last saw, and leaving
+           it armed would re-ask an unanswerable question on every boot
+           from here on. The retry budget still converges on a visible
+           gave_up, so the device does not go silent. */
+        ESP_LOGW(TAG, "ota_pend_ver unreadable (%d): consuming it without reporting a rollback", (int)ret);
+        (void)nvs_config_set_ota_pend_ver("");
         return;
     }
-    record(OTA_REASON_ROLLED_BACK, 0);
-    ESP_LOGW(TAG, "rolled back: %s was committed but never certified; %s is running", target, running);
+    if (committed[0] == '\0')
+        return; /* nothing was committed — and no flash spent saying so */
+
+    const char *running = (s_cfg.running_version != NULL) ? s_cfg.running_version : "";
+    if (strcmp(committed, running) == 0)
+        return; /* it IS running; certification is this wake's job */
+
+    /* CONSUMED BEFORE THE REPORT IS WRITTEN, and the report is abandoned
+       if the consume does not land.
+
+       The order alone is the crash argument: if the consume lands and the
+       record does not, one revert goes unreported and the retry budget
+       still walks to a visible gave_up; the other order would have every
+       boot from here on re-report this rollback over whatever ota_result
+       had come to hold — the latch, reintroduced through the back door.
+
+       Checking the answer is the write-failure argument, which the order
+       alone does NOT cover. A consume that fails leaves the token armed,
+       so recording anyway would produce exactly that latch, once per boot
+       until the store recovers. Returning instead leaves the token armed
+       AND ota_result untouched, which is the same state this boot started
+       in — so the next boot detects the same revert and reports it then.
+       The revert is deferred rather than lost, and a report is never
+       written against a token that is still armed. */
+    if (nvs_config_set_ota_pend_ver("") != ESP_OK) {
+        ESP_LOGW(TAG,
+                 "rollback token could not be consumed: leaving the revert for the next boot rather than "
+                 "reporting one that would repeat");
+        return;
+    }
+
+    if (record(OTA_REASON_ROLLED_BACK, 0)) {
+        /* Only once the string is actually in NVS: claiming ota_result
+           for a write that failed would suppress this wake's real
+           outcomes to protect a verdict that is not there. */
+        s_revert_reported = true;
+        ESP_LOGW(TAG, "rolled back: %s was committed but never certified; %s is running", committed, running);
+    }
 }
 
 static void fill_gate(ota_gate_in_t *g, bool url_set, bool time_valid, int batt_pct, bool charge_locked) {
@@ -205,15 +306,25 @@ void ota_flow_init(const ota_flow_ops_t *ops, const ota_flow_cfg_t *cfg) {
     s_dl_running = false;
     s_dl_ms = 0;
     s_failsafe_sleep = false;
+    s_revert_reported = false;
 
     /* Last, because it reads s_cfg.running_version and may write NVS.
        Here rather than at a call site of its own because this is the only
        function in this module that a post-rollback boot is guaranteed to
        reach: ota_flow_check() does nothing unless the wake armed a check,
        and the wake that comes back from a revert usually did not arm one.
+
        Running it from init also puts the verdict in NVS before app_main
-       opens the network window, which is what gets it into the SAME
-       wake's stat payload rather than tomorrow's. */
+       opens the network window — necessary for the verdict to reach this
+       wake's payload, but on its own the exact opposite of sufficient,
+       and this comment used to claim otherwise. Being FIRST in the wake
+       means every persistable outcome the wake produces afterwards is
+       written to the same single-slot ota_result before the payload is
+       built, and the evidence has already been consumed by then. Earliest
+       writer, not last writer, is the losing position. What makes the
+       ordering work is record()'s guard, which hands ota_result to the
+       revert for the rest of the boot; read that before moving this
+       call. */
     note_rollback_if_reverted();
 }
 
@@ -406,7 +517,7 @@ void ota_flow_confirm_image(void) {
        the failsafe decline above leaves the flag standing on purpose,
        because that wake genuinely did not certify anything and the next
        boot has to be able to tell. */
-    (void)nvs_config_set_ota_pend(0);
+    (void)nvs_config_set_ota_pend_ver("");
 }
 
 /* ---- the apply (main task, window 2) ------------------------------------ */
@@ -798,11 +909,21 @@ void ota_flow_apply(int batt_pct, bool charge_locked) {
        as invisible as it was before task 14.
 
        It is set AFTER dl_finish rather than before it for the same reason
-       in reverse: a flag armed ahead of a commit that then FAILS would
+       in reverse: a token armed ahead of a commit that then FAILS would
        have the next boot see "committed, not running the target" -- a
        false rollback report, written over the genuine failure reason
-       fail_attempt just recorded. */
-    (void)nvs_config_set_ota_pend(1);
+       fail_attempt just recorded.
+
+       It stores THE VERSION, and s_target is the only correct value for
+       it: this is the line where "what was committed" is a fact rather
+       than an inference. The detector must not go looking for that fact
+       in ota_target, which by then means "what the retry budget is
+       counting", a different question with a different answer -- see
+       note_rollback_if_reverted. s_target is non-empty by construction
+       (ota_policy rejects an empty manifest version as bad_version, and
+       nothing reaches this line without a decision that named one), which
+       is what lets one key carry both the arming and the name. */
+    (void)nvs_config_set_ota_pend_ver(s_target);
     (void)nvs_config_set_ota_result("");
 
     ESP_LOGI(TAG, "update to %s committed in %u ms; restarting", s_target, (unsigned)s_dl_ms);

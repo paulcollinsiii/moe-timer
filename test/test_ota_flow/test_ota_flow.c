@@ -66,7 +66,14 @@ static void note_int(const char *tag, int value) {
 #define MANIFEST_URL "https://ota.test/magtag.json"
 #define IMAGE_URL "https://ota.test/magtag-1.6.0.bin"
 
+/* A THIRD version, for the cases where an attempt happens between a
+   commit and its revert: the retry budget's key moves to this one while
+   the record of what was committed must not. */
+#define NEXT "1.7.0"
+#define NEXT_IMAGE_URL "https://ota.test/magtag-1.7.0.bin"
+
 #define MANIFEST_UPDATE "[{\"schema\":1,\"default\":{\"version\":\"" TARGET "\",\"url\":\"" IMAGE_URL "\"}}]"
+#define MANIFEST_NEXT "[{\"schema\":1,\"default\":{\"version\":\"" NEXT "\",\"url\":\"" NEXT_IMAGE_URL "\"}}]"
 #define MANIFEST_SAME "[{\"schema\":1,\"default\":{\"version\":\"" RUNNING "\",\"url\":\"" IMAGE_URL "\"}}]"
 #define MANIFEST_PINNED "[{\"schema\":1,\"default\":{\"version\":null}}]"
 
@@ -384,10 +391,13 @@ static uint32_t stored_dl_ms(void) {
     return n;
 }
 
-static uint16_t stored_pend(void) {
-    uint16_t n = 0;
-    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_ota_pend(&n));
-    return n;
+/* The certification token: the version that was committed, "" when there
+   is nothing outstanding. Deliberately a different key from ota_target —
+   see the misattribution cases below. */
+static const char *stored_pend_ver(void) {
+    static char buf[CFG_BOUND_OTA_TARGET_MAX];
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_ota_pend_ver(buf, sizeof(buf)));
+    return buf;
 }
 
 /* A boot of the firmware whose app descriptor says `ver`. Everything
@@ -1441,7 +1451,15 @@ static void test_a_rollback_loop_is_bounded_by_the_retry_budget(void) {
     g_log[0] = '\0';
     check_at_rollover();
     TEST_ASSERT_FALSE(ota_flow_pending());
-    TEST_ASSERT_EQUAL_STRING("gave_up", stored_result());
+    /* rolled_back, NOT gave_up: this boot came back from the third
+       revert, and a revert reported at init keeps ota_result for the rest
+       of the boot (see record()). The budget verdict is a level and
+       returns on the next wake —
+       test_the_verdict_a_revert_displaces_returns_on_the_next_wake pins
+       that. What this case is about is the BOUND, and the bound is
+       ota_fails, which the report does not touch. */
+    TEST_ASSERT_EQUAL_STRING("rolled_back", stored_result());
+    TEST_ASSERT_EQUAL_UINT16(3, stored_fails());
     ota_flow_apply(90, false);
     TEST_ASSERT_EQUAL_STRING("get", g_log); /* no paint, no radio, no download */
 }
@@ -1550,16 +1568,19 @@ static void test_the_failsafe_flag_does_not_outlive_its_boot(void) {
    device tried. The only evidence was indirect and took three ~1.5 MB
    downloads to become a gave_up.
 
-   The token these turn on is ota_pend, written by the commit at the one
-   instant that is unambiguous and consumed by whichever future arrives:
-   certification, or a boot that came up on something else. */
+   The token these turn on is ota_pend_ver, written by the commit at the
+   one instant that is unambiguous and consumed by whichever future
+   arrives: certification, or a boot that came up on something else. It
+   holds the committed VERSION rather than a flag, so that the detector
+   never has to ask ota_target — the retry budget's key, re-pointed before
+   every attempt — what this device committed. */
 
-/* The commit arms the token. Nothing else in the flow does — see the
-   failure cases below. */
+/* The commit arms the token, and arms it with the version it committed.
+   Nothing else in the flow does — see the failure cases below. */
 static void test_a_commit_arms_the_certification_token(void) {
     check_at_rollover();
     ota_flow_apply(90, false);
-    TEST_ASSERT_EQUAL_UINT16(1, stored_pend());
+    TEST_ASSERT_EQUAL_STRING(TARGET, stored_pend_ver());
 }
 
 /* THE HEADLINE CASE. The update committed, the new image never certified
@@ -1590,7 +1611,7 @@ static void test_a_revert_is_reported_once_and_never_again(void) {
     ota_flow_apply(90, false);
     boot_running(RUNNING);
     TEST_ASSERT_EQUAL_STRING("rolled_back", stored_result());
-    TEST_ASSERT_EQUAL_UINT16(0, stored_pend()); /* consumed */
+    TEST_ASSERT_EQUAL_STRING("", stored_pend_ver()); /* consumed */
 
     TEST_ASSERT_EQUAL(ESP_OK, nvs_config_set_ota_result("tls_cert"));
     boot_running(RUNNING);
@@ -1610,7 +1631,7 @@ static void test_the_boot_that_came_up_on_the_new_image_reports_nothing(void) {
 
     boot_running(TARGET); /* the new image, running */
     TEST_ASSERT_EQUAL_STRING("", stored_result());
-    TEST_ASSERT_EQUAL_UINT16(1, stored_pend()); /* left for the certification */
+    TEST_ASSERT_EQUAL_STRING(TARGET, stored_pend_ver()); /* left for the certification */
 }
 
 /* ...and the certification retires it. After that the device is on an
@@ -1622,7 +1643,7 @@ static void test_certifying_the_image_retires_the_token(void) {
     ota_flow_apply(90, false);
     boot_running(TARGET);
     ota_flow_confirm_image();
-    TEST_ASSERT_EQUAL_UINT16(0, stored_pend());
+    TEST_ASSERT_EQUAL_STRING("", stored_pend_ver());
 
     boot_running(RUNNING);
     TEST_ASSERT_EQUAL_STRING("", stored_result());
@@ -1639,7 +1660,7 @@ static void test_a_failsafe_sleep_leaves_the_revert_detectable(void) {
     boot_running(TARGET);
     ota_flow_note_failsafe_sleep();
     ota_flow_confirm_image();
-    TEST_ASSERT_EQUAL_UINT16(1, stored_pend());
+    TEST_ASSERT_EQUAL_STRING(TARGET, stored_pend_ver());
 
     boot_running(RUNNING);
     TEST_ASSERT_EQUAL_STRING("rolled_back", stored_result());
@@ -1656,7 +1677,7 @@ static void test_a_failed_download_never_reports_a_rollback(void) {
     check_at_rollover();
     ota_flow_apply(90, false);
     TEST_ASSERT_EQUAL_STRING("net", stored_result());
-    TEST_ASSERT_EQUAL_UINT16(0, stored_pend());
+    TEST_ASSERT_EQUAL_STRING("", stored_pend_ver());
 
     boot_running(RUNNING);
     TEST_ASSERT_EQUAL_STRING("net", stored_result());
@@ -1683,6 +1704,190 @@ static void test_every_revert_in_a_rollback_loop_is_reported(void) {
         TEST_ASSERT_EQUAL_STRING("rolled_back", stored_result());
         TEST_ASSERT_EQUAL_UINT16(turn, stored_fails());
     }
+}
+
+/* ---- the revert has to SURVIVE the wake that detected it ---------------
+
+   The detector runs from ota_flow_init(), which is the earliest thing in
+   the wake, and ota_result is one slot. Everything the wake does
+   afterwards — the check's gate, its budget verdict, the second window's
+   download failure — writes that same slot BEFORE the payload is built
+   (net_window.c runs ota_flow_check() and then mqtt_ha_window()). The
+   token is already spent by then, so an overwrite is not a delay, it is
+   the permanent loss of a one-shot event.
+
+   So a revert reported on this boot keeps ota_result for the rest of the
+   boot. The cases below pin both halves of that trade: what the rollback
+   holds on to, and what the displaced verdict does instead (it comes
+   back on the next wake, because it is a level and the condition has not
+   gone anywhere). */
+
+/* The exact collision that made the report losable: a revert detected at
+   init, then an ordinary gate decline in the same wake, ahead of the
+   publish. */
+static void test_a_revert_outranks_the_same_wakes_check_result(void) {
+    check_at_rollover();
+    ota_flow_apply(90, false); /* commits TARGET */
+
+    boot_running(RUNNING); /* the revert */
+    TEST_ASSERT_EQUAL_STRING("rolled_back", stored_result());
+
+    ota_flow_arm(OTA_TRIGGER_ROLLOVER, 12, false); /* flat battery */
+    ota_flow_check(true);
+    TEST_ASSERT_EQUAL_STRING("rolled_back", stored_result());
+}
+
+/* The second window's failure is the other writer, and it lands after
+   the payload has been built rather than before it — but the token is
+   just as spent, so it is held off too. The retry budget is NOT: the
+   attempt still counts, which is what keeps a rollback loop bounded
+   while the operator is reading a rollback report. */
+static void test_a_download_failure_in_the_same_boot_cannot_bury_the_revert(void) {
+    check_at_rollover();
+    ota_flow_apply(90, false); /* commits TARGET, charging fails=1 */
+
+    boot_running(RUNNING);
+    TEST_ASSERT_EQUAL_STRING("rolled_back", stored_result());
+
+    m_finish_ok = false;
+    m_finish_facts.transport_failed = true;
+    check_at_rollover();
+    ota_flow_apply(90, false);
+    TEST_ASSERT_EQUAL_STRING("rolled_back", stored_result());
+    TEST_ASSERT_EQUAL_UINT16(2, stored_fails()); /* the attempt still counted */
+}
+
+/* What the sacrifice actually costs, stated as a test: the displaced
+   verdict is a LEVEL, so the next wake records it again and it reaches
+   HA one day late. gave_up is the sharpest case — it is the verdict a
+   device in a rollback loop reaches, i.e. the one most likely to collide
+   with a revert report. */
+static void test_the_verdict_a_revert_displaces_returns_on_the_next_wake(void) {
+    /* A device whose budget is spent, coming back from a revert. */
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_set_ota_target(TARGET));
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_set_ota_fails(3)); /* at the cap */
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_set_ota_pend_ver(TARGET));
+
+    boot_running(RUNNING);
+    TEST_ASSERT_EQUAL_STRING("rolled_back", stored_result());
+    check_at_rollover();
+    TEST_ASSERT_FALSE(ota_flow_pending());
+    TEST_ASSERT_EQUAL_STRING("rolled_back", stored_result()); /* not gave_up */
+
+    boot_running(RUNNING); /* the next day: the token is spent */
+    check_at_rollover();
+    TEST_ASSERT_EQUAL_STRING("gave_up", stored_result());
+}
+
+/* ---- what was committed is not what the budget is counting ------------
+
+   ota_target is the RETRY BUDGET's key and charge_the_attempt() writes it
+   before every download by design. Reading it as "the version that was
+   committed" is only correct while no attempt happens between a commit
+   and its revert — and an image bad enough to be reverted usually wedges
+   before it certifies, so that attempt is ordinary rather than exotic.
+   Both directions of the error are below. */
+
+/* MISATTRIBUTION. The uncertified boot attempts a third version, which
+   re-points ota_target. Reading ota_target here would call the boot that
+   comes up on the committed image a revert — a rollback reported against
+   a version that was never downloaded, over the top of the genuine
+   failure the attempt recorded. */
+static void test_an_attempt_after_the_commit_does_not_forge_a_revert(void) {
+    check_at_rollover();
+    ota_flow_apply(90, false); /* commits TARGET */
+
+    boot_running(TARGET); /* the new image, not yet certified */
+    TEST_ASSERT_EQUAL_STRING("", stored_result());
+
+    m_body = MANIFEST_NEXT; /* and a newer build is offered straight away */
+    m_finish_ok = false;
+    m_finish_facts.transport_failed = true;
+    check_at_rollover();
+    ota_flow_apply(90, false);
+    TEST_ASSERT_EQUAL_STRING(NEXT, stored_target());     /* the budget moved */
+    TEST_ASSERT_EQUAL_STRING(TARGET, stored_pend_ver()); /* the record did not */
+    TEST_ASSERT_EQUAL_STRING("net", stored_result());
+
+    /* That wake wedged without certifying, and the next boot comes up on
+       the committed image again. Nothing was reverted. */
+    boot_running(TARGET);
+    TEST_ASSERT_EQUAL_STRING("net", stored_result());
+    TEST_ASSERT_EQUAL_STRING(TARGET, stored_pend_ver()); /* still owed a verdict */
+}
+
+/* THE INVERSE, and the worse of the two. ota_policy allows downgrades on
+   purpose — "a downgrade is how a rollback is published" — so the
+   operator's designed recovery is to re-point the manifest at the
+   known-good build. That attempt sets ota_target to the version the
+   device is about to revert TO. Comparing against it would match, the
+   genuine revert would be swallowed, and the token would stay armed. */
+static void test_a_revert_to_the_version_the_manifest_now_names_is_reported(void) {
+    check_at_rollover();
+    ota_flow_apply(90, false); /* commits TARGET */
+
+    boot_running(TARGET);   /* the new image, not yet certified */
+    m_body = MANIFEST_SAME; /* the operator re-points at the good build */
+    m_finish_ok = false;
+    m_finish_facts.transport_failed = true;
+    check_at_rollover();
+    ota_flow_apply(90, false);
+    TEST_ASSERT_EQUAL_STRING(RUNNING, stored_target()); /* the recovery target */
+
+    /* Then the image wedges and the bootloader reverts to it anyway. */
+    boot_running(RUNNING);
+    TEST_ASSERT_EQUAL_STRING("rolled_back", stored_result());
+    TEST_ASSERT_EQUAL_STRING("", stored_pend_ver());
+}
+
+/* ---- the token's own edges --------------------------------------------- */
+
+/* A report must never be written against a token that is still armed:
+   that is the latch, one boot at a time. So the consume comes first AND
+   its answer is believed — a store that refuses the write leaves this
+   boot exactly as it found it, and the next boot detects the same revert
+   and reports it then. Deferred, not lost, and never doubled. */
+static void test_a_token_that_cannot_be_consumed_is_left_for_the_next_boot(void) {
+    check_at_rollover();
+    ota_flow_apply(90, false); /* commits TARGET */
+
+    mock_nvs_fail_writes(1); /* the consume is this boot's first write */
+    boot_running(RUNNING);
+    TEST_ASSERT_EQUAL_STRING("", stored_result());       /* nothing claimed */
+    TEST_ASSERT_EQUAL_STRING(TARGET, stored_pend_ver()); /* still armed */
+
+    boot_running(RUNNING); /* the store recovers */
+    TEST_ASSERT_EQUAL_STRING("rolled_back", stored_result());
+    TEST_ASSERT_EQUAL_STRING("", stored_pend_ver());
+}
+
+/* A committed version the detector cannot read WHOLE is the one case
+   where it knows something happened and cannot name it. Reporting would
+   blame whatever version the operator last saw; leaving it armed would
+   re-ask an unanswerable question on every boot forever. So it is
+   consumed silently — the declared gap, now pinned rather than assumed.
+   Written through the store's own primitive because the bounded setter
+   exists precisely to refuse this value. */
+static void test_an_unreadable_committed_version_is_consumed_unreported(void) {
+    char big[CFG_BOUND_OTA_TARGET_MAX + 8];
+    memset(big, 'v', sizeof(big) - 1);
+    big[sizeof(big) - 1] = '\0';
+    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_SIZE, nvs_config_set_ota_pend_ver(big));
+    TEST_ASSERT_EQUAL(ESP_OK, hal_nvs_write_str(NVS_KEY_OTA_PEND_VER, big));
+
+    boot_running(RUNNING);
+    TEST_ASSERT_EQUAL_STRING("", stored_result());   /* nothing to attribute */
+    TEST_ASSERT_EQUAL_STRING("", stored_pend_ver()); /* and it does not ask again */
+}
+
+/* The other edge of the same key, and the reason it is one key: with no
+   commit outstanding there is no state to interpret and nothing to
+   write. A version change with an empty token is a reflash or a manual
+   downgrade, not a revert — and an ordinary boot costs no flash. */
+static void test_a_boot_with_nothing_committed_reports_nothing_and_writes_nothing(void) {
+    boot_running("9.9.9");
+    TEST_ASSERT_EQUAL_STRING("", stored_result());
+    TEST_ASSERT_EQUAL_INT(0, mock_nvs_write_count(NVS_KEY_OTA_PEND_VER));
 }
 
 /* The reason string is stored and published like any other, so it has to
@@ -1790,5 +1995,14 @@ int main(void) {
     RUN_TEST(test_a_virgin_boot_reports_no_rollback);
     RUN_TEST(test_every_revert_in_a_rollback_loop_is_reported);
     RUN_TEST(test_the_rollback_reason_is_a_persistable_code_that_fits);
+
+    RUN_TEST(test_a_revert_outranks_the_same_wakes_check_result);
+    RUN_TEST(test_a_download_failure_in_the_same_boot_cannot_bury_the_revert);
+    RUN_TEST(test_the_verdict_a_revert_displaces_returns_on_the_next_wake);
+    RUN_TEST(test_an_attempt_after_the_commit_does_not_forge_a_revert);
+    RUN_TEST(test_a_revert_to_the_version_the_manifest_now_names_is_reported);
+    RUN_TEST(test_a_token_that_cannot_be_consumed_is_left_for_the_next_boot);
+    RUN_TEST(test_an_unreadable_committed_version_is_consumed_unreported);
+    RUN_TEST(test_a_boot_with_nothing_committed_reports_nothing_and_writes_nothing);
     return UNITY_END();
 }

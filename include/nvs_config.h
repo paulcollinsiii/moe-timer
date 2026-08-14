@@ -99,8 +99,8 @@ esp_err_t nvs_config_get_ota_on_sync(uint16_t *out);
 esp_err_t nvs_config_set_ota_on_sync(uint16_t on);
 /* Device-owned state (no bulk-document key): last attempt's reason code,
    the version the retry budget is counting against, the consecutive-
-   failure count for that target, the last download's wall time, and
-   whether a committed image is still awaiting certification. The first
+   failure count for that target, the last download's wall time, and which
+   committed image is still awaiting certification. The first
    four feed the stat payload (ota_flow_stat reads them at PUBLISH time);
    a different target resets the count.
 
@@ -119,12 +119,18 @@ esp_err_t nvs_config_set_ota_fails(uint16_t fails);
    timing. */
 esp_err_t nvs_config_get_ota_dl_ms(uint32_t *out);
 esp_err_t nvs_config_set_ota_dl_ms(uint32_t ms);
-/* 1 = an image was committed and has not yet been certified. The ONLY
-   durable trace an OTA reboot leaves behind, and the signal a rollback is
-   detected from — see ota_flow.c. Not published; the reason string it
-   produces is. */
-esp_err_t nvs_config_get_ota_pend(uint16_t *out);
-esp_err_t nvs_config_set_ota_pend(uint16_t pending);
+/* The version an OTA reboot committed and that has not been certified yet;
+   "" = nothing outstanding. The ONLY durable trace an OTA reboot leaves
+   behind, and the signal a rollback is detected from — see ota_flow.c.
+   Deliberately NOT ota_target: that key is the retry budget's, and it is
+   re-pointed before every attempt. Not published; the reason string it
+   produces is.
+
+   Buffer >= CFG_BOUND_OTA_TARGET_MAX, and for the same reason ota_target
+   needs one: a short read reports no match, which here would forge a
+   rollback rather than merely miss one.  */
+esp_err_t nvs_config_get_ota_pend_ver(char *buf, size_t len);
+esp_err_t nvs_config_set_ota_pend_ver(const char *ver);
 
 /* Extra-timer definitions from HA (timer_defs_install falls back to the
    Kconfig table when absent). Version/size drift reads as stale. */

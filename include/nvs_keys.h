@@ -55,9 +55,18 @@
    anything can publish it and reads back 0 forever. See ota_flow.c's
    stop_clock(). Published one wake later, like ota_result. */
 #define NVS_KEY_OTA_DL_MS "ota_dl_ms"
-/* 1 = an image was committed and has NOT yet been certified. Written just
-   before the OTA reboot, cleared either by the certification that follows
-   it or by the boot that finds the device running something else — which
-   is what a rollback looks like from inside the firmware. Consumed on
-   read, so it reports one revert once and cannot latch. */
-#define NVS_KEY_OTA_PEND "ota_pend"
+/* The version that was COMMITTED and has not yet been certified — empty
+   when there is nothing outstanding. Written just before the OTA reboot,
+   cleared either by the certification that follows it or by the boot that
+   finds the device running something else, which is what a rollback looks
+   like from inside the firmware. Consumed on read, so it reports one
+   revert once and cannot latch.
+
+   One key rather than a flag plus a version, because the two would be one
+   fact stored twice: "armed with no version" and "a version with nothing
+   armed" are both unrepresentable here, and the second of those was a
+   real defect — the detector used to borrow NVS_KEY_OTA_TARGET, which is
+   the RETRY BUDGET's key and is re-pointed by charge_the_attempt() before
+   any download, so an attempt made between a commit and its revert moved
+   the record of what had been committed. See ota_flow.c. */
+#define NVS_KEY_OTA_PEND_VER "ota_pend_ver"
