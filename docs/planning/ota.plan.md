@@ -159,6 +159,10 @@ keeping with how this project already re-arms `-Werror=unused-function` rather
 than trusting review to notice. LVGL is the largest single library in the
 image (233 objects); one more Montserrat font is ~20–40 KB.
 
+**Superseded on the verb.** Task 15 below landed this as a check that *fails*
+the build, not one that warns. The reasoning is recorded there; the short
+version is that a warning needs a reader and this repo has no CI to be one.
+
 ---
 
 ## Version scheme — there is not one today, and OTA needs one
@@ -1966,7 +1970,42 @@ deserve their own commit and their own review:
     and could only produce the unattributable report the detector already
     declines to write.
 
-15. Build-size guard (warn at 85 % slot occupancy).
+15. **Landed.** Build-size guard at 85 % slot occupancy —
+    `tools/check_slot_size.py`, wired from the project root `CMakeLists.txt`
+    as a custom target `app` depends on, so it runs on every build including
+    the no-op rebuild. It **fails** the build; this paragraph originally said
+    *warn*. A printed warning has one reader, whoever happens to be watching
+    that build, and this repo has no CI to catch what they miss; a threshold
+    you must raise in a commit, with a reason, turns silent erosion into a
+    reviewed decision. `MAGTAG_MAX_SLOT_PCT` is that documented override and
+    the failure message names it, the frozen slot, and the byte figures.
+
+    Scope is the app slot only. A matching bootloader guard was considered
+    and declined. It is worth recording what is therefore unguarded: the
+    bootloader sits at 22,720 B of 28,672 (5,952 B, 21 % free) and moves only
+    when ESP-IDF or a bootloader Kconfig moves it — task 13's rollback flag
+    cost 80 B of it — so nothing this repo commits erodes it silently, which
+    is the specific failure the app-slot guard exists to catch.
+
+    The comparison is integer cross-multiplication (`image * 100 > slot *
+    pct`), not a float percentage: `70000 / 1000000 * 100.0` is
+    7.000000000000001, so the float form fails a build sitting exactly on its
+    own threshold. The slot size is read from the generated partition-table
+    binary rather than restated, so `partitions.csv` stays the only place it
+    is written down. `test/test_check_slot_size/` (29 cases) drives both
+    sides of the boundary with synthetic sizes — the failure branch is
+    otherwise unreachable without growing the image by tens of KB.
+
+    **Measured at landing:** app image **1,495,552 B**, **81.5 %** of the
+    1,835,008 B slot, **64,204 B** left under the guard (IDF's own check
+    still reads 18 % free). That is **+320 B** over task 14's recorded
+    1,495,232 B, and all of it is task 13's
+    `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE`: no source changed, and this is
+    the first build after `sdkconfig.defaults` gained the symbol. Task 13
+    measured that flag at +384 B against its own baseline; the difference is
+    which code it is compiled against, not a discrepancy. The bootloader
+    confirms it independently at 0x58c0 = 22,720 B, exactly the rollback-**on**
+    figure in the table above.
 16. Hardware smoke test (below).
 17. Update `docs/architecture.md`: module table, layer lists, a subsystem note
     for the two-window design and the timeout/retry mechanism, and the new

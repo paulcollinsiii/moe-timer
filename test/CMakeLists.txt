@@ -127,3 +127,20 @@ add_host_test(test_ota_flow
     EXTRA_SRCS ${CMAKE_CURRENT_SOURCE_DIR}/../lib/cJSON/cJSON.c
     EXTRA_INCLUDES ${CMAKE_CURRENT_SOURCE_DIR}/../lib/cJSON
     EXTRA_LIBS m)
+
+# ---- the one suite that is not C, and why ----
+#
+# tools/check_slot_size.py is the build-size guard wired into the project
+# root CMakeLists.txt. It is a build-system tool, not firmware: add_host_test
+# cannot build it and Unity cannot call it. The alternative -- exercising the
+# guard only by building the firmware -- can never reach its failure branch,
+# because tripping it for real would mean growing the image by tens of KB.
+# So it is registered directly with add_test() and driven by unittest, which
+# ships with the Python the ESP-IDF toolchain already requires.
+#
+# It stays in the same ctest sweep as the C suites on purpose: a guard whose
+# tests live somewhere separate is a guard whose tests stop being run.
+find_package(Python3 REQUIRED COMPONENTS Interpreter)
+add_test(NAME test_check_slot_size
+         COMMAND ${Python3_EXECUTABLE}
+                 ${CMAKE_CURRENT_SOURCE_DIR}/test_check_slot_size/test_check_slot_size.py)
