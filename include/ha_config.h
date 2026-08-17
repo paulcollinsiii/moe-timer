@@ -7,8 +7,14 @@
 /* Editable Home Assistant config entities. A single field registry drives
    three things — MQTT-discovery payloads (number/text/switch), the current-
    value state JSON (magtag/<id>/cfg), and per-field command apply
-   (magtag/<id>/set/<key>). Pure over nvs_config + the shared validators;
-   host-tested. No cJSON — values arrive from MQTT as strings. */
+   (magtag/<id>/set/<key>). Over nvs_config + the shared validators, and —
+   since BUG-8 — over the timer module's INSTALLED slot table: when the
+   timer-defs blob cannot be read, the state JSON and the discovery
+   fingerprint fall back to whatever timer_defs_install() put in RAM this
+   boot, so this is not a pure function of NVS. The per-field timer writes
+   deliberately do NOT use that fallback; they NAK instead (err "nodefs"),
+   because a table nobody stored must not be persisted as though someone
+   had. Host-tested. No cJSON — values arrive from MQTT as strings. */
 
 #ifdef __cplusplus
 extern "C" {

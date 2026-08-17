@@ -1,4 +1,7 @@
-/* Apply an HA config document to NVS. Pure over nvs_config; host-tested. */
+/* Apply an HA config document to NVS. Pure over nvs_config and the shared
+   validators, plus one read of the compile-time timer table
+   (timer_defs_compiled) for the bottom rung of apply_timers()' optional-key
+   ladder. Host-tested. */
 #include "config_apply.h"
 
 #include <stdio.h>
@@ -9,7 +12,7 @@
 #include "config_validate.h" /* config_is_iso_date */
 #include "nvs_config.h"
 #include "quiet_hours.h" /* quiet_hhmm_valid */
-#include "timer.h"       /* TIMER_EXTRA_SLOTS */
+#include "timer.h"       /* TIMER_EXTRA_SLOTS, timer_defs_compiled */
 #include "tones.h"       /* tones_names for the tone selects */
 
 /* ---- error accumulator: builds the ack "errors" list ---- */
@@ -224,34 +227,87 @@ static void apply_timers(const cJSON *root, err_acc_t *e) {
         }
         snprintf(defs.defs[slot].name, sizeof(defs.defs[slot].name), "%s", name->valuestring);
         defs.defs[slot].min = min->valueint;
-        /* Optional keys: ABSENT MEANS UNCHANGED for a slot that already has
-           a definition, and false for one this document is defining for the
-           first time.
+        /* Optional keys (`reload`, `break`) resolve down a three-tier
+           ladder, evaluated per FIELD, not per slot:
 
-           It used to mean false unconditionally, on the argument that a
-           wrong `break: true` would let a screen activity run during (and
-           drain) a break. That argument is right for a NEW slot and is kept
-           for one — but it does not justify overriding a value the operator
-           already set, and doing so was a live defect: `break` is settable
-           from HA's per-timer switch yet is absent from the documented
-           `timers` schema, so every application of a documentation-shaped
-           document silently cleared it. The retained set/ command that would
+               this document  >  the stored blob  >  menuconfig
+
+           the document's key if it carries one; otherwise the stored value
+           for a slot that already HAS a definition; otherwise the
+           compile-time value for this slot index. There is no fourth tier:
+           a slot menuconfig does not configure has 0 in both flags anyway,
+           so "empty defaults" is what the bottom rung already yields there.
+
+           Tier 1 over tier 2 is BUG-6. It used to be "absent means false"
+           unconditionally, which silently cleared a flag the operator had
+           set from the per-timer switch every time a document that did not
+           mention it was applied — and the retained set/ command that would
            have restored it is consumed on apply (mqtt_ha.c), so nothing
-           healed it. See BUG-6 in docs/planning/refactor.bugdiscoveries.md.
+           healed it. (When BUG-6 was written `break` was missing from the
+           documented `timers` schema, which is why documentation-shaped
+           documents omitted it. docs/home_assistant.md documents both keys
+           now, so an operator who states `break` explicitly gets durable
+           intent — it survives an NVS erase and tier 3 never applies to
+           that slot. Tier 3 is the answer for slots the document does not
+           speak to.) See docs/planning/refactor.bugdiscoveries.md.
 
-           Caveat worth knowing: "already has a definition" is by SLOT, not
-           by name, so renaming a slot in the document carries its flags
-           over. Repurposing slot 3 from a chore to a screen activity must
-           therefore say `"break": false` explicitly rather than rely on
-           omission. Stated here because the safe direction for this field is
-           false, and this rule does not always pick it. */
+           Tier 2 over tier 3 keeps a value someone chose in HA above one
+           chosen at build time.
+
+           The menuconfig tier is the one that keeps getting lost, so, twice
+           over: it is a DEFAULT CONSULTED IN PLACE, never a value written
+           to flash to earn standing. Before BUG-8 the ladder appeared to
+           work only because timer_defs_install() wrote the Kconfig table to
+           NVS at boot, which made `existed` true and put the compile-time
+           value in `prev` — laundering a build-time default into tier-2
+           storage, where it was indistinguishable from an operator's choice
+           and got published to HA as one. THAT is BUG-8. 8a4b18f removed
+           the laundering and took the tier with it, collapsing the ladder
+           to `document > empty` and dropping a deliberate menuconfig
+           break-eligibility on the first document applied after an NVS
+           erase. The timer_defs_compiled() reads below restore the tier
+           without the forgery. Reinstating the boot write to get it back
+           would reopen BUG-8; deleting these reads would flatten the ladder
+           again.
+
+           A menuconfig value that reaches flash THROUGH this function is
+           not that masquerade: the document is authoritative, and a later
+           document omitting the key then preserving it via tier 2 is the
+           intended outcome, not a regression.
+
+           Caveat, and it now has teeth: "already has a definition" is by
+           SLOT INDEX, not by name, so a document that repurposes a slot
+           carries the previous activity's flags over — and on a first
+           definition it carries MENUCONFIG's flags over. Slots 1 and 2 ship
+           break-eligible in this project's sdkconfig, so repurposing either
+           to a screen activity while omitting `break` now inherits `true`
+           and lets that activity run during (and drain) a Screen Break,
+           where it used to resolve to false. Repurposing a slot index to a
+           different KIND of activity must say `"break": false` explicitly
+           rather than rely on omission. Same for `reload`, whose menuconfig
+           help warns that a non-break-eligible chore should not be
+           reloadable.
+
+           Accepted consequence, decided deliberately rather than stumbled
+           into: `break` is settable from the per-timer switch, and that
+           retained set/ command is consumed on apply. So a "break off" that
+           exists ONLY as a switch flip — never written into the retained
+           document — does not survive an NVS erase: the blob is gone, the
+           command was eaten, the document says nothing, and menuconfig's
+           `y` wins. The operator accepted that price for ranking menuconfig
+           above empty; the fix if it bites is `"break": false` in the
+           document, not deleting the tier. */
         bool existed = have_prev && prev.defs[slot].name[0] != '\0';
+        /* Tier 3. NULL only if TIMER_EXTRA_SLOTS outgrew the Kconfig table. */
+        const timer_def_t *ct = timer_defs_compiled(slot + 1);
+        uint8_t ct_reload = (ct != NULL && ct->reloadable) ? 1 : 0;
+        uint8_t ct_break = (ct != NULL && ct->break_eligible) ? 1 : 0;
         defs.defs[slot].reload = (reload != NULL) ? (cJSON_IsTrue(reload) ? 1 : 0)
                                  : existed        ? prev.defs[slot].reload
-                                                  : 0;
+                                                  : ct_reload;
         defs.defs[slot].break_eligible = (brk != NULL) ? (cJSON_IsTrue(brk) ? 1 : 0)
                                          : existed     ? prev.defs[slot].break_eligible
-                                                       : 0;
+                                                       : ct_break;
         slot++;
     }
     if (nvs_config_set_timer_defs(&defs) != ESP_OK)

@@ -92,6 +92,15 @@ const timer_def_t *timer_slot_def(int slot) {
     return &s_defs[slot];
 }
 
+/* Same table, without the enablement filter: a slot that has a name but no
+   duration is a definition that exists and is not yet runnable, and the
+   callers that mirror the stored table need to see it. See timer.h. */
+const timer_def_t *timer_slot_def_raw(int slot) {
+    if (slot <= 0 || slot >= s_defs_count)
+        return NULL; /* Screen (0) or out of range; s_defs_count is 0 when unset */
+    return &s_defs[slot];
+}
+
 const timer_def_t *timer_active_def(void) {
     int slot = g_rtc_state.active_slot;
     if (slot == 0 || slot >= s_defs_count)

@@ -20,7 +20,11 @@
 #define ESP_LOGW(tag, ...) ((void)(tag))
 #endif
 
-static const char *TAG = "timer_defs";
+/* File-scoped, and deliberately not plain `TAG`: ha_config.c has its own,
+   and since BUG-8 the two files are close enough that a single test TU
+   compiles both (test_timer_defs). Two `static const char *TAG` at file
+   scope in one translation unit is a redefinition. */
+static const char *TAG_TIMER_DEFS = "timer_defs";
 
 /* Kconfig emits bool symbols only when =y; default the rest to 0 so the
    table can reference every slot unconditionally. */
@@ -98,9 +102,25 @@ static const timer_def_t s_kconfig_defs[TIMER_SLOT_COUNT] = {
 static char s_names[TIMER_SLOT_COUNT][16];
 static timer_def_t s_nvs_defs[TIMER_SLOT_COUNT];
 
+/* The menuconfig table, for callers that need the DEFAULT rather than the
+   installed or the stored one. config_apply.c's apply_timers() resolves an
+   optional key that a retained document omits for a slot it is defining for
+   the FIRST time from here. Exposed rather than duplicated because
+   sdkconfig.h is only reachable from this file. */
+const timer_def_t *timer_defs_compiled(int slot) {
+    if (slot < 0 || slot >= TIMER_SLOT_COUNT)
+        return NULL;
+    return &s_kconfig_defs[slot];
+}
+
+/* See the ESP_LOGW below: one warning per boot, not one per install. */
+static bool s_no_blob_warned;
+
 void timer_defs_install(void) {
     nvs_timer_defs_blob_t blob;
-    if (nvs_config_get_timer_defs(&blob) != ESP_OK) {
+    if (nvs_config_get_timer_defs(&blob) == ESP_OK) {
+        s_no_blob_warned = false; /* a later loss warns about it again */
+    } else {
         /* No readable HA-managed blob: run THIS BOOT on the Kconfig table,
            but do not persist it — BUG-8. Writing it here made an invented
            value indistinguishable from an operator's: apply_timers() then
@@ -110,11 +130,29 @@ void timer_defs_install(void) {
            "something authoritative wrote it", so the first retained config
            document is correctly recognised as a first-time definition.
 
+           What the boot write DID get right, by the wrong mechanism, is
+           that a menuconfig value outranks an empty default: laundering the
+           Kconfig table into NVS made apply_timers() see it as tier-1
+           stored state. That precedence is restored honestly in
+           apply_timers() itself, via timer_defs_compiled() below -- as a
+           default consulted in place, with no write to flash to earn its
+           standing. Do not reinstate the write to get it back.
+
            ha_config.c's load_defs() covers the readers that used to depend
            on this write (the discovery hash and the cfg state JSON): they
-           now fall back to this same installed table via timer_slot_def(),
-           which is where mqtt_ha.c already gets the per-timer entities. */
-        ESP_LOGW(TAG, "no readable timer-defs blob; running on the compile-time table (not persisted)");
+           now fall back to this same installed table via
+           timer_slot_def_raw(), the unfiltered form of the accessor
+           mqtt_ha.c already uses for the per-timer entities. */
+        /* Once per boot, not once per call: main.c installs at wake and
+           net_apply's reconcile_defs() re-installs after EVERY network
+           window, so an unconditional warn is a per-window log line on a
+           device that legitimately has no blob. The latch clears on a
+           successful read, so losing the blob later still says so. Statics
+           do not survive deep sleep, so "per boot" is "per wake". */
+        if (!s_no_blob_warned) {
+            ESP_LOGW(TAG_TIMER_DEFS, "no readable timer-defs blob; running on the compile-time table (not persisted)");
+            s_no_blob_warned = true;
+        }
         memset(&blob, 0, sizeof(blob));
         blob.version = TIMER_DEFS_BLOB_VERSION;
         for (int i = 0; i < TIMER_EXTRA_SLOTS; i++) {

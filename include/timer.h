@@ -207,6 +207,23 @@ int timer_active_slot(void);
 const timer_def_t *timer_active_def(void);
 /* Definition of any slot; NULL for slot 0, disabled, or out of range. */
 const timer_def_t *timer_slot_def(int slot);
+/* The installed definition for a slot WHETHER OR NOT it is enabled; NULL
+   only for slot 0 and out of range. timer_slot_def() hides a slot that has
+   a name but no duration yet, which is a real intermediate state (HA's
+   CFG_TNAME writes the name; CFG_TMIN follows in a later window). Callers
+   that mirror the stored table rather than the running timers -- the cfg
+   state JSON and the discovery fingerprint -- must see that slot, or they
+   publish a blank name and a fingerprint that flips as the blob becomes
+   readable. Everything that decides whether a timer can RUN wants
+   timer_slot_def(). */
+const timer_def_t *timer_slot_def_raw(int slot);
+/* The compile-time (menuconfig) definition for a slot, regardless of what
+   is installed or stored; NULL out of range. This is the DEFAULT source for
+   a field a retained config document does not mention -- see apply_timers()
+   in config_apply.c. It is deliberately not the installed table: the
+   installed table is whatever this boot happens to be running, which for a
+   device that has a blob is the operator's own edits. */
+const timer_def_t *timer_defs_compiled(int slot);
 /* Slot index for a timer name; 0 for "Screen"/NULL/"", -1 if no enabled
    extra slot matches (HA grant targeting). */
 int timer_slot_by_name(const char *name);

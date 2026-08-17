@@ -5,11 +5,18 @@
 /* Single-TU: the editable-config applier over mock NVS + real accessors
    and validators. No cJSON — values arrive as strings (from MQTT).
 
-   timer.c is here because load_defs() falls back to timer_slot_def() when
-   the blob cannot be read (BUG-8): the real slot table, not a stub, so the
-   fallback is exercised against the same enablement rule the device uses.
-   Tests that do not call timer_set_defs() see an empty table, which makes
-   the fallback identical to the zeroed blob it replaced. */
+   timer.c is here because load_defs() falls back to timer_slot_def_raw()
+   when the blob cannot be read (BUG-8): the real slot table, not a stub, so
+   the fallback is exercised against the same table the device runs on.
+   Tests that do not call timer_set_defs() see an empty table.
+
+   setUp() stores an EMPTY-BUT-PRESENT timer-defs table, because the three
+   read-modify-write cases now NAK when there is no readable one (a blob
+   nobody stored must not be persisted as though somebody had). Most cases
+   here are about validating and persisting a field, not about provenance,
+   and an empty stored table gives them exactly the blob the old
+   zeroed-fallback gave them. The cases that ARE about provenance clear it
+   with mock_nvs_reset() or make it unreadable, and say so. */
 // clang-format off
 #include "mock_hal_nvs.c"
 #include "mock_hal_time.c"
@@ -27,9 +34,21 @@
 
 static void seed_blob(void); /* defined with the Phase B tests below */
 
+/* A stored table that defines no slots: "somebody wrote a table, and it is
+   empty" — which is what every pre-BUG-8 case implicitly assumed, since
+   boot used to write one unconditionally. Distinct from "no table at all",
+   which the provenance cases below use. */
+static void store_empty_table(void) {
+    nvs_timer_defs_blob_t b;
+    memset(&b, 0, sizeof(b));
+    b.version = TIMER_DEFS_BLOB_VERSION;
+    nvs_config_set_timer_defs(&b);
+}
+
 void setUp(void) {
     mock_nvs_reset();
     timer_set_defs(NULL, 0); /* s_defs is a static: clear it like the NVS */
+    store_empty_table();
 }
 void tearDown(void) {}
 
@@ -880,14 +899,25 @@ void test_discovery_hash_tolerates_an_unterminated_slot_name(void) {
    timer_defs_install() no longer materializes the blob at boot, so
    "unreadable" is the ordinary state of a device whose NVS was erased —
    not an exotic error. load_defs() therefore falls back to the table the
-   boot installed rather than to zeros, and all three of its callers are
-   pinned below. */
+   boot installed rather than to zeros. That fallback is the right answer
+   for the two READ-ONLY callers and the wrong answer for the three that
+   WRITE, so load_defs() reports which it handed back and the writers NAK.
+   All five are pinned below. */
 
 /* The table timer_defs_install() would have left in place. File scope
    because timer.c keeps the pointers, not copies. */
 static const timer_def_t INSTALLED[TIMER_SLOT_COUNT] = {
     {"Screen", 0, false, false}, {"Piano", 15 * 60, true, true}, {"Meditation", 10 * 60, false, true},
     {"", 0, false, false},       {"", 0, false, false},
+};
+
+/* Same, plus slot 3 mid-way through the documented two-edit flow: named in
+   one window, minutes still unset. timer_slot_def() hides this slot (it
+   gates on name AND duration); timer_slot_def_raw(), which load_defs()
+   uses, does not. */
+static const timer_def_t INSTALLED_NAME_ONLY[TIMER_SLOT_COUNT] = {
+    {"Screen", 0, false, false},  {"Piano", 15 * 60, true, true}, {"Meditation", 10 * 60, false, true},
+    {"Reading", 0, false, false}, {"", 0, false, false},
 };
 
 /* Store a blob the getter refuses. A stale layout version is the
@@ -903,22 +933,75 @@ static void store_unreadable_blob(void) {
     TEST_ASSERT_NOT_EQUAL(ESP_OK, nvs_config_get_timer_defs(&probe));
 }
 
-/* The caller with teeth. A read-modify-write on an unreadable blob used to
-   persist ZEROES for every slot the edit did not touch, so one transient
-   failure while the operator nudged timer2_min wiped timer1 outright. */
-void test_edit_with_unreadable_blob_keeps_the_other_slots(void) {
+/* The caller with teeth, and the reason load_defs() reports provenance.
+
+   A read-modify-write on an unreadable blob first persisted ZEROES for
+   every slot the edit did not touch (one transient failure while the
+   operator nudged timer2_min wiped timer1 outright), and then — once the
+   fallback became the installed table — persisted the BOOT SNAPSHOT for
+   them instead. Both are the same mistake: writing a table that was not
+   read. The device must refuse, and say so. */
+void test_edit_with_unreadable_blob_is_refused(void) {
     timer_set_defs(INSTALLED, TIMER_SLOT_COUNT);
     store_unreadable_blob();
+    int writes_before = mock_nvs_write_count(NVS_KEY_TIMER_DEFS);
     char ack[128];
-    TEST_ASSERT_EQUAL(HA_CFG_OK, ha_config_set("timer2_min", "25", ack, sizeof(ack)));
+    ha_cfg_result_t r = ha_config_set("timer2_min", "25", ack, sizeof(ack));
+    /* Nothing written: the unreadable blob is still whatever it was. This
+       first, so a regression reports the write rather than the ack. */
+    TEST_ASSERT_EQUAL_INT(writes_before, mock_nvs_write_count(NVS_KEY_TIMER_DEFS));
+    TEST_ASSERT_EQUAL(HA_CFG_REJECTED, r);
+    TEST_ASSERT_NOT_NULL(strstr(ack, "\"ok\":false"));
+    TEST_ASSERT_NOT_NULL(strstr(ack, "\"err\":\"nodefs\""));
+}
+
+/* All four slot-bound kinds take the same door, so all four must NAK —
+   a single-field name edit is the one the operator reaches for first. */
+void test_every_timer_field_is_refused_without_a_stored_table(void) {
+    timer_set_defs(INSTALLED, TIMER_SLOT_COUNT);
+    mock_nvs_reset(); /* no table at all: a device whose NVS was erased */
+    const char *keys[4] = {"timer1_name", "timer1_min", "timer1_reload", "timer1_break"};
+    const char *vals[4] = {"Cello", "25", "ON", "ON"};
+    ha_cfg_result_t r[4];
+    char acks[4][128];
+    for (int i = 0; i < 4; i++)
+        r[i] = ha_config_set(keys[i], vals[i], acks[i], sizeof(acks[i]));
+    /* The masquerade never happened: no table was invented. Asserted before
+       the acks so a regression reports the invented table, which is the
+       defect, rather than the ack, which is its symptom. */
+    TEST_ASSERT_EQUAL_INT(0, mock_nvs_write_count(NVS_KEY_TIMER_DEFS));
+    nvs_timer_defs_blob_t b;
+    TEST_ASSERT_NOT_EQUAL(ESP_OK, nvs_config_get_timer_defs(&b));
+    for (int i = 0; i < 4; i++) {
+        TEST_ASSERT_EQUAL_MESSAGE(HA_CFG_REJECTED, r[i], keys[i]);
+        TEST_ASSERT_NOT_NULL_MESSAGE(strstr(acks[i], "\"err\":\"nodefs\""), keys[i]);
+    }
+}
+
+/* The fallback is a BOOT snapshot, and the blob is rewritten mid-window
+   without re-installing (net_apply's reconcile_defs runs after the window).
+   So synthesizing from it does not merely invent bystanders, it REVERTS an
+   edit the operator made minutes earlier — and used to ack that ok:true. */
+void test_a_refused_edit_does_not_revert_an_earlier_one(void) {
+    timer_set_defs(INSTALLED, TIMER_SLOT_COUNT);
+    char ack[128];
+    TEST_ASSERT_EQUAL(HA_CFG_OK, ha_config_set("timer1_name", "Cello", ack, sizeof(ack)));
+    /* Now the blob stops being readable, content intact (version drift). */
     nvs_timer_defs_blob_t b;
     TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_timer_defs(&b));
-    TEST_ASSERT_EQUAL_INT32(25, b.defs[1].min);        /* the edit landed */
-    TEST_ASSERT_EQUAL_STRING("Piano", b.defs[0].name); /* the bystander survived */
-    TEST_ASSERT_EQUAL_INT32(15, b.defs[0].min);
-    TEST_ASSERT_EQUAL_UINT8(1, b.defs[0].reload);
-    TEST_ASSERT_EQUAL_UINT8(1, b.defs[0].break_eligible);
-    TEST_ASSERT_EQUAL_STRING("Meditation", b.defs[1].name);
+    b.version = (uint8_t)(TIMER_DEFS_BLOB_VERSION - 1);
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_set_timer_defs(&b));
+    ha_cfg_result_t r = ha_config_set("timer2_min", "30", ack, sizeof(ack));
+    /* Read past the version gate: the stored bytes must still say Cello, not
+       the "Piano" the boot table would have written back over them. Asserted
+       BEFORE the result so a regression reports the data loss rather than
+       stopping at the ack. */
+    nvs_timer_defs_blob_t raw;
+    size_t len = sizeof(raw);
+    TEST_ASSERT_EQUAL(ESP_OK, hal_nvs_read_blob(NVS_KEY_TIMER_DEFS, &raw, &len));
+    TEST_ASSERT_EQUAL_STRING("Cello", raw.defs[0].name);
+    TEST_ASSERT_EQUAL(HA_CFG_REJECTED, r);
+    TEST_ASSERT_NOT_NULL(strstr(ack, "\"err\":\"nodefs\""));
 }
 
 /* The cfg state drives HA's text/number/switch controls. Empty names here
@@ -962,6 +1045,43 @@ void test_discovery_hash_falls_back_to_the_installed_table(void) {
     mock_nvs_reset();
     timer_set_defs(NULL, 0);
     TEST_ASSERT_NOT_EQUAL(from_installed, ha_config_discovery_hash("Kitchen", "1.5.0"));
+}
+
+/* A slot that is NAMED but has no minutes yet is the middle of the two-edit
+   flow this file documents, and timer_slot_def() hides it. Published
+   through the filtered accessor, the fallback blanked the operator's name
+   in HA's text control — on a device whose only fault was an unreadable
+   blob. */
+void test_state_json_shows_a_name_only_slot(void) {
+    timer_set_defs(INSTALLED_NAME_ONLY, TIMER_SLOT_COUNT);
+    store_unreadable_blob();
+    char buf[HA_CONFIG_STATE_MAX];
+    ha_config_state_json(buf, sizeof(buf));
+    TEST_ASSERT_NOT_NULL(strstr(buf, "\"timer3_name\":\"Reading\""));
+    TEST_ASSERT_NOT_NULL(strstr(buf, "\"timer3_min\":0"));
+}
+
+/* Same slot, the other read-only caller. The fingerprint must not depend on
+   whether the blob happened to be readable this window: it folds the name,
+   so hiding a name-only slot moved the hash and cost a full retained
+   discovery republish — then another one when the read next succeeded,
+   which is precisely the waste this fallback exists to prevent. */
+void test_discovery_hash_is_stable_for_a_name_only_slot(void) {
+    timer_set_defs(INSTALLED_NAME_ONLY, TIMER_SLOT_COUNT);
+    store_unreadable_blob();
+    uint16_t from_installed = ha_config_discovery_hash("Kitchen", "1.5.0");
+
+    mock_nvs_reset();
+    nvs_timer_defs_blob_t b;
+    memset(&b, 0, sizeof(b));
+    b.version = TIMER_DEFS_BLOB_VERSION;
+    snprintf(b.defs[0].name, sizeof(b.defs[0].name), "Piano");
+    b.defs[0].min = 15;
+    snprintf(b.defs[1].name, sizeof(b.defs[1].name), "Meditation");
+    b.defs[1].min = 10;
+    snprintf(b.defs[2].name, sizeof(b.defs[2].name), "Reading"); /* min still 0 */
+    nvs_config_set_timer_defs(&b);
+    TEST_ASSERT_EQUAL_UINT16(ha_config_discovery_hash("Kitchen", "1.5.0"), from_installed);
 }
 
 int main(void) {
@@ -1038,8 +1158,12 @@ int main(void) {
     RUN_TEST(test_discovery_hash_separates_zero_and_nonzero_duration);
     RUN_TEST(test_discovery_hash_ignores_a_duration_change_that_keeps_it_enabled);
     RUN_TEST(test_discovery_hash_tolerates_an_unterminated_slot_name);
-    RUN_TEST(test_edit_with_unreadable_blob_keeps_the_other_slots);
+    RUN_TEST(test_edit_with_unreadable_blob_is_refused);
+    RUN_TEST(test_every_timer_field_is_refused_without_a_stored_table);
+    RUN_TEST(test_a_refused_edit_does_not_revert_an_earlier_one);
     RUN_TEST(test_state_json_falls_back_to_the_installed_table);
     RUN_TEST(test_discovery_hash_falls_back_to_the_installed_table);
+    RUN_TEST(test_state_json_shows_a_name_only_slot);
+    RUN_TEST(test_discovery_hash_is_stable_for_a_name_only_slot);
     return UNITY_END();
 }

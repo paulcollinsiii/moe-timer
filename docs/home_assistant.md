@@ -102,11 +102,25 @@ confirmed value to `magtag/<id>/cfg` so the control reflects reality.
   edit takes effect on the device's next wake (~≤1 min or a button press);
   allocations / quiet hours / break settings apply live; timezone at the
   next boot.
-- **Timer defaults are seeded once.** On first boot the `MAGTAG_TIMER<n>_*`
-  menuconfig values are copied into NVS and become the editable source of
-  truth. After that, HA edits (or a bulk-config `timers` array) win, and
-  changing the menuconfig defaults no longer affects an already-provisioned
-  device — erase NVS (or re-flash with NVS erased) to reseed from Kconfig.
+- **Timer defaults are a fallback, not a seed.** The `MAGTAG_TIMER<n>_*`
+  menuconfig values are what the device runs when NVS holds no timer table,
+  but boot does **not** copy them into NVS — a stored table means somebody
+  chose it, and inventing one made a build-time default indistinguishable
+  from your edit. The table is created the first time you send a
+  bulk-config `timers` array; after that, HA edits win, and changing the
+  menuconfig defaults no longer affects a provisioned device (erase NVS to
+  go back to them).
+  One consequence: until that table exists, the per-timer **controls**
+  (name / minutes / reloadable / break eligible) have nothing to edit and
+  NAK with `{"key":"timer1_min","ok":false,"err":"nodefs"}` rather than
+  persist a table you never chose. They start working the moment a `timers`
+  document has been applied — and since the device applies the retained
+  config document before the retained `set/` commands in the same window,
+  that is normally the same window. A rejected `set/` command is *not*
+  cleared, so it is retried on the next window and the edit is not lost.
+  The same NAK appears if a stored table cannot be read (version drift or a
+  bad read): the device refuses to overwrite a table it could not load,
+  rather than writing a guess over it.
 - **Firmware updates:** **OTA manifest URL** (Text) is the https endpoint
   the device checks for a new build; **OTA check on sync** (Switch) makes
   it also check during a Button D full sync, on top of the daily
@@ -215,17 +229,32 @@ so a shortened list never reads as "everything else was fine".
   take effect on the device's next boot/operation (the running slot is
   never disturbed mid-run).
 - Within a `timers` entry, `name` and `min` are **required**; `reload` and
-  `break` are optional and **an omitted one leaves the stored value alone**.
-  That matters because both are also settable from the per-timer switches
-  above: omitting them here will not undo a switch you flipped in HA. To
-  turn one off from the document, say so explicitly (`"break": false`) —
-  omission is not an assertion of false.
-  Two caveats. A slot the document is defining for the **first time** has no
-  stored value to keep, so an omitted flag is false there (the safe default:
-  a wrong `break: true` would let a screen activity run during, and drain, a
-  break). And "already defined" is tracked **by slot, not by name** — so
-  repurposing slot 3 from a chore to a screen activity should set
-  `"break": false` rather than rely on the rename.
+  `break` are optional, and each one resolves down a ladder, **per field**:
+
+      this document  >  the per-timer switch (stored)  >  menuconfig
+
+  So an omitted flag **leaves the stored value alone** — omitting them here
+  will not undo a switch you flipped in HA — and if there is no stored value
+  either, it falls back to the compile-time `MAGTAG_TIMER<n>_RELOADABLE` /
+  `MAGTAG_TIMER<n>_BREAK_ELIGIBLE` chosen in `menuconfig` for that slot.
+  Omission is never an assertion of false; to turn one off from the
+  document, say so explicitly (`"break": false`).
+  Two consequences worth knowing.
+  **The menuconfig rung is what survives an NVS erase.** The per-timer
+  switch stores its value in the erased blob and its retained `set/` command
+  is consumed when applied, so a "break off" that exists only as a switch
+  flip does not come back after a wipe: the document is silent and
+  menuconfig's value wins. Writing `"break": false` into the document is the
+  durable way to say off — a flag the document states explicitly is never
+  overridden by menuconfig.
+  **"Already defined" is tracked by slot, not by name.** Repurposing a slot
+  index carries the previous activity's flags over, and on a first
+  definition after an erase it carries menuconfig's over. If slot 1 or 2 is
+  break-eligible in your `sdkconfig` and you repurpose that index to a
+  *screen* activity, omitting `"break"` will inherit `true` and let it run
+  during — and drain — a Screen Break. Repurposing a slot to a different
+  kind of activity should set `"break": false` explicitly rather than rely
+  on the rename.
 - `break` marks a timer as a genuine break activity (music practice,
   reading): it may be started during a Screen Break and its time does not
   count against the screen-exposure balance.

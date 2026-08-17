@@ -1,4 +1,8 @@
-/* Editable HA config entities — pure over nvs_config + validators. */
+/* Editable HA config entities. Over nvs_config + the shared validators, and
+   — since BUG-8 — over the timer module's INSTALLED slot table, which the
+   timer-defs readers fall back to when the NVS blob cannot be read. Not
+   pure: the state JSON and the discovery fingerprint depend on what
+   timer_defs_install() put in RAM this boot. Host-tested. */
 #include "ha_config.h"
 
 #include <stdarg.h>
@@ -10,7 +14,7 @@
 #include "config_validate.h"
 #include "nvs_config.h"
 #include "quiet_hours.h"
-#include "timer.h" /* timer_slot_def: the table this boot is running */
+#include "timer.h" /* timer_slot_def_raw: the table this boot is running */
 #include "tones.h"
 
 #ifndef NATIVE
@@ -19,7 +23,11 @@
 #define ESP_LOGW(tag, ...) ((void)(tag))
 #endif
 
-static const char *TAG = "ha_config";
+/* File-scoped, and deliberately not plain `TAG`: timer_defs.c has its own,
+   and since BUG-8 the two files are close enough that a single test TU
+   compiles both (test_timer_defs). Two `static const char *TAG` at file
+   scope in one translation unit is a redefinition. */
+static const char *TAG_HA_CONFIG = "ha_config";
 
 /* snprintf-append with truncation tracking; buffer stays NUL-terminated. */
 static int jcat(char *buf, size_t len, int pos, const char *fmt, ...) {
@@ -258,37 +266,75 @@ static ha_cfg_result_t reject(char *ack, size_t len, const char *key, const char
     return HA_CFG_REJECTED;
 }
 
-/* Load the timer-defs blob, falling back to the table this boot is
-   actually running when it cannot be read.
+/* See the ESP_LOGW in load_defs(): one warning per boot, not one per call. */
+static bool s_defs_fallback_warned;
 
-   The fallback used to be a ZEROED blob, and the read-modify-write cases
-   in ha_config_set persist whatever this returns — so one transient read
-   failure while the operator edited a single field wiped every OTHER
-   slot's name, minutes and flags. Zeros are also the wrong answer for the
-   two read-only callers below: since BUG-8, timer_defs_install() no
-   longer materializes the blob at boot, so "unreadable" is the ordinary
-   state of a device whose NVS was erased, and empties here would publish
-   blank names in the cfg state and a discovery hash that disagrees with
-   the per-timer entities mqtt_ha.c builds from this very same
-   timer_slot_def(). Falling back to the installed table gives all three
-   callers what the device is running, whether that came from NVS or from
-   the compile-time defaults. A slot the timer layer reports as disabled
-   stays zeroed, which is what a disabled slot means in the blob too. */
-static void load_defs(nvs_timer_defs_blob_t *b) {
-    if (nvs_config_get_timer_defs(b) == ESP_OK)
-        return;
+/* Load the timer-defs blob, falling back to the table this boot is actually
+   running when it cannot be read. RETURNS TRUE ONLY WHEN THE BLOB WAS READ
+   FROM FLASH — false means "this is a reconstruction, not stored state",
+   and callers that are about to WRITE must refuse on false.
+
+   That return value is the whole point. The fallback used to be a ZEROED
+   blob, and the read-modify-write cases in ha_config_set persist whatever
+   this returns, so one unreadable read while the operator edited a single
+   field wiped every OTHER slot's name, minutes and flags. Replacing the
+   zeros with the installed table (BUG-8) fixed the wipe and replaced it
+   with a subtler failure of the same shape: the RMW then persisted a table
+   nobody had chosen — the compile-time defaults for every slot the edit did
+   not touch, and, worse, a BOOT-TIME SNAPSHOT that silently reverts an edit
+   made earlier in this same window (the blob is written here but the RAM
+   table is only re-installed after the window, in net_apply's
+   reconcile_defs). A device is not allowed to write a table it did not
+   read. The three RMW cases below therefore NAK.
+
+   The NAK is self-healing rather than a dead end: mqtt_ha's apply_sets()
+   clears a retained set/ command only on HA_CFG_OK, so a rejected edit
+   stays retained and is re-applied on the next window — by which time the
+   retained config document (applied first, in the same window) has created
+   the table. What the operator loses is a window, not the edit.
+
+   The two READ-ONLY callers are the reason the fallback exists at all and
+   they still use it. Since BUG-8, timer_defs_install() no longer
+   materializes the blob at boot, so "unreadable" is the ordinary state of a
+   device whose NVS was erased; zeros there would publish blank names into
+   HA's text controls and produce a discovery fingerprint that disagrees
+   with the per-timer entities mqtt_ha.c builds from the same installed
+   table — a full retained-discovery republish on the window the read fails
+   and another undoing it on the window it succeeds.
+
+   timer_slot_def_raw(), not timer_slot_def(): the filtered accessor hides a
+   slot that has a NAME but no duration yet, which is exactly what the
+   documented two-edit flow produces (set timer4_name in one window,
+   timer4_min in a later one). Hiding it made the fallback publish an empty
+   name over the operator's and fingerprint differently from the readable
+   blob for identical device state — the republish this fallback exists to
+   prevent. The enabled/disabled distinction still lives in the `min` field,
+   which is where the blob keeps it too. */
+static bool load_defs(nvs_timer_defs_blob_t *b) {
+    if (nvs_config_get_timer_defs(b) == ESP_OK) {
+        s_defs_fallback_warned = false; /* a later loss warns about it again */
+        return true;
+    }
     memset(b, 0, sizeof(*b));
     b->version = TIMER_DEFS_BLOB_VERSION;
     for (int i = 0; i < TIMER_EXTRA_SLOTS; i++) {
-        const timer_def_t *d = timer_slot_def(i + 1);
-        if (d == NULL)
+        const timer_def_t *d = timer_slot_def_raw(i + 1);
+        if (d == NULL || d->name == NULL)
             continue;
         snprintf(b->defs[i].name, sizeof(b->defs[i].name), "%s", d->name);
         b->defs[i].min = d->duration_sec / 60;
         b->defs[i].reload = d->reloadable ? 1 : 0;
         b->defs[i].break_eligible = d->break_eligible ? 1 : 0;
     }
-    ESP_LOGW(TAG, "timer-defs blob unreadable; using the installed table");
+    /* Once per boot: both read-only callers run every network window, so an
+       unconditional warn is several log lines per window on a device that
+       legitimately has no blob. Statics do not survive deep sleep, so "per
+       boot" is "per wake". */
+    if (!s_defs_fallback_warned) {
+        ESP_LOGW(TAG_HA_CONFIG, "timer-defs blob unreadable; reads use the installed table, writes will NAK");
+        s_defs_fallback_warned = true;
+    }
+    return false;
 }
 
 uint16_t ha_config_discovery_hash(const char *dev_name, const char *fw) {
@@ -316,7 +362,7 @@ uint16_t ha_config_discovery_hash(const char *dev_name, const char *fw) {
        device — every time someone nudged 20 minutes to 30. */
     uint16_t h = ha_config_device_hash(dev_name, fw);
     nvs_timer_defs_blob_t defs;
-    load_defs(&defs);
+    (void)load_defs(&defs); /* read-only: the reconstruction is the right answer here */
     for (int i = 0; i < TIMER_EXTRA_SLOTS; i++) {
         const char *name = defs.defs[i].name;
         /* Bounded: the blob comes from flash and nvs_config_get_timer_defs
@@ -394,7 +440,8 @@ ha_cfg_result_t ha_config_set(const char *key, const char *value, char *ack, siz
                 return reject(ack, ack_len, key, "len");
             if (!config_is_clean_str(value))
                 return reject(ack, ack_len, key, "char");
-            load_defs(&b);
+            if (!load_defs(&b))
+                return reject(ack, ack_len, key, "nodefs");
             snprintf(b.defs[f->slot - 1].name, sizeof(b.defs[0].name), "%s", value);
             if (nvs_config_set_timer_defs(&b) != ESP_OK)
                 return reject(ack, ack_len, key, "nvs");
@@ -407,7 +454,8 @@ ha_cfg_result_t ha_config_set(const char *key, const char *value, char *ack, siz
             if (v < 1 || v > 1440)
                 return reject(ack, ack_len, key, "range");
             nvs_timer_defs_blob_t b;
-            load_defs(&b);
+            if (!load_defs(&b))
+                return reject(ack, ack_len, key, "nodefs");
             b.defs[f->slot - 1].min = (int32_t)v;
             if (nvs_config_set_timer_defs(&b) != ESP_OK)
                 return reject(ack, ack_len, key, "nvs");
@@ -419,7 +467,8 @@ ha_cfg_result_t ha_config_set(const char *key, const char *value, char *ack, siz
             if (!parse_onoff(value, &on))
                 return reject(ack, ack_len, key, "onoff");
             nvs_timer_defs_blob_t b;
-            load_defs(&b);
+            if (!load_defs(&b))
+                return reject(ack, ack_len, key, "nodefs");
             if (f->kind == CFG_TRELOAD)
                 b.defs[f->slot - 1].reload = on;
             else
@@ -451,7 +500,7 @@ ha_cfg_result_t ha_config_set(const char *key, const char *value, char *ack, siz
 
 int ha_config_state_json(char *buf, size_t len) {
     nvs_timer_defs_blob_t defs;
-    load_defs(&defs);
+    (void)load_defs(&defs); /* read-only: publish what the device is running */
     int pos = jcat(buf, len, 0, "{");
     int n = (int)(sizeof(FIELDS) / sizeof(FIELDS[0]));
     for (int i = 0; i < n; i++) {

@@ -3,16 +3,27 @@
 
 /* Single-TU: cJSON + the config applier over the mock NVS + real
    nvs_config accessors (so validation and persistence are exercised
-   end-to-end without hardware). */
+   end-to-end without hardware).
+
+   timer_defs.c (and timer.c under it) are here because apply_timers()
+   resolves the bottom rung of its optional-key ladder from the compile-time
+   table, via timer_defs_compiled(). This TU defines no CONFIG_MAGTAG_TIMER*
+   symbols, so that table is empty and the rung yields 0 — which is exactly
+   the pre-existing behaviour every case below was written against. The
+   suite that pins the rung itself needs a non-empty compile-time table and
+   lives in test_timer_defs. */
 // clang-format off
 #include "cJSON.h"
 #include "mock_hal_nvs.c"
+#include "mock_hal_time.c"
+#include "../../main/timer.c"
 #include "../../main/nvs_config.c"
 #include "../../main/quiet_hours.c"
 #include "../../main/bedtime.c"
 #include "../../main/config_validate.c"
 #include "../../main/tones.c"
 #include "../../main/config_apply.c"
+#include "../../main/timer_defs.c"
 // clang-format on
 
 void setUp(void) {
@@ -325,8 +336,10 @@ void test_timers_array_maps_to_blob(void) {
     TEST_ASSERT_EQUAL_STRING("Meditation", defs.defs[2].name);
     TEST_ASSERT_EQUAL_UINT8(1, defs.defs[2].reload);         /* reload: true */
     TEST_ASSERT_EQUAL_UINT8(1, defs.defs[0].break_eligible); /* break: true */
-    TEST_ASSERT_EQUAL_UINT8(0, defs.defs[2].break_eligible); /* absent on a NEW slot = false */
-    TEST_ASSERT_EQUAL_STRING("", defs.defs[3].name);         /* {} = disabled */
+    /* Absent on a NEW slot falls to the compile-time value for that slot,
+       which is 0 here: this TU defines no CONFIG_MAGTAG_TIMER* symbols. */
+    TEST_ASSERT_EQUAL_UINT8(0, defs.defs[2].break_eligible);
+    TEST_ASSERT_EQUAL_STRING("", defs.defs[3].name); /* {} = disabled */
 }
 
 /* ---- optional keys: absent means UNCHANGED for an existing slot --------
