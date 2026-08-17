@@ -932,12 +932,13 @@ void ota_flow_apply(int batt_pct, bool charge_locked) {
     /* The timer snapshot, and the reason this reboot needs one when no
        other path in the firmware does.
 
-       timer_persist_save() runs at exactly four places: enter_deep_sleep,
-       the Bed Time lock, a break start and the expiry alert. NOT on a day
-       rollover, NOT on a button action, NOT on an HA grant. Every one of
-       those relies on enter_deep_sleep to flush eventually — and this
-       reboot never reaches it, because maybe_apply_update() sits ahead
-       of the sleep in both wake tails.
+       Apart from this injected op, timer_persist_save() runs at exactly
+       four places: enter_deep_sleep, the Bed Time lock, a break start and
+       the expiry alert. NOT on a day rollover, NOT on a button action,
+       NOT on an HA grant. Every one of those — and the charge lock, which
+       has no save of its own either — relies on enter_deep_sleep to flush
+       eventually, and this reboot never reaches it, because
+       maybe_apply_update() sits ahead of the sleep in both wake tails.
 
        That would not matter if RTC memory survived the restart. It does
        not: on the ESP32-S2 only a deep-sleep wake preserves the RTC

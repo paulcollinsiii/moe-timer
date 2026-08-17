@@ -78,7 +78,11 @@ project-root `CMakeLists.txt`) and **fails the build** — it does not warn — 
 the app image passes `MAGTAG_MAX_SLOT_PCT` percent of the `0x1C0000` app slot.
 The threshold is currently **85**. A passing build prints the live figure
 (`Build-size guard: image N B is X.X % of the … slot; M B left under the 85 %
-guard`); a failing one prints the same numbers plus how far over you are.
+guard`). A failing one prints image, guard limit and slot size instead of the
+headroom, plus how far over you are — and it has **two** branches: over the
+guard but still inside the slot, or over the slot itself, which says the image
+*does not fit* and that raising the guard cannot help (the tool refuses a
+`--max-pct` above 100, and 100 % is the slot).
 
 It fails rather than warns on purpose. This repo has no CI, so a printed warning
 has exactly one reader — whoever happens to be watching that build — and the
@@ -91,11 +95,14 @@ mattered.
 `-D MAGTAG_MAX_SLOT_PCT=…` on the command line is deliberately **refused** with
 a `FATAL_ERROR`. The threshold is a plain (non-cache) variable that shadows any
 cache entry, so the flag would otherwise be silently ignored and the build would
-fail at the same number with no hint why. Raising the guard is legitimate — it
-accepts a new floor — but it costs an edit to `set(MAGTAG_MAX_SLOT_PCT …)` in
-`CMakeLists.txt`, in its own commit whose message says what the bytes bought.
-Nothing to clean up after a refusal: `idf.py` deletes `CMakeCache.txt` when a
-configure fails, so just re-run without the flag.
+fail at the same number with no hint why. Raising the guard is legitimate while
+the image still fits the slot — it accepts a new floor — but it costs an edit
+to `set(MAGTAG_MAX_SLOT_PCT …)` in `CMakeLists.txt`, in its own commit whose
+message says what the bytes bought.
+Nothing to clean up after a refusal **under `idf.py`**: it deletes
+`CMakeCache.txt` whenever a configure fails, so just re-run without the flag.
+Driving `cmake` directly the entry *does* persist — clear it with
+`cmake -U MAGTAG_MAX_SLOT_PCT -B <build dir>`.
 
 The arithmetic is covered from both sides by `test/test_check_slot_size/`, which
 can drive the failure branch with synthetic sizes — something no real build can

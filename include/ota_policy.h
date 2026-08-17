@@ -188,7 +188,7 @@ typedef struct {
     const char *running_version; /* esp_app_get_description()->version */
     const char *counted_target;  /* NVS ota_target: what ota_fails counts against */
     uint16_t fails;              /* NVS ota_fails */
-    uint16_t max_fails;          /* CONFIG_MAGTAG_OTA_MAX_FAILS; 0 disables the budget */
+    uint16_t max_fails;          /* CONFIG_MAGTAG_OTA_MAX_FAILS; 0 means OTA_MAX_FAILS_DEFAULT, not "no budget" */
 } ota_decide_in_t;
 
 /* version/url are filled as soon as they validate, including on the

@@ -987,13 +987,14 @@ static void test_a_failed_commit_still_lands_on_the_ordinary_awake_budget(void) 
 
 /* MAJOR-2: the OTA reboot is the one sleep-less exit in the firmware.
  *
- * timer_persist_save() is called from exactly four places — enter_deep_sleep,
- * the charge lock, a break start and the expiry alert. NOT on a day
- * rollover, NOT on a button action, NOT on an HA grant; those all rely on
- * enter_deep_sleep to flush eventually. This reboot never reaches it,
- * because maybe_apply_update() sits ahead of the sleep in both wake
- * tails, and RTC memory does not survive esp_restart on the S2 — only a
- * deep-sleep wake preserves the RTC segments.
+ * Apart from this injected op, timer_persist_save() is called from exactly
+ * four places — enter_deep_sleep, the Bed Time lock, a break start and the
+ * expiry alert. NOT on a day rollover, NOT on a button action, NOT on an HA
+ * grant; those all rely on enter_deep_sleep to flush eventually, as does the
+ * charge lock, which has no save of its own either. This reboot never
+ * reaches it, because maybe_apply_update() sits ahead of the sleep in both
+ * wake tails, and RTC memory does not survive esp_restart on the S2 — only
+ * a deep-sleep wake preserves the RTC segments.
  *
  * The sharp case is the primary trigger: on a rollover wake the stale
  * snapshot still carries YESTERDAY'S date, timer_restore_snapshot refuses

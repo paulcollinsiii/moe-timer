@@ -41,9 +41,12 @@ architecture rather than build trivia:
   flashed WAV needs `tools/flash_assets.sh` re-run after reflashing the table.
 - **The bootloader is not OTA-updatable.** `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE`
   is *not* a bootloader-only symbol — the app is compiled against it too
-  (`app_update/esp_ota_ops.c` guards four blocks on it, and IDF mirrors it into
-  the app config as the deprecated alias `CONFIG_APP_ROLLBACK_ENABLE`, which is
-  why it appears twice in a generated `sdkconfig`). But the *decisive* half is
+  (`app_update/esp_ota_ops.c` guards four blocks on it, and `app_update` is an
+  app component). The second spelling in a generated `sdkconfig`,
+  `CONFIG_APP_ROLLBACK_ENABLE`, is not a second symbol: it is this one's
+  deprecated former name, declared in the bootloader component's
+  `sdkconfig.rename` and re-emitted for backward compatibility with old
+  configs. It says nothing about the app half. But the *decisive* half is
   bootloader-resident: only the 2nd-stage bootloader can mark a `PENDING_VERIFY`
   slot aborted and boot the other one, and switching the option on grows that
   binary (22,640 B off → 22,720 B on). An OTA writes only the app slot, so a
@@ -77,22 +80,21 @@ are set out under the list.
 2. **Stateful orchestration** — `wake_flow`, `lock_gate`, `timer`, `timer_defs`, `timer_persist`, `config_cache`, `config_apply`, `cmd_apply`, `ha_config`, `net_apply`, `app_state`, `alerts`, `schedule`, `ota_flow`. Owns the RTC/NVS state, sequences the layer-1 calls, and calls layer-3 drivers for the effects. Host-tested by single-TU include: the suite `#include`s the `.c` under test and resolves its device effects with link-time stubs (`test/test_wake_flow` is the worked example). `ota_flow` takes it one step further, as `net_apply` does: every device effect arrives through an injected `ota_flow_ops_t`, so `test_ota_flow` runs the real sequence with counters in place of a radio and a panel, over the real `nvs_config.c` against `mock_hal_nvs.c`.
 3. **Device drivers** — `display`, `neopixel`, `audio`, `buttons`, `battery`, `light`, `net_window`, `wifi_session`, `ntp`, `mqtt_ha`, `ota`, `ota_task`, `device_id`, `nvs_config`, `hal_nvs`, `hal_time`, `components/ssd1680`. Touch silicon; verified on hardware ([hardware_smoke_test.md](hardware_smoke_test.md)). Two of them are here for the ladder's reason rather than the label's: `net_window` and `ota_task` touch no silicon at all, but they are FreeRTOS task mechanics with nothing in them a host suite could call, so hardware is the only place they run. Both are the *task* half of a split whose *sequence* half is host-tested in layer 2 (`net_apply`, `ota_flow`).
 
-**The direction rule.** Only one rule comes close to holding across the tree:
-**no layer-3 driver calls layer 2**. Everything else people expect to be true here
-is not, and that rule itself has more breaches than any short list admits, so both
-are spelled out rather than asserted:
+**The direction rule.** The rule with the strongest claim across the tree is
+**no layer-3 driver calls layer 2** — and even it does not hold. Everything else
+people expect to be true here is not, and that rule itself has more breaches than
+any short list admits, so both are spelled out rather than asserted:
 
 - A driver calling **layer 1** is normal and pervasive, not an exception — that is
   just a driver reaching for a pure helper, which is what the ladder is for.
   `audio.c` → `tones_*`/`wav_header_parse`, `buttons.c` → `button_latch_*` and
   `buttons_policy_wake_mask`, `mqtt_ha.c` → `stats_json_*`/`mqtt_rx_on_data`.
 - Layer 1 is meant not to call *out* at all. Two modules break that.
-- Even the one rule is broken, in four drivers (`net_window.c`, `mqtt_ha.c`,
-  `buttons.c`, `ota_task.c`) reaching five layer-2 modules (`timer`, `ota_flow`,
-  `ha_config`, `config_apply`, `cmd_apply`). The list below is **illustrative,
-  not a census**, and deliberately carries no total: three consecutive commits
-  shipped a count that was wrong, each while claiming accuracy. The source is
-  the authority — re-scan it, never count from here.
+- Even the one rule is broken, by drivers that reach into layer 2 directly —
+  some of them mutators. The list below is **illustrative, not a census**, and
+  deliberately carries no total, and no per-driver or per-module count either:
+  three consecutive commits shipped a count that was wrong, each while claiming
+  accuracy. The source is the authority — re-scan it, never count from here.
 
 Every entry here was found by scanning the call graph, not by reading the previous
 version of this section. An earlier draft claimed "calls go down only", and the
@@ -264,7 +266,7 @@ The struct above is not the whole `RTC_DATA_ATTR` inventory. `main/lock_gate.c` 
 
 **`RTC_DATA_ATTR` survives deep sleep and nothing else — an OTA reboot zeroes all of it.** The bootloader loads the `.rtc.data` segment on every reset *except* a deep-sleep wake (the `load_rtc_memory = esp_rom_get_reset_reason(0) != RESET_REASON_CORE_DEEP_SLEEP` test in ESP-IDF's `esp_image_format.c`, cited at `main/display.c`), so the `esp_restart()` that ends an OTA commit brings every variable above back at its initialiser: `g_rtc_state` zeroed, both `lock_gate.c` flags clear, `s_prev_fb_valid` and `s_takeover_on_panel` false, `s_last_refresh_sec` and `s_prev_frame_valid` gone with them, and `s_held_mask_at_sleep`/`s_sleep_entry_time` cleared too. `RTC_NOINIT_ATTR` is **not** the fix. The state has to cross into a *separately linked image*, and the mechanism that already does that — and that can *refuse* what it is handed, which no un-initialised RAM can — is the versioned NVS snapshot.
 
-What actually copes is one injected call. `ota_flow_ops_t.persist_state` is `timer_persist_save` (wired in `main/main.c`), and `ota_flow_apply` calls it exactly once: after `session_end()`, so the flash write is not competing with the radio, and immediately before `restart()`. It is needed because `timer_persist_save` otherwise runs only at `enter_deep_sleep`, the **Bed Time** lock (`lock_gate_bedtime_engage`, not the charge lock — `lock_gate_check_charge` sleeps without saving), a break start and the expiry alert — every other path relies on the sleep funnel to flush eventually, and the OTA reboot never reaches it (`maybe_apply_update` sits ahead of the sleep in both wake tails). The sharp case is the primary trigger: on a rollover wake the pre-existing snapshot still carries *yesterday's* date, `timer_restore_snapshot` refuses it (it compares the blob's date against today and returns false on a mismatch), `g_rtc_state` therefore stays zeroed with an empty `last_date`, and `timer_is_new_day()` reads that as yes — so the new firmware would run the day rollover a second time and publish yesterday's summary computed from all-zero slots, permanently overwriting Home Assistant's record. Saving on this line instead writes a blob carrying *today's* date, which the post-OTA boot restores cleanly.
+What actually copes is one injected call. `ota_flow_ops_t.persist_state` is `timer_persist_save` (wired in `main/main.c`), and `ota_flow_apply` calls it exactly once: after `session_end()`, so the flash write is not competing with the radio, and immediately before `restart()`. It is needed because `timer_persist_save` otherwise runs only at `enter_deep_sleep`, the **Bed Time** lock (`lock_gate_bedtime_engage` — it has a save of its own *ahead of* its sleep, at `main/lock_gate.c:91`, because it has just paused a running timer and wants that durable before a long lock; `lock_gate_check_charge` has no save of its own and is flushed by the same funnel like any ordinary path, which is why only the bed-time lock is a direct call site), a break start and the expiry alert — every other path relies on the sleep funnel to flush eventually, and the OTA reboot never reaches it (`maybe_apply_update` sits ahead of the sleep in both wake tails). The sharp case is the primary trigger: on a rollover wake the pre-existing snapshot still carries *yesterday's* date, `timer_restore_snapshot` refuses it (it compares the blob's date against today and returns false on a mismatch), `g_rtc_state` therefore stays zeroed with an empty `last_date`, and `timer_is_new_day()` reads that as yes — so the new firmware would run the day rollover a second time and publish yesterday's summary computed from all-zero slots, permanently overwriting Home Assistant's record. Saving on this line instead writes a blob carrying *today's* date, which the post-OTA boot restores cleanly.
 
 Two things about that save are easy to miss, and neither is decoration. It is also what keeps a rollback loop down to one attempt per day rather than a continuous one — `wake_flow.c` arms the OTA check inside the rollover branch *before* the in-rollover restore, so without a valid same-day snapshot every post-rollback boot would arm a fresh check, re-download, revert, and come straight back round with no sleep in between. And it works only because the wall clock outlives the reset that wipes `.rtc.data`: with `CONFIG_ESP_TIME_FUNCS_USE_RTC_TIMER=y`, ESP-IDF keeps boot time in the RTC retention *registers* rather than the `.rtc.data` segment, so `time(NULL)` is correct on the next boot and the snapshot is recognised as today's.
 
