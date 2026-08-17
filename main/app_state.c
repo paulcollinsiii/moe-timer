@@ -87,6 +87,10 @@ display_state_t app_state_display(const app_state_in_t *in, int32_t remaining, t
         .swap_available = timer_swap_allowed(),
         .reload_available = timer_reload_allowed(in->parent_testing),
         .start_available = timer_start_allowed(),
+        /* Rendered on the battery row. The app descriptor is a device
+           read, so it arrives injected — app_state stays host-testable
+           and display_screens stays ESP-free. */
+        .fw_version = in->fw_version,
     };
 }
 

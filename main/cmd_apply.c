@@ -35,8 +35,13 @@ cmd_result_t cmd_apply(const char *json, cmd_action_t *out, char *ack, size_t ac
         return CMD_INVALID;
     }
 
-    /* Apply-once: the retained command is re-delivered every window */
-    char last[40];
+    /* Apply-once: the retained command is re-delivered every window.
+       Zero-initialised: a stored id longer than this buffer makes the read
+       fail and write nothing, and the return is not checked — uninitialised
+       stack into strcmp would make the dedup compare garbage, so a retained
+       `grant` could re-apply every window. nvs_config_set_cmd_id now bounds
+       the write, so a too-long id cannot be stored in the first place. */
+    char last[40] = {0};
     nvs_config_get_cmd_id(last, sizeof(last));
     if (strcmp(last, id->valuestring) == 0) {
         cJSON_Delete(root);

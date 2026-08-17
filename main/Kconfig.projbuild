@@ -291,4 +291,131 @@ menu "MagTag Timer"
             device out for the whole day). Also editable from Home
             Assistant, which is the only remote fix path while locked.
 
+    comment "Over-the-air firmware updates"
+
+    config MAGTAG_OTA_URL
+        string "OTA manifest URL (empty = OTA disabled)"
+        default ""
+        help
+            HTTPS endpoint serving the update manifest (the JSON listing
+            the available firmware version and image URL). Plain http is
+            rejected at every entry point — an unauthenticated firmware
+            endpoint is an arbitrary-code-execution channel, and TLS is
+            what makes the manifest trustworthy.
+
+            Prefer setting NVS_DEFAULT_OTA_URL in
+            include/credentials.local.h (gitignored) so a hosting
+            endpoint never lands in a committed sdkconfig.defaults —
+            the same treatment MAGTAG_MQTT_URI gets.
+
+            This is only the fallback the device uses while NVS holds no
+            endpoint of its own. It is deliberately NOT part of the
+            defaults fingerprint, so once Home Assistant has set an
+            endpoint (the "OTA manifest URL" text entity, or the bulk
+            config document's ota_url), changing this value no longer
+            affects that device. Empty disables update checks entirely.
+
+    config MAGTAG_OTA_CHECK_ON_SYNC
+        bool "Also check for updates on a Button D full sync"
+        default n
+        help
+            By default an update check runs only at the day rollover,
+            when the device is already awake and nobody is waiting on it.
+            Enable this to also check during the manual full sync Button D
+            forces — useful while testing an update, at the cost of a
+            slower Button D and the extra radio time on every press.
+
+            Like the URL, this only seeds the runtime value: the "OTA
+            check on sync" switch in Home Assistant overrides it, and a
+            menuconfig change here will not revert that.
+
+    config MAGTAG_OTA_MIN_BATT_PCT
+        int "Battery floor for an update check (percent)"
+        default 30
+        range 0 100
+        help
+            Skip the update check when the battery is below this. A
+            download is the longest radio session the device ever runs,
+            and a brownout partway through a flash write is the one
+            failure this design cannot recover from cheaply — so the
+            check does not even start on a low battery. It simply runs at
+            the next rollover after a charge. 0 disables the check
+            (not recommended on battery power).
+
+    config MAGTAG_OTA_MAX_SEC
+        int "Download window budget (seconds)"
+        default 300
+        range 60 600
+        help
+            Awake-failsafe extension applied before the download window
+            opens, and the deadline the download loop checks itself
+            against. Exceeding it aborts cleanly — the partial image is
+            discarded and the boot partition is never switched — instead
+            of the awake failsafe killing the write mid-flight.
+
+            Kept at or below 600 to stay consistent with
+            MAGTAG_MAX_AWAKE_SEC's own range: this value temporarily
+            replaces that failsafe, so a budget beyond its ceiling would
+            mean OTA quietly runs with weaker battery protection than the
+            rest of the firmware is allowed to.
+
+    config MAGTAG_OTA_MAX_FAILS
+        int "Consecutive failures before giving up on a version"
+        default 3
+        range 1 10
+        help
+            Retry budget, counted per target version. An image that
+            reliably fails to download (too slow a link, a bad host)
+            would otherwise be re-attempted at every rollover forever —
+            a daily battery cost that produces nothing and looks, from
+            the outside, like nothing is happening. After this many
+            consecutive failures against the SAME version the device
+            stops trying and reports it to Home Assistant. Publishing a
+            different version string resets the counter and re-arms it.
+
+            The range floor of 1 is deliberate: it makes 0 unreachable
+            from configuration, which is what lets ota_policy treat a
+            zero budget as "the caller forgot to set the field" and fall
+            back to OTA_MAX_FAILS_DEFAULT rather than as "no retries" or
+            "unlimited retries". Both of those readings are defensible in
+            the abstract, which is exactly why the value must never
+            arrive ambiguous. Widening this to 0 would silently change
+            the meaning of a config nobody edited.
+
+    config MAGTAG_OTA_MIN_FREE_HEAP
+        int "Free-heap floor for an update check or download (bytes)"
+        default 40960
+        range 32768 131072
+        help
+            Both OTA gates refuse below this. The download needs roughly
+            40 KB free during the TLS handshake and transfer (mbedTLS
+            record buffers plus the http client), and a handshake that
+            runs out of heap fails in a way that reads like a
+            certificate problem — so the gate turns it into a logged
+            low_heap instead.
+
+            The floor of 32 KB is structural, not taste. With
+            CONFIG_MBEDTLS_DYNAMIC_BUFFER unset, the record buffers alone
+            are CONFIG_MBEDTLS_SSL_IN_CONTENT_LEN (16384) plus
+            CONFIG_MBEDTLS_SSL_OUT_CONTENT_LEN (4096) = 20 KB, before the
+            SSL context, the pinned CA, the peer chain and the http
+            client's 1 KB rx buffer. A floor below that would configure a
+            gate that PASSES at a heap level where the handshake is
+            guaranteed to fail — the exact outcome this symbol exists to
+            prevent — so the range stops short of it rather than trusting
+            the operator not to go there. Widening it again means turning
+            the dynamic-buffer option on first.
+
+            In bytes rather than KB so app_main can pass the symbol
+            straight into ota_flow_cfg_t without arithmetic: main.c is
+            the composition root and a unit conversion there is a policy
+            number wearing a cast.
+
+            Board-tunable on purpose. The 2025 MagTag has 2 MB PSRAM,
+            but CONFIG_SPIRAM_IGNORE_NOTFOUND=y means a PSRAM-less board
+            must still boot, and that board has the tighter headroom.
+            Raise this if a download reports low_heap on a board that
+            has the memory; lower it only with a measurement of
+            esp_get_minimum_free_heap_size() across a real download.
+
 endmenu

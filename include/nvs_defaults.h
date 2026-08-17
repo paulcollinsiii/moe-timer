@@ -64,6 +64,33 @@
 #endif
 #endif
 
+/* OTA manifest endpoint and the check-on-sync flag. Set the URL in
+   credentials.local.h (preferred — gitignored, like WiFi/MQTT) or via
+   menuconfig; empty disables OTA entirely.
+
+   DELIBERATELY NOT IN THE SEEDED-DEFAULTS REGISTRY BELOW. Both keys are
+   HA-editable at runtime, and the registry drives the defaults
+   fingerprint: a row here would mean that editing any unrelated
+   allocation in menuconfig changes the fingerprint, reseeds NVS, and
+   silently reverts an operator's HA-set endpoint and check-on-sync flag
+   on the next boot — the opposite of what a runtime override is for. The
+   getters supply these lazily instead, via the same with-default helpers
+   that tz, the quiet-hours pair and bedtime already use. Pinned by
+   test_reseed_does_not_revert_ha_set_ota_values. */
+#ifndef NVS_DEFAULT_OTA_URL
+#ifdef CONFIG_MAGTAG_OTA_URL
+#define NVS_DEFAULT_OTA_URL CONFIG_MAGTAG_OTA_URL
+#else
+#define NVS_DEFAULT_OTA_URL ""
+#endif
+#endif
+/* Kconfig bool: defined (to 1) only when y, so #ifdef is the test. */
+#ifdef CONFIG_MAGTAG_OTA_CHECK_ON_SYNC
+#define NVS_DEFAULT_OTA_ON_SYNC 1
+#else
+#define NVS_DEFAULT_OTA_ON_SYNC 0
+#endif
+
 /* HA config-in defaults (phase 2): consumed by nvs_config getters when the
    key was never written; menuconfig values on firmware, fixed on host. */
 #define NVS_DEFAULT_TZ "EST5EDT,M3.2.0,M11.1.0"
@@ -114,7 +141,8 @@
    change. ROW ORDER IS LOAD-BEARING: the fingerprint folds rows in this
    order, and a changed fingerprint reseeds every deployed device
    (reverting HA-managed keys). The holidays blob is seeded separately and
-   deliberately NOT fingerprinted. */
+   deliberately NOT fingerprinted, and neither are the OTA keys — see the
+   NVS_DEFAULT_OTA_URL comment above before adding a row for them. */
 #include "nvs_keys.h"
 
 #define NVS_SEEDED_U16S(X)                          \

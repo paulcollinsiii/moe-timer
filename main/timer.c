@@ -14,6 +14,23 @@ rtc_state_t RTC_DATA_ATTR g_rtc_state;
 rtc_state_t g_rtc_state;
 #endif
 
+/* The whole of the guard: two fields compared, and on any disagreement
+   the struct is zeroed rather than repaired. Repair is not on the table —
+   there is nothing to repair TO. A mismatch means these bytes were
+   written by a different build (or by nothing at all), so every field
+   behind them is suspect, and the firmware already has a tested,
+   validated recovery for "the RTC state is gone": the NVS snapshot, with
+   its own version, checksum and range checks. Zeroing routes the fault
+   there instead of inventing a second recovery path. */
+bool timer_rtc_state_guard(void) {
+    if (g_rtc_state.magic == RTC_STATE_MAGIC && g_rtc_state.version == RTC_STATE_VERSION)
+        return false;
+    memset(&g_rtc_state, 0, sizeof(g_rtc_state));
+    g_rtc_state.magic = RTC_STATE_MAGIC;
+    g_rtc_state.version = RTC_STATE_VERSION;
+    return true;
+}
+
 /* Slot definitions live in rodata, not RTC memory — re-injected every boot
    (timer_defs.c on firmware, the test table on host). */
 static const timer_def_t *s_defs;

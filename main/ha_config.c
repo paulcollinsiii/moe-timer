@@ -35,6 +35,20 @@ const char *ha_config_json_escape(char *tmp, size_t tmplen, const char *s) {
 }
 #define jesc ha_config_json_escape
 
+uint16_t ha_config_device_hash(const char *dev_name, const char *fw) {
+    /* djb2 over both fields, with a separator between them so a rename
+       cannot cancel out a version change ("ab"+"c" != "a"+"bc"). The
+       separator is a NUL, which neither field can contain. */
+    uint16_t h = 5381;
+    const char *parts[2] = {dev_name, fw};
+    for (int i = 0; i < 2; i++) {
+        for (const char *p = parts[i]; p != NULL && *p != '\0'; p++)
+            h = (uint16_t)(h * 33u + (unsigned char)*p);
+        h = (uint16_t)(h * 33u); /* field separator */
+    }
+    return h;
+}
+
 /* ---- field registry (Phase A: scalar settings) ---- */
 
 /* Designated initializers so adding/reordering fields can't silently
@@ -59,6 +73,18 @@ const char *ha_config_json_escape(char *tmp, size_t tmplen, const char *s) {
     }
 #define TEXT(k, nm, maxlen, set, get) \
     { .key = k, .component = "text", .name = nm, .kind = CFG_STR, .hi = maxlen, .set_str = set, .get_str = get }
+/* Text with a field-specific content rule on top of length + cleanliness;
+   the same predicate config_apply.c uses, so the per-entity and bulk
+   paths accept exactly the same values. */
+#define TEXT_V(k, nm, maxlen, set, get, val)                                                                      \
+    {                                                                                                             \
+        .key = k, .component = "text", .name = nm, .kind = CFG_STR, .hi = maxlen, .set_str = set, .get_str = get, \
+        .validate_str = val                                                                                       \
+    }
+/* Standalone on/off setting: a switch backed by a u16 0/1 accessor pair
+   (no timer slot). See CFG_BOOL in ha_config.h. */
+#define BOOL_SWITCH(k, nm, set, get) \
+    { .key = k, .component = "switch", .name = nm, .kind = CFG_BOOL, .set_u16 = set, .get_u16 = get }
 /* Extra-timer slot fields — read-modify-write the timer_defs blob by slot. */
 /* Derived from the blob field, not written out: `hi` is what discovery
    advertises to HA *and* what ha_config_set rejects on, so the two can
@@ -97,6 +123,20 @@ const char *ha_config_json_escape(char *tmp, size_t tmplen, const char *s) {
 /* The registry hardcodes extra-timer slots 1..4; if TIMER_EXTRA_SLOTS ever
    shrinks, defs[slot-1] in the state builder would read out of bounds. */
 _Static_assert(TIMER_EXTRA_SLOTS >= 4, "ha_config registry assumes >= 4 extra-timer slots");
+/* ha_config_state_json's render frame is raw[CFG_STR_MAX] plus
+   esc[2 * CFG_STR_MAX], and it runs on the net_win task (10 KB stack,
+   net_window.c) with the MQTT client and TLS beneath it. CFG_STR_MAX
+   therefore controls a stack frame, not just a buffer size, so the frame
+   gets a stated ceiling of its own: raising CFG_STR_MAX to 512 would take
+   this from 384 B to 1.5 KB, and nothing else in the build would notice. */
+#define STATE_JSON_SCRATCH (3 * CFG_STR_MAX)
+_Static_assert(STATE_JSON_SCRATCH <= 1024, "state_json scratch must stay a small fraction of the net_win stack");
+
+/* The per-bound "<= CFG_STR_MAX" asserts live in config_validate.h, next
+   to the bounds themselves, so a new TEXT() field is checked wherever it
+   is declared rather than against a conjunction maintained by hand here
+   (which a fifth string field would have passed while overrunning raw[]).
+   Slot count is asserted against the window's set buffer below. */
 
 static const cfg_field_t FIELDS[] = {
     /* step=1: HA validates entries against min+k*step, so a step of 5 with
@@ -140,7 +180,23 @@ static const cfg_field_t FIELDS[] = {
     /* >100% applies clipping gain in the renderer — louder, harsher. */
     NUM_U16("alert_volume", "Alert volume", "%", 0, TONES_VOLUME_MAX, 1, nvs_config_set_alert_volume,
             nvs_config_get_alert_volume),
+    /* OTA. Empty URL = updates disabled, which is why config_is_ota_url
+       accepts "" — it is the only off switch HA has for the endpoint.
+       Both fields are also parsed from the bulk config document
+       (config_apply.c) and documented in docs/home_assistant.md; all
+       three are required or an applied document silently clears them. */
+    TEXT_V("ota_url", "OTA manifest URL", CFG_BOUND_OTA_URL_MAX, nvs_config_set_ota_url, nvs_config_get_ota_url,
+           config_is_ota_url),
+    BOOL_SWITCH("ota_on_sync", "OTA check on sync", nvs_config_set_ota_on_sync, nvs_config_get_ota_on_sync),
 };
+
+/* The window's set buffer has to hold every field at once (all of them can
+   be sitting retained on their set/<key> topics), plus mqtt_ha's two action
+   entities, plus room for a live edit arriving on top of a retained copy.
+   Asserted here because this is the only place the real field count is
+   known at compile time. */
+_Static_assert((int)(sizeof(FIELDS) / sizeof(FIELDS[0])) + 2 <= HA_CONFIG_SET_SLOTS,
+               "HA_CONFIG_SET_SLOTS must cover every registry field plus the action entities");
 
 const cfg_field_t *ha_config_fields(int *count) {
     *count = (int)(sizeof(FIELDS) / sizeof(FIELDS[0]));
@@ -165,17 +221,28 @@ static bool parse_int(const char *s, long *out) {
     return *end == '\0';
 }
 
-/* Reject values that would corrupt the discovery/state JSON (unescaped
-   quote/backslash) or the MQTT/HA layer (control chars). Empty is allowed
-   here (an empty timer name disables the slot); NULL is not clean. */
-static bool str_is_clean(const char *s) {
+/* Switch payloads are the pl_on/pl_off strings discovery advertises, so
+   the match is exact and case-sensitive — shared by every switch kind
+   (CFG_BOOL and the two slot-bound ones) to keep them identical. */
+static bool parse_onoff(const char *s, uint8_t *out) {
     if (s == NULL)
         return false;
-    for (; *s != '\0'; s++)
-        if (*s == '"' || *s == '\\' || (unsigned char)*s < 0x20)
-            return false;
-    return true;
+    if (strcmp(s, "ON") == 0) {
+        *out = 1;
+        return true;
+    }
+    if (strcmp(s, "OFF") == 0) {
+        *out = 0;
+        return true;
+    }
+    return false;
 }
+
+/* The "would this value corrupt the discovery/state JSON (unescaped
+   quote/backslash) or the MQTT/HA layer (control chars)" rule lives in
+   config_validate.c: the bulk-document path needs the same one for its
+   `ver` string, and two copies would drift. Called by its real name
+   below rather than through a local alias. */
 
 static ha_cfg_result_t reject(char *ack, size_t len, const char *key, const char *err) {
     snprintf(ack, len, "{\"key\":\"%s\",\"ok\":false,\"err\":\"%s\"}", key, err);
@@ -189,6 +256,52 @@ static void load_defs(nvs_timer_defs_blob_t *b) {
         memset(b, 0, sizeof(*b));
         b->version = TIMER_DEFS_BLOB_VERSION;
     }
+}
+
+uint16_t ha_config_discovery_hash(const char *dev_name, const char *fw) {
+    /* Start from the dev block, then fold every extra-timer slot name.
+       Those names are the second mutable input to discovery: mqtt_ha's
+       per-timer stat entities (`<Name> remaining` / `<Name> limit` /
+       `<Name> runs`) take their published names from timerN_name, and
+       which of them exist at all depends on whether the slot is enabled.
+       Neither is covered by DISC_SCHEMA_VER, so without this a rename in
+       HA left the old entity names in place until someone bumped the
+       schema — the same defect class as the stale `sw` field.
+
+       The name alone is NOT enough, because enablement is not the name.
+       timer.c gates a slot on name[0] != 0 AND duration > 0, while
+       ha_config_set's CFG_TNAME case writes only the name — so the normal
+       two-edit flow (set timer4_name in one window, timer4_min in a
+       later one) flipped the slot to enabled without moving a
+       name-only fold, and the three per-slot entities never appeared.
+       Each slot therefore contributes its name AND an enabled bit.
+
+       The bit rather than the raw duration, deliberately: discovery
+       depends on whether the entities exist and what they are called,
+       not on how long the timer runs. Folding the minutes would force a
+       full discovery republish — a wasted radio burst on a battery
+       device — every time someone nudged 20 minutes to 30. */
+    uint16_t h = ha_config_device_hash(dev_name, fw);
+    nvs_timer_defs_blob_t defs;
+    load_defs(&defs);
+    for (int i = 0; i < TIMER_EXTRA_SLOTS; i++) {
+        const char *name = defs.defs[i].name;
+        /* Bounded: the blob comes from flash and nvs_config_get_timer_defs
+           validates only size and version, so an unterminated name would
+           otherwise read on into the next slot. */
+        size_t n = strnlen(name, sizeof(defs.defs[i].name));
+        for (size_t j = 0; j < n; j++)
+            h = (uint16_t)(h * 33u + (unsigned char)name[j]);
+        h = (uint16_t)(h * 33u); /* name/enabled separator */
+        /* Mirrors timer.c's enablement predicate (name AND duration). */
+        h = (uint16_t)(h * 33u + ((n > 0 && defs.defs[i].min > 0) ? 1u : 0u));
+        h = (uint16_t)(h * 33u); /* slot separator, as in device_hash */
+    }
+    return h;
+}
+
+bool ha_config_discovery_stale(uint16_t stored_ver, uint16_t stored_hash, uint16_t schema_ver, uint16_t dev_hash) {
+    return (stored_ver != schema_ver) || (stored_hash != dev_hash);
 }
 
 ha_cfg_result_t ha_config_set(const char *key, const char *value, char *ack, size_t ack_len) {
@@ -226,9 +339,19 @@ ha_cfg_result_t ha_config_set(const char *key, const char *value, char *ack, siz
         case CFG_STR: {
             if (value == NULL || strlen(value) >= (size_t)f->hi)
                 return reject(ack, ack_len, key, "len");
-            if (!str_is_clean(value))
+            if (!config_is_clean_str(value))
                 return reject(ack, ack_len, key, "char");
+            if (f->validate_str != NULL && !f->validate_str(value))
+                return reject(ack, ack_len, key, "value");
             if (f->set_str(value) != ESP_OK)
+                return reject(ack, ack_len, key, "nvs");
+            break;
+        }
+        case CFG_BOOL: {
+            uint8_t on;
+            if (!parse_onoff(value, &on))
+                return reject(ack, ack_len, key, "onoff");
+            if (f->set_u16(on) != ESP_OK)
                 return reject(ack, ack_len, key, "nvs");
             break;
         }
@@ -236,7 +359,7 @@ ha_cfg_result_t ha_config_set(const char *key, const char *value, char *ack, siz
             nvs_timer_defs_blob_t b;
             if (value == NULL || strlen(value) >= (size_t)f->hi)
                 return reject(ack, ack_len, key, "len");
-            if (!str_is_clean(value))
+            if (!config_is_clean_str(value))
                 return reject(ack, ack_len, key, "char");
             load_defs(&b);
             snprintf(b.defs[f->slot - 1].name, sizeof(b.defs[0].name), "%s", value);
@@ -259,9 +382,9 @@ ha_cfg_result_t ha_config_set(const char *key, const char *value, char *ack, siz
         }
         case CFG_TRELOAD:
         case CFG_TBREAK: {
-            if (value == NULL || (strcmp(value, "ON") != 0 && strcmp(value, "OFF") != 0))
+            uint8_t on;
+            if (!parse_onoff(value, &on))
                 return reject(ack, ack_len, key, "onoff");
-            uint8_t on = (strcmp(value, "ON") == 0) ? 1 : 0;
             nvs_timer_defs_blob_t b;
             load_defs(&b);
             if (f->kind == CFG_TRELOAD)
@@ -302,18 +425,28 @@ int ha_config_state_json(char *buf, size_t len) {
         const cfg_field_t *f = &FIELDS[i];
         if (i)
             pos = jcat(buf, len, pos, ",");
-        char esc[128]; /* holds a fully-escaped tz (<=47) or device name */
+        /* Worst case is a maxed OTA URL with every character escaped. */
+        char esc[2 * CFG_STR_MAX];
         switch (f->kind) {
             case CFG_STR: {
-                char raw[64];
+                /* Must fit the longest CFG_STR value in the registry, or a
+                   stored value is silently truncated on republish. */
+                char raw[CFG_STR_MAX];
                 raw[0] = '\0';
                 f->get_str(raw, sizeof(raw));
                 pos = jcat(buf, len, pos, "\"%s\":\"%s\"", f->key, jesc(esc, sizeof(esc), raw));
                 break;
             }
-            case CFG_TNAME:
-                pos = jcat(buf, len, pos, "\"%s\":\"%s\"", f->key, jesc(esc, sizeof(esc), defs.defs[f->slot - 1].name));
+            case CFG_TNAME: {
+                /* Copy through a bounded buffer first: the blob is flash
+                   data validated only for size and version, so an
+                   unterminated name would let jesc run into the next
+                   slot. */
+                char tname[sizeof(defs.defs[0].name) + 1];
+                snprintf(tname, sizeof(tname), "%.*s", (int)sizeof(defs.defs[0].name), defs.defs[f->slot - 1].name);
+                pos = jcat(buf, len, pos, "\"%s\":\"%s\"", f->key, jesc(esc, sizeof(esc), tname));
                 break;
+            }
             case CFG_TMIN:
                 pos = jcat(buf, len, pos, "\"%s\":%ld", f->key, (long)defs.defs[f->slot - 1].min);
                 break;
@@ -324,6 +457,15 @@ int ha_config_state_json(char *buf, size_t len) {
                 pos =
                     jcat(buf, len, pos, "\"%s\":\"%s\"", f->key, defs.defs[f->slot - 1].break_eligible ? "ON" : "OFF");
                 break;
+            case CFG_BOOL: {
+                /* Any non-zero stored value reads as ON: HA's switch state
+                   must be one of pl_on/pl_off, and a value written by a
+                   different firmware still has to render. */
+                uint16_t v = 0;
+                f->get_u16(&v);
+                pos = jcat(buf, len, pos, "\"%s\":\"%s\"", f->key, v ? "ON" : "OFF");
+                break;
+            }
             case CFG_ENUM: {
                 /* HA select state must be one of the options — clamp a
                    stored index from a different firmware to option 0. */

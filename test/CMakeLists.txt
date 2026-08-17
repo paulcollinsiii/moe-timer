@@ -89,6 +89,10 @@ add_host_test(test_stats_json)
 add_host_test(test_mqtt_topics)
 add_host_test(test_mqtt_rx)
 add_host_test(test_config_validate)
+# The one decision inside the OTA driver that needs no radio: whether a
+# Location header may be followed. It compiles config_validate.c beside
+# ota_url.c so the https rule under test is the real one, not a restatement.
+add_host_test(test_ota_url)
 add_host_test(test_ha_config EXTRA_LIBS m) # m: tones.c sine LUT
 add_host_test(test_tones EXTRA_LIBS m)
 add_host_test(test_wav_header)
@@ -102,3 +106,41 @@ add_host_test(test_cmd_apply
     EXTRA_SRCS ${CMAKE_CURRENT_SOURCE_DIR}/../lib/cJSON/cJSON.c
     EXTRA_INCLUDES ${CMAKE_CURRENT_SOURCE_DIR}/../lib/cJSON
     EXTRA_LIBS m)
+add_host_test(test_ota_policy
+    EXTRA_SRCS ${CMAKE_CURRENT_SOURCE_DIR}/../lib/cJSON/cJSON.c
+    EXTRA_INCLUDES ${CMAKE_CURRENT_SOURCE_DIR}/../lib/cJSON
+    EXTRA_LIBS m)
+# The decisions that were buried in the OTA driver: esp-tls vs socket
+# classification, image-vs-transport errors, the fallback-fact rule and
+# manifest completeness. It carries ota_policy.c (and therefore cJSON)
+# because the fallback rule's guarantee is stated in terms of
+# ota_policy_reason, and asserting it against the real classifier rather
+# than a restatement is the whole point.
+add_host_test(test_ota_facts
+    EXTRA_SRCS ${CMAKE_CURRENT_SOURCE_DIR}/../lib/cJSON/cJSON.c
+    EXTRA_INCLUDES ${CMAKE_CURRENT_SOURCE_DIR}/../lib/cJSON
+    EXTRA_LIBS m)
+# The flow suite carries cJSON for the same reason: it runs the REAL
+# ota_policy under the sequencing rather than a mock of it, so the
+# decisions driving the order are the ones the firmware will make.
+add_host_test(test_ota_flow
+    EXTRA_SRCS ${CMAKE_CURRENT_SOURCE_DIR}/../lib/cJSON/cJSON.c
+    EXTRA_INCLUDES ${CMAKE_CURRENT_SOURCE_DIR}/../lib/cJSON
+    EXTRA_LIBS m)
+
+# ---- the one suite that is not C, and why ----
+#
+# tools/check_slot_size.py is the build-size guard wired into the project
+# root CMakeLists.txt. It is a build-system tool, not firmware: add_host_test
+# cannot build it and Unity cannot call it. The alternative -- exercising the
+# guard only by building the firmware -- can never reach its failure branch,
+# because tripping it for real would mean growing the image by tens of KB.
+# So it is registered directly with add_test() and driven by unittest, which
+# ships with the Python the ESP-IDF toolchain already requires.
+#
+# It stays in the same ctest sweep as the C suites on purpose: a guard whose
+# tests live somewhere separate is a guard whose tests stop being run.
+find_package(Python3 REQUIRED COMPONENTS Interpreter)
+add_test(NAME test_check_slot_size
+         COMMAND ${Python3_EXECUTABLE}
+                 ${CMAKE_CURRENT_SOURCE_DIR}/test_check_slot_size/test_check_slot_size.py)

@@ -60,6 +60,9 @@ static display_state_t base_state(void) {
         .break_duration_sec = 900,
         .swap_available = true,
         .start_available = true,
+        /* Fixed injected version — display_screens.c never reads the app
+           descriptor, which is what keeps these goldens deterministic. */
+        .fw_version = "1.5.0",
     };
 }
 
@@ -284,6 +287,195 @@ void test_main_low_battery_warn_badge(void) {
     assert_matches_golden("main_warn_badge");
 }
 
+/* The version rides the battery label, so the only two things that can go
+   wrong are a buffer overflow (bounded by the format's own arithmetic) and
+   a collision with the 28 pt remaining-time label sharing the {58,87}
+   band. Measure both labels' real extents rather than eyeballing the
+   golden. The battery label is the one aligned at y=66, the remaining time
+   the one at y=58 — unambiguous within this screen. */
+static void measure_battery_row(const display_state_t *st, int32_t *batt_right, int32_t *rem_left) {
+    display_screens_build_main(st);
+    lv_obj_t *scr = lv_screen_active();
+    lv_obj_update_layout(scr);
+    *batt_right = -1;
+    *rem_left = -1;
+    uint32_t n = lv_obj_get_child_count(scr);
+    for (uint32_t i = 0; i < n; i++) {
+        lv_obj_t *o = lv_obj_get_child(scr, i);
+        if (!lv_obj_check_type(o, &lv_label_class))
+            continue;
+        if (lv_obj_get_y(o) == 66)
+            *batt_right = lv_obj_get_x(o) + lv_obj_get_width(o);
+        else if (lv_obj_get_y(o) == 58)
+            *rem_left = lv_obj_get_x(o);
+    }
+    TEST_ASSERT_NOT_EQUAL_MESSAGE(-1, *batt_right, "battery label (y=66) not found");
+    TEST_ASSERT_NOT_EQUAL_MESSAGE(-1, *rem_left, "remaining-time label (y=58) not found");
+}
+
+/* Every version this row can be asked to render, against the widest the
+   28 pt remaining time ever gets. OTA_VERSION_MAX (ota_policy.h) is 32, so
+   31 characters is publishable and therefore reachable — untruncated it
+   overstruck the time label by 106 px, which on 1 bpp e-ink is two black
+   strings on top of each other, not a graceful clip.
+
+   The pathological rows are the point: a character budget alone cannot
+   bound the rendered width (a 12 pt digit advances ~8 px, 'W' ~14), which
+   is why the label also carries a hard width cap. */
+static const struct {
+    const char *ver;
+    const char *what;
+} VERSION_CASES[] = {
+    {"", "empty"},
+    {"1.5.0", "typical release"},
+    {"1.10.10-rc1", "pre-release"},
+    {"1.5.0-dirty-20260811-abcdef0", "28-char build id"},
+    {"0000000000000000000000000000000", "31 digits (OTA_VERSION_MAX-1)"},
+    {"WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW", "31 'W' - widest glyph in the font"},
+    {"mmmmmmmmmmmmmmmmmmmmmmmmmmmmmmm", "31 'm' - widest lowercase"},
+};
+
+void test_version_fits_the_battery_row(void) {
+    display_state_t st = base_state();
+    st.battery_pct = 100;      /* three digits + the full-battery glyph */
+    st.remaining_sec = 359999; /* 99:59:59, the widest time the panel renders */
+    for (size_t i = 0; i < sizeof(VERSION_CASES) / sizeof(VERSION_CASES[0]); i++) {
+        st.fw_version = VERSION_CASES[i].ver;
+        int32_t batt_right, rem_left;
+        measure_battery_row(&st, &batt_right, &rem_left);
+        printf("battery row [%2d ch, %-32s] ends x=%3d, time starts x=%d, gap=%d px\n",
+               (int)strlen(VERSION_CASES[i].ver), VERSION_CASES[i].what, (int)batt_right, (int)rem_left,
+               (int)(rem_left - batt_right));
+        char msg[160];
+        snprintf(msg, sizeof(msg), "%s: battery+version ends at x=%d, remaining-time label starts at x=%d",
+                 VERSION_CASES[i].what, (int)batt_right, (int)rem_left);
+        TEST_ASSERT_TRUE_MESSAGE(batt_right < rem_left, msg);
+        TEST_ASSERT_TRUE_MESSAGE(batt_right <= HOR, "battery+version label runs off the right edge");
+    }
+}
+
+/* Settles, against the real LVGL this suite links, that the geometric cap
+   is not merely advisory. lv_obj_set_style_max_width() bounds the OBJECT;
+   this asserts the DRAWING is bounded too, which is the property the row
+   actually depends on and the one that could differ between LVGL versions.
+
+   Renders the pathological 31-'W' version — 502 px of text uncapped, i.e.
+   past the panel's right edge and straight through the remaining-time
+   label — and requires every pixel from the cap's right edge (x=172) up to
+   the time label's left edge to be white. LV_LABEL_LONG_CLIP is also under
+   test here: LV_LABEL_LONG_DOT wraps a content-sized label to three lines
+   (h 15 -> 45), which this catches as ink below the battery row's band. */
+/* display_screens.c aligns the battery label at x=4 and caps it at 168 px
+   (BATT_ROW_MAX_W), so its right edge cannot pass 172; the 28 pt time
+   label's left edge bottoms out at 180. Mirrored here as literals on
+   purpose — a test that recomputed them from the source constants would
+   move in lockstep with a mistake in them. */
+#define BATT_ROW_CAP_RIGHT 172
+#define TIME_LABEL_LEFT 180
+
+void test_version_cap_clips_the_drawing_not_just_the_object(void) {
+    display_state_t st = base_state();
+    st.battery_pct = 100;
+    st.remaining_sec = 359999;
+    st.fw_version = "WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW"; /* 31 */
+
+    int32_t batt_right, rem_left;
+    measure_battery_row(&st, &batt_right, &rem_left);
+    lv_refr_now(s_disp);
+    printf("cap check: object ends x=%d, time label starts x=%d\n", (int)batt_right, (int)rem_left);
+
+    /* Bounds are the CONSTANTS, never the measured edge: deriving the
+       corridor from batt_right would make the scan vacuous exactly when
+       the cap has failed, because an overrunning label pushes its own
+       right edge past the corridor's end and the loop stops running. */
+    TEST_ASSERT_TRUE_MESSAGE(batt_right <= BATT_ROW_CAP_RIGHT, "capped label is wider than the cap allows");
+    for (int32_t y = 58; y <= 91; y++) {
+        for (int32_t x = BATT_ROW_CAP_RIGHT; x < TIME_LABEL_LEFT; x++) {
+            int bit = (s_captured[y * (HOR / 8) + x / 8] >> (7 - (x & 7))) & 1;
+            char msg[96];
+            snprintf(msg, sizeof(msg), "ink at x=%d y=%d - capped label spilled past x=%d", (int)x, (int)y,
+                     BATT_ROW_CAP_RIGHT);
+            TEST_ASSERT_EQUAL_HEX8_MESSAGE(1, bit, msg); /* LVGL I1: 1 = white */
+        }
+    }
+
+    /* And nothing wrapped down into the mode/state row's band. */
+    assert_rows_blank(92, 94);
+}
+
+void test_no_version_renders_the_row_unchanged(void) {
+    /* NULL (nothing injected) and "" must both drop the separator
+       entirely — no trailing whitespace widening the label, and no %s on a
+       null pointer. */
+    static uint8_t with_null[FB_BYTES];
+    display_state_t st = base_state();
+    st.fw_version = NULL;
+    display_screens_build_main(&st);
+    lv_refr_now(s_disp);
+    memcpy(with_null, s_captured, FB_BYTES);
+
+    st.fw_version = "";
+    display_screens_build_main(&st);
+    lv_refr_now(s_disp);
+    TEST_ASSERT_EQUAL_MEMORY_MESSAGE(with_null, s_captured, FB_BYTES, "NULL and empty version render differently");
+
+    int32_t batt_right, rem_left;
+    st.fw_version = NULL;
+    measure_battery_row(&st, &batt_right, &rem_left);
+    int32_t bare = batt_right;
+    st.fw_version = "1.5.0";
+    measure_battery_row(&st, &batt_right, &rem_left);
+    TEST_ASSERT_TRUE_MESSAGE(batt_right > bare, "the version added no width - it is not being rendered");
+}
+
+void test_ota_screen(void) {
+    /* Firmware update, full refresh: both versions, direction-neutral verb
+       (the policy deliberately supports downgrades). */
+    display_screens_build_ota("1.5.0", "1.6.0");
+    assert_matches_golden("ota");
+}
+
+/* Design margin for the OTA screen: the 28 pt title renders 279 px on a
+   296 px panel, i.e. 8 px a side. Asserting merely "<= HOR" would let a
+   296 px line pass while silently eating that margin, so the bound is the
+   margin, not the panel. */
+#define OTA_MAX_LINE_W (HOR - 16)
+
+static void assert_ota_lines_fit(const char *from, const char *to) {
+    display_screens_build_ota(from, to);
+    lv_obj_t *scr = lv_screen_active();
+    lv_obj_update_layout(scr);
+    uint32_t n = lv_obj_get_child_count(scr);
+    TEST_ASSERT_EQUAL_UINT32(4, n);
+    for (uint32_t i = 0; i < n; i++) {
+        lv_obj_t *o = lv_obj_get_child(scr, i);
+        printf("ota line %u: \"%s\" w=%d h=%d y=%d\n", i, lv_label_get_text(o), (int)lv_obj_get_width(o),
+               (int)lv_obj_get_height(o), (int)lv_obj_get_y(o));
+        char msg[160];
+        snprintf(msg, sizeof(msg), "\"%s\" is %d px wide, budget is %d (panel %d less 8 px a side)",
+                 lv_label_get_text(o), (int)lv_obj_get_width(o), OTA_MAX_LINE_W, HOR);
+        TEST_ASSERT_TRUE_MESSAGE(lv_obj_get_width(o) <= OTA_MAX_LINE_W, msg);
+        /* A wrapped label is taller than one line of its font. */
+        TEST_ASSERT_TRUE_MESSAGE(lv_obj_get_height(o) < 40, "label wrapped onto a second line");
+        TEST_ASSERT_TRUE_MESSAGE(lv_obj_get_y(o) + lv_obj_get_height(o) <= VER, "label runs off the bottom edge");
+    }
+}
+
+void test_ota_screen_lines_fit_the_panel(void) {
+    /* The 28 pt "Updating Firmware" title is the widest fixed string on
+       any screen in this tree (279 px; the plan's all-caps "UPDATING
+       FIRMWARE" measured 327 and would have been clipped, which is why
+       the title is mixed case). The 18 pt "Installing v..." line is the
+       widest VARIABLE one — untruncated it left the panel at 21
+       characters (303 px) and reached 426 px at 31. Drive both the
+       ordinary and the maximum-length cases. */
+    assert_ota_lines_fit("1.10.10-rc1", "1.10.11-rc2");
+    for (size_t i = 0; i < sizeof(VERSION_CASES) / sizeof(VERSION_CASES[0]); i++) {
+        printf("-- ota with %s --\n", VERSION_CASES[i].what);
+        assert_ota_lines_fit(VERSION_CASES[i].ver, VERSION_CASES[i].ver);
+    }
+}
+
 void test_charge_me_screen(void) {
     /* <= 10%: full stop — the panel says only Charge Me! */
     display_screens_build_charge_me();
@@ -326,6 +518,11 @@ int main(void) {
     RUN_TEST(test_start_available_only_changes_button_a);
     RUN_TEST(test_break_screen_no_eligible);
     RUN_TEST(test_main_low_battery_warn_badge);
+    RUN_TEST(test_version_fits_the_battery_row);
+    RUN_TEST(test_version_cap_clips_the_drawing_not_just_the_object);
+    RUN_TEST(test_no_version_renders_the_row_unchanged);
+    RUN_TEST(test_ota_screen);
+    RUN_TEST(test_ota_screen_lines_fit_the_panel);
     RUN_TEST(test_charge_me_screen);
     RUN_TEST(test_timesup_screen);
     RUN_TEST(test_sync_failed_screen);

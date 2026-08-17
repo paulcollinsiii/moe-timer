@@ -2,8 +2,15 @@
 # Flash (or erase) the raw "assets" partition holding the custom alert WAV.
 #
 # The firmware accepts 16-bit mono PCM WAV, 8000-22050 Hz, up to the
-# partition size (952 KB ~= 30 s at 16 kHz). An empty/invalid partition
-# makes the "Custom WAV" tone fall back to the built-in chime.
+# partition size -- currently 440 KB = 450,560 B ~= 14 s at 16 kHz, ~28 s at
+# 8 kHz, ~10 s at 22.05 kHz. partitions.csv is the source of truth for that
+# size; this figure is a convenience copy, so re-check it there if the table
+# changes (the flash itself is by name and needs no size). An empty/invalid partition makes the "Custom WAV"
+# tone fall back to the built-in chime.
+#
+# The partition is addressed by name, so this script needs no offsets - but
+# re-flashing a changed partition table moves "assets" and destroys whatever
+# was written here. Re-run this script after any partition-table reflash.
 #
 # Usage:
 #   tools/flash_assets.sh [-p PORT] path/to/tone.wav   # write

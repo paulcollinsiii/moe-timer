@@ -139,6 +139,31 @@ esp_err_t hal_nvs_write_u16(const char *key, uint16_t val) {
     return ESP_OK;
 }
 
+/* Width-checked exactly like the u16 pair: a key written as one type and
+   read as the other must MISS, because ESP-IDF's nvs_get_u32 does the
+   same. Sharing a key between widths would otherwise pass here and fail
+   on the device. */
+esp_err_t hal_nvs_read_u32(const char *key, uint32_t *out) {
+    count_read(key);
+    const Entry *e = find_entry(key);
+    if (!e || e->len != sizeof(uint32_t))
+        return ESP_ERR_NVS_NOT_FOUND;
+    memcpy(out, e->data, sizeof(uint32_t));
+    return ESP_OK;
+}
+
+esp_err_t hal_nvs_write_u32(const char *key, uint32_t val) {
+    count_write(key);
+    if (take_write_failure())
+        return ESP_FAIL;
+    Entry *e = alloc_entry(key);
+    if (!e)
+        return ESP_FAIL;
+    memcpy(e->data, &val, sizeof(uint32_t));
+    e->len = sizeof(uint32_t);
+    return ESP_OK;
+}
+
 esp_err_t hal_nvs_read_str(const char *key, char *buf, size_t *len) {
     count_read(key);
     const Entry *e = find_entry(key);
@@ -148,10 +173,20 @@ esp_err_t hal_nvs_read_str(const char *key, char *buf, size_t *len) {
         *len = e->len + 1; /* report required size including NUL */
         return ESP_OK;
     }
-    size_t copy = (e->len < *len) ? e->len : *len - 1;
-    memcpy(buf, e->data, copy);
-    buf[copy] = '\0';
-    *len = copy + 1; /* match ESP-IDF: *len includes NUL byte */
+    /* Match nvs_get_str: a buffer too small to hold the value plus its NUL
+       is an ERROR, and the buffer is left UNTOUCHED. The mock used to
+       truncate instead, which is a materially different failure — a short
+       reader saw a shortened string here but would see an uninitialised
+       buffer on device, and a caller that only maps NOT_FOUND to "" (which
+       is all get_str_empty_default does) never notices either way. That
+       divergence hid the real consequence of an undersized read buffer. */
+    if (e->len + 1 > *len) {
+        *len = e->len + 1; /* required size, as ESP-IDF reports it */
+        return ESP_ERR_NVS_INVALID_LENGTH;
+    }
+    memcpy(buf, e->data, e->len);
+    buf[e->len] = '\0';
+    *len = e->len + 1; /* match ESP-IDF: *len includes NUL byte */
     return ESP_OK;
 }
 

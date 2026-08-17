@@ -47,8 +47,8 @@ Everything appears under one device, grouped by HA `entity_category`:
   Break / Bed time tone, incl. "Custom WAV" from the assets partition),
   Alert volume (0–200 %; 100 = clean reference level, above that adds
   clipping gain for real loudness, 0 mutes), device name, timezone, the
-  four timer slots, plus the Screen-bonus number and Find-my-timer
-  switch.
+  four timer slots, the OTA manifest URL + OTA check-on-sync switch,
+  plus the Screen-bonus number and Find-my-timer switch.
 - **Diagnostic** (read-only detail): battery voltage, ambient light,
   active timer, day type, last reset, **Screen time limit** (the computed
   allocation for today — the read-only *result* of the editable allocation
@@ -107,6 +107,21 @@ confirmed value to `magtag/<id>/cfg` so the control reflects reality.
   truth. After that, HA edits (or a bulk-config `timers` array) win, and
   changing the menuconfig defaults no longer affects an already-provisioned
   device — erase NVS (or re-flash with NVS erased) to reseed from Kconfig.
+- **Firmware updates:** **OTA manifest URL** (Text) is the https endpoint
+  the device checks for a new build; **OTA check on sync** (Switch) makes
+  it also check during a Button D full sync, on top of the daily
+  rollover check. Clearing the URL to empty is how you turn updates off —
+  it is the only off switch, so an empty value is accepted where any
+  other non-`https://` value is rejected. Plain `http://` is refused by
+  both this control and the bulk document: an unauthenticated firmware
+  endpoint is an arbitrary-code-execution channel. A rejected value shows
+  up as `{"key":"ota_url","ok":false,"err":"value"}` on the ack topic and
+  the control snaps back at the next `cfg` republish.
+
+  These override `CONFIG_MAGTAG_OTA_URL` / `CONFIG_MAGTAG_OTA_CHECK_ON_SYNC`
+  permanently: unlike the allocation defaults, the OTA keys are excluded
+  from the defaults fingerprint, so a later menuconfig change (or any
+  change that reseeds NVS) will **not** revert what you set here.
 - Commands are sent on retained `set/<key>` topics so the sleeping device
   receives edits made while it's asleep. Idempotent, so re-delivery is
   harmless.
@@ -171,7 +186,9 @@ applies it and republishes the applied version to
 `magtag/<id>/config_ack`. Every field is optional except `ver` — applied
 only when `ver` differs from the last one, so a retained message is safe
 to leave on the topic. A rejected field is named in the ack's `errors`
-list but never blocks the others.
+list but never blocks the others. If more fields fail than the ack can
+name, it carries `"errors_truncated": true` alongside the ones it did —
+so a shortened list never reads as "everything else was fine".
 
 ```json
 {
@@ -182,6 +199,7 @@ list but never blocks the others.
   "quiet_start": 2230, "quiet_end": 800,
   "break_interval_min": 30, "break_duration_min": 15,
   "summer_start": "2026-05-29", "school_start": "2026-08-20", "school_end": "2027-05-28",
+  "ota_url": "https://example.com/magtag/manifest.json", "ota_on_sync": false,
   "holidays": ["2026-10-16", "2026-11-03"],
   "timers": [
     {"name": "Piano", "min": 15, "reload": true, "break": true},
@@ -211,6 +229,12 @@ list but never blocks the others.
 - `break` marks a timer as a genuine break activity (music practice,
   reading): it may be started during a Screen Break and its time does not
   count against the screen-exposure balance.
+- `ota_url` must be `https://…` (max 127 chars) or `""` to disable update
+  checks; `ota_on_sync` is a JSON boolean (`1` or `"ON"` is rejected, so a
+  mistyped document is named in the ack rather than half-applied). Both
+  mirror the native controls above, and — like `reload`/`break` — **an
+  omitted one leaves the stored value alone**: a document written before
+  OTA existed will not clear an endpoint you set from the HA card.
 - `holidays` replaces the stored list (rolling ~45-date cap).
 
 The same fields are available here as on the native controls (`name`, `tz`,

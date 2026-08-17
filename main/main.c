@@ -8,6 +8,7 @@
 #include "config_cache.h"
 #include "display.h"
 #include "driver/gpio.h"
+#include "esp_app_desc.h" /* esp_app_get_description(): the running version */
 #include "esp_log.h"
 #include "esp_sleep.h"
 #include "esp_system.h"
@@ -21,20 +22,24 @@
 #include "net_window.h"
 #include "nvs_config.h"
 #include "nvs_flash.h"
+#include "ota.h"
+#include "ota_flow.h"
 #include "sleep_plan.h"
 #include "timer.h"
 #include "timer_persist.h"
 #include "wake_flow.h"
+#include "wifi_session.h"
 
 /* This file is the composition root and nothing else. The rule it is held
    to (.claude/CLAUDE.md) is that it may contain wiring and device calls
    but may not contain a DECISION. Every symbol below with an executable
    statement names the numbered reason that admits it; the rest — the log
-   TAG, the PARENT_TESTING macro and the NET_APPLY_OPS table — are pure
-   wiring, admitted by the headline rule rather than by a number, because
-   a construct with nothing to execute has nothing to decide. The
-   numbered reasons, quoted from the rule rather than paraphrased — the
-   rule is not negotiable against the code that has to satisfy it:
+   TAG, the PARENT_TESTING macro and the NET_APPLY_OPS and OTA_FLOW_OPS
+   tables — are pure wiring, admitted by the headline rule rather than by
+   a number, because a construct with nothing to execute has nothing to
+   decide. The numbered reasons, quoted from the rule rather than
+   paraphrased — the rule is not negotiable against the code that has to
+   satisfy it:
 
      1. Boot ordering is a hardware contract.
      2. It runs in an ISR or esp_timer context where a module API is not
@@ -104,6 +109,15 @@ void enter_deep_sleep(wake_sleep_mode_t mode) {
        context. */
     net_window_join(15000, NULL);
     net_window_log_last(); /* timing repeat: the boot-time line is often lost to CDC */
+    /* Rollback: this wake reached sleep, so keep the image it came up on.
+       Early in the funnel on purpose — every step below it can block (the
+       3 s release wait, neopixel_stop_sync's 500 ms ack, the break-end
+       repaint) and this wake is the image's only chance to be certified.
+       It does not need to be above hal_nvs_close() at the bottom, though
+       it also is: the mark writes the ota_data partition through the
+       esp_ota APIs, not through hal_nvs. Whether it certifies or declines
+       is ota_flow's, host-tested; the funnel decides nothing. */
+    ota_flow_confirm_image();
     timer_persist_save();
     /* EXT1 ANY_LOW is level-triggered: a still-held button would re-wake
        instantly and re-fire its action. Wait (bounded) for release before
@@ -235,6 +249,13 @@ static const net_apply_ops_t NET_APPLY_OPS = {
 static void awake_failsafe_cb(void *arg) {
     (void)arg;
     ESP_LOGE(TAG, "Awake failsafe: still awake after %d s - forcing deep sleep", CONFIG_MAGTAG_MAX_AWAKE_SEC);
+    /* Announce the path before entering the funnel: this sleep must not
+       certify a pending image. A wake that had to be killed is the worst
+       possible evidence for the firmware running it, and the funnel's
+       ota_flow_confirm_image() has no other way to tell this caller from
+       the healthy ones. One line, no branch — ota_flow.h owns the
+       argument and ota_flow.c the decision. */
+    ota_flow_note_failsafe_sleep();
     enter_deep_sleep(lock_gate_sleep_mode());
 }
 
@@ -259,17 +280,104 @@ static void arm_awake_failsafe(void) {
 }
 
 /* Push the awake failsafe out so a long deliberate awake stretch (the
-   locate alarm) isn't cut short by it. Installed into alerts.c at boot;
-   HOW LONG to push is the caller's, and this only applies it. Keep this
-   to exactly one reference — it is `static`, so the unused-function
-   warning is the only thing left that would notice a dropped install
-   (see refactor.bugdiscoveries.md). */
-static void extend_awake_failsafe(int seconds) {
+   locate alarm) isn't cut short by it. HOW LONG to push is the caller's,
+   and this only applies it.
+
+   ANSWERS WHETHER THERE WAS A FAILSAFE TO PUSH, which used to be
+   swallowed. arm_awake_failsafe above only logs a create/start failure,
+   so on such a boot s_failsafe_timer stays NULL and this is a silent
+   no-op for the rest of the wake. Harmless for the locate alarm — with
+   no failsafe there is nothing to cut it short — but not for OTA:
+   ota_task_run_apply blocks on portMAX_DELAY and names this failsafe as
+   its only bound, so ota_flow_apply has to be able to ask, and declines
+   the download when the answer is no. */
+static bool extend_awake_failsafe(int seconds) {
     if (s_failsafe_timer != NULL) {
         esp_timer_stop(s_failsafe_timer);
         esp_timer_start_once(s_failsafe_timer, (uint64_t)seconds * 1000000ULL);
+        return true;
     }
+    return false;
 }
+
+/* Residency 4. alerts.c's extender callback is void(int) — it has no use
+   for the answer, and widening its ABI to carry one nobody reads would
+   be the tail wagging the dog. One line, no branch.
+   This also keeps the property the note above used to ask for by hand:
+   each of the two installs still has exactly one static symbol behind
+   it, so -Werror=unused-function is what notices a dropped install
+   (see refactor.bugdiscoveries.md). */
+static void alerts_extend_awake_cb(int seconds) {
+    (void)extend_awake_failsafe(seconds);
+}
+
+/* ---- OTA ---------------------------------------------------------------
+   Same shape as the network window above: the sequence is ota_flow.c's
+   (host-tested against injected counters), the transport is ota.c's, and
+   what belongs here is only the binding between them plus the budgets.
+
+   Note where the call sites are NOT: this file does not call
+   ota_flow_arm, ota_flow_check or ota_flow_apply. Arming and applying are
+   wake_flow.c's, checking is net_window.c's, and the apply is
+   deliberately kept off enter_deep_sleep() — awake_failsafe_cb reaches
+   that funnel from the esp_timer task, and a wedged wake is the last one
+   that should start a 1.5 MB download. The reasoning is written out at
+   maybe_apply_update() in wake_flow.c.
+
+   The rollback confirmation goes the OTHER way, and the contrast is the
+   point rather than an inconsistency. ota_flow_confirm_image() IS on
+   enter_deep_sleep(), because skipping the apply defers an update by a
+   day while skipping the confirmation REVERTS one — so it has to sit on
+   the funnel every sleep passes through, early-outs included. The
+   failsafe still must not certify anything, which is why
+   awake_failsafe_cb announces itself first; ota_flow.h argues that
+   choice out in full. */
+
+/* Residency 4. wifi_session_begin answers esp_err_t; ota_flow_ops_t wants
+   a bool, because the host suite has no esp_err_t. One line, no branch. */
+static bool ota_session_begin(void) {
+    return wifi_session_begin() == ESP_OK;
+}
+
+/* Residency 4. esp_timer counts microseconds; ota_flow measures its
+   download deadline in milliseconds. One line, no branch. */
+static int64_t ota_mono_ms(void) {
+    return esp_timer_get_time() / 1000;
+}
+
+/* Wiring, no executable statement — the same standing as NET_APPLY_OPS
+   above, and admitted by the headline rule for the same reason: a
+   construct with nothing to execute has nothing to decide.
+
+   .repaint is wake_flow's public entry point rather than main.c
+   implementing the paint itself; wake_flow.h records why that direction
+   is the one the residency audit landed on. */
+static const ota_flow_ops_t OTA_FLOW_OPS = {
+    .manifest_get = ota_manifest_get,
+    .dl_begin = ota_download_begin,
+    .dl_step = ota_download_step,
+    .dl_finish = ota_download_finish,
+    .dl_abort = ota_download_abort,
+    .session_begin = ota_session_begin,
+    .session_end = wifi_session_end,
+    .paint_update = display_ota,
+    .repaint = wake_flow_repaint_current_state,
+    .extend_awake = extend_awake_failsafe,
+    /* The OTA reboot skips enter_deep_sleep() entirely — maybe_apply_update
+       sits ahead of it in both wake tails — so this is the only thing
+       that flushes the timer snapshot before esp_restart() wipes RTC
+       memory. ota_flow.h says what the stale snapshot would cost. */
+    .persist_state = timer_persist_save,
+    .restart = esp_restart,
+    .free_heap = esp_get_free_heap_size,
+    .mono_ms = ota_mono_ms,
+    /* Cancels the pending-verify rollback. In ota.c rather than here
+       because esp_ota_mark_app_valid_cancel_rollback() is a bare call
+       with no handle, which the residency rule keeps out of this file;
+       reached through the ops table so the "should this wake certify?"
+       decision stays in host-tested ota_flow.c. */
+    .mark_valid = ota_mark_valid_if_pending,
+};
 
 /* Residency 1, whole-function: this is the boot sequence, and the order
    of it is a hardware contract at every step — the NeoPixel gate before
@@ -310,6 +418,15 @@ void app_main(void) {
     setenv("TZ", tz, 1);
     tzset();
 
+    /* Before anything reads the timer state, and in particular before the
+       restore below: g_rtc_state now carries a magic and a version, and
+       zeroing a struct that fails them is what makes last_date empty and
+       so hands the boot to the NVS snapshot. Answers whether it fired;
+       nothing here acts on that, because on a cold boot and on every
+       esp_restart the answer is yes by construction. The one case it is
+       actually defending against is written out above rtc_state_t. */
+    (void)timer_rtc_state_guard();
+
     /* Slot definitions live in rodata, not RTC memory — install them
        before the first timer_* call on every boot/wake. */
     timer_defs_install();
@@ -321,8 +438,35 @@ void app_main(void) {
     /* Paired with the line below: net_apply_init is what makes .on_locate
        dispatchable, so this is where a missing install would bite. Order
        against arm_awake_failsafe is free — the extender null-guards. */
-    alerts_set_extend_awake(extend_awake_failsafe);
+    alerts_set_extend_awake(alerts_extend_awake_cb);
     net_apply_init(&NET_APPLY_OPS);
+    /* Before wake_flow_handle_wake at the bottom of this function, which
+       is where the first ota_flow_arm() happens — the module's contract
+       is "once, before any other call", and this is the only point that
+       satisfies it on every wake path.
+
+       The CONFIG_MAGTAG_* symbols are READ HERE and passed in rather than
+       included by ota_flow.c, which is the arrangement ota_flow.h asks
+       for: the host suite asserts on the deadline and the retry budget
+       against its own numbers, and a host build that supplied its own
+       CONFIG_ defines would be asserting against values this firmware
+       does not necessarily use.
+
+       running_version is the app descriptor's, which version.txt at the
+       project root stamps (1.5.0). It is the SAME string the panel and
+       the `fw` stat publish, and that is the point: it is also the OTA
+       comparison key, so the two cannot disagree. Without version.txt IDF
+       falls back to `git describe`, which yields something no manifest
+       could ever match and very nearly overflows the 32-byte field. */
+    const ota_flow_cfg_t ota_cfg = {
+        .max_sec = CONFIG_MAGTAG_OTA_MAX_SEC,
+        .awake_sec = CONFIG_MAGTAG_MAX_AWAKE_SEC,
+        .min_batt_pct = CONFIG_MAGTAG_OTA_MIN_BATT_PCT,
+        .max_fails = CONFIG_MAGTAG_OTA_MAX_FAILS,
+        .min_free_heap = CONFIG_MAGTAG_OTA_MIN_FREE_HEAP,
+        .running_version = esp_app_get_description()->version,
+    };
+    ota_flow_init(&OTA_FLOW_OPS, &ota_cfg);
     buttons_init();
     battery_init();
     /* audio + light init lazily on first use (most wakes need neither);

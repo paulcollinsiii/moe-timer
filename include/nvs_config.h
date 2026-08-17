@@ -79,6 +79,59 @@ esp_err_t nvs_config_set_cfg_ver(const char *ver);
 esp_err_t nvs_config_get_cmd_id(char *buf, size_t len);
 esp_err_t nvs_config_set_cmd_id(const char *id);
 
+/* ---- OTA ------------------------------------------------------------
+   None of these are seeded by nvs_config_init_defaults and none are in
+   the defaults fingerprint (see nvs_defaults.h) — a menuconfig change
+   must not revert an HA-set endpoint. */
+/* READER BUFFER SIZES ARE A CONTRACT, not a suggestion. hal_nvs_read_str
+   wraps nvs_get_str, which returns ESP_ERR_INVALID_LENGTH on a buffer too
+   small and writes NOTHING into it; get_str_*_default maps only
+   NOT_FOUND to a default, so a reader that guesses low is left holding an
+   UNINITIALISED buffer. Give each getter at least the bound named below.
+   The setters reject over-long values rather than truncating, so a
+   too-long write fails loudly instead of storing a corrupted value. */
+
+/* Manifest endpoint; "" = OTA disabled. Buffer >= CFG_BOUND_OTA_URL_MAX. */
+esp_err_t nvs_config_get_ota_url(char *buf, size_t len);
+esp_err_t nvs_config_set_ota_url(const char *url);
+/* Also check for an update on every Button D full sync (0/1). */
+esp_err_t nvs_config_get_ota_on_sync(uint16_t *out);
+esp_err_t nvs_config_set_ota_on_sync(uint16_t on);
+/* Device-owned state (no bulk-document key): last attempt's reason code,
+   the version the retry budget is counting against, the consecutive-
+   failure count for that target, the last download's wall time, and which
+   committed image is still awaiting certification. The first
+   four feed the stat payload (ota_flow_stat reads them at PUBLISH time);
+   a different target resets the count.
+
+   Buffer >= CFG_BOUND_OTA_RESULT_MAX. */
+esp_err_t nvs_config_get_ota_result(char *buf, size_t len);
+esp_err_t nvs_config_set_ota_result(const char *reason);
+/* Buffer >= CFG_BOUND_OTA_TARGET_MAX. Reading this one short is not
+   cosmetic: the retry-budget comparison would never match its stored
+   target, so the device would retry a doomed version forever. */
+esp_err_t nvs_config_get_ota_target(char *buf, size_t len);
+esp_err_t nvs_config_set_ota_target(const char *ver);
+esp_err_t nvs_config_get_ota_fails(uint16_t *out);
+esp_err_t nvs_config_set_ota_fails(uint16_t fails);
+/* Milliseconds, so u32: a u16 saturates at 65.5 s and the download budget
+   is CONFIG_MAGTAG_OTA_MAX_SEC. 0 = no download has ever completed a
+   timing. */
+esp_err_t nvs_config_get_ota_dl_ms(uint32_t *out);
+esp_err_t nvs_config_set_ota_dl_ms(uint32_t ms);
+/* The version an OTA reboot committed and that has not been certified yet;
+   "" = nothing outstanding. The ONLY durable trace an OTA reboot leaves
+   behind, and the signal a rollback is detected from — see ota_flow.c.
+   Deliberately NOT ota_target: that key is the retry budget's, and it is
+   re-pointed before every attempt. Not published; the reason string it
+   produces is.
+
+   Buffer >= CFG_BOUND_OTA_TARGET_MAX, and for the same reason ota_target
+   needs one: a short read reports no match, which here would forge a
+   rollback rather than merely miss one.  */
+esp_err_t nvs_config_get_ota_pend_ver(char *buf, size_t len);
+esp_err_t nvs_config_set_ota_pend_ver(const char *ver);
+
 /* Extra-timer definitions from HA (timer_defs_install falls back to the
    Kconfig table when absent). Version/size drift reads as stale. */
 #define TIMER_DEFS_BLOB_VERSION 2 /* v2: + break_eligible */

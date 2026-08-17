@@ -720,6 +720,92 @@ void test_restore_of_a_slot_the_firmware_no_longer_defines_lands_on_screen(void)
     TEST_ASSERT_EQUAL_INT(TIMER_RUNNING, timer_slot_state(SLOT_PIANO));
 }
 
+/* ---- the RTC-state guard ------------------------------------------------ */
+
+/* The struct had NO validation at all — no magic, no version, no
+ * checksum — while the NVS blob it mirrors has all three. That asymmetry
+ * was fine while RTC memory could only ever come back intact (deep-sleep
+ * wake) or zeroed (every other reset, which reloads .rtc.data from the
+ * image). There is exactly one path where it can come back as something
+ * else, and it is the OTA commit's worst case: the awake failsafe fires
+ * between esp_ota_set_boot_partition() and esp_restart(), the device
+ * deep-sleeps, and the next boot is a deep-sleep wake OF THE NEW IMAGE —
+ * the one reset for which the bootloader SKIPS loading the RTC segments.
+ * The new image then reads the old image's bytes at its own offsets.
+ *
+ * ota_flow.c closes that race by re-arming the failsafe before the
+ * commit; this is the belt to those braces, and the whole of it is that
+ * a struct which fails its own head is routed to the recovery the
+ * firmware already has and tests above — the NVS snapshot. */
+void test_a_foreign_rtc_image_is_zeroed_so_the_nvs_snapshot_takes_over(void) {
+    arm_rich_state(NOON);
+    timer_persist_save();
+
+    /* Not a wipe: a plausible-looking state carrying the WRONG identity,
+       which is what a differently-laid-out image's bytes look like. A
+       date that reads as today is the dangerous part — without the guard
+       timer_persist_try_restore refuses to run at all and the firmware
+       spends the day on these bytes. */
+    g_rtc_state.magic = 0xDEADBEEFu;
+    g_rtc_state.version = RTC_STATE_VERSION; /* only the MAGIC is wrong here */
+    g_rtc_state.slots[0].run_accum_sec = 999999;
+    timer_record_date(NOON);
+
+    TEST_ASSERT_TRUE_MESSAGE(timer_rtc_state_guard(), "a wrong magic was accepted");
+    TEST_ASSERT_EQUAL_STRING("", timer_current_date());
+    TEST_ASSERT_TRUE(timer_persist_try_restore(NOON));
+    TEST_ASSERT_EQUAL_INT(SLOT_PIANO, timer_active_slot());
+    /* The stored value, not the invented one: the guard's whole job is
+       that nothing downstream ever sees 999999. */
+    TEST_ASSERT_EQUAL_INT32(777, g_rtc_state.slots[0].run_accum_sec);
+}
+
+/* The version half, which the magic alone cannot cover: two builds can
+   agree on the magic and still disagree on every offset behind it. Same
+   rule TIMER_SNAPSHOT_VERSION follows, and the same reason. */
+void test_a_matching_magic_with_the_wrong_version_is_still_rejected(void) {
+    arm_rich_state(NOON);
+    timer_persist_save();
+    /* The magic MATCHES — that is the whole point. A test that left it
+       unstamped would pass against a guard with no version check at
+       all, which is exactly the mutation this case exists to catch. */
+    g_rtc_state.magic = RTC_STATE_MAGIC;
+    g_rtc_state.version = RTC_STATE_VERSION + 1;
+    timer_record_date(NOON);
+
+    TEST_ASSERT_TRUE(timer_rtc_state_guard());
+    TEST_ASSERT_EQUAL_STRING("", timer_current_date());
+    TEST_ASSERT_TRUE(timer_persist_try_restore(NOON));
+    TEST_ASSERT_EQUAL_INT(SLOT_PIANO, timer_active_slot());
+}
+
+/* And the case that must NOT be disturbed, which is every ordinary
+   deep-sleep wake: a stamped struct is left exactly as it is, so the
+   live RTC state keeps beating the stored one. Zeroing here would refund
+   the day's allocation on every single wake. */
+void test_a_stamped_rtc_image_is_left_untouched(void) {
+    arm_rich_state(NOON);
+    timer_record_date(NOON);
+    TEST_ASSERT_TRUE(timer_rtc_state_guard()); /* stamps it the first time */
+
+    const rtc_state_t before = g_rtc_state;
+    TEST_ASSERT_FALSE_MESSAGE(timer_rtc_state_guard(), "a valid RTC state was thrown away");
+    TEST_ASSERT_EQUAL_INT(0, memcmp(&before, &g_rtc_state, sizeof(before)));
+    TEST_ASSERT_FALSE(timer_persist_try_restore(NOON)); /* RTC wins */
+}
+
+/* A zeroed struct — the ordinary panic / EN-reset / esp_restart case,
+   where .rtc.data is reloaded from the image — fails the magic too, and
+   must come out of the guard STAMPED. Otherwise the guard fires again on
+   the next call and the stamp never takes. */
+void test_a_zeroed_rtc_image_comes_out_stamped(void) {
+    wipe_rtc();
+    TEST_ASSERT_TRUE(timer_rtc_state_guard());
+    TEST_ASSERT_EQUAL_HEX32(RTC_STATE_MAGIC, g_rtc_state.magic);
+    TEST_ASSERT_EQUAL_UINT16(RTC_STATE_VERSION, g_rtc_state.version);
+    TEST_ASSERT_FALSE(timer_rtc_state_guard());
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_first_save_on_a_blank_store_writes_once);
@@ -753,5 +839,10 @@ int main(void) {
     RUN_TEST(test_day_rollover_without_a_snapshot_falls_through_to_the_reset);
     RUN_TEST(test_restore_depends_on_the_defs_table_being_installed_first);
     RUN_TEST(test_restore_of_a_slot_the_firmware_no_longer_defines_lands_on_screen);
+
+    RUN_TEST(test_a_foreign_rtc_image_is_zeroed_so_the_nvs_snapshot_takes_over);
+    RUN_TEST(test_a_matching_magic_with_the_wrong_version_is_still_rejected);
+    RUN_TEST(test_a_stamped_rtc_image_is_left_untouched);
+    RUN_TEST(test_a_zeroed_rtc_image_comes_out_stamped);
     return UNITY_END();
 }

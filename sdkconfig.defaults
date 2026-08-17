@@ -24,14 +24,54 @@ CONFIG_ESP_SYSTEM_PANIC_REBOOT_DELAY_SECONDS=3
 # in mqtt_ha.c, not on this stack.)
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=7168
 
-# 4 MB flash; custom table: two 1.5 MB OTA app slots (OTA plumbing is
-# future work — empty otadata boots ota_0, which sits at the old factory
-# offset) + a raw 952 KB "assets" partition for the alert WAV. nvs/phy
-# offsets match the previous SINGLE_APP_LARGE layout so reflashing keeps
-# device config.
+# 4 MB flash; custom table: two 1.75 MB (0x1C0000) OTA app slots + a raw
+# 440 KB "assets" partition for the alert WAV. Grown from this project's
+# previous custom table (0x180000 slots, otadata at 0x310000); nvs/phy/ota_0
+# keep their offsets from it so reflashing keeps device config, and an empty
+# otadata still boots ota_0 at the old factory offset. The
+# slot size is frozen — OTA cannot rewrite the partition table. Growing the
+# slots moved ota_1/otadata/assets, so a flashed WAV needs re-writing with
+# tools/flash_assets.sh. See partitions.csv.
 CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
 CONFIG_PARTITION_TABLE_CUSTOM=y
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+
+# OTA rollback-on-failure. A freshly written slot boots as PENDING_VERIFY;
+# unless the app calls esp_ota_mark_app_valid_cancel_rollback() during that
+# boot, the bootloader marks it ABORTED and boots the previous slot. Without
+# this symbol a bad update is permanent and the device is a brick on a shelf
+# with no UART bridge chip to recover it. main.c's enter_deep_sleep() makes
+# the call via ota_mark_valid_if_pending(); CONFIG_BOOTLOADER_SKIP_VALIDATE_
+# IN_DEEP_SLEEP stays off, so a deep-sleep wake re-runs the bootloader and is
+# therefore a rollback opportunity — the device gets exactly one wake to mark
+# the image good. Costs 80 B of bootloader (22,640 -> 22,720 of 28,672, so
+# 5,952 B still free) and 384 B of app; measured at HEAD against a genuine
+# rollback-off control, see docs/planning/ota.plan.md task 13. Deliberately
+# NOT paired with CONFIG_BOOTLOADER_APP_ANTI_ROLLBACK, which this symbol
+# merely makes visible: that one is downgrade prevention, burns efuses, and
+# is irreversible — out of scope for this feature.
+#
+# This line IS picked up on a tree that already has a gitignored sdkconfig —
+# measured, not assumed: an isolated reconfigure against a copy of the real
+# sdkconfig (which had the symbol "not set") came back =y, and the same run
+# with an empty defaults file left it "not set". No hand-editing of sdkconfig
+# is needed for this symbol.
+#
+# Do not generalise that into a rule. Precedence between sdkconfig and
+# sdkconfig.defaults is symbol-dependent, and the mechanism deciding it was
+# not identified. In the same measured run CONFIG_MAGTAG_PARENT_TESTING went
+# the other way twice: sdkconfig won over defaults in both directions, while
+# this symbol had defaults win. Measure the symbol you care about rather than
+# assuming either way, without touching the real config:
+#   cp sdkconfig /tmp/sdkconfig.probe
+#   idf.py -B /tmp/build.probe -D SDKCONFIG=/tmp/sdkconfig.probe reconfigure
+#
+# The next real build rewrites sdkconfig in place, changing exactly 4 lines:
+# this symbol, the newly-visible CONFIG_BOOTLOADER_APP_ANTI_ROLLBACK at n,
+# and the two deprecated aliases CONFIG_APP_ROLLBACK_ENABLE and
+# CONFIG_APP_ANTI_ROLLBACK. Verified by diffing the regenerated file: no MQTT
+# credential, timer name or PARENT_TESTING line changes.
+CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
 
 # MagTag 2025 revision carries 2 MB PSRAM; auto-detect, and keep booting
 # on older PSRAM-less boards instead of aborting.

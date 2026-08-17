@@ -38,6 +38,8 @@
 #include "net_window.h"
 #include "nvs_config.h"
 #include "nvs_defaults.h"
+#include "ota_flow.h" /* ota_trigger_t, for the arm stub below */
+#include "ota_task.h"
 #include "sleep_plan.h" /* BREAK_CHIME_GRACE_SEC */
 #include "status_led.h"
 #include "timer.h"
@@ -104,6 +106,9 @@ typedef enum {
     EV_CHECK_BEDTIME,
     EV_PROMOTE_RENDER,
     EV_WAKEUP_BUTTON,
+    /* the OTA call sites */
+    EV_OTA_ARM,
+    EV_OTA_APPLY,
     EV_SLEEP,
 } flow_event_t;
 
@@ -948,6 +953,11 @@ static int32_t flow_made_break_remaining;
    ParentTesting twin binary is what proves both values of. */
 static int flow_assembled_mv;
 static bool flow_assembled_parent;
+/* The version string the assembly handed over. The main screen renders it
+   on the battery row, so a paint that leaves it NULL blanks the version on
+   hardware — which is exactly what shipped once, because this stub used to
+   drop the field on the floor. */
+static const char *flow_assembled_fw;
 
 /* Cases inject a percentage; the pair below is a FAKE CURVE and not an
    identity, following test_lock_gate. A read that got dropped or an mv
@@ -958,15 +968,39 @@ static bool flow_assembled_parent;
    ordering. */
 #define FLOW_MV_OFFSET 2500
 static int flow_batt_pct;
+/* battery.h documents <= 0 mV as a failed ADC read. The OTA gates have to
+   tell that apart from a genuinely flat cell, so the suite needs to be
+   able to produce it; a case opts in. */
+static bool flow_batt_unreadable;
 
 int battery_read_mv(void) {
-    return flow_batt_pct * 10 + FLOW_MV_OFFSET;
+    return flow_batt_unreadable ? 0 : flow_batt_pct * 10 + FLOW_MV_OFFSET;
+}
+
+/* The other half of the fake curve, in test_lock_gate's shape, so that
+   dropping either side of battery_percent_from_mv(battery_read_mv())
+   yields a nonsense percentage rather than the right answer by luck.
+
+   The clamp is NOT decoration and is not a restatement of the real curve
+   either: battery.h documents this function as "0-100, clamped", and that
+   clamp is the entire reason ota_batt_pct() has to check the mV for <= 0
+   before calling it. A stub that returned a negative number for a failed
+   read would make that guard untestable — the wrong answer and the right
+   one would both be negative. */
+int battery_percent_from_mv(int mv) {
+    int pct = (mv - FLOW_MV_OFFSET) / 10;
+    if (pct < 0)
+        return 0;
+    if (pct > 100)
+        return 100;
+    return pct;
 }
 
 display_state_t app_state_display(const app_state_in_t *in, int32_t remaining, time_t now) {
     flow_log_push(EV_MAKE_STATE);
     flow_assembled_mv = in->batt_mv;
     flow_assembled_parent = in->parent_testing;
+    flow_assembled_fw = in->fw_version;
     /* Row 3's pair: the slot the selection was on when the state was
        assembled, and the number that went with it. A paint that runs
        before the drain records the PRE-snap slot and the row-3 case
@@ -1083,6 +1117,68 @@ int light_read_mv(void) {
 
 bool lock_gate_charge_locked(void) {
     return flow_charge_locked;
+}
+
+/* ---- the OTA call sites -------------------------------------------------
+
+   ota_flow.c has its own suite (test_ota_flow) and it asserts the
+   SEQUENCE inside an update. What only this file can see is the CALL
+   SITES: which wake triggers arm a check and which deliberately do not,
+   where in the pre-sleep tail the apply sits relative to the join and the
+   sleep, and what facts each of the two is handed. Task 12's plan entry
+   said "the module's own tests cannot reach any of them", which is true
+   of ota_flow's suite and not of this one — two of the four call sites
+   land in wake_flow.c and are pinned below. The other two have no host
+   home at all: ota_flow_check's position inside net_window_task (no
+   suite exists for that file) and the ops table in app_main. */
+
+static int flow_ota_arms;
+static ota_trigger_t flow_ota_trigger; /* the last arm's trigger */
+static int flow_ota_arm_batt;
+static bool flow_ota_arm_locked;
+static int flow_ota_batt_after_arm; /* < 0: the cell does not move */
+
+static bool flow_ota_pending;
+static int flow_ota_applies;
+static int flow_ota_apply_batt;
+static bool flow_ota_apply_locked;
+
+void ota_flow_arm(ota_trigger_t trigger, int batt_pct, bool charge_locked) {
+    flow_log_push(EV_OTA_ARM);
+    flow_ota_arms++;
+    flow_ota_trigger = trigger;
+    flow_ota_arm_batt = batt_pct;
+    flow_ota_arm_locked = charge_locked;
+    /* The cell moving BETWEEN the two windows — minutes and a full-panel
+       repaint apart on device — which is the whole reason ota_flow_apply
+       takes its facts as arguments instead of reusing what was sampled
+       here. Inert unless a case opts in. */
+    if (flow_ota_batt_after_arm >= 0) {
+        flow_batt_pct = flow_ota_batt_after_arm;
+    }
+}
+
+bool ota_flow_pending(void) {
+    return flow_ota_pending;
+}
+
+/* false = the spawn itself failed: no semaphore, or xTaskCreate refused
+   the 16 KB stack on a fragmented heap. ota_flow_apply never runs at all
+   in that case, which is why the outcome has to be reported from HERE —
+   the flow module cannot report what it never saw. */
+static bool flow_ota_spawn_ok = true;
+static int flow_ota_spawn_failures_noted;
+
+bool ota_task_run_apply(int batt_pct, bool charge_locked) {
+    flow_log_push(EV_OTA_APPLY);
+    flow_ota_applies++;
+    flow_ota_apply_batt = batt_pct;
+    flow_ota_apply_locked = charge_locked;
+    return flow_ota_spawn_ok;
+}
+
+void ota_flow_note_spawn_failed(void) {
+    flow_ota_spawn_failures_noted++;
 }
 
 /* Distinctive enough that a version arriving from anywhere else — a
@@ -1337,8 +1433,10 @@ void setUp(void) {
     /* A percentage no real curve endpoint sits on, so an assertion that
        matched a default rather than the injected read stands out. */
     flow_batt_pct = 67;
+    flow_batt_unreadable = false;
     flow_assembled_mv = -1;
     flow_assembled_parent = true; /* poisoned: the shipping build is false */
+    flow_assembled_fw = "poison"; /* not the descriptor's string */
     /* Wake-sticky on device (one wake is one boot), so the suite zeroes it
        directly — as test_lock_gate does with the lock flags — rather than
        making wake_flow carry a reset entry point production never calls. */
@@ -1431,6 +1529,24 @@ void setUp(void) {
     flow_stats_posts = 0;
     flow_light_pct = 0;
     flow_charge_locked = false;
+
+    /* OTA: nothing armed, nothing buffered, a cell that does not move.
+       Every case opts into each of the three, the same way it opts into
+       its wake cause and its join result. The two recorded fact pairs are
+       poisoned rather than zeroed — 0 % is a value the module could
+       genuinely produce, so zeroing them would make "never called" and
+       "called with a flat battery" the same assertion. */
+    flow_ota_arms = 0;
+    flow_ota_trigger = (ota_trigger_t)-1;
+    flow_ota_arm_batt = -424242;
+    flow_ota_arm_locked = true;
+    flow_ota_batt_after_arm = -1;
+    flow_ota_pending = false;
+    flow_ota_applies = 0;
+    flow_ota_apply_batt = -424242;
+    flow_ota_apply_locked = true;
+    flow_ota_spawn_ok = true;
+    flow_ota_spawn_failures_noted = 0;
     memset(&flow_stats_in, 0, sizeof flow_stats_in);
     flow_stats_now = 0;
     flow_net_finish = NET_FINISH_IDLE;
@@ -1854,6 +1970,36 @@ void test_the_state_assembly_hands_the_battery_read_to_app_state(void) {
 void test_the_state_assembly_carries_the_parent_testing_flag(void) {
     (void)make_display_state(0, flow_at(15, 0));
     TEST_ASSERT_EQUAL_INT(PARENT_TESTING ? 1 : 0, flow_assembled_parent ? 1 : 0);
+}
+
+/* The third field, and the one with no compile-time excuse. The main
+   screen renders the running version on the battery row, so it has to
+   travel on the PAINT path, not just the stats path — and it did not:
+   make_display_state() left .fw_version implicitly NULL while
+   stats_collect() set it, so every main-screen paint on device took the
+   empty-version branch and rendered exactly as it had before the feature
+   existed. Nothing caught it because this stub recorded only batt_mv and
+   parent_testing.
+
+   Asserted against the descriptor stub's string rather than merely
+   non-NULL, so substituting some other string on the way in fails too. */
+void test_the_state_assembly_carries_the_firmware_version(void) {
+    (void)make_display_state(0, flow_at(15, 0));
+    TEST_ASSERT_NOT_NULL(flow_assembled_fw);
+    TEST_ASSERT_EQUAL_STRING(esp_app_get_description()->version, flow_assembled_fw);
+}
+
+/* ...and the same through a real paint rather than the assembly called
+   directly, because make_display_state() is the funnel every render site
+   goes through and this is the cheapest one to drive end to end. */
+void test_paint_carries_the_firmware_version(void) {
+    flow_arm_break(flow_at(16, 0), FLOW_SCREEN, FLOW_PIANO);
+    mock_time_set(flow_at(16, 0) + 3);
+
+    TEST_ASSERT_TRUE(wake_flow_break_end_repaint());
+
+    TEST_ASSERT_EQUAL_INT(1, flow_repaint_count());
+    TEST_ASSERT_EQUAL_STRING(esp_app_get_description()->version, flow_assembled_fw);
 }
 
 /* Nothing but the assembly: a stat read must never transition the state
@@ -3664,8 +3810,14 @@ void test_the_rollover_effect_order_is_pinned_end_to_end(void) {
     flow_new_day = true;
     flow_restore_ok = false;
     wake_flow_handle_day_rollover(&now);
-    static const flow_event_t expect[] = {EV_IS_NEW_DAY,      EV_QUEUE_SUMMARY, EV_BONUS_CLEAR, EV_TRY_WINDOW,
-                                          EV_PERSIST_RESTORE, EV_TIMER_RESET,   EV_RECORD_DATE};
+    /* EV_OTA_ARM sits between the bonus clear and the window because the
+       update check RIDES that window: ota_flow_check runs on the network
+       task and reads what the arm sampled on this one. This trace is what
+       makes that a pinned position rather than an incidental one — an arm
+       moved after EV_TRY_WINDOW fails here even though every count-based
+       assertion in the OTA cases below would still pass. */
+    static const flow_event_t expect[] = {EV_IS_NEW_DAY, EV_QUEUE_SUMMARY,   EV_BONUS_CLEAR, EV_OTA_ARM,
+                                          EV_TRY_WINDOW, EV_PERSIST_RESTORE, EV_TIMER_RESET, EV_RECORD_DATE};
     TEST_ASSERT_EQUAL_INT((int)(sizeof expect / sizeof expect[0]), flow_log_n);
     for (int i = 0; i < flow_log_n; i++) {
         TEST_ASSERT_EQUAL_INT((int)expect[i], (int)flow_log[i]);
@@ -6205,6 +6357,278 @@ void test_row13_the_sleep_drain_has_no_side_effects_beyond_the_take(void) {
     TEST_ASSERT_EQUAL_INT(FLOW_PIANO, flow_active_slot);
 }
 
+/* ---- the OTA call sites -------------------------------------------------
+
+   Four things, and only the first two of the four are decisions this
+   module makes: WHICH triggers arm a check, WHAT facts they are armed
+   with, WHERE in the pre-sleep tail the download sits, and that it is
+   handed facts sampled at that point rather than at arming.
+
+   The negative cases matter as much as the positive ones. "Only arm on a
+   trigger that can check" is a deliberate choice over "always arm, with
+   OTA_TRIGGER_NONE where appropriate", and the difference is invisible in
+   the ordinary case: ota_flow_arm's buffer clear only fires when the arm
+   actually arms, so an arm(NONE) is a no-op for everything except one
+   state — a wake whose FIRST window never ran the check (no WiFi, or a
+   window that failed to spawn), where the arm is still live and the
+   second window of the same wake would pick it up. An arm(NONE) at that
+   second window silently throws that away. Button A and the tick sync are
+   therefore left alone, and these two cases are what stop a later tidy-up
+   from "completing the set". */
+
+void test_a_day_rollover_arms_an_update_check_before_it_opens_the_window(void) {
+    time_t now = flow_at(0, 5);
+    flow_new_day = true;
+
+    wake_flow_handle_day_rollover(&now);
+
+    TEST_ASSERT_EQUAL_INT(1, flow_ota_arms);
+    TEST_ASSERT_EQUAL_INT(OTA_TRIGGER_ROLLOVER, (int)flow_ota_trigger);
+    /* The order is the load-bearing half: the check runs on the network
+       task and reads what the arm sampled, so an arm after the spawn is
+       a race rather than a style question. */
+    int armed = flow_log_at(EV_OTA_ARM);
+    TEST_ASSERT_TRUE(armed >= 0);
+    TEST_ASSERT_TRUE(armed < flow_log_at(EV_TRY_WINDOW));
+}
+
+/* A wake that is not a new day opens no window and arms nothing. */
+void test_a_day_that_has_not_rolled_over_arms_nothing(void) {
+    time_t now = flow_at(9, 0);
+    flow_new_day = false;
+
+    wake_flow_handle_day_rollover(&now);
+
+    TEST_ASSERT_EQUAL_INT(0, flow_ota_arms);
+}
+
+void test_the_rollover_arm_carries_the_battery_and_the_charge_lock(void) {
+    time_t now = flow_at(0, 5);
+    flow_new_day = true;
+    flow_batt_pct = 41;
+    flow_charge_locked = true;
+
+    wake_flow_handle_day_rollover(&now);
+
+    TEST_ASSERT_EQUAL_INT(41, flow_ota_arm_batt);
+    TEST_ASSERT_TRUE(flow_ota_arm_locked);
+}
+
+/* The failed ADC read, kept distinct from a flat cell. ota_gate_in_t says
+   batt_pct < 0 is "unreadable" and does NOT gate; the SoC curve clamps a
+   dead read to 0 %, which WOULD gate — permanently, and silently, on a
+   device whose ADC broke. */
+void test_an_unreadable_battery_arms_as_unknown_rather_than_as_flat(void) {
+    time_t now = flow_at(0, 5);
+    flow_new_day = true;
+    flow_batt_unreadable = true;
+
+    wake_flow_handle_day_rollover(&now);
+
+    TEST_ASSERT_EQUAL_INT(-1, flow_ota_arm_batt);
+}
+
+void test_button_d_arms_a_sync_check_before_it_opens_its_window(void) {
+    mock_time_set(flow_at(15, 0));
+    flow_wakeup_btn = BTN_D;
+
+    TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_button());
+
+    TEST_ASSERT_EQUAL_INT(1, flow_ota_arms);
+    TEST_ASSERT_EQUAL_INT(OTA_TRIGGER_SYNC, (int)flow_ota_trigger);
+    int armed = flow_log_at(EV_OTA_ARM);
+    TEST_ASSERT_TRUE(armed >= 0);
+    TEST_ASSERT_TRUE(armed < flow_log_at(EV_NET_OPEN));
+}
+
+/* Button A opens a window and must NOT arm: the user is waiting on the
+   panel, and a manifest GET would sit between the press and the render.
+   The window is asserted so the case cannot pass by the press being
+   dropped. */
+void test_button_a_opens_a_window_without_arming_a_check(void) {
+    mock_time_set(flow_at(15, 0));
+    flow_wakeup_btn = BTN_A;
+    flow_a_result = BTN_A_STARTED;
+
+    TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_button());
+
+    TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_NET_OPEN));
+    TEST_ASSERT_EQUAL_INT(0, flow_ota_arms);
+}
+
+/* The periodic clock sync is the third window this firmware opens, and it
+   does not arm either — it is a tick wake, which the trigger enum names
+   as never checking. */
+void test_the_periodic_sync_window_arms_no_check(void) {
+    mock_time_set(flow_at(15, 0));
+    flow_state = TIMER_IDLE;
+    flow_last_ntp = flow_at(15, 0) - IDLE_SYNC_INTERVAL_SEC; /* sync is due */
+
+    TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_tick());
+
+    TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_TRY_WINDOW));
+    TEST_ASSERT_EQUAL_INT(0, flow_ota_arms);
+}
+
+/* The `repaint` seam app_main hands to ota_flow_ops_t. A failed download
+   leaves the update screen on the panel, and this is the only thing that
+   takes it off — so an entry point that compiled but did nothing would be
+   invisible until a real download failed in the field. The composition
+   root's half (that the ops table actually points HERE) has no host home;
+   this pins the other half, that what it points at is the repaint. */
+void test_the_ota_repaint_seam_paints_the_normal_screen(void) {
+    mock_time_set(flow_at(15, 0));
+
+    wake_flow_repaint_current_state();
+
+    TEST_ASSERT_EQUAL_INT(1, flow_repaint_count());
+    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_PARTIAL));
+}
+
+/* ---- the apply point ---------------------------------------------------- */
+
+/* The whole reason the apply is at the tail of the wake handlers rather
+   than inside enter_deep_sleep(): it has to be after the join (ota_flow.h
+   makes the pending flag readable only there) and before the sleep, and
+   it has to be somewhere the awake failsafe's esp_timer context cannot
+   reach. The first two halves are assertable here; the third is
+   structural and is asserted by the absence of a call in main.c. */
+void test_a_pending_update_is_applied_after_the_join_and_before_the_sleep(void) {
+    mock_time_set(flow_at(0, 5));
+    flow_new_day = true;
+    flow_ota_pending = true;
+
+    TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_tick());
+
+    TEST_ASSERT_EQUAL_INT(1, flow_ota_applies);
+    int applied = flow_log_at(EV_OTA_APPLY);
+    TEST_ASSERT_TRUE(applied >= 0);
+    TEST_ASSERT_TRUE(flow_log_at(EV_TRY_WINDOW) < applied);
+    TEST_ASSERT_TRUE(applied < flow_log_at(EV_SLEEP));
+}
+
+/* The common path. Nothing pending means no second window, no ADC read
+   for it and no 16 KB task allocation — which is why the test lives at
+   this call site and not inside ota_flow_apply's own early-out. */
+void test_a_wake_with_nothing_pending_opens_no_second_window(void) {
+    mock_time_set(flow_at(0, 5));
+    flow_new_day = true;
+    flow_ota_pending = false;
+
+    TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_tick());
+
+    TEST_ASSERT_EQUAL_INT(0, flow_ota_applies);
+}
+
+/* A spawn that fails is the one outcome ota_flow.c can never report,
+   because ota_flow_apply does not run at all: xTaskCreate refused the
+   16 KB stack (the largest single allocation this firmware makes) or the
+   semaphore could not be allocated. s_pending had been true, so an update
+   WAS found and announced by the check — and before this the device then
+   said nothing about it, on this wake and on every wake after it. */
+void test_a_download_task_that_cannot_be_spawned_is_reported(void) {
+    mock_time_set(flow_at(0, 5));
+    flow_new_day = true;
+    flow_ota_pending = true;
+    flow_ota_spawn_ok = false;
+
+    TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_tick());
+
+    TEST_ASSERT_EQUAL_INT(1, flow_ota_applies);
+    TEST_ASSERT_EQUAL_INT(1, flow_ota_spawn_failures_noted);
+}
+
+/* And the ordinary path stays silent: a spawn that worked hands the
+   reporting to ota_flow_apply, which knows what actually happened. Two
+   notes for one wake would overwrite a real download failure with a
+   heap excuse. */
+void test_a_download_task_that_spawns_reports_nothing_from_here(void) {
+    mock_time_set(flow_at(0, 5));
+    flow_new_day = true;
+    flow_ota_pending = true;
+
+    TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_tick());
+
+    TEST_ASSERT_EQUAL_INT(1, flow_ota_applies);
+    TEST_ASSERT_EQUAL_INT(0, flow_ota_spawn_failures_noted);
+}
+
+/* The button handler's tail is the second call site, and it is a separate
+   statement: deleting either one leaves the other's cases green. */
+void test_the_button_handler_applies_a_pending_update_too(void) {
+    mock_time_set(flow_at(15, 0));
+    flow_wakeup_btn = BTN_D;
+    flow_ota_pending = true;
+
+    TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_button());
+
+    TEST_ASSERT_EQUAL_INT(1, flow_ota_applies);
+    int applied = flow_log_at(EV_OTA_APPLY);
+    TEST_ASSERT_TRUE(applied >= 0);
+    TEST_ASSERT_TRUE(flow_log_at(EV_NET_FINISH) < applied);
+    TEST_ASSERT_TRUE(applied < flow_log_at(EV_SLEEP));
+}
+
+/* The facts are RE-SAMPLED at the apply, not carried over from the arm.
+   The two windows are minutes and a full-panel repaint apart, and a cell
+   that has crossed into the charge lock in between is exactly the one
+   that must not be asked for a sustained radio burst followed by a flash
+   write. The stub moves the cell at the arm to make the difference
+   visible; carrying the arm's value over would report 41 twice. */
+void test_the_apply_samples_the_battery_again_instead_of_reusing_the_arms(void) {
+    mock_time_set(flow_at(0, 5));
+    flow_new_day = true;
+    flow_ota_pending = true;
+    flow_batt_pct = 41;
+    flow_ota_batt_after_arm = 88;
+
+    TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_tick());
+
+    TEST_ASSERT_EQUAL_INT(41, flow_ota_arm_batt);
+    TEST_ASSERT_EQUAL_INT(88, flow_ota_apply_batt);
+}
+
+/* The apply is the LAST thing the wake does. Not a stylistic preference:
+   the pre-sleep event watch can hold the CPU for the whole final minute
+   and repaints when it is done, so an apply hoisted above it would paint
+   the update screen and then have the watch paint over it — and, worse,
+   a reboot mid-watch would swallow the expiry alert the watch exists to
+   fire. A RUNNING wake with an expiry inside the watch window is what
+   makes the watch produce an event at all; with an empty watch the two
+   orderings are indistinguishable. */
+void test_the_apply_runs_after_the_pre_sleep_event_watch(void) {
+    time_t now = flow_at(15, 0);
+    mock_time_set(now);
+    flow_state = TIMER_RUNNING;
+    flow_expiry_wall = (int64_t)now + 30; /* inside the final-minute watch */
+    flow_last_ntp = now;                  /* no sync window to muddy the trace */
+    flow_needs_sync = false;
+    flow_ota_pending = true;
+
+    TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_tick());
+
+    int alerted = flow_log_at(EV_ALERT_EXPIRY);
+    int applied = flow_log_at(EV_OTA_APPLY);
+    int slept = flow_log_at(EV_SLEEP);
+    TEST_ASSERT_TRUE(alerted >= 0); /* the watch really did run */
+    TEST_ASSERT_TRUE(alerted < applied);
+    /* Nothing at all between the download and the sleep. */
+    TEST_ASSERT_EQUAL_INT(slept - 1, applied);
+}
+
+/* The charge lock rides the same path, and it is the fact with teeth: it
+   is the one the download gate refuses on. */
+void test_the_apply_carries_the_charge_lock_it_sampled(void) {
+    mock_time_set(flow_at(0, 5));
+    flow_new_day = true;
+    flow_ota_pending = true;
+    flow_charge_locked = false;
+
+    TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_tick());
+
+    TEST_ASSERT_FALSE(flow_ota_apply_locked);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_deepsleep_is_the_healthy_reason);
@@ -6234,6 +6658,8 @@ int main(void) {
     RUN_TEST(test_a_silent_break_end_still_repaints);
     RUN_TEST(test_the_state_assembly_hands_the_battery_read_to_app_state);
     RUN_TEST(test_the_state_assembly_carries_the_parent_testing_flag);
+    RUN_TEST(test_the_state_assembly_carries_the_firmware_version);
+    RUN_TEST(test_paint_carries_the_firmware_version);
     RUN_TEST(test_the_state_assembly_neither_ticks_nor_paints);
     RUN_TEST(test_the_full_repaint_ticks_then_assembles_then_flushes);
     RUN_TEST(test_the_full_repaint_never_goes_partial);
@@ -6516,5 +6942,21 @@ int main(void) {
     RUN_TEST(test_row13_the_undrained_take_actually_consumes_the_latch);
     RUN_TEST(test_row13_a_wake_that_drained_its_break_reports_nothing_at_sleep);
     RUN_TEST(test_row13_the_sleep_drain_has_no_side_effects_beyond_the_take);
+    RUN_TEST(test_a_day_rollover_arms_an_update_check_before_it_opens_the_window);
+    RUN_TEST(test_a_day_that_has_not_rolled_over_arms_nothing);
+    RUN_TEST(test_the_rollover_arm_carries_the_battery_and_the_charge_lock);
+    RUN_TEST(test_an_unreadable_battery_arms_as_unknown_rather_than_as_flat);
+    RUN_TEST(test_button_d_arms_a_sync_check_before_it_opens_its_window);
+    RUN_TEST(test_button_a_opens_a_window_without_arming_a_check);
+    RUN_TEST(test_the_periodic_sync_window_arms_no_check);
+    RUN_TEST(test_the_ota_repaint_seam_paints_the_normal_screen);
+    RUN_TEST(test_a_pending_update_is_applied_after_the_join_and_before_the_sleep);
+    RUN_TEST(test_a_wake_with_nothing_pending_opens_no_second_window);
+    RUN_TEST(test_a_download_task_that_cannot_be_spawned_is_reported);
+    RUN_TEST(test_a_download_task_that_spawns_reports_nothing_from_here);
+    RUN_TEST(test_the_button_handler_applies_a_pending_update_too);
+    RUN_TEST(test_the_apply_samples_the_battery_again_instead_of_reusing_the_arms);
+    RUN_TEST(test_the_apply_runs_after_the_pre_sleep_event_watch);
+    RUN_TEST(test_the_apply_carries_the_charge_lock_it_sampled);
     return UNITY_END();
 }

@@ -39,6 +39,45 @@ static ssd1680_refresh_mode_t s_pending_mode = SSD1680_REFRESH_FULL;
    sleep without living in the timer module's rtc_state_t. */
 static RTC_DATA_ATTR uint8_t s_partial_count;
 
+/* "The panel is showing a full-screen takeover." Set by display_ota(),
+   consumed by the next display_update().
+
+   Zeroing s_partial_count is NOT enough on its own: the next
+   display_update() increments it to 1, and 1 < FULL_REFRESH_EVERY_N, so
+   the paint that lands on top of a 28 pt full-panel headline is a
+   PARTIAL — the worst case for ghosting. lock_gate_promote_render()
+   solves exactly this for the lock screens, one layer up; this is the
+   same idea expressed where the takeover is painted, so no caller has to
+   remember.
+
+   WHAT THIS FLAG ACTUALLY COVERS: the repaint that follows a takeover
+   WITHIN THE SAME WAKE. That is ota_flow's failure-path repaint (the
+   update screen goes up, the download fails, wake_flow repaints the
+   normal layout) and the equivalent after a lock screen. RTC_DATA_ATTR
+   so it also survives DEEP SLEEP, which is a real case: the awake
+   failsafe can sleep the device with the update screen still on the
+   glass, and the next wake's first paint has to be full.
+
+   WHAT IT DOES NOT COVER, corrected from an earlier claim here that it
+   did: esp_restart(). RTC_DATA_ATTR does not survive a software reset on
+   the ESP32-S2. The bootloader loads the .rtc.data segment on every reset
+   EXCEPT a deep-sleep wake (esp_image_format.c: `load_rtc_memory =
+   esp_rom_get_reset_reason(0) != RESET_REASON_CORE_DEEP_SLEEP`), so after
+   the OTA reboot this flag comes back as whatever the new image's
+   initialiser says — false.
+
+   The post-OTA first paint is full anyway, and it is worth knowing by
+   WHICH mechanism, because it is not this one. ssd1680.c's
+   s_prev_frame_valid is RTC_DATA_ATTR too and is wiped by the same
+   reboot, so ssd1680_resolve_refresh_mode() promotes the requested
+   PARTIAL to FULL and logs "partial promoted to full: no valid previous
+   frame this power cycle". The driver guard is doing the work. Nobody
+   should "simplify it away" on the strength of the flag above, and no
+   later task needs to add code for the post-reboot case — it is already
+   correct, for this reason rather than for the one previously written
+   down here. */
+static RTC_DATA_ATTR bool s_takeover_on_panel;
+
 /* Bring-up knobs: if the image is rotated 180 deg or mirrored on hardware,
    flip these (see docs/hardware_smoke_test.md step 2). */
 #define ROT_FLIP_X 0
@@ -55,7 +94,18 @@ static uint32_t tick_ms(void) {
    line_height / bar height); byte alignment then widens each edge outward
    by up to 7 rows — that slop is the packed-framebuffer format, not
    margin. Bands must not share a framebuffer byte (y/8): a shared byte
-   would be inverted twice and cancel out. */
+   would be inverted twice and cancel out.
+
+   NOTE what this table does NOT constrain. After byte alignment the four
+   bands are 0..2, 3..6, 7..10 and 11..15 of a 16-byte row — contiguous,
+   and jointly every byte of every row. So no widget can land outside a
+   band, and "does this new label need a band?" is never the question for
+   a widget on the main screen; the answer is always no. The rule the
+   comment above states is a constraint on the BAND EXTENTS themselves
+   (keep them from sharing a byte with each other), which is why adding a
+   fifth band or moving a row boundary is the change that needs care. A
+   screen that only ever full-refreshes needs no entry either, for the
+   different reason that this table is read only on the partial path. */
 static const struct {
     int y0, y1; /* inclusive landscape rows */
 } CLEAN_BANDS[] = {
@@ -183,6 +233,17 @@ void display_update(const display_state_t *st) {
     if (!s_initialized)
         display_init();
     build_for_state(st);
+    /* A takeover screen is still on the glass — from earlier in this
+       wake, or from before a deep sleep. NOT from before a reboot: the
+       flag does not survive esp_restart (see its declaration), and the
+       driver's own previous-frame guard is what covers that case. Promote
+       this paint to a full refresh and clear the flag. */
+    if (s_takeover_on_panel) {
+        s_takeover_on_panel = false;
+        s_partial_count = 0;
+        render(SSD1680_REFRESH_FULL);
+        return;
+    }
     /* Policy: full refresh every Nth partial (anti-ghosting). The counter
        lives in RTC memory so the cadence survives deep sleep. */
     s_partial_count++;
@@ -198,6 +259,7 @@ void display_full_refresh(const display_state_t *st) {
     if (!s_initialized)
         display_init();
     build_for_state(st);
+    s_takeover_on_panel = false; /* this paint is already the full one */
     s_partial_count = 0;
     render(SSD1680_REFRESH_FULL);
 }
@@ -230,6 +292,22 @@ void display_bedtime(void) {
     if (!s_initialized)
         display_init();
     display_screens_build_bedtime();
+    s_partial_count = 0;
+    render(SSD1680_REFRESH_FULL);
+}
+
+/* Painted between the OTA check window and the download window, with the
+   radio down: net_window.c documents that a panel refresh coinciding with
+   a WiFi TX burst browns out the rail. Full refresh only, so it needs no
+   CLEAN_BANDS entry (that table is read only on the partial path). */
+void display_ota(const char *from_version, const char *to_version) {
+    if (!s_initialized)
+        display_init();
+    display_screens_build_ota(from_version, to_version);
+    /* Whatever paints next — the failure-path repaint, or the first paint
+       of the new firmware after the reboot — must be full, not a partial
+       over a full-panel 28 pt headline. See s_takeover_on_panel. */
+    s_takeover_on_panel = true;
     s_partial_count = 0;
     render(SSD1680_REFRESH_FULL);
 }

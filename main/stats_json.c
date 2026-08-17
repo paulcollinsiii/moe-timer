@@ -29,10 +29,13 @@ static const char *jesc(char *tmp, size_t tmplen, const char *s) {
     return tmp;
 }
 
-int stats_json_stat(char *buf, size_t len, const stats_snapshot_t *s) {
+int stats_json_stat(char *buf, size_t len, const stats_snapshot_t *s, const ota_stat_t *ota) {
     /* Every string field is escaped (and NULL-flattened to "") — the pure
-       boundary must never invoke UB on a bad/NULL field. */
+       boundary must never invoke UB on a bad/NULL field. The two OTA
+       buffers are DOUBLE the stored width because jesc escapes, and a
+       target string of nothing but backslashes doubles in length. */
     char state[24], name[64], day[24], fw[32], rst[24];
+    char ores[CFG_BOUND_OTA_RESULT_MAX * 2], otgt[CFG_BOUND_OTA_TARGET_MAX * 2];
     int pos = 0;
     pos = jcat(buf, len, pos,
                "{\"batt_pct\":%d,\"batt_mv\":%d,\"light_mv\":%d,\"state\":\"%s\",\"active_timer\":\"%s\","
@@ -50,9 +53,15 @@ int stats_json_stat(char *buf, size_t len, const stats_snapshot_t *s) {
     for (int i = 0; i < TIMER_EXTRA_SLOTS; i++) {
         pos = jcat(buf, len, pos, i ? ",%u" : "%u", (unsigned)s->completions[i]);
     }
-    pos = jcat(buf, len, pos, "],\"charge_lock\":%s,\"break_s\":%ld,\"accum_s\":%ld,\"fw\":\"%s\",\"reset\":\"%s\"}",
+    pos = jcat(buf, len, pos, "],\"charge_lock\":%s,\"break_s\":%ld,\"accum_s\":%ld,\"fw\":\"%s\",\"reset\":\"%s\"",
                s->charge_lock ? "true" : "false", (long)s->break_remaining_s, (long)s->accum_s,
                jesc(fw, sizeof(fw), s->fw), jesc(rst, sizeof(rst), s->reset_reason));
+    /* The OTA leg. Read from NVS at publish time and handed in — never a
+       snapshot field; stats_json.h says why. */
+    pos = jcat(buf, len, pos, ",\"ota_result\":\"%s\",\"ota_target\":\"%s\",\"ota_fails\":%u,\"ota_dl_ms\":%lu}",
+               jesc(ores, sizeof(ores), (ota != NULL) ? ota->result : NULL),
+               jesc(otgt, sizeof(otgt), (ota != NULL) ? ota->target : NULL), (unsigned)((ota != NULL) ? ota->fails : 0),
+               (unsigned long)((ota != NULL) ? ota->dl_ms : 0));
     return pos;
 }
 
@@ -138,6 +147,37 @@ static const ha_entity_t ENTITIES[] = {
        wake died (BROWNOUT/PANIC/...) — the USB CDC console loses that
        evidence, MQTT doesn't. Never expires. */
     {"sensor", "last_reset", "Last reset", NULL, NULL, "{{ value_json.reset }}", "stat", 0, false, DIAG},
+    /* ---- OTA. All four carry expire_after 0, and that is a decision,
+       not a copy of the neighbour above.
+
+       STAT_EXPIRE_SEC exists so a device that has stopped checking in
+       reads "unavailable" instead of showing stale live telemetry, and
+       for a battery reading that is exactly right. These four are not
+       telemetry: they are the record of the last update attempt, and
+       they change only when an attempt happens — which on this device is
+       at most once a day and usually never. An expiry would blank them
+       on precisely the device this task exists to make legible: one that
+       tried to update, rolled back, and is now failing to check in. The
+       evidence has to outlive the silence, so they follow last_reset's
+       precedent rather than the sensors around it. (They are still
+       republished every window, so a live device keeps them fresh either
+       way; expire_after only decides what happens when it stops.)
+
+       ota_result is the one PRIMARY entity of the four. "Did my update
+       work?" is the operator's question and this is the answer to it —
+       the whole point of the entry in docs/planning/ota.plan.md is that
+       a rollback was invisible. The other three are the supporting
+       detail consulted after that answer, so they sit in the Diagnostic
+       group. Keys are clear of the remaining_/limit_/completions_
+       prefixes mqtt_ha.c matches on to attach a runtime slot name. */
+    {"sensor", "ota_result", "Update result", NULL, NULL, "{{ value_json.ota_result }}", "stat", 0, false, NULL},
+    {"sensor", "ota_target", "Update target", NULL, NULL, "{{ value_json.ota_target }}", "stat", 0, false, DIAG},
+    {"sensor", "ota_fails", "Update failures", NULL, NULL, "{{ value_json.ota_fails }}", "stat", 0, false, DIAG},
+    /* Milliseconds, unconverted: the number is read against the download
+       deadline (CONFIG_MAGTAG_OTA_MAX_SEC), and a link trending toward it
+       shows up as a rising figure long before it becomes a timeout. */
+    {"sensor", "ota_dl_ms", "Update download time", "ms", "duration", "{{ value_json.ota_dl_ms }}", "stat", 0, false,
+     DIAG},
 };
 
 const ha_entity_t *stats_json_entities(int *count) {

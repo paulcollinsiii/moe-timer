@@ -448,6 +448,246 @@ void test_timers_bad_min_names_the_offending_entry(void) {
     TEST_ASSERT_NOT_NULL(strstr(ack, "timers[1]"));
 }
 
+/* ---- OTA fields (the "three places" rule) ----------------------------
+   Both HA-settable OTA fields must be parsed from the bulk retained
+   document as well as the per-entity set path. `break_eligible` shipped
+   with an entity and no bulk-document key, and every application of the
+   retained document silently cleared it (BUG-6). These pin the same
+   shape for ota_url / ota_on_sync so it cannot happen again. */
+
+void test_ota_fields_apply_from_bulk_document(void) {
+    char ack[256];
+    const char *doc = "{\"ver\":\"1\",\"ota_url\":\"https://example.com/ota.json\",\"ota_on_sync\":true}";
+    TEST_ASSERT_EQUAL(CONFIG_APPLIED, apply(doc, ack, sizeof(ack)));
+    char s[CFG_BOUND_OTA_URL_MAX];
+    nvs_config_get_ota_url(s, sizeof(s));
+    TEST_ASSERT_EQUAL_STRING("https://example.com/ota.json", s);
+    uint16_t v;
+    nvs_config_get_ota_on_sync(&v);
+    TEST_ASSERT_EQUAL_UINT16(1, v);
+    TEST_ASSERT_NOT_NULL(strstr(ack, "\"ok\":true"));
+}
+
+void test_ota_on_sync_false_applies(void) {
+    char ack[256];
+    nvs_config_set_ota_on_sync(1);
+    TEST_ASSERT_EQUAL(CONFIG_APPLIED, apply("{\"ver\":\"1\",\"ota_on_sync\":false}", ack, sizeof(ack)));
+    uint16_t v;
+    nvs_config_get_ota_on_sync(&v);
+    TEST_ASSERT_EQUAL_UINT16(0, v);
+}
+
+/* The BUG-6 shape: a document that says nothing about the OTA fields must
+   leave an HA-set value alone, not clear it. */
+void test_document_omitting_ota_fields_leaves_them_alone(void) {
+    char ack[256];
+    nvs_config_set_ota_url("https://ha.example/ota.json");
+    nvs_config_set_ota_on_sync(1);
+    TEST_ASSERT_EQUAL(CONFIG_APPLIED, apply("{\"ver\":\"1\",\"weekday_min\":45}", ack, sizeof(ack)));
+    char s[CFG_BOUND_OTA_URL_MAX];
+    nvs_config_get_ota_url(s, sizeof(s));
+    TEST_ASSERT_EQUAL_STRING("https://ha.example/ota.json", s);
+    uint16_t v;
+    nvs_config_get_ota_on_sync(&v);
+    TEST_ASSERT_EQUAL_UINT16(1, v);
+}
+
+void test_bulk_ota_url_rejects_non_https(void) {
+    char ack[256];
+    nvs_config_set_ota_url("https://good.example/ota.json");
+    TEST_ASSERT_EQUAL(CONFIG_APPLIED,
+                      apply("{\"ver\":\"1\",\"ota_url\":\"http://evil.example/ota.json\"}", ack, sizeof(ack)));
+    TEST_ASSERT_NOT_NULL(strstr(ack, "\"ota_url\""));
+    TEST_ASSERT_NOT_NULL(strstr(ack, "\"ok\":false"));
+    char s[CFG_BOUND_OTA_URL_MAX];
+    nvs_config_get_ota_url(s, sizeof(s));
+    TEST_ASSERT_EQUAL_STRING("https://good.example/ota.json", s); /* unchanged */
+}
+
+void test_bulk_ota_url_empty_disables_and_is_valid(void) {
+    char ack[256];
+    nvs_config_set_ota_url("https://good.example/ota.json");
+    TEST_ASSERT_EQUAL(CONFIG_APPLIED, apply("{\"ver\":\"1\",\"ota_url\":\"\"}", ack, sizeof(ack)));
+    TEST_ASSERT_NOT_NULL(strstr(ack, "\"ok\":true"));
+    char s[CFG_BOUND_OTA_URL_MAX];
+    nvs_config_get_ota_url(s, sizeof(s));
+    TEST_ASSERT_EQUAL_STRING("", s);
+}
+
+void test_bulk_ota_url_overlong_rejected(void) {
+    char ack[256];
+    char doc[CFG_BOUND_OTA_URL_MAX + 64];
+    char url[CFG_BOUND_OTA_URL_MAX + 8];
+    memset(url, 'u', sizeof(url) - 1);
+    memcpy(url, "https://", 8);
+    url[sizeof(url) - 1] = '\0';
+    snprintf(doc, sizeof(doc), "{\"ver\":\"1\",\"ota_url\":\"%s\"}", url);
+    apply(doc, ack, sizeof(ack));
+    TEST_ASSERT_NOT_NULL(strstr(ack, "\"ota_url\""));
+    char s[CFG_BOUND_OTA_URL_MAX];
+    nvs_config_get_ota_url(s, sizeof(s));
+    TEST_ASSERT_EQUAL_STRING(NVS_DEFAULT_OTA_URL, s); /* never written */
+}
+
+void test_bulk_ota_fields_reject_wrong_types(void) {
+    char ack[256];
+    apply("{\"ver\":\"1\",\"ota_on_sync\":1,\"ota_url\":42}", ack, sizeof(ack));
+    TEST_ASSERT_NOT_NULL(strstr(ack, "\"ota_on_sync\""));
+    TEST_ASSERT_NOT_NULL(strstr(ack, "\"ota_url\""));
+    uint16_t v;
+    nvs_config_get_ota_on_sync(&v);
+    TEST_ASSERT_EQUAL_UINT16(NVS_DEFAULT_OTA_ON_SYNC, v);
+}
+
+/* ---- ack integrity under a fully-invalid document ----
+   err_add used to let snprintf truncate mid-field-name, leaving an
+   unterminated JSON string. HA cannot parse that, so EVERY error in the
+   ack is lost — not just the one that overflowed. The OTA fields sort
+   last and so were the first to be dropped. */
+
+/* Every field present and wrong-typed: the worst case for the error list. */
+static const char *const ALL_WRONG =
+    "{\"ver\":\"1\",\"name\":1,\"tz\":2,\"weekday_min\":\"x\",\"weekend_min\":\"x\","
+    "\"holiday_min\":\"x\",\"summer_min\":\"x\",\"quiet_start\":\"x\",\"quiet_end\":\"x\","
+    "\"bedtime\":\"x\",\"break_interval_min\":\"x\",\"break_duration_min\":\"x\","
+    "\"tone_expiry\":1,\"tone_break\":1,\"tone_bed\":1,\"alert_volume\":\"x\","
+    "\"summer_start\":1,\"school_start\":1,\"school_end\":1,"
+    "\"ota_url\":42,\"ota_on_sync\":1,\"holidays\":5,\"timers\":5}";
+
+void test_worst_case_ack_is_parseable_json(void) {
+    char ack[CONFIG_ACK_MIN];
+    apply(ALL_WRONG, ack, sizeof(ack));
+    cJSON *root = cJSON_Parse(ack);
+    TEST_ASSERT_NOT_NULL_MESSAGE(root, ack); /* the whole point */
+    TEST_ASSERT_TRUE(cJSON_IsFalse(cJSON_GetObjectItemCaseSensitive(root, "ok")));
+    TEST_ASSERT_TRUE(cJSON_IsArray(cJSON_GetObjectItemCaseSensitive(root, "errors")));
+    cJSON_Delete(root);
+}
+
+void test_worst_case_ack_flags_truncation(void) {
+    char ack[CONFIG_ACK_MIN];
+    apply(ALL_WRONG, ack, sizeof(ack));
+    cJSON *root = cJSON_Parse(ack);
+    TEST_ASSERT_NOT_NULL(root);
+    /* Without the flag a dropped entry is indistinguishable from a field
+       that applied cleanly. */
+    TEST_ASSERT_TRUE(cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(root, "errors_truncated")));
+    cJSON_Delete(root);
+}
+
+void test_worst_case_ack_fits_the_declared_minimum(void) {
+    char ack[CONFIG_ACK_MIN];
+    memset(ack, 0x7F, sizeof(ack));
+    apply(ALL_WRONG, ack, sizeof(ack));
+    /* Fits WHOLE, with the NUL inside the buffer — not merely "snprintf
+       didn't crash". */
+    TEST_ASSERT_TRUE(strlen(ack) < sizeof(ack));
+}
+
+/* Every named error must be a complete field name, never a fragment. */
+void test_truncated_error_list_contains_no_partial_names(void) {
+    char ack[CONFIG_ACK_MIN];
+    apply(ALL_WRONG, ack, sizeof(ack));
+    cJSON *root = cJSON_Parse(ack);
+    TEST_ASSERT_NOT_NULL(root);
+    const cJSON *errors = cJSON_GetObjectItemCaseSensitive(root, "errors");
+    const cJSON *item;
+    cJSON_ArrayForEach(item, errors) {
+        TEST_ASSERT_TRUE(cJSON_IsString(item));
+        /* Every real field name appears verbatim in the document. */
+        TEST_ASSERT_NOT_NULL_MESSAGE(strstr(ALL_WRONG, item->valuestring), item->valuestring);
+    }
+    cJSON_Delete(root);
+}
+
+/* A handful of errors must NOT claim truncation. */
+void test_small_error_list_is_not_flagged_truncated(void) {
+    char ack[CONFIG_ACK_MIN];
+    apply("{\"ver\":\"1\",\"weekday_min\":\"x\",\"ota_url\":\"http://nope\"}", ack, sizeof(ack));
+    cJSON *root = cJSON_Parse(ack);
+    TEST_ASSERT_NOT_NULL(root);
+    TEST_ASSERT_NULL(cJSON_GetObjectItemCaseSensitive(root, "errors_truncated"));
+    TEST_ASSERT_NOT_NULL(strstr(ack, "\"ota_url\""));
+    cJSON_Delete(root);
+}
+
+/* ---- ver is interpolated into all three ack emissions ----
+   A quote in ver produced {"ver":"a"b","ok":true}, which does not parse —
+   defeating the errors[] work, and reachable with one mistyped ver. */
+
+void test_ver_with_a_quote_is_rejected_and_ack_parses(void) {
+    char ack[CONFIG_ACK_MIN];
+    TEST_ASSERT_EQUAL(CONFIG_INVALID, apply("{\"ver\":\"a\\\"b\",\"weekday_min\":45}", ack, sizeof(ack)));
+    cJSON *root = cJSON_Parse(ack);
+    TEST_ASSERT_NOT_NULL_MESSAGE(root, ack);
+    TEST_ASSERT_TRUE(cJSON_IsFalse(cJSON_GetObjectItemCaseSensitive(root, "ok")));
+    TEST_ASSERT_EQUAL_STRING("ver", cJSON_GetObjectItemCaseSensitive(root, "err")->valuestring);
+    cJSON_Delete(root);
+    /* nothing applied, and cfg_ver untouched */
+    uint16_t v;
+    nvs_config_get_weekday_min(&v);
+    TEST_ASSERT_EQUAL_UINT16(NVS_DEFAULT_WEEKDAY_MIN, v);
+}
+
+void test_ver_with_a_backslash_is_rejected(void) {
+    char ack[CONFIG_ACK_MIN];
+    TEST_ASSERT_EQUAL(CONFIG_INVALID, apply("{\"ver\":\"a\\\\b\"}", ack, sizeof(ack)));
+    cJSON *root = cJSON_Parse(ack);
+    TEST_ASSERT_NOT_NULL_MESSAGE(root, ack);
+    cJSON_Delete(root);
+}
+
+void test_ver_with_a_control_character_is_rejected(void) {
+    char ack[CONFIG_ACK_MIN];
+    TEST_ASSERT_EQUAL(CONFIG_INVALID, apply("{\"ver\":\"a\\nb\"}", ack, sizeof(ack)));
+    cJSON *root = cJSON_Parse(ack);
+    TEST_ASSERT_NOT_NULL_MESSAGE(root, ack);
+    cJSON_Delete(root);
+}
+
+/* The SKIPPED emission interpolates ver too — it is only reachable with a
+   clean ver now, but pin that its ack parses. */
+void test_skipped_ack_parses(void) {
+    char ack[CONFIG_ACK_MIN];
+    apply("{\"ver\":\"20260811\",\"weekday_min\":45}", ack, sizeof(ack));
+    TEST_ASSERT_EQUAL(CONFIG_SKIPPED, apply("{\"ver\":\"20260811\"}", ack, sizeof(ack)));
+    cJSON *root = cJSON_Parse(ack);
+    TEST_ASSERT_NOT_NULL_MESSAGE(root, ack);
+    TEST_ASSERT_TRUE(cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(root, "skipped")));
+    cJSON_Delete(root);
+}
+
+/* A clean ver at full width still round-trips (the check rejects
+   characters, not length). */
+void test_clean_ver_still_applies(void) {
+    char ack[CONFIG_ACK_MIN];
+    TEST_ASSERT_EQUAL(CONFIG_APPLIED, apply("{\"ver\":\"2026-08-11T00:00:01Z\"}", ack, sizeof(ack)));
+    char stored[24];
+    nvs_config_get_cfg_ver(stored, sizeof(stored));
+    TEST_ASSERT_EQUAL_STRING("2026-08-11T00:00:01Z", stored);
+}
+
+/* ---- a failed NVS write must reach the ack ----
+   Rejecting instead of truncating only pays off if someone hears it. */
+
+void test_nvs_write_failure_is_reported_not_swallowed(void) {
+    char ack[CONFIG_ACK_MIN];
+    mock_nvs_fail_writes(1); /* first write of the document fails */
+    apply("{\"ver\":\"1\",\"weekday_min\":45}", ack, sizeof(ack));
+    cJSON *root = cJSON_Parse(ack);
+    TEST_ASSERT_NOT_NULL_MESSAGE(root, ack);
+    TEST_ASSERT_TRUE_MESSAGE(cJSON_IsFalse(cJSON_GetObjectItemCaseSensitive(root, "ok")), ack);
+    TEST_ASSERT_NOT_NULL(strstr(ack, "weekday_min"));
+    cJSON_Delete(root);
+}
+
+void test_ota_url_nvs_write_failure_is_reported(void) {
+    char ack[CONFIG_ACK_MIN];
+    mock_nvs_fail_writes(1);
+    apply("{\"ver\":\"1\",\"ota_url\":\"https://example.com/ota.json\"}", ack, sizeof(ack));
+    TEST_ASSERT_NOT_NULL_MESSAGE(strstr(ack, "ota_url"), ack);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_full_document_applies_and_stores_ver);
@@ -482,5 +722,24 @@ int main(void) {
     RUN_TEST(test_timers_overlong_name_rejected);
     RUN_TEST(test_timers_error_names_the_offending_entry);
     RUN_TEST(test_timers_bad_min_names_the_offending_entry);
+    RUN_TEST(test_ota_fields_apply_from_bulk_document);
+    RUN_TEST(test_ota_on_sync_false_applies);
+    RUN_TEST(test_document_omitting_ota_fields_leaves_them_alone);
+    RUN_TEST(test_bulk_ota_url_rejects_non_https);
+    RUN_TEST(test_bulk_ota_url_empty_disables_and_is_valid);
+    RUN_TEST(test_bulk_ota_url_overlong_rejected);
+    RUN_TEST(test_bulk_ota_fields_reject_wrong_types);
+    RUN_TEST(test_worst_case_ack_is_parseable_json);
+    RUN_TEST(test_worst_case_ack_flags_truncation);
+    RUN_TEST(test_worst_case_ack_fits_the_declared_minimum);
+    RUN_TEST(test_truncated_error_list_contains_no_partial_names);
+    RUN_TEST(test_small_error_list_is_not_flagged_truncated);
+    RUN_TEST(test_ver_with_a_quote_is_rejected_and_ack_parses);
+    RUN_TEST(test_ver_with_a_backslash_is_rejected);
+    RUN_TEST(test_ver_with_a_control_character_is_rejected);
+    RUN_TEST(test_skipped_ack_parses);
+    RUN_TEST(test_clean_ver_still_applies);
+    RUN_TEST(test_nvs_write_failure_is_reported_not_swallowed);
+    RUN_TEST(test_ota_url_nvs_write_failure_is_reported);
     return UNITY_END();
 }

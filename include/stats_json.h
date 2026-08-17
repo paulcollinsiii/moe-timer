@@ -3,7 +3,8 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include "timer.h" /* TIMER_EXTRA_SLOTS */
+#include "config_validate.h" /* CFG_BOUND_OTA_* — the stored OTA widths */
+#include "timer.h"           /* TIMER_EXTRA_SLOTS */
 
 /* Pure JSON payload builders for the Home Assistant MQTT integration —
    no ESP dependencies; host-tested (test_stats_json). All builders use
@@ -50,7 +51,34 @@ typedef struct {
                                  sleep/reset transitions */
 } stats_snapshot_t;
 
-int stats_json_stat(char *buf, size_t len, const stats_snapshot_t *s);
+/* The OTA leg of the stat payload, and the reason it is a SEPARATE
+   argument rather than four more stats_snapshot_t fields.
+
+   stats_snapshot_t is filled by stats_collect() on the main task and
+   posted to the network task BY VALUE (wake_flow_post_stats_snapshot);
+   net_window_task has already copied it off the queue before it calls
+   ota_flow_check(). An OTA field carried in the snapshot is therefore
+   frozen BEFORE this wake's check runs, and could only ever publish the
+   PREVIOUS wake's result — the ordering at net_window.c:103-105 buys
+   nothing for it. Keeping these four out of the snapshot makes that
+   mistake unrepresentable rather than merely discouraged. They are read
+   from NVS at publish time by ota_flow_stat(); see docs/planning/
+   ota.plan.md task 12, "A correction to this entry's own third bullet".
+
+   dl_ms belongs here for a second reason on top of that one: the
+   download runs in a window that closes before MQTT opens, and its
+   success path ends in esp_restart(), so the value has to come off flash
+   whatever else happens. It reports the LAST download, one wake later. */
+typedef struct {
+    char result[CFG_BOUND_OTA_RESULT_MAX]; /* ota_policy reason code, "" = none */
+    char target[CFG_BOUND_OTA_TARGET_MAX]; /* version the retry budget counts against */
+    uint16_t fails;                        /* consecutive failures for that target */
+    uint32_t dl_ms;                        /* last download's wall time */
+} ota_stat_t;
+
+/* ota may be NULL, which publishes ""/0 — the same NULL-tolerance every
+   string field here already has. */
+int stats_json_stat(char *buf, size_t len, const stats_snapshot_t *s, const ota_stat_t *ota);
 int stats_json_summary(char *buf, size_t len, const char *date, int32_t screen_used_s,
                        const uint16_t completions[TIMER_EXTRA_SLOTS]);
 
@@ -69,6 +97,25 @@ typedef struct {
     bool binary;              /* adds pl_on/pl_off */
     const char *ent_cat;      /* "diagnostic" / NULL = primary (top-level in HA) */
 } ha_entity_t;
+
+/* Home Assistant re-reads a discovery config only when something in it
+   changes; a NEW entity does not appear at all until the retained
+   discovery documents are republished, and mqtt_ha.c republishes them
+   only when this number moves (ha_config_discovery_stale). So it lives
+   HERE, next to the table it versions, rather than in mqtt_ha.c where
+   adding a row to ENTITIES left it out of sight — and test_stats_json
+   pins it against the row count, so adding an entity without bumping it
+   fails a host test rather than a hardware smoke test.
+
+   v18: + the four OTA entities (result/target/fails/dl_ms). */
+#define STATS_JSON_DISC_SCHEMA_VER 18
+
+/* Buffer the stat/summary/discovery payloads are built into (mqtt_ha.c).
+   Named here because stats_json_stat is what can outgrow it, and a stat
+   payload that does is silently NOT PUBLISHED — publish_states drops any
+   build whose needed length reaches the buffer size. Pinned against the
+   worst case by test_stats_json. */
+#define STATS_JSON_PAYLOAD_MAX 768
 
 const ha_entity_t *stats_json_entities(int *count);
 int stats_json_discovery_topic(char *buf, size_t len, const char *dev_id, const ha_entity_t *ent);

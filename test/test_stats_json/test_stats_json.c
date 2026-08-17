@@ -1,3 +1,4 @@
+#include <stdio.h>
 #include <string.h>
 #include <unity.h>
 
@@ -6,6 +7,11 @@
 
 void setUp(void) {}
 void tearDown(void) {}
+
+/* What a device that has never attempted an update reports. Named rather
+   than passed as NULL so the ordinary cases exercise the same path the
+   firmware takes; the NULL tolerance gets its own case below. */
+static const ota_stat_t NO_OTA;
 
 static stats_snapshot_t base_snapshot(void) {
     return (stats_snapshot_t){
@@ -30,7 +36,7 @@ static stats_snapshot_t base_snapshot(void) {
 void test_stat_payload_exact(void) {
     char buf[512];
     stats_snapshot_t s = base_snapshot();
-    int n = stats_json_stat(buf, sizeof(buf), &s);
+    int n = stats_json_stat(buf, sizeof(buf), &s, &NO_OTA);
     /* remaining_s/allocation_s are PER-SLOT arrays ([0] = Screen, [N] =
        extra timer N) so HA tracks each timer's own history — the old
        active-timer scalars mixed different timers into one series. */
@@ -39,7 +45,8 @@ void test_stat_payload_exact(void) {
         "\"active_timer\":\"Screen\",\"remaining_s\":[3400,840,0,300,900],"
         "\"allocation_s\":[3600,900,0,600,900],"
         "\"day_type\":\"Weekday\",\"completions\":[0,2,0,1],\"charge_lock\":false,"
-        "\"break_s\":0,\"accum_s\":0,\"fw\":\"v1.4.0-test\",\"reset\":\"DEEPSLEEP\"}",
+        "\"break_s\":0,\"accum_s\":0,\"fw\":\"v1.4.0-test\",\"reset\":\"DEEPSLEEP\","
+        "\"ota_result\":\"\",\"ota_target\":\"\",\"ota_fails\":0,\"ota_dl_ms\":0}",
         buf);
     TEST_ASSERT_EQUAL_INT((int)strlen(buf), n);
 }
@@ -50,7 +57,7 @@ void test_stat_payload_reports_a_running_break(void) {
     char buf[512];
     stats_snapshot_t s = base_snapshot();
     s.break_remaining_s = 754;
-    stats_json_stat(buf, sizeof(buf), &s);
+    stats_json_stat(buf, sizeof(buf), &s, &NO_OTA);
     TEST_ASSERT_NOT_NULL(strstr(buf, "\"break_s\":754"));
 }
 
@@ -61,7 +68,7 @@ void test_stat_payload_reports_the_exposure_balance(void) {
     char buf[512];
     stats_snapshot_t s = base_snapshot();
     s.accum_s = 1500;
-    stats_json_stat(buf, sizeof(buf), &s);
+    stats_json_stat(buf, sizeof(buf), &s, &NO_OTA);
     TEST_ASSERT_NOT_NULL(strstr(buf, "\"accum_s\":1500"));
 }
 
@@ -72,7 +79,7 @@ void test_stat_payload_reset_reason_flags_crash_wakes(void) {
     char buf[512];
     stats_snapshot_t s = base_snapshot();
     s.reset_reason = "BROWNOUT";
-    stats_json_stat(buf, sizeof(buf), &s);
+    stats_json_stat(buf, sizeof(buf), &s, &NO_OTA);
     TEST_ASSERT_NOT_NULL(strstr(buf, "\"reset\":\"BROWNOUT\""));
 }
 
@@ -80,7 +87,7 @@ void test_stat_payload_charge_lock_true(void) {
     char buf[512];
     stats_snapshot_t s = base_snapshot();
     s.charge_lock = true;
-    stats_json_stat(buf, sizeof(buf), &s);
+    stats_json_stat(buf, sizeof(buf), &s, &NO_OTA);
     TEST_ASSERT_NOT_NULL(strstr(buf, "\"charge_lock\":true"));
 }
 
@@ -88,14 +95,14 @@ void test_stat_payload_escapes_timer_name(void) {
     char buf[512];
     stats_snapshot_t s = base_snapshot();
     s.active_timer = "Say \"Om\"\\now"; /* quotes + backslash must escape */
-    stats_json_stat(buf, sizeof(buf), &s);
+    stats_json_stat(buf, sizeof(buf), &s, &NO_OTA);
     TEST_ASSERT_NOT_NULL(strstr(buf, "\"active_timer\":\"Say \\\"Om\\\"\\\\now\""));
 }
 
 void test_stat_payload_reports_needed_length_when_truncated(void) {
     char buf[32];
     stats_snapshot_t s = base_snapshot();
-    int n = stats_json_stat(buf, sizeof(buf), &s);
+    int n = stats_json_stat(buf, sizeof(buf), &s, &NO_OTA);
     TEST_ASSERT_GREATER_THAN_INT((int)sizeof(buf), n);  /* snprintf semantics */
     TEST_ASSERT_EQUAL_CHAR('\0', buf[sizeof(buf) - 1]); /* still terminated */
 }
@@ -110,7 +117,7 @@ void test_stat_payload_null_string_fields_are_safe(void) {
     s.active_timer = NULL;
     s.day_type = NULL;
     s.fw = NULL;
-    int n = stats_json_stat(buf, sizeof(buf), &s);
+    int n = stats_json_stat(buf, sizeof(buf), &s, &NO_OTA);
     TEST_ASSERT_GREATER_THAN_INT(0, n);
     /* NULL renders as empty strings, JSON stays well-formed */
     TEST_ASSERT_NOT_NULL(strstr(buf, "\"state\":\"\""));
@@ -137,9 +144,143 @@ void test_discovery_entity_table_is_populated(void) {
     TEST_ASSERT_NOT_NULL(ents);
     /* battery, battery_mv, light, state, active_timer, day_type,
        charge_lock, last_reset, screen_remaining, screen_limit,
-       screen_break, break_remaining, screen_exposure
+       screen_break, break_remaining, screen_exposure,
+       ota_result, ota_target, ota_fails, ota_dl_ms
        + per extra slot: completions, remaining, limit */
-    TEST_ASSERT_EQUAL_INT(13 + 3 * TIMER_EXTRA_SLOTS, count);
+    TEST_ASSERT_EQUAL_INT(17 + 3 * TIMER_EXTRA_SLOTS, count);
+}
+
+/* THE BUMP, pinned to the table it describes.
+
+   Home Assistant does not re-read a retained discovery config it has
+   already seen, and mqtt_ha.c only republishes them when this number
+   moves. A new row in ENTITIES with the version left alone therefore
+   produces a device that publishes a field no entity is subscribed to --
+   nothing appears, nothing errors, and the only way to find out is to
+   flash it and go looking. Asserting the two numbers TOGETHER turns that
+   into a failing host test: adding an entity fails the count above, and
+   fixing the count without touching the version fails this. */
+void test_discovery_schema_version_moves_with_the_entity_table(void) {
+    int count = 0;
+    (void)stats_json_entities(&count);
+    TEST_ASSERT_EQUAL_INT(17 + 3 * TIMER_EXTRA_SLOTS, count);
+    TEST_ASSERT_EQUAL_INT(18, STATS_JSON_DISC_SCHEMA_VER);
+}
+
+/* ---- the OTA leg of the stat payload ---- */
+
+/* The four fields come from the ota_stat_t argument, which mqtt_ha.c
+   fills from NVS at publish time -- NOT from stats_snapshot_t, which was
+   frozen on the main task before this wake's check ran. The snapshot has
+   no OTA fields at all, so the mistake cannot be made silently; this
+   pins the values it CAN carry. */
+void test_stat_payload_carries_the_ota_fields(void) {
+    char buf[512];
+    stats_snapshot_t s = base_snapshot();
+    ota_stat_t ota = {.fails = 2, .dl_ms = 41250};
+    snprintf(ota.result, sizeof(ota.result), "%s", "rolled_back");
+    snprintf(ota.target, sizeof(ota.target), "%s", "1.6.0");
+    stats_json_stat(buf, sizeof(buf), &s, &ota);
+    TEST_ASSERT_NOT_NULL(strstr(buf, "\"ota_result\":\"rolled_back\""));
+    TEST_ASSERT_NOT_NULL(strstr(buf, "\"ota_target\":\"1.6.0\""));
+    TEST_ASSERT_NOT_NULL(strstr(buf, "\"ota_fails\":2"));
+    TEST_ASSERT_NOT_NULL(strstr(buf, "\"ota_dl_ms\":41250"));
+}
+
+/* Same snapshot, different OTA argument, different payload: the fields
+   track the argument and nothing else. A builder that ignored `ota` and
+   emitted constants would pass the case above and fail this one. */
+void test_stat_payload_ota_fields_track_the_argument(void) {
+    char a[512], b[512];
+    stats_snapshot_t s = base_snapshot();
+    ota_stat_t first = {.fails = 1, .dl_ms = 1000};
+    ota_stat_t second = {.fails = 3, .dl_ms = 2000};
+    snprintf(first.result, sizeof(first.result), "%s", "timeout");
+    snprintf(second.result, sizeof(second.result), "%s", "gave_up");
+    stats_json_stat(a, sizeof(a), &s, &first);
+    stats_json_stat(b, sizeof(b), &s, &second);
+    TEST_ASSERT_NOT_NULL(
+        strstr(a, "\"ota_result\":\"timeout\",\"ota_target\":\"\",\"ota_fails\":1,\"ota_dl_ms\":1000"));
+    TEST_ASSERT_NOT_NULL(
+        strstr(b, "\"ota_result\":\"gave_up\",\"ota_target\":\"\",\"ota_fails\":3,\"ota_dl_ms\":2000"));
+}
+
+/* A duration is a u32 because a u16 saturates at 65.5 s, well under the
+   download's own deadline. The payload must carry the full range. */
+void test_stat_payload_ota_duration_survives_a_long_download(void) {
+    char buf[512];
+    stats_snapshot_t s = base_snapshot();
+    ota_stat_t ota = {.dl_ms = 298000}; /* just inside a 300 s budget */
+    stats_json_stat(buf, sizeof(buf), &s, &ota);
+    TEST_ASSERT_NOT_NULL(strstr(buf, "\"ota_dl_ms\":298000"));
+}
+
+/* The pure boundary must not fault on a NULL OTA leg either. */
+void test_stat_payload_null_ota_is_safe(void) {
+    char buf[512];
+    stats_snapshot_t s = base_snapshot();
+    int n = stats_json_stat(buf, sizeof(buf), &s, NULL);
+    TEST_ASSERT_GREATER_THAN_INT(0, n);
+    TEST_ASSERT_NOT_NULL(strstr(buf, "\"ota_result\":\"\",\"ota_target\":\"\",\"ota_fails\":0,\"ota_dl_ms\":0}"));
+}
+
+/* Reason codes and version strings come off flash, and NVS bytes are not
+   trustworthy input: a quote or a backslash in either would otherwise
+   close the JSON string early and hand Home Assistant a payload it drops
+   silently. */
+void test_stat_payload_escapes_the_ota_strings(void) {
+    char buf[512];
+    stats_snapshot_t s = base_snapshot();
+    ota_stat_t ota = {0};
+    snprintf(ota.result, sizeof(ota.result), "%s", "a\"b");
+    snprintf(ota.target, sizeof(ota.target), "%s", "c\\d");
+    stats_json_stat(buf, sizeof(buf), &s, &ota);
+    TEST_ASSERT_NOT_NULL(strstr(buf, "\"ota_result\":\"a\\\"b\""));
+    TEST_ASSERT_NOT_NULL(strstr(buf, "\"ota_target\":\"c\\\\d\""));
+}
+
+/* The stat payload is built into a fixed buffer and publish_states DROPS
+   any build that reaches its size -- silently, with no log line and no
+   retry. This task added ~110 bytes to it, so the worst case is worth a
+   number rather than a hope: every string field at its stored width,
+   every escape doubling it, every counter at its maximum. */
+void test_stat_payload_worst_case_fits_the_publish_buffer(void) {
+    char buf[STATS_JSON_PAYLOAD_MAX];
+    stats_snapshot_t s = base_snapshot();
+    char longname[64], longday[24], longfw[32], longrst[24];
+    memset(longname, '\\', sizeof(longname) - 1);
+    longname[sizeof(longname) - 1] = '\0';
+    memset(longday, '\\', sizeof(longday) - 1);
+    longday[sizeof(longday) - 1] = '\0';
+    memset(longfw, '\\', sizeof(longfw) - 1);
+    longfw[sizeof(longfw) - 1] = '\0';
+    memset(longrst, '\\', sizeof(longrst) - 1);
+    longrst[sizeof(longrst) - 1] = '\0';
+    s.state = longday;
+    s.active_timer = longname;
+    s.day_type = longday;
+    s.fw = longfw;
+    s.reset_reason = longrst;
+    s.batt_pct = -999;
+    s.batt_mv = -99999;
+    s.light_mv = -99999;
+    for (int i = 0; i < TIMER_SLOT_COUNT; i++) {
+        s.remaining_s[i] = -2147483647;
+        s.allocation_s[i] = 4294967295u;
+    }
+    for (int i = 0; i < TIMER_EXTRA_SLOTS; i++)
+        s.completions[i] = 65535;
+    s.break_remaining_s = -2147483647;
+    s.accum_s = -2147483647;
+
+    ota_stat_t ota = {.fails = 65535, .dl_ms = 4294967295u};
+    memset(ota.result, '\\', sizeof(ota.result) - 1);
+    memset(ota.target, '\\', sizeof(ota.target) - 1);
+    ota.result[sizeof(ota.result) - 1] = '\0';
+    ota.target[sizeof(ota.target) - 1] = '\0';
+
+    int n = stats_json_stat(buf, sizeof(buf), &s, &ota);
+    TEST_ASSERT_LESS_THAN_INT((int)sizeof(buf), n);
 }
 
 void test_discovery_last_reset_diagnostic_sensor(void) {
@@ -154,6 +295,42 @@ void test_discovery_last_reset_diagnostic_sensor(void) {
     TEST_ASSERT_EQUAL_STRING("diagnostic", reset->ent_cat);
     TEST_ASSERT_NOT_NULL(strstr(reset->tpl, "value_json.reset"));
     TEST_ASSERT_EQUAL_INT(0, reset->expire_after); /* evidence must not expire */
+}
+
+/* expire_after 0 on all four, and it is a decision. These are the record
+   of the last update attempt, not live telemetry: an expiry blanks them
+   on exactly the device this task exists to make legible -- one that
+   tried to update, rolled back, and is now failing to check in. */
+void test_ota_entities_never_expire(void) {
+    int count = 0;
+    const ha_entity_t *ents = stats_json_entities(&count);
+    const char *keys[] = {"ota_result", "ota_target", "ota_fails", "ota_dl_ms"};
+    for (unsigned k = 0; k < sizeof(keys) / sizeof(keys[0]); k++) {
+        const ha_entity_t *e = NULL;
+        for (int i = 0; i < count; i++) {
+            if (strcmp(ents[i].key, keys[k]) == 0)
+                e = &ents[i];
+        }
+        TEST_ASSERT_NOT_NULL(e);
+        TEST_ASSERT_EQUAL_INT(0, e->expire_after);
+        TEST_ASSERT_EQUAL_STRING("stat", e->topic_suffix);
+        TEST_ASSERT_FALSE(e->binary);
+    }
+}
+
+/* "Did my update work?" is an operator question, not a diagnostic one, so
+   ota_result sits at the top level of the device card and the three
+   supporting fields do not. */
+void test_ota_result_is_the_primary_entity_of_the_four(void) {
+    int count = 0;
+    const ha_entity_t *ents = stats_json_entities(&count);
+    for (int i = 0; i < count; i++) {
+        if (strcmp(ents[i].key, "ota_result") == 0)
+            TEST_ASSERT_NULL(ents[i].ent_cat);
+        if (strcmp(ents[i].key, "ota_target") == 0 || strcmp(ents[i].key, "ota_fails") == 0 ||
+            strcmp(ents[i].key, "ota_dl_ms") == 0)
+            TEST_ASSERT_EQUAL_STRING("diagnostic", ents[i].ent_cat);
+    }
 }
 
 void test_discovery_topic(void) {
@@ -357,6 +534,15 @@ int main(void) {
     RUN_TEST(test_stat_payload_null_string_fields_are_safe);
     RUN_TEST(test_summary_payload_exact);
     RUN_TEST(test_discovery_entity_table_is_populated);
+    RUN_TEST(test_discovery_schema_version_moves_with_the_entity_table);
+    RUN_TEST(test_stat_payload_carries_the_ota_fields);
+    RUN_TEST(test_stat_payload_ota_fields_track_the_argument);
+    RUN_TEST(test_stat_payload_ota_duration_survives_a_long_download);
+    RUN_TEST(test_stat_payload_null_ota_is_safe);
+    RUN_TEST(test_stat_payload_escapes_the_ota_strings);
+    RUN_TEST(test_stat_payload_worst_case_fits_the_publish_buffer);
+    RUN_TEST(test_ota_entities_never_expire);
+    RUN_TEST(test_ota_result_is_the_primary_entity_of_the_four);
     RUN_TEST(test_discovery_topic);
     RUN_TEST(test_discovery_battery_payload);
     RUN_TEST(test_discovery_binary_sensor_has_payload_states);
