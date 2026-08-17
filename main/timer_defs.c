@@ -7,8 +7,20 @@
 #include <string.h>
 
 #include "nvs_config.h"
-#include "sdkconfig.h"
 #include "timer.h"
+
+/* menuconfig on firmware builds; host tests have no sdkconfig and fall
+   back to the #ifndef defaults below (pattern: timer.h, nvs_defaults.h).
+   The file is host-compiled since BUG-8 so timer_defs_install() itself is
+   under test, not a transcription of it. */
+#ifndef NATIVE
+#include "esp_log.h"
+#include "sdkconfig.h"
+#else
+#define ESP_LOGW(tag, ...) ((void)(tag))
+#endif
+
+static const char *TAG = "timer_defs";
 
 /* Kconfig emits bool symbols only when =y; default the rest to 0 so the
    table can reference every slot unconditionally. */
@@ -35,6 +47,20 @@
 #endif
 #ifndef CONFIG_MAGTAG_TIMER4_BREAK_ELIGIBLE
 #define CONFIG_MAGTAG_TIMER4_BREAK_ELIGIBLE 0
+#endif
+/* Names are strings, and the host build has no sdkconfig at all: an empty
+   name leaves the slot disabled, which is the right host default. */
+#ifndef CONFIG_MAGTAG_TIMER1_NAME
+#define CONFIG_MAGTAG_TIMER1_NAME ""
+#endif
+#ifndef CONFIG_MAGTAG_TIMER2_NAME
+#define CONFIG_MAGTAG_TIMER2_NAME ""
+#endif
+#ifndef CONFIG_MAGTAG_TIMER3_NAME
+#define CONFIG_MAGTAG_TIMER3_NAME ""
+#endif
+#ifndef CONFIG_MAGTAG_TIMER4_NAME
+#define CONFIG_MAGTAG_TIMER4_NAME ""
 #endif
 /* Same for _MIN: "depends on" hides them while the name is empty. */
 #ifndef CONFIG_MAGTAG_TIMER1_MIN
@@ -75,9 +101,20 @@ static timer_def_t s_nvs_defs[TIMER_SLOT_COUNT];
 void timer_defs_install(void) {
     nvs_timer_defs_blob_t blob;
     if (nvs_config_get_timer_defs(&blob) != ESP_OK) {
-        /* No HA-managed blob yet: materialize one from the Kconfig table so
-           HA shows the compile-time timers as editable (not empty) and the
-           blob becomes the single source of truth for later edits. */
+        /* No readable HA-managed blob: run THIS BOOT on the Kconfig table,
+           but do not persist it — BUG-8. Writing it here made an invented
+           value indistinguishable from an operator's: apply_timers() then
+           saw have_prev/existed true and BUG-6's "absent means unchanged"
+           rule preserved the compile-time break_eligible as though someone
+           had chosen it. Leaving NVS empty keeps "the blob exists" meaning
+           "something authoritative wrote it", so the first retained config
+           document is correctly recognised as a first-time definition.
+
+           ha_config.c's load_defs() covers the readers that used to depend
+           on this write (the discovery hash and the cfg state JSON): they
+           now fall back to this same installed table via timer_slot_def(),
+           which is where mqtt_ha.c already gets the per-timer entities. */
+        ESP_LOGW(TAG, "no readable timer-defs blob; running on the compile-time table (not persisted)");
         memset(&blob, 0, sizeof(blob));
         blob.version = TIMER_DEFS_BLOB_VERSION;
         for (int i = 0; i < TIMER_EXTRA_SLOTS; i++) {
@@ -88,7 +125,6 @@ void timer_defs_install(void) {
             blob.defs[i].reload = d->reloadable ? 1 : 0;
             blob.defs[i].break_eligible = d->break_eligible ? 1 : 0;
         }
-        nvs_config_set_timer_defs(&blob);
     }
     s_nvs_defs[0] = (timer_def_t)SCREEN_DEF;
     for (int i = 0; i < TIMER_EXTRA_SLOTS; i++) {

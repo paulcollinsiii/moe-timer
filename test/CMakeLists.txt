@@ -106,6 +106,14 @@ add_host_test(test_cmd_apply
     EXTRA_SRCS ${CMAKE_CURRENT_SOURCE_DIR}/../lib/cJSON/cJSON.c
     EXTRA_INCLUDES ${CMAKE_CURRENT_SOURCE_DIR}/../lib/cJSON
     EXTRA_LIBS m)
+# BUG-8. The ONLY suite that host-compiles main/timer_defs.c, which is what
+# lets timer_defs_install() be tested rather than transcribed (the entry's
+# repro had to copy it). It carries cJSON because the regression needs the
+# real config_apply() on the other side of the boot.
+add_host_test(test_timer_defs
+    EXTRA_SRCS ${CMAKE_CURRENT_SOURCE_DIR}/../lib/cJSON/cJSON.c
+    EXTRA_INCLUDES ${CMAKE_CURRENT_SOURCE_DIR}/../lib/cJSON
+    EXTRA_LIBS m)
 add_host_test(test_ota_policy
     EXTRA_SRCS ${CMAKE_CURRENT_SOURCE_DIR}/../lib/cJSON/cJSON.c
     EXTRA_INCLUDES ${CMAKE_CURRENT_SOURCE_DIR}/../lib/cJSON

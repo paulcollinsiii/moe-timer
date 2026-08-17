@@ -10,7 +10,16 @@
 #include "config_validate.h"
 #include "nvs_config.h"
 #include "quiet_hours.h"
+#include "timer.h" /* timer_slot_def: the table this boot is running */
 #include "tones.h"
+
+#ifndef NATIVE
+#include "esp_log.h"
+#else
+#define ESP_LOGW(tag, ...) ((void)(tag))
+#endif
+
+static const char *TAG = "ha_config";
 
 /* snprintf-append with truncation tracking; buffer stays NUL-terminated. */
 static int jcat(char *buf, size_t len, int pos, const char *fmt, ...) {
@@ -249,13 +258,37 @@ static ha_cfg_result_t reject(char *ack, size_t len, const char *key, const char
     return HA_CFG_REJECTED;
 }
 
-/* Load the timer-defs blob, or a fresh zeroed one (all slots disabled) if
-   none exists yet — so the first HA edit materializes a valid blob. */
+/* Load the timer-defs blob, falling back to the table this boot is
+   actually running when it cannot be read.
+
+   The fallback used to be a ZEROED blob, and the read-modify-write cases
+   in ha_config_set persist whatever this returns — so one transient read
+   failure while the operator edited a single field wiped every OTHER
+   slot's name, minutes and flags. Zeros are also the wrong answer for the
+   two read-only callers below: since BUG-8, timer_defs_install() no
+   longer materializes the blob at boot, so "unreadable" is the ordinary
+   state of a device whose NVS was erased, and empties here would publish
+   blank names in the cfg state and a discovery hash that disagrees with
+   the per-timer entities mqtt_ha.c builds from this very same
+   timer_slot_def(). Falling back to the installed table gives all three
+   callers what the device is running, whether that came from NVS or from
+   the compile-time defaults. A slot the timer layer reports as disabled
+   stays zeroed, which is what a disabled slot means in the blob too. */
 static void load_defs(nvs_timer_defs_blob_t *b) {
-    if (nvs_config_get_timer_defs(b) != ESP_OK) {
-        memset(b, 0, sizeof(*b));
-        b->version = TIMER_DEFS_BLOB_VERSION;
+    if (nvs_config_get_timer_defs(b) == ESP_OK)
+        return;
+    memset(b, 0, sizeof(*b));
+    b->version = TIMER_DEFS_BLOB_VERSION;
+    for (int i = 0; i < TIMER_EXTRA_SLOTS; i++) {
+        const timer_def_t *d = timer_slot_def(i + 1);
+        if (d == NULL)
+            continue;
+        snprintf(b->defs[i].name, sizeof(b->defs[i].name), "%s", d->name);
+        b->defs[i].min = d->duration_sec / 60;
+        b->defs[i].reload = d->reloadable ? 1 : 0;
+        b->defs[i].break_eligible = d->break_eligible ? 1 : 0;
     }
+    ESP_LOGW(TAG, "timer-defs blob unreadable; using the installed table");
 }
 
 uint16_t ha_config_discovery_hash(const char *dev_name, const char *fw) {

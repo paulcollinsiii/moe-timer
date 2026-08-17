@@ -3,9 +3,17 @@
 #include <unity.h>
 
 /* Single-TU: the editable-config applier over mock NVS + real accessors
-   and validators. No cJSON — values arrive as strings (from MQTT). */
+   and validators. No cJSON — values arrive as strings (from MQTT).
+
+   timer.c is here because load_defs() falls back to timer_slot_def() when
+   the blob cannot be read (BUG-8): the real slot table, not a stub, so the
+   fallback is exercised against the same enablement rule the device uses.
+   Tests that do not call timer_set_defs() see an empty table, which makes
+   the fallback identical to the zeroed blob it replaced. */
 // clang-format off
 #include "mock_hal_nvs.c"
+#include "mock_hal_time.c"
+#include "../../main/timer.c"
 #include "../../main/nvs_config.c"
 #include "../../main/quiet_hours.c"
 #include "../../main/bedtime.c"
@@ -21,6 +29,7 @@ static void seed_blob(void); /* defined with the Phase B tests below */
 
 void setUp(void) {
     mock_nvs_reset();
+    timer_set_defs(NULL, 0); /* s_defs is a static: clear it like the NVS */
 }
 void tearDown(void) {}
 
@@ -866,6 +875,95 @@ void test_discovery_hash_tolerates_an_unterminated_slot_name(void) {
     ha_config_state_json(buf, sizeof(buf)); /* same field, via jesc */
 }
 
+/* ---- BUG-8: load_defs()'s fallback when the blob cannot be read ----
+
+   timer_defs_install() no longer materializes the blob at boot, so
+   "unreadable" is the ordinary state of a device whose NVS was erased —
+   not an exotic error. load_defs() therefore falls back to the table the
+   boot installed rather than to zeros, and all three of its callers are
+   pinned below. */
+
+/* The table timer_defs_install() would have left in place. File scope
+   because timer.c keeps the pointers, not copies. */
+static const timer_def_t INSTALLED[TIMER_SLOT_COUNT] = {
+    {"Screen", 0, false, false}, {"Piano", 15 * 60, true, true}, {"Meditation", 10 * 60, false, true},
+    {"", 0, false, false},       {"", 0, false, false},
+};
+
+/* Store a blob the getter refuses. A stale layout version is the
+   version-drift loss the entry lists as candidate 2, and it makes the read
+   fail without adding a read-failure hook to a mock 39 other suites share. */
+static void store_unreadable_blob(void) {
+    nvs_timer_defs_blob_t b;
+    memset(&b, 0, sizeof(b));
+    b.version = (uint8_t)(TIMER_DEFS_BLOB_VERSION - 1);
+    snprintf(b.defs[0].name, sizeof(b.defs[0].name), "Stale");
+    nvs_config_set_timer_defs(&b);
+    nvs_timer_defs_blob_t probe;
+    TEST_ASSERT_NOT_EQUAL(ESP_OK, nvs_config_get_timer_defs(&probe));
+}
+
+/* The caller with teeth. A read-modify-write on an unreadable blob used to
+   persist ZEROES for every slot the edit did not touch, so one transient
+   failure while the operator nudged timer2_min wiped timer1 outright. */
+void test_edit_with_unreadable_blob_keeps_the_other_slots(void) {
+    timer_set_defs(INSTALLED, TIMER_SLOT_COUNT);
+    store_unreadable_blob();
+    char ack[128];
+    TEST_ASSERT_EQUAL(HA_CFG_OK, ha_config_set("timer2_min", "25", ack, sizeof(ack)));
+    nvs_timer_defs_blob_t b;
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_timer_defs(&b));
+    TEST_ASSERT_EQUAL_INT32(25, b.defs[1].min);        /* the edit landed */
+    TEST_ASSERT_EQUAL_STRING("Piano", b.defs[0].name); /* the bystander survived */
+    TEST_ASSERT_EQUAL_INT32(15, b.defs[0].min);
+    TEST_ASSERT_EQUAL_UINT8(1, b.defs[0].reload);
+    TEST_ASSERT_EQUAL_UINT8(1, b.defs[0].break_eligible);
+    TEST_ASSERT_EQUAL_STRING("Meditation", b.defs[1].name);
+}
+
+/* The cfg state drives HA's text/number/switch controls. Empty names here
+   are what the device would publish on the first window after an NVS erase
+   if the fallback were still zeros. */
+void test_state_json_falls_back_to_the_installed_table(void) {
+    timer_set_defs(INSTALLED, TIMER_SLOT_COUNT);
+    store_unreadable_blob();
+    char buf[HA_CONFIG_STATE_MAX];
+    ha_config_state_json(buf, sizeof(buf));
+    TEST_ASSERT_NOT_NULL(strstr(buf, "\"timer1_name\":\"Piano\""));
+    TEST_ASSERT_NOT_NULL(strstr(buf, "\"timer1_min\":15"));
+    TEST_ASSERT_NOT_NULL(strstr(buf, "\"timer1_break\":\"ON\""));
+    TEST_ASSERT_NOT_NULL(strstr(buf, "\"timer2_name\":\"Meditation\""));
+}
+
+/* The discovery hash is the caller that cannot wait for someone else to
+   write the blob: mqtt_ha.c runs publish_states() BEFORE apply_incoming()
+   applies the retained document. It also has to agree with the per-timer
+   entities mqtt_ha.c builds from this same timer_slot_def(). */
+void test_discovery_hash_falls_back_to_the_installed_table(void) {
+    timer_set_defs(INSTALLED, TIMER_SLOT_COUNT);
+    store_unreadable_blob();
+    uint16_t from_installed = ha_config_discovery_hash("Kitchen", "1.5.0");
+
+    /* The same two slots, but stored: the fallback must reach the same
+       fingerprint, or the first window after an erase burns a discovery
+       republish and the second burns another one changing it back. */
+    mock_nvs_reset();
+    nvs_timer_defs_blob_t b;
+    memset(&b, 0, sizeof(b));
+    b.version = TIMER_DEFS_BLOB_VERSION;
+    snprintf(b.defs[0].name, sizeof(b.defs[0].name), "Piano");
+    b.defs[0].min = 15;
+    snprintf(b.defs[1].name, sizeof(b.defs[1].name), "Meditation");
+    b.defs[1].min = 10;
+    nvs_config_set_timer_defs(&b);
+    TEST_ASSERT_EQUAL_UINT16(ha_config_discovery_hash("Kitchen", "1.5.0"), from_installed);
+
+    /* And it is not the all-empty hash the zeroed fallback produced. */
+    mock_nvs_reset();
+    timer_set_defs(NULL, 0);
+    TEST_ASSERT_NOT_EQUAL(from_installed, ha_config_discovery_hash("Kitchen", "1.5.0"));
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_set_timer_name_enables_slot);
@@ -940,5 +1038,8 @@ int main(void) {
     RUN_TEST(test_discovery_hash_separates_zero_and_nonzero_duration);
     RUN_TEST(test_discovery_hash_ignores_a_duration_change_that_keeps_it_enabled);
     RUN_TEST(test_discovery_hash_tolerates_an_unterminated_slot_name);
+    RUN_TEST(test_edit_with_unreadable_blob_keeps_the_other_slots);
+    RUN_TEST(test_state_json_falls_back_to_the_installed_table);
+    RUN_TEST(test_discovery_hash_falls_back_to_the_installed_table);
     return UNITY_END();
 }
