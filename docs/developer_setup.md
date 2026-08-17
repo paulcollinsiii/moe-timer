@@ -71,6 +71,36 @@ idf.py fullclean        # wipe the build directory
 
 `sdkconfig` is generated from `sdkconfig.defaults` (committed) and is gitignored — delete `sdkconfig` and rebuild to pick up changed defaults.
 
+### Build-size guard
+
+Every build runs `tools/check_slot_size.py` (hung off the `app` target from the
+project-root `CMakeLists.txt`) and **fails the build** — it does not warn — once
+the app image passes `MAGTAG_MAX_SLOT_PCT` percent of the `0x1C0000` app slot.
+The threshold is currently **85**. A passing build prints the live figure
+(`Build-size guard: image N B is X.X % of the … slot; M B left under the 85 %
+guard`); a failing one prints the same numbers plus how far over you are.
+
+It fails rather than warns on purpose. This repo has no CI, so a printed warning
+has exactly one reader — whoever happens to be watching that build — and the
+headroom it protects is **one-way**: an OTA writes an app slot and cannot
+rewrite the partition table, so the slot size shipped with the first OTA-capable
+firmware is the size those devices keep, short of a serial cable per device.
+ESP-IDF's own check only speaks up at 5 % free, which is after the decision that
+mattered.
+
+`-D MAGTAG_MAX_SLOT_PCT=…` on the command line is deliberately **refused** with
+a `FATAL_ERROR`. The threshold is a plain (non-cache) variable that shadows any
+cache entry, so the flag would otherwise be silently ignored and the build would
+fail at the same number with no hint why. Raising the guard is legitimate — it
+accepts a new floor — but it costs an edit to `set(MAGTAG_MAX_SLOT_PCT …)` in
+`CMakeLists.txt`, in its own commit whose message says what the bytes bought.
+Nothing to clean up after a refusal: `idf.py` deletes `CMakeCache.txt` when a
+configure fails, so just re-run without the flag.
+
+The arithmetic is covered from both sides by `test/test_check_slot_size/`, which
+can drive the failure branch with synthetic sizes — something no real build can
+do without first growing the image by tens of KB.
+
 ---
 
 ## Flashing & Monitoring

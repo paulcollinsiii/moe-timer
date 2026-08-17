@@ -23,7 +23,7 @@
    already opening (ota_flow_check, on the network task, after the
    snapshot rendezvous and before the MQTT phase). A download is a second
    window, opened only on the days an update actually exists
-   (ota_flow_apply, on the main task, after the first window has closed).
+   (ota_flow_apply, on its own task, after the first window has closed).
 
    Between them the panel is painted, and that gap is the entire reason
    for the split. display_ota() carries no net_window_active() guard and

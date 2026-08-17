@@ -933,7 +933,7 @@ void ota_flow_apply(int batt_pct, bool charge_locked) {
        other path in the firmware does.
 
        timer_persist_save() runs at exactly four places: enter_deep_sleep,
-       the charge lock, a break start and the expiry alert. NOT on a day
+       the Bed Time lock, a break start and the expiry alert. NOT on a day
        rollover, NOT on a button action, NOT on an HA grant. Every one of
        those relies on enter_deep_sleep to flush eventually — and this
        reboot never reaches it, because maybe_apply_update() sits ahead

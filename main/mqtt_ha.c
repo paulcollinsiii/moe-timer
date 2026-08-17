@@ -444,7 +444,7 @@ static int publish_states(esp_mqtt_client_handle_t client, const stats_snapshot_
        ota_flow_check(), so any OTA field carried in it would be this
        wake's snapshot of the PREVIOUS wake's result. Reading NVS on this
        line instead picks up the verdict the check wrote two statements
-       earlier at net_window.c:103. See ota_flow.h's ota_flow_stat() and
+       earlier at net_window.c:107. See ota_flow.h's ota_flow_stat() and
        task 12 of docs/planning/ota.plan.md. */
     ota_stat_t ota;
     ota_flow_stat(&ota);
