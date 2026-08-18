@@ -5,12 +5,12 @@
 /* BUG-8 regression: what boot leaves behind for the network window.
 
    Single-TU, and deliberately the REAL timer_defs_install() rather than a
-   transcription of it — docs/planning/bug8.repro.c (commit ef3af99) had to
-   copy the function because main/timer_defs.c would not compile for the
-   host; it does now, and this is the only suite that compiles it. The other
-   half of the defect is the REAL config_apply() over the mock NVS: the bug
-   is not in either function alone, it is in the boot writing a table the
-   window then mistakes for an operator's. */
+   transcription of it — docs/planning/implemented/bug8.repro.c (commit
+   ef3af99) had to copy the function because main/timer_defs.c would not
+   compile for the host; it does now, and this is the only suite that
+   compiles it. The other half of the defect is the REAL config_apply() over
+   the mock NVS: the bug is not in either function alone, it is in the boot
+   writing a table the window then mistakes for an operator's. */
 
 /* The compile-time table this TU's timer_defs.c is built against. Defined
    ahead of the include because that file's #ifndef fallbacks exist for
@@ -175,7 +175,7 @@ void test_intact_blob_keeps_operator_break(void) {
    Here the value is consulted in place, and it lands in flash only because
    an authoritative document was applied over it.
 
-   This is the assertion 8a4b18f inverted: it removed the boot write and the
+   This is the assertion ad62dff inverted: it removed the boot write and the
    menuconfig rung together, so both slots came out 0 and a deliberate
    menuconfig choice was silently dropped on the first document after an
    erase. */

@@ -276,7 +276,7 @@ static void apply_timers(const cJSON *root, err_acc_t *e) {
            NVS at boot, which made `existed` true and put the compile-time
            value in `prev` — laundering a build-time default into tier-2
            storage, where it was indistinguishable from an operator's choice
-           and got published to HA as one. THAT is BUG-8. 8a4b18f removed
+           and got published to HA as one. THAT is BUG-8. ad62dff removed
            the laundering and took the tier with it, collapsing the ladder
            to `document > empty` and dropping a deliberate menuconfig
            break-eligibility on the first document applied after an NVS

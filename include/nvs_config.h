@@ -142,7 +142,7 @@ esp_err_t nvs_config_set_ota_pend_ver(const char *ver);
    nvs_config_get_timer_defs() reject every blob in the field, discarding
    the very table this field exists to protect. That is safe only because
    every writer memsets the whole struct before filling it — config_apply.c
-   apply_timers(), ha_config.c load_defs(), and the pre-8a4b18f boot write
+   apply_timers(), ha_config.c load_defs(), and the pre-ad62dff boot write
    that created the blobs now on devices (357d2f6 main/timer_defs.c) — so
    the byte reads 0 on an existing blob, which is exactly the "provenance
    unknown, fall back to the name test" answer apply_timers() wants. Any
