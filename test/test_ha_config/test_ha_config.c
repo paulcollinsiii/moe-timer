@@ -999,11 +999,23 @@ void test_every_timer_field_is_accepted_without_a_stored_table(void) {
 }
 
 /* ...and the write records WHO, per slot. Only the slot the edit named is
-   stamped; the other three stay 0 so apply_timers() still sees them as
-   first-time definitions and the menuconfig rung still answers for them.
-   Not a detail: stamping the whole table here is BUG-8 through a different
-   door, since `defined` is exactly the "somebody authoritative chose this"
-   signal the blob's mere existence used to be. */
+   stamped; the other three stay 0. Not a detail: stamping the whole table
+   here is BUG-8 through a different door, since `defined` is exactly the
+   "somebody authoritative chose this" signal the blob's mere existence used
+   to be. That is the whole of what the assertions below pin.
+
+   What they deliberately do NOT pin — and what an earlier version of this
+   comment wrongly claimed they did — is that a 0 sends the slot back to the
+   menuconfig rung on a later document. It does not, in general: apply_timers()
+   tests `defined || name[0] != '\0'`, so a bystander slot carrying a
+   menuconfig-seeded NAME reads as already defined and the stored value
+   answers instead. That distinction is untestable in this TU, which compiles
+   no CONFIG_MAGTAG_TIMER* symbols at all: the compile-time table is empty,
+   nothing gets seeded, every bystander name is "", and the two tiers can
+   never be told apart here. Do not add rung-sensitive coverage to this file
+   — test_timer_defs/ is the only suite with a non-empty compile-time table,
+   and test_the_rung_survives_a_table_a_control_created is where this
+   behaviour is pinned and described honestly. */
 void test_a_control_edit_stamps_only_the_slot_it_touched(void) {
     timer_set_defs(INSTALLED, TIMER_SLOT_COUNT);
     mock_nvs_reset();

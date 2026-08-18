@@ -113,20 +113,40 @@ confirmed value to `magtag/<id>/cfg` so the control reflects reality.
   Note the second half of that: the first control edit provisions the whole
   table, not only the slot you edited. The slots you did not touch are
   carried across at their menuconfig values — the alternative was writing
-  blanks over them and disabling those timers — and are recorded as *not*
-  chosen by you, so a later `timers` document still treats them as
-  first-time definitions. What they no longer do is follow a menuconfig
-  change in a future firmware build.
+  blanks over them and disabling those timers. They are recorded as *not*
+  chosen by you, but that record does **not** hand them back to the
+  menuconfig defaults: a slot that menuconfig **names** is carried across
+  with that name, and a named slot counts as already defined. So a later
+  `timers` document that omits a key for such a slot keeps the *stored*
+  value, and the slot no longer follows a menuconfig change in a future
+  firmware build. Only a slot menuconfig leaves unnamed still falls back to
+  the build-time defaults. The one-line version: the first control edit
+  provisions every named timer, not just the one you edited.
   If a stored table exists but **cannot be read** (version drift, a bad
   read), the per-timer controls do still NAK, with
   `{"key":"timer1_min","ok":false,"err":"nodefs"}` — the device will not
   write a guess over bytes it could not load. That NAK is not visible in
   Home Assistant (see below); the symptom you will actually see is a
   control that snaps back to its old value at the next `cfg` republish.
-  It clears itself: a retained `timers` document is re-applied on the next
-  window even when its `ver` has not changed, precisely so an unreadable
-  table gets rebuilt instead of stranding the device. A rejected `set/`
-  command is also *not* cleared, so it is retried and the edit is not lost.
+  It can clear itself, but only if you have published a config document:
+  a retained document carrying a **valid** `timers` array is re-applied on
+  the next window even when its `ver` has not changed, precisely so an
+  unreadable table gets rebuilt instead of stranding the device. Read that
+  condition strictly — there are three ways to have no recovery at all, and
+  none of them says anything in Home Assistant:
+  - **No retained config document.** If you drive the device only from the
+    HA controls and have never published to `magtag/<id>/config`, there is
+    nothing to re-apply and this recovery never runs. The controls stay
+    dead until you publish a document (or erase NVS).
+  - **A retained document with no `timers` array.** It is re-read and
+    performs zero writes; the table stays unreadable.
+  - **A retained document whose `timers` array is invalid.** Also zero
+    writes — and on this path the errors are discarded, so the ack still
+    reads `{"ok":true,"skipped":true}`. A failed recovery is indistinguishable
+    from a successful one from HA; the device log is the only place it shows.
+
+  A rejected `set/` command is *not* cleared, so it is retried and the edit
+  is not lost.
 - **The per-field ack is a log line, not a topic.** `config_ack` carries the
   ack for the **bulk config document** only. A per-field `set/<key>` result
   — `ok`, or `err` of `range` / `char` / `value` / `nodefs` — is written to

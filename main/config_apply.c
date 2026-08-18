@@ -405,14 +405,39 @@ config_result_t config_apply(const char *json, char *ack, size_t ack_len) {
            a stuck device denies you.
 
            So: on a `ver` match, still rebuild the timer table if it is
-           unreadable. Deliberately narrow. Nothing else is re-applied
-           (everything else has its own NVS key and is not at risk of this
+           unreadable. Deliberately narrow. No other NVS KEY is re-applied
+           (everything else has its own key and is not at risk of this
            coupling), the result is still CONFIG_SKIPPED because no new
            configuration was accepted, and apply_timers() returns
            immediately for a document with no `timers` array. Errors go to
            the accumulator and are dropped: the ack for a skipped document
            says "skipped", and inventing an error field here would make a
-           document that is fine look broken. BUG-5. */
+           document that is fine look broken. BUG-5.
+
+           Three consequences that "narrow" does NOT cover. None is a bug to
+           fix here; they are recorded because each was rediscovered once.
+
+           1. It DESTROYS the unreadable bytes. apply_timers() sees
+              have_prev == false, so tier 2 is skipped for every slot,
+              menuconfig answers, and the result is written over data that
+              was still physically intact. The runtime answer for this wake
+              was already menuconfig's (timer_defs_install() ran on the
+              compile-time table anyway); what this adds is persistence, with
+              no operator action and an ack of ok:true. The governing
+              consequence: any TIMER_DEFS_BLOB_VERSION bump must ship its
+              migration in the SAME image, because the first window after
+              the bump leaves the migration nothing to read. See BUG-5 in
+              docs/planning/refactor.bugdiscoveries.md.
+           2. "Nothing else is re-applied" is about NVS keys, not about
+              running timers. net_apply.c's reconcile_defs() re-installs the
+              table at window close; if this branch rewrote it mid-window,
+              timer_reconcile_def() may RESET a running slot and chirp.
+              Traced, not executed.
+           3. The retry is unbounded and silent. If the write keeps failing
+              this runs every window forever, always answering
+              ok:true,skipped:true. Not a flash-wear problem — a failing
+              write does not program, and the healthy path writes exactly
+              once — but it is permanently invisible. */
         nvs_timer_defs_blob_t probe;
         if (nvs_config_get_timer_defs(&probe) != ESP_OK) {
             err_acc_t rebuild = {.errors = {0}, .count = 0, .truncated = false};

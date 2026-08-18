@@ -278,29 +278,85 @@ timer configuration can be discarded without a trace.
 Three of the four pieces are done. The migration is not, and is still the only
 thing that would make a version bump non-destructive.
 
-1. **The overwrite is gone (`8a4b18f`, BUG-8).** `timer_defs_install()` no
-   longer writes anything at boot, on any path. An unreadable blob is left
-   physically intact; the boot merely runs on the compile-time table for that
-   wake. So the *discard* half of this entry no longer happens — the data is
-   still there, it is just not reachable until the layout matches again.
+1. **The overwrite is gone from *boot* (`8a4b18f`, BUG-8) — but not from the
+   device.** `timer_defs_install()` no longer writes anything at boot, on any
+   path, and the boot merely runs on the compile-time table for that wake.
+
+   An earlier revision of this item went on to claim the unreadable blob is
+   "left physically intact … still there, just not reachable until the layout
+   matches again". **That is no longer true, and it is the most load-bearing
+   correction on this page.** Item 3's rebuild (`main/config_apply.c`, the
+   `strcmp(stored, ver_str)` branch) re-runs `apply_timers()` against an
+   unreadable table. `apply_timers()` derives `have_prev` from
+   `nvs_config_get_timer_defs() == ESP_OK`, so an unreadable table means
+   `have_prev == false`, tier 2 is skipped for **every** slot, menuconfig
+   answers, and the result is written **over the still-intact bytes**. The old
+   bytes are gone at the end of the first network window that delivers a
+   retained document with a valid `timers` array.
+
+   Reproduced end to end: an operator's deliberate `break=OFF` comes back ON,
+   with no operator action and an ack of `ok:true`. `apply_timers()`' own
+   comment already describes this conflation and accepts it; what was wrong
+   was this page telling the reader the data survives it.
+
+   Do not overstate it either. The *runtime* outcome for that wake was already
+   `break=ON` before `21f15dd`, because `timer_defs_install()` runs on the
+   compile-time table regardless. What changed is that the result became
+   **persistent**, the original bytes are **destroyed** rather than merely
+   shadowed, and it fires with **no operator action**.
 2. **The silence is gone.** `timer_defs_install()` and `ha_config.c`'s
    `load_defs()` each now emit two distinct warnings, "no timer-defs blob
    stored" versus "blob present but UNREADABLE (`esp_err_to_name`)". This is
    the *"whatever the policy, log it"* constraint below, which was marked
    unconditional and worth landing on its own. It was.
-3. **A stranded device can now recover, which is the failure this entry
-   understated.** `cfg_ver` and the timer-defs blob are independent NVS keys.
-   `config_apply()` returned `CONFIG_SKIPPED` on a `ver` match *before*
-   `apply_timers()` ran, so a device that lost its table while `cfg_ver`
-   survived skipped the one document that would rebuild it — on every window,
-   forever. Combined with `ha_config_set`'s NAK on an unreadable table, every
-   per-timer control was dead permanently and nothing in HA said why. The skip
-   is now conditional: on a `ver` match with an unreadable table,
-   `apply_timers()` still runs (`main/config_apply.c`, the `strcmp(stored,
-   ver_str)` branch). Nothing else is re-applied and the result is still
-   `CONFIG_SKIPPED`. Pinned by
+3. **A stranded device can recover *if it has a retained document with a valid
+   `timers` array* — which the BUG-8 operator does not.** `cfg_ver` and the
+   timer-defs blob are independent NVS keys. `config_apply()` returned
+   `CONFIG_SKIPPED` on a `ver` match *before* `apply_timers()` ran, so a device
+   that lost its table while `cfg_ver` survived skipped the one document that
+   would rebuild it — on every window, forever. Combined with
+   `ha_config_set`'s NAK on an unreadable table, every per-timer control was
+   dead permanently and nothing in HA said why. The skip is now conditional: on
+   a `ver` match with an unreadable table, `apply_timers()` still runs
+   (`main/config_apply.c`, the `strcmp(stored, ver_str)` branch). Pinned by
    `test_timer_defs/test_a_ver_match_still_rebuilds_an_unreadable_table` and
    its negative twin `..._with_a_readable_table_writes_nothing`.
+
+   **The qualifier is not decoration.** `config_apply()` has exactly one
+   caller, `main/mqtt_ha.c:483`, reached only when a retained config document
+   arrives. Three ways the recovery silently does not happen:
+
+   - **No retained document at all.** This is precisely the BUG-8 operator
+     profile — drives the device only from the HA controls, never publishes a
+     `timers` document. There is nothing to re-apply and the branch never
+     runs. `21f15dd` hands that operator a blob for the first time; if it
+     later becomes unreadable they are stuck exactly as they were before this
+     fix landed. Claiming recovery without this qualifier is how the fix gets
+     believed to cover the operator it does not cover.
+   - **A retained document with no `timers` array.** `apply_timers()` returns
+     immediately; zero writes; the table stays unreadable.
+   - **A retained document with an *invalid* `timers` array.** Also zero
+     writes — and its errors go to a throwaway accumulator that is discarded,
+     so the failed recovery is invisible and the ack still says
+     `{"ok":true,"skipped":true}`.
+
+   **Two behaviours of this branch that the commit message did not disclose:**
+
+   - *It is not inert with respect to running timers.* "Nothing else is
+     re-applied and the result is still `CONFIG_SKIPPED`" is true of the other
+     NVS keys, and false of runtime timer state. `main/net_apply.c:80-81` runs
+     `reconcile_defs()` → `timer_defs_install()` at window close. If this
+     branch rewrote the table mid-window the installed table changes under
+     the reconciler, and `timer_reconcile_def` may RESET a running slot and
+     chirp (`net_apply.c:102-105`). Traced, not executed — treat as plausible,
+     not confirmed.
+   - *The retry is unbounded and silent.* If the rebuild's NVS write keeps
+     failing, the branch retries on every window forever, always answering
+     `ok:true,skipped:true`. This is **not** a flash-wear problem — a failing
+     write does not program, and the healthy path self-limits to exactly one
+     write (pinned by the negative twin test above). The cost is window time
+     and permanent silence. Confirmed, low severity; recorded so it is not
+     rediscovered as something worse.
 4. **The layout guard proposed below is in** (`include/nvs_config.h`): the
    implicit padding is named (`defined`, `rsvd`, and `rsvd[3]` in the header)
    and `_Static_assert`s pin every size and offset. Measured, not assumed:
@@ -314,8 +370,25 @@ thing that would make a version bump non-destructive.
 **Still open:** the v1→v2 migration decided on 2026-08-07 (read a v1 blob, copy
 the common prefix, default `break_eligible` from the Kconfig value, write back
 as v2). Until it exists, a version bump still makes the stored table
-unreachable — it is now loud, non-destructive and recoverable from HA rather
-than silent and permanent, but the values are still not carried across.
+unreachable — loud and recoverable-from-HA rather than silent and permanent,
+but the values are not carried across. Note the word dropped from an earlier
+revision of this sentence: the bump is **not** "non-destructive". See item 1.
+
+> **SEQUENCING CONSTRAINT — governs this entry. Read before touching
+> `TIMER_DEFS_BLOB_VERSION`.**
+>
+> **Any future `TIMER_DEFS_BLOB_VERSION` bump must ship its migration in the
+> same firmware image.** The first network window after the bump destroys the
+> old bytes: the table reads as unreadable, item 3's rebuild fires, menuconfig
+> answers every slot, and the result is written over the v1 data.
+>
+> This is not a style preference, it is what makes the deferred migration
+> reachable at all. The migration's entire premise is reading the old bytes
+> and carrying the values across. Bump first and migrate later and there is
+> nothing left to migrate by the time the migration ships — the fix for the
+> data loss would arrive after the data loss, on every device that took a
+> network window in between. Shipping the bump and the migration together is
+> the only ordering in which the migration does anything.
 
 `TIMER_DEFS_BLOB_VERSION` went to 2 in `6fab99d feat(timer)!: add
 break_eligible to the timer definition`. Any device carrying a pre-`6fab99d`

@@ -395,9 +395,21 @@ static bool load_defs_for_write(nvs_timer_defs_blob_t *b) {
 }
 
 /* Record that an authority set this slot. Only the slot the edit names:
-   every other slot keeps `defined` as it was (0 in a freshly seeded table),
-   so apply_timers() still treats it as a first-time definition and the
-   menuconfig rung still answers for it.
+   every other slot keeps `defined` as it was (0 in a freshly seeded table).
+
+   That bit alone does NOT hand those slots back to the menuconfig rung, and
+   an earlier version of this comment claimed it did. apply_timers()'
+   `existed` test is `defined || name[0] != '\0'` (config_apply.c) — an OR,
+   not the bit alone — and the seed loop above fills a non-empty name for
+   every slot menuconfig NAMES. So on the common path (a control edit on a
+   device with no blob, whose sdkconfig names its timers) the untouched
+   named slots read as `existed`, and tier 2 — the value just stored —
+   answers for them, not tier 3. Only a slot menuconfig leaves unnamed goes
+   to the rung. Harmless at the instant of the write, since the seed came
+   from timer_defs_compiled() and the two tiers hold the same value; the
+   consequence is that the first control edit provisions the WHOLE table,
+   and the bystander slots stop tracking a later menuconfig change. Stated
+   at length in config_apply.c's `existed` comment; do not re-derive it.
 
    The semantics this creates, stated because they are a real trade:
    stamping a slot means THE OPERATOR ADOPTED IT. That slot's other fields
