@@ -15,6 +15,7 @@
    under test, not a transcription of it. */
 #ifndef NATIVE
 #include "esp_log.h"
+#include "nvs.h" /* ESP_ERR_NVS_NOT_FOUND — esp_compat.h only defines it on NATIVE */
 #include "sdkconfig.h"
 #else
 #define ESP_LOGW(tag, ...) ((void)(tag))
@@ -118,7 +119,8 @@ static bool s_no_blob_warned;
 
 void timer_defs_install(void) {
     nvs_timer_defs_blob_t blob;
-    if (nvs_config_get_timer_defs(&blob) == ESP_OK) {
+    esp_err_t err = nvs_config_get_timer_defs(&blob);
+    if (err == ESP_OK) {
         s_no_blob_warned = false; /* a later loss warns about it again */
     } else {
         /* No readable HA-managed blob: run THIS BOOT on the Kconfig table,
@@ -148,9 +150,26 @@ void timer_defs_install(void) {
            window, so an unconditional warn is a per-window log line on a
            device that legitimately has no blob. The latch clears on a
            successful read, so losing the blob later still says so. Statics
-           do not survive deep sleep, so "per boot" is "per wake". */
+           do not survive deep sleep, so "per boot" is "per wake".
+
+           Two messages, not one, and this is BUG-5's unconditional
+           constraint: "never configured" and "configured, but the stored
+           bytes no longer parse" are different events that happen to take
+           the same branch. The first is the expected state of a fresh or
+           erased device and costs nothing. The second means a table
+           somebody chose is sitting in flash unreachable — the timers
+           silently revert to compile-time values and every HA per-timer
+           control NAKs until a config document rebuilds it. Sharing one
+           line made the second indistinguishable from the first. */
         if (!s_no_blob_warned) {
-            ESP_LOGW(TAG_TIMER_DEFS, "no readable timer-defs blob; running on the compile-time table (not persisted)");
+            if (err == ESP_ERR_NVS_NOT_FOUND)
+                ESP_LOGW(TAG_TIMER_DEFS,
+                         "no timer-defs blob stored; running on the compile-time table (not persisted)");
+            else
+                ESP_LOGW(TAG_TIMER_DEFS,
+                         "timer-defs blob present but UNREADABLE (%s): the stored table is NOT in use; running on the "
+                         "compile-time table (not persisted, not overwritten)",
+                         esp_err_to_name(err));
             s_no_blob_warned = true;
         }
         memset(&blob, 0, sizeof(blob));

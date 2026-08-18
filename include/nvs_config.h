@@ -133,18 +133,58 @@ esp_err_t nvs_config_get_ota_pend_ver(char *buf, size_t len);
 esp_err_t nvs_config_set_ota_pend_ver(const char *ver);
 
 /* Extra-timer definitions from HA (timer_defs_install falls back to the
-   Kconfig table when absent). Version/size drift reads as stale. */
-#define TIMER_DEFS_BLOB_VERSION 2 /* v2: + break_eligible */
+   Kconfig table when absent). Version/size drift reads as stale.
+
+   `defined` was added WITHOUT a version bump, on purpose. It lands in two
+   bytes that were already implicit padding, so sizeof() and every offset
+   are unchanged (asserted below) and a blob written by an older build is
+   byte-identical to one this build would write. A bump would have made
+   nvs_config_get_timer_defs() reject every blob in the field, discarding
+   the very table this field exists to protect. That is safe only because
+   every writer memsets the whole struct before filling it — config_apply.c
+   apply_timers(), ha_config.c load_defs(), and the pre-8a4b18f boot write
+   that created the blobs now on devices (357d2f6 main/timer_defs.c) — so
+   the byte reads 0 on an existing blob, which is exactly the "provenance
+   unknown, fall back to the name test" answer apply_timers() wants. Any
+   new writer MUST memset too, or this reserve stops being trustworthy. */
+#define TIMER_DEFS_BLOB_VERSION 2 /* v2: + break_eligible, + defined (padding) */
 typedef struct {
     char name[16]; /* "" = slot disabled */
     int32_t min;
     uint8_t reload;
     uint8_t break_eligible; /* 1 = a genuine break activity (timer_def_t) */
+    /* 1 = an authority (an HA `timers` document, or an HA per-timer
+       control) set this slot. NOT the same question as "is the name
+       non-empty": a slot whose reload/break switch was flipped before it
+       was ever named is defined with an empty name, and apply_timers()
+       must keep that flag rather than fall back to menuconfig. 0 on every
+       blob written before this field existed — see the note above. */
+    uint8_t defined;
+    uint8_t rsvd; /* was implicit padding; named so nothing can hide */
 } nvs_timer_def_t;
 typedef struct {
     uint8_t version;
+    uint8_t rsvd[3]; /* was implicit padding; named so nothing can hide */
     nvs_timer_def_t defs[TIMER_EXTRA_SLOTS];
 } nvs_timer_defs_blob_t;
+/* Measured on this toolchain, not assumed: naming the padding leaves every
+   number identical to the v2 layout already on devices. The point of the
+   asserts is the NEXT field — with no implicit padding left, it must
+   either grow the struct (caught here) or visibly consume `rsvd`, which is
+   an edit sitting directly under TIMER_DEFS_BLOB_VERSION. A sizeof assert
+   alone would not do it: two more uint8_t used to fit for free. */
+_Static_assert(sizeof(nvs_timer_def_t) == 24, "layout grew: migrate or bump TIMER_DEFS_BLOB_VERSION");
+_Static_assert(offsetof(nvs_timer_def_t, min) == 16, "fields reordered");
+_Static_assert(offsetof(nvs_timer_def_t, reload) == 20, "fields reordered");
+_Static_assert(offsetof(nvs_timer_def_t, break_eligible) == 21, "fields reordered");
+_Static_assert(offsetof(nvs_timer_def_t, defined) == 22, "fields reordered");
+_Static_assert(offsetof(nvs_timer_def_t, rsvd) == 23, "fields reordered");
+_Static_assert(16 + 4 + 1 + 1 + 1 + 1 == sizeof(nvs_timer_def_t),
+               "implicit padding reappeared: a new field could hide in it");
+_Static_assert(sizeof(nvs_timer_defs_blob_t) == 100, "blob layout changed");
+_Static_assert(offsetof(nvs_timer_defs_blob_t, defs) == 4, "blob header layout changed");
+_Static_assert(1 + 3 + TIMER_EXTRA_SLOTS * sizeof(nvs_timer_def_t) == sizeof(nvs_timer_defs_blob_t),
+               "implicit padding reappeared in the blob header");
 esp_err_t nvs_config_get_timer_defs(nvs_timer_defs_blob_t *out);
 esp_err_t nvs_config_set_timer_defs(const nvs_timer_defs_blob_t *defs);
 

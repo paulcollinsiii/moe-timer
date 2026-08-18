@@ -106,21 +106,34 @@ confirmed value to `magtag/<id>/cfg` so the control reflects reality.
   menuconfig values are what the device runs when NVS holds no timer table,
   but boot does **not** copy them into NVS — a stored table means somebody
   chose it, and inventing one made a build-time default indistinguishable
-  from your edit. The table is created the first time you send a
-  bulk-config `timers` array; after that, HA edits win, and changing the
-  menuconfig defaults no longer affects a provisioned device (erase NVS to
-  go back to them).
-  One consequence: until that table exists, the per-timer **controls**
-  (name / minutes / reloadable / break eligible) have nothing to edit and
-  NAK with `{"key":"timer1_min","ok":false,"err":"nodefs"}` rather than
-  persist a table you never chose. They start working the moment a `timers`
-  document has been applied — and since the device applies the retained
-  config document before the retained `set/` commands in the same window,
-  that is normally the same window. A rejected `set/` command is *not*
-  cleared, so it is retried on the next window and the edit is not lost.
-  The same NAK appears if a stored table cannot be read (version drift or a
-  bad read): the device refuses to overwrite a table it could not load,
-  rather than writing a guess over it.
+  from your edit. The table is created the first time an *authority* writes
+  one: a bulk-config `timers` array, or a per-timer control edit. After
+  that the device is **provisioned**, HA edits win, and changing the
+  menuconfig defaults no longer affects it (erase NVS to go back to them).
+  Note the second half of that: the first control edit provisions the whole
+  table, not only the slot you edited. The slots you did not touch are
+  carried across at their menuconfig values — the alternative was writing
+  blanks over them and disabling those timers — and are recorded as *not*
+  chosen by you, so a later `timers` document still treats them as
+  first-time definitions. What they no longer do is follow a menuconfig
+  change in a future firmware build.
+  If a stored table exists but **cannot be read** (version drift, a bad
+  read), the per-timer controls do still NAK, with
+  `{"key":"timer1_min","ok":false,"err":"nodefs"}` — the device will not
+  write a guess over bytes it could not load. That NAK is not visible in
+  Home Assistant (see below); the symptom you will actually see is a
+  control that snaps back to its old value at the next `cfg` republish.
+  It clears itself: a retained `timers` document is re-applied on the next
+  window even when its `ver` has not changed, precisely so an unreadable
+  table gets rebuilt instead of stranding the device. A rejected `set/`
+  command is also *not* cleared, so it is retried and the edit is not lost.
+- **The per-field ack is a log line, not a topic.** `config_ack` carries the
+  ack for the **bulk config document** only. A per-field `set/<key>` result
+  — `ok`, or `err` of `range` / `char` / `value` / `nodefs` — is written to
+  the device's serial log and nowhere else. There is no `set_ack` topic and
+  no HA entity for it. To confirm a control edit took, watch the value the
+  device republishes to `magtag/<id>/cfg`: it is what the device now
+  believes, so a control that snaps back was rejected.
 - **Firmware updates:** **OTA manifest URL** (Text) is the https endpoint
   the device checks for a new build; **OTA check on sync** (Switch) makes
   it also check during a Button D full sync, on top of the daily
@@ -128,9 +141,10 @@ confirmed value to `magtag/<id>/cfg` so the control reflects reality.
   it is the only off switch, so an empty value is accepted where any
   other non-`https://` value is rejected. Plain `http://` is refused by
   both this control and the bulk document: an unauthenticated firmware
-  endpoint is an arbitrary-code-execution channel. A rejected value shows
-  up as `{"key":"ota_url","ok":false,"err":"value"}` on the ack topic and
-  the control snaps back at the next `cfg` republish.
+  endpoint is an arbitrary-code-execution channel. A rejected value is
+  logged as `{"key":"ota_url","ok":false,"err":"value"}` on the serial
+  console — not published anywhere — and the control snaps back at the next
+  `cfg` republish, which is the only sign of it you get in HA.
 
   These override `CONFIG_MAGTAG_OTA_URL` / `CONFIG_MAGTAG_OTA_CHECK_ON_SYNC`
   permanently: unlike the allocation defaults, the OTA keys are excluded
@@ -255,6 +269,18 @@ so a shortened list never reads as "everything else was fine".
   during — and drain — a Screen Break. Repurposing a slot to a different
   kind of activity should set `"break": false` explicitly rather than rely
   on the rename.
+  **An unreadable table counts as no table, and that direction is unsafe.**
+  A stored table that fails its version/size check (a firmware layout
+  change, a bad read) is treated as absent, because there is no way to tell
+  the two apart without a migration. The stored rung is then skipped for
+  *every* slot, so an omitted `break` falls all the way to menuconfig — and
+  on a build where slots 1 and 2 ship `BREAK_ELIGIBLE=y`, a deliberate
+  break **off** you set from the switch comes back **on**, which is the
+  unsafe direction for a gate that decides what may run during a Screen
+  Break. The result is then written back over the bytes that were still
+  physically there. This is a known, accepted cost of treating unreadable
+  as absent; the mitigation is the same as above — `"break": false` stated
+  in the document survives any blob loss.
 - `break` marks a timer as a genuine break activity (music practice,
   reading): it may be started during a Screen Break and its time does not
   count against the screen-exposure balance.

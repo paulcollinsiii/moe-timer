@@ -246,38 +246,177 @@ void test_a_stored_off_outranks_the_compile_time_on(void) {
     TEST_ASSERT_EQUAL_UINT8(0, b.defs[0].break_eligible);
 }
 
-/* BUG-8's other door, and the one the census missed: ha_config_set's
-   read-modify-write cases. A single-field edit from an HA control must not
-   materialize the table the boot deliberately refused to write — otherwise
-   the operator nudging one number does at the set/ topic exactly what
-   8a4b18f stopped boot doing, and the "a blob exists means somebody
-   authoritative wrote it" invariant is gone.
+/* BUG-8's other door: ha_config_set's read-modify-write cases. They used to
+   NAK unconditionally, which kept the "a blob exists means somebody
+   authoritative wrote it" invariant by refusing to be an authority at all —
+   and left an operator who never publishes a `timers` document NAKing
+   forever, with no diagnostic (nothing publishes this ack; see mqtt_ha.c).
 
-   Ordering note for why this is reachable rather than theoretical:
+   The control IS an authority. So the edit now lands, and the invariant
+   moves from the blob's EXISTENCE to a per-slot `defined` bit: the table
+   this writes says, byte by byte, which slot a human chose and which slots
+   are menuconfig defaults carried along so the write does not disable them.
+
+   Ordering note for why this path is reachable rather than theoretical:
    mqtt_ha's apply_incoming() runs config_apply BEFORE apply_sets, so a
-   retained document in the same window closes the window; the hole is open
-   on a device that has no `timers` document at all. */
-void test_a_single_field_edit_does_not_materialize_the_table(void) {
+   retained document in the same window would have closed the hole; it is
+   open precisely on a device that has no `timers` document at all. */
+void test_a_single_field_edit_creates_the_table_and_stamps_its_slot(void) {
     timer_defs_install(); /* boot: no blob, running on the Kconfig table */
     char ack[CONFIG_ACK_MIN];
-    ha_cfg_result_t r = ha_config_set("timer1_min", "42", ack, sizeof(ack));
-    /* The invariant first: no write, and the blob still does not exist. A
-       regression should report the materialized table, not the ack. */
-    TEST_ASSERT_EQUAL_INT(0, mock_nvs_write_count(NVS_KEY_TIMER_DEFS));
+    TEST_ASSERT_EQUAL(HA_CFG_OK, ha_config_set("timer1_min", "42", ack, sizeof(ack)));
     nvs_timer_defs_blob_t b;
-    TEST_ASSERT_NOT_EQUAL(ESP_OK, nvs_config_get_timer_defs(&b));
-    TEST_ASSERT_EQUAL(HA_CFG_REJECTED, r);
-    TEST_ASSERT_NOT_NULL(strstr(ack, "\"ok\":false"));
-
-    /* And because nothing was written, the document that arrives next is
-       still recognised as defining these slots for the first time. */
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_timer_defs(&b));
+    TEST_ASSERT_EQUAL_INT32(42, b.defs[0].min);
+    TEST_ASSERT_EQUAL_UINT8(1, b.defs[0].defined);
+    /* The bystanders are carried, not adopted. Carried, because writing
+       zeros over them would disable timers menuconfig enabled — the wipe
+       BUG-8's first form actually caused. Not adopted, because `defined`
+       stays 0 and their values are menuconfig's own, verbatim. */
+    TEST_ASSERT_EQUAL_STRING("Meditation", b.defs[1].name);
+    TEST_ASSERT_EQUAL_INT32(10, b.defs[1].min);
+    TEST_ASSERT_EQUAL_UINT8(0, b.defs[1].reload); /* TIMER2_RELOADABLE=0 */
+    TEST_ASSERT_EQUAL_UINT8(0, b.defs[1].defined);
+    TEST_ASSERT_EQUAL_UINT8(0, b.defs[2].defined);
+    TEST_ASSERT_EQUAL_UINT8(0, b.defs[3].defined);
+    /* And the document still wins over the control when it arrives. */
     config_apply(DOC_NO_BREAK, ack, sizeof(ack));
     TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_timer_defs(&b));
-    TEST_ASSERT_EQUAL_INT32(15, b.defs[0].min); /* the document's, not the refused 42 */
-    TEST_ASSERT_EQUAL_UINT8(1, b.defs[0].break_eligible);
+    TEST_ASSERT_EQUAL_INT32(15, b.defs[0].min);
+}
 
-    /* ...and once the table exists, the same edit is accepted. */
+/* The stamp is what carries an operator's choice on a slot that has no
+   name yet — the case the pre-`defined` name test could not represent, and
+   the reason a bit was needed rather than a widened name test.
+
+   Slot 4 is unnamed in the compile-time table, so flipping its break
+   switch leaves `name` empty. Under the old predicate the next document to
+   name that slot saw "no previous definition" and handed the flag back to
+   menuconfig, silently discarding the switch flip. */
+void test_a_switch_flip_on_an_unnamed_slot_survives_the_next_document(void) {
+    timer_defs_install();
+    char ack[CONFIG_ACK_MIN];
+    TEST_ASSERT_EQUAL(HA_CFG_OK, ha_config_set("timer4_break", "ON", ack, sizeof(ack)));
+    nvs_timer_defs_blob_t b;
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_timer_defs(&b));
+    TEST_ASSERT_EQUAL_STRING("", b.defs[3].name);
+    TEST_ASSERT_EQUAL_UINT8(1, b.defs[3].defined);
+
+    config_apply(
+        "{\"ver\":\"20260712\",\"timers\":[{},{},{},"
+        "{\"name\":\"Yoga\",\"min\":20}]}",
+        ack, sizeof(ack));
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_timer_defs(&b));
+    TEST_ASSERT_EQUAL_STRING("Yoga", b.defs[3].name);
+    TEST_ASSERT_EQUAL_UINT8(1, b.defs[3].break_eligible); /* the switch, not menuconfig's 0 */
+}
+
+/* The menuconfig rung survives a control-created table, for a slot the
+   control did not stamp.
+
+   Read the assertion honestly: for slot 2 the stored value and the
+   menuconfig value are the SAME value, because the table the control wrote
+   was seeded from timer_defs_compiled(). That identity is exactly why
+   `existed` may stay OR'd with the name test without reopening BUG-8 — a
+   carried bystander cannot answer differently from the rung it came from.
+   Slot 4, unnamed in menuconfig, is where the two are distinguishable, and
+   it goes to the rung. The stamped slot is the control: it holds the
+   operator's OFF against a menuconfig that says ON. */
+void test_the_rung_survives_a_table_a_control_created(void) {
+    timer_defs_install();
+    char ack[CONFIG_ACK_MIN];
+    /* menuconfig says TIMER1_BREAK_ELIGIBLE=1; the operator says no. */
+    TEST_ASSERT_EQUAL(HA_CFG_OK, ha_config_set("timer1_break", "OFF", ack, sizeof(ack)));
+    nvs_timer_defs_blob_t b;
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_timer_defs(&b));
+    TEST_ASSERT_EQUAL_UINT8(1, b.defs[0].defined);
+    TEST_ASSERT_EQUAL_UINT8(0, b.defs[1].defined);
+
+    /* A document defining all four slots and stating neither optional key. */
+    config_apply(
+        "{\"ver\":\"20260713\",\"timers\":["
+        "{\"name\":\"Piano\",\"min\":15},"
+        "{\"name\":\"Meditation\",\"min\":10},"
+        "{\"name\":\"Cello\",\"min\":30},"
+        "{\"name\":\"Yoga\",\"min\":20}]}",
+        ack, sizeof(ack));
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_timer_defs(&b));
+    TEST_ASSERT_EQUAL_UINT8(0, b.defs[0].break_eligible); /* stamped: the operator's OFF */
+    TEST_ASSERT_EQUAL_UINT8(1, b.defs[0].reload);         /* stamped: carried, = TIMER1_RELOADABLE */
+    TEST_ASSERT_EQUAL_UINT8(1, b.defs[1].break_eligible); /* unstamped: TIMER2_BREAK_ELIGIBLE=1 */
+    TEST_ASSERT_EQUAL_UINT8(0, b.defs[1].reload);         /* unstamped: TIMER2_RELOADABLE=0 */
+    /* Slots 3 and 4 are unnamed in menuconfig, so the rung is 0/0 and the
+       carried-bystander identity above cannot be masking anything. */
+    TEST_ASSERT_EQUAL_UINT8(0, b.defs[2].break_eligible);
+    TEST_ASSERT_EQUAL_UINT8(0, b.defs[3].break_eligible);
+}
+
+/* A v2 blob written before `defined` existed reads as all-zero in those
+   bytes, and must behave EXACTLY as it does today: the name test carries
+   it and nothing about the ladder moves. This is the whole safety argument
+   for landing the field without a version bump, so it is asserted rather
+   than reasoned about — including on the byte itself, since a writer that
+   forgot to memset would show up here first. */
+void test_a_blob_with_no_defined_bytes_behaves_exactly_as_before(void) {
+    timer_defs_install();
+    operator_sets_both_break_switches(); /* memset: every `defined` is 0 */
+    nvs_timer_defs_blob_t b;
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_timer_defs(&b));
+    for (int i = 0; i < TIMER_EXTRA_SLOTS; i++) {
+        TEST_ASSERT_EQUAL_UINT8(0, b.defs[i].defined);
+        TEST_ASSERT_EQUAL_UINT8(0, b.defs[i].rsvd);
+    }
+    char ack[CONFIG_ACK_MIN];
+    config_apply(DOC_NO_BREAK, ack, sizeof(ack));
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_timer_defs(&b));
+    /* Tier 2 answered for both slots on the strength of the name alone. */
+    TEST_ASSERT_EQUAL_UINT8(1, b.defs[0].break_eligible);
+    TEST_ASSERT_EQUAL_UINT8(1, b.defs[1].break_eligible);
+    TEST_ASSERT_EQUAL_UINT8(1, b.defs[0].reload);
+    TEST_ASSERT_EQUAL_UINT8(1, b.defs[1].reload);
+}
+
+/* BUG-5. `cfg_ver` and the timer-defs blob are independent NVS keys, so the
+   `ver`-match early return could strand a device forever: the table is
+   gone, the only document that would rebuild it is skipped unread, and
+   every per-timer control NAKs because there is nothing readable to
+   modify. Nothing in HA says so and nothing on the device heals it. The
+   skip is now conditional on the table being readable. */
+void test_a_ver_match_still_rebuilds_an_unreadable_table(void) {
+    timer_defs_install();
+    char ack[CONFIG_ACK_MIN];
+    TEST_ASSERT_EQUAL(CONFIG_APPLIED, config_apply(DOC_WITH_BREAK, ack, sizeof(ack)));
+
+    /* The table stops parsing; cfg_ver is untouched, as a separate key is. */
+    nvs_timer_defs_blob_t b;
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_timer_defs(&b));
+    b.version = (uint8_t)(TIMER_DEFS_BLOB_VERSION - 1);
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_set_timer_defs(&b));
+    TEST_ASSERT_NOT_EQUAL(ESP_OK, nvs_config_get_timer_defs(&b));
+
+    /* The same retained document, redelivered on the next window. */
+    TEST_ASSERT_EQUAL(CONFIG_SKIPPED, config_apply(DOC_WITH_BREAK, ack, sizeof(ack)));
+    TEST_ASSERT_NOT_NULL(strstr(ack, "\"skipped\":true"));
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_timer_defs(&b));
+    TEST_ASSERT_EQUAL_STRING("Piano", b.defs[0].name);
+    TEST_ASSERT_EQUAL_STRING("Meditation", b.defs[1].name);
+    TEST_ASSERT_EQUAL_UINT8(1, b.defs[0].break_eligible);
+    /* Rebuilt from the document, so the slots it defines are stamped. */
+    TEST_ASSERT_EQUAL_UINT8(1, b.defs[0].defined);
+}
+
+/* ...and the skip is still a skip when the table is fine: a ver match must
+   not rewrite the blob every window (a flash write per wake on a battery
+   device), nor undo an HA control edit made since the document landed. */
+void test_a_ver_match_with_a_readable_table_writes_nothing(void) {
+    timer_defs_install();
+    char ack[CONFIG_ACK_MIN];
+    TEST_ASSERT_EQUAL(CONFIG_APPLIED, config_apply(DOC_WITH_BREAK, ack, sizeof(ack)));
     TEST_ASSERT_EQUAL(HA_CFG_OK, ha_config_set("timer1_min", "42", ack, sizeof(ack)));
+    int writes_before = mock_nvs_write_count(NVS_KEY_TIMER_DEFS);
+    TEST_ASSERT_EQUAL(CONFIG_SKIPPED, config_apply(DOC_WITH_BREAK, ack, sizeof(ack)));
+    TEST_ASSERT_EQUAL_INT(writes_before, mock_nvs_write_count(NVS_KEY_TIMER_DEFS));
+    nvs_timer_defs_blob_t b;
     TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_timer_defs(&b));
     TEST_ASSERT_EQUAL_INT32(42, b.defs[0].min);
 }
@@ -339,15 +478,37 @@ void test_the_missing_blob_warnings_are_latched(void) {
 
     timer_defs_install(); /* no blob */
     TEST_ASSERT_TRUE(s_no_blob_warned);
-    TEST_ASSERT_FALSE(load_defs(&b));
+    TEST_ASSERT_EQUAL(ESP_ERR_NVS_NOT_FOUND, load_defs(&b, DEFS_SEED_INSTALLED));
     TEST_ASSERT_TRUE(s_defs_fallback_warned);
 
     /* A readable table re-arms both. */
     operator_sets_both_break_switches();
     timer_defs_install();
     TEST_ASSERT_FALSE(s_no_blob_warned);
-    TEST_ASSERT_TRUE(load_defs(&b));
+    TEST_ASSERT_EQUAL(ESP_OK, load_defs(&b, DEFS_SEED_INSTALLED));
     TEST_ASSERT_FALSE(s_defs_fallback_warned);
+}
+
+/* The other half of the split BUG-5 asked for: load_defs() and
+   timer_defs_install() must be able to say WHICH failure they hit, because
+   "never written" is routine and "written but unparseable" is data loss
+   that also disables every per-timer control. ESP_LOGW is a no-op on the
+   host, so what is pinned is that the two states are distinguishable at
+   all — the write path's behaviour turns on exactly this distinction. */
+void test_a_never_written_table_is_distinguishable_from_an_unreadable_one(void) {
+    nvs_timer_defs_blob_t b;
+    TEST_ASSERT_EQUAL(ESP_ERR_NVS_NOT_FOUND, load_defs(&b, DEFS_SEED_COMPILED));
+
+    memset(&b, 0, sizeof(b));
+    b.version = (uint8_t)(TIMER_DEFS_BLOB_VERSION - 1);
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_set_timer_defs(&b));
+    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_VERSION, load_defs(&b, DEFS_SEED_COMPILED));
+
+    /* And the write path acts on the difference: bytes that are there but
+       unreadable are still not overwritten by a single-field edit. */
+    char ack[CONFIG_ACK_MIN];
+    TEST_ASSERT_EQUAL(HA_CFG_REJECTED, ha_config_set("timer1_min", "42", ack, sizeof(ack)));
+    TEST_ASSERT_NOT_NULL(strstr(ack, "\"err\":\"nodefs\""));
 }
 
 int main(void) {
@@ -360,10 +521,16 @@ int main(void) {
     RUN_TEST(test_lost_blob_takes_reload_from_kconfig_when_the_document_is_silent);
     RUN_TEST(test_a_slot_menuconfig_does_not_configure_still_defaults_to_off);
     RUN_TEST(test_a_stored_off_outranks_the_compile_time_on);
-    RUN_TEST(test_a_single_field_edit_does_not_materialize_the_table);
+    RUN_TEST(test_a_single_field_edit_creates_the_table_and_stamps_its_slot);
+    RUN_TEST(test_a_switch_flip_on_an_unnamed_slot_survives_the_next_document);
+    RUN_TEST(test_the_rung_survives_a_table_a_control_created);
+    RUN_TEST(test_a_blob_with_no_defined_bytes_behaves_exactly_as_before);
+    RUN_TEST(test_a_ver_match_still_rebuilds_an_unreadable_table);
+    RUN_TEST(test_a_ver_match_with_a_readable_table_writes_nothing);
     RUN_TEST(test_lost_blob_document_carrying_break_wins);
     RUN_TEST(test_next_boot_runs_on_the_applied_document);
     RUN_TEST(test_stale_version_blob_is_not_overwritten_at_boot);
     RUN_TEST(test_the_missing_blob_warnings_are_latched);
+    RUN_TEST(test_a_never_written_table_is_distinguishable_from_an_unreadable_one);
     return UNITY_END();
 }

@@ -10,13 +10,19 @@
    the fallback is exercised against the same table the device runs on.
    Tests that do not call timer_set_defs() see an empty table.
 
-   setUp() stores an EMPTY-BUT-PRESENT timer-defs table, because the three
-   read-modify-write cases now NAK when there is no readable one (a blob
-   nobody stored must not be persisted as though somebody had). Most cases
-   here are about validating and persisting a field, not about provenance,
-   and an empty stored table gives them exactly the blob the old
-   zeroed-fallback gave them. The cases that ARE about provenance clear it
-   with mock_nvs_reset() or make it unreadable, and say so. */
+   timer_defs.c is here for timer_defs_compiled(), which is the OTHER seed:
+   the write path reconstructs from menuconfig, never from the installed
+   table (see load_defs()). This TU defines no CONFIG_MAGTAG_TIMER* symbols,
+   so that compiled table is entirely empty — which is exactly what makes
+   "the write seeded a table and stamped ONLY the edited slot" observable
+   here. The rung-sensitive cases, where the compiled table is non-empty,
+   live in test_timer_defs.
+
+   setUp() stores an EMPTY-BUT-PRESENT timer-defs table. Most cases here are
+   about validating and persisting a field, not about provenance, and an
+   empty stored table gives them exactly the blob the old zeroed-fallback
+   gave them. The cases that ARE about provenance clear it with
+   mock_nvs_reset() or make it unreadable, and say so. */
 // clang-format off
 #include "mock_hal_nvs.c"
 #include "mock_hal_time.c"
@@ -27,6 +33,7 @@
 #include "../../main/config_validate.c"
 #include "../../main/tones.c"
 #include "../../main/ha_config.c"
+#include "../../main/timer_defs.c"
 // clang-format on
 /* Header only: the set/<key> transport slot the registry's advertised
    maximums have to fit through. */
@@ -898,11 +905,22 @@ void test_discovery_hash_tolerates_an_unterminated_slot_name(void) {
 
    timer_defs_install() no longer materializes the blob at boot, so
    "unreadable" is the ordinary state of a device whose NVS was erased —
-   not an exotic error. load_defs() therefore falls back to the table the
-   boot installed rather than to zeros. That fallback is the right answer
-   for the two READ-ONLY callers and the wrong answer for the three that
-   WRITE, so load_defs() reports which it handed back and the writers NAK.
-   All five are pinned below. */
+   not an exotic error. load_defs() therefore falls back to a
+   reconstruction rather than to zeros, and reports which one it handed
+   back.
+
+   The two failures are NOT the same event and the write path treats them
+   differently, which is the split these cases pin:
+
+     nothing stored (ESP_ERR_NVS_NOT_FOUND) — the write PROCEEDS. Refusing
+       here was a dead end for an operator who drives the device only from
+       the HA controls: no `timers` document ever arrives, so no table is
+       ever created, so every edit NAKs forever with no diagnostic anywhere
+       in HA (nothing publishes the ha_config_set ack — see mqtt_ha.c).
+     stored but unparseable (anything else) — the write still NAKs. Bytes
+       are physically there and a device is not allowed to write a table it
+       did not read. Recovery is config_apply, which since BUG-5 rebuilds
+       an unreadable table even on a `ver` match. */
 
 /* The table timer_defs_install() would have left in place. File scope
    because timer.c keeps the pointers, not copies. */
@@ -955,9 +973,11 @@ void test_edit_with_unreadable_blob_is_refused(void) {
     TEST_ASSERT_NOT_NULL(strstr(ack, "\"err\":\"nodefs\""));
 }
 
-/* All four slot-bound kinds take the same door, so all four must NAK —
-   a single-field name edit is the one the operator reaches for first. */
-void test_every_timer_field_is_refused_without_a_stored_table(void) {
+/* The controls-only hole, closed. All four slot-bound kinds take the same
+   door, so all four have to work on a device that has never been handed a
+   `timers` document — that operator has no other way in, and until this
+   they NAK'd forever. */
+void test_every_timer_field_is_accepted_without_a_stored_table(void) {
     timer_set_defs(INSTALLED, TIMER_SLOT_COUNT);
     mock_nvs_reset(); /* no table at all: a device whose NVS was erased */
     const char *keys[4] = {"timer1_name", "timer1_min", "timer1_reload", "timer1_break"};
@@ -966,16 +986,60 @@ void test_every_timer_field_is_refused_without_a_stored_table(void) {
     char acks[4][128];
     for (int i = 0; i < 4; i++)
         r[i] = ha_config_set(keys[i], vals[i], acks[i], sizeof(acks[i]));
-    /* The masquerade never happened: no table was invented. Asserted before
-       the acks so a regression reports the invented table, which is the
-       defect, rather than the ack, which is its symptom. */
-    TEST_ASSERT_EQUAL_INT(0, mock_nvs_write_count(NVS_KEY_TIMER_DEFS));
-    nvs_timer_defs_blob_t b;
-    TEST_ASSERT_NOT_EQUAL(ESP_OK, nvs_config_get_timer_defs(&b));
     for (int i = 0; i < 4; i++) {
-        TEST_ASSERT_EQUAL_MESSAGE(HA_CFG_REJECTED, r[i], keys[i]);
-        TEST_ASSERT_NOT_NULL_MESSAGE(strstr(acks[i], "\"err\":\"nodefs\""), keys[i]);
+        TEST_ASSERT_EQUAL_MESSAGE(HA_CFG_OK, r[i], keys[i]);
+        TEST_ASSERT_NOT_NULL_MESSAGE(strstr(acks[i], "\"ok\":true"), keys[i]);
     }
+    nvs_timer_defs_blob_t b;
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_timer_defs(&b));
+    TEST_ASSERT_EQUAL_STRING("Cello", b.defs[0].name);
+    TEST_ASSERT_EQUAL_INT32(25, b.defs[0].min);
+    TEST_ASSERT_EQUAL_UINT8(1, b.defs[0].reload);
+    TEST_ASSERT_EQUAL_UINT8(1, b.defs[0].break_eligible);
+}
+
+/* ...and the write records WHO, per slot. Only the slot the edit named is
+   stamped; the other three stay 0 so apply_timers() still sees them as
+   first-time definitions and the menuconfig rung still answers for them.
+   Not a detail: stamping the whole table here is BUG-8 through a different
+   door, since `defined` is exactly the "somebody authoritative chose this"
+   signal the blob's mere existence used to be. */
+void test_a_control_edit_stamps_only_the_slot_it_touched(void) {
+    timer_set_defs(INSTALLED, TIMER_SLOT_COUNT);
+    mock_nvs_reset();
+    char ack[128];
+    TEST_ASSERT_EQUAL(HA_CFG_OK, ha_config_set("timer2_break", "ON", ack, sizeof(ack)));
+    nvs_timer_defs_blob_t b;
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_timer_defs(&b));
+    TEST_ASSERT_EQUAL_UINT8(1, b.defs[1].defined);
+    TEST_ASSERT_EQUAL_UINT8(0, b.defs[0].defined);
+    TEST_ASSERT_EQUAL_UINT8(0, b.defs[2].defined);
+    TEST_ASSERT_EQUAL_UINT8(0, b.defs[3].defined);
+    /* The stamp is what carries the edit, not the name: slot 2 is unnamed
+       in this TU's (empty) compile-time table, so the pre-`defined` name
+       test would have called this slot undefined and handed the operator's
+       ON back to menuconfig on the next document. */
+    TEST_ASSERT_EQUAL_STRING("", b.defs[1].name);
+    TEST_ASSERT_EQUAL_UINT8(1, b.defs[1].break_eligible);
+}
+
+/* The seed is menuconfig, NOT the installed table. This TU compiles no
+   CONFIG_MAGTAG_TIMER* symbols, so the compiled table is empty while
+   INSTALLED names Piano/Meditation — if the write ever reconstructed from
+   the running table it would persist those two names as though somebody
+   had authored them, which is the BUG-8 masquerade with a boot snapshot
+   in place of the Kconfig table. */
+void test_the_created_table_is_seeded_from_menuconfig_not_the_running_table(void) {
+    timer_set_defs(INSTALLED, TIMER_SLOT_COUNT);
+    mock_nvs_reset();
+    char ack[128];
+    TEST_ASSERT_EQUAL(HA_CFG_OK, ha_config_set("timer3_min", "20", ack, sizeof(ack)));
+    nvs_timer_defs_blob_t b;
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_timer_defs(&b));
+    TEST_ASSERT_EQUAL_STRING("", b.defs[0].name); /* not "Piano" */
+    TEST_ASSERT_EQUAL_STRING("", b.defs[1].name); /* not "Meditation" */
+    TEST_ASSERT_EQUAL_INT32(0, b.defs[0].min);
+    TEST_ASSERT_EQUAL_INT32(20, b.defs[2].min);
 }
 
 /* The fallback is a BOOT snapshot, and the blob is rewritten mid-window
@@ -1159,7 +1223,9 @@ int main(void) {
     RUN_TEST(test_discovery_hash_ignores_a_duration_change_that_keeps_it_enabled);
     RUN_TEST(test_discovery_hash_tolerates_an_unterminated_slot_name);
     RUN_TEST(test_edit_with_unreadable_blob_is_refused);
-    RUN_TEST(test_every_timer_field_is_refused_without_a_stored_table);
+    RUN_TEST(test_every_timer_field_is_accepted_without_a_stored_table);
+    RUN_TEST(test_a_control_edit_stamps_only_the_slot_it_touched);
+    RUN_TEST(test_the_created_table_is_seeded_from_menuconfig_not_the_running_table);
     RUN_TEST(test_a_refused_edit_does_not_revert_an_earlier_one);
     RUN_TEST(test_state_json_falls_back_to_the_installed_table);
     RUN_TEST(test_discovery_hash_falls_back_to_the_installed_table);

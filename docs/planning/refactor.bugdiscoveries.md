@@ -246,7 +246,8 @@ Recorded on `test_a_latched_d_press_is_never_dispatched_by_the_tick_drain`.
 
 ## BUG-5 — a timer-defs blob version bump silently discards the user's table
 
-**Status:** OPEN · **Found:** 2026-08-07, hardware, build `59c3afa`
+**Status:** PARTLY FIXED — see *What landed* · **Found:** 2026-08-07,
+hardware, build `59c3afa`
 **Severity:** user-visible data loss, **one-shot per version bump** — an
 HA-configured timer table reverts to compile-time defaults with no log line and
 no indication anything happened.
@@ -262,15 +263,59 @@ no indication anything happened.
 
 ### The defect
 
-`nvs_config_get_timer_defs()` (`main/nvs_config.c:248`) returns
+`nvs_config_get_timer_defs()` (`main/nvs_config.c`, now `:322`) returns
 `ESP_ERR_INVALID_VERSION` on **any** size or version drift.
-`timer_defs_install()` (`main/timer_defs.c:76`) does not distinguish that from
-"never configured" — both take the same branch, whose comment reads *"No
-HA-managed blob yet"*, and it re-seeds from the Kconfig table and writes the
-result back over the user's table.
+`timer_defs_install()` (`main/timer_defs.c`, now `:119`) does not distinguish
+that from "never configured" — both take the same branch, whose comment read
+*"No HA-managed blob yet"* — and it re-seeded from the Kconfig table and wrote
+the result back over the user's table.
 
 There is **no migration and no log line at all** on that path. A user's entire
 timer configuration can be discarded without a trace.
+
+### What landed
+
+Three of the four pieces are done. The migration is not, and is still the only
+thing that would make a version bump non-destructive.
+
+1. **The overwrite is gone (`8a4b18f`, BUG-8).** `timer_defs_install()` no
+   longer writes anything at boot, on any path. An unreadable blob is left
+   physically intact; the boot merely runs on the compile-time table for that
+   wake. So the *discard* half of this entry no longer happens — the data is
+   still there, it is just not reachable until the layout matches again.
+2. **The silence is gone.** `timer_defs_install()` and `ha_config.c`'s
+   `load_defs()` each now emit two distinct warnings, "no timer-defs blob
+   stored" versus "blob present but UNREADABLE (`esp_err_to_name`)". This is
+   the *"whatever the policy, log it"* constraint below, which was marked
+   unconditional and worth landing on its own. It was.
+3. **A stranded device can now recover, which is the failure this entry
+   understated.** `cfg_ver` and the timer-defs blob are independent NVS keys.
+   `config_apply()` returned `CONFIG_SKIPPED` on a `ver` match *before*
+   `apply_timers()` ran, so a device that lost its table while `cfg_ver`
+   survived skipped the one document that would rebuild it — on every window,
+   forever. Combined with `ha_config_set`'s NAK on an unreadable table, every
+   per-timer control was dead permanently and nothing in HA said why. The skip
+   is now conditional: on a `ver` match with an unreadable table,
+   `apply_timers()` still runs (`main/config_apply.c`, the `strcmp(stored,
+   ver_str)` branch). Nothing else is re-applied and the result is still
+   `CONFIG_SKIPPED`. Pinned by
+   `test_timer_defs/test_a_ver_match_still_rebuilds_an_unreadable_table` and
+   its negative twin `..._with_a_readable_table_writes_nothing`.
+4. **The layout guard proposed below is in** (`include/nvs_config.h`): the
+   implicit padding is named (`defined`, `rsvd`, and `rsvd[3]` in the header)
+   and `_Static_assert`s pin every size and offset. Measured, not assumed:
+   `sizeof(nvs_timer_def_t) == 24`, `sizeof(nvs_timer_defs_blob_t) == 100`,
+   `offsetof(defs) == 4` — byte-identical to blobs already on devices. The
+   first of the two reserve bytes was immediately spent on `defined` (the
+   per-slot provenance bit), **without** a version bump, for exactly the
+   reason this entry exists: a bump would have invalidated every blob in the
+   field, which is the data loss, not the fix for it.
+
+**Still open:** the v1→v2 migration decided on 2026-08-07 (read a v1 blob, copy
+the common prefix, default `break_eligible` from the Kconfig value, write back
+as v2). Until it exists, a version bump still makes the stored table
+unreachable — it is now loud, non-destructive and recoverable from HA rather
+than silent and permanent, but the values are still not carried across.
 
 `TIMER_DEFS_BLOB_VERSION` went to 2 in `6fab99d feat(timer)!: add
 break_eligible to the timer definition`. Any device carrying a pre-`6fab99d`
@@ -381,6 +426,13 @@ which no layout guard can see.
 
 ### The guard that does work: remove the hiding place
 
+> **LANDED — and this snippet is a PROPOSAL, not the shipping struct.** It has
+> already been misread once as a transcription of `include/nvs_config.h`. What
+> shipped differs: the two reserve bytes are `uint8_t defined; uint8_t rsvd;`,
+> because the first was spent immediately on the per-slot provenance bit, and
+> there are two more asserts (`offsetof(blob, defs) == 4` and a
+> no-implicit-padding sum for the header). Read the header.
+
 Make the implicit padding an explicit field, then assert that no implicit
 padding remains. A new field then has nowhere to land silently — it must either
 grow the struct (caught) or visibly consume the named reserve, which is an edit
@@ -412,8 +464,14 @@ The blob header needs the same treatment — `uint8_t version` followed by a
 **This change is free to deploy.** Verified: naming the padding leaves
 `sizeof(def) == 24`, `sizeof(blob) == 100` and `offsetof(blob, defs) == 4`
 exactly as they are today, so it is byte-identical to blobs already on devices
-and needs no migration of its own. Both writers already `memset` before
-filling, so the reserve stays zeroed and is usable by a future field.
+and needs no migration of its own. Every writer already `memset`s before
+filling, so the reserve reads 0 on blobs already in the field and is usable by
+a future field. Re-verified at source when `defined` claimed the first byte,
+because the whole no-bump argument rests on it: `main/config_apply.c`
+`apply_timers()`, `main/ha_config.c` `load_defs()`, and the pre-`8a4b18f` boot
+write that created the blobs now on devices (`git show 357d2f6:main/timer_defs.c`).
+No compound-literal or designated-initializer writer exists. **Any new writer
+must `memset` too**, or the reserve stops being trustworthy.
 
 Prefer the individual asserts over a single digest: identical detection power,
 but a digest reports one opaque number where these name the field that moved.
@@ -425,18 +483,22 @@ but a digest reports one opaque number where these name the field that moved.
   for that slot, write back as v2. This is what makes the stated policy's
   second clause ("bug fixes land without changing the HA set config") actually
   hold.
-* **Consequence of that decision, flagged deliberately:** the silent re-seed is
-  currently the *only* mechanism by which device defaults ever beat the HA
-  document. `config_apply` has no such branch — it skips when `cfg_ver` matches
-  and applies when it does not (`main/config_apply.c:233`), and never prefers
-  its own defaults. So migrating does not merely fix a bug, it **removes the
-  only implementation of "device defaults win"** that exists. If that clause of
-  the stated policy is wanted for real, it is new work and must be built
+* **Consequence of that decision, flagged deliberately — now obsolete:** the
+  silent re-seed used to be the *only* mechanism by which device defaults ever
+  beat the HA document. It was removed by `8a4b18f` (BUG-8), so migrating no
+  longer removes anything. `config_apply` skips when `cfg_ver` matches and
+  applies when it does not (`main/config_apply.c`, the `strcmp(stored,
+  ver_str)` branch — which since this entry's fix also rebuilds an unreadable
+  timer table on a match), and never prefers its own defaults. "Device defaults
+  win" therefore has **no** implementation at all today; menuconfig is a
+  default consulted in place, never a stored value. If that clause of the
+  stated policy is wanted for real, it is new work and must be built
   deliberately.
-* **Whatever the policy, log it.** "Stale blob, config reset" and "no blob yet,
-  seeding" are different events and must not share a silent code path. This
-  constraint is unconditional and is arguably worth landing on its own even if
-  the migration is deferred.
+* **Whatever the policy, log it. DONE.** "Stale blob, config reset" and "no
+  blob yet, seeding" are different events and must not share a silent code
+  path. This constraint was unconditional and worth landing on its own even
+  with the migration deferred, and that is exactly how it landed — see *What
+  landed* (2).
 * **Keep `TIMER_DEFS_BLOB_VERSION`, independent of `DISC_SCHEMA_VER`, and
   guard the layout mechanically. Decided 2026-08-07.** Two alternatives were
   rejected with reasons:

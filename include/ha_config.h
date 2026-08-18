@@ -12,9 +12,13 @@
    timer-defs blob cannot be read, the state JSON and the discovery
    fingerprint fall back to whatever timer_defs_install() put in RAM this
    boot, so this is not a pure function of NVS. The per-field timer writes
-   deliberately do NOT use that fallback; they NAK instead (err "nodefs"),
-   because a table nobody stored must not be persisted as though someone
-   had. Host-tested. No cJSON — values arrive from MQTT as strings. */
+   deliberately do NOT use that fallback: when a table was stored but could
+   not be parsed they NAK (err "nodefs"), because a table nobody read must
+   not be overwritten. When NOTHING was ever stored they now create one from
+   the compile-time table and stamp `defined` on the slot the edit names —
+   an operator who drives the device only from the HA controls, and never
+   publishes a `timers` document, otherwise NAKs forever. Host-tested. No
+   cJSON — values arrive from MQTT as strings. */
 
 #ifdef __cplusplus
 extern "C" {

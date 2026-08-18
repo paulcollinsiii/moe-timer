@@ -186,7 +186,22 @@ static void apply_timers(const cJSON *root, err_acc_t *e) {
     }
     /* The stored table, for the optional-key rule below. A read failure
        (never written, or version drift) just means "no slot existed", which
-       is the same answer as an empty table — so no error path is needed. */
+       is the same answer as an empty table — so no error path is needed.
+
+       That conflation has a cost, and it is deliberate rather than
+       overlooked. On version drift the bytes are still physically there;
+       treating them as absent skips tier 2 for EVERY slot, so the
+       menuconfig rung answers and the result is then persisted over the
+       data that was still present. For `break_eligible` on this project's
+       shipping sdkconfig (slots 1 and 2 are =y) that turns an operator's
+       deliberate break=OFF back ON — the unsafe direction for a safety
+       gate, since a break-eligible activity may run during, and drain, a
+       Screen Break. It is accepted because the design's whole premise is
+       that "unreadable" cannot be distinguished from "absent" without a
+       migration, and a migration is what BUG-5 defers. The operator-side
+       mitigation is the same one BUG-6 has: state `"break": false` in the
+       document, which is durable across any blob loss. Recorded in
+       docs/home_assistant.md so it is not folklore. */
     nvs_timer_defs_blob_t prev;
     bool have_prev = (nvs_config_get_timer_defs(&prev) == ESP_OK);
 
@@ -297,7 +312,27 @@ static void apply_timers(const cJSON *root, err_acc_t *e) {
            `y` wins. The operator accepted that price for ranking menuconfig
            above empty; the fix if it bites is `"break": false` in the
            document, not deleting the tier. */
-        bool existed = have_prev && prev.defs[slot].name[0] != '\0';
+        /* "Already has a definition", widened by the `defined` provenance
+           bit. The name test alone missed a slot an HA per-timer SWITCH had
+           touched before the slot was ever named — reload/break set, name
+           still "" — and handed that operator's choice back to menuconfig
+           the moment a document named the slot. The two tests are OR'd, not
+           swapped: `defined` reads 0 on every blob written before the field
+           existed, so on a device in the field the name test is the one
+           that answers and behaviour is bit-for-bit what it is today.
+
+           Consequence of the OR, stated so it is not discovered later: a
+           blob that ha_config.c's fallback wrote (an HA control edit on a
+           device with no table) carries MENUCONFIG-seeded names for the
+           slots the edit did not touch, and a non-empty name reads as
+           `existed`. That is harmless at the moment of the write — the
+           seed came from timer_defs_compiled(), so tier 2 and tier 3 hold
+           the same value — but it freezes those slots against a LATER
+           menuconfig change. In other words the first per-timer control
+           edit provisions the whole table, not just the slot it stamps.
+           Per-slot `defined` granularity was chosen over per-field; this is
+           the edge it does not cover. */
+        bool existed = have_prev && (prev.defs[slot].defined || prev.defs[slot].name[0] != '\0');
         /* Tier 3. NULL only if TIMER_EXTRA_SLOTS outgrew the Kconfig table. */
         const timer_def_t *ct = timer_defs_compiled(slot + 1);
         uint8_t ct_reload = (ct != NULL && ct->reloadable) ? 1 : 0;
@@ -308,6 +343,13 @@ static void apply_timers(const cJSON *root, err_acc_t *e) {
         defs.defs[slot].break_eligible = (brk != NULL) ? (cJSON_IsTrue(brk) ? 1 : 0)
                                          : existed     ? prev.defs[slot].break_eligible
                                                        : ct_break;
+        /* The document is an authority, so a slot it names is defined by
+           it. Redundant with the name test for THIS slot; recorded anyway
+           so the bit means one thing everywhere ("an authority set this")
+           rather than "an authority set this, except when a name happens
+           to be present". A `{}` entry takes the `continue` above and stays
+           0, which is the same answer the name test gives it today. */
+        defs.defs[slot].defined = 1;
         slot++;
     }
     if (nvs_config_set_timer_defs(&defs) != ESP_OK)
@@ -349,6 +391,33 @@ config_result_t config_apply(const char *json, char *ack, size_t ack_len) {
     char stored[24];
     nvs_config_get_cfg_ver(stored, sizeof(stored));
     if (strcmp(stored, ver_str) == 0) {
+        /* Skipped — with one exception, and it is the difference between a
+           recoverable device and a bricked config.
+
+           `cfg_ver` and the timer-defs blob are independent NVS keys. Lose
+           the blob (version drift, a bad read, a partial erase) while
+           `cfg_ver` survives and this early return fires on every window
+           forever: the document that would rebuild the table is never
+           looked at, ha_config.c's per-timer writes have no readable table
+           to modify, and there is nothing the operator can do from HA
+           except notice the timers are wrong. Bumping `ver` fixes it, but
+           only if you already know that — which is precisely the knowledge
+           a stuck device denies you.
+
+           So: on a `ver` match, still rebuild the timer table if it is
+           unreadable. Deliberately narrow. Nothing else is re-applied
+           (everything else has its own NVS key and is not at risk of this
+           coupling), the result is still CONFIG_SKIPPED because no new
+           configuration was accepted, and apply_timers() returns
+           immediately for a document with no `timers` array. Errors go to
+           the accumulator and are dropped: the ack for a skipped document
+           says "skipped", and inventing an error field here would make a
+           document that is fine look broken. BUG-5. */
+        nvs_timer_defs_blob_t probe;
+        if (nvs_config_get_timer_defs(&probe) != ESP_OK) {
+            err_acc_t rebuild = {.errors = {0}, .count = 0, .truncated = false};
+            apply_timers(root, &rebuild);
+        }
         snprintf(ack, ack_len, "{\"ver\":\"%s\",\"ok\":true,\"skipped\":true}", ver_str);
         cJSON_Delete(root);
         return CONFIG_SKIPPED;
