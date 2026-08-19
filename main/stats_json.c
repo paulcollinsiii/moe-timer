@@ -29,13 +29,20 @@ static const char *jesc(char *tmp, size_t tmplen, const char *s) {
     return tmp;
 }
 
-int stats_json_stat(char *buf, size_t len, const stats_snapshot_t *s, const ota_stat_t *ota) {
+int stats_json_stat(char *buf, size_t len, const stats_snapshot_t *s, const ota_stat_t *ota, const diag_stat_t *diag) {
     /* Every string field is escaped (and NULL-flattened to "") — the pure
        boundary must never invoke UB on a bad/NULL field. The two OTA
        buffers are DOUBLE the stored width because jesc escapes, and a
        target string of nothing but backslashes doubles in length. */
     char state[24], name[64], day[24], fw[32], rst[24];
     char ores[CFG_BOUND_OTA_RESULT_MAX * 2], otgt[CFG_BOUND_OTA_TARGET_MAX * 2];
+    /* The phase label is built by panic_diag.c from a fixed literal map,
+       so it can contain no quote and no backslash. Escaped anyway, and
+       double-width like the OTA pair: this function's contract is that
+       NO string reaching it can break the JSON, and a field that is safe
+       only because of what some other module currently does is a field
+       that stops being safe the day that module changes. */
+    char pph[DIAG_PHASE_MAX * 2];
     int pos = 0;
     pos = jcat(buf, len, pos,
                "{\"batt_pct\":%d,\"batt_mv\":%d,\"light_mv\":%d,\"state\":\"%s\",\"active_timer\":\"%s\","
@@ -58,10 +65,26 @@ int stats_json_stat(char *buf, size_t len, const stats_snapshot_t *s, const ota_
                jesc(fw, sizeof(fw), s->fw), jesc(rst, sizeof(rst), s->reset_reason));
     /* The OTA leg. Read from NVS at publish time and handed in — never a
        snapshot field; stats_json.h says why. */
-    pos = jcat(buf, len, pos, ",\"ota_result\":\"%s\",\"ota_target\":\"%s\",\"ota_fails\":%u,\"ota_dl_ms\":%lu}",
+    pos = jcat(buf, len, pos, ",\"ota_result\":\"%s\",\"ota_target\":\"%s\",\"ota_fails\":%u,\"ota_dl_ms\":%lu",
                jesc(ores, sizeof(ores), (ota != NULL) ? ota->result : NULL),
                jesc(otgt, sizeof(otgt), (ota != NULL) ? ota->target : NULL), (unsigned)((ota != NULL) ? ota->fails : 0),
                (unsigned long)((ota != NULL) ? ota->dl_ms : 0));
+    /* The diagnostics leg — the last panic, then the live health
+       readings. Same NULL tolerance and the same read-at-publish-time
+       reasoning as the OTA leg above; stats_json.h says why neither can
+       ride in the snapshot. */
+    pos = jcat(buf, len, pos, ",\"panics\":%lu,\"pphase\":\"%s\",\"pup_s\":%lu,\"pheap\":%lu",
+               (unsigned long)((diag != NULL) ? diag->panics : 0),
+               jesc(pph, sizeof(pph), (diag != NULL) ? diag->panic_phase : NULL),
+               (unsigned long)((diag != NULL) ? diag->panic_uptime_s : 0),
+               (unsigned long)((diag != NULL) ? diag->panic_heap : 0));
+    pos = jcat(buf, len, pos, ",\"pstk_main\":%u,\"pstk_net\":%u",
+               (unsigned)((diag != NULL) ? diag->panic_stack_main : 0),
+               (unsigned)((diag != NULL) ? diag->panic_stack_net : 0));
+    pos = jcat(buf, len, pos, ",\"heap\":%lu,\"heap_min\":%lu,\"stk_main\":%u,\"stk_net\":%u,\"nvs_free\":%u}",
+               (unsigned long)((diag != NULL) ? diag->heap_free : 0),
+               (unsigned long)((diag != NULL) ? diag->heap_min : 0), (unsigned)((diag != NULL) ? diag->stack_main : 0),
+               (unsigned)((diag != NULL) ? diag->stack_net : 0), (unsigned)((diag != NULL) ? diag->nvs_free : 0));
     return pos;
 }
 
@@ -177,6 +200,65 @@ static const ha_entity_t ENTITIES[] = {
        deadline (CONFIG_MAGTAG_OTA_MAX_SEC), and a link trending toward it
        shows up as a rising figure long before it becomes a timeout. */
     {"sensor", "ota_dl_ms", "Update download time", "ms", "duration", "{{ value_json.ota_dl_ms }}", "stat", 0, false,
+     DIAG},
+    /* ---- panic forensics. See include/panic_diag.h for the whole
+       argument; what matters HERE is expire_after and the primary/
+       diagnostic split.
+
+       The four panic entities carry expire_after 0, for last_reset's
+       reason rather than the telemetry sensors' reason: they are the
+       RECORD of an event, not a live reading, and they change only when
+       a panic happens. An expiry would blank them on exactly the device
+       this exists for — one that panicked and then went quiet.
+
+       panic_count is the one PRIMARY entity of the group. "Is it still
+       crashing, and how often?" is the operator's question; the phase,
+       the uptime and the heap are the detail consulted after that
+       answer, so they sit in Diagnostic.
+
+       panic_count is a TOTAL_INCREASING measurement in HA terms, which
+       is deliberately NOT declared as a state_class here: this table has
+       no state_class column and adding one for a single row would be a
+       schema change for cosmetics. HA still graphs the raw value, and
+       the useful reading is the difference between two points, which
+       works either way.
+
+       Keys are clear of the remaining_/limit_/completions_ prefixes
+       mqtt_ha.c matches on to attach a runtime slot name. */
+    {"sensor", "panic_count", "Panic count", NULL, NULL, "{{ value_json.panics }}", "stat", 0, false, NULL},
+    /* Blank means no breadcrumb is on file; "NONE" means a panic landed
+       outside every marked phase. panic_diag.c keeps those distinct on
+       purpose. */
+    {"sensor", "panic_phase", "Panic phase", NULL, NULL, "{{ value_json.pphase }}", "stat", 0, false, DIAG},
+    {"sensor", "panic_uptime", "Panic uptime", "s", "duration", "{{ value_json.pup_s }}", "stat", 0, false, DIAG},
+    {"sensor", "panic_heap", "Panic free heap", "B", NULL, "{{ value_json.pheap }}", "stat", 0, false, DIAG},
+    {"sensor", "panic_stack_main", "Panic stack free (main)", "B", NULL, "{{ value_json.pstk_main }}", "stat", 0, false,
+     DIAG},
+    {"sensor", "panic_stack_net", "Panic stack free (net)", "B", NULL, "{{ value_json.pstk_net }}", "stat", 0, false,
+     DIAG},
+    /* ---- live health. These five ARE telemetry, so they take
+       STAT_EXPIRE_SEC like the battery: a device that has stopped
+       checking in should read unavailable rather than show a heap figure
+       from yesterday.
+
+       Bytes, unconverted, and no dev_class: HA's data_size class exists
+       but brings unit conversion with it, and these numbers are read
+       against fixed budgets (the 10 KB net_win stack, the 16 KB ota_dl
+       stack) where a helpfully rescaled "9.8 kB" is harder to compare,
+       not easier. */
+    {"sensor", "heap_free", "Free heap", "B", NULL, "{{ value_json.heap }}", "stat", STAT_EXPIRE_SEC, false, DIAG},
+    {"sensor", "heap_min", "Free heap low water", "B", NULL, "{{ value_json.heap_min }}", "stat", STAT_EXPIRE_SEC,
+     false, DIAG},
+    {"sensor", "stack_main", "Main task stack free", "B", NULL, "{{ value_json.stk_main }}", "stat", STAT_EXPIRE_SEC,
+     false, DIAG},
+    {"sensor", "stack_net", "Network task stack free", "B", NULL, "{{ value_json.stk_net }}", "stat", STAT_EXPIRE_SEC,
+     false, DIAG},
+    /* Free ENTRIES, not bytes, and the only NVS figure published: total
+       is a constant of a partition table frozen for OTA'd devices and
+       used is total - free, so either would be the same fact twice.
+       Answers the headroom question behind main.c's silent
+       nvs_flash_erase() on ESP_ERR_NVS_NO_FREE_PAGES. */
+    {"sensor", "nvs_free", "NVS free entries", NULL, NULL, "{{ value_json.nvs_free }}", "stat", STAT_EXPIRE_SEC, false,
      DIAG},
 };
 

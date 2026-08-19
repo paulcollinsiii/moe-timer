@@ -24,6 +24,7 @@
 #include "nvs_flash.h"
 #include "ota.h"
 #include "ota_flow.h"
+#include "panic_diag.h"
 #include "sleep_plan.h"
 #include "timer.h"
 #include "timer_persist.h"
@@ -97,6 +98,12 @@ static bool status_leds_quiet(void) {
    below is wake_flow's. What remains is the ORDER, which is the part that
    cannot move — each step below is a hardware precondition for the next. */
 void enter_deep_sleep(wake_sleep_mode_t mode) {
+    /* Breadcrumb: everything below is the sleep funnel. First statement
+       in the function so the whole funnel is covered, including the
+       failsafe's entry from esp_timer context. No branch and no
+       decision — which slot the phase belongs to is panic_diag's, and
+       the phase table is host-tested there. */
+    (void)panic_diag_enter(PANIC_PHASE_SLEEP);
     /* Late-wake forensics repeat: the boot-time log of this line is often
        lost to USB CDC re-enumeration; by sleep entry the console has had
        the whole wake to come up. */
@@ -389,6 +396,19 @@ static const ota_flow_ops_t OTA_FLOW_OPS = {
    ordering; what it must not contain is a decision, and after the audit
    it contains one branch, the ESP-IDF-documented NVS re-init idiom. */
 void app_main(void) {
+    /* Reason 1, and it must be the first statement in the function.
+       Latches the previous boot's panic breadcrumb out of RTC memory
+       BEFORE anything can overwrite it, and starts this boot's. Anything
+       executed ahead of it is unattributable — a panic there would be
+       reported against the phase the PREVIOUS wake ended in.
+
+       Does NOT displace neopixel_init()'s claim on the line below: that
+       claim is on the first PERIPHERAL call, and this touches only RTC
+       memory, the reset-reason register and the monotonic timer. It
+       writes no NVS either, because NVS is not up yet; panic_diag_commit()
+       below is the other half. */
+    panic_diag_init();
+
     /* MUST be first peripheral call: GPIO 21 power gate HIGH (NeoPixels off) */
     neopixel_init();
     arm_awake_failsafe();
@@ -412,6 +432,15 @@ void app_main(void) {
     }
     ESP_ERROR_CHECK(ret);
     ESP_ERROR_CHECK(nvs_config_init_defaults());
+
+    /* Reason 1: the other half of panic_diag_init(), and its position is
+       the whole content of it — the first point in the boot where NVS
+       can be written. Bumps the panic counter and files the breadcrumb
+       so the evidence outlives RTC memory, which only reaches the NEXT
+       boot; this device does not open a network window on every wake, so
+       without this the record would routinely be dropped before anything
+       could publish it. A no-op unless this boot followed a panic. */
+    panic_diag_commit();
 
     /* TZ from NVS (HA config-in) with the compile-time default as fallback */
     char tz[48];
@@ -497,5 +526,10 @@ void app_main(void) {
        file choosing between two non-returning handlers, which is the
        largest fork in the firmware and had no test at all. The decode now
        lives in wake_flow.c with one. Does not return. */
+    /* Boot is over; everything past this line is the wake itself. Marked
+       here rather than inside wake_flow.c because this is the exact
+       boundary — wake_flow_handle_wake() does not return, so there is no
+       other point that means "init finished". */
+    (void)panic_diag_enter(PANIC_PHASE_AWAKE);
     wake_flow_handle_wake(causes);
 }

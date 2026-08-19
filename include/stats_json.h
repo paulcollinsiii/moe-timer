@@ -76,9 +76,49 @@ typedef struct {
     uint32_t dl_ms;                        /* last download's wall time */
 } ota_stat_t;
 
-/* ota may be NULL, which publishes ""/0 — the same NULL-tolerance every
-   string field here already has. */
-int stats_json_stat(char *buf, size_t len, const stats_snapshot_t *s, const ota_stat_t *ota);
+/* Width of the published panic-phase label. The longest the phase table
+   can produce is "RENDER+OTA_CHECK" (16 + NUL); panic_diag.c carries a
+   _Static_assert tying this number to that table, so a longer phase name
+   fails the build rather than truncating the evidence. */
+#define DIAG_PHASE_MAX 20
+
+/* The panic/health leg of the stat payload. A SEPARATE argument for
+   exactly the reason ota_stat_t is one, and read at the same moment by
+   the same code path (mqtt_ha.c's publish_states):
+
+     - the panic fields come off NVS, which is the only place they can
+       come from — the breadcrumb is latched from RTC memory at BOOT, on
+       the main task, long before the snapshot for this window exists;
+
+     - the LIVE fields (heap, stacks, NVS headroom) must be sampled on
+       the NETWORK task at publish time. stack_net is a high-water mark
+       and only means anything read from the task that owns that stack,
+       and a heap figure taken back on the main task would predate wifi,
+       TLS and the MQTT client — i.e. it would miss every allocation this
+       feature exists to watch.
+
+   Carrying either group in stats_snapshot_t would therefore publish the
+   wrong wake's numbers, the same trap ota_stat_t was split out to make
+   unrepresentable. */
+typedef struct {
+    /* ---- the last panic (sticky; survives until the next one) ---- */
+    uint32_t panics;                  /* monotonic count; 0 = none ever */
+    char panic_phase[DIAG_PHASE_MAX]; /* "RENDER+OTA_CHECK"; "" = no breadcrumb on file */
+    uint32_t panic_uptime_s;          /* how far into that wake it died */
+    uint32_t panic_heap;              /* free heap at the last mark before it died */
+    uint16_t panic_stack_main;        /* main-side stack floor at that mark, bytes */
+    uint16_t panic_stack_net;         /* network/OTA-side stack floor, bytes */
+    /* ---- live, this window ---- */
+    uint32_t heap_free;
+    uint32_t heap_min; /* minimum ever free THIS BOOT (esp_get_minimum_free_heap_size) */
+    uint16_t stack_main;
+    uint16_t stack_net;
+    uint16_t nvs_free; /* nvs_get_stats() free entries */
+} diag_stat_t;
+
+/* ota and diag may each be NULL, which publishes ""/0 — the same
+   NULL-tolerance every string field here already has. */
+int stats_json_stat(char *buf, size_t len, const stats_snapshot_t *s, const ota_stat_t *ota, const diag_stat_t *diag);
 int stats_json_summary(char *buf, size_t len, const char *date, int32_t screen_used_s,
                        const uint16_t completions[TIMER_EXTRA_SLOTS]);
 
@@ -107,15 +147,25 @@ typedef struct {
    pins it against the row count, so adding an entity without bumping it
    fails a host test rather than a hardware smoke test.
 
-   v18: + the four OTA entities (result/target/fails/dl_ms). */
-#define STATS_JSON_DISC_SCHEMA_VER 18
+   v18: + the four OTA entities (result/target/fails/dl_ms).
+   v19: + the eleven panic/health diagnostics (panic count and
+        breadcrumb, live heap and task stack floors, NVS headroom). */
+#define STATS_JSON_DISC_SCHEMA_VER 19
 
 /* Buffer the stat/summary/discovery payloads are built into (mqtt_ha.c).
    Named here because stats_json_stat is what can outgrow it, and a stat
    payload that does is silently NOT PUBLISHED — publish_states drops any
    build whose needed length reaches the buffer size. Pinned against the
-   worst case by test_stats_json. */
-#define STATS_JSON_PAYLOAD_MAX 768
+   worst case by test_stats_json.
+
+   768 -> 1024 with the diagnostics leg: the measured worst case was
+   already 705 of 768, i.e. 63 bytes of headroom, and eleven more fields
+   do not fit in that. This buffer is inside window_mem_t, which is
+   HEAP-allocated at window start and freed at teardown (mqtt_ha.c), so
+   the 256 bytes are borrowed for the length of an MQTT window rather
+   than parked in .bss — and the struct's own _Static_assert against its
+   12 KB budget is what keeps that growth deliberate. */
+#define STATS_JSON_PAYLOAD_MAX 1024
 
 const ha_entity_t *stats_json_entities(int *count);
 int stats_json_discovery_topic(char *buf, size_t len, const char *dev_id, const ha_entity_t *ent);

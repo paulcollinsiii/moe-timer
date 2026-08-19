@@ -16,6 +16,7 @@
 #include "neopixel.h"
 #include "ntp.h"
 #include "ota_flow.h"
+#include "panic_diag.h"
 #include "sdkconfig.h"
 #include "timer.h"
 #include "wifi_session.h"
@@ -41,6 +42,14 @@ static int64_t s_last_total_ms = -1;
 
 static void net_window_task(void *arg) {
     (void)arg;
+    /* Breadcrumbs for the whole window. These write the NET slot of the
+       panic record, which is separate from the main task's slot
+       precisely so that a panic in here is not misattributed to whatever
+       the main task was doing (panic_diag.h). Every mark below also
+       resamples this task's stack high-water mark into stack_net, so the
+       published floor is the pessimistic one — after wifi, after SNTP,
+       after the TLS session the update check opens. */
+    (void)panic_diag_enter(PANIC_PHASE_NET);
     int64_t mono_before_us = esp_timer_get_time();
     time_t wall_before = time(NULL);
     /* Phase timing: real-world budget evidence for tightening the wifi/
@@ -104,13 +113,28 @@ static void net_window_task(void *arg) {
 
                A no-op unless ota_flow_arm() armed this wake, so the
                ordinary window pays one comparison for it. */
+            /* The two phases the OTA hypothesis turns on. OTA_CHECK is
+               the manifest GET — DNS, the TLS handshake against the
+               pinned root, and the JSON read — and it is the ONLY thing
+               separating this device from the one on the same firmware
+               that never panics (its OTA URL is http://, which
+               config_is_ota_url rejects, so it never enters this call at
+               all). If the breadcrumb comes back OTA_CHECK, that is the
+               answer. */
+            (void)panic_diag_enter(PANIC_PHASE_OTA_CHECK);
             ota_flow_check(s_ntp_result == ESP_OK);
+            (void)panic_diag_enter(PANIC_PHASE_MQTT);
             int64_t t = esp_timer_get_time();
             mqtt_ha_window(&snap);
             mqtt_ms = (esp_timer_get_time() - t) / 1000;
         }
         wifi_session_end();
     }
+    /* Window over: the net slot goes idle so a later panic on the main
+       task is not reported as "...+MQTT". Placed after wifi_session_end()
+       so the radio teardown is still covered, and outside the wifi_up
+       branch so the no-wifi path clears it too. */
+    panic_diag_exit(PANIC_PHASE_MQTT, PANIC_PHASE_NONE);
     s_last_wifi_ms = wifi_ms;
     s_last_sntp_ms = sntp_ms;
     s_last_mqtt_ms = mqtt_ms;

@@ -13,6 +13,12 @@ void tearDown(void) {}
    firmware takes; the NULL tolerance gets its own case below. */
 static const ota_stat_t NO_OTA;
 
+/* Likewise for the diagnostics leg: a device that has never panicked and
+   whose live readings are all zero. Zeroed rather than NULL so the
+   ordinary cases walk the same code the firmware does — the NULL
+   tolerance has its own case. */
+static const diag_stat_t NO_DIAG;
+
 static stats_snapshot_t base_snapshot(void) {
     return (stats_snapshot_t){
         .batt_pct = 87,
@@ -36,7 +42,7 @@ static stats_snapshot_t base_snapshot(void) {
 void test_stat_payload_exact(void) {
     char buf[512];
     stats_snapshot_t s = base_snapshot();
-    int n = stats_json_stat(buf, sizeof(buf), &s, &NO_OTA);
+    int n = stats_json_stat(buf, sizeof(buf), &s, &NO_OTA, &NO_DIAG);
     /* remaining_s/allocation_s are PER-SLOT arrays ([0] = Screen, [N] =
        extra timer N) so HA tracks each timer's own history — the old
        active-timer scalars mixed different timers into one series. */
@@ -46,7 +52,9 @@ void test_stat_payload_exact(void) {
         "\"allocation_s\":[3600,900,0,600,900],"
         "\"day_type\":\"Weekday\",\"completions\":[0,2,0,1],\"charge_lock\":false,"
         "\"break_s\":0,\"accum_s\":0,\"fw\":\"v1.4.0-test\",\"reset\":\"DEEPSLEEP\","
-        "\"ota_result\":\"\",\"ota_target\":\"\",\"ota_fails\":0,\"ota_dl_ms\":0}",
+        "\"ota_result\":\"\",\"ota_target\":\"\",\"ota_fails\":0,\"ota_dl_ms\":0,"
+        "\"panics\":0,\"pphase\":\"\",\"pup_s\":0,\"pheap\":0,\"pstk_main\":0,\"pstk_net\":0,"
+        "\"heap\":0,\"heap_min\":0,\"stk_main\":0,\"stk_net\":0,\"nvs_free\":0}",
         buf);
     TEST_ASSERT_EQUAL_INT((int)strlen(buf), n);
 }
@@ -57,7 +65,7 @@ void test_stat_payload_reports_a_running_break(void) {
     char buf[512];
     stats_snapshot_t s = base_snapshot();
     s.break_remaining_s = 754;
-    stats_json_stat(buf, sizeof(buf), &s, &NO_OTA);
+    stats_json_stat(buf, sizeof(buf), &s, &NO_OTA, &NO_DIAG);
     TEST_ASSERT_NOT_NULL(strstr(buf, "\"break_s\":754"));
 }
 
@@ -68,7 +76,7 @@ void test_stat_payload_reports_the_exposure_balance(void) {
     char buf[512];
     stats_snapshot_t s = base_snapshot();
     s.accum_s = 1500;
-    stats_json_stat(buf, sizeof(buf), &s, &NO_OTA);
+    stats_json_stat(buf, sizeof(buf), &s, &NO_OTA, &NO_DIAG);
     TEST_ASSERT_NOT_NULL(strstr(buf, "\"accum_s\":1500"));
 }
 
@@ -79,7 +87,7 @@ void test_stat_payload_reset_reason_flags_crash_wakes(void) {
     char buf[512];
     stats_snapshot_t s = base_snapshot();
     s.reset_reason = "BROWNOUT";
-    stats_json_stat(buf, sizeof(buf), &s, &NO_OTA);
+    stats_json_stat(buf, sizeof(buf), &s, &NO_OTA, &NO_DIAG);
     TEST_ASSERT_NOT_NULL(strstr(buf, "\"reset\":\"BROWNOUT\""));
 }
 
@@ -87,7 +95,7 @@ void test_stat_payload_charge_lock_true(void) {
     char buf[512];
     stats_snapshot_t s = base_snapshot();
     s.charge_lock = true;
-    stats_json_stat(buf, sizeof(buf), &s, &NO_OTA);
+    stats_json_stat(buf, sizeof(buf), &s, &NO_OTA, &NO_DIAG);
     TEST_ASSERT_NOT_NULL(strstr(buf, "\"charge_lock\":true"));
 }
 
@@ -95,14 +103,14 @@ void test_stat_payload_escapes_timer_name(void) {
     char buf[512];
     stats_snapshot_t s = base_snapshot();
     s.active_timer = "Say \"Om\"\\now"; /* quotes + backslash must escape */
-    stats_json_stat(buf, sizeof(buf), &s, &NO_OTA);
+    stats_json_stat(buf, sizeof(buf), &s, &NO_OTA, &NO_DIAG);
     TEST_ASSERT_NOT_NULL(strstr(buf, "\"active_timer\":\"Say \\\"Om\\\"\\\\now\""));
 }
 
 void test_stat_payload_reports_needed_length_when_truncated(void) {
     char buf[32];
     stats_snapshot_t s = base_snapshot();
-    int n = stats_json_stat(buf, sizeof(buf), &s, &NO_OTA);
+    int n = stats_json_stat(buf, sizeof(buf), &s, &NO_OTA, &NO_DIAG);
     TEST_ASSERT_GREATER_THAN_INT((int)sizeof(buf), n);  /* snprintf semantics */
     TEST_ASSERT_EQUAL_CHAR('\0', buf[sizeof(buf) - 1]); /* still terminated */
 }
@@ -117,7 +125,7 @@ void test_stat_payload_null_string_fields_are_safe(void) {
     s.active_timer = NULL;
     s.day_type = NULL;
     s.fw = NULL;
-    int n = stats_json_stat(buf, sizeof(buf), &s, &NO_OTA);
+    int n = stats_json_stat(buf, sizeof(buf), &s, &NO_OTA, &NO_DIAG);
     TEST_ASSERT_GREATER_THAN_INT(0, n);
     /* NULL renders as empty strings, JSON stays well-formed */
     TEST_ASSERT_NOT_NULL(strstr(buf, "\"state\":\"\""));
@@ -145,9 +153,12 @@ void test_discovery_entity_table_is_populated(void) {
     /* battery, battery_mv, light, state, active_timer, day_type,
        charge_lock, last_reset, screen_remaining, screen_limit,
        screen_break, break_remaining, screen_exposure,
-       ota_result, ota_target, ota_fails, ota_dl_ms
+       ota_result, ota_target, ota_fails, ota_dl_ms,
+       panic_count, panic_phase, panic_uptime, panic_heap,
+       panic_stack_main, panic_stack_net,
+       heap_free, heap_min, stack_main, stack_net, nvs_free
        + per extra slot: completions, remaining, limit */
-    TEST_ASSERT_EQUAL_INT(17 + 3 * TIMER_EXTRA_SLOTS, count);
+    TEST_ASSERT_EQUAL_INT(28 + 3 * TIMER_EXTRA_SLOTS, count);
 }
 
 /* THE BUMP, pinned to the table it describes.
@@ -163,8 +174,8 @@ void test_discovery_entity_table_is_populated(void) {
 void test_discovery_schema_version_moves_with_the_entity_table(void) {
     int count = 0;
     (void)stats_json_entities(&count);
-    TEST_ASSERT_EQUAL_INT(17 + 3 * TIMER_EXTRA_SLOTS, count);
-    TEST_ASSERT_EQUAL_INT(18, STATS_JSON_DISC_SCHEMA_VER);
+    TEST_ASSERT_EQUAL_INT(28 + 3 * TIMER_EXTRA_SLOTS, count);
+    TEST_ASSERT_EQUAL_INT(19, STATS_JSON_DISC_SCHEMA_VER);
 }
 
 /* ---- the OTA leg of the stat payload ---- */
@@ -180,7 +191,7 @@ void test_stat_payload_carries_the_ota_fields(void) {
     ota_stat_t ota = {.fails = 2, .dl_ms = 41250};
     snprintf(ota.result, sizeof(ota.result), "%s", "rolled_back");
     snprintf(ota.target, sizeof(ota.target), "%s", "1.6.0");
-    stats_json_stat(buf, sizeof(buf), &s, &ota);
+    stats_json_stat(buf, sizeof(buf), &s, &ota, &NO_DIAG);
     TEST_ASSERT_NOT_NULL(strstr(buf, "\"ota_result\":\"rolled_back\""));
     TEST_ASSERT_NOT_NULL(strstr(buf, "\"ota_target\":\"1.6.0\""));
     TEST_ASSERT_NOT_NULL(strstr(buf, "\"ota_fails\":2"));
@@ -197,8 +208,8 @@ void test_stat_payload_ota_fields_track_the_argument(void) {
     ota_stat_t second = {.fails = 3, .dl_ms = 2000};
     snprintf(first.result, sizeof(first.result), "%s", "timeout");
     snprintf(second.result, sizeof(second.result), "%s", "gave_up");
-    stats_json_stat(a, sizeof(a), &s, &first);
-    stats_json_stat(b, sizeof(b), &s, &second);
+    stats_json_stat(a, sizeof(a), &s, &first, &NO_DIAG);
+    stats_json_stat(b, sizeof(b), &s, &second, &NO_DIAG);
     TEST_ASSERT_NOT_NULL(
         strstr(a, "\"ota_result\":\"timeout\",\"ota_target\":\"\",\"ota_fails\":1,\"ota_dl_ms\":1000"));
     TEST_ASSERT_NOT_NULL(
@@ -211,7 +222,7 @@ void test_stat_payload_ota_duration_survives_a_long_download(void) {
     char buf[512];
     stats_snapshot_t s = base_snapshot();
     ota_stat_t ota = {.dl_ms = 298000}; /* just inside a 300 s budget */
-    stats_json_stat(buf, sizeof(buf), &s, &ota);
+    stats_json_stat(buf, sizeof(buf), &s, &ota, &NO_DIAG);
     TEST_ASSERT_NOT_NULL(strstr(buf, "\"ota_dl_ms\":298000"));
 }
 
@@ -219,9 +230,13 @@ void test_stat_payload_ota_duration_survives_a_long_download(void) {
 void test_stat_payload_null_ota_is_safe(void) {
     char buf[512];
     stats_snapshot_t s = base_snapshot();
-    int n = stats_json_stat(buf, sizeof(buf), &s, NULL);
+    int n = stats_json_stat(buf, sizeof(buf), &s, NULL, NULL);
     TEST_ASSERT_GREATER_THAN_INT(0, n);
-    TEST_ASSERT_NOT_NULL(strstr(buf, "\"ota_result\":\"\",\"ota_target\":\"\",\"ota_fails\":0,\"ota_dl_ms\":0}"));
+    TEST_ASSERT_NOT_NULL(strstr(buf, "\"ota_result\":\"\",\"ota_target\":\"\",\"ota_fails\":0,\"ota_dl_ms\":0"));
+    /* And the diagnostics leg. An empty pphase is the "no breadcrumb on
+       file" reading, which is exactly what a NULL leg means. */
+    TEST_ASSERT_NOT_NULL(strstr(buf, "\"panics\":0,\"pphase\":\"\",\"pup_s\":0,\"pheap\":0"));
+    TEST_ASSERT_NOT_NULL(strstr(buf, "\"nvs_free\":0}"));
 }
 
 /* Reason codes and version strings come off flash, and NVS bytes are not
@@ -234,16 +249,24 @@ void test_stat_payload_escapes_the_ota_strings(void) {
     ota_stat_t ota = {0};
     snprintf(ota.result, sizeof(ota.result), "%s", "a\"b");
     snprintf(ota.target, sizeof(ota.target), "%s", "c\\d");
-    stats_json_stat(buf, sizeof(buf), &s, &ota);
+    stats_json_stat(buf, sizeof(buf), &s, &ota, &NO_DIAG);
     TEST_ASSERT_NOT_NULL(strstr(buf, "\"ota_result\":\"a\\\"b\""));
     TEST_ASSERT_NOT_NULL(strstr(buf, "\"ota_target\":\"c\\\\d\""));
 }
 
 /* The stat payload is built into a fixed buffer and publish_states DROPS
    any build that reaches its size -- silently, with no log line and no
-   retry. This task added ~110 bytes to it, so the worst case is worth a
-   number rather than a hope: every string field at its stored width,
-   every escape doubling it, every counter at its maximum. */
+   retry. Every string field at its stored width, every escape doubling
+   it, every counter at its maximum.
+
+   The diagnostics leg added eleven fields and took the worst case past
+   the old 768-byte buffer, which is why STATS_JSON_PAYLOAD_MAX moved to
+   1024 rather than this assertion being relaxed: a payload that does not
+   fit is not published AT ALL, so on a device that is panicking the
+   evidence would be dropped precisely when it exists. pphase is filled
+   with backslashes even though the label builder can only emit letters
+   and '+' -- the buffer has to survive the field's declared width, not
+   the current producer's habits. */
 void test_stat_payload_worst_case_fits_the_publish_buffer(void) {
     char buf[STATS_JSON_PAYLOAD_MAX];
     stats_snapshot_t s = base_snapshot();
@@ -279,7 +302,22 @@ void test_stat_payload_worst_case_fits_the_publish_buffer(void) {
     ota.result[sizeof(ota.result) - 1] = '\0';
     ota.target[sizeof(ota.target) - 1] = '\0';
 
-    int n = stats_json_stat(buf, sizeof(buf), &s, &ota);
+    diag_stat_t diag = {
+        .panics = 4294967295u,
+        .panic_uptime_s = 4294967295u,
+        .panic_heap = 4294967295u,
+        .panic_stack_main = 65535,
+        .panic_stack_net = 65535,
+        .heap_free = 4294967295u,
+        .heap_min = 4294967295u,
+        .stack_main = 65535,
+        .stack_net = 65535,
+        .nvs_free = 65535,
+    };
+    memset(diag.panic_phase, '\\', sizeof(diag.panic_phase) - 1);
+    diag.panic_phase[sizeof(diag.panic_phase) - 1] = '\0';
+
+    int n = stats_json_stat(buf, sizeof(buf), &s, &ota, &diag);
     TEST_ASSERT_LESS_THAN_INT((int)sizeof(buf), n);
 }
 
@@ -329,6 +367,118 @@ void test_ota_result_is_the_primary_entity_of_the_four(void) {
             TEST_ASSERT_NULL(ents[i].ent_cat);
         if (strcmp(ents[i].key, "ota_target") == 0 || strcmp(ents[i].key, "ota_fails") == 0 ||
             strcmp(ents[i].key, "ota_dl_ms") == 0)
+            TEST_ASSERT_EQUAL_STRING("diagnostic", ents[i].ent_cat);
+    }
+}
+
+/* ---- the diagnostics leg ---- */
+
+/* The values come from the diag_stat_t argument, which mqtt_ha.c fills
+   on the NETWORK task at publish time -- never from stats_snapshot_t,
+   which was frozen on the main task before the radio came up and so
+   cannot show TLS-time heap or the network task's stack floor at all. */
+void test_stat_payload_carries_the_panic_fields(void) {
+    char buf[STATS_JSON_PAYLOAD_MAX];
+    stats_snapshot_t s = base_snapshot();
+    diag_stat_t d = {
+        .panics = 7,
+        .panic_uptime_s = 41,
+        .panic_heap = 21000,
+        .panic_stack_main = 3500,
+        .panic_stack_net = 1200,
+        .heap_free = 88000,
+        .heap_min = 60000,
+        .stack_main = 4000,
+        .stack_net = 2100,
+        .nvs_free = 190,
+    };
+    snprintf(d.panic_phase, sizeof(d.panic_phase), "%s", "RENDER+OTA_CHECK");
+    stats_json_stat(buf, sizeof(buf), &s, &NO_OTA, &d);
+    TEST_ASSERT_NOT_NULL(strstr(buf, "\"panics\":7,\"pphase\":\"RENDER+OTA_CHECK\",\"pup_s\":41,\"pheap\":21000"));
+    TEST_ASSERT_NOT_NULL(strstr(buf, "\"pstk_main\":3500,\"pstk_net\":1200"));
+    TEST_ASSERT_NOT_NULL(
+        strstr(buf, "\"heap\":88000,\"heap_min\":60000,\"stk_main\":4000,\"stk_net\":2100,\"nvs_free\":190}"));
+}
+
+/* The phase label is produced by panic_diag.c from a fixed literal map,
+   so today it cannot contain a quote. The escape still has to be there:
+   a field that is safe only because of what another module currently
+   does stops being safe the day that module changes, and an unescaped
+   quote here silently costs Home Assistant the WHOLE payload, not just
+   this field. */
+void test_stat_payload_escapes_the_panic_phase(void) {
+    char buf[STATS_JSON_PAYLOAD_MAX];
+    stats_snapshot_t s = base_snapshot();
+    diag_stat_t d = {0};
+    snprintf(d.panic_phase, sizeof(d.panic_phase), "%s", "a\"b\\c");
+    stats_json_stat(buf, sizeof(buf), &s, &NO_OTA, &d);
+    TEST_ASSERT_NOT_NULL(strstr(buf, "\"pphase\":\"a\\\"b\\\\c\""));
+}
+
+/* Same call for the same reason as the OTA leg's: the counter is what
+   makes the panic RATE knowable, and a device that has never panicked
+   must be distinguishable from one whose breadcrumb was lost. Zero plus
+   an empty phase is that reading. */
+void test_stat_payload_null_diag_is_safe(void) {
+    char buf[STATS_JSON_PAYLOAD_MAX];
+    stats_snapshot_t s = base_snapshot();
+    int n = stats_json_stat(buf, sizeof(buf), &s, &NO_OTA, NULL);
+    TEST_ASSERT_GREATER_THAN_INT(0, n);
+    TEST_ASSERT_NOT_NULL(strstr(buf, "\"panics\":0,\"pphase\":\"\""));
+}
+
+/* The four panic entities are the RECORD of an event, not telemetry:
+   they change only when a panic happens, and an expiry would blank them
+   on exactly the device this exists for -- one that panicked and then
+   went quiet. Same precedent as last_reset and the OTA four. */
+void test_panic_entities_never_expire(void) {
+    int count = 0;
+    const ha_entity_t *ents = stats_json_entities(&count);
+    const char *keys[] = {"panic_count", "panic_phase",      "panic_uptime",
+                          "panic_heap",  "panic_stack_main", "panic_stack_net"};
+    for (unsigned k = 0; k < sizeof(keys) / sizeof(keys[0]); k++) {
+        const ha_entity_t *e = NULL;
+        for (int i = 0; i < count; i++) {
+            if (strcmp(ents[i].key, keys[k]) == 0)
+                e = &ents[i];
+        }
+        TEST_ASSERT_NOT_NULL_MESSAGE(e, "a panic entity is missing from the table");
+        TEST_ASSERT_EQUAL_INT(0, e->expire_after);
+        TEST_ASSERT_EQUAL_STRING("stat", e->topic_suffix);
+    }
+}
+
+/* The live health readings ARE telemetry, so they expire: a device that
+   has stopped checking in must read unavailable rather than show
+   yesterday's heap as if it were current. The opposite decision to the
+   panic group above, in the same table, which is why both are pinned. */
+void test_live_health_entities_expire(void) {
+    int count = 0;
+    const ha_entity_t *ents = stats_json_entities(&count);
+    const char *keys[] = {"heap_free", "heap_min", "stack_main", "stack_net", "nvs_free"};
+    for (unsigned k = 0; k < sizeof(keys) / sizeof(keys[0]); k++) {
+        const ha_entity_t *e = NULL;
+        for (int i = 0; i < count; i++) {
+            if (strcmp(ents[i].key, keys[k]) == 0)
+                e = &ents[i];
+        }
+        TEST_ASSERT_NOT_NULL_MESSAGE(e, "a live health entity is missing from the table");
+        TEST_ASSERT_GREATER_THAN_INT(0, e->expire_after);
+        TEST_ASSERT_EQUAL_STRING("diagnostic", e->ent_cat);
+    }
+}
+
+/* "Is it still crashing, and how often?" is an operator question, not a
+   diagnostic one, so the count sits at the top level of the device card
+   and every supporting number does not. */
+void test_panic_count_is_the_primary_entity_of_the_group(void) {
+    int count = 0;
+    const ha_entity_t *ents = stats_json_entities(&count);
+    for (int i = 0; i < count; i++) {
+        if (strcmp(ents[i].key, "panic_count") == 0)
+            TEST_ASSERT_NULL(ents[i].ent_cat);
+        if (strcmp(ents[i].key, "panic_phase") == 0 || strcmp(ents[i].key, "panic_uptime") == 0 ||
+            strcmp(ents[i].key, "panic_heap") == 0)
             TEST_ASSERT_EQUAL_STRING("diagnostic", ents[i].ent_cat);
     }
 }
@@ -543,6 +693,13 @@ int main(void) {
     RUN_TEST(test_stat_payload_worst_case_fits_the_publish_buffer);
     RUN_TEST(test_ota_entities_never_expire);
     RUN_TEST(test_ota_result_is_the_primary_entity_of_the_four);
+
+    RUN_TEST(test_stat_payload_carries_the_panic_fields);
+    RUN_TEST(test_stat_payload_escapes_the_panic_phase);
+    RUN_TEST(test_stat_payload_null_diag_is_safe);
+    RUN_TEST(test_panic_entities_never_expire);
+    RUN_TEST(test_live_health_entities_expire);
+    RUN_TEST(test_panic_count_is_the_primary_entity_of_the_group);
     RUN_TEST(test_discovery_topic);
     RUN_TEST(test_discovery_battery_payload);
     RUN_TEST(test_discovery_binary_sensor_has_payload_states);

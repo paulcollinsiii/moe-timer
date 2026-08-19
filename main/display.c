@@ -10,6 +10,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "lvgl.h"
+#include "panic_diag.h"
 #include "sdkconfig.h"
 #include "ssd1680.h"
 
@@ -216,9 +217,29 @@ void display_init(void) {
     s_initialized = true;
 }
 
+/* The single choke point every paint in this file goes through, which is
+   why the RENDER breadcrumb is here rather than at nine call sites.
+   Covers the LVGL render pass AND the synchronous flush underneath it
+   (the SPI writes and the panel's BUSY wait), which between them are the
+   longest uninterruptible stretch of a quiet wake.
+
+   ENTER/EXIT rather than a plain mark, because RENDER nests: it sits
+   inside AWAKE, or inside BOOT, or inside SLEEP, and a paint that left
+   the phase reading RENDER afterwards would misreport every subsequent
+   panic in that wake. The previous value is restored rather than
+   hard-coded back to AWAKE for the same reason.
+
+   This function is also reached from the OTA task
+   (wake_flow_repaint_current_state and display_ota), so the MAIN slot is
+   written by two tasks — never concurrently, because ota_task_run_apply
+   blocks the main task on a semaphore for the whole attempt. That
+   produces the honest reading "RENDER+OTA_DL" while the download paints
+   its progress screen. panic_diag.h carries the argument in full. */
 static void render(ssd1680_refresh_mode_t mode) {
+    const panic_phase_t prev = panic_diag_enter(PANIC_PHASE_RENDER);
     s_pending_mode = mode;
     lv_refr_now(s_disp); /* renders + calls flush_cb synchronously */
+    panic_diag_exit(PANIC_PHASE_RENDER, prev);
 }
 
 static void build_for_state(const display_state_t *st) {

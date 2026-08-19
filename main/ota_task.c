@@ -11,6 +11,7 @@
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 #include "ota_flow.h"
+#include "panic_diag.h"
 
 static const char *TAG = "ota_task";
 
@@ -48,7 +49,16 @@ static void ota_apply_task(void *arg) {
     bool charge_locked = a->charge_locked;
     SemaphoreHandle_t done = a->done;
 
+    /* The download's breadcrumb — the net slot, not the main one, and
+       the same slot the window's OTA_CHECK used: this task and net_win
+       never run together (the window is joined before maybe_apply_update
+       spawns this one), so the slot has a single writer at all times.
+       A committed image never reaches the exit below — ota_flow_apply
+       restarts from inside — so a panic anywhere in the TLS session, the
+       flash writes or the commit reads back as OTA_DL. */
+    (void)panic_diag_enter(PANIC_PHASE_OTA_DL);
     ota_flow_apply(batt_pct, charge_locked);
+    panic_diag_exit(PANIC_PHASE_OTA_DL, PANIC_PHASE_NONE);
 
     /* Only a declined, failed or aborted attempt reaches this line — a
        committed image restarts from inside ota_flow_apply and never

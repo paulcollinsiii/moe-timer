@@ -86,6 +86,12 @@ add_host_test(test_mock_hal_time)
 add_host_test(test_net_apply)
 add_host_test(test_app_state)
 add_host_test(test_stats_json)
+# The panic breadcrumb. Only the PURE half of panic_diag.c compiles under
+# NATIVE (the RTC/NVS/FreeRTOS half is behind the fence), which is the
+# half that carries every rule: the phase table, the slot map, the label,
+# the magic+checksum guard that stops an uninitialised cold-boot record
+# being published as evidence, and the record state machine.
+add_host_test(test_panic_diag)
 add_host_test(test_mqtt_topics)
 add_host_test(test_mqtt_rx)
 add_host_test(test_config_validate)

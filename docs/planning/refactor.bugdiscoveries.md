@@ -706,6 +706,32 @@ HA-visible diagnostics, approved 2026-08-19. The device has to say what it was
 doing when it died, because inference from an activity stream has already
 produced one wrong answer. See the implementor brief for scope.
 
+**Landed.** `main/panic_diag.c` + `include/panic_diag.h`, host-tested in
+`test/test_panic_diag`. Eleven new HA entities (discovery schema v19), +3,696 B
+of image — 1,496,784 → 1,500,480 B, 81.8 % of the app slot.
+
+* **How often.** `panic_cnt`, a monotonic `u32` in NVS bumped once per
+  `ESP_RST_PANIC` boot and published as **Panic count**. `last_reset` is a
+  *state*, so HA collapses PANIC → PANIC into one row and the rate was
+  unknowable; a counter is differenceable between any two publishes.
+* **Doing what.** A 24-byte `RTC_NOINIT_ATTR` breadcrumb carrying two phase
+  slots (main task / network side), uptime, free heap and both task stack
+  floors, re-sealed with a magic + FNV-1a checksum on every phase change. It
+  is latched on the boot after a panic and copied to NVS, because RTC memory
+  reaches the next boot only and this firmware does not open a network window
+  on every wake. `RTC_DATA_ATTR` was not a candidate: it is zeroed by a panic
+  reset. The guard is what makes `RTC_NOINIT_ATTR` safe here and is the whole
+  difference from the timer-state case the project note rejected.
+* **Phases:** BOOT / AWAKE / RENDER / SLEEP on the main slot, NET / OTA_CHECK /
+  MQTT / OTA_DL on the network slot, published joined ("RENDER+OTA_CHECK").
+  Two slots rather than one byte because a single byte would be written by
+  whichever task moved last and would routinely report a network panic as a
+  render.
+* **F3's headroom question is now measured**, though F3 itself is untouched as
+  briefed: `nvs_get_stats()` free entries is published every window as **NVS
+  free entries**. Free only — total is a constant of a frozen partition table
+  and used is total − free. The erase at `main.c:410` is still silent.
+
 ## Closed — moved to the archive
 
 Full detail, and the reasoning behind each, is in

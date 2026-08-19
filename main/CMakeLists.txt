@@ -30,6 +30,7 @@ idf_component_register(
         "ota_url.c"
         "ota_facts.c"
         "ota.c"
+        "panic_diag.c"
         "ha_config.c"
         "cmd_apply.c"
         "device_id.c"

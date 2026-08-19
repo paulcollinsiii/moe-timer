@@ -70,3 +70,20 @@
    any download, so an attempt made between a commit and its revert moved
    the record of what had been committed. See ota_flow.c. */
 #define NVS_KEY_OTA_PEND_VER "ota_pend_ver"
+/* Panic forensics (panic_diag.c). Device-owned bookkeeping written and
+   read through hal_nvs directly rather than through an nvs_config
+   accessor pair — the same arrangement mqtt_ha.c already uses for
+   NVS_KEY_DISC_VER, and for the same reason: these are not settings.
+   They are never seeded, never defaulted, never editable from Home
+   Assistant, and nvs_config's registry (nvs_defaults.h) would have to
+   grow rows that exist only to leave them alone.
+
+   panic_cnt is monotonic and is never reset by this firmware: HA reads
+   the rate as the difference between two publishes, and a counter the
+   device can zero cannot be differenced. panic_rec is one
+   panic_diag_rec_t blob — the breadcrumb latched out of RTC memory on
+   the boot after a panic, kept here because RTC memory survives to the
+   NEXT boot only and this device does not open a network window on
+   every wake. */
+#define NVS_KEY_PANIC_CNT "panic_cnt"
+#define NVS_KEY_PANIC_REC "panic_rec"

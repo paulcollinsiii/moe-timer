@@ -18,6 +18,7 @@
 #include "nvs_config.h"
 #include "nvs_keys.h"
 #include "ota_flow.h"
+#include "panic_diag.h"
 #include "timer.h"
 
 static const char *TAG = "mqtt_ha";
@@ -448,9 +449,18 @@ static int publish_states(esp_mqtt_client_handle_t client, const stats_snapshot_
        task 12 of docs/planning/ota.plan.md. */
     ota_stat_t ota;
     ota_flow_stat(&ota);
+    /* Same line of reasoning, one file further. The panic breadcrumb has
+       to come off NVS — it was latched at BOOT, on the main task, before
+       this window existed — and the live heap/stack/NVS readings have to
+       be taken HERE, on the network task, mid-window: a snapshot field
+       would carry the main task's pre-radio view of both, which is
+       exactly the reading that cannot show TLS pressure. See
+       panic_diag_stat() and the diag_stat_t comment in stats_json.h. */
+    diag_stat_t diag;
+    panic_diag_stat(&diag);
 
     mqtt_topic(s_mem->topic, sizeof(s_mem->topic), device_id(), "stat");
-    if (stats_json_stat(s_mem->payload, sizeof(s_mem->payload), snap, &ota) < (int)sizeof(s_mem->payload)) {
+    if (stats_json_stat(s_mem->payload, sizeof(s_mem->payload), snap, &ota, &diag) < (int)sizeof(s_mem->payload)) {
         published += publish(client, s_mem->topic, s_mem->payload, 1);
     }
 
