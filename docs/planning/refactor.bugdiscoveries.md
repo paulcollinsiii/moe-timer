@@ -125,17 +125,18 @@ lived on.
 
 ### S1 — the checks, most dangerous first
 
-**Field result 2026-08-19 — S1.1 and S1.3 answered, in the affirmative.** The
-device crossed a genuine day rollover at 01:29 (`active timer → Screen` is
-`timer_reset()`) carrying an HA-configured table written by an older image, and
-the timer names, minutes and break-eligible switches were unchanged across it.
-HA logs state *changes*, so the flags' absence from the activity stream between
-01:29 and the unrelated 05:12 event is the evidence: the padding reuse read
-correctly on a blob it did not write. S1.3's provocation arrived unrequested a
-few hours later and is written up as **BUG-10** — the switches came back as a
-Kconfig value rather than as never-set, which is the documented consequence of
-a switch-only setting meeting an NVS erase, not a failure of this fix. The
-remaining rows (S1.2, S1.4, S1.5, S1.6) are still owed.
+**Field result 2026-08-19 — S1.1 answered, in the affirmative.** The device
+crossed genuine day rollovers at 01:28:46 EDT on 08-18 and 01:29:18 EDT on
+08-19 (`active timer -> Screen` is `timer_reset()`), carrying an HA-configured
+table written by an older image, and the timer names, minutes and
+break-eligible switches were unchanged across both. HA logs state *changes*,
+so the flags' absence from the activity stream across those boundaries is the
+evidence: the padding reuse read correctly on a blob it did not write. The
+rollover was the check this row existed for, and it passed twice.
+
+S1.3 is **still owed** — see BUG-10 for the retraction of a first reading that
+mistook an HA automation for a device-side revert. Nothing has yet provoked a
+real blob loss on this device. S1.2, S1.4, S1.5 and S1.6 are also still owed.
 
 **S1.1 — an existing blob still reads.** This is the one that would be
 catastrophic and silent, so do it first and on a device that already has an
@@ -202,7 +203,7 @@ constraint remains; everything else is independent and can be reordered freely.
 | # | Item | Why here | Blocked by |
 |---|---|---|---|
 | 0 | **S1 + S2 smoke tests** | The only item that needs the device. Two merged fixes stay unconfirmed until it happens, and everything below is engineering time that can proceed in parallel | a USB flash, then an OTA |
-| 0.5 | **BUG-10** — a silent self-erase of NVS, seen in the field | The only item on this page that is actively destroying operator state on a live device, and it recurs on its own schedule. Its step 1 (make the erase loud) is a precondition for diagnosing the rest of it — everything else about this defect is inference from an HA activity stream until the device says so itself | — |
+| 0.5 | **BUG-10** — recurring PANIC resets on an idle device | A device that reboots itself several times a day is the most serious thing on this page, and the cause is unknown. Diagnostics first: inference from an HA activity stream has already produced one retracted answer, so the device needs to report what it was doing when it died | — |
 | 1 | **BUG-7** — a RUNNING slot outliving its own definition | State-machine change to an uncovered path; independent | — |
 | 2 | **BUG-2**, then **BUG-3** | Same latch/mask surface — fix together so each is checked against the other. Both need a re-baselined sweep to show the fix changed *only* the intended cases. | — |
 | 3 | **BUG-5** — the v1→v2 migration | Only bites on a version bump, and **R4** means it has to be written *before* one rather than after. Nothing in flight bumps the version, which is why it sits last. | — |
@@ -625,92 +626,85 @@ powered-off gap.
 
 ---
 
-## BUG-10 — the device erased its own NVS in the field, silently
+## BUG-10 — recurring PANIC resets on an idle device
 
-**Reported 2026-08-19 from the device.** Overnight, idle on a desk, no input.
-HA's activity stream:
+**Reported 2026-08-19 from the testing device, with an HA activity-stream
+export.** The device panics on its own, unattended, several times a day.
 
-| Time | Event |
+| Panic (EDT) | Gap from previous |
 |---|---|
-| 08-18 22:47:54 | Last reset → **PANIC** |
-| 08-18 23:29 | Last reset → Deep Sleep |
-| 08-19 01:29 | active timer → Screen |
-| 08-19 05:12 | timer 1/3/4 break-eligible → **off**, OTA check on sync → **off** |
-| 08-19 06:46 | Last reset → **PANIC** |
+| 08-18 01:49:04 | — |
+| 08-18 22:47:54 | 20 h 58 m 49 s |
+| 08-19 06:46:05 | 7 h 58 m 11 s |
 
-**This is not BUG-8 regressing, and the S1 rollover check passed.** The 01:29
-`active timer → Screen` is `timer_reset()`, i.e. the day rollover. The four
-flags did not change then; HA logs state *changes*, so their absence from the
-stream between 01:29 and 05:12 is positive evidence they held across the
-rollover. S1.1 and S1.3 were answered in the affirmative before the unrelated
-05:12 event.
+Reset reason is `ESP_RST_PANIC` — an abort or a CPU exception. Not a watchdog
+and not a brownout: `wake_flow.c:250-268` gives `ESP_RST_TASK_WDT`,
+`ESP_RST_INT_WDT` and `ESP_RST_BROWNOUT` their own strings, and
+`CONFIG_ESP_TASK_WDT_PANIC` is off.
 
-**What 05:12 was: a full `nvs_flash_erase()`.** The four reverted settings are
-exactly the ones that have an HA entity but no key in *this operator's*
-retained config document. Everything else the document names was restored when
-it re-applied, which is why four things moved and not thirty.
-`config_apply.c:305` describes this scenario in advance as an accepted
-consequence — "a `break` off that exists ONLY as a switch flip … does not
-survive an NVS erase."
+**Not the OTA.** The OTA landed 08-18 16:02 UTC (`last_reset` -> `SW`,
+`update_target` 1.5.1). The 08-18 05:49 UTC panic predates it, so the panics
+are not something the new image introduced.
 
-The benign alternative is ruled out. A plain re-apply cannot do it: `break`
-reverting needs `have_prev == false` (`config_apply.c:206`), and `ota_on_sync`
-reverting needs its key to be *missing*, since it is a lazy default with no
-registry row (`nvs_config.c:275`) and so is untouched by a defaults reseed. Had
-the document carried `ota_on_sync:false` it would have been off already, not
-on until 05:12. A key that was set and is now reading its missing-key default
-was erased.
+**Not deterministic on the rollover either.** The 08-18 panic followed that
+day's 01:28:46 rollover by 20 minutes, but the 08-19 rollover at 01:29:18 was
+followed by five clean hours. Three points is not a period; the gaps are 21 h
+and 8 h, and the second device's stream may or may not agree.
 
-The only erase in the tree is `main.c:410`, taken when `nvs_flash_init()`
-returns `NO_FREE_PAGES` or `NEW_VERSION_FOUND`. The partition has never been
-resized (`0x9000`/`0x6000` since `412986a`; only `ota_0` grew in `d7e28f6`), so
-the trigger is pressure or damage inside those six pages — the headroom the S1
-tail flagged as never measured. Note that the app's own keys are perhaps one
-page of live data; the rest of the partition is the WiFi stack's.
+### Retracted: the "silent NVS self-erase" reading of 2026-08-19
 
-**Why it was invisible.** The most destructive act the firmware can perform
-wipes every credential and every operator choice and logs *nothing*, publishes
-nothing, and leaves no counter. Recovery hides it further: the reseed rewrites
-WiFi/MQTT from the compiled-in defaults, so the device reconnects and looks
-healthy, and clearing `cfg_ver` re-applies the retained document over the top.
-The only trace is which settings failed to come back.
+The first version of this entry concluded that the device had erased its own
+NVS at 05:12 EDT via `main.c:410`, on the strength of four settings reverting
+at once across two unrelated storage mechanisms. **That was wrong, and the
+activity-stream CSV disproves it.** Recorded rather than deleted, because the
+reasoning was sound given what it had and someone will otherwise re-derive it.
 
-**The PANICs are genuine.** `ESP_RST_PANIC`, not a watchdog and not a brownout
-— `wake_flow.c:250-268` gives those their own strings and
-`CONFIG_ESP_TASK_WDT_PANIC` is off. Direction of causation is unresolved and
-needs the device: an NVS fault reaches `ESP_ERROR_CHECK` at `main.c:413-414`
-and panics, and a panic mid-commit can damage NVS. `nvs_get_stats()` and a
-backtrace settle it; `CONFIG_ESP_CONSOLE_USB_CDC_SUPPORT_ETS_PRINTF=y`, so
-panic output does reach USB CDC, and `wake_flow_boot_quiet_after_panic()`
-holds the console quiet 2 s at boot to let a host attach.
+The four rows carry `context_event_type=call_service`,
+`context_domain=homeassistant`, `context_service=turn_off`. Every state the
+*device* publishes in the same export has empty context columns. A Home
+Assistant automation or scene turned those switches off; the firmware never
+published them. The same call recurs 24 h earlier at 08-18 09:10:51 UTC
+against `ota_check_on_sync` alone — the only one of the four that was on at the
+time — which makes it a daily ~05:11 EDT HA action, not a device event.
 
-**Fixes, in the order they earn their keep.**
+**The lesson worth keeping is a method one:** an HA activity stream carries
+provenance, and it was available for the asking. The whole erase chain was
+built on the unexamined premise that a state change in HA meant the device had
+published it. Check the context columns before reasoning from a state change.
 
-1. **Make the erase loud.** Increment a persisted counter immediately after
-   `nvs_flash_erase()` and publish it as an HA entity with the erase's reset
-   reason. Nothing else on this list can be evaluated without it, and it is the
-   difference between diagnosing this in one night and another week of
-   inference from an activity stream.
-2. **Measure the headroom.** `nvs_get_stats()` into the stats payload —
-   used/free/total entries. The S1 tail asked for this before the incident.
-3. **Stop amplifying a transient read.** `config_apply.c:206` turns *any*
-   failure of `nvs_config_get_timer_defs()` — including a transient one — into
-   `have_prev == false` for every slot, and line 355 then writes the
-   compile-time answer back to flash permanently. A read error and a
-   genuinely-absent blob are not the same event and must not take the same
-   branch; `ESP_ERR_NVS_NOT_FOUND` is the only one that means "never
-   configured". This is BUG-5's unconditional constraint applied to the
-   writer instead of the logger.
-4. **Reconsider `ESP_ERROR_CHECK` on the NVS init pair.** A transient write
-   failure at `main.c:414` panics, and a panic is itself a candidate cause of
-   NVS damage.
+*Nothing in the retraction touches the two real findings the trace turned up,
+which stand on their own reading of the source and are kept below.*
 
-*Operator mitigation available today, and the one the source already
-recommends: put `break` per timer and `ota_on_sync` into the retained config
-document. A setting that exists only as a switch flip has nothing to restore
-it.*
+### Standing findings from the same trace
 
----
+**F1 — consecutive panics are invisible.** `last_reset` is a state, so HA
+collapses PANIC -> PANIC into one row and only a PANIC -> DEEPSLEEP -> PANIC
+sequence is countable. The cadence above is therefore a lower bound. A
+monotonic persisted panic counter would make the real rate visible; it is also
+the cheapest thing on this list.
+
+**F2 — a transient NVS read permanently rewrites the table.**
+`config_apply.c:206` sets `have_prev = (nvs_config_get_timer_defs(&prev) ==
+ESP_OK)`, so *any* failure — transient included — makes `existed` false for
+every slot, drops `break`/`reload` to the compile-time answer, and line 355
+then writes that back to flash. A read error and a genuinely-absent blob are
+different events and must not share a branch; `ESP_ERR_NVS_NOT_FOUND` is the
+only one that means "never configured". This is BUG-5's unconditional
+constraint applied to the writer rather than the logger. Not implicated in
+anything observed so far — found by reading, not by failing.
+
+**F3 — the erase at `main.c:410` is silent.** Whether or not it has ever
+fired, the most destructive act the firmware can perform logs nothing,
+publishes nothing and leaves no counter, and the reseed then restores WiFi and
+MQTT from compiled-in defaults so the device reconnects looking healthy. It
+should not be possible for this to happen without saying so. `nvs_get_stats()`
+would also settle the headroom question the S1 tail raised and never measured.
+
+### What is being built
+
+HA-visible diagnostics, approved 2026-08-19. The device has to say what it was
+doing when it died, because inference from an activity stream has already
+produced one wrong answer. See the implementor brief for scope.
 
 ## Closed — moved to the archive
 
