@@ -152,3 +152,15 @@ find_package(Python3 REQUIRED COMPONENTS Interpreter)
 add_test(NAME test_check_slot_size
          COMMAND ${Python3_EXECUTABLE}
                  ${CMAKE_CURRENT_SOURCE_DIR}/test_check_slot_size/test_check_slot_size.py)
+
+# scripts/check-log-args.py is the HAZ-1 gate: no function call inside an
+# ESP_LOGx argument list, because ESP_LOGx wraps its arguments in a
+# compile-time level guard and a call left there stops executing once the
+# level is compiled out. Same reasoning as the guard above for why it is
+# Python and why it is registered here: it is a pre-commit tool, not
+# firmware, and a gate whose tests live somewhere separate is a gate whose
+# tests stop being run. It shipped with two silent holes that review found
+# and no test could have missed -- which is why it has one now.
+add_test(NAME test_check_log_args
+         COMMAND ${Python3_EXECUTABLE}
+                 ${CMAKE_CURRENT_SOURCE_DIR}/test_check_log_args/test_check_log_args.py)

@@ -633,7 +633,9 @@ once its comments are reworded.
   hoisted to locals. `68121a8`. Named by the anchor comments on the three
   allowlisted formatters (`main/ota_policy.c`, `main/ota_url.c`,
   `main/wake_flow.c`) and by the hoist comments in seven files. The durable
-  lesson is **R3**.
+  lesson is **R3**. **No hardware row on purpose** — the archive entry argues
+  why, and records that this image must reach the device by OTA rather than a
+  USB reflash, which would reseed NVS and destroy S1's in-flight observation.
 * **BUG-8** — losing the timer-defs blob no longer cements a Kconfig
   `break_eligible`. `ad62dff` `858d41e` `de21436` `10745de`. Named by
   `main/main.c:309` and `docs/planning/ota.plan.md:2070`. **Not finished:

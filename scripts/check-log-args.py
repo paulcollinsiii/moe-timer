@@ -30,12 +30,44 @@ builds so it cannot see the difference either.
 Hence a bright line rather than a maintained census: no call in a log argument,
 except an allowlisted total formatter.  Hoist the rest to a local.
 
+The `esp_check.h` family (`ESP_RETURN_ON_ERROR` and friends) is covered too:
+those macros forward their variadic format arguments straight into `ESP_LOGE`,
+so an argument there carries the identical hazard.  Their leading non-format
+arguments -- the condition, the error code, the goto label -- are evaluated
+outside the log and are skipped; see LOG_MACROS.
+
+KNOWN LIMITATIONS
+-----------------
+This is a lexer, not a preprocessor, and the following are invisible to it.
+They are recorded so the next reader knows the gate's edges rather than
+assuming it has none.  Each needs real preprocessing to close, which is a far
+larger tool than this one; the tree was checked and none of them occurs today.
+
+  * An object-like macro that expands to a call:
+        #define STACK_FREE uxTaskGetStackHighWaterMark(NULL)
+        ESP_LOGI(TAG, "%u", (unsigned)STACK_FREE);
+    There is no `(` at the use site, so nothing looks like a call.
+  * A wrapper macro around ESP_LOGx (`#define MY_LOG(...) ESP_LOGI(TAG, ...)`).
+    Uses of the wrapper are not scanned; the *definition* is, so a call written
+    inside the definition is still caught.
+  * A function-like ALL_CAPS macro that expands to a call.  ALL_CAPS names are
+    exempted as macros (see CALL_RE), which is what stops MIN/BIT/pdMS_TO_TICKS
+    from being reported as calls; a macro that hides a call behind that
+    spelling is the price.
+  * A call through a dereferenced function pointer, `(*s_ops->get)()`.  The
+    ordinary `s_ops->get()` form IS caught.
+  * A macro or callee name split by a line continuation (`ESP_LO\\<newline>GI`).
+  * Code inside `#if 0` is scanned and can be reported, because it is not
+    preprocessed away.
+
 USAGE
 -----
     scripts/check-log-args.py [FILE ...]
 
 With no arguments the default roots (main/ components/ include/ test/) are
 scanned.  pre-commit passes the changed files.  Exit status 1 on any finding.
+Its own test suite is test/test_check_log_args/test_check_log_args.py, run by
+ctest with the C suites.
 """
 
 import os
@@ -101,12 +133,18 @@ ALLOWLIST = {
     ),
 }
 
-# Allowlist entries defined in this repository. Their definitions are
-# re-verified by check_definitions() whenever the defining file is scanned.
+# Allowlist entries defined in this repository, mapped to the file that is
+# expected to define them.  Two things hang off this:
+#   * check_definitions() re-verifies the body whenever a file defining one is
+#     scanned, so a side effect is caught at the moment it is introduced;
+#   * if the named file is scanned and the definition is NOT located, that is
+#     itself a finding.  A body check that silently finds nothing is
+#     indistinguishable from a body check that passed, which would make this
+#     whole mechanism decorative.
 REPO_LOCAL = {
-    "ota_policy_reason_str",
-    "ota_url_redirect_str",
-    "wake_flow_reset_reason_str",
+    "ota_policy_reason_str": "main/ota_policy.c",
+    "ota_url_redirect_str": "main/ota_url.c",
+    "wake_flow_reset_reason_str": "main/wake_flow.c",
 }
 
 # Deliberately NOT allowlisted, recorded so the argument is not re-litigated:
@@ -127,17 +165,67 @@ REPO_LOCAL = {
 C_KEYWORDS = {
     "if", "for", "while", "switch", "return", "sizeof", "defined", "do",
     "else", "case", "goto", "_Static_assert", "static_assert", "typeof",
-    "__typeof__", "alignof", "_Alignof", "offsetof",
+    "__typeof__", "alignof", "_Alignof", "offsetof", "__attribute__",
 }
 
-# The whole ESP log family: the plain levels, the early/DRAM variants used
-# from ISR and pre-heap contexts, and the two level-parameterised forms every
-# one of them expands through.
-LOG_RE = re.compile(
-    r"\bESP_(?:EARLY_|DRAM_)?LOG(?:[EWIDV]|_LEVEL(?:_LOCAL)?|_BUFFER_HEX(?:DUMP)?"
-    r"(?:_LEVEL)?|_BUFFER_CHAR(?:_LEVEL)?)\s*\("
-)
+# Log-family macros, mapped to the number of LEADING arguments that are NOT
+# part of the log statement and are therefore evaluated unconditionally.
+#
+# The esp_check.h macros expand to (roughly)
+#     do { if (unlikely((err_rc_ = (x)) != ESP_OK)) { ESP_LOGE(log_tag, format, ...); ... } }
+# so `x` / `a` are assigned and tested outside the log, `err_code` sits in the
+# return statement and `goto_tag` is a label -- none of them is conditionally
+# evaluated by the *level*.  Everything after them lands in ESP_LOGE's argument
+# list and carries the hazard, including the tag.
+LOG_MACROS = {}
+for _lvl in ("E", "W", "I", "D", "V"):
+    LOG_MACROS["ESP_LOG" + _lvl] = 0
+    LOG_MACROS["ESP_EARLY_LOG" + _lvl] = 0
+    LOG_MACROS["ESP_DRAM_LOG" + _lvl] = 0
+LOG_MACROS["ESP_LOG_LEVEL"] = 0
+LOG_MACROS["ESP_LOG_LEVEL_LOCAL"] = 0
+for _b in ("ESP_LOG_BUFFER_HEX", "ESP_LOG_BUFFER_CHAR"):
+    LOG_MACROS[_b] = 0
+    LOG_MACROS[_b + "_LEVEL"] = 0
+LOG_MACROS["ESP_LOG_BUFFER_HEXDUMP"] = 0
+for _s in ("", "_ISR"):
+    LOG_MACROS["ESP_RETURN_ON_ERROR" + _s] = 1      # (x, log_tag, format, ...)
+    LOG_MACROS["ESP_GOTO_ON_ERROR" + _s] = 2        # (x, goto_tag, log_tag, format, ...)
+    LOG_MACROS["ESP_RETURN_ON_FALSE" + _s] = 2      # (a, err_code, log_tag, format, ...)
+    LOG_MACROS["ESP_GOTO_ON_FALSE" + _s] = 3        # (a, err_code, goto_tag, log_tag, format, ...)
+
+LOG_RE = re.compile(r"\b(" + "|".join(sorted(LOG_MACROS, key=len, reverse=True)) + r")\s*\(")
+
 CALL_RE = re.compile(r"\b([A-Za-z_][A-Za-z0-9_]*)\s*\(")
+
+# An ALL_CAPS identifier is a macro by universal C convention, and a macro that
+# expands to a pure expression is evaluated -- or not -- exactly like any other
+# expression, so it carries no hazard.  Rejecting MIN(), BIT(), pdMS_TO_TICKS()
+# and friends would block legitimate commits and push authors towards the
+# ALLOWLIST, whose stated criterion ("returns a display string") fits none of
+# them -- diluting the one list that has to stay meaningful.
+#
+# A short lower-case prefix is allowed because that is how FreeRTOS and IDF
+# spell their macros (pdMS_TO_TICKS, portTICK_PERIOD_MS).  Real functions in
+# this tree are lower_snake_case or camelCase and never match.
+MACRO_RE = re.compile(r"^[a-z]{0,4}[A-Z][A-Z0-9_]*$")
+
+# Assignment operators, excluding the comparisons ==, !=, <=, >= that share the
+# `=` character.  <<= and >>= must be listed explicitly: they were missing from
+# the first version of this file and a `s_flags <<= 1;` walked straight through.
+ASSIGN_RE = re.compile(r"(<<=|>>=|[-+*/%&|^]=(?!=)|(?<![=!<>+\-*/%&|^])=(?!=))")
+INCDEC_RE = re.compile(r"(\+\+|--)")
+
+# A statement that starts with one of these declares something; its `=` is an
+# initialiser, not a write to existing state.  Anything else with an `=` in it
+# is assigning to an object that already exists, which a pure formatter has no
+# reason to do.
+TYPE_STARTERS = {
+    "const", "volatile", "register", "char", "int", "short", "long",
+    "unsigned", "signed", "float", "double", "bool", "void", "struct",
+    "union", "enum", "auto", "_Bool",
+}
+TYPEDEF_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*_t$")
 
 DEFAULT_ROOTS = ("main", "components", "include", "test")
 SKIP_DIRS = {"build", ".pio", "unity", "cJSON", "managed_components", ".git"}
@@ -205,56 +293,176 @@ def balanced(s, lparen):
     return "", len(s)
 
 
+def split_args(args):
+    """Split an argument list on top-level commas."""
+    out = []
+    depth = 0
+    cur = []
+    for ch in args:
+        if ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            depth -= 1
+        if ch == "," and depth == 0:
+            out.append("".join(cur))
+            cur = []
+        else:
+            cur.append(ch)
+    out.append("".join(cur))
+    return out
+
+
 def line_of(src, pos):
     return src.count("\n", 0, pos) + 1
 
 
-def check_calls(path, src, stripped):
-    """Findings for calls inside log argument lists."""
+def brace_depths(s):
+    """Depth *before* each character, so a file-scope `{` sits at depth 0."""
+    depths = []
+    d = 0
+    for ch in s:
+        depths.append(d)
+        if ch == "{":
+            d += 1
+        elif ch == "}":
+            d = max(0, d - 1)
+    depths.append(d)
+    return depths
+
+
+# ---------------------------------------------------------------------------
+# Rule 1: no call inside a log argument list
+# ---------------------------------------------------------------------------
+def check_calls(src, stripped):
     findings = []
     for m in LOG_RE.finditer(stripped):
-        macro = stripped[m.start():m.end() - 1].strip()
+        macro = m.group(1)
         args, _ = balanced(stripped, m.end() - 1)
-        for c in CALL_RE.finditer(args):
+        parts = split_args(args)[LOG_MACROS[macro]:]
+        for c in CALL_RE.finditer(",".join(parts)):
             name = c.group(1)
-            if name in C_KEYWORDS or name in ALLOWLIST:
+            if name in C_KEYWORDS or name in ALLOWLIST or MACRO_RE.match(name):
                 continue
             findings.append((line_of(src, m.start()), macro, name))
     return findings
 
 
-ASSIGN_RE = re.compile(r"\b([sg]_[A-Za-z0-9_]*)\s*(?:\+\+|--|[-+*/%|&^]?=(?!=))")
-INCDEC_RE = re.compile(r"(\+\+|--)")
+# ---------------------------------------------------------------------------
+# Rule 2: an allowlisted repo-local formatter must stay a pure formatter
+# ---------------------------------------------------------------------------
+ATTR_ONLY_RE = re.compile(r"^\s*(?:__attribute__\s*\(\(.*?\)\)\s*)*$", re.S)
+
+
+def classify(stripped, rparen):
+    """What follows a parameter list: 'definition', 'prototype', or None.
+
+    None means "this looked like a file-scope signature but could not be
+    classified" -- which is reported rather than skipped.  The first version of
+    this file looked for `{` in a fixed 40-character window and silently
+    treated anything else as a call; a trailing comment longer than forty
+    characters was enough to make a poisoned definition pass.
+    """
+    brace = stripped.find("{", rparen + 1)
+    semi = stripped.find(";", rparen + 1)
+    if semi >= 0 and (brace < 0 or semi < brace):
+        return "prototype", -1
+    if brace < 0:
+        return None, -1
+    if not ATTR_ONLY_RE.match(stripped[rparen + 1:brace]):
+        return None, -1
+    return "definition", brace
+
+
+def statements(body):
+    """Split a function body into statements, keeping each one's offset."""
+    out = []
+    start = 0
+    for i, ch in enumerate(body):
+        if ch in ";{}":
+            out.append((start, body[start:i]))
+            start = i + 1
+    out.append((start, body[start:]))
+    return [(o, t) for o, t in out if t.strip()]
+
+
+def lvalue_of(stmt, op_start):
+    """The assignment target: back to the previous top-level comma."""
+    depth = 0
+    cut = 0
+    for i, ch in enumerate(stmt[:op_start]):
+        if ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            depth -= 1
+        elif ch == "," and depth == 0:
+            cut = i + 1
+    return stmt[cut:op_start]
+
+
+def purity_violations(body):
+    """Everything in `body` that a total pure formatter cannot contain."""
+    bad = []
+    for c in CALL_RE.finditer(body):
+        if c.group(1) not in C_KEYWORDS:
+            bad.append("calls %s()" % c.group(1))
+    if INCDEC_RE.search(body):
+        bad.append("uses ++/--")
+    for _, stmt in statements(body):
+        tokens = re.findall(r"[A-Za-z_][A-Za-z0-9_]*", stmt)
+        first = tokens[0] if tokens else ""
+        if "static" in tokens:
+            bad.append("declares a function-local static")
+        is_decl = first in TYPE_STARTERS or bool(TYPEDEF_RE.match(first))
+        for op in ASSIGN_RE.finditer(stmt):
+            lv = lvalue_of(stmt, op.start()).strip()
+            if "[" in lv or "." in lv or "->" in lv or lv.startswith("*"):
+                # An indexed, member or pointer write. This is the shape the
+                # naming-convention check used to miss, and it is the single
+                # most likely way one of these functions stops being pure:
+                # "format into a buffer and return a pointer to it".
+                bad.append("writes through `%s`" % " ".join(lv.split()))
+            elif not is_decl:
+                bad.append("assigns to `%s`" % " ".join(lv.split()))
+    return sorted(set(bad))
 
 
 def check_definitions(path, src, stripped):
-    """Re-verify that repo-local allowlist entries are still pure formatters.
-
-    A cheap tripwire, not a proof: it fires whenever the defining file is
-    touched, which is the moment a side effect would be introduced. A body
-    that calls nothing, increments nothing and assigns to no file-scope
-    (`s_`/`g_`) object cannot do I/O, cannot mutate module state, and cannot
-    recurse into something that does.
-    """
     findings = []
+    depths = brace_depths(stripped)
+    seen = set()
     for name in sorted(REPO_LOCAL):
         for m in re.finditer(r"\b" + re.escape(name) + r"\s*\(", stripped):
+            if depths[m.start()] != 0:
+                continue  # inside a function body: a call, not a signature
             _, rparen = balanced(stripped, m.end() - 1)
-            tail = stripped[rparen + 1:rparen + 40]
-            if not tail.lstrip().startswith("{"):
-                continue  # a call or a prototype, not a definition
-            brace = rparen + 1 + len(tail) - len(tail.lstrip())
+            kind, brace = classify(stripped, rparen)
+            if kind == "prototype":
+                seen.add(name)
+                continue
+            if kind is None:
+                findings.append((
+                    line_of(src, m.start()), name,
+                    ["could not be classified as a definition or a prototype, "
+                     "so its body was NEVER CHECKED"],
+                ))
+                seen.add(name)
+                continue
+            seen.add(name)
             body, _ = balanced(stripped, brace)
-            bad = []
-            for c in CALL_RE.finditer(body):
-                if c.group(1) not in C_KEYWORDS:
-                    bad.append("calls %s()" % c.group(1))
-            if INCDEC_RE.search(body):
-                bad.append("uses ++/--")
-            for a in ASSIGN_RE.finditer(body):
-                bad.append("assigns to %s" % a.group(1))
+            bad = purity_violations(body)
             if bad:
-                findings.append((line_of(src, m.start()), name, sorted(set(bad))))
+                findings.append((line_of(src, m.start()), name, bad))
+
+    # The backstop: if this is the file that is supposed to define one of them
+    # and no signature was found at file scope at all, say so.
+    norm = os.path.normpath(path).replace(os.sep, "/")
+    for name, expected in REPO_LOCAL.items():
+        if norm.endswith(expected) and name not in seen:
+            findings.append((
+                1, name,
+                ["is allowlisted and recorded as defined in %s, but no "
+                 "file-scope definition was found there" % expected],
+            ))
     return findings
 
 
@@ -264,7 +472,8 @@ CALL_HELP = """\
     compiled out the guard is `if (0)` and the argument is NEVER EVALUATED --
     on the device, not only on host. Whether this call runs is therefore a
     Kconfig value (CONFIG_LOG_MAXIMUM_LEVEL), and nothing in the suite or the
-    differential sweep can see the difference.
+    differential sweep can see the difference. The esp_check.h macros forward
+    their format arguments into ESP_LOGE and behave the same way.
 
     Fix: hoist it to a local computed BEFORE the log statement.
 
@@ -272,12 +481,14 @@ CALL_HELP = """\
         ESP_LOGI(TAG, "state %d", (int)st);
 
     If the local ends up consumed only by the log, add `(void)st;` -- the
-    host log stubs discard their varargs, so it would otherwise be
-    set-but-unused under -Wall.
+    host log stubs discard their varargs, so it would otherwise be an
+    unused variable under -Wall.
 
     If the callee is a TOTAL, SIDE-EFFECT-FREE FORMATTER (an enum -> string
     mapper, like esp_err_to_name), add it to ALLOWLIST in
-    scripts/check-log-args.py together with a written justification."""
+    scripts/check-log-args.py together with a written justification. Do NOT
+    add anything else there: a pure MACRO needs no entry (ALL_CAPS names are
+    already exempt), and a state read belongs in a local."""
 
 DEF_HELP = """\
     This function is on the ALLOWLIST in scripts/check-log-args.py, which lets
@@ -299,6 +510,21 @@ def iter_default_files():
                     yield os.path.join(dirpath, fn)
 
 
+def scan(path):
+    """Findings for one file, as printable blocks."""
+    with open(path, "r", encoding="utf-8", errors="replace") as fh:
+        src = fh.read()
+    stripped = strip_noise(src)
+    blocks = []
+    for line, macro, name in check_calls(src, stripped):
+        blocks.append("%s:%d: function call `%s()` inside an %s argument list\n%s"
+                      % (path, line, name, macro, CALL_HELP))
+    for line, name, bad in check_definitions(path, src, stripped):
+        blocks.append("%s:%d: allowlisted log formatter `%s()` %s\n%s"
+                      % (path, line, name, "; ".join(bad), DEF_HELP))
+    return blocks
+
+
 def main(argv):
     paths = argv[1:] or sorted(iter_default_files())
     total = 0
@@ -306,29 +532,18 @@ def main(argv):
         if not path.endswith((".c", ".h")):
             continue
         try:
-            with open(path, "r", encoding="utf-8", errors="replace") as fh:
-                src = fh.read()
+            blocks = scan(path)
         except OSError as exc:
             print("%s: cannot read (%s)" % (path, exc), file=sys.stderr)
             total += 1
             continue
-        stripped = strip_noise(src)
-
-        for line, macro, name in check_calls(path, src, stripped):
+        for b in blocks:
             total += 1
-            print("\n%s:%d: function call `%s()` inside an %s argument list"
-                  % (path, line, name, macro))
-            print(CALL_HELP)
-
-        for line, name, bad in check_definitions(path, src, stripped):
-            total += 1
-            print("\n%s:%d: allowlisted log formatter `%s()` is no longer pure: %s"
-                  % (path, line, name, "; ".join(bad)))
-            print(DEF_HELP)
+            print("\n" + b)
 
     if total:
-        print("\n%d finding(s). See HAZ-1 in docs/planning/refactor.bugdiscoveries.md."
-              % total)
+        print("\n%d finding(s). See HAZ-1 in "
+              "docs/planning/implemented/20260818.bugregister.closed.md." % total)
         return 1
     return 0
 

@@ -43,8 +43,10 @@ bool timer_persist_try_restore(time_t now) {
     if (!timer_restore_snapshot(&snap, now))
         return false;
     /* Hoisted out of the log argument (HAZ-1). The (void) is not
-       decoration: the host stub above discards its varargs, which would
-       leave this set-but-unused under -Wall. */
+       decoration: the host stub above discards its varargs, so `st` would
+       have no reader at all here and -Wall would report it as an unused
+       variable. On device the compiled-out form still references it, so
+       the cast is for the host build alone. */
     const timer_state_t st = timer_get_state();
     (void)st;
     ESP_LOGW(TAG, "Timer state restored from NVS snapshot, state=%d", (int)st);
