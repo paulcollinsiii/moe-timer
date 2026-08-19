@@ -46,6 +46,21 @@ repos:
         files: \.(c|h)$
         exclude: ^(build/|\.pio/)
 
+  # ── Log-argument hazard (HAZ-1) ───────────────────────────────────────────────
+  # ESP_LOGx wraps its ARGUMENTS in a compile-time level guard, so a call left
+  # inside one stops executing entirely once the level is compiled out — on the
+  # device, not only on host. Nothing else here can see that: the host log stubs
+  # discard their varargs too, and the differential sweep compares two host
+  # builds. The scanner carries the allowlist and the reasoning.
+  - repo: local
+    hooks:
+      - id: no-calls-in-log-args
+        name: no function calls in ESP_LOGx arguments
+        language: script
+        entry: scripts/check-log-args.py
+        files: \.(c|h)$
+        exclude: ^(build/|\.pio/)
+
   # ── Commit message format ─────────────────────────────────────────────────────
   - repo: local
     hooks:

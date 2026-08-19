@@ -71,19 +71,16 @@ typedef enum {
 } esp_sleep_source_t;
 #define BIT(nr) (1UL << (nr))
 
-/* These discard their varargs, so ANY function call made inside a log
-   argument is invisible to every host test — it is never evaluated here.
-   SEVEN call sites exist today, and every one is a verified pure read:
-     - timer_active_slot()          x2 (the break-over snap, the Button C swap)
-     - timer_get_state()               (the join poll's "state %d -> %d")
-     - timer_get_state()               (the post-action render's "state %d -> %d")
-     - timer_run_accum(now)            (the break gate's accrual)
-     - timer_current_date()            (the day rollover)
-     - battery_percent_from_mv(mv)     (the state assembly's battery line)
-   Before putting an eighth call in a log line, check it has no side
-   effect AND update the list above: a state change smuggled in as a %d
-   argument would run on device and be unobservable in the suite, and an
-   enumeration nobody maintains is what lets that happen unnoticed. */
+/* These discard their varargs, which is only half the story: on DEVICE
+   ESP_LOGx also wraps its arguments in a compile-time level guard, so a
+   call left in a log argument stops being executed there too as soon as
+   the level is compiled out. Host and device agree by accident, which is
+   why no test and no differential sweep can see it.
+   The census that used to live here — seven pure reads, maintained by
+   hand, and never propagated to the other files that needed it — has been
+   replaced by scripts/check-log-args.py, which refuses the whole class at
+   pre-commit time and carries the allowlist. There is nothing to keep in
+   step here any more: put a call in a log argument and the hook says so. */
 #define ESP_LOGD(tag, ...) ((void)(tag))
 #define ESP_LOGI(tag, ...) ((void)(tag))
 #define ESP_LOGW(tag, ...) ((void)(tag))
@@ -164,12 +161,19 @@ static void render_action_result(button_id_t btn, timer_state_t before, time_t n
 
    Unchanged by the move APART FROM THE LOG TAG: the debug line below used
    to print under main.c's TAG="main" and now prints under "wake_flow".
-   Serial output only. Its battery_percent_from_mv() call is the seventh
-   entry in the log-vararg census at the top of this file — the host build
-   discards it, so it must stay a pure read. */
+   Serial output only. */
 static display_state_t make_display_state(int32_t remaining, time_t now) {
     int mv = battery_read_mv();
-    ESP_LOGD(TAG, "battery: %d mV (%d%%)", mv, battery_percent_from_mv(mv));
+    /* Hoisted out of the ESP_LOGD argument (HAZ-1). This one is the live
+       case, not the hypothetical: CONFIG_LOG_MAXIMUM_LEVEL is INFO, so the
+       call inside the argument list was already not running on the device.
+       Hoisting makes the conversion happen unconditionally — a real
+       behaviour change, in the safe direction (a pure integer map that now
+       runs where it previously did not), and the only way the line means
+       what it says at any log level. */
+    const int batt_pct = battery_percent_from_mv(mv);
+    (void)batt_pct; /* the host stub discards its varargs */
+    ESP_LOGD(TAG, "battery: %d mV (%d%%)", mv, batt_pct);
     app_state_in_t in = {
         .batt_mv = mv,
         .parent_testing = PARENT_TESTING,
@@ -239,6 +243,10 @@ static int ota_batt_pct(void) {
     return (mv <= 0) ? -1 : battery_percent_from_mv(mv);
 }
 
+/* ALLOWLISTED in scripts/check-log-args.py — see the note on
+   ota_policy_reason_str(). Must stay a pure enum -> string literal map.
+   Note the allowlist covers THIS function only: esp_reset_reason(), which
+   reads a hardware register, is hoisted at both of its log sites. */
 const char *wake_flow_reset_reason_str(esp_reset_reason_t reason) {
     switch (reason) {
         case ESP_RST_DEEPSLEEP:
@@ -315,7 +323,11 @@ bool wake_flow_break_end(void) {
        timer, which suppressed the chime above. */
     int interrupted = timer_break_interrupted_slot();
     if (timer_active_slot() != interrupted && timer_select_interrupted()) {
-        ESP_LOGI(TAG, "Break over: chimed, selection back to slot %d", timer_active_slot());
+        /* Read AFTER the select — the log reports where selection landed,
+           not where it started — and outside the argument list (HAZ-1). */
+        const int selected = timer_active_slot();
+        (void)selected;
+        ESP_LOGI(TAG, "Break over: chimed, selection back to slot %d", selected);
     } else {
         ESP_LOGI(TAG, "Break over: chimed");
     }
@@ -426,7 +438,9 @@ bool wake_flow_dispatch_button_action(button_id_t btn, time_t *now, timer_state_
                the full-screen inversion. Overwriting it made those
                renders partial, which ghosts the panel. */
             if (timer_select_next()) {
-                ESP_LOGI(TAG, "button C: selected slot %d", timer_active_slot());
+                const int selected = timer_active_slot(); /* after the swap */
+                (void)selected;
+                ESP_LOGI(TAG, "button C: selected slot %d", selected);
                 *selection_changed = true;
                 return true;
             }
@@ -479,7 +493,9 @@ bool wake_flow_poll_button_a_action(void) {
     (void)st;
     if (button_a_apply(hal_time_now()) == BTN_A_NONE)
         return false;
-    ESP_LOGI(TAG, "button A during join: state %d -> %d", (int)st, (int)timer_get_state());
+    const timer_state_t after = timer_get_state(); /* post-apply half of the pair */
+    (void)after;
+    ESP_LOGI(TAG, "button A during join: state %d -> %d", (int)st, (int)after);
     status_led_show_timer_state();
     return true;
 }
@@ -545,7 +561,11 @@ bool wake_flow_maybe_start_break(time_t now) {
         ESP_LOGW(TAG, "Screen break due but would cross bed time");
         lock_gate_bedtime_engage(now, true); /* no return */
     }
-    ESP_LOGI(TAG, "Screen break due (accum %ld s)", (long)timer_run_accum(now));
+    /* Before timer_start_break() rebases the balance, and outside the log
+       argument list (HAZ-1). */
+    const int32_t accum = timer_run_accum(now);
+    (void)accum;
+    ESP_LOGI(TAG, "Screen break due (accum %ld s)", (long)accum);
     timer_start_break(now, (int32_t)duration_min * 60);
     timer_persist_save();
     paint_break_started(now); /* blue LED through the inverted SCREEN BREAK refresh */
@@ -591,7 +611,9 @@ void wake_flow_handle_day_rollover(time_t *now) {
     /* last_date + wall time in the log: if a rollover ever fires when the
        date has NOT actually changed, this pinpoints why (bad stored date
        vs. stepped clock). */
-    ESP_LOGW(TAG, "Day rollover (last_date='%s', now=%lld)", timer_current_date(), (long long)*now);
+    const char *last_date = timer_current_date();
+    (void)last_date;
+    ESP_LOGW(TAG, "Day rollover (last_date='%s', now=%lld)", last_date, (long long)*now);
     queue_rollover_summary();    /* yesterday's stats, before any reset */
     mqtt_ha_queue_bonus_clear(); /* clear the retained HA bonus target this window */
     /* The update check rides the window opened on the next line, so the
@@ -817,14 +839,20 @@ static void render_action_result(button_id_t btn, timer_state_t before, time_t n
     /* Button D is the user-facing "refresh everything" button — it always
        gets a real full refresh regardless of the render policy. */
     bool force_full = (btn == BTN_D);
-    wake_render_t bwr =
-        wake_policy_render(before, timer_get_state(), true, wake_flow_break_ended_this_wake(), selection_changed);
+    /* One read feeds both the policy call and the log below. It has to
+       leave the log argument list anyway (HAZ-1); sharing it with the
+       policy call is the version that also guarantees the line reports the
+       state the policy actually saw. Safe because wake_policy_render() and
+       wake_flow_break_ended_this_wake() are both pure reads, so nothing
+       between the two former call sites could have moved the state. */
+    const timer_state_t after = timer_get_state();
+    wake_render_t bwr = wake_policy_render(before, after, true, wake_flow_break_ended_this_wake(), selection_changed);
     if (bwr == WAKE_RENDER_EXPIRY_ALERT) {
         wake_flow_fire_expiry_alert(); /* alert owns the NeoPixels (red pulse) */
     } else {
         /* Includes EXPIRED: any button returns the display to the main
            layout (empty bar, TIME'S UP state). */
-        ESP_LOGI(TAG, "button %d: state %d -> %d, %s refresh", (int)btn, (int)before, (int)timer_get_state(),
+        ESP_LOGI(TAG, "button %d: state %d -> %d, %s refresh", (int)btn, (int)before, (int)after,
                  (force_full || bwr == WAKE_RENDER_FULL) ? "full" : "partial");
         status_led_show_timer_state(); /* resulting state, lit until sleep */
         if (force_full || bwr == WAKE_RENDER_FULL) {

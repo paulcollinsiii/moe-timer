@@ -100,7 +100,8 @@ void enter_deep_sleep(wake_sleep_mode_t mode) {
     /* Late-wake forensics repeat: the boot-time log of this line is often
        lost to USB CDC re-enumeration; by sleep entry the console has had
        the whole wake to come up. */
-    ESP_LOGI(TAG, "this boot: reset %s", wake_flow_reset_reason_str(esp_reset_reason()));
+    const esp_reset_reason_t rst = esp_reset_reason();
+    ESP_LOGI(TAG, "this boot: reset %s", wake_flow_reset_reason_str(rst));
     /* Never sleep with the network task alive: it holds WiFi and may be
        mid-publish. Normal paths finished the window already (no-op here);
        this covers cut-short paths. Bounded — on the failsafe path the
@@ -476,13 +477,15 @@ void app_main(void) {
     /* Heap headroom check: the LED + network task stacks now ride
        alongside WiFi and the LVGL framebuffer — regressions show up here
        long before an alloc fails in the field. */
-    ESP_LOGI(TAG, "free heap after init: %lu B (min ever %lu B)", (unsigned long)esp_get_free_heap_size(),
-             (unsigned long)esp_get_minimum_free_heap_size());
+    const uint32_t heap_free = esp_get_free_heap_size();
+    const uint32_t heap_min = esp_get_minimum_free_heap_size();
+    ESP_LOGI(TAG, "free heap after init: %lu B (min ever %lu B)", (unsigned long)heap_free, (unsigned long)heap_min);
 
     uint32_t causes = esp_sleep_get_wakeup_causes();
     /* Reset reason distinguishes a real cold boot from an external reset
        (e.g. monitor DTR/RTS) — both report wake cause UNDEFINED. */
-    ESP_LOGI(TAG, "Wakeup causes: 0x%08lx, reset reason: %d", (unsigned long)causes, (int)esp_reset_reason());
+    const esp_reset_reason_t reset_reason = esp_reset_reason();
+    ESP_LOGI(TAG, "Wakeup causes: 0x%08lx, reset reason: %d", (unsigned long)causes, (int)reset_reason);
 
     /* Battery gate before any wake work: does not return while locked */
     lock_gate_check_charge();

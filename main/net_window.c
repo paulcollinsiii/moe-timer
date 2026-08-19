@@ -117,8 +117,13 @@ static void net_window_task(void *arg) {
     s_last_total_ms = (esp_timer_get_time() - mono_before_us) / 1000;
     ESP_LOGI(TAG, "window: wifi %lld ms, sntp %lld ms, mqtt %lld ms, total %lld ms", (long long)wifi_ms,
              (long long)sntp_ms, (long long)mqtt_ms, (long long)s_last_total_ms);
-    /* Stack sizing evidence (ESP-IDF watermark is in bytes) */
-    ESP_LOGI(TAG, "net task stack floor: %u B free", (unsigned)uxTaskGetStackHighWaterMark(NULL));
+    /* Stack sizing evidence (ESP-IDF watermark is in bytes). Read into a
+       local rather than left in the log argument: an argument is not
+       evaluated at a level where the statement is compiled out (HAZ-1), and
+       a stack floor that silently stops being sampled when someone trims the
+       log level is the worst way to lose this number. */
+    const UBaseType_t stack_floor = uxTaskGetStackHighWaterMark(NULL);
+    ESP_LOGI(TAG, "net task stack floor: %u B free", (unsigned)stack_floor);
     xSemaphoreGive(s_window_done);
     vTaskDelete(NULL);
 }

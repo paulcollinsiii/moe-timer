@@ -56,7 +56,8 @@ static void ota_apply_task(void *arg) {
        which is the pessimistic one anyway: it has been through the
        manifest-sized TLS session, the repaint, and however many chunks
        landed before the failure. */
-    ESP_LOGI(TAG, "ota task stack floor: %u B free", (unsigned)uxTaskGetStackHighWaterMark(NULL));
+    const UBaseType_t stack_floor = uxTaskGetStackHighWaterMark(NULL);
+    ESP_LOGI(TAG, "ota task stack floor: %u B free", (unsigned)stack_floor);
     xSemaphoreGive(done);
     vTaskDelete(NULL);
 }

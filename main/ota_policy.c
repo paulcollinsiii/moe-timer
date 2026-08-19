@@ -42,6 +42,11 @@ static const char *const REASON_STR[OTA_REASON_COUNT] = {
     [OTA_REASON_ROLLED_BACK] = "rolled_back",
 };
 
+/* ALLOWLISTED in scripts/check-log-args.py, which means this is called
+   directly inside ESP_LOGx argument lists — where it may not be evaluated
+   at all. Keep it a total, side-effect-free enum -> string literal map:
+   no calls, no state, no I/O. The scanner re-checks that on every commit
+   that touches this file. */
 const char *ota_policy_reason_str(ota_reason_t reason) {
     /* One cast, not a `reason < 0 ||` half-guard: the enum has no
        negative enumerators so GCC gives it an unsigned type, which makes

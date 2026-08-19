@@ -33,6 +33,8 @@ ota_redirect_t ota_url_redirect_check(const char *location, int redirects_done, 
     return OTA_REDIRECT_FOLLOW;
 }
 
+/* ALLOWLISTED in scripts/check-log-args.py — see the note on
+   ota_policy_reason_str(). Must stay a pure enum -> string literal map. */
 const char *ota_url_redirect_str(ota_redirect_t r) {
     switch (r) {
         case OTA_REDIRECT_FOLLOW:

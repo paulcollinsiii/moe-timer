@@ -538,8 +538,10 @@ bool ota_download_begin(const char *url, ota_error_facts_t *facts) {
         return false;
     }
 
-    ESP_LOGI(TAG, "downloading %.32s (%d bytes, %d redirect(s))", desc.version, esp_https_ota_get_image_size(s_dl),
-             s_dl_ctx.redirects);
+    /* Hoisted out of the log argument list (HAZ-1): inside it, the size
+       query would not run at all at a compiled-out level. */
+    const int image_size = esp_https_ota_get_image_size(s_dl);
+    ESP_LOGI(TAG, "downloading %.32s (%d bytes, %d redirect(s))", desc.version, image_size, s_dl_ctx.redirects);
     return true;
 }
 

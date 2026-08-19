@@ -84,8 +84,14 @@ void lock_gate_check_charge(void) {
 
 void lock_gate_bedtime_engage(time_t now, bool alert) {
     s_bedtime_locked = true;
-    ESP_LOGW(TAG, "Bed time engaged (state %d%s)", (int)timer_get_state(), alert ? ", alerting" : "");
-    if (timer_get_state() == TIMER_RUNNING) {
+    /* Read once, into a local, BEFORE the log rather than inside its
+       argument list: ESP_LOGx wraps its arguments in a compile-time level
+       guard, so an inline call stops happening entirely at a level where
+       the statement is compiled out (HAZ-1). The local also collapses what
+       were two reads of the same state into one. */
+    const timer_state_t st = timer_get_state();
+    ESP_LOGW(TAG, "Bed time engaged (state %d%s)", (int)st, alert ? ", alerting" : "");
+    if (st == TIMER_RUNNING) {
         timer_pause(now);
     }
     timer_persist_save();
