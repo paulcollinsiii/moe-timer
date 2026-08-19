@@ -68,9 +68,14 @@ asymmetric — a per-field set is one-shot by design. That is sound for the time
 fields today, because the document can now express all of them and no longer
 overrides by omission. R2 is what keeps it sound for the next field.
 
-**R3 — no side-effecting call in a log-statement argument.** Log arguments are
-evaluated conditionally at compile time on device as well as host (see HAZ-1),
-so a side effect placed there is a Kconfig value away from disappearing.
+**R3 — no function call at all in a log-statement argument.** Log arguments
+are evaluated conditionally at compile time on device as well as host, so a
+side effect placed there is a Kconfig value away from disappearing. The rule is
+deliberately stronger than "no *side-effecting* call": purity is a judgement,
+and a judgement made once per call site is the thing that failed here. It is
+enforced by `scripts/check-log-args.py` from pre-commit, which also carries the
+allowlist of pure formatters and the argument for each entry. See HAZ-1 in the
+closed archive.
 
 **R4 — a `TIMER_DEFS_BLOB_VERSION` bump must ship its migration in the same
 firmware image.** This is not a style preference; it is what makes a migration
@@ -185,11 +190,10 @@ constraint remains; everything else is independent and can be reordered freely.
 | # | Item | Why here | Blocked by |
 |---|---|---|---|
 | 0 | **S1 + S2 smoke tests** | The only item that needs the device. Two merged fixes stay unconfirmed until it happens, and everything below is engineering time that can proceed in parallel | a USB flash, then an OTA |
-| 1 | **HAZ-1** — calls inside log-statement arguments | Mechanical, closes a whole class, touches nothing else | — |
-| 2 | **BUG-7** — a RUNNING slot outliving its own definition | State-machine change to an uncovered path; independent | — |
-| 3 | **BUG-2**, then **BUG-3** | Same latch/mask surface — fix together so each is checked against the other. Both need a re-baselined sweep to show the fix changed *only* the intended cases. | — |
-| 4 | **BUG-5** — the v1→v2 migration | Only bites on a version bump, and **R4** means it has to be written *before* one rather than after. Nothing in flight bumps the version, which is why it sits last. | — |
-| — | **BUG-1** | **Parked 2026-08-07.** Settling its fork needs an instrumented build run on hardware, which is reporter time rather than engineering time. Revisit after item 3: BUG-2's fix touches the same latch surface and may move the ground under it. | — |
+| 1 | **BUG-7** — a RUNNING slot outliving its own definition | State-machine change to an uncovered path; independent | — |
+| 2 | **BUG-2**, then **BUG-3** | Same latch/mask surface — fix together so each is checked against the other. Both need a re-baselined sweep to show the fix changed *only* the intended cases. | — |
+| 3 | **BUG-5** — the v1→v2 migration | Only bites on a version bump, and **R4** means it has to be written *before* one rather than after. Nothing in flight bumps the version, which is why it sits last. | — |
+| — | **BUG-1** | **Parked 2026-08-07.** Settling its fork needs an instrumented build run on hardware, which is reporter time rather than engineering time. Revisit after item 2: BUG-2's fix touches the same latch surface and may move the ground under it. | — |
 
 **Constraint — BUG-2 and BUG-3 together.** They share a root shape and both
 touch button-latch masks; a fix for either must be checked against the other
@@ -608,116 +612,6 @@ powered-off gap.
 
 ---
 
-## HAZ-1 — function calls inside log-statement arguments
-
-**Status:** HAZARD — no defect today (all call sites verified pure) · **Found:**
-2026-08-07 · **Rescoped 2026-08-07** after the device-side behaviour was checked
-
-Originally filed as a host-build artifact: the host log stub discards its
-varargs, so a call inside a log argument is not evaluated on host. That framing
-was too narrow and let the risk read as a testing quirk. It is not.
-
-### The actual rule: log arguments are conditionally evaluated *on device too*
-
-`ESP_LOGx` expands through `ESP_LOG_LEVEL_LOCAL`, which wraps the entire call —
-**arguments included** — in a compile-time conditional:
-
-```c
-#define ESP_LOG_LEVEL_LOCAL(configs, tag, format, ...) \
-    do { if (ESP_LOG_ENABLED(configs)) { ESP_LOG_LEVEL(...); } } while(0)
-/* esp_log.h:157 */
-
-#define ESP_LOG_ENABLED(configs) (LOG_LOCAL_LEVEL >= ESP_LOG_GET_LEVEL(configs))
-/* esp_log_level.h:73 — a compile-time constant */
-```
-
-When the level is disabled the guard is `if (0)` and **the argument expressions
-are never evaluated on the device**. A call placed there is not "a call that
-might get optimised out one day" — it is a call whose execution is a function of
-a Kconfig value.
-
-### This is already active, not hypothetical
-
-`sdkconfig` sets `CONFIG_LOG_MAXIMUM_LEVEL=3` (INFO), so `ESP_LOGD` and
-`ESP_LOGV` are compiled out **today**. `main/wake_flow.c:164` is an `ESP_LOGD`
-whose argument list calls `battery_percent_from_mv(mv)` — **that call does not
-happen on the device as shipped.** It is pure, so nothing is currently wrong;
-but the mechanism is live, not waiting for anyone to change a flag.
-
-Lowering `CONFIG_LOG_MAXIMUM_LEVEL` to WARN — an entirely routine size/power
-change on a battery device — silently extends the same treatment to all five
-`ESP_LOGI` sites below. Lowering it to ERROR takes the four `ESP_LOGW` sites too.
-
-### Why nothing would catch it
-
-The host stubs are of the form
-
-```c
-#define ESP_LOGI(tag, ...) ((void)(tag))
-```
-
-which discards the varargs, so host and device happen to **agree** — by
-accident, and only while the level is disabled. Worse, the differential sweep
-cannot see the difference either, because both sides of the comparison are host
-builds. A side-effecting call in a log argument is a divergence with **no
-detector anywhere in the project**.
-
-### Census — verified mechanically
-
-Re-counted with comments and string literals stripped, so format-string words
-like `"...unavailable("` do not register as calls.
-
-Stubs are defined in **five** files: `main/wake_flow.c:85-87`,
-`main/alerts.c:41-42`, `main/net_apply.c:18-19`, `main/timer_persist.c:16`,
-`main/lock_gate.c:21`. (`alerts.c` and `net_apply.c` carry stubs but no
-calls-in-arguments, so they are exposure-free today.)
-
-**Ten** call sites, **six** distinct callees, all verified pure reads:
-
-| Site | Level | Call | Evaluated on device today? |
-|---|---|---|---|
-| `main/wake_flow.c:164` | D | `battery_percent_from_mv(mv)` | **no — already compiled out** |
-| `main/wake_flow.c:267` | I | `timer_active_slot()` | yes |
-| `main/wake_flow.c:378` | I | `timer_active_slot()` | yes |
-| `main/wake_flow.c:431` | I | `timer_get_state()` | yes |
-| `main/wake_flow.c:497` | I | `timer_run_accum(now)` | yes |
-| `main/wake_flow.c:543` | W | `timer_current_date()` | yes |
-| `main/wake_flow.c:766` | I | `timer_get_state()` | yes |
-| `main/timer_persist.c:33` | W | `esp_err_to_name(ret)` | yes |
-| `main/timer_persist.c:45` | W | `timer_get_state()` | yes |
-| `main/lock_gate.c:87` | W | `timer_get_state()` | yes |
-
-`wake_flow.c` carries a maintained census comment for exactly this reason and it
-is accurate. `timer_persist.c` and `lock_gate.c` carry **none** — and that is the
-real finding here. The discipline protecting against this exists in one of the
-three files that need it, which means it is not a discipline, it is a habit that
-did not propagate.
-
-### Recommended fix — a bright line, not a better census
-
-**Rule: no function call in a log-statement argument list, except an
-allowlisted pure formatter (`esp_err_to_name` and friends).** Hoist the rest to
-a local computed before the log statement.
-
-Enforce it with a checked-in scanner run from pre-commit — the
-comment-and-string-stripping scanner used for the census above is most of it
-already. Cost is roughly nine mechanical edits and one hook.
-
-The alternative — keep the calls, extend `wake_flow.c`'s census comment to the
-other two files, and require a purity judgement per addition — is cheaper now
-and is what the code does today. It is not recommended: it has already been
-tried implicitly and failed to reach two of three files, and it asks every
-future contributor to reason about compile-time argument evaluation correctly.
-A bright line asks nobody to reason about anything.
-
-**Wrinkle the fix must handle:** hoisting a value consumed only by a
-compiled-out log makes it set-but-unused, which `-Wall` will flag —
-`main/wake_flow.c:164`'s `ESP_LOGD` is exactly this case. Pair each hoist with a
-`(void)` or scope it to levels that are not compiled out; do not discover this
-halfway through and quietly revert the rule.
-
----
-
 ## Closed — moved to the archive
 
 Full detail, and the reasoning behind each, is in
@@ -734,6 +628,12 @@ once its comments are reworded.
   `test/test_config_apply/test_config_apply.c:334`. The durable lesson is **R2**.
 * **Build hardening** — `-Werror=unused-function` re-armed per-target on `main`
   and `components/ssd1680`. `1865a3f`.
+* **HAZ-1** — a function call in an `ESP_LOGx` argument list is now refused by
+  `scripts/check-log-args.py` at pre-commit, and the sixteen that existed were
+  hoisted to locals. `68121a8`. Named by the anchor comments on the three
+  allowlisted formatters (`main/ota_policy.c`, `main/ota_url.c`,
+  `main/wake_flow.c`) and by the hoist comments in seven files. The durable
+  lesson is **R3**.
 * **BUG-8** — losing the timer-defs blob no longer cements a Kconfig
   `break_eligible`. `ad62dff` `858d41e` `de21436` `10745de`. Named by
   `main/main.c:309` and `docs/planning/ota.plan.md:2070`. **Not finished:
