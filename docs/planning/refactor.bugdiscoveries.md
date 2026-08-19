@@ -106,6 +106,18 @@ first real OTA payload, so a failure is ambiguous until S2's item 4 has passed
 at least once. Flash the base image over USB and confirm a plain OTA works
 before reading anything into S1's results.
 
+**Field status 2026-08-19 — the coupling is discharged.** The BUG-8 fix was
+delivered to the device *by OTA* and is running correctly so far. That single
+event settles the ambiguity above: the OTA chain carried a real payload
+end-to-end, so S1's results can now be read at face value. It is not a pass for
+either row yet — S2 still owes the rest of its 16-item list, and S1's decisive
+check has not happened. **What is outstanding is the day rollover**, which is
+when an HA-configured table either stays set or reverts; that is S1.1 and S1.3
+observed in the field rather than provoked on a bench. Until that rollover is
+seen, "working correctly" means nothing has gone visibly wrong, which is the
+expected reading of a device that has not yet crossed the boundary the defect
+lived on.
+
 ### S1 — the checks, most dangerous first
 
 **S1.1 — an existing blob still reads.** This is the one that would be
