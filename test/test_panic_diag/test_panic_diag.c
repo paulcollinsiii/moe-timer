@@ -341,6 +341,136 @@ void test_the_ota_hypothesis_is_answerable_from_the_published_phase_alone(void) 
     TEST_ASSERT_NOT_EQUAL(0, strcmp(a.panic_phase, b.panic_phase));
 }
 
+void test_every_phase_pair_fits_the_published_field(void) {
+    /* The _Static_assert in panic_diag.c compares two hardcoded literals
+       and therefore does NOT catch a longer phase name being added — see
+       the comment above it. This walks the real table instead, so adding
+       PANIC_PHASE_OTA_ROLLBACK ("OTA_ROLLBACK_CHECK") fails HERE rather
+       than shipping a label snprintf-truncated to something that still
+       reads like a valid phase in HA. */
+    for (int m = 0; m < PANIC_PHASE__COUNT; m++) {
+        for (int n = 0; n < PANIC_PHASE__COUNT; n++) {
+            char buf[DIAG_PHASE_MAX];
+            const int want = panic_diag_phase_label(buf, sizeof(buf), (uint8_t)m, (uint8_t)n);
+            /* snprintf answers what it WOULD have written. Equal to the
+               buffer size is already truncation. */
+            TEST_ASSERT_TRUE_MESSAGE(want < (int)sizeof(buf), "a phase pair no longer fits DIAG_PHASE_MAX - grow it");
+            TEST_ASSERT_EQUAL_INT(want, (int)strlen(buf));
+        }
+    }
+}
+
+void test_the_stored_phase_numbers_are_pinned_because_they_outlive_the_image(void) {
+    /* These values are written to RTC memory AND to an NVS blob, so a
+       field device that panicked under an older image hands them to a
+       newer one. Renumbering the enum decodes those records as the wrong
+       phase — silently, and only on the devices that actually panicked.
+       Append; do not reorder. The name<->symbol tests elsewhere in this
+       file all survive a renumbering, which is why this one exists. */
+    TEST_ASSERT_EQUAL_INT(0, PANIC_PHASE_NONE);
+    TEST_ASSERT_EQUAL_INT(1, PANIC_PHASE_BOOT);
+    TEST_ASSERT_EQUAL_INT(2, PANIC_PHASE_AWAKE);
+    TEST_ASSERT_EQUAL_INT(3, PANIC_PHASE_RENDER);
+    TEST_ASSERT_EQUAL_INT(4, PANIC_PHASE_SLEEP);
+    TEST_ASSERT_EQUAL_INT(5, PANIC_PHASE_NET);
+    TEST_ASSERT_EQUAL_INT(6, PANIC_PHASE_OTA_CHECK);
+    TEST_ASSERT_EQUAL_INT(7, PANIC_PHASE_MQTT);
+    TEST_ASSERT_EQUAL_INT(8, PANIC_PHASE_OTA_DL);
+    TEST_ASSERT_EQUAL_INT(9, PANIC_PHASE__COUNT);
+}
+
+void test_leaving_a_phase_nobody_disturbed_restores_the_outer_one(void) {
+    /* The ordinary render()-inside-AWAKE case, now through the exit
+       path rather than a raw mark. */
+    panic_diag_rec_t r;
+    panic_diag_rec_reset(&r);
+    panic_diag_rec_mark(&r, PANIC_PHASE_AWAKE, PANIC_PHASE_AWAKE, &SAMPLE);
+    panic_diag_rec_mark(&r, PANIC_PHASE_RENDER, PANIC_PHASE_RENDER, &SAMPLE);
+
+    TEST_ASSERT_TRUE(panic_diag_rec_exit(&r, PANIC_PHASE_RENDER, PANIC_PHASE_AWAKE, &SAMPLE));
+    TEST_ASSERT_EQUAL_UINT8(PANIC_PHASE_AWAKE, r.main_phase);
+    TEST_ASSERT_TRUE(panic_diag_rec_valid(&r));
+}
+
+void test_a_late_exit_does_not_put_a_stale_phase_back_over_the_sleep_funnel(void) {
+    /* The awake failsafe fires on the esp_timer task and marks SLEEP
+       while a render() started on ota_dl is still inside its 2-4 s e-ink
+       refresh. When that refresh finally returns, its exit must NOT
+       restore AWAKE: a panic in the sleep funnel would then publish
+       "AWAKE+OTA_DL" and point the reader at the wake handler instead of
+       at the funnel that was actually running. This is the failure the
+       breadcrumb exists to avoid, on the one path where the device is
+       already known to be wedged. */
+    panic_diag_rec_t r;
+    panic_diag_rec_reset(&r);
+    panic_diag_rec_mark(&r, PANIC_PHASE_AWAKE, PANIC_PHASE_AWAKE, &SAMPLE);
+    panic_diag_rec_mark(&r, PANIC_PHASE_OTA_DL, PANIC_PHASE_OTA_DL, &SAMPLE);
+    panic_diag_rec_mark(&r, PANIC_PHASE_RENDER, PANIC_PHASE_RENDER, &SAMPLE); /* ota_dl paints */
+
+    panic_diag_rec_mark(&r, PANIC_PHASE_SLEEP, PANIC_PHASE_SLEEP, &SAMPLE); /* failsafe, other task */
+
+    TEST_ASSERT_FALSE(panic_diag_rec_exit(&r, PANIC_PHASE_RENDER, PANIC_PHASE_AWAKE, &SAMPLE));
+    TEST_ASSERT_EQUAL_UINT8(PANIC_PHASE_SLEEP, r.main_phase);
+    TEST_ASSERT_EQUAL_UINT8(PANIC_PHASE_OTA_DL, r.net_phase);
+
+    diag_stat_t st;
+    panic_diag_fill_stat(&st, 1, &r);
+    TEST_ASSERT_EQUAL_STRING("SLEEP+OTA_DL", st.panic_phase);
+}
+
+void test_a_refused_exit_leaves_the_record_completely_alone(void) {
+    /* Not just the phase: the task that owns the slot now is the one
+       whose uptime and heap should be published, and a late exit has
+       nothing to add. */
+    panic_diag_rec_t r;
+    panic_diag_rec_reset(&r);
+    panic_diag_rec_mark(&r, PANIC_PHASE_RENDER, PANIC_PHASE_RENDER, &SAMPLE);
+    const panic_sample_t owner = {.uptime_ms = 5000, .heap_free = 61000, .stack_free = 3000};
+    panic_diag_rec_mark(&r, PANIC_PHASE_SLEEP, PANIC_PHASE_SLEEP, &owner);
+
+    const panic_sample_t late = {.uptime_ms = 9999, .heap_free = 11111, .stack_free = 77};
+    TEST_ASSERT_FALSE(panic_diag_rec_exit(&r, PANIC_PHASE_RENDER, PANIC_PHASE_AWAKE, &late));
+    TEST_ASSERT_EQUAL_UINT32(5000, r.uptime_ms);
+    TEST_ASSERT_EQUAL_UINT32(61000, r.heap_free);
+    TEST_ASSERT_EQUAL_UINT16(3000, r.stack_main);
+    TEST_ASSERT_TRUE(panic_diag_rec_valid(&r));
+}
+
+void test_an_exit_on_a_record_that_failed_its_guard_rearms_without_restoring(void) {
+    panic_diag_rec_t r;
+    memset(&r, 0xFF, sizeof(r));
+    TEST_ASSERT_FALSE(panic_diag_rec_exit(&r, PANIC_PHASE_RENDER, PANIC_PHASE_AWAKE, &SAMPLE));
+    TEST_ASSERT_TRUE(panic_diag_rec_valid(&r));
+    /* Re-armed, not restored: the phase the corrupt record claimed to
+       hold is not evidence, so AWAKE must not appear. */
+    TEST_ASSERT_EQUAL_UINT8(PANIC_PHASE_NONE, r.main_phase);
+}
+
+void test_the_exit_path_answers_null_rather_than_dereferencing_it(void) {
+    TEST_ASSERT_FALSE(panic_diag_rec_exit(NULL, PANIC_PHASE_RENDER, PANIC_PHASE_AWAKE, &SAMPLE));
+}
+
+void test_a_mark_from_a_task_that_does_not_own_the_slot_leaves_its_stack_alone(void) {
+    /* render() also runs from ota_dl, whose stack is 16 KB against the
+       main task's 7 KB. Writing ota_dl's high-water mark into stack_main
+       publishes a figure the main task cannot physically produce, under
+       a label that says it did. The phase still moves — only the stack
+       figure is withheld. */
+    panic_diag_rec_t r;
+    panic_diag_rec_reset(&r);
+    const panic_sample_t mine = {.uptime_ms = 100, .heap_free = 80000, .stack_free = 2600};
+    const panic_sample_t theirs = {.uptime_ms = 200, .heap_free = 79000, .stack_free = 14200, .stack_foreign = true};
+
+    panic_diag_rec_mark(&r, PANIC_PHASE_AWAKE, PANIC_PHASE_AWAKE, &mine);
+    panic_diag_rec_mark(&r, PANIC_PHASE_RENDER, PANIC_PHASE_RENDER, &theirs);
+
+    TEST_ASSERT_EQUAL_UINT8(PANIC_PHASE_RENDER, r.main_phase);
+    TEST_ASSERT_EQUAL_UINT16(2600, r.stack_main);
+    /* Uptime and heap are global readings, not per-task ones, so they
+       are still taken from whoever marked last. */
+    TEST_ASSERT_EQUAL_UINT32(200, r.uptime_ms);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_every_phase_has_a_distinct_name);
@@ -352,6 +482,8 @@ int main(void) {
     RUN_TEST(test_one_side_idle_reports_only_the_other);
     RUN_TEST(test_neither_side_in_a_phase_is_a_reading_not_a_blank);
     RUN_TEST(test_the_worst_case_label_fits_the_published_field);
+    RUN_TEST(test_every_phase_pair_fits_the_published_field);
+    RUN_TEST(test_the_stored_phase_numbers_are_pinned_because_they_outlive_the_image);
     RUN_TEST(test_the_label_answers_a_zero_length_buffer_rather_than_writing_to_it);
 
     RUN_TEST(test_a_freshly_reset_record_is_valid);
@@ -366,6 +498,13 @@ int main(void) {
     RUN_TEST(test_the_two_stack_figures_stay_attached_to_their_own_tasks);
     RUN_TEST(test_a_mark_on_a_record_that_failed_its_guard_rearms_it);
     RUN_TEST(test_a_mark_without_a_sample_still_moves_the_phase);
+    RUN_TEST(test_a_mark_from_a_task_that_does_not_own_the_slot_leaves_its_stack_alone);
+
+    RUN_TEST(test_leaving_a_phase_nobody_disturbed_restores_the_outer_one);
+    RUN_TEST(test_a_late_exit_does_not_put_a_stale_phase_back_over_the_sleep_funnel);
+    RUN_TEST(test_a_refused_exit_leaves_the_record_completely_alone);
+    RUN_TEST(test_an_exit_on_a_record_that_failed_its_guard_rearms_without_restoring);
+    RUN_TEST(test_the_exit_path_answers_null_rather_than_dereferencing_it);
 
     RUN_TEST(test_no_record_publishes_an_empty_phase_not_none);
     RUN_TEST(test_a_corrupt_stored_record_is_not_published_as_evidence);

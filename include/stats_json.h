@@ -77,9 +77,11 @@ typedef struct {
 } ota_stat_t;
 
 /* Width of the published panic-phase label. The longest the phase table
-   can produce is "RENDER+OTA_CHECK" (16 + NUL); panic_diag.c carries a
-   _Static_assert tying this number to that table, so a longer phase name
-   fails the build rather than truncating the evidence. */
+   can produce is "RENDER+OTA_CHECK" (16 + NUL). panic_diag.c carries a
+   _Static_assert, but it compares literals rather than the table and is
+   only a floor — what actually holds a longer phase name to this width
+   is test_every_phase_pair_fits_the_published_field, which walks the
+   whole cross-product. Grow this number, or that test fails. */
 #define DIAG_PHASE_MAX 20
 
 /* The panic/health leg of the stat payload. A SEPARATE argument for

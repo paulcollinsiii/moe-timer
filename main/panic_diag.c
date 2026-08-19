@@ -85,11 +85,15 @@ int panic_diag_phase_label(char *buf, size_t len, uint8_t main_phase, uint8_t ne
     return snprintf(buf, len, "%s", m);
 }
 
-/* The longest label the table above can produce, pinned against the
-   published field's width rather than against a comment. "RENDER" is the
-   longest main phase and "OTA_CHECK" the longest net phase, so the
-   worst case is 6 + 1 + 9 + NUL. If a longer phase name is ever added,
-   this fails the build instead of silently truncating the evidence. */
+/* A FLOOR, not a guarantee. It compares two hardcoded literals, so it
+   catches DIAG_PHASE_MAX shrinking but NOT a longer phase name being
+   added to the table above — that would truncate the label silently
+   (panic_diag_fill_stat discards the snprintf return, and a truncated
+   "RENDER+OTA_ROLLBACK" is a plausible-looking phase string in HA).
+   The real guarantee is test_every_phase_pair_fits_the_published_field
+   in test_panic_diag, which walks the whole PANIC_PHASE__COUNT^2
+   cross-product through the actual table. Keep both: this one fails
+   fast, that one fails correctly. */
 _Static_assert(DIAG_PHASE_MAX >= sizeof("RENDER") + sizeof("OTA_CHECK"),
                "DIAG_PHASE_MAX cannot hold the worst-case "
                "phase label");
@@ -150,11 +154,11 @@ void panic_diag_rec_mark(panic_diag_rec_t *rec, panic_phase_t slot_of, panic_pha
 
     if (panic_diag_phase_is_net(slot_of)) {
         rec->net_phase = (uint8_t)value;
-        if (sample != NULL)
+        if (sample != NULL && !sample->stack_foreign)
             rec->stack_net = sample->stack_free;
     } else {
         rec->main_phase = (uint8_t)value;
-        if (sample != NULL)
+        if (sample != NULL && !sample->stack_foreign)
             rec->stack_main = sample->stack_free;
     }
     if (sample != NULL) {
@@ -165,6 +169,24 @@ void panic_diag_rec_mark(panic_diag_rec_t *rec, panic_phase_t slot_of, panic_pha
         rec->heap_free = sample->heap_free;
     }
     rec->sum = rec_sum(rec);
+}
+
+bool panic_diag_rec_exit(panic_diag_rec_t *rec, panic_phase_t phase, panic_phase_t prev, const panic_sample_t *sample) {
+    if (rec == NULL)
+        return false;
+    /* Same totality argument as panic_diag_rec_mark: a record that never
+       passed its guard is re-armed rather than written into. Nothing is
+       restored on top of it — the phase it claimed to hold is not
+       evidence. */
+    if (!panic_diag_rec_valid(rec)) {
+        panic_diag_rec_reset(rec);
+        return false;
+    }
+    const uint8_t held = panic_diag_phase_is_net(phase) ? rec->net_phase : rec->main_phase;
+    if (held != (uint8_t)phase)
+        return false;
+    panic_diag_rec_mark(rec, phase, prev, sample);
+    return true;
 }
 
 void panic_diag_fill_stat(diag_stat_t *out, uint32_t panics, const panic_diag_rec_t *last) {
@@ -239,6 +261,12 @@ static bool s_panicked;
 static bool s_latched;
 static panic_diag_rec_t s_last;
 
+/* Captured by panic_diag_init(), which runs as app_main's first
+   statement — so this is the main task by construction. Used only to
+   decide whether a mark on the MAIN slot is allowed to write that slot's
+   stack figure; see panic_sample_t::stack_foreign. */
+static TaskHandle_t s_main_task;
+
 static uint16_t stack_free_bytes(void) {
     /* ESP-IDF's watermark is in BYTES (net_window.c's stack-floor log
        says the same). Saturating rather than wrapping: a 16-bit field is
@@ -264,7 +292,19 @@ static void sample_now(panic_sample_t *out) {
     out->stack_free = stack_free_bytes();
 }
 
+/* Does the marking task own the slot this phase selects? The net slot is
+   shared by every network-window task on purpose, so only the main slot
+   is checked. Before init has run there is nothing to compare against,
+   which reads as "owned" — the only mark in that window is init's own,
+   on the main task. */
+static void note_stack_ownership(panic_sample_t *s, panic_phase_t phase) {
+    if (panic_diag_phase_is_net(phase))
+        return;
+    s->stack_foreign = (s_main_task != NULL) && (xTaskGetCurrentTaskHandle() != s_main_task);
+}
+
 void panic_diag_init(void) {
+    s_main_task = xTaskGetCurrentTaskHandle();
     s_panicked = (esp_reset_reason() == ESP_RST_PANIC);
     /* The copy has to happen BEFORE the reset below, and the reset has
        to happen before the first mark — otherwise this boot's BOOT mark
@@ -329,6 +369,7 @@ panic_phase_t panic_diag_enter(panic_phase_t phase) {
        device with a 16 kHz audio DAC and an e-ink BUSY wait would be a
        real cost for a diagnostic. */
     sample_now(&s);
+    note_stack_ownership(&s, phase);
     portENTER_CRITICAL(&s_rec_mux);
     const panic_phase_t prev =
         panic_diag_phase_is_net(phase) ? (panic_phase_t)s_rec.net_phase : (panic_phase_t)s_rec.main_phase;
@@ -340,8 +381,14 @@ panic_phase_t panic_diag_enter(panic_phase_t phase) {
 void panic_diag_exit(panic_phase_t phase, panic_phase_t prev) {
     panic_sample_t s;
     sample_now(&s);
+    note_stack_ownership(&s, phase);
     portENTER_CRITICAL(&s_rec_mux);
-    panic_diag_rec_mark(&s_rec, phase, prev, &s);
+    /* Conditional restore, and the return is discarded on purpose: a
+       refusal means a third task moved this slot while we were inside
+       the phase (the awake failsafe is the one that does it), and that
+       task's reading is the one worth keeping. panic_diag_rec_exit
+       carries the argument. */
+    (void)panic_diag_rec_exit(&s_rec, phase, prev, &s);
     portEXIT_CRITICAL(&s_rec_mux);
 }
 

@@ -147,6 +147,17 @@ typedef struct {
     uint32_t uptime_ms;
     uint32_t heap_free;
     uint16_t stack_free; /* the MARKING task's high-water mark, bytes */
+    /* Set when the marking task does NOT own the slot the mark selects,
+       which leaves that slot's stack field alone. The main slot belongs
+       to the main task, but two other tasks mark it: render() runs from
+       ota_dl while a download paints, and the awake failsafe runs
+       enter_deep_sleep() from the esp_timer task. Without this, a panic
+       during an OTA publishes ota_dl's 16 KB-stack high-water mark under
+       the label "stack free (main)" — a figure the 7 KB main task cannot
+       physically produce, sending the reader after a stack bug that is
+       not there. Defaults false so a sample that does not think about
+       ownership behaves as before. */
+    bool stack_foreign;
 } panic_sample_t;
 
 /* ---- pure layer (host-tested: test_panic_diag) ----------------------- */
@@ -184,6 +195,24 @@ bool panic_diag_rec_valid(const panic_diag_rec_t *rec);
    the two numbers stay attached to the tasks they were taken on. */
 void panic_diag_rec_mark(panic_diag_rec_t *rec, panic_phase_t slot_of, panic_phase_t value,
                          const panic_sample_t *sample);
+
+/* Leave a phase: restore `prev` into the slot `phase` owns, but ONLY if
+   that slot still holds `phase`.
+
+   The conditional is the whole point. enter/exit is a read-modify-write
+   spanning the phase body, and the spinlock only makes each end atomic —
+   it cannot stop a THIRD task moving the slot in between. The awake
+   failsafe does exactly that: it fires on the esp_timer task and marks
+   SLEEP while a render() started on ota_dl is still inside its 2-4 s
+   e-ink refresh. An unconditional restore then puts AWAKE back over
+   SLEEP, and a panic in the sleep funnel publishes the wrong phase — on
+   the wedged-device path this feature exists to explain.
+
+   Answers true when the restore happened. When it did not, the record is
+   left completely untouched (uptime and heap included): the task that
+   owns the slot now is the one whose view should be published, and a
+   late exit has nothing to add to it. */
+bool panic_diag_rec_exit(panic_diag_rec_t *rec, panic_phase_t phase, panic_phase_t prev, const panic_sample_t *sample);
 
 /* Compose the panic half of the published view. `last` is the stored
    record, or NULL when there is none (or it failed its guard) — which

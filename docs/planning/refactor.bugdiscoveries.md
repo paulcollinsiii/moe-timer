@@ -732,6 +732,56 @@ of image — 1,496,784 → 1,500,480 B, 81.8 % of the app slot.
   free entries**. Free only — total is a constant of a frozen partition table
   and used is total − free. The erase at `main.c:410` is still silent.
 
+**Reviewed, and four defects in it fixed before it shipped.** Image is now
+1,500,848 B, 81.8 %, 58,908 B under the guard; 32 host cases in
+`test_panic_diag`, up from 24.
+
+* **The breadcrumb could lie on the one path it was built for.**
+  `panic_diag_exit()` restored the saved outer phase *unconditionally*, and
+  enter/exit is a read-modify-write spanning the whole phase body — the
+  spinlock makes each end atomic but cannot stop a third task moving the slot
+  in between. The awake failsafe does exactly that: it fires on the esp_timer
+  task and marks SLEEP while a `render()` started on `ota_dl` is still inside
+  a 2–4 s e-ink refresh, and that refresh's exit then put AWAKE back over it.
+  A panic in the sleep funnel would have published `AWAKE+OTA_DL`. Now a
+  compare-and-restore (`panic_diag_rec_exit`): the slot is only rewound if it
+  still holds the phase being left, and a refused exit touches nothing at all.
+* **`stack_main` could carry another task's floor.** `render()` runs from
+  `ota_dl` (16 KB stack) as well as the main task (7 KB), so a panic during a
+  download published a high-water mark the main task cannot physically produce
+  under the label "stack free (main)" — a number that sends the reader after a
+  stack bug that is not there. A sample now declares whether the marking task
+  owns the slot (`panic_sample_t::stack_foreign`); the phase still moves, only
+  the stack figure is withheld.
+* **A `_Static_assert` claimed a guarantee it does not provide.** It compares
+  two hardcoded literals, not the phase table, so adding a longer phase name
+  would have silently truncated the label to something that still reads like a
+  valid phase in HA (`panic_diag_fill_stat` discards the `snprintf` return).
+  The comment in `panic_diag.c` and the matching claim in `stats_json.h:79`
+  both said otherwise. Both corrected, and the property is now pinned by
+  `test_every_phase_pair_fits_the_published_field`, which walks the whole
+  `PANIC_PHASE__COUNT²` cross-product through the real table.
+* **Two publish paths dropped an oversized payload without a word.** The
+  entity-table loop at `mqtt_ha.c:241` is where all eleven diagnostic entities
+  land, and the stat publish has 86 B of headroom left at the measured 938 B
+  worst case. Both now log the skip, as the action-discovery path beside them
+  already did.
+* **The stored phase numbers are now pinned by a test.** They reach a newer
+  image off flash, so renumbering the enum decodes old records as the wrong
+  phase — silently, and only on the devices that actually panicked. Every
+  other test in the file survives a renumbering, which is the point.
+
+**Deferred, deliberately: NVS write amplification in a panic loop.** Before
+this feature a panic boot-loop cost zero NVS writes; each iteration now costs
+a counter write plus a blob write, both committed. Minimum loop period is
+~4.5–5 s, so a sustained loop is ~68k entries/day into six pages shared with
+the WiFi stack. Raw endurance survives it (~3 years of *continuous* looping),
+but the churn raises the odds of `ESP_ERR_NVS_NO_FREE_PAGES` — whose handler
+is the silent erase of F3. The fix is cheap (skip the blob write when nothing
+was latched; only rewrite when the record differs) and is **not** being made
+yet, because the number that decides whether it matters does not exist: read
+**NVS free entries** on the first window after this image lands, then decide.
+
 ## Closed — moved to the archive
 
 Full detail, and the reasoning behind each, is in

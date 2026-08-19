@@ -239,6 +239,13 @@ static int publish_discovery(esp_mqtt_client_handle_t client, const char *dev_na
                                            name_override);
         if (n < (int)sizeof(s_mem->payload)) {
             published += publish(client, topic, payload, 1);
+        } else {
+            /* The action-discovery path below already says this out loud;
+               the entity table is where the eleven diagnostic entities
+               land, so it has to as well. An entity that overflows here
+               simply never appears in HA, which on a diagnostics feature
+               is the one failure that must not be silent. */
+            ESP_LOGW(TAG, "%s discovery truncated, skipped", ents[i].key);
         }
     }
     /* Retire replaced entities (v9): clear their retained discovery configs
@@ -460,8 +467,15 @@ static int publish_states(esp_mqtt_client_handle_t client, const stats_snapshot_
     panic_diag_stat(&diag);
 
     mqtt_topic(s_mem->topic, sizeof(s_mem->topic), device_id(), "stat");
-    if (stats_json_stat(s_mem->payload, sizeof(s_mem->payload), snap, &ota, &diag) < (int)sizeof(s_mem->payload)) {
+    const int cap = (int)sizeof(s_mem->payload);
+    const int stat_n = stats_json_stat(s_mem->payload, sizeof(s_mem->payload), snap, &ota, &diag);
+    if (stat_n < cap) {
         published += publish(client, s_mem->topic, s_mem->payload, 1);
+    } else {
+        /* Headroom here is 86 B at the measured worst case, so this is
+           one added field away from firing. Silence would look exactly
+           like a healthy device with nothing to report. */
+        ESP_LOGW(TAG, "stat payload truncated (%d >= %d), not published", stat_n, cap);
     }
 
     if (s_summary.pending) {
