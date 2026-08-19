@@ -125,6 +125,18 @@ lived on.
 
 ### S1 — the checks, most dangerous first
 
+**Field result 2026-08-19 — S1.1 and S1.3 answered, in the affirmative.** The
+device crossed a genuine day rollover at 01:29 (`active timer → Screen` is
+`timer_reset()`) carrying an HA-configured table written by an older image, and
+the timer names, minutes and break-eligible switches were unchanged across it.
+HA logs state *changes*, so the flags' absence from the activity stream between
+01:29 and the unrelated 05:12 event is the evidence: the padding reuse read
+correctly on a blob it did not write. S1.3's provocation arrived unrequested a
+few hours later and is written up as **BUG-10** — the switches came back as a
+Kconfig value rather than as never-set, which is the documented consequence of
+a switch-only setting meeting an NVS erase, not a failure of this fix. The
+remaining rows (S1.2, S1.4, S1.5, S1.6) are still owed.
+
 **S1.1 — an existing blob still reads.** This is the one that would be
 catastrophic and silent, so do it first and on a device that already has an
 HA-configured table. Boot the new image once and confirm the timer names,
@@ -190,6 +202,7 @@ constraint remains; everything else is independent and can be reordered freely.
 | # | Item | Why here | Blocked by |
 |---|---|---|---|
 | 0 | **S1 + S2 smoke tests** | The only item that needs the device. Two merged fixes stay unconfirmed until it happens, and everything below is engineering time that can proceed in parallel | a USB flash, then an OTA |
+| 0.5 | **BUG-10** — a silent self-erase of NVS, seen in the field | The only item on this page that is actively destroying operator state on a live device, and it recurs on its own schedule. Its step 1 (make the erase loud) is a precondition for diagnosing the rest of it — everything else about this defect is inference from an HA activity stream until the device says so itself | — |
 | 1 | **BUG-7** — a RUNNING slot outliving its own definition | State-machine change to an uncovered path; independent | — |
 | 2 | **BUG-2**, then **BUG-3** | Same latch/mask surface — fix together so each is checked against the other. Both need a re-baselined sweep to show the fix changed *only* the intended cases. | — |
 | 3 | **BUG-5** — the v1→v2 migration | Only bites on a version bump, and **R4** means it has to be written *before* one rather than after. Nothing in flight bumps the version, which is why it sits last. | — |
@@ -609,6 +622,93 @@ disable is already treated:
 Add the missing test: snapshot a RUNNING extra, install a defs table without it,
 restore, assert `assert_state_legal()` passes and the balance did not gain the
 powered-off gap.
+
+---
+
+## BUG-10 — the device erased its own NVS in the field, silently
+
+**Reported 2026-08-19 from the device.** Overnight, idle on a desk, no input.
+HA's activity stream:
+
+| Time | Event |
+|---|---|
+| 08-18 22:47:54 | Last reset → **PANIC** |
+| 08-18 23:29 | Last reset → Deep Sleep |
+| 08-19 01:29 | active timer → Screen |
+| 08-19 05:12 | timer 1/3/4 break-eligible → **off**, OTA check on sync → **off** |
+| 08-19 06:46 | Last reset → **PANIC** |
+
+**This is not BUG-8 regressing, and the S1 rollover check passed.** The 01:29
+`active timer → Screen` is `timer_reset()`, i.e. the day rollover. The four
+flags did not change then; HA logs state *changes*, so their absence from the
+stream between 01:29 and 05:12 is positive evidence they held across the
+rollover. S1.1 and S1.3 were answered in the affirmative before the unrelated
+05:12 event.
+
+**What 05:12 was: a full `nvs_flash_erase()`.** The four reverted settings are
+exactly the ones that have an HA entity but no key in *this operator's*
+retained config document. Everything else the document names was restored when
+it re-applied, which is why four things moved and not thirty.
+`config_apply.c:305` describes this scenario in advance as an accepted
+consequence — "a `break` off that exists ONLY as a switch flip … does not
+survive an NVS erase."
+
+The benign alternative is ruled out. A plain re-apply cannot do it: `break`
+reverting needs `have_prev == false` (`config_apply.c:206`), and `ota_on_sync`
+reverting needs its key to be *missing*, since it is a lazy default with no
+registry row (`nvs_config.c:275`) and so is untouched by a defaults reseed. Had
+the document carried `ota_on_sync:false` it would have been off already, not
+on until 05:12. A key that was set and is now reading its missing-key default
+was erased.
+
+The only erase in the tree is `main.c:410`, taken when `nvs_flash_init()`
+returns `NO_FREE_PAGES` or `NEW_VERSION_FOUND`. The partition has never been
+resized (`0x9000`/`0x6000` since `412986a`; only `ota_0` grew in `d7e28f6`), so
+the trigger is pressure or damage inside those six pages — the headroom the S1
+tail flagged as never measured. Note that the app's own keys are perhaps one
+page of live data; the rest of the partition is the WiFi stack's.
+
+**Why it was invisible.** The most destructive act the firmware can perform
+wipes every credential and every operator choice and logs *nothing*, publishes
+nothing, and leaves no counter. Recovery hides it further: the reseed rewrites
+WiFi/MQTT from the compiled-in defaults, so the device reconnects and looks
+healthy, and clearing `cfg_ver` re-applies the retained document over the top.
+The only trace is which settings failed to come back.
+
+**The PANICs are genuine.** `ESP_RST_PANIC`, not a watchdog and not a brownout
+— `wake_flow.c:250-268` gives those their own strings and
+`CONFIG_ESP_TASK_WDT_PANIC` is off. Direction of causation is unresolved and
+needs the device: an NVS fault reaches `ESP_ERROR_CHECK` at `main.c:413-414`
+and panics, and a panic mid-commit can damage NVS. `nvs_get_stats()` and a
+backtrace settle it; `CONFIG_ESP_CONSOLE_USB_CDC_SUPPORT_ETS_PRINTF=y`, so
+panic output does reach USB CDC, and `wake_flow_boot_quiet_after_panic()`
+holds the console quiet 2 s at boot to let a host attach.
+
+**Fixes, in the order they earn their keep.**
+
+1. **Make the erase loud.** Increment a persisted counter immediately after
+   `nvs_flash_erase()` and publish it as an HA entity with the erase's reset
+   reason. Nothing else on this list can be evaluated without it, and it is the
+   difference between diagnosing this in one night and another week of
+   inference from an activity stream.
+2. **Measure the headroom.** `nvs_get_stats()` into the stats payload —
+   used/free/total entries. The S1 tail asked for this before the incident.
+3. **Stop amplifying a transient read.** `config_apply.c:206` turns *any*
+   failure of `nvs_config_get_timer_defs()` — including a transient one — into
+   `have_prev == false` for every slot, and line 355 then writes the
+   compile-time answer back to flash permanently. A read error and a
+   genuinely-absent blob are not the same event and must not take the same
+   branch; `ESP_ERR_NVS_NOT_FOUND` is the only one that means "never
+   configured". This is BUG-5's unconditional constraint applied to the
+   writer instead of the logger.
+4. **Reconsider `ESP_ERROR_CHECK` on the NVS init pair.** A transient write
+   failure at `main.c:414` panics, and a panic is itself a candidate cause of
+   NVS damage.
+
+*Operator mitigation available today, and the one the source already
+recommends: put `break` per timer and `ota_on_sync` into the retained config
+document. A setting that exists only as a switch flip has nothing to restore
+it.*
 
 ---
 
