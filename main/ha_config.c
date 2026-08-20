@@ -664,10 +664,13 @@ int ha_config_discovery(char *buf, size_t len, const char *dev_id, const char *d
                         const cfg_field_t *f) {
     char dname[128]; /* escaped device name (<=63 raw) */
     int pos = 0;
+    /* obj_id: same string as uniq_id, same reason as the entity table in
+       stats_json.c — entity_ids must not move when the device is
+       renamed. */
     pos = jcat(buf, len, pos,
-               "{\"name\":\"%s\",\"uniq_id\":\"%s_%s\",\"stat_t\":\"magtag/%s/cfg\","
+               "{\"name\":\"%s\",\"uniq_id\":\"%s_%s\",\"obj_id\":\"%s_%s\",\"stat_t\":\"magtag/%s/cfg\","
                "\"val_tpl\":\"{{ value_json.%s }}\",\"cmd_t\":\"magtag/%s/set/%s\",\"retain\":true",
-               f->name, dev_id, f->key, dev_id, f->key, dev_id, f->key);
+               f->name, dev_id, f->key, dev_id, f->key, dev_id, f->key, dev_id, f->key);
     /* optimistic: the device is asleep, so the cfg state topic lags an edit
        by a whole window. Without this, HA re-renders the control from the
        stale retained state the instant you change it — the switch snaps back

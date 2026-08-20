@@ -275,9 +275,20 @@ int stats_json_discovery_named(char *buf, size_t len, const char *dev_id, const 
                                const ha_entity_t *ent, const char *name_override) {
     char ename[64], dname[64];
     int pos = 0;
-    pos = jcat(buf, len, pos, "{\"name\":\"%s\",\"uniq_id\":\"%s_%s\",\"stat_t\":\"magtag/%s/%s\",\"val_tpl\":\"%s\"",
+    /* obj_id carries the SAME string as uniq_id, on purpose. Without it
+       HA builds the entity_id from the device name and the entity name,
+       so renaming a device silently re-slugs every entity under it —
+       which is how a house automation that excluded "magtag" stopped
+       matching devices renamed to "Testing Timer" and swept their
+       switches off. dev_id is MAC-derived (device_id.h) and outlives any
+       rename, so entity_ids built from it are stable by construction.
+       See DISC_SCHEMA_VER's note: this only takes effect at an entity's
+       FIRST registration. */
+    pos = jcat(buf, len, pos,
+               "{\"name\":\"%s\",\"uniq_id\":\"%s_%s\",\"obj_id\":\"%s_%s\","
+               "\"stat_t\":\"magtag/%s/%s\",\"val_tpl\":\"%s\"",
                jesc(ename, sizeof(ename), name_override ? name_override : ent->name), dev_id, ent->key, dev_id,
-               ent->topic_suffix, ent->tpl);
+               ent->key, dev_id, ent->topic_suffix, ent->tpl);
     if (ent->unit != NULL)
         pos = jcat(buf, len, pos, ",\"unit_of_meas\":\"%s\"", ent->unit);
     if (ent->dev_class != NULL)

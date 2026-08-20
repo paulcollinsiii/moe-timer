@@ -72,6 +72,43 @@ Notes:
 - The daily summary publishes at the first wake after midnight and covers
   the finished day: `screen_used_s` + completions per extra timer.
 
+### Entity IDs are stable, and do not follow the device name
+
+Every discovery payload carries `obj_id`, so HA builds entity IDs from the
+MAC-derived device id rather than from the device's friendly name:
+
+    binary_sensor.magtag_xxxxxx_charge_lock
+    switch.magtag_xxxxxx_ota_check_on_sync
+    number.magtag_xxxxxx_weekday_min
+
+Renaming the device in HA changes the display name and nothing else. This
+matters more than it sounds: without it HA derives the entity ID from the
+device name, so a rename silently re-slugs every entity underneath it, and
+any automation that matched on the old IDs stops matching. A house
+automation that turned off every switch except ones matching `magtag` did
+exactly that after two devices were renamed — it stopped recognising them
+and swept their configuration switches off overnight, which reads on the
+device side as settings reverting by themselves.
+
+**One-time step on a device HA already knows.** `obj_id` seeds an entity ID
+only at that entity's *first* registration; HA keys its registry on
+`uniq_id` and will not re-slug an existing entity behind your back. So on
+an already-paired device the IDs stay as they are until you re-register:
+
+1. Let the device run one network window on firmware carrying discovery
+   schema v20 or later (`STATS_JSON_DISC_SCHEMA_VER` in
+   `include/stats_json.h`), so the new retained discovery payloads reach
+   the broker.
+2. Settings → Devices & Services → MQTT → the device → **Delete**.
+3. Restart HA (or wait for the next reconnect). It re-reads the retained
+   discovery configs and registers the entities with their new IDs.
+
+Do it in that order. Deleting first makes HA re-add from the *old* retained
+payload and slug from the name all over again.
+
+Automations, dashboards and scripts referencing the old IDs need updating —
+that is the cost of the change, and it is paid once.
+
 ## Example: low-battery notification
 
 ```yaml

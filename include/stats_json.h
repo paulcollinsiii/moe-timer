@@ -151,8 +151,21 @@ typedef struct {
 
    v18: + the four OTA entities (result/target/fails/dl_ms).
    v19: + the eleven panic/health diagnostics (panic count and
-        breadcrumb, live heap and task stack floors, NVS headroom). */
-#define STATS_JSON_DISC_SCHEMA_VER 19
+        breadcrumb, live heap and task stack floors, NVS headroom).
+   v20: + obj_id on every discovery payload, so entity_ids derive from
+        the MAC-based device id instead of the user-editable device name.
+
+   NOTE on v20, because it is the one bump that does NOT finish the job:
+   obj_id seeds an entity_id only at the entity's FIRST registration.
+   Republishing discovery over an already-registered entity updates
+   everything else about it and leaves the entity_id alone — HA keys the
+   registry on uniq_id and will not re-slug behind the user's back. So on
+   a device HA already knows, this bump changes nothing visible until the
+   MQTT device is deleted in HA once and allowed to re-register. Order
+   matters: let this firmware publish the new retained discovery FIRST,
+   then delete, or HA re-adds from the old retained payload and re-slugs
+   from the name again. */
+#define STATS_JSON_DISC_SCHEMA_VER 20
 
 /* Buffer the stat/summary/discovery payloads are built into (mqtt_ha.c).
    Named here because stats_json_stat is what can outgrow it, and a stat

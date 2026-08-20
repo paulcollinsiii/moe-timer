@@ -175,7 +175,7 @@ void test_discovery_schema_version_moves_with_the_entity_table(void) {
     int count = 0;
     (void)stats_json_entities(&count);
     TEST_ASSERT_EQUAL_INT(28 + 3 * TIMER_EXTRA_SLOTS, count);
-    TEST_ASSERT_EQUAL_INT(19, STATS_JSON_DISC_SCHEMA_VER);
+    TEST_ASSERT_EQUAL_INT(20, STATS_JSON_DISC_SCHEMA_VER);
 }
 
 /* ---- the OTA leg of the stat payload ---- */
@@ -497,7 +497,7 @@ void test_discovery_battery_payload(void) {
     const ha_entity_t *ents = stats_json_entities(&count); /* [0] = battery */
     int n = stats_json_discovery(buf, sizeof(buf), "magtag-a1b2c3", "Kitchen MagTag", "v1.4.0-test", &ents[0]);
     TEST_ASSERT_EQUAL_STRING(
-        "{\"name\":\"Battery\",\"uniq_id\":\"magtag-a1b2c3_battery\","
+        "{\"name\":\"Battery\",\"uniq_id\":\"magtag-a1b2c3_battery\",\"obj_id\":\"magtag-a1b2c3_battery\","
         "\"stat_t\":\"magtag/magtag-a1b2c3/stat\",\"val_tpl\":\"{{ value_json.batt_pct }}\","
         "\"unit_of_meas\":\"%\",\"dev_cla\":\"battery\",\"expire_after\":7500,"
         "\"dev\":{\"ids\":[\"magtag-a1b2c3\"],\"name\":\"Kitchen MagTag\",\"mf\":\"Adafruit\","
@@ -667,6 +667,76 @@ void test_primary_entity_omits_category(void) {
     TEST_ASSERT_NULL(strstr(buf, "ent_cat"));
 }
 
+/* HA builds an entity_id from the device name and the entity name unless
+   discovery says otherwise, so renaming a device re-slugs every entity
+   under it. That is not hypothetical here: a house automation excluding
+   "magtag" stopped matching after two devices were renamed, and swept
+   their switches off overnight. obj_id pins the entity_id to the
+   MAC-derived device id instead. The rule these three tests hold is that
+   EVERY discovery payload carries obj_id, and that its value is the same
+   string as uniq_id. */
+void test_discovery_object_id_is_the_unique_id(void) {
+    char buf[STATS_JSON_PAYLOAD_MAX];
+    char want[128];
+    int count = 0;
+    const ha_entity_t *ents = stats_json_entities(&count);
+    for (int i = 0; i < count; i++) {
+        stats_json_discovery(buf, sizeof(buf), "magtag-a1b2c3", "Kitchen MagTag", "fw", &ents[i]);
+        snprintf(want, sizeof(want), "\"obj_id\":\"magtag-a1b2c3_%s\"", ents[i].key);
+        TEST_ASSERT_NOT_NULL_MESSAGE(strstr(buf, want), ents[i].key);
+        snprintf(want, sizeof(want), "\"uniq_id\":\"magtag-a1b2c3_%s\"", ents[i].key);
+        TEST_ASSERT_NOT_NULL_MESSAGE(strstr(buf, want), ents[i].key);
+    }
+}
+
+void test_discovery_object_id_does_not_move_when_the_device_is_renamed(void) {
+    /* The actual regression, stated as a test: two device names that HA
+       would slug differently must produce the same obj_id. The name
+       itself still changes, which is what stops this passing vacuously. */
+    char a[STATS_JSON_PAYLOAD_MAX], b[STATS_JSON_PAYLOAD_MAX];
+    int count = 0;
+    const ha_entity_t *ents = stats_json_entities(&count);
+    stats_json_discovery(a, sizeof(a), "magtag-a1b2c3", "Testing Timer", "fw", &ents[0]);
+    stats_json_discovery(b, sizeof(b), "magtag-a1b2c3", "Julia's Timer", "fw", &ents[0]);
+
+    char want[128];
+    snprintf(want, sizeof(want), "\"obj_id\":\"magtag-a1b2c3_%s\"", ents[0].key);
+    TEST_ASSERT_NOT_NULL(strstr(a, want));
+    TEST_ASSERT_NOT_NULL(strstr(b, want));
+    TEST_ASSERT_NOT_NULL(strstr(a, "Testing Timer"));
+    TEST_ASSERT_NOT_NULL(strstr(b, "Julia"));
+    TEST_ASSERT_NOT_EQUAL(0, strcmp(a, b));
+}
+
+void test_every_discovery_payload_fits_the_publish_buffer(void) {
+    /* mqtt_ha.c builds discovery into the same STATS_JSON_PAYLOAD_MAX
+       buffer as the stat payload, and an overflow there means the entity
+       simply never appears in HA. It logs the skip now, but a bound is
+       better than a log. Worst realistic case: the longest device name
+       the name entity accepts, and the per-slot sensors' runtime name
+       override at its own cap. */
+    char buf[STATS_JSON_PAYLOAD_MAX];
+    char longname[64];
+    memset(longname, 'W', sizeof(longname) - 1); /* widest glyph, 63 chars */
+    longname[sizeof(longname) - 1] = '\0';
+    char override[48];
+    memset(override, 'W', sizeof(override) - 1);
+    override[sizeof(override) - 1] = '\0';
+
+    int count = 0, worst = 0;
+    const ha_entity_t *ents = stats_json_entities(&count);
+    for (int i = 0; i < count; i++) {
+        const int n = stats_json_discovery_named(buf, sizeof(buf), "magtag-a1b2c3", longname, "fw", &ents[i], override);
+        if (n > worst)
+            worst = n;
+        TEST_ASSERT_TRUE_MESSAGE(n < (int)sizeof(buf), ents[i].key);
+    }
+    /* Not an equality assert — this is a headroom report that fails only
+       if the margin is gone. Kept loose so an entity can be added without
+       editing a magic number, and tight enough to notice a doubling. */
+    TEST_ASSERT_TRUE_MESSAGE(worst < (int)sizeof(buf) - 128, "discovery headroom below 128 B");
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_discovery_diagnostic_category);
@@ -702,6 +772,9 @@ int main(void) {
     RUN_TEST(test_panic_count_is_the_primary_entity_of_the_group);
     RUN_TEST(test_discovery_topic);
     RUN_TEST(test_discovery_battery_payload);
+    RUN_TEST(test_discovery_object_id_is_the_unique_id);
+    RUN_TEST(test_discovery_object_id_does_not_move_when_the_device_is_renamed);
+    RUN_TEST(test_every_discovery_payload_fits_the_publish_buffer);
     RUN_TEST(test_discovery_binary_sensor_has_payload_states);
     RUN_TEST(test_discovery_completions_use_runtime_slot_names);
     RUN_TEST(test_stat_payload_reports_a_running_break);

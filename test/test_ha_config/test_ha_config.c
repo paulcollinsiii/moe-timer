@@ -38,6 +38,10 @@
 /* Header only: the set/<key> transport slot the registry's advertised
    maximums have to fit through. */
 #include "mqtt_rx.h"
+/* Header only: STATS_JSON_PAYLOAD_MAX is the buffer mqtt_ha.c builds
+   THESE payloads into as well, so the size bound belongs to the same
+   number rather than to a copy of it. */
+#include "stats_json.h"
 
 static void seed_blob(void); /* defined with the Phase B tests below */
 
@@ -1160,6 +1164,26 @@ void test_discovery_hash_is_stable_for_a_name_only_slot(void) {
     TEST_ASSERT_EQUAL_UINT16(ha_config_discovery_hash("Kitchen", "1.5.0"), from_installed);
 }
 
+/* Same rule as the entity table in stats_json.c: every discovery payload
+   carries obj_id, and its value is the uniq_id string. These are the
+   editable controls — the switches an over-broad HA automation reaches
+   for — so they are the half of the surface that actually got swept. */
+void test_discovery_object_id_is_the_unique_id_for_every_config_field(void) {
+    char buf[STATS_JSON_PAYLOAD_MAX];
+    char want[128];
+    int count = 0;
+    const cfg_field_t *fields = ha_config_fields(&count);
+    TEST_ASSERT_TRUE(count > 0);
+    for (int i = 0; i < count; i++) {
+        ha_config_discovery(buf, sizeof(buf), "magtag-a1b2c3", "Kitchen MagTag", "fw", &fields[i]);
+        snprintf(want, sizeof(want), "\"obj_id\":\"magtag-a1b2c3_%s\"", fields[i].key);
+        TEST_ASSERT_NOT_NULL_MESSAGE(strstr(buf, want), fields[i].key);
+        snprintf(want, sizeof(want), "\"uniq_id\":\"magtag-a1b2c3_%s\"", fields[i].key);
+        TEST_ASSERT_NOT_NULL_MESSAGE(strstr(buf, want), fields[i].key);
+        TEST_ASSERT_TRUE_MESSAGE(strlen(buf) < sizeof(buf) - 1, fields[i].key);
+    }
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_set_timer_name_enables_slot);
@@ -1190,6 +1214,7 @@ int main(void) {
     RUN_TEST(test_state_json_worst_case_fits_firmware_buffer);
     RUN_TEST(test_state_json_reports_current_values);
     RUN_TEST(test_discovery_number_has_command_bounds_and_config_category);
+    RUN_TEST(test_discovery_object_id_is_the_unique_id_for_every_config_field);
     RUN_TEST(test_discovery_text_has_mode);
     RUN_TEST(test_discovery_text_advertises_max_length);
     RUN_TEST(test_timer_name_max_matches_the_reject_boundary);

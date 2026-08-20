@@ -287,16 +287,23 @@ static int publish_action_discovery(esp_mqtt_client_handle_t client, const char 
     char dn[128];
     ha_config_json_escape(dn, sizeof(dn), dev_name);
     int published = 0, n;
+    /* These two payloads are hand-written rather than table-driven, so
+       nothing walks them in a host test: the obj_id below is held only by
+       this comment and by test_discovery_object_id_is_the_unique_id in
+       test_stats_json, which pins the RULE the two must follow. Any
+       discovery payload added here must carry obj_id with the same value
+       as its uniq_id. */
     /* number: Screen adjust (min) today (signed; key stays screen_bonus) */
     mqtt_disc_topic(topic, sizeof(s_mem->topic), "number", id, "screen_bonus");
     n = snprintf(payload, sizeof(s_mem->payload),
                  "{\"name\":\"Screen adjust (min) today\",\"uniq_id\":\"%s_screen_bonus\","
+                 "\"obj_id\":\"%s_screen_bonus\","
                  "\"stat_t\":\"magtag/%s/act\",\"val_tpl\":\"{{ value_json.screen_bonus }}\","
                  "\"cmd_t\":\"magtag/%s/set/screen_bonus\",\"retain\":true,\"min\":-%d,\"max\":%d,\"step\":5,"
                  "\"mode\":\"box\",\"optimistic\":true,\"unit_of_meas\":\"min\",\"ent_cat\":\"config\","
                  "\"dev\":{\"ids\":[\"%s\"],\"name\":\"%s\","
                  "\"mf\":\"Adafruit\",\"mdl\":\"MagTag 2.9\",\"sw\":\"%s\"}}",
-                 id, id, id, BONUS_MAX_MIN, BONUS_MAX_MIN, id, dn, fw);
+                 id, id, id, id, BONUS_MAX_MIN, BONUS_MAX_MIN, id, dn, fw);
     if (n < (int)sizeof(s_mem->payload))
         published += publish(client, topic, payload, 1);
     else
@@ -306,11 +313,12 @@ static int publish_action_discovery(esp_mqtt_client_handle_t client, const char 
        rendering over the snap-back). */
     mqtt_disc_topic(topic, sizeof(s_mem->topic), "switch", id, "locate");
     n = snprintf(payload, sizeof(s_mem->payload),
-                 "{\"name\":\"Find my timer\",\"uniq_id\":\"%s_locate\",\"stat_t\":\"magtag/%s/act\","
+                 "{\"name\":\"Find my timer\",\"uniq_id\":\"%s_locate\",\"obj_id\":\"%s_locate\","
+                 "\"stat_t\":\"magtag/%s/act\","
                  "\"val_tpl\":\"{{ value_json.locate }}\",\"cmd_t\":\"magtag/%s/set/locate\",\"retain\":true,"
                  "\"pl_on\":\"ON\",\"pl_off\":\"OFF\",\"optimistic\":true,\"dev\":{\"ids\":[\"%s\"],\"name\":\"%s\","
                  "\"mf\":\"Adafruit\",\"mdl\":\"MagTag 2.9\",\"sw\":\"%s\"}}",
-                 id, id, id, id, dn, fw);
+                 id, id, id, id, id, dn, fw);
     if (n < (int)sizeof(s_mem->payload))
         published += publish(client, topic, payload, 1);
     else
