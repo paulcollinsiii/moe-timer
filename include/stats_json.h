@@ -152,11 +152,25 @@ typedef struct {
    v18: + the four OTA entities (result/target/fails/dl_ms).
    v19: + the eleven panic/health diagnostics (panic count and
         breadcrumb, live heap and task stack floors, NVS headroom).
-   v20: + obj_id on every discovery payload, so entity_ids derive from
-        the MAC-based device id instead of the user-editable device name.
+   v20: + def_ent_id on every discovery payload, so entity_ids derive
+        from the MAC-based device id instead of the user-editable device
+        name. Value is "<component>.<uniq_id>" — HA treats the field as a
+        full entity_id and keeps only what follows the FIRST dot, so the
+        component prefix is mandatory and a dotless value would register
+        an EMPTY object id.
+
+   FLOOR: HA >= 2025.10, when default_entity_id was added. Older HA drops
+   the unknown key (the MQTT platform schemas are extra=REMOVE_EXTRA) and
+   entity_ids simply stay as they are today, so the field costs nothing
+   and breaks nothing below the floor.
+
+   v20 first shipped carrying obj_id, which HA had already removed from
+   MQTT discovery in 2026.4.0 and which every current HA therefore threw
+   away unread. That v20 never reached a device, so the correction reuses
+   the number instead of spending another retained-discovery burst.
 
    NOTE on v20, because it is the one bump that does NOT finish the job:
-   obj_id seeds an entity_id only at the entity's FIRST registration.
+   def_ent_id seeds an entity_id only at the entity's FIRST registration.
    Republishing discovery over an already-registered entity updates
    everything else about it and leaves the entity_id alone — HA keys the
    registry on uniq_id and will not re-slug behind the user's back. So on
@@ -164,7 +178,14 @@ typedef struct {
    MQTT device is deleted in HA once and allowed to re-register. Order
    matters: let this firmware publish the new retained discovery FIRST,
    then delete, or HA re-adds from the old retained payload and re-slugs
-   from the name again. */
+   from the name again.
+
+   ON MAC COLLISIONS: device_id() is the last three MAC bytes, so two
+   colliding devices already collided on uniq_id and this changes nothing
+   about that. It changes the SYMPTOM: HA's async_generate_entity_id
+   appends _2 to a taken entity_id, so the second device lands on
+   ..._2 ids that read as a cosmetic naming quirk rather than as the MAC
+   clash they are. */
 #define STATS_JSON_DISC_SCHEMA_VER 20
 
 /* Buffer the stat/summary/discovery payloads are built into (mqtt_ha.c).

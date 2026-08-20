@@ -664,13 +664,20 @@ int ha_config_discovery(char *buf, size_t len, const char *dev_id, const char *d
                         const cfg_field_t *f) {
     char dname[128]; /* escaped device name (<=63 raw) */
     int pos = 0;
-    /* obj_id: same string as uniq_id, same reason as the entity table in
-       stats_json.c — entity_ids must not move when the device is
-       renamed. */
+    /* def_ent_id: "<component>.<uniq_id>", same reason as the entity table
+       in stats_json.c — entity_ids must not move when the device is
+       renamed. The "<component>." half is required, not decoration: HA
+       reads the value as a full entity_id and keeps only what follows the
+       first dot, so a dotless value registers an EMPTY object id.
+       f->component is what ha_config_discovery_topic() writes into the
+       topic, so payload and topic agree by construction. (This replaces
+       obj_id, which HA removed from MQTT discovery in 2026.4.0;
+       def_ent_id dates from 2025.10 and is silently ignored before it.) */
     pos = jcat(buf, len, pos,
-               "{\"name\":\"%s\",\"uniq_id\":\"%s_%s\",\"obj_id\":\"%s_%s\",\"stat_t\":\"magtag/%s/cfg\","
+               "{\"name\":\"%s\",\"uniq_id\":\"%s_%s\",\"def_ent_id\":\"%s.%s_%s\","
+               "\"stat_t\":\"magtag/%s/cfg\","
                "\"val_tpl\":\"{{ value_json.%s }}\",\"cmd_t\":\"magtag/%s/set/%s\",\"retain\":true",
-               f->name, dev_id, f->key, dev_id, f->key, dev_id, f->key, dev_id, f->key);
+               f->name, dev_id, f->key, f->component, dev_id, f->key, dev_id, f->key, dev_id, f->key);
     /* optimistic: the device is asleep, so the cfg state topic lags an edit
        by a whole window. Without this, HA re-renders the control from the
        stale retained state the instant you change it — the switch snaps back

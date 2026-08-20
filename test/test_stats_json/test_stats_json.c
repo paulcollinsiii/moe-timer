@@ -497,7 +497,8 @@ void test_discovery_battery_payload(void) {
     const ha_entity_t *ents = stats_json_entities(&count); /* [0] = battery */
     int n = stats_json_discovery(buf, sizeof(buf), "magtag-a1b2c3", "Kitchen MagTag", "v1.4.0-test", &ents[0]);
     TEST_ASSERT_EQUAL_STRING(
-        "{\"name\":\"Battery\",\"uniq_id\":\"magtag-a1b2c3_battery\",\"obj_id\":\"magtag-a1b2c3_battery\","
+        "{\"name\":\"Battery\",\"uniq_id\":\"magtag-a1b2c3_battery\","
+        "\"def_ent_id\":\"sensor.magtag-a1b2c3_battery\","
         "\"stat_t\":\"magtag/magtag-a1b2c3/stat\",\"val_tpl\":\"{{ value_json.batt_pct }}\","
         "\"unit_of_meas\":\"%\",\"dev_cla\":\"battery\",\"expire_after\":7500,"
         "\"dev\":{\"ids\":[\"magtag-a1b2c3\"],\"name\":\"Kitchen MagTag\",\"mf\":\"Adafruit\","
@@ -671,27 +672,65 @@ void test_primary_entity_omits_category(void) {
    discovery says otherwise, so renaming a device re-slugs every entity
    under it. That is not hypothetical here: a house automation excluding
    "magtag" stopped matching after two devices were renamed, and swept
-   their switches off overnight. obj_id pins the entity_id to the
-   MAC-derived device id instead. The rule these three tests hold is that
-   EVERY discovery payload carries obj_id, and that its value is the same
-   string as uniq_id. */
-void test_discovery_object_id_is_the_unique_id(void) {
+   their switches off overnight. def_ent_id pins the entity_id to the
+   MAC-derived device id instead. The rule these tests hold is that EVERY
+   discovery payload carries def_ent_id, and that its value is the
+   entity's component, a dot, and its uniq_id.
+
+   The field is def_ent_id and not obj_id because HA removed obj_id from
+   MQTT discovery in 2026.4.0; def_ent_id has existed since 2025.10. */
+void test_discovery_default_entity_id_is_the_component_and_unique_id(void) {
     char buf[STATS_JSON_PAYLOAD_MAX];
     char want[128];
     int count = 0;
     const ha_entity_t *ents = stats_json_entities(&count);
+    TEST_ASSERT_TRUE(count > 0);
     for (int i = 0; i < count; i++) {
         stats_json_discovery(buf, sizeof(buf), "magtag-a1b2c3", "Kitchen MagTag", "fw", &ents[i]);
-        snprintf(want, sizeof(want), "\"obj_id\":\"magtag-a1b2c3_%s\"", ents[i].key);
+        snprintf(want, sizeof(want), "\"def_ent_id\":\"%s.magtag-a1b2c3_%s\"", ents[i].component, ents[i].key);
         TEST_ASSERT_NOT_NULL_MESSAGE(strstr(buf, want), ents[i].key);
         snprintf(want, sizeof(want), "\"uniq_id\":\"magtag-a1b2c3_%s\"", ents[i].key);
         TEST_ASSERT_NOT_NULL_MESSAGE(strstr(buf, want), ents[i].key);
+        /* The payload's component must be the one the topic routes on,
+           or HA registers the entity under one platform and names it for
+           another. */
+        char topic[128];
+        stats_json_discovery_topic(topic, sizeof(topic), "magtag-a1b2c3", &ents[i]);
+        snprintf(want, sizeof(want), "homeassistant/%s/", ents[i].component);
+        TEST_ASSERT_EQUAL_STRING_LEN_MESSAGE(want, topic, strlen(want), ents[i].key);
     }
 }
 
-void test_discovery_object_id_does_not_move_when_the_device_is_renamed(void) {
+void test_discovery_default_entity_id_survives_the_ha_dot_partition(void) {
+    /* HA does not use def_ent_id whole. It does
+       `_, _, object_id = default_entity_id.partition(".")` and generates
+       from the TAIL, and Python's partition returns an empty tail when
+       there is no dot — so a value without the "<component>." prefix
+       registers an EMPTY object id, which is worse than omitting the
+       field. This walks every entity through that exact split. */
+    char buf[STATS_JSON_PAYLOAD_MAX];
+    int count = 0;
+    const ha_entity_t *ents = stats_json_entities(&count);
+    for (int i = 0; i < count; i++) {
+        stats_json_discovery(buf, sizeof(buf), "magtag-a1b2c3", "Kitchen MagTag", "fw", &ents[i]);
+        const char *v = strstr(buf, "\"def_ent_id\":\"");
+        TEST_ASSERT_NOT_NULL_MESSAGE(v, ents[i].key);
+        v += strlen("\"def_ent_id\":\"");
+        const char *end = strchr(v, '"');
+        TEST_ASSERT_NOT_NULL_MESSAGE(end, ents[i].key);
+        const char *dot = strchr(v, '.');
+        TEST_ASSERT_NOT_NULL_MESSAGE(dot, ents[i].key); /* dotless -> empty object id */
+        TEST_ASSERT_TRUE_MESSAGE(dot < end, ents[i].key);
+        char want[128];
+        snprintf(want, sizeof(want), "magtag-a1b2c3_%s", ents[i].key);
+        TEST_ASSERT_EQUAL_INT_MESSAGE((int)strlen(want), (int)(end - dot - 1), ents[i].key);
+        TEST_ASSERT_EQUAL_STRING_LEN_MESSAGE(want, dot + 1, strlen(want), ents[i].key);
+    }
+}
+
+void test_discovery_default_entity_id_does_not_move_when_the_device_is_renamed(void) {
     /* The actual regression, stated as a test: two device names that HA
-       would slug differently must produce the same obj_id. The name
+       would slug differently must produce the same def_ent_id. The name
        itself still changes, which is what stops this passing vacuously. */
     char a[STATS_JSON_PAYLOAD_MAX], b[STATS_JSON_PAYLOAD_MAX];
     int count = 0;
@@ -700,7 +739,7 @@ void test_discovery_object_id_does_not_move_when_the_device_is_renamed(void) {
     stats_json_discovery(b, sizeof(b), "magtag-a1b2c3", "Julia's Timer", "fw", &ents[0]);
 
     char want[128];
-    snprintf(want, sizeof(want), "\"obj_id\":\"magtag-a1b2c3_%s\"", ents[0].key);
+    snprintf(want, sizeof(want), "\"def_ent_id\":\"%s.magtag-a1b2c3_%s\"", ents[0].component, ents[0].key);
     TEST_ASSERT_NOT_NULL(strstr(a, want));
     TEST_ASSERT_NOT_NULL(strstr(b, want));
     TEST_ASSERT_NOT_NULL(strstr(a, "Testing Timer"));
@@ -713,8 +752,15 @@ void test_every_discovery_payload_fits_the_publish_buffer(void) {
        buffer as the stat payload, and an overflow there means the entity
        simply never appears in HA. It logs the skip now, but a bound is
        better than a log. Worst realistic case: the longest device name
-       the name entity accepts, and the per-slot sensors' runtime name
-       override at its own cap. */
+       the transport carries, and the per-slot sensors' runtime name
+       override at its own cap.
+
+       fw is 31 characters, not the 2 this test used to pass. The device
+       hands over esp_app_get_description()->version, which is char[32],
+       and this project derives it from `git describe` — so the realistic
+       input is a full tag+offset+hash string, not "fw". A 2-char stub
+       understated the worst case by 29 bytes and would have kept
+       understating it as tags grew. */
     char buf[STATS_JSON_PAYLOAD_MAX];
     char longname[64];
     memset(longname, 'W', sizeof(longname) - 1); /* widest glyph, 63 chars */
@@ -722,11 +768,14 @@ void test_every_discovery_payload_fits_the_publish_buffer(void) {
     char override[48];
     memset(override, 'W', sizeof(override) - 1);
     override[sizeof(override) - 1] = '\0';
+    char fw[32]; /* == sizeof(esp_app_desc_t.version): 31 chars + NUL */
+    memset(fw, 'W', sizeof(fw) - 1);
+    fw[sizeof(fw) - 1] = '\0';
 
     int count = 0, worst = 0;
     const ha_entity_t *ents = stats_json_entities(&count);
     for (int i = 0; i < count; i++) {
-        const int n = stats_json_discovery_named(buf, sizeof(buf), "magtag-a1b2c3", longname, "fw", &ents[i], override);
+        const int n = stats_json_discovery_named(buf, sizeof(buf), "magtag-a1b2c3", longname, fw, &ents[i], override);
         if (n > worst)
             worst = n;
         TEST_ASSERT_TRUE_MESSAGE(n < (int)sizeof(buf), ents[i].key);
@@ -772,8 +821,9 @@ int main(void) {
     RUN_TEST(test_panic_count_is_the_primary_entity_of_the_group);
     RUN_TEST(test_discovery_topic);
     RUN_TEST(test_discovery_battery_payload);
-    RUN_TEST(test_discovery_object_id_is_the_unique_id);
-    RUN_TEST(test_discovery_object_id_does_not_move_when_the_device_is_renamed);
+    RUN_TEST(test_discovery_default_entity_id_is_the_component_and_unique_id);
+    RUN_TEST(test_discovery_default_entity_id_survives_the_ha_dot_partition);
+    RUN_TEST(test_discovery_default_entity_id_does_not_move_when_the_device_is_renamed);
     RUN_TEST(test_every_discovery_payload_fits_the_publish_buffer);
     RUN_TEST(test_discovery_binary_sensor_has_payload_states);
     RUN_TEST(test_discovery_completions_use_runtime_slot_names);

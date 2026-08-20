@@ -1165,23 +1165,97 @@ void test_discovery_hash_is_stable_for_a_name_only_slot(void) {
 }
 
 /* Same rule as the entity table in stats_json.c: every discovery payload
-   carries obj_id, and its value is the uniq_id string. These are the
-   editable controls — the switches an over-broad HA automation reaches
-   for — so they are the half of the surface that actually got swept. */
-void test_discovery_object_id_is_the_unique_id_for_every_config_field(void) {
+   carries def_ent_id, and its value is "<component>.<uniq_id>". These are
+   the editable controls — the switches an over-broad HA automation reaches
+   for — so they are the half of the surface that actually got swept.
+
+   The component prefix is load-bearing, not decoration: HA reads the field
+   as a full entity_id and keeps only what follows the FIRST dot, so a
+   dotless value registers an EMPTY object id. The walk below therefore
+   splits the value the way HA does rather than only looking for a
+   substring. (obj_id, the field this replaces, was removed from HA's MQTT
+   discovery in 2026.4.0; def_ent_id has existed since 2025.10.)
+
+   This is also where the size ceiling for the config payloads is proven,
+   on the same buffer and the same -128 B margin as the entity table's
+   test, because the two want the same walk and def_ent_id must not depend
+   on the device name at all — which 63 W's state more loudly than
+   "Kitchen MagTag" does. */
+static void assert_config_discovery(const char *dev_name, const char *fw, const char *what) {
     char buf[STATS_JSON_PAYLOAD_MAX];
     char want[128];
-    int count = 0;
+    int count = 0, worst = 0;
+    const char *worst_key = "";
     const cfg_field_t *fields = ha_config_fields(&count);
     TEST_ASSERT_TRUE(count > 0);
     for (int i = 0; i < count; i++) {
-        ha_config_discovery(buf, sizeof(buf), "magtag-a1b2c3", "Kitchen MagTag", "fw", &fields[i]);
-        snprintf(want, sizeof(want), "\"obj_id\":\"magtag-a1b2c3_%s\"", fields[i].key);
-        TEST_ASSERT_NOT_NULL_MESSAGE(strstr(buf, want), fields[i].key);
+        const int n = ha_config_discovery(buf, sizeof(buf), "magtag-a1b2c3", dev_name, fw, &fields[i]);
         snprintf(want, sizeof(want), "\"uniq_id\":\"magtag-a1b2c3_%s\"", fields[i].key);
         TEST_ASSERT_NOT_NULL_MESSAGE(strstr(buf, want), fields[i].key);
-        TEST_ASSERT_TRUE_MESSAGE(strlen(buf) < sizeof(buf) - 1, fields[i].key);
+        snprintf(want, sizeof(want), "\"def_ent_id\":\"%s.magtag-a1b2c3_%s\"", fields[i].component, fields[i].key);
+        TEST_ASSERT_NOT_NULL_MESSAGE(strstr(buf, want), fields[i].key);
+        /* HA's own split: `_, _, object_id = value.partition(".")`. */
+        const char *v = strstr(buf, "\"def_ent_id\":\"");
+        TEST_ASSERT_NOT_NULL_MESSAGE(v, fields[i].key);
+        v += strlen("\"def_ent_id\":\"");
+        const char *dot = strchr(v, '.');
+        const char *end = strchr(v, '"');
+        TEST_ASSERT_NOT_NULL_MESSAGE(dot, fields[i].key); /* dotless -> empty object id */
+        TEST_ASSERT_NOT_NULL_MESSAGE(end, fields[i].key);
+        TEST_ASSERT_TRUE_MESSAGE(dot < end, fields[i].key);
+        snprintf(want, sizeof(want), "magtag-a1b2c3_%s", fields[i].key);
+        TEST_ASSERT_EQUAL_INT_MESSAGE((int)strlen(want), (int)(end - dot - 1), fields[i].key);
+        /* The payload's component must be the one the topic routes on. */
+        char topic[128];
+        ha_config_discovery_topic(topic, sizeof(topic), "magtag-a1b2c3", &fields[i]);
+        snprintf(want, sizeof(want), "homeassistant/%s/", fields[i].component);
+        TEST_ASSERT_EQUAL_STRING_LEN_MESSAGE(want, topic, strlen(want), fields[i].key);
+        TEST_ASSERT_TRUE_MESSAGE(n < (int)sizeof(buf), fields[i].key);
+        if (n > worst) {
+            worst = n;
+            worst_key = fields[i].key;
+        }
     }
+    /* Not an equality assert — a headroom report that fails only when the
+       margin is gone, so a field can be added without editing a magic
+       number. The message carries the measurement and the widest field so
+       a failure says WHICH control blew the budget. */
+    char msg[192];
+    snprintf(msg, sizeof(msg), "%s: worst %d B of %d, widest field '%s'", what, worst, (int)sizeof(buf), worst_key);
+    TEST_ASSERT_TRUE_MESSAGE(worst < (int)sizeof(buf) - 128, msg);
+}
+
+void test_every_config_discovery_payload_carries_def_ent_id_and_fits(void) {
+    /* 63 W's, not the 31 the HA text entity advertises as its max: the
+       transport ceiling is mqtt_ha.c's `char dev_name[64]`, and a name
+       written to NVS by an older firmware or by a path that does not go
+       through CFG_BOUND_NAME_MAX arrives through that buffer. Same figure
+       as the entity table's test, so one worst case covers both.
+
+       fw is 31 chars because that is what the device passes:
+       esp_app_get_description()->version is char[32], filled here from
+       `git describe`. The 2-char "fw" this test used to pass understated
+       every payload by 29 bytes. */
+    char longname[64];
+    memset(longname, 'W', sizeof(longname) - 1);
+    longname[sizeof(longname) - 1] = '\0';
+    char fw[32];
+    memset(fw, 'W', sizeof(fw) - 1);
+    fw[sizeof(fw) - 1] = '\0';
+    assert_config_discovery(longname, fw, "config discovery headroom below 128 B (plain 63-char name)");
+
+    /* The escape-expansion case, and the real ceiling. Each quote escapes
+       to two bytes, and ha_config.c escapes the device name into char[128]
+       where stats_json.c uses char[64] — so all 63 quotes land here as 126
+       bytes, while the entity table fills its smaller buffer and stops at
+       62 bytes whatever the name is. The quotes therefore cost the entity
+       payloads nothing and cost these ones 63 B, which is what makes the
+       config registry, not the entity table, the widest thing mqtt_ha.c
+       publishes. */
+    char quoted[64];
+    memset(quoted, '"', sizeof(quoted) - 1);
+    quoted[sizeof(quoted) - 1] = '\0';
+    assert_config_discovery(quoted, fw, "config discovery headroom below 128 B (63 quotes, escaped to 126 B)");
 }
 
 int main(void) {
@@ -1214,7 +1288,7 @@ int main(void) {
     RUN_TEST(test_state_json_worst_case_fits_firmware_buffer);
     RUN_TEST(test_state_json_reports_current_values);
     RUN_TEST(test_discovery_number_has_command_bounds_and_config_category);
-    RUN_TEST(test_discovery_object_id_is_the_unique_id_for_every_config_field);
+    RUN_TEST(test_every_config_discovery_payload_carries_def_ent_id_and_fits);
     RUN_TEST(test_discovery_text_has_mode);
     RUN_TEST(test_discovery_text_advertises_max_length);
     RUN_TEST(test_timer_name_max_matches_the_reject_boundary);

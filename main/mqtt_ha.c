@@ -267,8 +267,17 @@ static int publish_config_discovery(esp_mqtt_client_handle_t client, const char 
     for (int i = 0; i < count; i++) {
         ha_config_discovery_topic(topic, sizeof(s_mem->topic), device_id(), &fields[i]);
         int n = ha_config_discovery(payload, sizeof(s_mem->payload), device_id(), dev_name, fw, &fields[i]);
-        if (n < (int)sizeof(s_mem->payload))
+        if (n < (int)sizeof(s_mem->payload)) {
             published += publish(client, topic, payload, 1);
+        } else {
+            /* The other three producers all say this out loud; this one
+               did not, and these are the editable CONTROLS — a number or
+               switch that silently never appears in HA reads as a feature
+               that was never shipped. The select fields are the widest
+               payloads on the device (their options list inline), so this
+               is the arm most likely to fire. */
+            ESP_LOGW(TAG, "%s config discovery truncated, skipped", fields[i].key);
+        }
     }
     return published;
 }
@@ -288,16 +297,20 @@ static int publish_action_discovery(esp_mqtt_client_handle_t client, const char 
     ha_config_json_escape(dn, sizeof(dn), dev_name);
     int published = 0, n;
     /* These two payloads are hand-written rather than table-driven, so
-       nothing walks them in a host test: the obj_id below is held only by
-       this comment and by test_discovery_object_id_is_the_unique_id in
+       nothing walks them in a host test: the def_ent_id below is held only
+       by this comment and by
+       test_discovery_default_entity_id_is_the_component_and_unique_id in
        test_stats_json, which pins the RULE the two must follow. Any
-       discovery payload added here must carry obj_id with the same value
-       as its uniq_id. */
+       discovery payload added here must carry def_ent_id built as
+       "<component>.<uniq_id>", with the component literal matching the one
+       handed to mqtt_disc_topic() two lines up — HA keeps only what
+       follows the first dot, so the dot is load-bearing and a dotless
+       value would register an EMPTY object id. */
     /* number: Screen adjust (min) today (signed; key stays screen_bonus) */
     mqtt_disc_topic(topic, sizeof(s_mem->topic), "number", id, "screen_bonus");
     n = snprintf(payload, sizeof(s_mem->payload),
                  "{\"name\":\"Screen adjust (min) today\",\"uniq_id\":\"%s_screen_bonus\","
-                 "\"obj_id\":\"%s_screen_bonus\","
+                 "\"def_ent_id\":\"number.%s_screen_bonus\","
                  "\"stat_t\":\"magtag/%s/act\",\"val_tpl\":\"{{ value_json.screen_bonus }}\","
                  "\"cmd_t\":\"magtag/%s/set/screen_bonus\",\"retain\":true,\"min\":-%d,\"max\":%d,\"step\":5,"
                  "\"mode\":\"box\",\"optimistic\":true,\"unit_of_meas\":\"min\",\"ent_cat\":\"config\","
@@ -313,7 +326,8 @@ static int publish_action_discovery(esp_mqtt_client_handle_t client, const char 
        rendering over the snap-back). */
     mqtt_disc_topic(topic, sizeof(s_mem->topic), "switch", id, "locate");
     n = snprintf(payload, sizeof(s_mem->payload),
-                 "{\"name\":\"Find my timer\",\"uniq_id\":\"%s_locate\",\"obj_id\":\"%s_locate\","
+                 "{\"name\":\"Find my timer\",\"uniq_id\":\"%s_locate\","
+                 "\"def_ent_id\":\"switch.%s_locate\","
                  "\"stat_t\":\"magtag/%s/act\","
                  "\"val_tpl\":\"{{ value_json.locate }}\",\"cmd_t\":\"magtag/%s/set/locate\",\"retain\":true,"
                  "\"pl_on\":\"ON\",\"pl_off\":\"OFF\",\"optimistic\":true,\"dev\":{\"ids\":[\"%s\"],\"name\":\"%s\","

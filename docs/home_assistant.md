@@ -65,8 +65,8 @@ Notes:
   interval: they stay "available" while the device sleeps but go
   unavailable if it genuinely dies (or is charge-locked, which stops
   network windows — the final stat before locking sets
-  `binary_sensor.charge_lock` ON, a good automation trigger for a
-  "charge the timer" notification).
+  `binary_sensor.magtag_xxxxxx_charge_lock` ON, a good automation trigger
+  for a "charge the timer" notification).
 - Update cadence = the sync cadence: every 10 min while a timer runs,
   hourly while idle (menuconfig). Button D forces a window immediately.
 - The daily summary publishes at the first wake after midnight and covers
@@ -74,12 +74,27 @@ Notes:
 
 ### Entity IDs are stable, and do not follow the device name
 
-Every discovery payload carries `obj_id`, so HA builds entity IDs from the
-MAC-derived device id rather than from the device's friendly name:
+**Requires Home Assistant 2025.10 or newer.** Every discovery payload
+carries `def_ent_id` (`default_entity_id`), added to MQTT discovery in HA
+2025.10, so HA builds entity IDs from the MAC-derived device id rather than
+from the device's friendly name:
 
     binary_sensor.magtag_xxxxxx_charge_lock
-    switch.magtag_xxxxxx_ota_check_on_sync
+    switch.magtag_xxxxxx_ota_on_sync
     number.magtag_xxxxxx_weekday_min
+
+The published value is a **full** entity ID, component prefix and all —
+`sensor.magtag-xxxxxx_battery` — because HA keeps only the part after the
+first dot. A value without the prefix would give it nothing to work with.
+HA then slugifies what it kept, which is why the hyphen in the device id
+comes out as an underscore in the IDs above.
+
+Below 2025.10 the key is simply unknown: HA's MQTT platform schemas drop
+extra keys without a warning, so entity IDs stay exactly as they are today.
+The field costs nothing and breaks nothing on an older HA — it just does not
+help. (Firmware before this carried `obj_id`, which HA removed from MQTT
+discovery in 2026.4.0. On any HA from 2026.4.0 on, that field was dropped
+silently and did nothing at all.)
 
 Renaming the device in HA changes the display name and nothing else. This
 matters more than it sounds: without it HA derives the entity ID from the
@@ -90,8 +105,8 @@ exactly that after two devices were renamed — it stopped recognising them
 and swept their configuration switches off overnight, which reads on the
 device side as settings reverting by themselves.
 
-**One-time step on a device HA already knows.** `obj_id` seeds an entity ID
-only at that entity's *first* registration; HA keys its registry on
+**One-time step on a device HA already knows.** `def_ent_id` seeds an entity
+ID only at that entity's *first* registration; HA keys its registry on
 `uniq_id` and will not re-slug an existing entity behind your back. So on
 an already-paired device the IDs stay as they are until you re-register:
 
@@ -104,10 +119,24 @@ an already-paired device the IDs stay as they are until you re-register:
    discovery configs and registers the entities with their new IDs.
 
 Do it in that order. Deleting first makes HA re-add from the *old* retained
-payload and slug from the name all over again.
+payload and slug from the name all over again — deleting the device in HA
+does **not** clear the retained discovery topics on the broker, so whatever
+is retained there is what comes back.
 
-Automations, dashboards and scripts referencing the old IDs need updating —
-that is the cost of the change, and it is paid once.
+**What step 2 actually costs.** It is an entity-registry delete, not a
+cosmetic refresh, and everything HA stores *about* those entities goes with
+them: area assignment, custom entity names, custom icons, labels, and
+hidden/disabled flags. They come back with the firmware's own names, in no
+area, with nothing customised. Anything that names the old IDs —
+dashboards, automations, scripts, template sensors, notification groups —
+has to be updated by hand; HA does not rewrite references. Recorder history
+and long-term statistics are keyed on the entity ID too, so the graphs on
+the read-only sensors restart under the new ID while the old series stays
+behind, orphaned, under the old one.
+
+That is the price of the change, and it is paid once. Skipping it is a valid
+choice: an already-paired device keeps working exactly as it does now, it
+just keeps name-derived entity IDs.
 
 ## Example: low-battery notification
 
@@ -230,38 +259,60 @@ confirmed value to `magtag/<id>/cfg` so the control reflects reality.
 The device page auto-sorts entities alphabetically by name within each
 category — the firmware can't set a display order (MQTT discovery has no
 ordering field). For a custom layout, add a **dashboard Entities card** and
-list them in the order you want; the entity IDs follow
-`number.<device>_<field>` / `text.<device>_<field>` (use the entity picker
-if unsure of the exact slug):
+list them in the order you want.
+
+The IDs are `<component>.magtag_xxxxxx_<key>`, where `<key>` is the
+registry key in `main/ha_config.c` — **not** a slug of the display name the
+card shows. "Weekday allocation" is `weekday_min`; "Quiet hours start
+(HHMM)" is `quiet_start`; "Break interval" is `break_interval_min`; "Device
+name" is `name`; "Timer 1 name" is `timer1_name`. Use the entity picker if
+in doubt.
 
 ```yaml
 type: entities
 title: Kitchen MagTag
 entities:
-  - entity: text.kitchen_magtag_device_name
+  - entity: text.magtag_xxxxxx_name            # Device name
+  - entity: text.magtag_xxxxxx_tz              # Timezone
   - type: section
     label: Daily limits
-  - entity: number.kitchen_magtag_weekday_allocation
-  - entity: number.kitchen_magtag_weekend_allocation
-  - entity: number.kitchen_magtag_holiday_allocation
-  - entity: number.kitchen_magtag_summer_allocation
+  - entity: number.magtag_xxxxxx_weekday_min
+  - entity: number.magtag_xxxxxx_weekend_min
+  - entity: number.magtag_xxxxxx_holiday_min
+  - entity: number.magtag_xxxxxx_summer_min
   - type: section
     label: Quiet hours
-  - entity: number.kitchen_magtag_quiet_hours_start_hhmm
-  - entity: number.kitchen_magtag_quiet_hours_end_hhmm
+  - entity: number.magtag_xxxxxx_quiet_start
+  - entity: number.magtag_xxxxxx_quiet_end
+  - entity: number.magtag_xxxxxx_bedtime
   - type: section
     label: Breaks
-  - entity: number.kitchen_magtag_break_duration
-  - entity: number.kitchen_magtag_break_interval
-  - entity: number.kitchen_magtag_screen_bonus_min_today
+  - entity: number.magtag_xxxxxx_break_interval_min
+  - entity: number.magtag_xxxxxx_break_duration_min
+  - entity: number.magtag_xxxxxx_screen_bonus  # Screen adjust (min) today
   - type: section
     label: Extra timers
-  - entity: text.kitchen_magtag_timer_1_name
-  - entity: number.kitchen_magtag_timer_1_minutes
-  - entity: switch.kitchen_magtag_timer_1_reloadable
-  - entity: switch.kitchen_magtag_timer_1_break_eligible
-  # ...timers 2-4
+  - entity: text.magtag_xxxxxx_timer1_name
+  - entity: number.magtag_xxxxxx_timer1_min
+  - entity: switch.magtag_xxxxxx_timer1_reload
+  - entity: switch.magtag_xxxxxx_timer1_break
+  # ...timers 2-4: same four keys with the digit changed
+  - type: section
+    label: Sound
+  - entity: select.magtag_xxxxxx_tone_expiry
+  - entity: select.magtag_xxxxxx_tone_break
+  - entity: select.magtag_xxxxxx_tone_bed
+  - entity: number.magtag_xxxxxx_alert_volume
+  - type: section
+    label: Updates
+  - entity: text.magtag_xxxxxx_ota_url
+  - entity: switch.magtag_xxxxxx_ota_on_sync
 ```
+
+`screen_bonus` is the one control above that is not in the config registry —
+it is published from `main/mqtt_ha.c` alongside `switch.magtag_xxxxxx_locate`
+("Find my timer"), which is left off the card because it belongs on a button
+rather than in a settings list.
 
 ### Bulk config document (holidays, scripted setup)
 

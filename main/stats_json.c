@@ -275,20 +275,34 @@ int stats_json_discovery_named(char *buf, size_t len, const char *dev_id, const 
                                const ha_entity_t *ent, const char *name_override) {
     char ename[64], dname[64];
     int pos = 0;
-    /* obj_id carries the SAME string as uniq_id, on purpose. Without it
+    /* def_ent_id carries "<component>.<uniq_id>", on purpose. Without it
        HA builds the entity_id from the device name and the entity name,
        so renaming a device silently re-slugs every entity under it —
        which is how a house automation that excluded "magtag" stopped
        matching devices renamed to "Testing Timer" and swept their
        switches off. dev_id is MAC-derived (device_id.h) and outlives any
        rename, so entity_ids built from it are stable by construction.
-       See DISC_SCHEMA_VER's note: this only takes effect at an entity's
-       FIRST registration. */
+
+       The "<component>." prefix is mandatory, not cosmetic. HA reads
+       default_entity_id as a FULL entity_id and keeps only what follows
+       the FIRST dot; a value with no dot partitions to an EMPTY object
+       id, which is worse than sending nothing at all. ent->component is
+       the same string stats_json_discovery_topic() puts in the topic, so
+       payload and topic name one platform by construction — they have to
+       agree, or HA registers the entity under one and names it for
+       another.
+
+       Why def_ent_id and not obj_id: HA removed obj_id from MQTT
+       discovery in 2026.4.0. def_ent_id has existed since 2025.10, and
+       HA older than that drops the unknown key (the platform schemas are
+       extra=REMOVE_EXTRA) and leaves entity_ids exactly as they are — so
+       this fails safe rather than failing loudly. See DISC_SCHEMA_VER's
+       note: it only takes effect at an entity's FIRST registration. */
     pos = jcat(buf, len, pos,
-               "{\"name\":\"%s\",\"uniq_id\":\"%s_%s\",\"obj_id\":\"%s_%s\","
+               "{\"name\":\"%s\",\"uniq_id\":\"%s_%s\",\"def_ent_id\":\"%s.%s_%s\","
                "\"stat_t\":\"magtag/%s/%s\",\"val_tpl\":\"%s\"",
-               jesc(ename, sizeof(ename), name_override ? name_override : ent->name), dev_id, ent->key, dev_id,
-               ent->key, dev_id, ent->topic_suffix, ent->tpl);
+               jesc(ename, sizeof(ename), name_override ? name_override : ent->name), dev_id, ent->key, ent->component,
+               dev_id, ent->key, dev_id, ent->topic_suffix, ent->tpl);
     if (ent->unit != NULL)
         pos = jcat(buf, len, pos, ",\"unit_of_meas\":\"%s\"", ent->unit);
     if (ent->dev_class != NULL)
