@@ -76,12 +76,23 @@ typedef struct {
     uint32_t dl_ms;                        /* last download's wall time */
 } ota_stat_t;
 
-/* Width of the published panic-phase label. The longest the phase table
-   can produce is "RENDER+OTA_CHECK" (16 + NUL). panic_diag.c carries a
-   _Static_assert, but it compares literals rather than the table and is
-   only a floor — what actually holds a longer phase name to this width
-   is test_every_phase_pair_fits_the_published_field, which walks the
-   whole cross-product. Grow this number, or that test fails. */
+/* Width of the published panic-phase label: main + '+' + net + NUL.
+   The longest the phase table can now produce is "BOOT_LOCK+OTA_CHECK"
+   (19 + NUL), which is this number EXACTLY — the field is full. It was
+   "RENDER+OTA_CHECK" (16 + NUL) until PANIC_PHASE_BOOT was subdivided,
+   and the three characters that went is the whole budget a main-slot
+   phase name has left: nine, because the widest net-slot label is
+   "OTA_CHECK" (9) and 20 - 1 - 9 - 1 = 9.
+
+   Two things hold that. panic_diag.c's _Static_assert now checks every
+   row of the real phase table against that nine-character budget rather
+   than comparing two hardcoded literals (the old form could not see a
+   longer name being added at all), and
+   test_every_phase_pair_fits_the_published_field
+   walks the whole PANIC_PHASE__COUNT^2 cross-product through the actual
+   label builder. A longer phase name fails both. Shorten the name or
+   grow this number — and growing it costs a byte in every stat payload,
+   which mqtt_ha.c's publish path has a measured budget for. */
 #define DIAG_PHASE_MAX 20
 
 /* The panic/health leg of the stat payload. A SEPARATE argument for

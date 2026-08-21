@@ -65,6 +65,42 @@ void test_the_phases_the_brief_asked_for_are_all_separable(void) {
     TEST_ASSERT_EQUAL_STRING("SLEEP", panic_diag_phase_str(PANIC_PHASE_SLEEP));
 }
 
+void test_each_boot_subdivision_names_one_init_call(void) {
+    /* The whole reason these exist: a breadcrumb reading "BOOT" spans
+       NVS init, the OTA rollback detector, the ADC, the LVGL framebuffer
+       and a charge gate that can run a full refresh AND a network window
+       — which localises nothing. Named individually, and against the
+       exact strings, because the strings ARE the diagnostic: an operator
+       reads them in Home Assistant and goes to that call. */
+    TEST_ASSERT_EQUAL_STRING("BOOT_NVS", panic_diag_phase_str(PANIC_PHASE_BOOT_NVS));
+    TEST_ASSERT_EQUAL_STRING("BOOT_OTA", panic_diag_phase_str(PANIC_PHASE_BOOT_OTA));
+    TEST_ASSERT_EQUAL_STRING("BOOT_DISP", panic_diag_phase_str(PANIC_PHASE_BOOT_DISP));
+    TEST_ASSERT_EQUAL_STRING("BOOT_BATT", panic_diag_phase_str(PANIC_PHASE_BOOT_BATT));
+    TEST_ASSERT_EQUAL_STRING("BOOT_LOCK", panic_diag_phase_str(PANIC_PHASE_BOOT_LOCK));
+    /* And the phase they subdivide is still its own reading: the wiring
+       calls nobody gave a sub-phase to (neopixel_init, the TZ read, the
+       timer restore, buttons_init, the heap log) still report BOOT. */
+    TEST_ASSERT_EQUAL_STRING("BOOT", panic_diag_phase_str(PANIC_PHASE_BOOT));
+}
+
+void test_the_reachable_boot_lock_pairing_fills_the_published_field_exactly(void) {
+    /* This is the pairing that spends the entire width budget, and it is
+       reachable rather than theoretical: lock_gate_check_charge() runs
+       from inside BOOT_LOCK and calls net_apply_try_window(), which is
+       what puts OTA_CHECK in the net slot. 9 + 1 + 9 + 1 = 20 =
+       DIAG_PHASE_MAX, so the field is FULL — a tenth character on a
+       main-slot label ("BOOT_DISPLAY" was the first draft) truncates
+       here, and a truncated label still reads like a phase name in Home
+       Assistant. Asserted as an exact length rather than "fits", so
+       shortening DIAG_PHASE_MAX or lengthening a name both land here
+       with the arithmetic on show. */
+    char buf[DIAG_PHASE_MAX];
+    const int n = panic_diag_phase_label(buf, sizeof(buf), PANIC_PHASE_BOOT_LOCK, PANIC_PHASE_OTA_CHECK);
+    TEST_ASSERT_EQUAL_STRING("BOOT_LOCK+OTA_CHECK", buf);
+    TEST_ASSERT_EQUAL_INT(19, n);
+    TEST_ASSERT_EQUAL_INT((int)sizeof(buf) - 1, n); /* exactly full, not merely fitting */
+}
+
 void test_a_phase_this_image_does_not_know_is_not_reported_as_one_it_does(void) {
     /* The values are stored — in RTC memory and in an NVS blob — so a
        record written by another firmware can arrive here. "?" says the
@@ -87,6 +123,18 @@ void test_the_slot_map_puts_every_network_phase_on_the_network_side(void) {
     TEST_ASSERT_FALSE(panic_diag_phase_is_net(PANIC_PHASE_SLEEP));
     TEST_ASSERT_FALSE(panic_diag_phase_is_net(PANIC_PHASE_NONE));
     TEST_ASSERT_FALSE(panic_diag_phase_is_net((panic_phase_t)200));
+    /* The BOOT subdivisions, every one of them. They are marked from the
+       main task inside app_main, and BOOT_LOCK in particular runs a whole
+       network window from inside itself (lock_gate_check_charge calls
+       net_apply_try_window) — so a boot phase that answered true here
+       would overwrite the very NET/OTA_CHECK/MQTT reading that window is
+       there to produce, and the published label would lose the half that
+       matters. */
+    TEST_ASSERT_FALSE(panic_diag_phase_is_net(PANIC_PHASE_BOOT_NVS));
+    TEST_ASSERT_FALSE(panic_diag_phase_is_net(PANIC_PHASE_BOOT_OTA));
+    TEST_ASSERT_FALSE(panic_diag_phase_is_net(PANIC_PHASE_BOOT_DISP));
+    TEST_ASSERT_FALSE(panic_diag_phase_is_net(PANIC_PHASE_BOOT_BATT));
+    TEST_ASSERT_FALSE(panic_diag_phase_is_net(PANIC_PHASE_BOOT_LOCK));
 }
 
 /* ---- the label ---- */
@@ -376,7 +424,17 @@ void test_the_stored_phase_numbers_are_pinned_because_they_outlive_the_image(voi
     TEST_ASSERT_EQUAL_INT(6, PANIC_PHASE_OTA_CHECK);
     TEST_ASSERT_EQUAL_INT(7, PANIC_PHASE_MQTT);
     TEST_ASSERT_EQUAL_INT(8, PANIC_PHASE_OTA_DL);
-    TEST_ASSERT_EQUAL_INT(9, PANIC_PHASE__COUNT);
+    /* The BOOT subdivision, appended in 2026-08 rather than slotted in
+       next to PANIC_PHASE_BOOT where it would read in wake order. A
+       device that panicked under the image before it has records on
+       flash carrying 1..8; inserting BOOT_NVS at 2 would decode every
+       one of those as the phase after the one it really was. */
+    TEST_ASSERT_EQUAL_INT(9, PANIC_PHASE_BOOT_NVS);
+    TEST_ASSERT_EQUAL_INT(10, PANIC_PHASE_BOOT_OTA);
+    TEST_ASSERT_EQUAL_INT(11, PANIC_PHASE_BOOT_DISP);
+    TEST_ASSERT_EQUAL_INT(12, PANIC_PHASE_BOOT_BATT);
+    TEST_ASSERT_EQUAL_INT(13, PANIC_PHASE_BOOT_LOCK);
+    TEST_ASSERT_EQUAL_INT(14, PANIC_PHASE__COUNT);
 }
 
 void test_leaving_a_phase_nobody_disturbed_restores_the_outer_one(void) {
@@ -475,6 +533,8 @@ int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_every_phase_has_a_distinct_name);
     RUN_TEST(test_the_phases_the_brief_asked_for_are_all_separable);
+    RUN_TEST(test_each_boot_subdivision_names_one_init_call);
+    RUN_TEST(test_the_reachable_boot_lock_pairing_fills_the_published_field_exactly);
     RUN_TEST(test_a_phase_this_image_does_not_know_is_not_reported_as_one_it_does);
     RUN_TEST(test_the_slot_map_puts_every_network_phase_on_the_network_side);
 

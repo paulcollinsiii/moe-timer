@@ -75,7 +75,8 @@
    a property of the phase itself (panic_diag_phase_is_net), not of the
    caller. Each slot has exactly one writer at a time:
 
-     - main slot  BOOT / AWAKE / RENDER / SLEEP
+     - main slot  BOOT (and its BOOT_* subdivisions) / AWAKE /
+                  RENDER / SLEEP
      - net slot   NET / OTA_CHECK / MQTT / OTA_DL
 
    The published label is both, joined: "RENDER+OTA_CHECK" means the main
@@ -115,12 +116,73 @@ typedef enum {
     PANIC_PHASE_OTA_CHECK, /* the manifest GET (HTTPS/TLS) */
     PANIC_PHASE_MQTT,      /* the MQTT session */
     PANIC_PHASE_OTA_DL,    /* the image download + flash write */
+    /* ---- BOOT subdivided. Appended, not inserted — see below. ---- */
+    PANIC_PHASE_BOOT_NVS,  /* nvs_flash_init + defaults + panic_diag_commit */
+    PANIC_PHASE_BOOT_OTA,  /* ota_flow_init: rollback detector + its NVS writes */
+    PANIC_PHASE_BOOT_DISP, /* display_init: panel bring-up + the LVGL framebuffer */
+    PANIC_PHASE_BOOT_BATT, /* battery_init: the ADC oneshot unit */
+    PANIC_PHASE_BOOT_LOCK, /* lock_gate_check_charge: may repaint, may open a window */
     PANIC_PHASE__COUNT
 } panic_phase_t;
 
-/* Longest label is "RENDER+OTA_CHECK" (16) — see the static assert in
-   panic_diag.c, which pins DIAG_PHASE_MAX against the real table rather
-   than against this comment. */
+/* ---- why BOOT is subdivided, and why exactly these five --------------
+
+   BOOT as originally drawn spans main.c's panic_diag_init() through the
+   panic_diag_enter(PANIC_PHASE_AWAKE) that closes app_main, and the
+   device's nightly panics all report it with the net slot idle. That is
+   not a finding. The span contains the NVS bring-up (including the
+   documented erase branch), the OTA rollback detector and its flash
+   writes, the LVGL framebuffer — the largest single allocation on the
+   device — the ADC unit, and lock_gate_check_charge(), which on a charge
+   lock runs a full e-ink refresh AND an entire network window without
+   ever leaving BOOT. "It died in BOOT" therefore localises nothing,
+   which is the one thing this module exists to do.
+
+   The five phases above name the calls that do real work. What is LEFT
+   under plain BOOT is a decision, not an oversight: neopixel_init, the
+   panic quiet, the TZ read, timer_rtc_state_guard, timer_defs_install,
+   timer_persist_try_restore, alerts_set_extend_awake, net_apply_init,
+   buttons_init and the heap log are small and allocation-light, and each
+   extra mark costs a full walk of the task stack looking for the fill
+   pattern (uxTaskGetStackHighWaterMark). A reading of plain BOOT now
+   means "one of the small wiring calls", which is itself a narrowing.
+
+   TWO CONSTRAINTS SHAPED THIS, and neither is visible from the diff:
+
+     1. THE VALUES ARE STORED, so these are APPENDED after
+        PANIC_PHASE_OTA_DL rather than slotted next to PANIC_PHASE_BOOT
+        where they would read in wake order. A field device that panicked
+        under an older image hands its record — RTC copy and NVS blob
+        alike — to whatever image reads it next, and a renumbering
+        decodes those records as the wrong phase: silently, and only on
+        the devices that actually panicked. The enum is chronological as
+        far as OTA_DL and historical after it. The pin is
+        test_the_stored_phase_numbers_are_pinned_because_they_outlive_the_image.
+
+     2. NINE CHARACTERS, HARD. The published field is DIAG_PHASE_MAX (20)
+        and holds main + '+' + net + NUL. The widest net-slot label is
+        "OTA_CHECK" (9), so a main-slot label gets 20 - 1 - 9 - 1 = 9
+        characters and not one more. "BOOT_DISPLAY" (12) was the first
+        draft and does not fit; "BOOT_DISP" (9) fits exactly. The pairing
+        that costs the budget is reachable, not hypothetical:
+        lock_gate_check_charge() calls net_apply_try_window() from inside
+        BOOT_LOCK, so "BOOT_LOCK+OTA_CHECK" (19 + NUL = 20) is a label
+        this firmware can publish, and it fills the field to the byte.
+
+   BOOT_BATT and BOOT_LOCK are two phases rather than one "battery"
+   phase for two reasons. battery_init() is a two-call ADC setup and
+   lock_gate_check_charge() is the heaviest thing in the whole boot — a
+   full refresh, a network window and the sleep funnel — so sharing a
+   label would make the most likely BOOT panic site indistinguishable
+   from an ADC bring-up. They are also not adjacent: display_init() runs
+   between them, so one phase could not have been one contiguous span
+   without swallowing the framebuffer allocation as well.
+
+   The label width is pinned in panic_diag.c by a _Static_assert derived
+   from the phase table itself (it used to compare two hardcoded
+   literals, which could not see a longer name being added at all) and by
+   test_every_phase_pair_fits_the_published_field, which walks the whole
+   PANIC_PHASE__COUNT^2 cross-product. */
 
 /* ---- the record ------------------------------------------------------
    Layout is hole-free by construction and asserted to be 24 bytes: the

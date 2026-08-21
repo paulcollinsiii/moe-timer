@@ -19,6 +19,53 @@
 
 /* ---- pure layer --------------------------------------------------------- */
 
+/* ---- the phase table, stated once --------------------------------------
+
+   Three things have to agree about every phase: the NAME it publishes,
+   the SLOT it owns, and how much of the joined label it can consume.
+   They used to be three hand-maintained lists — two switches and a
+   _Static_assert over a pair of hardcoded literals — and it was the
+   assert that gave way. It compared sizeof("RENDER") + sizeof("OTA_CHECK")
+   and so could not see a LONGER phase name being added at all, which is
+   exactly what the BOOT_* subdivision is. Adding those phases against a
+   guard blind to them would have been adding them against no guard, so
+   the lists were collapsed into this table first.
+
+   The enum itself stays hand-written in panic_diag.h rather than being
+   generated from here. That is deliberate, and it is the only real cost
+   of the arrangement: the header is where the stored-value argument and
+   the per-phase notes live, and an enum spelled as a macro invocation
+   would hide the numbering that the whole append-don't-renumber rule is
+   about. A new enumerator can therefore be forgotten HERE — which is why
+   the row count is asserted against PANIC_PHASE__COUNT below, and why
+   test_every_phase_has_a_distinct_name catches a missing row as two
+   phases both answering "?".
+
+   Columns: enumerator, published label, does it own the net slot. */
+#define PANIC_PHASE_TABLE(X)                     \
+    X(PANIC_PHASE_NONE, "NONE", false)           \
+    X(PANIC_PHASE_BOOT, "BOOT", false)           \
+    X(PANIC_PHASE_AWAKE, "AWAKE", false)         \
+    X(PANIC_PHASE_RENDER, "RENDER", false)       \
+    X(PANIC_PHASE_SLEEP, "SLEEP", false)         \
+    X(PANIC_PHASE_NET, "NET", true)              \
+    X(PANIC_PHASE_OTA_CHECK, "OTA_CHECK", true)  \
+    X(PANIC_PHASE_MQTT, "MQTT", true)            \
+    X(PANIC_PHASE_OTA_DL, "OTA_DL", true)        \
+    X(PANIC_PHASE_BOOT_NVS, "BOOT_NVS", false)   \
+    X(PANIC_PHASE_BOOT_OTA, "BOOT_OTA", false)   \
+    X(PANIC_PHASE_BOOT_DISP, "BOOT_DISP", false) \
+    X(PANIC_PHASE_BOOT_BATT, "BOOT_BATT", false) \
+    X(PANIC_PHASE_BOOT_LOCK, "BOOT_LOCK", false)
+
+#define PANIC_PHASE_X_STR(sym, str, is_net) \
+    case sym:                               \
+        return str;
+
+#define PANIC_PHASE_X_IS_NET(sym, str, is_net) \
+    case sym:                                  \
+        return is_net;
+
 /* ALLOWLIST CANDIDATE, and deliberately not one: unlike
    ota_policy_reason_str() this is never called from inside an ESP_LOGx
    argument list (standing rule R3 — a call there stops executing once
@@ -27,24 +74,7 @@
    scripts/check-log-args.py. */
 const char *panic_diag_phase_str(panic_phase_t phase) {
     switch (phase) {
-        case PANIC_PHASE_NONE:
-            return "NONE";
-        case PANIC_PHASE_BOOT:
-            return "BOOT";
-        case PANIC_PHASE_AWAKE:
-            return "AWAKE";
-        case PANIC_PHASE_RENDER:
-            return "RENDER";
-        case PANIC_PHASE_SLEEP:
-            return "SLEEP";
-        case PANIC_PHASE_NET:
-            return "NET";
-        case PANIC_PHASE_OTA_CHECK:
-            return "OTA_CHECK";
-        case PANIC_PHASE_MQTT:
-            return "MQTT";
-        case PANIC_PHASE_OTA_DL:
-            return "OTA_DL";
+        PANIC_PHASE_TABLE(PANIC_PHASE_X_STR)
         case PANIC_PHASE__COUNT:
         default:
             /* A stored value this image does not know. Reported as
@@ -57,12 +87,16 @@ const char *panic_diag_phase_str(panic_phase_t phase) {
 
 bool panic_diag_phase_is_net(panic_phase_t phase) {
     switch (phase) {
-        case PANIC_PHASE_NET:
-        case PANIC_PHASE_OTA_CHECK:
-        case PANIC_PHASE_MQTT:
-        case PANIC_PHASE_OTA_DL:
-            return true;
+        PANIC_PHASE_TABLE(PANIC_PHASE_X_IS_NET)
+        case PANIC_PHASE__COUNT:
         default:
+            /* Out of range answers "main slot", the same as NONE. Every
+               BOOT_* phase answers false through the table above, and
+               that is not a formality: they are marked from the main
+               task inside app_main, and a boot phase that landed in the
+               net slot would overwrite whatever a window opened from
+               INSIDE the boot had put there — which
+               lock_gate_check_charge() does. */
             return false;
     }
 }
@@ -85,18 +119,57 @@ int panic_diag_phase_label(char *buf, size_t len, uint8_t main_phase, uint8_t ne
     return snprintf(buf, len, "%s", m);
 }
 
-/* A FLOOR, not a guarantee. It compares two hardcoded literals, so it
-   catches DIAG_PHASE_MAX shrinking but NOT a longer phase name being
-   added to the table above — that would truncate the label silently
-   (panic_diag_fill_stat discards the snprintf return, and a truncated
-   "RENDER+OTA_ROLLBACK" is a plausible-looking phase string in HA).
-   The real guarantee is test_every_phase_pair_fits_the_published_field
-   in test_panic_diag, which walks the whole PANIC_PHASE__COUNT^2
-   cross-product through the actual table. Keep both: this one fails
-   fast, that one fails correctly. */
-_Static_assert(DIAG_PHASE_MAX >= sizeof("RENDER") + sizeof("OTA_CHECK"),
-               "DIAG_PHASE_MAX cannot hold the worst-case "
-               "phase label");
+/* Nine characters per label, and the arithmetic that produces the nine.
+   The published field holds main + '+' + net + NUL, so the two labels
+   share DIAG_PHASE_MAX - 2 characters between them; an even split gives
+   each slot (DIAG_PHASE_MAX - 2) / 2 = 9.
+
+   Checked PER ROW, against the same table the labels themselves come
+   from. What stood here before was
+   `DIAG_PHASE_MAX >= sizeof("RENDER") + sizeof("OTA_CHECK")` — two
+   literals that were the worst case on the day they were written and
+   stopped being it the moment a longer name was appended, which is
+   exactly what the BOOT_* subdivision did. A guard that cannot see the
+   thing it guards against is decoration. This one fires on the row that
+   broke it and names the phase in the message, so "BOOT_DISPLAY" is
+   rejected at the point where it can still be shortened to "BOOT_DISP".
+
+   SUFFICIENT, NOT EXACT, and that is a deliberate trade. An even split
+   rejects a 10-character main-slot label even in a world where every
+   net-slot label is short enough to have paid for it. Today the two
+   maxima are 9 and 9 ("BOOT_LOCK" and "OTA_CHECK"), so the budget IS the
+   real limit and nothing is being given away; if that ever stops being
+   true, the fix is to state the two budgets separately rather than to
+   loosen this one. The EXACT statement — every pair the label builder
+   can actually produce fits — is
+   test_every_phase_pair_fits_the_published_field, which walks the whole
+   PANIC_PHASE__COUNT^2 cross-product through the real builder. Keep
+   both: this one fails fast and points at the row, that one covers the
+   joining logic as well as the arithmetic.
+
+   A fold computing the two maxima here was tried first and abandoned:
+   a function-like MAX macro cannot be opened by one X-macro pass and
+   closed by another, because the preprocessor requires each invocation's
+   argument list to be balanced within a single expansion. The variants
+   that do work (bit-mask folds, twenty-branch ternary chains) are harder
+   to read than the property they check. */
+#define PANIC_PHASE_LABEL_BUDGET ((DIAG_PHASE_MAX - 2) / 2)
+#define PANIC_PHASE_X_FITS(sym, str, is_net)                             \
+    _Static_assert(sizeof(str) - 1u <= PANIC_PHASE_LABEL_BUDGET,         \
+                   "phase label " str                                    \
+                   " does not fit DIAG_PHASE_MAX: the "                  \
+                   "published field is main + '+' + net + NUL, so each " \
+                   "slot's label gets (DIAG_PHASE_MAX - 2) / 2 characters");
+PANIC_PHASE_TABLE(PANIC_PHASE_X_FITS)
+
+/* The one thing the table cannot check about itself: that it has a row
+   for every enumerator. A missing row makes that phase publish "?" AND
+   sit on the main slot regardless of where it belongs — both silent, and
+   both visible only on a device that has already panicked. */
+#define PANIC_PHASE_X_COUNT(sym, str, is_net) +1
+_Static_assert((0 PANIC_PHASE_TABLE(PANIC_PHASE_X_COUNT)) == PANIC_PHASE__COUNT,
+               "the phase table in panic_diag.c and panic_phase_t in panic_diag.h "
+               "disagree on how many phases there are");
 
 /* Layout guard for the checksum below: it hashes RAW BYTES, so an
    implicit padding hole would put whatever the compiler happened to

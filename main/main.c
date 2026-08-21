@@ -25,6 +25,7 @@
 #include "ota.h"
 #include "ota_flow.h"
 #include "panic_diag.h"
+#include "panic_soak.h"
 #include "sleep_plan.h"
 #include "timer.h"
 #include "timer_persist.h"
@@ -67,6 +68,16 @@
        3 s cap is a policy number. It names NO reason on the list. It is
        recorded here as DEBT rather than given a label; the comment at
        the loop says where it belongs.
+
+   One PREPROCESSOR conditional is also left, and it is deliberately not
+   on the list above because it is not a branch: the
+   `#if MAGTAG_PANIC_SOAK` at the end of app_main. It tests a
+   hand-flipped compile-time constant that ships at 0, so the ordinary
+   image does not contain the code at all — there is no runtime state it
+   can consult and no path it can choose between. Named here anyway so
+   the next reviewer does not have to re-derive that;
+   include/panic_soak.h carries the rest of the argument, including why
+   it is a #define rather than a Kconfig symbol.
 
    Adding a line here means naming its reason in the review. */
 
@@ -421,6 +432,27 @@ void app_main(void) {
        boot's first console output, which is what the quiet is for. */
     wake_flow_boot_quiet_after_panic();
 
+    /* Boot sub-phase 1 of 5. panic_diag.h argues why BOOT was subdivided
+       at all; what belongs here is why THIS span is one phase. Everything
+       between this mark and its exit is flash work on the NVS partition
+       — the documented re-init idiom below (whose erase branch is the
+       most destructive act the firmware can perform), the defaults seed,
+       and panic_diag_commit(), which files the previous boot's
+       breadcrumb. If panics are landing in flash, this is the label that
+       says so.
+
+       ENTER/EXIT rather than a bare mark, and the exit restores what the
+       enter returned rather than hard-coding PANIC_PHASE_BOOT back. Two
+       reasons, both real: the slot goes back to whatever it actually
+       held, so the unclaimed wiring calls between these spans still read
+       as plain BOOT; and the awake failsafe is already armed a few lines
+       above and marks SLEEP from the esp_timer task, so a restore has to
+       be conditional. panic_diag_rec_exit does that comparison — this
+       file only has to hand back the value it was given. Reason 1 in the
+       same sense as the AWAKE mark at the bottom of this function: the
+       whole content of a phase mark is WHERE it sits, so it cannot live
+       anywhere but here. */
+    const panic_phase_t boot_prev_nvs = panic_diag_enter(PANIC_PHASE_BOOT_NVS);
     /* The one surviving branch. ESP-IDF's documented NVS init idiom: a
        flash image whose NVS partition is full or was written by a newer
        version cannot be opened until it is erased, and there is nowhere
@@ -441,6 +473,7 @@ void app_main(void) {
        without this the record would routinely be dropped before anything
        could publish it. A no-op unless this boot followed a panic. */
     panic_diag_commit();
+    panic_diag_exit(PANIC_PHASE_BOOT_NVS, boot_prev_nvs);
 
     /* TZ from NVS (HA config-in) with the compile-time default as fallback */
     char tz[48];
@@ -496,12 +529,44 @@ void app_main(void) {
         .min_free_heap = CONFIG_MAGTAG_OTA_MIN_FREE_HEAP,
         .running_version = esp_app_get_description()->version,
     };
+    /* Boot sub-phase 2 of 5. ota_flow_init() runs the rollback detector
+       — it reads the running partition's OTA state, decides whether this
+       boot has to certify the image, and writes NVS either way. It is
+       the only part of boot that can be affected by the PREVIOUS boot
+       having been an OTA, which makes "did it die in the rollback
+       detector?" a question worth being able to answer separately from
+       the rest of init. */
+    const panic_phase_t boot_prev_ota = panic_diag_enter(PANIC_PHASE_BOOT_OTA);
     ota_flow_init(&OTA_FLOW_OPS, &ota_cfg);
+    panic_diag_exit(PANIC_PHASE_BOOT_OTA, boot_prev_ota);
+
     buttons_init();
+
+    /* Boot sub-phase 3 of 5. Two ADC calls and nothing else, which is
+       exactly why it gets its own label rather than sharing one with the
+       charge gate below: if a panic ever reports BOOT_BATT, the search
+       space is a oneshot unit handle and a channel config. Kept separate
+       from BOOT_LOCK for that reason and because display_init() runs
+       between them — one phase could not have covered both without
+       swallowing the framebuffer allocation as well. */
+    const panic_phase_t boot_prev_batt = panic_diag_enter(PANIC_PHASE_BOOT_BATT);
     battery_init();
+    panic_diag_exit(PANIC_PHASE_BOOT_BATT, boot_prev_batt);
+
     /* audio + light init lazily on first use (most wakes need neither);
        until then the amp pin stays under its deep-sleep hold (off). */
+
+    /* Boot sub-phase 4 of 5, and the leading suspect: the SSD1680
+       bring-up plus lv_init() and the LVGL framebuffer, which is the
+       largest single allocation on the device. A heap or a panel-init
+       fault here is indistinguishable from every other boot fault while
+       they all report BOOT. The label is "BOOT_DISP" and not
+       "BOOT_DISPLAY" for a hard reason, spelled out in panic_diag.h: a
+       main-slot label gets nine characters, because "BOOT_DISP" has to
+       be able to sit next to "OTA_CHECK" inside DIAG_PHASE_MAX. */
+    const panic_phase_t boot_prev_disp = panic_diag_enter(PANIC_PHASE_BOOT_DISP);
     display_init();
+    panic_diag_exit(PANIC_PHASE_BOOT_DISP, boot_prev_disp);
 
     /* Heap headroom check: the LED + network task stacks now ride
        alongside WiFi and the LVGL framebuffer — regressions show up here
@@ -516,8 +581,23 @@ void app_main(void) {
     const esp_reset_reason_t reset_reason = esp_reset_reason();
     ESP_LOGI(TAG, "Wakeup causes: 0x%08lx, reset reason: %d", (unsigned long)causes, (int)reset_reason);
 
-    /* Battery gate before any wake work: does not return while locked */
+    /* Boot sub-phase 5 of 5, and by far the heaviest. Battery gate
+       before any wake work: does not return while locked. On the locked
+       path lock_gate_check_charge() pauses the timer, runs a FULL e-ink
+       refresh (display_charge_me), opens an entire network window
+       (net_apply_try_window — wifi, SNTP, the update check, MQTT) and
+       then enters deep sleep — all of it inside what used to be
+       undifferentiated BOOT. That is also why "BOOT_LOCK+OTA_CHECK" is a
+       genuinely reachable label rather than a theoretical worst case,
+       and it is the pairing that fills the published field to the byte.
+
+       No exit on the locked path, and that is correct: the function does
+       not return, so the breadcrumb should still read BOOT_LOCK if the
+       device dies in there. The exit below only runs when the gate
+       declined to lock. */
+    const panic_phase_t boot_prev_lock = panic_diag_enter(PANIC_PHASE_BOOT_LOCK);
     lock_gate_check_charge();
+    panic_diag_exit(PANIC_PHASE_BOOT_LOCK, boot_prev_lock);
 
     /* Reason 3 covers the READ above and stops there. The causes register
        is boot-scoped — valid only until something re-arms a wake source —
@@ -526,6 +606,26 @@ void app_main(void) {
        file choosing between two non-returning handlers, which is the
        largest fork in the firmware and had no test at all. The decode now
        lives in wake_flow.c with one. Does not return. */
+#if MAGTAG_PANIC_SOAK
+    /* Reset-loop soak, compiled out unless a human sets MAGTAG_PANIC_SOAK
+       to 1 in include/panic_soak.h. That header carries the whole
+       argument — why a #define rather than a Kconfig symbol (this
+       project's sdkconfig is hand-maintained and a reconfigure would
+       rewrite it), what the evidence looks like without a network, and
+       the fact that display_init() runs every iteration while no render
+       ever does.
+
+       The POSITION is the content, exactly as for the phase marks above:
+       here and nowhere else is the point where the entire BOOT window
+       has run and nothing of the wake has. Restarting from here loops
+       the span under investigation at maximum rate; restarting later
+       would drag the wake handler in, and it does not return. */
+    const int soak_settle_ms = MAGTAG_PANIC_SOAK_SETTLE_MS;
+    ESP_LOGE(TAG, "PANIC SOAK: boot window survived; restarting in %d ms", soak_settle_ms);
+    vTaskDelay(pdMS_TO_TICKS(soak_settle_ms));
+    esp_restart();
+#endif
+
     /* Boot is over; everything past this line is the wake itself. Marked
        here rather than inside wake_flow.c because this is the exact
        boundary — wake_flow_handle_wake() does not return, so there is no
