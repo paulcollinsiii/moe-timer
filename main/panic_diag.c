@@ -56,7 +56,8 @@
     X(PANIC_PHASE_BOOT_OTA, "BOOT_OTA", false)   \
     X(PANIC_PHASE_BOOT_DISP, "BOOT_DISP", false) \
     X(PANIC_PHASE_BOOT_BATT, "BOOT_BATT", false) \
-    X(PANIC_PHASE_BOOT_LOCK, "BOOT_LOCK", false)
+    X(PANIC_PHASE_BOOT_LOCK, "BOOT_LOCK", false) \
+    X(PANIC_PHASE_BOOT_TMR, "BOOT_TMR", false)
 
 #define PANIC_PHASE_X_STR(sym, str, is_net) \
     case sym:                               \

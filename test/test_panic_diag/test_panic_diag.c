@@ -77,9 +77,16 @@ void test_each_boot_subdivision_names_one_init_call(void) {
     TEST_ASSERT_EQUAL_STRING("BOOT_DISP", panic_diag_phase_str(PANIC_PHASE_BOOT_DISP));
     TEST_ASSERT_EQUAL_STRING("BOOT_BATT", panic_diag_phase_str(PANIC_PHASE_BOOT_BATT));
     TEST_ASSERT_EQUAL_STRING("BOOT_LOCK", panic_diag_phase_str(PANIC_PHASE_BOOT_LOCK));
+    /* The sixth, added after the first five were found not to cover the
+       whole window: the span between BOOT_NVS's exit and BOOT_OTA's
+       entry runs timer_rtc_state_guard, timer_defs_install and
+       timer_persist_try_restore - the boot's two biggest readers of RTC
+       state carried across a deep-sleep wake, plus the install of the
+       table that carried state is interpreted against. */
+    TEST_ASSERT_EQUAL_STRING("BOOT_TMR", panic_diag_phase_str(PANIC_PHASE_BOOT_TMR));
     /* And the phase they subdivide is still its own reading: the wiring
-       calls nobody gave a sub-phase to (neopixel_init, the TZ read, the
-       timer restore, buttons_init, the heap log) still report BOOT. */
+       calls nobody gave a sub-phase to (neopixel_init, the TZ read,
+       buttons_init, the heap log) still report BOOT. */
     TEST_ASSERT_EQUAL_STRING("BOOT", panic_diag_phase_str(PANIC_PHASE_BOOT));
 }
 
@@ -99,6 +106,32 @@ void test_the_reachable_boot_lock_pairing_fills_the_published_field_exactly(void
     TEST_ASSERT_EQUAL_STRING("BOOT_LOCK+OTA_CHECK", buf);
     TEST_ASSERT_EQUAL_INT(19, n);
     TEST_ASSERT_EQUAL_INT((int)sizeof(buf) - 1, n); /* exactly full, not merely fitting */
+}
+
+void test_the_timer_subdivision_fits_the_width_budget_beside_the_widest_net_label(void) {
+    /* "BOOT_TMR" is 8 characters against a hard budget of 9, and the
+       budget is the reason the name is not "BOOT_TIMER" (10): a tenth
+       character truncates in the published field, and a truncated label
+       still reads like a valid phase name in Home Assistant.
+
+       Driven through the REAL label builder against "OTA_CHECK", the
+       widest net-slot label, rather than by measuring the string. Nothing
+       inside this span opens a network window today - the guard, the defs
+       install and the restore are all local work - so the pairing is
+       headroom rather than a reading the firmware can currently publish.
+       That is exactly what makes it worth pinning: the span sits between
+       two phases that DO pair with windows, and a call added inside it
+       later must not be the thing that discovers the field was full. */
+    char buf[DIAG_PHASE_MAX];
+    TEST_ASSERT_EQUAL_STRING("BOOT_TMR", panic_diag_phase_str(PANIC_PHASE_BOOT_TMR));
+    const int n = panic_diag_phase_label(buf, sizeof(buf), PANIC_PHASE_BOOT_TMR, PANIC_PHASE_OTA_CHECK);
+    TEST_ASSERT_EQUAL_STRING("BOOT_TMR+OTA_CHECK", buf);
+    TEST_ASSERT_EQUAL_INT(18, n);
+    TEST_ASSERT_TRUE(n < (int)sizeof(buf)); /* snprintf answers what it WOULD have written */
+    /* And it is marked from the main task inside app_main, so it must
+       not claim the network slot - a boot phase that did would overwrite
+       the very NET/OTA_CHECK reading a window is there to produce. */
+    TEST_ASSERT_FALSE(panic_diag_phase_is_net(PANIC_PHASE_BOOT_TMR));
 }
 
 void test_a_phase_this_image_does_not_know_is_not_reported_as_one_it_does(void) {
@@ -462,7 +495,11 @@ void test_the_stored_phase_numbers_are_pinned_because_they_outlive_the_image(voi
     TEST_ASSERT_EQUAL_INT(11, PANIC_PHASE_BOOT_DISP);
     TEST_ASSERT_EQUAL_INT(12, PANIC_PHASE_BOOT_BATT);
     TEST_ASSERT_EQUAL_INT(13, PANIC_PHASE_BOOT_LOCK);
-    TEST_ASSERT_EQUAL_INT(14, PANIC_PHASE__COUNT);
+    /* Appended after them for the same reason, not slotted in at 10
+       where it would read in wake order: records carrying 9..13 are
+       already on flash in the field. */
+    TEST_ASSERT_EQUAL_INT(14, PANIC_PHASE_BOOT_TMR);
+    TEST_ASSERT_EQUAL_INT(15, PANIC_PHASE__COUNT);
 }
 
 void test_leaving_a_phase_nobody_disturbed_restores_the_outer_one(void) {
@@ -502,6 +539,49 @@ void test_a_late_exit_does_not_put_a_stale_phase_back_over_the_sleep_funnel(void
     diag_stat_t st;
     panic_diag_fill_stat(&st, 1, &r);
     TEST_ASSERT_EQUAL_STRING("SLEEP+OTA_DL", st.panic_phase);
+}
+
+void test_leaving_the_timer_subdivision_puts_plain_boot_back(void) {
+    /* main.c enters BOOT_TMR from inside plain BOOT and hands the exit
+       the value the enter returned, exactly as the other five boot
+       sub-phases do. The unclaimed wiring calls on either side have to
+       go back to reading BOOT - not NONE, which would claim the main
+       task was in no phase at all in the middle of app_main. */
+    panic_diag_rec_t r;
+    panic_diag_rec_reset(&r);
+    panic_diag_rec_mark(&r, PANIC_PHASE_BOOT, PANIC_PHASE_BOOT, &SAMPLE);
+    panic_diag_rec_mark(&r, PANIC_PHASE_BOOT_TMR, PANIC_PHASE_BOOT_TMR, &SAMPLE);
+    TEST_ASSERT_EQUAL_UINT8(PANIC_PHASE_BOOT_TMR, r.main_phase);
+
+    TEST_ASSERT_TRUE(panic_diag_rec_exit(&r, PANIC_PHASE_BOOT_TMR, PANIC_PHASE_BOOT, &SAMPLE));
+    TEST_ASSERT_EQUAL_UINT8(PANIC_PHASE_BOOT, r.main_phase);
+    TEST_ASSERT_EQUAL_UINT8(PANIC_PHASE_NONE, r.net_phase);
+    TEST_ASSERT_TRUE(panic_diag_rec_valid(&r));
+}
+
+void test_the_awake_failsafe_still_beats_the_timer_subdivisions_exit(void) {
+    /* arm_awake_failsafe() runs a few lines ABOVE this span in app_main,
+       so the esp_timer task can mark SLEEP while the main task is still
+       inside timer_persist_try_restore() - a restore that reads NVS and
+       is not instant. panic_diag_rec_exit only restores when the slot
+       still holds the phase being left, and that conditional is what
+       stops BOOT being put back over SLEEP: a panic in the sleep funnel
+       would otherwise publish as an early-boot one, on the wedged-device
+       path this whole feature exists to explain. Same rule as
+       RENDER-under-the-failsafe above, asserted again here because the
+       new sub-phase sits inside the armed window too. */
+    panic_diag_rec_t r;
+    panic_diag_rec_reset(&r);
+    panic_diag_rec_mark(&r, PANIC_PHASE_BOOT, PANIC_PHASE_BOOT, &SAMPLE);
+    panic_diag_rec_mark(&r, PANIC_PHASE_BOOT_TMR, PANIC_PHASE_BOOT_TMR, &SAMPLE);
+    panic_diag_rec_mark(&r, PANIC_PHASE_SLEEP, PANIC_PHASE_SLEEP, &SAMPLE); /* failsafe, other task */
+
+    TEST_ASSERT_FALSE(panic_diag_rec_exit(&r, PANIC_PHASE_BOOT_TMR, PANIC_PHASE_BOOT, &SAMPLE));
+    TEST_ASSERT_EQUAL_UINT8(PANIC_PHASE_SLEEP, r.main_phase);
+
+    diag_stat_t st;
+    panic_diag_fill_stat(&st, 1, &r);
+    TEST_ASSERT_EQUAL_STRING("SLEEP", st.panic_phase);
 }
 
 void test_a_refused_exit_leaves_the_record_completely_alone(void) {
@@ -602,6 +682,7 @@ int main(void) {
     RUN_TEST(test_the_phases_the_brief_asked_for_are_all_separable);
     RUN_TEST(test_each_boot_subdivision_names_one_init_call);
     RUN_TEST(test_the_reachable_boot_lock_pairing_fills_the_published_field_exactly);
+    RUN_TEST(test_the_timer_subdivision_fits_the_width_budget_beside_the_widest_net_label);
     RUN_TEST(test_a_phase_this_image_does_not_know_is_not_reported_as_one_it_does);
     RUN_TEST(test_the_slot_map_puts_every_network_phase_on_the_network_side);
 
@@ -631,6 +712,8 @@ int main(void) {
 
     RUN_TEST(test_leaving_a_phase_nobody_disturbed_restores_the_outer_one);
     RUN_TEST(test_a_late_exit_does_not_put_a_stale_phase_back_over_the_sleep_funnel);
+    RUN_TEST(test_leaving_the_timer_subdivision_puts_plain_boot_back);
+    RUN_TEST(test_the_awake_failsafe_still_beats_the_timer_subdivisions_exit);
     RUN_TEST(test_a_refused_exit_leaves_the_record_completely_alone);
     RUN_TEST(test_an_exit_on_a_record_that_failed_its_guard_rearms_without_restoring);
     RUN_TEST(test_the_exit_path_answers_null_rather_than_dereferencing_it);

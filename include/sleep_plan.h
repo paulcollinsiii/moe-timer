@@ -3,7 +3,8 @@
 #include <stdint.h>
 #include <time.h>
 
-#include "timer.h" /* timer_state_t */
+#include "panic_soak.h" /* MAGTAG_PANIC_SOAK_FAST_LOCKS - the lock-sleep knob */
+#include "timer.h"      /* timer_state_t */
 
 #ifdef __cplusplus
 extern "C" {
@@ -91,9 +92,43 @@ sleep_plan_in_t sleep_plan_from_timer(const sleep_plan_timer_in_t *in);
    planner for a fixed long interval and leave the buttons dark. Fixed and
    not menuconfig, like the leads above: both are protection margins, not
    preferences — 600 s is "re-read the battery often enough to notice a
-   charger" and 7200 s is "wake only for NTP and the rollover check". */
+   charger" and 7200 s is "wake only for NTP and the rollover check".
+
+   THE BEDTIME ONE — AND ONLY THAT ONE — COLLAPSES TO 90 s WHEN
+   MAGTAG_PANIC_SOAK_FAST_LOCKS IS 1, a debugging knob that ships at 0;
+   include/panic_soak.h carries the whole argument. The one-line version:
+   a bedtime-locked re-wake is the only path that opens a network window
+   on EVERY wake (lock_gate_check_bedtime calls net_apply_try_window
+   unconditionally, where the daytime path asks wake_policy first), so it
+   is the population the nightly panic cluster comes from - and at 7200 s
+   it costs two hours to observe one of them. Shortening the sleep is the
+   whole harness; nothing else about the locked path changes.
+
+   CHARGE_LOCK_SLEEP_SEC IS DELIBERATELY LEFT ALONE, and an earlier draft
+   of this header shortened it too. That was wrong twice over. It cannot
+   contribute to the hypothesis: lock_gate_check_charge() calls
+   net_apply_try_window() only inside its `if (!s_charge_locked)` engage
+   branch, and s_charge_locked is RTC_DATA_ATTR, so a charge-locked
+   RE-wake opens no window at all — there is nothing here to soak. And it
+   is actively harmful: 600 -> 90 puts a device at or below 10 % battery
+   through a full boot (display_init, lv_init, the lot) every 90 s
+   instead of every 600 s, ~6.7x the wake rate of the one mechanism whose
+   entire job is to stop draining a nearly-dead battery. It is also the
+   fail-closed fallback for an unrecognised mode in sleep_plan_outcome(),
+   so shortening it silently shortened that safety net as well.
+
+   The guard is written the long way, with the production value repeated
+   in the #else, rather than as a ternary or a scaling factor. These are
+   protection margins a reader has to be able to find by grepping for
+   them, and every assertion in test_sleep_plan names them literally - so
+   a flag left flipped fails the host suite here rather than shipping a
+   device that wakes every 90 s all night. */
 #define CHARGE_LOCK_SLEEP_SEC 600
+#if MAGTAG_PANIC_SOAK_FAST_LOCKS
+#define BEDTIME_SLEEP_SEC 90
+#else
 #define BEDTIME_SLEEP_SEC 7200
+#endif
 
 typedef enum {
     WAKE_SLEEP_NORMAL = 0,

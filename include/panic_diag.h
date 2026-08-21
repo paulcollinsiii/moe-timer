@@ -122,10 +122,11 @@ typedef enum {
     PANIC_PHASE_BOOT_DISP, /* display_init: panel bring-up + the LVGL framebuffer */
     PANIC_PHASE_BOOT_BATT, /* battery_init: the ADC oneshot unit */
     PANIC_PHASE_BOOT_LOCK, /* lock_gate_check_charge: may repaint, may open a window */
+    PANIC_PHASE_BOOT_TMR,  /* the carried RTC timer state: guard + defs install + restore */
     PANIC_PHASE__COUNT
 } panic_phase_t;
 
-/* ---- why BOOT is subdivided, and why exactly these five --------------
+/* ---- why BOOT is subdivided, and why exactly these six ---------------
 
    BOOT as originally drawn spans main.c's panic_diag_init() through the
    panic_diag_enter(PANIC_PHASE_AWAKE) that closes app_main, and the
@@ -140,14 +141,64 @@ typedef enum {
    died in BOOT" therefore localises nothing, which is the one thing this
    module exists to do.
 
-   The five phases above name the calls that do real work. What is LEFT
+   The six phases above name the calls that do real work. What is LEFT
    under plain BOOT is a decision, not an oversight: neopixel_init, the TZ
-   read, timer_rtc_state_guard, timer_defs_install,
-   timer_persist_try_restore, alerts_set_extend_awake, net_apply_init,
-   buttons_init and the heap log are small and allocation-light, and each
-   extra mark costs a full walk of the task stack looking for the fill
-   pattern (uxTaskGetStackHighWaterMark). A reading of plain BOOT now
-   means "one of the small wiring calls", which is itself a narrowing.
+   read, alerts_set_extend_awake, net_apply_init, buttons_init and the
+   heap log are small and allocation-light, and each extra mark costs a
+   full walk of the task stack looking for the fill pattern
+   (uxTaskGetStackHighWaterMark). A reading of plain BOOT now means "one
+   of the small wiring calls", which is itself a narrowing.
+
+   BOOT_TMR IS THE ONE ADDED AFTERWARDS, and it exists because the first
+   five left a hole exactly where the evidence points. BOOT_NVS exits
+   well before BOOT_OTA enters, and sitting in between, under plain BOOT,
+   are timer_rtc_state_guard(), timer_defs_install() and
+   timer_persist_try_restore(). Those are not three more wiring calls,
+   and the rule that draws the span around exactly them is: a call
+   belongs inside if it RUNS ON the timer state carried across a
+   deep-sleep wake, or INSTALLS THE TABLE that state is interpreted
+   against.
+
+   Two are the first kind. timer_rtc_state_guard() validates
+   g_rtc_state's magic and version and zeroes the struct when they fail;
+   timer_persist_try_restore() reads timer_current_date() out of that
+   same struct to decide whether to fall back to the NVS snapshot. The
+   third is the second kind, and is NOT an RTC reader at all:
+   timer_defs_install() reads an NVS blob into .bss statics (s_names,
+   s_nvs_defs) and hands them to timer_set_defs(), touching no
+   RTC_DATA_ATTR anywhere. It is inside the span because the slot
+   durations it installs are what the carried elapsed/remaining fields
+   MEAN — a fault in the carried state and a fault in the table that
+   state is read against are one investigation, not two.
+
+   THAT SPLIT ALSO SAYS WHICH POPULATION EXERCISED WHAT, which is the
+   real reason the span needs its own label. g_rtc_state survives a
+   deep-sleep wake and is ZEROED by esp_restart(), so the reset-loop soak
+   in panic_soak.h ran the guard and the restore against a blank slate on
+   every one of its 18 iterations and could not have reproduced a fault
+   in either — while every real panic is a deep-sleep wake with the state
+   intact. timer_defs_install() is the exception and should be read as
+   one: its only input is NVS, which esp_restart() leaves intact, so the
+   soak DID exercise that call fully and found nothing. Two of the three
+   remain unexercised by anything but the field. It is also, at 8
+   characters, joint-cheapest of the six against the budget below —
+   BOOT_NVS and BOOT_OTA are 8 too.
+
+   THE TZ READ IS DELIBERATELY OUTSIDE IT, on the lines immediately above
+   the mark, even though timer_persist_try_restore() does a date
+   comparison that depends on TZ having been set. The dependency is real
+   and the ordering comment in main.c still states it; the phase label is
+   not about dependencies, it is about where a reader is sent. The rule
+   above excludes the TZ read cleanly: it is UPSTREAM of all three calls
+   rather than one of them, and its result is consumed by far more than
+   the timer path — every render, every log timestamp, quiet hours, the
+   rollover check. Note what the discriminator is NOT: "it reads flash"
+   cannot be it, because timer_defs_install() reads flash too and is
+   inside. A fault in nvs_config_get_tz() is a flash-read story BOOT_NVS
+   already names, and setenv()/tzset() is libc plus an environ
+   allocation; pulling either in would widen the reading to "somewhere in
+   the middle of boot", which is the reading BOOT was subdivided to stop
+   producing.
 
    ONE UNMARKED SPAN IS NOT SMALL, and it is left unmarked for a
    different reason. wake_flow_boot_quiet_after_panic() — main.c, a few

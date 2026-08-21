@@ -476,6 +476,47 @@ void test_lock_outcomes_ignore_the_planner_input(void) {
     TEST_ASSERT_EQUAL_UINT32(20, sleep_plan_outcome(WAKE_SLEEP_NORMAL, &running).seconds);
 }
 
+/* The two soak knobs in include/panic_soak.h, reached from here because
+   sleep_plan.h includes it. Both are hand-flipped #defines, so the way
+   they fail is by being committed flipped, and neither has any business
+   in a shipped image: MAGTAG_PANIC_SOAK_FAST_LOCKS collapses
+   BEDTIME_SLEEP_SEC to 90 s (a device waking every ~2 min all night
+   through a full network window is a battery problem, not a debugging
+   aid), and MAGTAG_PANIC_SOAK turns app_main into a reset loop. The
+   header makes them mutually exclusive with an #error; nothing outside
+   this assertion notices either one left at 1.
+
+   The interval assertions above would already catch the first. These are
+   here so the failure NAMES the knob instead of reading as "the bedtime
+   lock changed length", so the OTHER knob is pinned at all - no suite
+   asserted it before - and so the rest of the claim is pinned too: the
+   fast-lock knob is one duration, and it must not have reached the
+   policy that decides WHICH mode a wake ends under, nor whether the
+   buttons are armed while a lock holds, nor the charge lock.
+
+   CHARGE_LOCK_SLEEP_SEC is deliberately asserted here even though it is
+   now unconditional: an earlier draft of the knob shortened it too, and
+   600 is both the battery-recheck margin and the fail-closed fallback
+   for an unrecognised mode below. */
+void test_the_fast_lock_soak_knob_ships_off_and_touches_only_the_interval(void) {
+    TEST_ASSERT_EQUAL_INT(0, MAGTAG_PANIC_SOAK_FAST_LOCKS);
+    TEST_ASSERT_EQUAL_INT(0, MAGTAG_PANIC_SOAK);
+    TEST_ASSERT_EQUAL_UINT32(600, CHARGE_LOCK_SLEEP_SEC);
+    TEST_ASSERT_EQUAL_UINT32(7200, BEDTIME_SLEEP_SEC);
+
+    /* The selection it must not have touched. */
+    TEST_ASSERT_EQUAL_INT(WAKE_SLEEP_NORMAL, wake_sleep_mode_select(false, false));
+    TEST_ASSERT_EQUAL_INT(WAKE_SLEEP_CHARGE_LOCK, wake_sleep_mode_select(true, false));
+    TEST_ASSERT_EQUAL_INT(WAKE_SLEEP_BEDTIME, wake_sleep_mode_select(false, true));
+    TEST_ASSERT_EQUAL_INT(WAKE_SLEEP_CHARGE_LOCK, wake_sleep_mode_select(true, true));
+
+    /* And the property that makes an HA edit the only exit from a
+       bedtime lock: buttons stay dark whatever the interval is. */
+    sleep_plan_in_t in = idle_at(17);
+    TEST_ASSERT_FALSE(sleep_plan_outcome(WAKE_SLEEP_BEDTIME, &in).enable_buttons);
+    TEST_ASSERT_FALSE(sleep_plan_outcome(WAKE_SLEEP_CHARGE_LOCK, &in).enable_buttons);
+}
+
 /* An out-of-range mode cannot arise while wake_sleep_mode_select() is the
    only producer, but a cast value would reach the fallback — and it must
    point the safe way. Buttons dark on a lock-length interval, never the
@@ -524,6 +565,7 @@ int main(void) {
     RUN_TEST(test_bedtime_outcome_is_a_fixed_buttonless_interval);
     RUN_TEST(test_normal_outcome_defers_to_the_planner);
     RUN_TEST(test_lock_outcomes_ignore_the_planner_input);
+    RUN_TEST(test_the_fast_lock_soak_knob_ships_off_and_touches_only_the_interval);
     RUN_TEST(test_unknown_mode_fails_closed);
     return UNITY_END();
 }

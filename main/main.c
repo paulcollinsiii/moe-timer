@@ -438,7 +438,7 @@ void app_main(void) {
        the published `panic_uptime_s`. */
     wake_flow_boot_quiet_after_panic();
 
-    /* Boot sub-phase 1 of 5. panic_diag.h argues why BOOT was subdivided
+    /* Boot sub-phase 1 of 6. panic_diag.h argues why BOOT was subdivided
        at all; what belongs here is why THIS span is one phase. Everything
        between this mark and its exit is flash work on the NVS partition
        — the documented re-init idiom below (whose erase branch is the
@@ -487,6 +487,36 @@ void app_main(void) {
     setenv("TZ", tz, 1);
     tzset();
 
+    /* Boot sub-phase 2 of 6, and the one that closes a hole rather than
+       naming a single call. BOOT_NVS exited a few lines above and
+       BOOT_OTA does not begin until well below, so this span used to
+       read as plain BOOT - and it is not more small wiring. The rule
+       drawing the span is: RUNS ON the timer state carried across a
+       deep-sleep wake, or INSTALLS THE TABLE that state is interpreted
+       against. The guard and the restore are the first kind (both go
+       through g_rtc_state, which is RTC_DATA_ATTR); timer_defs_install()
+       is the second, and reads NVS into plain statics without touching
+       RTC memory at all.
+
+       That split is also which soak proved what. esp_restart() zeroes
+       RTC memory but leaves NVS intact, so the reset-loop soak in
+       panic_soak.h exercised timer_defs_install() fully and cleared it,
+       while running the guard and the restore against a blank slate on
+       every iteration - the panics being chased are all genuine wakes
+       with the state intact.
+
+       The TZ read above is deliberately OUTSIDE the span even though
+       timer_persist_try_restore() depends on it having happened;
+       panic_diag.h argues why. In one line: it is upstream of all three
+       calls rather than one of them, and half the firmware consumes it.
+
+       Enter/exit with the value the enter returned, for the same two
+       reasons as sub-phase 1: the unclaimed calls on either side go back
+       to reading plain BOOT, and the awake failsafe armed at the top of
+       this function marks SLEEP from the esp_timer task, so the restore
+       has to be the conditional one panic_diag_rec_exit performs. */
+    const panic_phase_t boot_prev_tmr = panic_diag_enter(PANIC_PHASE_BOOT_TMR);
+
     /* Before anything reads the timer state, and in particular before the
        restore below: g_rtc_state now carries a magic and a version, and
        zeroing a struct that fails them is what makes last_date empty and
@@ -503,6 +533,7 @@ void app_main(void) {
     /* Must run after TZ is set (date comparison) and before the wake
        handlers (whose rollover check would otherwise reset the timer). */
     timer_persist_try_restore(time(NULL));
+    panic_diag_exit(PANIC_PHASE_BOOT_TMR, boot_prev_tmr);
 
     /* Paired with the line below: net_apply_init is what makes .on_locate
        dispatchable, so this is where a missing install would bite. Order
@@ -535,7 +566,7 @@ void app_main(void) {
         .min_free_heap = CONFIG_MAGTAG_OTA_MIN_FREE_HEAP,
         .running_version = esp_app_get_description()->version,
     };
-    /* Boot sub-phase 2 of 5. ota_flow_init() runs the rollback detector,
+    /* Boot sub-phase 3 of 6. ota_flow_init() runs the rollback detector,
        and what that detector actually does is an NVS READ and, on an
        ordinary boot, nothing else: note_rollback_if_reverted() reads the
        ota_pend_ver key and compares it against s_cfg.running_version. It
@@ -557,7 +588,7 @@ void app_main(void) {
 
     buttons_init();
 
-    /* Boot sub-phase 3 of 5. Two ADC calls and nothing else, which is
+    /* Boot sub-phase 4 of 6. Two ADC calls and nothing else, which is
        exactly why it gets its own label rather than sharing one with the
        charge gate below: if a panic ever reports BOOT_BATT, the search
        space is a oneshot unit handle and a channel config. Kept separate
@@ -571,7 +602,7 @@ void app_main(void) {
     /* audio + light init lazily on first use (most wakes need neither);
        until then the amp pin stays under its deep-sleep hold (off). */
 
-    /* Boot sub-phase 4 of 5, and still the leading suspect — but not for
+    /* Boot sub-phase 5 of 6, and still the leading suspect — but not for
        the reason first written here. The LVGL draw buffer is not "the
        largest allocation on the device"; it is not an allocation at all.
        display.c's s_lvbuf is a link-time static in .bss, 8 + 296*128/8 =
@@ -605,7 +636,7 @@ void app_main(void) {
     const esp_reset_reason_t reset_reason = esp_reset_reason();
     ESP_LOGI(TAG, "Wakeup causes: 0x%08lx, reset reason: %d", (unsigned long)causes, (int)reset_reason);
 
-    /* Boot sub-phase 5 of 5, and by far the heaviest. Battery gate
+    /* Boot sub-phase 6 of 6, and by far the heaviest. Battery gate
        before any wake work: does not return while locked. On the locked
        path lock_gate_check_charge() pauses the timer, runs a FULL e-ink
        refresh (display_charge_me), opens an entire network window
