@@ -14,16 +14,37 @@
 # ~19 % headroom for the project's own OTA code, a future font and drift.
 #
 # assets is a raw data partition (custom type 0x40) holding the optional
-# user-supplied alert WAV — see tools/flash_assets.sh. It is 0x6E000 =
-# 450,560 B (440 KB) ≈ 14 s of 16-bit mono PCM at 16 kHz, ~28 s at 8 kHz.
+# user-supplied alert WAV — see tools/flash_assets.sh. It is 0x5E000 =
+# 385,024 B (376 KB) ≈ 12 s of 16-bit mono PCM at 16 kHz, ~24 s at 8 kHz.
 # ota_1, otadata and assets all moved when the slots grew, so a device with
 # a flashed WAV must have tools/flash_assets.sh re-run after reflashing
 # this table.
 #
-# Name,     Type, SubType, Offset,   Size
-nvs,        data, nvs,     0x9000,   0x6000
-phy_init,   data, phy,     0xf000,   0x1000
-ota_0,      app,  ota_0,   0x10000,  0x1C0000
-ota_1,      app,  ota_1,   0x1D0000, 0x1C0000
-otadata,    data, ota,     0x390000, 0x2000
-assets,     data, 0x40,    0x392000, 0x6E000
+# coredump is the 64 KB at the tail, and it was taken from assets rather
+# than from anything above it. The table filled the 4 MB exactly, so the
+# space had to come from SOMEWHERE, and assets is the only partition that
+# can give it up: it is optional (a device with no WAV flashed has it
+# empty), it is data rather than app, and it is LAST — so shrinking it
+# moves no offset. That is the whole point. nvs, phy_init, ota_0, ota_1
+# and otadata keep the offsets they had, so an image built against the
+# old table runs unchanged against this one, a device flashed with this
+# table keeps its NVS (do not erase_flash), and the FROZEN app-slot rule
+# above is not touched. A device still on the old table stays OTA
+# compatible with one on this table, because the only thing an OTA
+# rewrites is a slot whose offset and size did not move.
+#
+# The cost is 64 KB of WAV headroom, ~2 s at 16 kHz. If a longer clip is
+# already flashed it must be re-cut and tools/flash_assets.sh re-run.
+#
+# Enabling it is a separate step: CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH in
+# sdkconfig. With ENABLE_TO_NONE (the default) this partition is simply
+# unused, which is why it is safe to carry in the shipped table.
+#
+# Name,     Type, SubType,  Offset,   Size
+nvs,        data, nvs,      0x9000,   0x6000
+phy_init,   data, phy,      0xf000,   0x1000
+ota_0,      app,  ota_0,    0x10000,  0x1C0000
+ota_1,      app,  ota_1,    0x1D0000, 0x1C0000
+otadata,    data, ota,      0x390000, 0x2000
+assets,     data, 0x40,     0x392000, 0x5E000
+coredump,   data, coredump, 0x3F0000, 0x10000
