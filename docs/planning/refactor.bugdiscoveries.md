@@ -204,6 +204,7 @@ constraint remains; everything else is independent and can be reordered freely.
 |---|---|---|---|
 | 0 | **S1 + S2 smoke tests** | The only item that needs the device. Two merged fixes stay unconfirmed until it happens, and everything below is engineering time that can proceed in parallel | a USB flash, then an OTA |
 | 0.5 | **BUG-10** — recurring PANIC resets on an idle device | A device that reboots itself several times a day is the most serious thing on this page, and the cause is unknown. Diagnostics first: inference from an HA activity stream has already produced one retracted answer, so the device needs to report what it was doing when it died | — |
+| 0.6 | **BUG-11** — bedtime is evaluated against an unvalidated clock | Registered, and deliberately **frozen**. It is a consequence of BUG-10 (a panic is what invalidates the clock), and changing bedtime behaviour while the panic rate is being measured would confound the measurement. Fix it after BUG-10 closes, not before | BUG-10 |
 | 1 | **BUG-7** — a RUNNING slot outliving its own definition | State-machine change to an uncovered path; independent | — |
 | 2 | **BUG-2**, then **BUG-3** | Same latch/mask surface — fix together so each is checked against the other. Both need a re-baselined sweep to show the fix changed *only* the intended cases. | — |
 | 3 | **BUG-5** — the v1→v2 migration | Only bites on a version bump, and **R4** means it has to be written *before* one rather than after. Nothing in flight bumps the version, which is why it sits last. | — |
@@ -771,6 +772,30 @@ of image — 1,496,784 → 1,500,480 B, 81.8 % of the app slot.
   phase — silently, and only on the devices that actually panicked. Every
   other test in the file survives a renumbering, which is the point.
 
+**Follow-on, 2026-08-20: BOOT was too coarse to be a finding.** Every panic
+observed so far reports `BOOT` with the net slot idle, and that phase spans
+NVS init, the OTA rollback detector, `buttons_init`, `battery_init`, the LVGL
+framebuffer, a heap check and `lock_gate_check_charge()` — which itself can run
+a full e-ink refresh AND an entire network window without leaving BOOT. The
+main slot now carries five appended sub-phases (`BOOT_NVS`, `BOOT_OTA`,
+`BOOT_DISP`, `BOOT_BATT`, `BOOT_LOCK`, values 9-13) so the breadcrumb names the
+init call rather than the window. Appended after `OTA_DL` rather than inserted
+next to `BOOT`, because the values are stored in RTC memory and in an NVS blob
+and reach a newer image off flash. A hand-flipped reset-loop soak harness
+(`include/panic_soak.h`, `MAGTAG_PANIC_SOAK`, ships at 0) restarts at the end
+of the BOOT window so the span can be exercised in minutes with a console
+attached instead of once a night; it deliberately adds no Kconfig symbol,
+because a reconfigure would rewrite this project's hand-maintained `sdkconfig`.
+
+**Still unexplained by the breadcrumb: the sample is taken at the MARK, not at
+the fault.** `panic_diag.c` fills uptime/heap/stack when a phase is entered and
+nothing re-samples inside a phase, so the published figures describe the start
+of the phase the device died in. Combined with `panic_uptime_s` being published
+in whole seconds (`last->uptime_ms / 1000u`), a BOOT panic still publishes an
+uptime of 0. The subdivision narrows WHERE; it does not improve WHEN. Left as
+found — it is a real limitation of the design, not a defect in the
+implementation, and the phase reading is the evidence being collected first.
+
 **Deferred, deliberately: NVS write amplification in a panic loop.** Before
 this feature a panic boot-loop cost zero NVS writes; each iteration now costs
 a counter write plus a blob write, both committed. Minimum loop period is
@@ -781,6 +806,113 @@ is the silent erase of F3. The fix is cheap (skip the blob write when nothing
 was latched; only rewrite when the record differs) and is **not** being made
 yet, because the number that decides whether it matters does not exist: read
 **NVS free entries** on the first window after this image lands, then decide.
+
+## BUG-11 — bed time is evaluated against a clock nothing has validated
+
+**Status:** OPEN — **REGISTERED, NOT FIXED, AND DELIBERATELY FROZEN** ·
+**Found:** 2026-08-20, by reading, while subdividing the BOOT panic phase
+**Severity:** one bed-time wake lost after every panic — and after every OTA
+reboot, brownout and serial reset
+
+> **Do not fix this yet.** It is downstream of BUG-10: a panic is precisely
+> what invalidates the clock, so the two are the same night's story. Changing
+> what bed time does on the boot after a panic would alter the sleep cadence
+> the panic measurement is being read from, and the cadence is one of the few
+> signals that measurement has. Land the diagnostics, get the phase readings
+> off the device, close BUG-10, and *then* fix this. The entry exists so the
+> finding survives the wait, not so someone acts on it.
+
+### The defect
+
+`lock_gate_check_bedtime()` (`main/lock_gate.c:107`) opens with
+
+```c
+if (!bedtime_active(time_util_minutes_of_day(now), config_cache_bedtime_minutes())) {
+```
+
+and `now` is `hal_time_now()`, handed in by the caller. Nothing anywhere on
+that path asks whether the clock has ever been set. It is called from
+`wake_flow_handle_timer_tick()` at `main/wake_flow.c:1051` — whose own comment
+says it runs *before* the sync block — and again from
+`wake_flow_handle_button_wake()` at `main/wake_flow.c:1205`.
+
+**The OTA path has exactly the guard this one is missing.**
+`ota_policy_check_gate()` refuses to act on an unvalidated clock:
+
+```c
+if (!in->time_valid)
+    return OTA_REASON_NO_TIME;
+```
+
+`main/ota_policy.c:165`, against `ota_gate_in_t::time_valid`, documented at
+`include/ota_policy.h:163` as *"NTP has set the clock this session"*. So the
+firmware already holds the position that a decision taken against an unset
+clock is not a decision. `lock_gate` has no equivalent, and it is making a
+comparison — minutes-of-day against a configured window — that is *more*
+sensitive to a wrong clock than the OTA gate is, not less.
+
+### Why the clock is bogus on exactly the boot that matters
+
+Two independent pieces of state, both in RTC memory, both `RTC_DATA_ATTR`,
+and `RTC_DATA_ATTR` survives deep sleep **only** — a panic reset zeroes it,
+and so does `esp_restart()`:
+
+1. `g_rtc_state` (`main/timer.c:12`) holds `next_ntp_sync`
+   (`include/timer.h:149`), from which `timer_last_ntp_sync()` is derived.
+   Zeroed, `timer_rtc_state_guard()` blanks the struct on the next boot and
+   the firmware no longer knows when it last synced.
+2. The IDF wall-clock offset that makes `gettimeofday` continuous across
+   sleeps lives in RTC too, and is cleared by any non-deep-sleep reset.
+
+So on the first boot after a panic, `hal_time_now()` answers with something
+near the epoch. `wake_flow_handle_timer_tick()` then evaluates bed time
+against that, `bedtime_active()` says no, the bed-time lock does not engage,
+and the wake takes an ordinary short sleep instead of `BEDTIME_SLEEP_SEC`
+(7200, `include/sleep_plan.h:96`). The NTP sync that would have fixed the
+clock happens **later in the same wake** — the call site comment at
+`wake_flow.c:1051` says so explicitly — which is too late for the decision
+already taken above it.
+
+The result is not a permanent failure; it is a lost wake. The next tick with
+a good clock engages the lock normally.
+
+### Observed
+
+On two consecutive nights the panic cluster ran with wake gaps of 1-7
+minutes — the normal short-sleep cadence, not the bed-time one — and a clean
+~2 h `BEDTIME_SLEEP_SEC` block began the moment a boot survived. That is the
+signature this defect predicts: bed time cannot engage while the device is
+panicking, because every post-panic boot re-asks the question with no clock.
+
+### Scope beyond the panic
+
+A panic is the loud case, not the only one. Any reset that is not a deep-sleep
+wake clears the same RTC state: an **OTA reboot** (`esp_restart()` at the end
+of a successful apply), a **brownout**, and a **serial reset** from attaching
+a monitor with DTR/RTS asserted. Each of those, if it lands inside the bed-time
+window, costs the same single wake.
+
+### Fix shape, for whoever picks this up later
+
+Not prescriptive, and explicitly not to be applied now — recorded because the
+reasoning is cheap to lose:
+
+* the input is the same one the OTA gate already computes; the question is
+  whether `lock_gate` should take a `time_valid` argument or whether the two
+  callers in `wake_flow.c` should hold the guard,
+* *"has NTP ever set this clock"* and *"has NTP set it this session"* are
+  different questions, and the OTA gate deliberately asks the second one,
+* and there is a real decision underneath about what bed time should DO when
+  it cannot tell the time: skipping the lock (today's behaviour, by accident)
+  and holding the previous lock state (which RTC memory can no longer supply)
+  are both defensible, which is a reason for the fix to be designed rather
+  than patched.
+
+**No pinning test yet, and that is a known gap.** The register's own rule is
+that an open defect is pinned by a test asserting the current, wrong
+behaviour. This one is not, because writing that test means working on the
+bed-time path, which is the thing being frozen. Write the pin with the fix,
+and flip it deliberately.
 
 ## Closed — moved to the archive
 
