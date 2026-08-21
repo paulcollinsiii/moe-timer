@@ -429,7 +429,13 @@ void app_main(void) {
     /* Panic-loop breaker. WHICH reset reason earns a quiet window and how
        long it lasts are decided in wake_flow.c and host-tested; what is
        reason 1 here is only the position — it has to happen before this
-       boot's first console output, which is what the quiet is for. */
+       boot's first console output, which is what the quiet is for.
+
+       DELIBERATELY UNMARKED, and it is the one unmarked span in boot
+       that is not small: 2,000 ms of blocking delay, on exactly the
+       post-panic boots this diagnostic measures. panic_diag.h argues why
+       a mark here could not report anything, and what the delay does to
+       the published `panic_uptime_s`. */
     wake_flow_boot_quiet_after_panic();
 
     /* Boot sub-phase 1 of 5. panic_diag.h argues why BOOT was subdivided
@@ -529,13 +535,22 @@ void app_main(void) {
         .min_free_heap = CONFIG_MAGTAG_OTA_MIN_FREE_HEAP,
         .running_version = esp_app_get_description()->version,
     };
-    /* Boot sub-phase 2 of 5. ota_flow_init() runs the rollback detector
-       — it reads the running partition's OTA state, decides whether this
-       boot has to certify the image, and writes NVS either way. It is
-       the only part of boot that can be affected by the PREVIOUS boot
-       having been an OTA, which makes "did it die in the rollback
-       detector?" a question worth being able to answer separately from
-       the rest of init. */
+    /* Boot sub-phase 2 of 5. ota_flow_init() runs the rollback detector,
+       and what that detector actually does is an NVS READ and, on an
+       ordinary boot, nothing else: note_rollback_if_reverted() reads the
+       ota_pend_ver key and compares it against s_cfg.running_version. It
+       does NOT read partition state — esp_ota_get_running_partition()
+       and esp_ota_get_state_partition() live in ota.c and are reached
+       later, through .mark_valid — and it does NOT write either way: an
+       empty key returns before any flash is spent saying so. The writes
+       happen only on the boot after something was committed.
+
+       Which is the reason it earns a label rather than an argument
+       against one. It is the only part of boot whose behaviour depends
+       on the PREVIOUS boot having been an OTA, so "did it die in the
+       rollback detector?" is a question worth answering separately from
+       the rest of init — and the boot that answers yes is the boot that
+       is doing the flash work. */
     const panic_phase_t boot_prev_ota = panic_diag_enter(PANIC_PHASE_BOOT_OTA);
     ota_flow_init(&OTA_FLOW_OPS, &ota_cfg);
     panic_diag_exit(PANIC_PHASE_BOOT_OTA, boot_prev_ota);
@@ -556,11 +571,20 @@ void app_main(void) {
     /* audio + light init lazily on first use (most wakes need neither);
        until then the amp pin stays under its deep-sleep hold (off). */
 
-    /* Boot sub-phase 4 of 5, and the leading suspect: the SSD1680
-       bring-up plus lv_init() and the LVGL framebuffer, which is the
-       largest single allocation on the device. A heap or a panel-init
-       fault here is indistinguishable from every other boot fault while
-       they all report BOOT. The label is "BOOT_DISP" and not
+    /* Boot sub-phase 4 of 5, and still the leading suspect — but not for
+       the reason first written here. The LVGL draw buffer is not "the
+       largest allocation on the device"; it is not an allocation at all.
+       display.c's s_lvbuf is a link-time static in .bss, 8 + 296*128/8 =
+       4,744 B, and it costs the runtime heap nothing. What genuinely
+       runs on the heap in here is lv_init()'s own allocator pool and
+       lv_display_create(), sitting on top of an SSD1680 bring-up that
+       drives GPIO, an SPI bus and a hardware BUSY wait.
+
+       It keeps the "leading suspect" billing on those grounds instead:
+       this is the only boot phase that both talks to a peripheral over a
+       bus and asks a third-party library to stand up its own allocator,
+       and a fault in either is indistinguishable from every other boot
+       fault while they all report BOOT. The label is "BOOT_DISP" and not
        "BOOT_DISPLAY" for a hard reason, spelled out in panic_diag.h: a
        main-slot label gets nine characters, because "BOOT_DISP" has to
        be able to sit next to "OTA_CHECK" inside DIAG_PHASE_MAX. */

@@ -131,21 +131,44 @@ typedef enum {
    panic_diag_enter(PANIC_PHASE_AWAKE) that closes app_main, and the
    device's nightly panics all report it with the net slot idle. That is
    not a finding. The span contains the NVS bring-up (including the
-   documented erase branch), the OTA rollback detector and its flash
-   writes, the LVGL framebuffer — the largest single allocation on the
-   device — the ADC unit, and lock_gate_check_charge(), which on a charge
-   lock runs a full e-ink refresh AND an entire network window without
-   ever leaving BOOT. "It died in BOOT" therefore localises nothing,
-   which is the one thing this module exists to do.
+   documented erase branch), the OTA rollback detector (an NVS read, plus
+   flash writes only when the previous boot committed an image), the
+   SSD1680 bring-up and lv_init()'s internal allocator pool — the LVGL
+   draw buffer itself is a .bss static, not an allocation — the ADC unit,
+   and lock_gate_check_charge(), which on a charge lock runs a full e-ink
+   refresh AND an entire network window without ever leaving BOOT. "It
+   died in BOOT" therefore localises nothing, which is the one thing this
+   module exists to do.
 
    The five phases above name the calls that do real work. What is LEFT
-   under plain BOOT is a decision, not an oversight: neopixel_init, the
-   panic quiet, the TZ read, timer_rtc_state_guard, timer_defs_install,
+   under plain BOOT is a decision, not an oversight: neopixel_init, the TZ
+   read, timer_rtc_state_guard, timer_defs_install,
    timer_persist_try_restore, alerts_set_extend_awake, net_apply_init,
    buttons_init and the heap log are small and allocation-light, and each
    extra mark costs a full walk of the task stack looking for the fill
    pattern (uxTaskGetStackHighWaterMark). A reading of plain BOOT now
    means "one of the small wiring calls", which is itself a narrowing.
+
+   ONE UNMARKED SPAN IS NOT SMALL, and it is left unmarked for a
+   different reason. wake_flow_boot_quiet_after_panic() — main.c, a few
+   lines above the BOOT_NVS mark — is a 2,000 ms BLOCKING delay
+   (PANIC_QUIET_MS), and it runs on exactly the population this module
+   exists to measure: only when esp_reset_reason() is ESP_RST_PANIC. It
+   is "allocation-light" and nothing else about it is light. It still
+   gets no mark, because a mark there could not report anything. Its
+   entire body is a vTaskDelay: the main task is Blocked and executing no
+   instruction for the whole span, so no panic can originate inside it
+   from the task the mark would be describing, and the tasks that CAN run
+   then (esp_timer, ipc, idle) sit outside every phase in this file by
+   design. A phase whose only honest reading is "some other task died"
+   would be a label rather than a finding — and it would spend the last
+   of the hard-exhausted nine-character budget below to be one.
+
+   IT IS NOT FREE, THOUGH, and the cost lands on a PUBLISHED number.
+   Samples are taken at the MARK, so on a post-panic boot the BOOT_NVS
+   sample is taken 2,000 ms later than the identical mark on a clean
+   boot. `panic_uptime_s` reading 2 instead of 0 for an early-boot panic
+   is that delay and nothing else — do not read it as time spent in NVS.
 
    TWO CONSTRAINTS SHAPED THIS, and neither is visible from the diff:
 
@@ -223,6 +246,19 @@ typedef struct {
 } panic_sample_t;
 
 /* ---- pure layer (host-tested: test_panic_diag) ----------------------- */
+
+/* Zero a sample, so every field of it has a defined value before
+   anything reads one. Callers declare samples on the stack, and only
+   SOME fields are written by the device sampler that follows: stack
+   ownership is decided for main-slot phases only (the net slot is shared
+   by every window task on purpose, so "does the marking task own it" is
+   not a question there). panic_diag_rec_mark() nevertheless READS
+   stack_foreign on both sides, to decide whether the stack figure is
+   recorded at all — so a field left to whatever was on the stack decides
+   that at random. This is the single point that makes that impossible;
+   the sampler calls it first and nothing else has to remember to.
+   NULL is a no-op. */
+void panic_diag_sample_reset(panic_sample_t *s);
 
 /* Enum -> literal. Out-of-range answers "?" rather than a phase name: a
    record that survived its checksum but carries a value this image does

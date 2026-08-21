@@ -112,29 +112,39 @@ void test_a_phase_this_image_does_not_know_is_not_reported_as_one_it_does(void) 
 
 void test_the_slot_map_puts_every_network_phase_on_the_network_side(void) {
     /* This is what stops a panic in the TLS path being attributed to the
-       main task's last paint. */
-    TEST_ASSERT_TRUE(panic_diag_phase_is_net(PANIC_PHASE_NET));
-    TEST_ASSERT_TRUE(panic_diag_phase_is_net(PANIC_PHASE_OTA_CHECK));
-    TEST_ASSERT_TRUE(panic_diag_phase_is_net(PANIC_PHASE_MQTT));
-    TEST_ASSERT_TRUE(panic_diag_phase_is_net(PANIC_PHASE_OTA_DL));
-    TEST_ASSERT_FALSE(panic_diag_phase_is_net(PANIC_PHASE_BOOT));
-    TEST_ASSERT_FALSE(panic_diag_phase_is_net(PANIC_PHASE_AWAKE));
-    TEST_ASSERT_FALSE(panic_diag_phase_is_net(PANIC_PHASE_RENDER));
-    TEST_ASSERT_FALSE(panic_diag_phase_is_net(PANIC_PHASE_SLEEP));
-    TEST_ASSERT_FALSE(panic_diag_phase_is_net(PANIC_PHASE_NONE));
-    TEST_ASSERT_FALSE(panic_diag_phase_is_net((panic_phase_t)200));
-    /* The BOOT subdivisions, every one of them. They are marked from the
-       main task inside app_main, and BOOT_LOCK in particular runs a whole
-       network window from inside itself (lock_gate_check_charge calls
-       net_apply_try_window) — so a boot phase that answered true here
+       main task's last paint.
+
+       EXHAUSTIVE, and deliberately not driven from PANIC_PHASE_TABLE:
+       the map under test is generated from that table, so checking it
+       against the table would only prove the preprocessor works. The
+       expectation below is stated independently — the network side is
+       exactly the four phases a window task marks, and every other
+       phase, INCLUDING ONE ADDED TOMORROW, belongs to the main slot.
+       Hand-enumerating the calls instead (which this test used to do)
+       cannot see a row that is present with the wrong is_net value, nor
+       a new phase with no assertion at all; the loop sees both. A
+       genuinely new network phase therefore has to flip the set here,
+       deliberately. */
+    for (int p = 0; p < PANIC_PHASE__COUNT; p++) {
+        const bool expect_net = (p == PANIC_PHASE_NET) || (p == PANIC_PHASE_OTA_CHECK) || (p == PANIC_PHASE_MQTT) ||
+                                (p == PANIC_PHASE_OTA_DL);
+        const char *name = panic_diag_phase_str((panic_phase_t)p);
+        TEST_ASSERT_EQUAL_INT_MESSAGE((int)expect_net, (int)panic_diag_phase_is_net((panic_phase_t)p), name);
+    }
+    /* The BOOT subdivisions are covered by the loop above, and their
+       answer matters for a specific reason: they are marked from the
+       main task inside app_main, and BOOT_LOCK in particular runs a
+       whole network window from inside itself (lock_gate_check_charge
+       calls net_apply_try_window) — so a boot phase that answered true
        would overwrite the very NET/OTA_CHECK/MQTT reading that window is
        there to produce, and the published label would lose the half that
        matters. */
-    TEST_ASSERT_FALSE(panic_diag_phase_is_net(PANIC_PHASE_BOOT_NVS));
-    TEST_ASSERT_FALSE(panic_diag_phase_is_net(PANIC_PHASE_BOOT_OTA));
-    TEST_ASSERT_FALSE(panic_diag_phase_is_net(PANIC_PHASE_BOOT_DISP));
-    TEST_ASSERT_FALSE(panic_diag_phase_is_net(PANIC_PHASE_BOOT_BATT));
     TEST_ASSERT_FALSE(panic_diag_phase_is_net(PANIC_PHASE_BOOT_LOCK));
+    /* Out of range answers "main slot", the same as NONE — it only
+       decides panic_diag_rec_exit's argument, and guessing "network"
+       there would move a slot nothing wrote. */
+    TEST_ASSERT_FALSE(panic_diag_phase_is_net((panic_phase_t)PANIC_PHASE__COUNT));
+    TEST_ASSERT_FALSE(panic_diag_phase_is_net((panic_phase_t)200));
 }
 
 /* ---- the label ---- */
@@ -164,11 +174,18 @@ void test_neither_side_in_a_phase_is_a_reading_not_a_blank(void) {
     TEST_ASSERT_EQUAL_STRING("NONE", buf);
 }
 
-void test_the_worst_case_label_fits_the_published_field(void) {
-    /* The field is a fixed width in the stat payload; a label that did
-       not fit would be truncated into a different phase's name. The
-       static assert in panic_diag.c pins the width, this pins the
-       string. */
+void test_the_label_returns_the_length_it_actually_wrote(void) {
+    /* NOT the worst case, and it used to claim to be. The worst case is
+       BOOT_LOCK+OTA_CHECK at 19 of DIAG_PHASE_MAX's 20, pinned exactly
+       by test_the_reachable_boot_lock_pairing_fills_the_published_field_-
+       exactly; RENDER+OTA_CHECK is 16 and has three characters of slack.
+
+       What this pins is the snprintf contract the callers depend on: the
+       return is the length WRITTEN, equal to strlen, and strictly less
+       than the buffer — so a caller comparing it against the buffer size
+       can tell a fit from a truncation.
+       test_every_phase_pair_fits_the_published_field applies exactly
+       that comparison across the whole cross-product. */
     char buf[DIAG_PHASE_MAX];
     int n = panic_diag_phase_label(buf, sizeof(buf), PANIC_PHASE_RENDER, PANIC_PHASE_OTA_CHECK);
     TEST_ASSERT_LESS_THAN_INT((int)sizeof(buf), n);
@@ -390,12 +407,23 @@ void test_the_ota_hypothesis_is_answerable_from_the_published_phase_alone(void) 
 }
 
 void test_every_phase_pair_fits_the_published_field(void) {
-    /* The _Static_assert in panic_diag.c compares two hardcoded literals
-       and therefore does NOT catch a longer phase name being added — see
-       the comment above it. This walks the real table instead, so adding
-       PANIC_PHASE_OTA_ROLLBACK ("OTA_ROLLBACK_CHECK") fails HERE rather
-       than shipping a label snprintf-truncated to something that still
-       reads like a valid phase in HA. */
+    /* The _Static_assert in panic_diag.c no longer compares two
+       hardcoded literals — it is expanded PER ROW of PANIC_PHASE_TABLE
+       against a per-slot budget of (DIAG_PHASE_MAX - 2) / 2 — so adding
+       PANIC_PHASE_OTA_ROLLBACK ("OTA_ROLLBACK_CHECK") now fails at
+       compile time, naming the row. That assert is SUFFICIENT BUT NOT
+       EXACT: an even split rejects a 10-character main-slot label even
+       where a short net-slot label could have paid for it, and it says
+       nothing about the joining itself.
+
+       This is the exact statement, and it is the reason to keep both:
+       it drives the REAL label builder over the whole
+       PANIC_PHASE__COUNT^2 cross-product, so the '+' separator, the NUL
+       and the one-sided cases are all inside what is being checked —
+       none of which arithmetic over the table can see. A pair that fits
+       the budget but not the buffer fails here rather than shipping a
+       label snprintf-truncated to something that still reads like a
+       valid phase in HA. */
     for (int m = 0; m < PANIC_PHASE__COUNT; m++) {
         for (int n = 0; n < PANIC_PHASE__COUNT; n++) {
             char buf[DIAG_PHASE_MAX];
@@ -529,6 +557,45 @@ void test_a_mark_from_a_task_that_does_not_own_the_slot_leaves_its_stack_alone(v
     TEST_ASSERT_EQUAL_UINT32(200, r.uptime_ms);
 }
 
+void test_a_sample_cannot_decide_the_net_stack_from_whatever_was_on_the_stack(void) {
+    /* THE bug this test was written for, reproduced at the only level a
+       host suite can reach it. The device sampler builds its sample in a
+       bare stack local; sample_now() fills three of the four fields, and
+       note_stack_ownership() fills the fourth for MAIN-slot phases only
+       — it returns early for every net phase. panic_diag_rec_mark()
+       reads stack_foreign on BOTH sides, so before the sampler zeroed
+       the struct, whether stack_net was recorded at all was decided by
+       whatever the stack happened to hold underneath it.
+       panic_diag_sample_reset() is the fix and is the shared line: this
+       walks exactly the sampler's sequence, so deleting that call from
+       sample_now() and from here fails HERE.
+
+       0xFF fill is the case that bites — it reads as
+       stack_foreign == true, which silently publishes stack_net as 0 on
+       a panic in the TLS path. A test that filled with zeros would pass
+       against the bug. */
+    panic_sample_t s;
+    memset(&s, 0xFF, sizeof(s)); /* an untouched stack local */
+    panic_diag_sample_reset(&s); /* what sample_now() does FIRST */
+    TEST_ASSERT_FALSE(s.stack_foreign);
+    TEST_ASSERT_EQUAL_UINT32(0, s.uptime_ms);
+    TEST_ASSERT_EQUAL_UINT32(0, s.heap_free);
+    TEST_ASSERT_EQUAL_UINT16(0, s.stack_free);
+    s.uptime_ms = 4200; /* then the three fields it fills */
+    s.heap_free = 71000;
+    s.stack_free = 1800;
+    /* and note_stack_ownership() writes nothing at all for a net phase */
+
+    panic_diag_rec_t r;
+    panic_diag_rec_reset(&r);
+    panic_diag_rec_mark(&r, PANIC_PHASE_MQTT, PANIC_PHASE_MQTT, &s);
+    TEST_ASSERT_EQUAL_UINT16(1800, r.stack_net);
+}
+
+void test_the_sample_reset_answers_null_rather_than_dereferencing_it(void) {
+    panic_diag_sample_reset(NULL); /* must not fault */
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_every_phase_has_a_distinct_name);
@@ -541,7 +608,7 @@ int main(void) {
     RUN_TEST(test_both_sides_busy_reports_both);
     RUN_TEST(test_one_side_idle_reports_only_the_other);
     RUN_TEST(test_neither_side_in_a_phase_is_a_reading_not_a_blank);
-    RUN_TEST(test_the_worst_case_label_fits_the_published_field);
+    RUN_TEST(test_the_label_returns_the_length_it_actually_wrote);
     RUN_TEST(test_every_phase_pair_fits_the_published_field);
     RUN_TEST(test_the_stored_phase_numbers_are_pinned_because_they_outlive_the_image);
     RUN_TEST(test_the_label_answers_a_zero_length_buffer_rather_than_writing_to_it);
@@ -559,6 +626,8 @@ int main(void) {
     RUN_TEST(test_a_mark_on_a_record_that_failed_its_guard_rearms_it);
     RUN_TEST(test_a_mark_without_a_sample_still_moves_the_phase);
     RUN_TEST(test_a_mark_from_a_task_that_does_not_own_the_slot_leaves_its_stack_alone);
+    RUN_TEST(test_a_sample_cannot_decide_the_net_stack_from_whatever_was_on_the_stack);
+    RUN_TEST(test_the_sample_reset_answers_null_rather_than_dereferencing_it);
 
     RUN_TEST(test_leaving_a_phase_nobody_disturbed_restores_the_outer_one);
     RUN_TEST(test_a_late_exit_does_not_put_a_stale_phase_back_over_the_sleep_funnel);

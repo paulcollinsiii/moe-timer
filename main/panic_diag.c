@@ -199,6 +199,12 @@ static uint32_t rec_sum(const panic_diag_rec_t *rec) {
     return h;
 }
 
+void panic_diag_sample_reset(panic_sample_t *s) {
+    if (s == NULL)
+        return;
+    memset(s, 0, sizeof(*s));
+}
+
 void panic_diag_rec_reset(panic_diag_rec_t *rec) {
     if (rec == NULL)
         return;
@@ -350,6 +356,18 @@ static uint16_t stack_free_bytes(void) {
 }
 
 static void sample_now(panic_sample_t *out) {
+    /* ZEROED FIRST, and this is load-bearing rather than tidiness. Every
+       caller declares the sample as a bare local, this function writes
+       three of its four fields, and note_stack_ownership() below writes
+       the fourth for MAIN-slot phases only — it returns early for the
+       net ones. panic_diag_rec_mark() reads stack_foreign on BOTH sides
+       to decide whether the stack figure is recorded, so without this
+       line whether stack_net lands is decided by whatever the stack
+       happened to hold. Fixed here, at the one point every mark goes
+       through, rather than at each declaration: a fifth field added
+       later is covered by the same line, and a sixth caller cannot
+       forget it. */
+    panic_diag_sample_reset(out);
     /* esp_timer_get_time() and NOT esp_system_get_time(): the published
        figure has to mean "how far into THIS wake", and only the former
        does. esp_timer_impl_get_time() reads the systimer, which sits in
@@ -369,7 +387,14 @@ static void sample_now(panic_sample_t *out) {
    shared by every network-window task on purpose, so only the main slot
    is checked. Before init has run there is nothing to compare against,
    which reads as "owned" — the only mark in that window is init's own,
-   on the main task. */
+   on the main task.
+
+   The early return for a net phase writes NOTHING, and that stays
+   correct only because sample_now() zeroed the field before calling
+   here: "owned" is the right reading for a slot with no single owner —
+   the window task's own high-water mark IS the net figure — and false is
+   what zeroing already left there. Do not turn the early return into a
+   write; do not remove the zeroing. */
 static void note_stack_ownership(panic_sample_t *s, panic_phase_t phase) {
     if (panic_diag_phase_is_net(phase))
         return;
