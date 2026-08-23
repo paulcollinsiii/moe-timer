@@ -10,12 +10,53 @@ CONFIG_IDF_TARGET="esp32s2"
 # Console over the ESP32-S2 native USB (the MagTag has no UART bridge chip).
 # Without this, logs go to UART0 pins and /dev/ttyACM0 carries no output.
 CONFIG_ESP_CONSOLE_USB_CDC=y
-# Route the ROM ets_printf path (panic backtraces, early-boot output) to
-# USB CDC too — without this a crash reboots silently and the monitor
-# shows nothing, making boot loops undiagnosable on this board.
-CONFIG_ESP_CONSOLE_USB_CDC_SUPPORT_ETS_PRINTF=y
-# Hold ~3 s after a panic so the backtrace flushes over USB CDC (which
-# re-enumerates on reboot and would otherwise drop it) before restarting.
+# Do NOT route the ROM ets_printf path (panic backtraces, ESP_EARLY_LOG)
+# to USB CDC. This was =y, and it was the direct cause of a nightly panic.
+#
+# usb_console.c:85 lets this symbol pick the console ISR's alloc flags:
+# with it set, the ISR is registered ESP_INTR_FLAG_IRAM, so
+# esp_intr_noniram_disable() does NOT mask it while the cache is off for a
+# flash operation. IDF's own comment at the esp_intr_alloc() call admits
+# the flag is claimed for the polling path, "not because we actually need
+# the interrupt to work with cache disabled". But that ISR calls
+# esp_usb_console_available_for_read() and esp_usb_console_write_available(),
+# and the component's linker.lf lists neither, so both sit in .flash.text.
+# A USB interrupt landing inside any cache-off window therefore fetches
+# garbage: IllegalInstructionCause with pc in .flash.text. Read off a flash
+# coredump — victim frame esp_flash_read() under the NVS read in
+# timer_persist_save(), i.e. the deep-sleep path, so the window opened on
+# EVERY sleep entry and fired ~3x a night whenever host USB traffic hit it.
+# Still unfixed upstream: v6.0.2 and master ship the same linker.lf.
+#
+# n is also the stock IDF default (esp_stdio/Kconfig: "default n") and saves
+# ~1 kB RAM. Ordinary ESP_LOGx over USB CDC is NOT affected — that goes
+# through the vfs_cdcacm driver rather than ets_printf, so the monitor still
+# shows normal logs. What is given up is the ROM panic backtrace and
+# early-boot output, which on this board now go nowhere (the UART console is
+# CONFIG_ESP_CONSOLE_UART_NUM=-1). Panic evidence comes from panic_diag's
+# counter and phase breadcrumb over MQTT instead, plus — wherever
+# CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH is turned on, which is deliberately
+# NOT set here; see partitions.csv — a full backtrace from the coredump
+# partition, which is strictly better than the console text ever was.
+#
+# PRECEDENCE, measured for THIS symbol rather than assumed — and it goes the
+# opposite way to CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE below, which is why
+# the note there says not to generalise. Two isolated reconfigures:
+#   - with no sdkconfig present, this line governs and the symbol comes out
+#     "is not set". That is the case this line exists for.
+#   - with a sdkconfig that already declares =y, THE EXISTING FILE WINS: the
+#     regenerated config still read =y and the diff was empty.
+# So this line protects a regenerated or freshly-cloned tree; it does NOT
+# retrofit a checkout whose gitignored sdkconfig already carries =y. Such a
+# tree has to drop the line from sdkconfig (or delete the file and let it
+# regenerate) before the fix takes. To re-enable for a bench session, the
+# same asymmetry applies — and expect the panic back while USB-attached.
+CONFIG_ESP_CONSOLE_USB_CDC_SUPPORT_ETS_PRINTF=n
+# Hold ~3 s after a panic before restarting. This used to be here so the ROM
+# backtrace could flush over USB CDC (which re-enumerates on reboot and
+# would otherwise drop it); with ets_printf off there is no ROM output left
+# to flush, so it now only buys time for the panic-adjacent ESP_LOGx lines
+# already queued on the CDC driver to drain.
 CONFIG_ESP_SYSTEM_PANIC_REBOOT_DELAY_SECONDS=3
 
 # Main task runs the network window (WiFi + SNTP + the MQTT/HA session +
