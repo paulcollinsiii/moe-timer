@@ -1701,6 +1701,48 @@ void test_bonus_reconcile_stale_replay_across_rollover_is_noop(void) {
     TEST_ASSERT_EQUAL_INT32(0, g_rtc_state.slots[0].bonus_applied);
 }
 
+/* The banked read the IDLE allocation displays are built on: an
+   adjustment applied before the day's first start lives in bonus_sec
+   until timer_start folds it, so every reader of an IDLE allocation has
+   to add it or the adjustment is invisible until someone presses A. */
+void test_banked_bonus_is_readable_until_start_folds_it(void) {
+    TEST_ASSERT_EQUAL_INT32(0, timer_slot_banked_bonus(0));
+    timer_bonus_reconcile(0, -2700); /* HA: -45 min, Screen still IDLE */
+    TEST_ASSERT_EQUAL_INT32(-2700, timer_slot_banked_bonus(0));
+    timer_start(T0, 7200); /* folded into the allocation, bank emptied */
+    TEST_ASSERT_EQUAL_INT32(0, timer_slot_banked_bonus(0));
+    TEST_ASSERT_EQUAL_INT32(4500, g_rtc_state.slots[0].allocation_sec);
+}
+
+/* Both report whether they actually moved anything, so the orchestrator
+   can tell a repaint-worthy adjustment from a retained-message replay
+   that changed nothing — an IDLE adjustment is invisible in the state
+   machine (still IDLE) but very visible on the panel, so "did the state
+   change" cannot stand in for it. */
+void test_bonus_reconcile_reports_whether_a_delta_landed(void) {
+    TEST_ASSERT_TRUE(timer_bonus_reconcile(0, -2700));
+    TEST_ASSERT_FALSE(timer_bonus_reconcile(0, -2700)); /* retained replay */
+    TEST_ASSERT_TRUE(timer_bonus_reconcile(0, -1800));  /* target moved */
+    TEST_ASSERT_FALSE(timer_bonus_reconcile(-1, 600));  /* bad slot */
+}
+
+void test_adjust_reports_whether_it_moved_anything(void) {
+    TEST_ASSERT_FALSE(timer_adjust(0, 0));    /* nothing asked for */
+    TEST_ASSERT_FALSE(timer_adjust(-1, 600)); /* bad slot */
+    TEST_ASSERT_TRUE(timer_adjust(0, 600));   /* IDLE: banked */
+    timer_start(T0, 3600);
+    TEST_ASSERT_TRUE(timer_adjust(0, -600)); /* RUNNING: expiry moved */
+    timer_tick(T0 + 4000);                   /* run it out */
+    TEST_ASSERT_EQUAL(TIMER_EXPIRED, timer_get_state());
+    TEST_ASSERT_FALSE(timer_adjust(0, -600)); /* EXPIRED: nothing to reclaim */
+    TEST_ASSERT_TRUE(timer_adjust(0, 600));   /* EXPIRED grant: back to PAUSED */
+}
+
+void test_banked_bonus_out_of_range_slot_reads_zero(void) {
+    TEST_ASSERT_EQUAL_INT32(0, timer_slot_banked_bonus(-1));
+    TEST_ASSERT_EQUAL_INT32(0, timer_slot_banked_bonus(TIMER_SLOT_COUNT));
+}
+
 /* ---- signed timer_adjust: negative = time lost ---- */
 
 void test_adjust_running_deducts_expiry_and_allocation(void) {
@@ -2706,6 +2748,10 @@ int main(void) {
     RUN_TEST(test_bonus_reconcile_lowering_target_reclaims_delta);
     RUN_TEST(test_bonus_reconcile_negative_target_applies_delta_once);
     RUN_TEST(test_bonus_reconcile_stale_replay_across_rollover_is_noop);
+    RUN_TEST(test_banked_bonus_is_readable_until_start_folds_it);
+    RUN_TEST(test_banked_bonus_out_of_range_slot_reads_zero);
+    RUN_TEST(test_bonus_reconcile_reports_whether_a_delta_landed);
+    RUN_TEST(test_adjust_reports_whether_it_moved_anything);
     RUN_TEST(test_adjust_running_deducts_expiry_and_allocation);
     RUN_TEST(test_adjust_running_past_zero_expires_on_next_tick);
     RUN_TEST(test_adjust_paused_past_zero_expires);

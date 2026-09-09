@@ -382,20 +382,36 @@ static int apply_sets(esp_mqtt_client_handle_t client, const stats_snapshot_t *s
             }
         }
     }
+    bool day_cleared = s_bonus_clear_pending;
     if (s_bonus_clear_pending) {
         /* Rollover: clear the retained bonus target so it doesn't repeat */
         mqtt_topic(topic, sizeof(s_mem->topic), device_id(), "set/screen_bonus");
         published += publish(client, topic, "0", 1);
         s_bonus_clear_pending = false;
     }
-    /* act state: confirmed bonus (applied minutes, from the orchestrator's
-       snapshot — live timer state is off-limits on this task) + locate off
-       (momentary). A target buffered THIS window confirms next window; the
-       HA number is optimistic, so it doesn't snap back meanwhile. */
+    /* act state: the Screen-adjust value HA renders + locate off
+       (momentary). A target buffered THIS window is reported NOW rather
+       than a window later, because this payload is what HA's number box
+       shows and `optimistic` does not stop a state message overwriting
+       it — publishing the snapshot's (pre-reconcile) applied figure here
+       snapped a fresh -45 back to 0 on the very sync that applied it. The
+       orchestrator applies the target immediately after joining this
+       task, and timer_bonus_reconcile is idempotent, so a window that
+       dies before the join simply re-buffers the retained set next time.
+       Live timer state stays off-limits on this task; the applied figure
+       still comes from the snapshot. */
+    act_state_t act_in = {
+        .applied_s = snap->screen_bonus_applied_s,
+        .target_s = s_bonus_target_s,
+        .target_pending = s_bonus_target_pending,
+        .day_cleared = day_cleared,
+    };
     char act[96];
     mqtt_topic(topic, sizeof(s_mem->topic), device_id(), "act");
-    snprintf(act, sizeof(act), "{\"screen_bonus\":%ld,\"locate\":\"OFF\"}", (long)(snap->screen_bonus_applied_s / 60));
-    published += publish(client, topic, act, 1);
+    if (stats_json_act(act, sizeof(act), &act_in) < (int)sizeof(act))
+        published += publish(client, topic, act, 1);
+    else
+        ESP_LOGW(TAG, "act payload truncated, not published");
     /* cfg state: current editable-config values. Skip a truncated doc —
        publishing invalid JSON would knock every editable control offline. */
     mqtt_topic(topic, sizeof(s_mem->topic), device_id(), "cfg");

@@ -314,6 +314,25 @@ it is published from `main/mqtt_ha.c` alongside `switch.magtag_xxxxxx_locate`
 ("Find my timer"), which is left off the card because it belongs on a button
 rather than in a settings list.
 
+**"Screen adjust (min) today" is a target, not an increment.** The number is
+*today's total adjustment* (-240..240), reconciled against what the device has
+already applied — so setting it to `-45` takes 45 minutes off the day exactly
+once, however many syncs run afterwards. To take a further 15, move it to
+`-60`; to give the time back, move it to `0`. Re-sending the same value is
+deliberately a no-op, which is what makes a retained command safe to leave on
+the broker and safe to replay across a reboot. The device applies it on the
+next sync (a Button D press, the day rollover, or any wake that opens a
+network window) and confirms it back on `magtag/<id>/act`, which is what the
+number box then shows. The day rollover resets the target to `0` and clears
+the retained command, so an adjustment never carries into tomorrow.
+
+An adjustment that lands while the Screen timer is still IDLE is held until
+the day's first start folds it into the allocation — but the panel and the
+`limit`/`remaining` sensors show the adjusted figure straight away, and the
+sync that applies it repaints the idle screen itself. So a `-45` set in the
+morning is visible before anyone presses A, rather than appearing as a jump
+from X to Y at the moment the timer starts.
+
 ### Bulk config document (holidays, scripted setup)
 
 For values that aren't a single control — chiefly the **holiday list** —

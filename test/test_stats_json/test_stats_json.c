@@ -786,8 +786,56 @@ void test_every_discovery_payload_fits_the_publish_buffer(void) {
     TEST_ASSERT_TRUE_MESSAGE(worst < (int)sizeof(buf) - 128, "discovery headroom below 128 B");
 }
 
+/* ---- act state (the Screen-adjust confirmation HA renders) ---------------
+   The number entity's value comes from this payload, and `optimistic` does
+   NOT protect the value the user typed: HA's MQTT number subscribes to
+   state_topic regardless, so whatever lands here overwrites the box. The
+   apply is deferred to net_apply_finish(), one join AFTER this payload is
+   built, so reporting the snapshot's bonus_applied here is what snapped a
+   fresh -45 back to 0 on the very sync that applied it. */
+
+void test_act_reports_the_target_arriving_this_window(void) {
+    char buf[96];
+    act_state_t a = {.applied_s = 0, .target_s = -2700, .target_pending = true};
+    int n = stats_json_act(buf, sizeof(buf), &a);
+    TEST_ASSERT_TRUE(n < (int)sizeof(buf));
+    TEST_ASSERT_EQUAL_STRING("{\"screen_bonus\":-45,\"locate\":\"OFF\"}", buf);
+}
+
+void test_act_reports_the_applied_value_when_nothing_arrived(void) {
+    /* Steady state: no set this window, so the confirmed figure stands
+       and a replayed retained target reads back unchanged. */
+    char buf[96];
+    act_state_t a = {.applied_s = -2700, .target_pending = false};
+    stats_json_act(buf, sizeof(buf), &a);
+    TEST_ASSERT_EQUAL_STRING("{\"screen_bonus\":-45,\"locate\":\"OFF\"}", buf);
+}
+
+void test_act_rollover_clear_outranks_a_stale_retained_target(void) {
+    /* The rollover window still receives yesterday's retained set and
+       still carries yesterday's applied figure in its snapshot, but the
+       day resets the moment the window closes: HA must be told 0, not
+       yesterday's number. */
+    char buf[96];
+    act_state_t a = {.applied_s = -2700, .target_s = -2700, .target_pending = true, .day_cleared = true};
+    stats_json_act(buf, sizeof(buf), &a);
+    TEST_ASSERT_EQUAL_STRING("{\"screen_bonus\":0,\"locate\":\"OFF\"}", buf);
+}
+
+void test_act_truncation_is_reported_not_written_past(void) {
+    char buf[8] = {0};
+    act_state_t a = {.applied_s = 900, .target_pending = false};
+    int n = stats_json_act(buf, sizeof(buf), &a);
+    TEST_ASSERT_TRUE(n >= (int)sizeof(buf));
+    TEST_ASSERT_EQUAL_CHAR('\0', buf[sizeof(buf) - 1]);
+}
+
 int main(void) {
     UNITY_BEGIN();
+    RUN_TEST(test_act_reports_the_target_arriving_this_window);
+    RUN_TEST(test_act_reports_the_applied_value_when_nothing_arrived);
+    RUN_TEST(test_act_rollover_clear_outranks_a_stale_retained_target);
+    RUN_TEST(test_act_truncation_is_reported_not_written_past);
     RUN_TEST(test_discovery_diagnostic_category);
     RUN_TEST(test_primary_entity_omits_category);
     RUN_TEST(test_retired_active_scoped_entities_gone);

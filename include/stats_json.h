@@ -132,6 +132,24 @@ typedef struct {
 /* ota and diag may each be NULL, which publishes ""/0 — the same
    NULL-tolerance every string field here already has. */
 int stats_json_stat(char *buf, size_t len, const stats_snapshot_t *s, const ota_stat_t *ota, const diag_stat_t *diag);
+/* Inputs to the act payload — the Screen-adjust confirmation HA renders.
+   The number entity draws its value from this topic and `optimistic` does
+   not protect the box: HA's MQTT number subscribes to state_topic either
+   way, so whatever is published here overwrites what the user typed.
+   Which matters because the adjustment is applied AFTER the window that
+   receives it (mqtt_ha buffers, net_apply_finish reconciles), so the
+   snapshot's applied figure is a window stale on exactly the sync that
+   acts on a fresh set. Precedence: a day about to reset reports 0, then a
+   target that arrived this window, then the confirmed applied value. */
+typedef struct {
+    int32_t applied_s;   /* bonus_applied, from the pre-window snapshot */
+    int32_t target_s;    /* target that arrived this window (if pending) */
+    bool target_pending; /* a set/screen_bonus landed this window */
+    bool day_cleared;    /* rollover: the day resets when this window closes */
+} act_state_t;
+
+int stats_json_act(char *buf, size_t len, const act_state_t *a);
+
 int stats_json_summary(char *buf, size_t len, const char *date, int32_t screen_used_s,
                        const uint16_t completions[TIMER_EXTRA_SLOTS]);
 

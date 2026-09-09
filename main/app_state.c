@@ -40,6 +40,14 @@ static const char *day_type_name(day_type_t dt) {
     }
 }
 
+/* Today's allocation for an IDLE slot: the scheduled/configured base plus
+   whatever adjustment is banked on it, clamped at 0 exactly as
+   timer_start does when it folds the bank for real. */
+static uint32_t idle_allocation(uint32_t base, int slot) {
+    int32_t a = (int32_t)base + timer_slot_banked_bonus(slot);
+    return (a > 0) ? (uint32_t)a : 0;
+}
+
 display_state_t app_state_display(const app_state_in_t *in, int32_t remaining, time_t now) {
     day_type_t dt = schedule_get_day_type(now);
     /* Extra timers have a fixed configured duration; Screen (slot 0)
@@ -48,6 +56,11 @@ display_state_t app_state_display(const app_state_in_t *in, int32_t remaining, t
     uint32_t alloc = (def != NULL) ? (uint32_t)def->duration_sec : schedule_get_allocation_sec(dt);
     /* IDLE shows today's full allocation (full bar), not 0 (ProductOverview) */
     if (timer_get_state() == TIMER_IDLE) {
+        /* ...and "today's allocation" includes an adjustment already
+           applied but still banked: timer_start folds bonus_sec in, and
+           until then the schedule figure alone would show a -45 min set
+           from HA as no change at all. Same clamp timer_start applies. */
+        alloc = idle_allocation(alloc, timer_active_slot());
         remaining = (int32_t)alloc;
     }
     int pct = battery_percent_from_mv(in->batt_mv);
@@ -115,7 +128,12 @@ void app_state_stats(const app_state_in_t *in, time_t now, stats_snapshot_t *out
         if (timer_slot_state(i) != TIMER_IDLE) {
             alloc = timer_slot_allocation(i);
         } else {
-            alloc = (i == 0) ? (int32_t)schedule_get_allocation_sec(dt) : sd->duration_sec;
+            /* The banked fold applies here for the same reason it does on
+               the panel: HA's limit/remaining sensors read this fallback,
+               and an adjustment that shows nowhere reads as one that never
+               landed. */
+            alloc =
+                (int32_t)idle_allocation((i == 0) ? schedule_get_allocation_sec(dt) : (uint32_t)sd->duration_sec, i);
         }
         out->allocation_s[i] = (uint32_t)alloc;
         out->remaining_s[i] = timer_slot_remaining(i, now, alloc);

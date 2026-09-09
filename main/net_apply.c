@@ -141,16 +141,30 @@ net_finish_t net_apply_finish(void) {
        school dates, quiet hours, bedtime): drop the wake-scoped caches so
        every read below and after sees the edited values. */
     s_ops.on_config_applied();
+    /* Both are tracked, not just applied: the paint on an interactive wake
+       happens BEFORE this join, so an adjustment nobody reports leaves the
+       pre-adjustment figure on the panel until some later wake — press
+       sync, see no change, and the minutes only appear when the timer
+       starts. A state diff cannot stand in for this: an adjustment applied
+       while the slot is IDLE is banked, so the state stays IDLE while the
+       allocation the panel renders has moved. */
+    bool adjusted = false;
     int32_t bonus_target;
     if (mqtt_ha_take_bonus_target(&bonus_target)) {
-        timer_bonus_reconcile(0, bonus_target);
+        adjusted |= timer_bonus_reconcile(0, bonus_target);
     }
     int grant_slot;
     int32_t grant_sec;
     if (mqtt_ha_take_grant(&grant_slot, &grant_sec)) {
-        timer_adjust(grant_slot, grant_sec);
+        adjusted |= timer_adjust(grant_slot, grant_sec);
     }
     net_finish_t nf = reconcile_defs();
+    /* Promote only from IDLE. ALERTED means the expiry path already owns
+       the display and must not be downgraded to an ordinary repaint, and
+       CHANGED already says everything this would. */
+    if (nf == NET_FINISH_IDLE && adjusted) {
+        nf = NET_FINISH_CHANGED;
+    }
     /* Locate last, after the radio is down (audio/LEDs, and it extends
        the awake failsafe). */
     if (mqtt_ha_locate_pending()) {

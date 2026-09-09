@@ -287,12 +287,17 @@ bool timer_reload(void);
    PAUSED holding it (press A to use it); a deduction is a no-op. Works
    on any slot — no now needed (RUNNING adjusts the stored wall expiry;
    the rest store durations). */
-void timer_adjust(int slot, int32_t sec);
+/* Returns whether anything actually moved: false for a zero/bad-slot call
+   and for a deduction against an already-EXPIRED slot, true otherwise.
+   The orchestrator needs that answer to decide on a repaint — an
+   adjustment banked while IDLE changes the panel without changing the
+   state, so a state diff cannot see it. */
+bool timer_adjust(int slot, int32_t sec);
 /* Idempotent signed "adjustment seconds today" for a slot (HA number):
    applies only the delta beyond what's already been applied today, in
    either direction, so re-delivering the same retained target every wake
    is a no-op. bonus_applied resets at timer_reset (day rollover). */
-void timer_bonus_reconcile(int slot, int32_t target_sec);
+bool timer_bonus_reconcile(int slot, int32_t target_sec); /* true when a delta landed */
 
 /* Outcome of reconciling a slot against an HA config edit that changed its
    definition mid-run (timer_reconcile_def). */
@@ -340,7 +345,13 @@ timer_state_t timer_slot_state(int slot);
 int32_t timer_slot_allocation(int slot);
 uint16_t timer_slot_completions(int slot);
 int32_t timer_screen_bonus_applied(void); /* slot 0 HA bonus reconciled today */
-const char *timer_current_date(void);     /* "YYYY-MM-DD"; "" until first record */
+/* Adjustment banked while the slot is IDLE, still waiting for timer_start
+   to fold it into the allocation. Anyone rendering an IDLE allocation has
+   to add this (and clamp at 0, as timer_start does), or an adjustment
+   applied before the day's first start is invisible on every surface
+   until someone presses A. */
+int32_t timer_slot_banked_bonus(int slot);
+const char *timer_current_date(void); /* "YYYY-MM-DD"; "" until first record */
 /* Display-facing remaining seconds for any slot, without ticking (no state
    change): RUNNING = expiry-now, PAUSED/BREAK = frozen remaining, IDLE =
    idle_fallback (caller's allocation), EXPIRED = 0; clamped >= 0. */

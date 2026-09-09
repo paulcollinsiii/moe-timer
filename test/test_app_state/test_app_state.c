@@ -77,6 +77,37 @@ void test_display_idle_shows_full_allocation(void) {
     TEST_ASSERT_NULL(st.timer_name); /* Screen renders no mode line */
 }
 
+/* An adjustment applied while Screen is IDLE sits in the bank until
+   timer_start folds it, so the IDLE allocation has to add it — otherwise
+   a -45 set from HA in the morning shows nothing on the panel until the
+   kid presses A, which reads exactly like the set never landed. */
+void test_display_idle_allocation_folds_a_banked_adjustment(void) {
+    timer_bonus_reconcile(0, -2700); /* HA: -45 min, Screen still IDLE */
+    display_state_t st = app_state_display(&IN_HEALTHY, 0, T0);
+    TEST_ASSERT_EQUAL_UINT32(900, st.allocation_sec); /* 60 - 45 min */
+    TEST_ASSERT_EQUAL_INT32(900, st.remaining_sec);   /* bar still full */
+}
+
+void test_display_idle_allocation_clamps_a_deduction_past_zero(void) {
+    /* Same clamp timer_start applies: a bank deeper than the allocation
+       shows an empty day, never a negative one. */
+    timer_bonus_reconcile(0, -7200); /* -120 min against a 60 min day */
+    display_state_t st = app_state_display(&IN_HEALTHY, 0, T0);
+    TEST_ASSERT_EQUAL_UINT32(0, st.allocation_sec);
+    TEST_ASSERT_EQUAL_INT32(0, st.remaining_sec);
+}
+
+void test_display_idle_extra_timer_folds_its_own_bank(void) {
+    /* A cmd grant can bank on any slot; the fold reads the ACTIVE slot's
+       bank, not slot 0's. */
+    select_slot(1);                  /* Piano, 15 min */
+    timer_adjust(1, 300);            /* +5 min banked while IDLE */
+    timer_bonus_reconcile(0, -2700); /* Screen's bank must not leak in */
+    display_state_t st = app_state_display(&IN_HEALTHY, 0, T0);
+    TEST_ASSERT_EQUAL_UINT32(1200, st.allocation_sec);
+    TEST_ASSERT_EQUAL_STRING("Piano", st.timer_name);
+}
+
 void test_display_running_passes_remaining_through(void) {
     timer_start(T0, 3600);
     display_state_t st = app_state_display(&IN_HEALTHY, 1234, T0 + 100);
@@ -258,6 +289,24 @@ void test_stats_idle_screen_falls_back_to_schedule(void) {
     TEST_ASSERT_EQUAL_STRING("Weekday", s.day_type);
 }
 
+/* The HA limit/remaining sensors read the same IDLE fallback the panel
+   does, and must fold the bank for the same reason. */
+void test_stats_idle_screen_allocation_folds_a_banked_adjustment(void) {
+    timer_bonus_reconcile(0, -2700);
+    stats_snapshot_t s;
+    app_state_stats(&IN_HEALTHY, T0, &s);
+    TEST_ASSERT_EQUAL_UINT32(900, s.allocation_s[0]);
+    TEST_ASSERT_EQUAL_INT32(900, s.remaining_s[0]);
+}
+
+void test_stats_idle_screen_allocation_clamps_at_zero(void) {
+    timer_bonus_reconcile(0, -7200);
+    stats_snapshot_t s;
+    app_state_stats(&IN_HEALTHY, T0, &s);
+    TEST_ASSERT_EQUAL_UINT32(0, s.allocation_s[0]);
+    TEST_ASSERT_EQUAL_INT32(0, s.remaining_s[0]);
+}
+
 void test_stats_started_slot_allocation_includes_grant(void) {
     timer_start(T0, 3600);
     timer_adjust(0, 300); /* HA grant mid-run */
@@ -292,6 +341,9 @@ void test_stats_injected_device_fields_pass_through(void) {
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_display_idle_shows_full_allocation);
+    RUN_TEST(test_display_idle_allocation_folds_a_banked_adjustment);
+    RUN_TEST(test_display_idle_allocation_clamps_a_deduction_past_zero);
+    RUN_TEST(test_display_idle_extra_timer_folds_its_own_bank);
     RUN_TEST(test_display_running_passes_remaining_through);
     RUN_TEST(test_display_extra_timer_uses_def_duration_and_name);
     RUN_TEST(test_display_charge_warn_tracks_battery_band);
@@ -313,6 +365,8 @@ int main(void) {
     RUN_TEST(test_display_swap_hint_survives_when_an_eligible_extra_exists);
     RUN_TEST(test_stats_disabled_slot_reports_zero_zero);
     RUN_TEST(test_stats_idle_screen_falls_back_to_schedule);
+    RUN_TEST(test_stats_idle_screen_allocation_folds_a_banked_adjustment);
+    RUN_TEST(test_stats_idle_screen_allocation_clamps_at_zero);
     RUN_TEST(test_stats_started_slot_allocation_includes_grant);
     RUN_TEST(test_stats_completions_map_extra_slots);
     RUN_TEST(test_stats_injected_device_fields_pass_through);

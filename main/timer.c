@@ -293,6 +293,12 @@ int32_t timer_screen_bonus_applied(void) {
     return g_rtc_state.slots[0].bonus_applied;
 }
 
+int32_t timer_slot_banked_bonus(int slot) {
+    if (slot < 0 || slot >= TIMER_SLOT_COUNT)
+        return 0;
+    return g_rtc_state.slots[slot].bonus_sec;
+}
+
 const char *timer_current_date(void) {
     return g_rtc_state.last_date; /* "" until timer_record_date / restore */
 }
@@ -364,9 +370,9 @@ void timer_start(time_t now, int32_t allocation_sec) {
 static void mark_expired(timer_slot_state_t *sl);
 static void expire_slot(int slot, time_t now);
 
-void timer_adjust(int slot, int32_t sec) {
+bool timer_adjust(int slot, int32_t sec) {
     if (slot < 0 || slot >= TIMER_SLOT_COUNT || sec == 0)
-        return;
+        return false;
     timer_slot_state_t *sl = &g_rtc_state.slots[slot];
     switch (sl->state) {
         case TIMER_RUNNING:
@@ -397,7 +403,7 @@ void timer_adjust(int slot, int32_t sec) {
             break;
         case TIMER_EXPIRED:
             if (sec < 0)
-                break; /* nothing left to reclaim */
+                return false; /* nothing left to reclaim */
             /* Chores-done grant after time ran out: hold it PAUSED so the
                kid presses A to start — never auto-run, and the expiry
                alert (already heard) must not re-fire. */
@@ -409,17 +415,19 @@ void timer_adjust(int slot, int32_t sec) {
             sl->bonus_sec += sec;
             break;
     }
+    return true;
 }
 
-void timer_bonus_reconcile(int slot, int32_t target_sec) {
+bool timer_bonus_reconcile(int slot, int32_t target_sec) {
     if (slot < 0 || slot >= TIMER_SLOT_COUNT)
-        return;
+        return false;
     timer_slot_state_t *sl = &g_rtc_state.slots[slot];
     int32_t delta = target_sec - sl->bonus_applied;
     if (delta == 0)
-        return; /* target met — idempotent across wakes and replays */
-    timer_adjust(slot, delta);
+        return false; /* target met — idempotent across wakes and replays */
+    bool moved = timer_adjust(slot, delta);
     sl->bonus_applied = target_sec;
+    return moved;
 }
 
 /* Mark a slot's run as reaching 00:00 (shared by tick and reconcile).

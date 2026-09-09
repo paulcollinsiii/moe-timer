@@ -264,6 +264,38 @@ void test_bonus_target_reconciled_against_applied(void) {
     TEST_ASSERT_EQUAL_INT32(4200, timer_tick(T0));
 }
 
+/* The repaint verdict has to cover the bonus, not just the def
+   reconcile. On a Button D sync the panel is painted BEFORE the window
+   joins, so an adjustment that reports nothing leaves the old figure on
+   screen until some later wake — the user presses sync, sees no change,
+   and the number only appears when the timer starts. An IDLE adjustment
+   never moves timer_get_state(), so the state diff cannot catch it. */
+void test_bonus_applied_while_idle_reports_changed_for_the_repaint(void) {
+    TEST_ASSERT_TRUE(net_apply_open());
+    mock_ha_bonus_pending = true;
+    mock_ha_bonus_target = -2700;
+    TEST_ASSERT_EQUAL(NET_FINISH_CHANGED, net_apply_finish());
+    TEST_ASSERT_EQUAL(TIMER_IDLE, timer_get_state()); /* state never moved */
+}
+
+void test_bonus_replay_that_changes_nothing_stays_idle(void) {
+    /* Every window redelivers the retained target; only the one that
+       moves something earns a full refresh. */
+    timer_bonus_reconcile(0, -2700);
+    TEST_ASSERT_TRUE(net_apply_open());
+    mock_ha_bonus_pending = true;
+    mock_ha_bonus_target = -2700;
+    TEST_ASSERT_EQUAL(NET_FINISH_IDLE, net_apply_finish());
+}
+
+void test_grant_applied_while_idle_reports_changed(void) {
+    TEST_ASSERT_TRUE(net_apply_open());
+    mock_ha_grant_pending = true;
+    mock_ha_grant_slot = 0;
+    mock_ha_grant_sec = 600;
+    TEST_ASSERT_EQUAL(NET_FINISH_CHANGED, net_apply_finish());
+}
+
 void test_locate_pending_fires_locate_after_apply(void) {
     TEST_ASSERT_TRUE(net_apply_open());
     mock_ha_locate = true;
@@ -358,6 +390,24 @@ void test_active_slot_shrunk_below_elapsed_expires_with_alert(void) {
     TEST_ASSERT_EQUAL(NET_FINISH_ALERTED, net_apply_finish());
     TEST_ASSERT_EQUAL_INT(1, n_expiry_alert);
     TEST_ASSERT_EQUAL(TIMER_EXPIRED, timer_get_state());
+}
+
+void test_bonus_must_not_downgrade_an_alerted_reconcile(void) {
+    /* ALERTED means the alert path already owns the display; a bonus
+       landing in the same window must not turn that into an ordinary
+       repaint and swallow the TIME'S UP screen. */
+    select_slot(1);
+    timer_start(T0, 900);
+    mock_time_set(T0 + 300);
+    TEST_ASSERT_TRUE(net_apply_open());
+    mock_ha_bonus_pending = true;
+    mock_ha_bonus_target = 600;
+    timer_def_t edited[TIMER_SLOT_COUNT];
+    memcpy(edited, PRE_DEFS, sizeof(edited));
+    edited[1].duration_sec = 120; /* shrunk under the elapsed 300 s */
+    install_table(edited);
+    TEST_ASSERT_EQUAL(NET_FINISH_ALERTED, net_apply_finish());
+    TEST_ASSERT_EQUAL_INT(1, n_expiry_alert);
 }
 
 void test_active_slot_grown_updates_without_chirp(void) {
@@ -479,6 +529,10 @@ int main(void) {
     RUN_TEST(test_finish_runs_join_poll_and_config_invalidate);
     RUN_TEST(test_grant_applied_to_running_screen_extends_remaining);
     RUN_TEST(test_bonus_target_reconciled_against_applied);
+    RUN_TEST(test_bonus_applied_while_idle_reports_changed_for_the_repaint);
+    RUN_TEST(test_bonus_replay_that_changes_nothing_stays_idle);
+    RUN_TEST(test_grant_applied_while_idle_reports_changed);
+    RUN_TEST(test_bonus_must_not_downgrade_an_alerted_reconcile);
     RUN_TEST(test_locate_pending_fires_locate_after_apply);
     RUN_TEST(test_no_locate_when_not_pending);
     RUN_TEST(test_unchanged_defs_reconcile_to_idle);

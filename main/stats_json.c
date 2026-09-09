@@ -88,6 +88,17 @@ int stats_json_stat(char *buf, size_t len, const stats_snapshot_t *s, const ota_
     return pos;
 }
 
+int stats_json_act(char *buf, size_t len, const act_state_t *a) {
+    int32_t sec = a->applied_s;
+    if (a->day_cleared) {
+        sec = 0; /* outranks a stale retained target from yesterday */
+    } else if (a->target_pending) {
+        sec = a->target_s; /* applied at the join, moments from now */
+    }
+    /* locate is momentary: the switch always reports back off. */
+    return jcat(buf, len, 0, "{\"screen_bonus\":%ld,\"locate\":\"OFF\"}", (long)(sec / 60));
+}
+
 int stats_json_summary(char *buf, size_t len, const char *date, int32_t screen_used_s,
                        const uint16_t completions[TIMER_EXTRA_SLOTS]) {
     int pos = jcat(buf, len, 0, "{\"date\":\"%s\",\"screen_used_s\":%ld,\"completions\":[", date, (long)screen_used_s);
