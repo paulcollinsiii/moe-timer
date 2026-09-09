@@ -42,9 +42,27 @@ static const char *day_type_name(day_type_t dt) {
 
 /* Today's allocation for an IDLE slot: the scheduled/configured base plus
    whatever adjustment is banked on it, clamped at 0 exactly as
-   timer_start does when it folds the bank for real. */
+   timer_start does when it folds the bank for real.
+
+   The clamp is load-bearing beyond looking tidy: the stats path casts the
+   result to uint32_t, so a -120 min adjustment against a 60 min day would
+   otherwise publish 4294963696 as HA's "Screen time limit". Both callers
+   below take their effective figure from here or from
+   timer_slot_allocation(), and timer.c clamps that one too, so no signed
+   value ever reaches the cast. */
 static uint32_t idle_allocation(uint32_t base, int slot) {
     int32_t a = (int32_t)base + timer_slot_banked_bonus(slot);
+    return (a > 0) ? (uint32_t)a : 0;
+}
+
+/* Today's EFFECTIVE limit for a slot, whatever state it is in: the banked
+   fold while IDLE, and after that the allocation the timer is actually
+   running on — timer_start folded the bank into it and timer_adjust moves
+   it in place, so this is the one figure that survives both. */
+static uint32_t effective_allocation(uint32_t base, int slot) {
+    if (timer_slot_state(slot) == TIMER_IDLE)
+        return idle_allocation(base, slot);
+    int32_t a = timer_slot_allocation(slot);
     return (a > 0) ? (uint32_t)a : 0;
 }
 
@@ -53,15 +71,48 @@ display_state_t app_state_display(const app_state_in_t *in, int32_t remaining, t
     /* Extra timers have a fixed configured duration; Screen (slot 0)
        follows the day schedule. */
     const timer_def_t *def = timer_active_def();
-    uint32_t alloc = (def != NULL) ? (uint32_t)def->duration_sec : schedule_get_allocation_sec(dt);
-    /* IDLE shows today's full allocation (full bar), not 0 (ProductOverview) */
+    /* The day's DEFAULT, never today's adjusted limit. The panel renders
+       the two separately — "Weekday - 60 min (-30 min today)" — because
+       folding them together produced a first number that was neither the
+       day's default nor anything the family had configured, and the
+       default is the half that answers "is this a normal day?".
+
+       It is also the bar's denominator, which is deliberate: a grant then
+       simply pins the bar full instead of silently rescaling the day, and
+       a deduction drains it against the same scale as every other day of
+       the week. display_bar_fill_px clamps both ends, so remaining above
+       it is not an error case. */
+    uint32_t base = (def != NULL) ? (uint32_t)def->duration_sec : schedule_get_allocation_sec(dt);
+    int slot = timer_active_slot();
+    uint32_t effective = effective_allocation(base, slot);
+    /* Read from the timer's own running total, NOT derived as
+       (effective - base). The two inputs to that subtraction are read at
+       different times: base is live config, while the effective limit was
+       frozen into the slot at timer_start. So anything that moved the
+       default underneath a started day — a parent editing the weekday
+       minutes, a holiday landing for today, school dates flipping to
+       Summer — manufactured an adjustment nobody made, and rewrote a real
+       one when there was one. The tracked total survives timer_start's
+       fold of the bank, which is the reason the derivation existed. */
+    int32_t adjust = timer_slot_adjust_today(slot);
+    /* Clamped FOR DISPLAY only. A -120 min deduction against a 60 min day
+       empties it and stops; reporting "(-120 min today)" beside a 60 min
+       default would describe a day of minus one hour. The stored total
+       keeps the untruncated figure — that is the record of what the
+       parent asked for — so the clamp lives here, at the seam that has to
+       make three numbers on one screen agree. */
+    if ((int64_t)base + adjust < 0) {
+        adjust = -(int32_t)base;
+    }
+    /* IDLE shows today's whole allocation rather than 0 (ProductOverview),
+       and the EFFECTIVE one: an adjustment banked before the day's first
+       start would otherwise show nowhere until someone presses A, which
+       reads exactly like a set that never landed. Note this is no longer
+       the same thing as a full BAR — the bar divides by `base`, so an
+       idle day with -30 on it draws half a bar, which is the point of the
+       split. */
     if (timer_get_state() == TIMER_IDLE) {
-        /* ...and "today's allocation" includes an adjustment already
-           applied but still banked: timer_start folds bonus_sec in, and
-           until then the schedule figure alone would show a -45 min set
-           from HA as no change at all. Same clamp timer_start applies. */
-        alloc = idle_allocation(alloc, timer_active_slot());
-        remaining = (int32_t)alloc;
+        remaining = (int32_t)effective;
     }
     int pct = battery_percent_from_mv(in->batt_mv);
     uint16_t break_dur = NVS_DEFAULT_BREAK_DURATION_MIN;
@@ -83,7 +134,8 @@ display_state_t app_state_display(const app_state_in_t *in, int32_t remaining, t
     }
     return (display_state_t){
         .remaining_sec = remaining,
-        .allocation_sec = alloc,
+        .allocation_sec = base,
+        .adjust_sec = adjust,
         .timer_state = timer_get_state(),
         .day_type = dt,
         .wall_time = now,
@@ -124,19 +176,17 @@ void app_state_stats(const app_state_in_t *in, time_t now, stats_snapshot_t *out
             out->allocation_s[i] = 0;
             continue;
         }
-        int32_t alloc;
-        if (timer_slot_state(i) != TIMER_IDLE) {
-            alloc = timer_slot_allocation(i);
-        } else {
-            /* The banked fold applies here for the same reason it does on
-               the panel: HA's limit/remaining sensors read this fallback,
-               and an adjustment that shows nowhere reads as one that never
-               landed. */
-            alloc =
-                (int32_t)idle_allocation((i == 0) ? schedule_get_allocation_sec(dt) : (uint32_t)sd->duration_sec, i);
-        }
-        out->allocation_s[i] = (uint32_t)alloc;
-        out->remaining_s[i] = timer_slot_remaining(i, now, alloc);
+        /* The EFFECTIVE limit, adjustment included — deliberately NOT the
+           split the panel gets. An automation asking "how much screen time
+           is there today" wants the number that is actually enforced, and
+           changing that would be an HA-visible semantic change owing a
+           DISC_SCHEMA_VER bump. The shared helper is also what keeps the
+           uint32_t below unsigned all the way down: it clamps, so no
+           signed intermediate exists here to leak a -3600 into the cast. */
+        uint32_t alloc = effective_allocation((i == 0) ? schedule_get_allocation_sec(dt) : (uint32_t)sd->duration_sec,
+                                              i); /* i == 0 short-circuits the NULL sd */
+        out->allocation_s[i] = alloc;
+        out->remaining_s[i] = timer_slot_remaining(i, now, (int32_t)alloc);
     }
     for (int i = 0; i < TIMER_EXTRA_SLOTS; i++) {
         out->completions[i] = timer_slot_completions(1 + i);

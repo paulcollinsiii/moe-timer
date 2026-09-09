@@ -2,6 +2,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <string.h>
 
 #include "display.h"
 
@@ -71,8 +72,45 @@ int display_fb_invert_dirty_rows(uint8_t *fb, const uint8_t *prev, int rows, int
     return dirty;
 }
 
+/* " (-30 min today)", appended to a status line that already carries the
+   day's DEFAULT allocation. A suffix rather than a field inside each
+   format string because the two lines below differ only in their head,
+   and because it has to vanish COMPLETELY when nothing was adjusted: an
+   unadjusted day must render byte-identically to the line that existed
+   before the adjustment was ever split out (the render goldens pin that).
+
+   The sign is explicit. The control it reports is signed — "15 min today"
+   would not say which way the day moved — so a grant reads "+15" and a
+   deduction "-30".
+
+   Sub-minute adjustments round away rather than printing "(+0 min
+   today)". Both sources work in whole minutes (HA's number and the cmd
+   topic each multiply by 60), so this is a floor on nonsense, not a
+   rounding policy.
+
+   The division is what makes negating the magnitude safe: adjust_sec / 60
+   is evaluated in int32_t and so cannot exceed 35791394 in magnitude, and
+   -x is only undefined at INT32_MIN. (`long` here is for the %ld, not for
+   the negation.)
+
+   len == 0 is a real call shape — snprintf accepts it and writes nothing,
+   which is what BOTH formatters did before this suffix existed. strlen()
+   on a buffer nothing has written to would read off the end of whatever
+   the caller owns, so the zero case returns before it. Past that, the
+   snprintf above has always NUL-terminated within len, so `used` is at
+   most len - 1 and the snprintf below gets a length of at least 1: no
+   further guard is possible, and one that looked like protection would
+   only be dead code claiming otherwise. */
+static void append_adjust(char *buf, size_t len, int32_t adjust_sec) {
+    long min = (long)(adjust_sec / 60);
+    if (min == 0 || len == 0)
+        return;
+    size_t used = strlen(buf);
+    snprintf(buf + used, len - used, " (%c%ld min today)", (min < 0) ? '-' : '+', (min < 0) ? -min : min);
+}
+
 void display_format_mode_line(char *buf, size_t len, const char *name, uint16_t completions, bool reloadable,
-                              uint32_t allocation_sec) {
+                              uint32_t allocation_sec, int32_t adjust_sec) {
     /* Completions only surface on reloadable timers — a depleted
        non-reloadable timer just shows its empty bar until rollover. */
     if (reloadable && completions > 0) {
@@ -80,6 +118,12 @@ void display_format_mode_line(char *buf, size_t len, const char *name, uint16_t 
     } else {
         snprintf(buf, len, "%s - %u min", name, (unsigned)(allocation_sec / 60));
     }
+    append_adjust(buf, len, adjust_sec);
+}
+
+void display_format_day_line(char *buf, size_t len, const char *day_type, uint32_t allocation_sec, int32_t adjust_sec) {
+    snprintf(buf, len, "%s - %u min", day_type, (unsigned)(allocation_sec / 60));
+    append_adjust(buf, len, adjust_sec);
 }
 
 void display_format_hm(char *buf, size_t len, int32_t sec) {

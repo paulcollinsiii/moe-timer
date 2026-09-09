@@ -75,6 +75,27 @@ static lv_obj_t *make_label(lv_obj_t *parent, const char *text, const lv_font_t 
    renders with. */
 #define BATT_ROW_MAX_W 168
 #define OTA_LINE_MAX_W 280
+/* The status row's left half, against the state word right-aligned at
+   x=292. "TIME'S UP" is the widest state word at 62 px, so it starts at
+   x=230; allowing 6 px of gap leaves x=224, and from the left margin at
+   x=4 that is 220. Measured against the real font in
+   test_mode_row_fits_beside_the_state_word, not guessed.
+
+   This is a geometric BACKSTOP, not a width the worst line fits inside.
+   Uncapped, "Weekday - 1440 min (-240 min today)" ends at exactly x=230:
+   it abuts "TIME'S UP" with no gap rather than overstriking it, and the
+   cap does not make it fit — it clips the last 6 px, which is the closing
+   paren. The cap's job is that the two strings never touch, whatever the
+   row is asked to carry.
+
+   And it can be asked to carry more than that line. The suffix's
+   magnitude is a RUNNING TOTAL of everything applied today, so the
+   ±240 min of HA's own number (BONUS_MAX_MIN) and of a single cmd grant
+   (GRANT_MAX_MINUTES) bound one adjustment, not the day: cmd grants
+   repeat, one per network window, and stack. A character budget cannot
+   bound this row either — the content is proportional text and the timer
+   name comes from an HA text field. Hence a pixel cap. */
+#define MODE_ROW_MAX_W 220
 
 /* Hard geometric backstop for a label carrying caller-supplied text.
    LV_SIZE_CONTENT keeps auto-sizing below the cap (so ordinary strings
@@ -211,11 +232,13 @@ static void build_main_status(lv_obj_t *scr, const display_state_t *st) {
        (left: day-type + allocation, or the extra timer's name/counter),
        state (right) */
     if (st->timer_name != NULL && st->timer_name[0] != '\0') {
-        display_format_mode_line(buf, sizeof(buf), st->timer_name, st->completions, st->reloadable, st->allocation_sec);
+        display_format_mode_line(buf, sizeof(buf), st->timer_name, st->completions, st->reloadable, st->allocation_sec,
+                                 st->adjust_sec);
     } else {
-        snprintf(buf, sizeof(buf), "%s - %u min", day_type_str(st->day_type), (unsigned)(st->allocation_sec / 60));
+        display_format_day_line(buf, sizeof(buf), day_type_str(st->day_type), st->allocation_sec, st->adjust_sec);
     }
-    make_label(scr, buf, &lv_font_montserrat_12, LV_ALIGN_BOTTOM_LEFT, 4, -18);
+    lv_obj_t *mode = make_label(scr, buf, &lv_font_montserrat_12, LV_ALIGN_BOTTOM_LEFT, 4, -18);
+    cap_width(mode, MODE_ROW_MAX_W);
 
     make_label(scr, state_str(st->timer_state), &lv_font_montserrat_12, LV_ALIGN_BOTTOM_RIGHT, -4, -18);
 }

@@ -91,6 +91,7 @@ static void arm_rich_state(time_t now) {
     s0->completions = 2;
     s0->bonus_sec = 111;
     s0->bonus_applied = 222;
+    s0->adjust_today_sec = -333;
 
     timer_slot_state_t *s1 = &g_rtc_state.slots[SLOT_PIANO];
     s1->state = TIMER_RUNNING;
@@ -100,6 +101,7 @@ static void arm_rich_state(time_t now) {
     s1->completions = 1;
     s1->bonus_sec = -60;
     s1->bonus_applied = -60;
+    s1->adjust_today_sec = -60;
 
     timer_slot_state_t *s3 = &g_rtc_state.slots[SLOT_LAUNDRY];
     s3->state = TIMER_EXPIRED;
@@ -108,6 +110,7 @@ static void arm_rich_state(time_t now) {
     s3->completions = 3;
     s3->bonus_sec = 30;
     s3->bonus_applied = 30;
+    s3->adjust_today_sec = 30;
 
     timer_slot_state_t *s4 = &g_rtc_state.slots[SLOT_VIOLIN];
     s4->state = TIMER_IDLE;
@@ -116,6 +119,7 @@ static void arm_rich_state(time_t now) {
     s4->completions = 0;
     s4->bonus_sec = 15;
     s4->bonus_applied = 0;
+    s4->adjust_today_sec = 15;
 }
 
 /* Simulate the RTC memory loss a panic, an EN reset or a power cycle
@@ -176,6 +180,7 @@ void test_each_save_reads_the_stored_blob_exactly_once(void) {
     X(slot0_completions, g_rtc_state.slots[0].completions += 1)                         \
     X(slot0_bonus_sec, g_rtc_state.slots[0].bonus_sec += 1)                             \
     X(slot0_bonus_applied, g_rtc_state.slots[0].bonus_applied += 1)                     \
+    X(slot0_adjust_today_sec, g_rtc_state.slots[0].adjust_today_sec += 1)               \
     X(slot1_state, g_rtc_state.slots[SLOT_PIANO].state = TIMER_PAUSED)                  \
     X(slot1_expiry_wall_time, g_rtc_state.slots[SLOT_PIANO].expiry_wall_time += 1)      \
     X(slot1_bonus_applied, g_rtc_state.slots[SLOT_PIANO].bonus_applied += 1)            \
@@ -183,6 +188,7 @@ void test_each_save_reads_the_stored_blob_exactly_once(void) {
     X(slot3_completions, g_rtc_state.slots[SLOT_LAUNDRY].completions += 1)              \
     X(slot4_remaining_at_pause, g_rtc_state.slots[SLOT_VIOLIN].remaining_at_pause += 1) \
     X(slot4_bonus_sec, g_rtc_state.slots[SLOT_VIOLIN].bonus_sec += 1)                   \
+    X(slot4_adjust_today_sec, g_rtc_state.slots[SLOT_VIOLIN].adjust_today_sec += 1)     \
     X(active_slot, g_rtc_state.active_slot = SLOT_LAUNDRY)                              \
     X(break_interrupted_slot, g_rtc_state.break_interrupted_slot = SLOT_VIOLIN)         \
     X(break_prev_state, g_rtc_state.break_prev_state = TIMER_RUNNING)                   \
@@ -609,6 +615,7 @@ void test_round_trip_preserves_every_persisted_field(void) {
         TEST_ASSERT_EQUAL_UINT16_MESSAGE(b->completions, a->completions, msg);
         TEST_ASSERT_EQUAL_INT32_MESSAGE(b->bonus_sec, a->bonus_sec, msg);
         TEST_ASSERT_EQUAL_INT32_MESSAGE(b->bonus_applied, a->bonus_applied, msg);
+        TEST_ASSERT_EQUAL_INT32_MESSAGE(b->adjust_today_sec, a->adjust_today_sec, msg);
     }
     TEST_ASSERT_EQUAL_UINT8(before.active_slot, g_rtc_state.active_slot);
     TEST_ASSERT_EQUAL_UINT8(before.break_interrupted_slot, g_rtc_state.break_interrupted_slot);

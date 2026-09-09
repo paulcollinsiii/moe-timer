@@ -147,22 +147,38 @@ net_finish_t net_apply_finish(void) {
        sync, see no change, and the minutes only appear when the timer
        starts. A state diff cannot stand in for this: an adjustment applied
        while the slot is IDLE is banked, so the state stays IDLE while the
-       allocation the panel renders has moved. */
-    bool adjusted = false;
+       allocation the panel renders has moved.
+
+       Tracked PER SLOT, because the panel draws one: every field the main
+       layout reads comes from timer_active_slot(), so an adjustment
+       anywhere else changes nothing a repaint could show. The bonus
+       always targets slot 0 and a cmd grant targets any slot, so
+       "something moved" is not the question — "the drawn slot moved" is.
+       The two slot-0 states that look like exceptions are not: a BREAK
+       running behind another timer draws the header chip off
+       break_expiry_wall, which timer_adjust never touches, and a grant
+       that flips an EXPIRED slot 0 to PAUSED moves a state only
+       break_banner reads, and only for BREAK. */
+    uint32_t moved_slots = 0;
     int32_t bonus_target;
     if (mqtt_ha_take_bonus_target(&bonus_target)) {
-        adjusted |= timer_bonus_reconcile(0, bonus_target);
+        if (timer_bonus_reconcile(0, bonus_target))
+            moved_slots |= 1u;
     }
     int grant_slot;
     int32_t grant_sec;
     if (mqtt_ha_take_grant(&grant_slot, &grant_sec)) {
-        adjusted |= timer_adjust(grant_slot, grant_sec);
+        if (timer_adjust(grant_slot, grant_sec) && grant_slot >= 0 && grant_slot < TIMER_SLOT_COUNT)
+            moved_slots |= 1u << grant_slot;
     }
     net_finish_t nf = reconcile_defs();
-    /* Promote only from IDLE. ALERTED means the expiry path already owns
+    /* Read the selection AFTER the reconcile: that is the slot the paint
+       will render. (A reconcile that moves the selection has already
+       answered CHANGED or ALERTED, so this only ever reads a settled
+       one.) Promote only from IDLE — ALERTED means the expiry path owns
        the display and must not be downgraded to an ordinary repaint, and
        CHANGED already says everything this would. */
-    if (nf == NET_FINISH_IDLE && adjusted) {
+    if (nf == NET_FINISH_IDLE && (moved_slots & (1u << timer_active_slot())) != 0) {
         nf = NET_FINISH_CHANGED;
     }
     /* Locate last, after the radio is down (audio/LEDs, and it extends

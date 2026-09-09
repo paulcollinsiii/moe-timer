@@ -1826,6 +1826,163 @@ void test_bonus_applied_resets_at_rollover(void) {
     TEST_ASSERT_EQUAL_INT32(0, g_rtc_state.slots[0].bonus_applied);
 }
 
+/* ---- adjust_today_sec: the day's adjustment, tracked not derived ----
+
+   The panel's "(-30 min today)" was once computed as (today's effective
+   limit - the day's default). Those are read at different times — the
+   default live from config, the limit frozen at timer_start — so an
+   ordinary edit of the day's minutes manufactured an adjustment that did
+   not exist. This field is the running total of what actually landed, and
+   these pin the properties app_state_display depends on. */
+
+void test_adjust_today_accumulates_every_landed_delta(void) {
+    timer_adjust(0, 600);
+    TEST_ASSERT_EQUAL_INT32(600, timer_slot_adjust_today(0));
+    timer_adjust(0, 600); /* a repeatable cmd grant stacks */
+    TEST_ASSERT_EQUAL_INT32(1200, timer_slot_adjust_today(0));
+    timer_adjust(0, -300);
+    TEST_ASSERT_EQUAL_INT32(900, timer_slot_adjust_today(0));
+}
+
+void test_adjust_today_survives_the_start_fold(void) {
+    /* The reason bonus_sec cannot stand in for this: timer_start zeroes
+       it. The panel must keep saying -30 while the clock counts it. */
+    timer_adjust(0, -1800);
+    timer_start(T0, 3600);
+    TEST_ASSERT_EQUAL_INT32(0, g_rtc_state.slots[0].bonus_sec);
+    TEST_ASSERT_EQUAL_INT32(-1800, timer_slot_adjust_today(0));
+}
+
+void test_adjust_today_covers_every_state_a_grant_can_land_in(void) {
+    timer_start(T0, 3600);
+    timer_adjust(0, 600); /* RUNNING: in place */
+    TEST_ASSERT_EQUAL_INT32(600, timer_slot_adjust_today(0));
+    timer_pause(T0 + 60);
+    timer_adjust(0, 300); /* PAUSED */
+    TEST_ASSERT_EQUAL_INT32(900, timer_slot_adjust_today(0));
+}
+
+void test_adjust_today_records_the_request_not_the_clamp(void) {
+    /* The stored total is the record of what the parent asked for; the
+       display clamps it against the day's default for presentation. A
+       clamp here would make the two disagree about what happened. */
+    timer_start(T0, 3600);
+    timer_adjust(0, -7200); /* twice the day, against a 60 min day */
+    TEST_ASSERT_EQUAL_INT32(0, g_rtc_state.slots[0].allocation_sec);
+    TEST_ASSERT_EQUAL_INT32(-7200, timer_slot_adjust_today(0));
+}
+
+void test_adjust_today_ignores_calls_that_never_landed(void) {
+    TEST_ASSERT_FALSE(timer_adjust(0, 0));
+    TEST_ASSERT_FALSE(timer_adjust(-1, 600));
+    TEST_ASSERT_FALSE(timer_adjust(TIMER_SLOT_COUNT, 600));
+    TEST_ASSERT_EQUAL_INT32(0, timer_slot_adjust_today(0));
+    /* A deduction against an EXPIRED slot is refused outright, so it did
+       not move the day and must not be counted as though it had. */
+    timer_start(T0, 600);
+    timer_tick(T0 + 700);
+    TEST_ASSERT_EQUAL(TIMER_EXPIRED, timer_get_state());
+    TEST_ASSERT_FALSE(timer_adjust(0, -600));
+    TEST_ASSERT_EQUAL_INT32(0, timer_slot_adjust_today(0));
+    TEST_ASSERT_TRUE(timer_adjust(0, 900)); /* ...but a grant does land */
+    TEST_ASSERT_EQUAL_INT32(900, timer_slot_adjust_today(0));
+}
+
+void test_adjust_today_is_per_slot(void) {
+    timer_adjust(0, 600);
+    timer_adjust(SLOT_PIANO, -300);
+    TEST_ASSERT_EQUAL_INT32(600, timer_slot_adjust_today(0));
+    TEST_ASSERT_EQUAL_INT32(-300, timer_slot_adjust_today(SLOT_PIANO));
+    TEST_ASSERT_EQUAL_INT32(0, timer_slot_adjust_today(SLOT_LAUNDRY));
+    TEST_ASSERT_EQUAL_INT32(0, timer_slot_adjust_today(-1));
+    TEST_ASSERT_EQUAL_INT32(0, timer_slot_adjust_today(TIMER_SLOT_COUNT));
+}
+
+void test_adjust_today_settles_at_the_reconciled_target(void) {
+    /* The HA number is a TARGET: reconciling it twice must not double it,
+       and moving it must move the running total by the delta only. */
+    timer_bonus_reconcile(0, 900);
+    TEST_ASSERT_EQUAL_INT32(900, timer_slot_adjust_today(0));
+    timer_bonus_reconcile(0, 900); /* retained replay */
+    TEST_ASSERT_EQUAL_INT32(900, timer_slot_adjust_today(0));
+    timer_bonus_reconcile(0, -1800);
+    TEST_ASSERT_EQUAL_INT32(-1800, timer_slot_adjust_today(0));
+    /* ...and a cmd-topic grant stacks ON TOP of the HA target without
+       disturbing the baseline the next reconcile computes against. */
+    timer_adjust(0, 600);
+    TEST_ASSERT_EQUAL_INT32(-1200, timer_slot_adjust_today(0));
+    TEST_ASSERT_EQUAL_INT32(-1800, g_rtc_state.slots[0].bonus_applied);
+    timer_bonus_reconcile(0, -1800); /* replay: still a no-op */
+    TEST_ASSERT_EQUAL_INT32(-1200, timer_slot_adjust_today(0));
+}
+
+void test_adjust_today_resets_at_rollover(void) {
+    timer_adjust(0, 900);
+    timer_adjust(SLOT_PIANO, 600);
+    timer_reset(); /* day rollover */
+    TEST_ASSERT_EQUAL_INT32(0, timer_slot_adjust_today(0));
+    TEST_ASSERT_EQUAL_INT32(0, timer_slot_adjust_today(SLOT_PIANO));
+}
+
+void test_adjust_today_clears_when_the_slot_is_reloaded(void) {
+    /* timer_reload memsets the slot: a reload starts the timer over, and
+       the day's grants belonged to the run that just ended. */
+    timer_select_next(); /* Piano, reloadable */
+    timer_adjust(SLOT_PIANO, 600);
+    timer_start(T0, 900);
+    timer_pause(T0 + 60);
+    TEST_ASSERT_TRUE(timer_reload());
+    TEST_ASSERT_EQUAL_INT32(0, timer_slot_adjust_today(SLOT_PIANO));
+}
+
+void test_adjust_today_clears_when_a_reconcile_replaces_the_timer(void) {
+    /* RESET branch: a different timer lives in the slot now, so the old
+       one's grants go with it (same rule bonus_sec/bonus_applied follow). */
+    static const timer_def_t OLD = {"Piano", 900, true, true};
+    static const timer_def_t NEW = {"Cello", 900, true, true};
+    timer_select_next(); /* Piano */
+    timer_adjust(SLOT_PIANO, 600);
+    timer_start(T0, 900);
+    bool was_running = false;
+    TEST_ASSERT_EQUAL(TIMER_RECONCILE_RESET, timer_reconcile_def(SLOT_PIANO, &OLD, &NEW, T0 + 60, &was_running));
+    TEST_ASSERT_EQUAL_INT32(0, timer_slot_adjust_today(SLOT_PIANO));
+}
+
+void test_adjust_today_survives_snapshot_roundtrip(void) {
+    /* A panic mid-day must not silently drop the parenthetical: the
+       snapshot is what the day comes back from. */
+    timer_adjust(0, -1800);
+    timer_start(T0, 3600); /* folds the bank; the total must persist */
+    timer_adjust(SLOT_PIANO, 600);
+    timer_record_date(T0);
+    timer_snapshot_t snap;
+    timer_make_snapshot(&snap);
+    TEST_ASSERT_EQUAL_UINT8(TIMER_SNAPSHOT_VERSION, snap.version);
+
+    timer_reset();
+    timer_set_defs(TEST_DEFS, TIMER_SLOT_COUNT);
+    TEST_ASSERT_TRUE(timer_restore_snapshot(&snap, T0 + 100));
+    TEST_ASSERT_EQUAL_INT32(-1800, timer_slot_adjust_today(0));
+    TEST_ASSERT_EQUAL_INT32(600, timer_slot_adjust_today(SLOT_PIANO));
+}
+
+void test_snapshot_with_an_absurd_adjust_today_is_refused(void) {
+    /* Bounded like bonus_sec, and for the same reason: a blob that slips
+       past the 8-bit XOR must not restore a day adjusted by a decade. */
+    timer_adjust(0, 600);
+    timer_record_date(T0);
+    timer_snapshot_t snap;
+    timer_make_snapshot(&snap);
+    snap.slots[0].adjust_today_sec = 30 * 86400;
+    snap.checksum = timer_snapshot_checksum(&snap);
+    TEST_ASSERT_FALSE(timer_restore_snapshot(&snap, T0 + 100));
+
+    timer_make_snapshot(&snap);
+    snap.slots[0].adjust_today_sec = -30 * 86400;
+    snap.checksum = timer_snapshot_checksum(&snap);
+    TEST_ASSERT_FALSE(timer_restore_snapshot(&snap, T0 + 100));
+}
+
 void test_bonus_applied_survives_snapshot_roundtrip(void) {
     timer_bonus_reconcile(0, 900);
     timer_start(T0, 3600); /* consumes bonus_sec into allocation */
@@ -2761,6 +2918,18 @@ int main(void) {
     RUN_TEST(test_adjust_idle_banks_negative_start_clamps_at_zero);
     RUN_TEST(test_snapshot_round_trips_negative_bonus);
     RUN_TEST(test_bonus_applied_resets_at_rollover);
+    RUN_TEST(test_adjust_today_accumulates_every_landed_delta);
+    RUN_TEST(test_adjust_today_survives_the_start_fold);
+    RUN_TEST(test_adjust_today_covers_every_state_a_grant_can_land_in);
+    RUN_TEST(test_adjust_today_records_the_request_not_the_clamp);
+    RUN_TEST(test_adjust_today_ignores_calls_that_never_landed);
+    RUN_TEST(test_adjust_today_is_per_slot);
+    RUN_TEST(test_adjust_today_settles_at_the_reconciled_target);
+    RUN_TEST(test_adjust_today_resets_at_rollover);
+    RUN_TEST(test_adjust_today_clears_when_the_slot_is_reloaded);
+    RUN_TEST(test_adjust_today_clears_when_a_reconcile_replaces_the_timer);
+    RUN_TEST(test_adjust_today_survives_snapshot_roundtrip);
+    RUN_TEST(test_snapshot_with_an_absurd_adjust_today_is_refused);
     RUN_TEST(test_bonus_applied_survives_snapshot_roundtrip);
     RUN_TEST(test_reset_state_is_idle);
     RUN_TEST(test_reset_expiry_is_zero);

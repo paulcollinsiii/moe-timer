@@ -77,35 +77,192 @@ void test_display_idle_shows_full_allocation(void) {
     TEST_ASSERT_NULL(st.timer_name); /* Screen renders no mode line */
 }
 
-/* An adjustment applied while Screen is IDLE sits in the bank until
-   timer_start folds it, so the IDLE allocation has to add it — otherwise
-   a -45 set from HA in the morning shows nothing on the panel until the
-   kid presses A, which reads exactly like the set never landed. */
-void test_display_idle_allocation_folds_a_banked_adjustment(void) {
+/* ---- the day's default vs today's adjustment ----------------------------
+
+   An adjustment applied while Screen is IDLE sits in the bank until
+   timer_start folds it, so today's REMAINING has to add it — otherwise a
+   -45 set from HA in the morning shows nothing on the panel until the kid
+   presses A, which reads exactly like the set never landed.
+
+   allocation_sec must NOT absorb it, though: it is the day's default, and
+   the status line renders it as such. Folding the two together made a
+   60-minute weekday with -45 applied say "Weekday - 15 min", a figure
+   that is neither the day's default nor anything anyone configured. */
+void test_display_idle_splits_the_days_default_from_the_adjustment(void) {
     timer_bonus_reconcile(0, -2700); /* HA: -45 min, Screen still IDLE */
     display_state_t st = app_state_display(&IN_HEALTHY, 0, T0);
-    TEST_ASSERT_EQUAL_UINT32(900, st.allocation_sec); /* 60 - 45 min */
-    TEST_ASSERT_EQUAL_INT32(900, st.remaining_sec);   /* bar still full */
+    TEST_ASSERT_EQUAL_UINT32(3600, st.allocation_sec); /* a weekday is still 60 min */
+    TEST_ASSERT_EQUAL_INT32(-2700, st.adjust_sec);
+    TEST_ASSERT_EQUAL_INT32(900, st.remaining_sec); /* ...but only 15 min of it left */
 }
 
-void test_display_idle_allocation_clamps_a_deduction_past_zero(void) {
+void test_display_no_adjustment_reports_zero(void) {
+    /* The common case, and the one the render goldens pin: with nothing
+       adjusted the status line must render exactly as it did before the
+       field existed. */
+    display_state_t st = app_state_display(&IN_HEALTHY, 0, T0);
+    TEST_ASSERT_EQUAL_INT32(0, st.adjust_sec);
+    TEST_ASSERT_EQUAL_UINT32(3600, st.allocation_sec);
+    TEST_ASSERT_EQUAL_INT32(3600, st.remaining_sec);
+}
+
+/* The adjustment has to survive timer_start folding bonus_sec away —
+   otherwise the parenthetical vanishes the moment the kid presses A,
+   while the clock beside it still counts the adjusted day. Derived as
+   (today's limit - the day's default) rather than read off the bank,
+   precisely so the start fold cannot lose it. */
+void test_display_adjustment_survives_the_start_fold(void) {
+    timer_bonus_reconcile(0, -1800);                        /* -30 min, banked */
+    timer_start(T0, 3600);                                  /* button_actions passes the schedule figure */
+    TEST_ASSERT_EQUAL_INT32(0, timer_slot_banked_bonus(0)); /* bank is gone... */
+    display_state_t st = app_state_display(&IN_HEALTHY, 1800, T0);
+    TEST_ASSERT_EQUAL_UINT32(3600, st.allocation_sec);
+    TEST_ASSERT_EQUAL_INT32(-1800, st.adjust_sec); /* ...the line still says -30 */
+}
+
+void test_display_adjustment_covers_a_grant_landing_mid_run(void) {
+    timer_start(T0, 3600);
+    timer_adjust(0, 600); /* +10 min while RUNNING: in place, never banked */
+    display_state_t st = app_state_display(&IN_HEALTHY, 4200, T0);
+    TEST_ASSERT_EQUAL_UINT32(3600, st.allocation_sec);
+    TEST_ASSERT_EQUAL_INT32(600, st.adjust_sec);
+}
+
+void test_display_idle_adjustment_clamps_a_deduction_past_zero(void) {
     /* Same clamp timer_start applies: a bank deeper than the allocation
-       shows an empty day, never a negative one. */
+       shows an empty day, never a negative one — and the line reports
+       what the day actually LOST (60), not what was asked for (120), so
+       default + adjustment always equals the remaining on screen. */
     timer_bonus_reconcile(0, -7200); /* -120 min against a 60 min day */
     display_state_t st = app_state_display(&IN_HEALTHY, 0, T0);
-    TEST_ASSERT_EQUAL_UINT32(0, st.allocation_sec);
+    TEST_ASSERT_EQUAL_UINT32(3600, st.allocation_sec);
+    TEST_ASSERT_EQUAL_INT32(-3600, st.adjust_sec);
     TEST_ASSERT_EQUAL_INT32(0, st.remaining_sec);
 }
 
-void test_display_idle_extra_timer_folds_its_own_bank(void) {
-    /* A cmd grant can bank on any slot; the fold reads the ACTIVE slot's
+/* The clamp is a DISPLAY clamp, and it has to hold in every state, not
+   just IDLE: the stored total records what was asked for (-120 min), and
+   only the seam that has to make three numbers on one screen agree
+   truncates it to what the day could actually lose. */
+void test_display_clamps_a_deduction_past_zero_while_running(void) {
+    timer_start(T0, 3600);
+    timer_adjust(0, -7200); /* -120 min against a 60 min day */
+    display_state_t st = app_state_display(&IN_HEALTHY, 0, T0 + 60);
+    TEST_ASSERT_EQUAL_UINT32(3600, st.allocation_sec);
+    TEST_ASSERT_EQUAL_INT32(-3600, st.adjust_sec); /* not -7200 */
+    TEST_ASSERT_EQUAL_INT32(0, st.remaining_sec);
+    /* ...while the timer keeps the truthful record. */
+    TEST_ASSERT_EQUAL_INT32(-7200, timer_slot_adjust_today(0));
+}
+
+/* A grant is never clamped — the bar pins full and the line says +240. */
+void test_display_does_not_clamp_a_grant(void) {
+    timer_bonus_reconcile(0, 14400);
+    display_state_t st = app_state_display(&IN_HEALTHY, 0, T0);
+    TEST_ASSERT_EQUAL_UINT32(3600, st.allocation_sec);
+    TEST_ASSERT_EQUAL_INT32(14400, st.adjust_sec);
+    TEST_ASSERT_EQUAL_INT32(18000, st.remaining_sec);
+}
+
+void test_display_idle_extra_timer_reports_its_own_bank(void) {
+    /* A cmd grant can bank on any slot; the split reads the ACTIVE slot's
        bank, not slot 0's. */
     select_slot(1);                  /* Piano, 15 min */
     timer_adjust(1, 300);            /* +5 min banked while IDLE */
     timer_bonus_reconcile(0, -2700); /* Screen's bank must not leak in */
     display_state_t st = app_state_display(&IN_HEALTHY, 0, T0);
-    TEST_ASSERT_EQUAL_UINT32(1200, st.allocation_sec);
+    TEST_ASSERT_EQUAL_UINT32(900, st.allocation_sec); /* Piano's configured duration */
+    TEST_ASSERT_EQUAL_INT32(300, st.adjust_sec);
+    TEST_ASSERT_EQUAL_INT32(1200, st.remaining_sec);
     TEST_ASSERT_EQUAL_STRING("Piano", st.timer_name);
+}
+
+/* ---- the adjustment is TRACKED, never derived ---------------------------
+
+   adjust_sec once came out of (today's effective limit - the day's
+   default). Those two are read at different TIMES: the default is read
+   LIVE from config/schedule on every paint, while the effective limit was
+   frozen into the slot at timer_start. Anything that moves the default
+   underneath a running day therefore manufactured an adjustment nobody
+   made — and, worse, rewrote a real one. The tests below are the four
+   ways that happened; every one of them printed a parenthetical where the
+   pre-split panel printed nothing at all. */
+
+void test_display_no_phantom_adjustment_when_the_parent_edits_the_limit(void) {
+    /* Screen starts on a 60 min weekday; the parent then raises HA's
+       "weekday minutes" to 90. Nothing was adjusted, so nothing may be
+       reported — the derivation read "Weekday - 90 min (-30 min today)". */
+    timer_start(T0, 3600);
+    hal_nvs_write_u16("weekday_min", 90);
+    schedule_cache_invalidate();
+    display_state_t st = app_state_display(&IN_HEALTHY, 3600, T0);
+    TEST_ASSERT_EQUAL_UINT32(5400, st.allocation_sec);
+    TEST_ASSERT_EQUAL_INT32(0, st.adjust_sec);
+}
+
+void test_display_no_phantom_adjustment_when_the_day_type_changes_mid_run(void) {
+    /* A holiday landing for today (or school dates flipping to Summer)
+       moves the day's default under a run that already started. The
+       derivation read the whole difference as an adjustment: "Weekend -
+       120 min (-60 min today)". */
+    timer_start(T0, 3600); /* Monday, 60 min */
+    display_state_t st = app_state_display(&IN_HEALTHY, 3600, T0 + 5 * 86400 /* Saturday */);
+    TEST_ASSERT_EQUAL_UINT32(7200, st.allocation_sec); /* the weekend default */
+    TEST_ASSERT_EQUAL_INT32(0, st.adjust_sec);
+}
+
+void test_display_a_real_adjustment_is_not_rewritten_by_a_limit_edit(void) {
+    /* The damaging half: -30 was genuinely applied and folded at start,
+       and then the weekday limit moved 60 -> 90. The derivation reported
+       "(-60 min today)" for an adjustment that was -30. */
+    timer_bonus_reconcile(0, -1800);
+    timer_start(T0, 3600);
+    hal_nvs_write_u16("weekday_min", 90);
+    schedule_cache_invalidate();
+    display_state_t st = app_state_display(&IN_HEALTHY, 1800, T0);
+    TEST_ASSERT_EQUAL_UINT32(5400, st.allocation_sec);
+    TEST_ASSERT_EQUAL_INT32(-1800, st.adjust_sec); /* what was actually applied */
+}
+
+void test_display_break_on_a_never_started_screen_reports_no_adjustment(void) {
+    /* timer_start_break moves slot 0 to BREAK without ever running it, so
+       its allocation_sec is still 0 while the day's default is 3600. The
+       derivation answered -3600 — invisible only because the break screen
+       happens to draw no mode line, which is not a property this field
+       may rely on. */
+    timer_start_break(T0, 900);
+    display_state_t st = app_state_display(&IN_HEALTHY, 0, T0);
+    TEST_ASSERT_EQUAL(TIMER_BREAK, st.timer_state);
+    TEST_ASSERT_EQUAL_INT32(0, st.adjust_sec);
+}
+
+/* An adjustment against a slot the panel is NOT drawing must not surface
+   on it: the field is per-slot, like every other one on this struct. */
+void test_display_adjustment_is_read_from_the_drawn_slot_only(void) {
+    select_slot(1);       /* Piano is what the panel draws */
+    timer_adjust(0, 600); /* Screen, off-screen */
+    display_state_t st = app_state_display(&IN_HEALTHY, 0, T0);
+    TEST_ASSERT_EQUAL_INT32(0, st.adjust_sec);
+}
+
+/* Repeatable cmd-topic grants accumulate: two +10s are a +20 day, not a
+   +10 day. (timer_bonus_reconcile's HA number is a TARGET and settles at
+   the target; the cmd topic is a delta and stacks.) */
+void test_display_adjustment_accumulates_across_grants(void) {
+    timer_adjust(0, 600);
+    timer_adjust(0, 600);
+    display_state_t st = app_state_display(&IN_HEALTHY, 0, T0);
+    TEST_ASSERT_EQUAL_INT32(1200, st.adjust_sec);
+    TEST_ASSERT_EQUAL_UINT32(3600, st.allocation_sec);
+    TEST_ASSERT_EQUAL_INT32(4800, st.remaining_sec);
+}
+
+/* The day rollover is where the day's adjustment goes. */
+void test_display_adjustment_clears_at_the_day_rollover(void) {
+    timer_bonus_reconcile(0, -1800);
+    timer_reset();
+    display_state_t st = app_state_display(&IN_HEALTHY, 0, T0);
+    TEST_ASSERT_EQUAL_INT32(0, st.adjust_sec);
 }
 
 void test_display_running_passes_remaining_through(void) {
@@ -307,6 +464,36 @@ void test_stats_idle_screen_allocation_clamps_at_zero(void) {
     TEST_ASSERT_EQUAL_INT32(0, s.remaining_s[0]);
 }
 
+/* allocation_s[] is uint32_t and the fallback is computed signed, so a
+   negative that escapes the clamp is not a small error — it publishes
+   4294963696 as "Screen time limit" and every automation reading it
+   believes the day has 49700 hours in it. Pinned as a magnitude, not
+   just as == 0, so a future split that reintroduces the signed path
+   cannot pass by coincidence. */
+void test_stats_allocation_never_wraps_through_the_uint32_cast(void) {
+    timer_bonus_reconcile(0, -86400); /* -24 h against a 60 min day */
+    stats_snapshot_t s;
+    app_state_stats(&IN_HEALTHY, T0, &s);
+    TEST_ASSERT_EQUAL_UINT32(0, s.allocation_s[0]);
+    TEST_ASSERT_TRUE_MESSAGE(s.allocation_s[0] <= 86400u, "allocation wrapped through the uint32 cast");
+}
+
+/* The display split is a DISPLAY split: the HA sensors keep publishing
+   the effective limit, because that is what an automation asking "how
+   much screen time is there today" wants. If these ever start reporting
+   the day's default, STATS_JSON_DISC_SCHEMA_VER owes a bump. */
+void test_stats_allocation_stays_the_effective_limit_not_the_default(void) {
+    timer_bonus_reconcile(0, -1800); /* -30 min against a 60 min day */
+    stats_snapshot_t s;
+    app_state_stats(&IN_HEALTHY, T0, &s);
+    TEST_ASSERT_EQUAL_UINT32(1800, s.allocation_s[0]);
+    TEST_ASSERT_EQUAL_INT32(1800, s.remaining_s[0]);
+    /* ...while the panel is told 60 min with a -30 today. */
+    display_state_t st = app_state_display(&IN_HEALTHY, 0, T0);
+    TEST_ASSERT_EQUAL_UINT32(3600, st.allocation_sec);
+    TEST_ASSERT_EQUAL_INT32(-1800, st.adjust_sec);
+}
+
 void test_stats_started_slot_allocation_includes_grant(void) {
     timer_start(T0, 3600);
     timer_adjust(0, 300); /* HA grant mid-run */
@@ -341,9 +528,21 @@ void test_stats_injected_device_fields_pass_through(void) {
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_display_idle_shows_full_allocation);
-    RUN_TEST(test_display_idle_allocation_folds_a_banked_adjustment);
-    RUN_TEST(test_display_idle_allocation_clamps_a_deduction_past_zero);
-    RUN_TEST(test_display_idle_extra_timer_folds_its_own_bank);
+    RUN_TEST(test_display_idle_splits_the_days_default_from_the_adjustment);
+    RUN_TEST(test_display_no_adjustment_reports_zero);
+    RUN_TEST(test_display_adjustment_survives_the_start_fold);
+    RUN_TEST(test_display_adjustment_covers_a_grant_landing_mid_run);
+    RUN_TEST(test_display_idle_adjustment_clamps_a_deduction_past_zero);
+    RUN_TEST(test_display_clamps_a_deduction_past_zero_while_running);
+    RUN_TEST(test_display_does_not_clamp_a_grant);
+    RUN_TEST(test_display_idle_extra_timer_reports_its_own_bank);
+    RUN_TEST(test_display_no_phantom_adjustment_when_the_parent_edits_the_limit);
+    RUN_TEST(test_display_no_phantom_adjustment_when_the_day_type_changes_mid_run);
+    RUN_TEST(test_display_a_real_adjustment_is_not_rewritten_by_a_limit_edit);
+    RUN_TEST(test_display_break_on_a_never_started_screen_reports_no_adjustment);
+    RUN_TEST(test_display_adjustment_is_read_from_the_drawn_slot_only);
+    RUN_TEST(test_display_adjustment_accumulates_across_grants);
+    RUN_TEST(test_display_adjustment_clears_at_the_day_rollover);
     RUN_TEST(test_display_running_passes_remaining_through);
     RUN_TEST(test_display_extra_timer_uses_def_duration_and_name);
     RUN_TEST(test_display_charge_warn_tracks_battery_band);
@@ -367,6 +566,8 @@ int main(void) {
     RUN_TEST(test_stats_idle_screen_falls_back_to_schedule);
     RUN_TEST(test_stats_idle_screen_allocation_folds_a_banked_adjustment);
     RUN_TEST(test_stats_idle_screen_allocation_clamps_at_zero);
+    RUN_TEST(test_stats_allocation_never_wraps_through_the_uint32_cast);
+    RUN_TEST(test_stats_allocation_stays_the_effective_limit_not_the_default);
     RUN_TEST(test_stats_started_slot_allocation_includes_grant);
     RUN_TEST(test_stats_completions_map_extra_slots);
     RUN_TEST(test_stats_injected_device_fields_pass_through);

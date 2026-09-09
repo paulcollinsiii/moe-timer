@@ -11,8 +11,39 @@
 #define DISP_VER 128
 
 typedef struct {
+    /* Today's EFFECTIVE remaining, adjustment included. IDLE reports the
+       whole effective allocation (ProductOverview: an idle day shows what
+       it has, not 0), which is what lets it exceed allocation_sec below.
+       That is a FULL bar only on an unadjusted day: the bar's denominator
+       is allocation_sec, the day's default, so an idle day carrying -30
+       against a 60 min default draws the bar HALF full, and one carrying
+       a grant pins it full with time to spare. Both ends are clamped by
+       display_bar_fill_px. */
     int32_t remaining_sec;
+    /* The day's DEFAULT — the scheduled figure for the day type, or an
+       extra timer's configured duration. NOT today's effective limit:
+       adjust_sec carries what was applied on top, and the status line
+       renders the two separately so a 60-minute weekday with -30 applied
+       still says what a weekday is worth. Also the progress bar's
+       denominator, which is why a grant simply pins the bar full
+       (display_bar_fill_px clamps both ends) rather than rescaling the
+       day under the reader.
+       Read LIVE from config/schedule on every paint, so it can move under
+       a timer that already started — which is precisely why adjust_sec
+       below cannot be a subtraction against it. */
     uint32_t allocation_sec;
+    /* Signed seconds of adjustment applied to this slot TODAY: HA's
+       "Screen adjust (min) today", a cmd-topic grant, or both, summed.
+       0 = the day is running on its default, and the status line then
+       renders exactly as it did before this field existed.
+       Comes from the timer's own tracked total (timer_slot_adjust_today),
+       NOT from (effective limit - allocation_sec): those two are read at
+       different times, so that subtraction reported a phantom adjustment
+       whenever the day's default moved mid-run.
+       Clamped for display so allocation_sec + adjust_sec is never
+       negative — a -120 min deduction against a 60 min day arrives here
+       as -60. The timer keeps the unclamped record. */
+    int32_t adjust_sec;
     timer_state_t timer_state;
     day_type_t day_type;
     time_t wall_time;
@@ -123,9 +154,25 @@ void display_format_swap_hint(char *buf, size_t len, const char *name);
 void display_format_version(char *buf, size_t len, const char *version);
 /* Mode line for an extra timer: "Meditation - 10 min", or with the day's
    completed-run counter ("Meditation (x2) - 10 min") when reloadable.
-   Screen (slot 0) keeps the day-type line rendered by display.c. */
+   Screen (slot 0) uses display_format_day_line below.
+
+   allocation_sec is the timer's CONFIGURED duration and adjust_sec the
+   signed seconds a grant has moved it by, rendered as a suffix:
+   "Piano - 15 min (+10 min today)". adjust_sec 0 renders nothing extra.
+   Extras carry it for the same reason Screen does — a cmd-topic grant can
+   bank on any slot, and a line that reports the configured duration while
+   the clock beside it counts something else is the same misreport. */
 void display_format_mode_line(char *buf, size_t len, const char *name, uint16_t completions, bool reloadable,
-                              uint32_t allocation_sec);
+                              uint32_t allocation_sec, int32_t adjust_sec);
+/* Status line for Screen (slot 0): "Weekday - 60 min", plus today's
+   adjustment when there is one — "Weekday - 60 min (-30 min today)".
+
+   allocation_sec is the DAY'S DEFAULT, never the adjusted limit: the
+   point of the split is that the family can still read what a weekday is
+   worth on a day 30 minutes were taken off it. day_type is the already
+   resolved label (display_screens.c owns that mapping; this file stays
+   free of anything but string math). */
+void display_format_day_line(char *buf, size_t len, const char *day_type, uint32_t allocation_sec, int32_t adjust_sec);
 /* Invert byte columns [b0..b1] (clamped) of every row in a row-major 1bpp
    framebuffer — builds the inverse pass of the ghost-cleaning double partial. */
 void display_fb_invert_byte_cols(uint8_t *fb, int rows, int row_bytes, int b0, int b1);

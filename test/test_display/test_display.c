@@ -1,5 +1,6 @@
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <unity.h>
 
@@ -184,21 +185,21 @@ void test_invert_dirty_rows_no_change_returns_zero(void) {
 
 void test_mode_line_extra_timer_without_completions(void) {
     char buf[48];
-    display_format_mode_line(buf, sizeof(buf), "Meditation", 0, true, 600);
+    display_format_mode_line(buf, sizeof(buf), "Meditation", 0, true, 600, 0);
     TEST_ASSERT_EQUAL_STRING("Meditation - 10 min", buf);
 }
 
 void test_mode_line_extra_timer_with_completions(void) {
     char buf[48];
-    display_format_mode_line(buf, sizeof(buf), "Meditation", 1, true, 600);
+    display_format_mode_line(buf, sizeof(buf), "Meditation", 1, true, 600, 0);
     TEST_ASSERT_EQUAL_STRING("Meditation (x1) - 10 min", buf);
-    display_format_mode_line(buf, sizeof(buf), "Meditation", 2, true, 600);
+    display_format_mode_line(buf, sizeof(buf), "Meditation", 2, true, 600, 0);
     TEST_ASSERT_EQUAL_STRING("Meditation (x2) - 10 min", buf);
 }
 
 void test_mode_line_non_reloadable_never_shows_counter(void) {
     char buf[48];
-    display_format_mode_line(buf, sizeof(buf), "Violin", 3, false, 900);
+    display_format_mode_line(buf, sizeof(buf), "Violin", 3, false, 900, 0);
     TEST_ASSERT_EQUAL_STRING("Violin - 15 min", buf);
 }
 
@@ -208,9 +209,123 @@ void test_mode_line_truncates_cleanly_in_small_buffer(void) {
        "ExtraLongTimerName (x12) - 90 min". */
     char buf[20];
     memset(buf, (char)0xAA, sizeof(buf));
-    display_format_mode_line(buf, sizeof(buf), "ExtraLongTimerName", 12, true, 5400);
+    display_format_mode_line(buf, sizeof(buf), "ExtraLongTimerName", 12, true, 5400, 0);
     TEST_ASSERT_EQUAL_UINT(19, strlen(buf));
     TEST_ASSERT_EQUAL_MEMORY("ExtraLongTimerName ", buf, 19);
+}
+
+/* An adjustment reaches the extra timers too (a cmd-topic grant can bank
+   on any slot), through the same suffix the Screen day line uses. */
+void test_mode_line_carries_the_days_adjustment(void) {
+    char buf[64];
+    display_format_mode_line(buf, sizeof(buf), "Piano", 0, false, 900, 600);
+    TEST_ASSERT_EQUAL_STRING("Piano - 15 min (+10 min today)", buf);
+    display_format_mode_line(buf, sizeof(buf), "Piano", 2, true, 900, -300);
+    TEST_ASSERT_EQUAL_STRING("Piano (x2) - 15 min (-5 min today)", buf);
+}
+
+/* ---- display_format_day_line (Screen, slot 0) ----
+
+   The line reports the DAY'S DEFAULT plus what today's adjustment did to
+   it, separately. Folding the adjustment into the first number (which is
+   what the allocation carried once the banked bonus was added to it) made
+   a 60-minute weekday with -30 applied read "Weekday - 30 min" — a figure
+   that is neither the day's default nor anything the family configured. */
+
+void test_day_line_without_an_adjustment_is_unchanged(void) {
+    /* The unadjusted line must stay byte-identical to the pre-feature
+       one: it is the overwhelmingly common case, and the render goldens
+       pin it. */
+    char buf[64];
+    display_format_day_line(buf, sizeof(buf), "Weekday", 3600, 0);
+    TEST_ASSERT_EQUAL_STRING("Weekday - 60 min", buf);
+}
+
+void test_day_line_reports_a_deduction_against_the_days_default(void) {
+    char buf[64];
+    display_format_day_line(buf, sizeof(buf), "Weekday", 3600, -1800);
+    TEST_ASSERT_EQUAL_STRING("Weekday - 60 min (-30 min today)", buf);
+}
+
+void test_day_line_reports_a_grant_with_an_explicit_plus(void) {
+    /* The sign is the whole point of a SIGNED adjustment control: "15 min
+       today" would not say which way it went. */
+    char buf[64];
+    display_format_day_line(buf, sizeof(buf), "Weekend", 7200, 900);
+    TEST_ASSERT_EQUAL_STRING("Weekend - 120 min (+15 min today)", buf);
+}
+
+void test_day_line_never_renders_an_empty_parenthetical(void) {
+    /* Sub-minute adjustments round away rather than printing "(+0 min
+       today)". Every path that sets one works in whole minutes (HA's
+       number and the cmd topic are both min * 60), so this is a
+       floor, not a rounding policy. */
+    char buf[64];
+    display_format_day_line(buf, sizeof(buf), "Weekday", 3600, 30);
+    TEST_ASSERT_EQUAL_STRING("Weekday - 60 min", buf);
+    display_format_day_line(buf, sizeof(buf), "Weekday", 3600, -30);
+    TEST_ASSERT_EQUAL_STRING("Weekday - 60 min", buf);
+}
+
+void test_day_line_truncates_cleanly_in_a_small_buffer(void) {
+    /* Same contract as the mode line: a suffix that does not fit
+       terminates, never overflows. Full text is
+       "Weekday - 60 min (-30 min today)". */
+    char buf[20];
+    memset(buf, (char)0xAA, sizeof(buf));
+    display_format_day_line(buf, sizeof(buf), "Weekday", 3600, -1800);
+    TEST_ASSERT_EQUAL_UINT(19, strlen(buf));
+    TEST_ASSERT_EQUAL_MEMORY("Weekday - 60 min (-", buf, 19);
+}
+
+void test_day_line_suffix_does_not_fit_at_all(void) {
+    /* Exactly full before the suffix: nothing is appended, and nothing is
+       written past the length the caller declared. The trailing canary is
+       what makes the second half of that sentence a test rather than a
+       claim — the head is 16 chars plus its NUL, so the suffix has a
+       one-byte window to misuse. */
+    char buf[32];
+    memset(buf, (char)0xAA, sizeof(buf));
+    display_format_day_line(buf, 17, "Weekday", 3600, -1800);
+    TEST_ASSERT_EQUAL_STRING("Weekday - 60 min", buf);
+    for (size_t i = 17; i < sizeof(buf); i++)
+        TEST_ASSERT_EQUAL_HEX8_MESSAGE((char)0xAA, buf[i], "wrote past the declared length");
+}
+
+/* Both formatters accepted len == 0 before the adjustment suffix existed:
+   snprintf writes nothing and returns. The suffix reintroduced an
+   unconditional strlen(), which on a zero-length call reads a buffer
+   nothing has written to — off the end of the allocation, and past
+   whatever the caller actually owns. No in-tree caller passes 0, but the
+   contract held before and has to keep holding. Heap-allocated and
+   deliberately unterminated so the sanitizer sees the read. */
+void test_format_lines_with_a_zero_length_buffer_touch_nothing(void) {
+    char *buf = malloc(8);
+    TEST_ASSERT_NOT_NULL(buf);
+    memset(buf, 'x', 8);
+    display_format_day_line(buf, 0, "Weekday", 3600, -1800);
+    display_format_mode_line(buf, 0, "Piano", 0, false, 900, 600);
+    for (size_t i = 0; i < 8; i++)
+        TEST_ASSERT_EQUAL_HEX8_MESSAGE('x', buf[i], "a zero-length format wrote to the buffer");
+    free(buf);
+}
+
+/* ---- the bar against a BASE denominator ----
+
+   The bar's denominator is now routinely the day's default rather than
+   the effective limit, so remaining can legitimately sit ABOVE it (a
+   grant) or at zero against a non-zero base (a deduction that emptied the
+   day). Both ends were already clamped; these pin that they stay clamped,
+   because the cases stopped being pathological. */
+
+void test_bar_is_full_when_a_grant_pushes_remaining_past_the_base(void) {
+    /* 75 min remaining against a 60 min base default. */
+    TEST_ASSERT_EQUAL_UINT16(280, display_bar_fill_px(4500, 3600));
+}
+
+void test_bar_is_empty_when_a_deduction_emptied_the_day(void) {
+    /* -60 applied to a 60 min day: nothing left, but the base is still 60. */
+    TEST_ASSERT_EQUAL_UINT16(0, display_bar_fill_px(0, 3600));
 }
 
 /* ---- display_format_break_chip: the header chip shown while a Screen
@@ -357,6 +472,16 @@ int main(void) {
     RUN_TEST(test_mode_line_extra_timer_with_completions);
     RUN_TEST(test_mode_line_non_reloadable_never_shows_counter);
     RUN_TEST(test_mode_line_truncates_cleanly_in_small_buffer);
+    RUN_TEST(test_mode_line_carries_the_days_adjustment);
+    RUN_TEST(test_day_line_without_an_adjustment_is_unchanged);
+    RUN_TEST(test_day_line_reports_a_deduction_against_the_days_default);
+    RUN_TEST(test_day_line_reports_a_grant_with_an_explicit_plus);
+    RUN_TEST(test_day_line_never_renders_an_empty_parenthetical);
+    RUN_TEST(test_day_line_truncates_cleanly_in_a_small_buffer);
+    RUN_TEST(test_day_line_suffix_does_not_fit_at_all);
+    RUN_TEST(test_format_lines_with_a_zero_length_buffer_touch_nothing);
+    RUN_TEST(test_bar_is_full_when_a_grant_pushes_remaining_past_the_base);
+    RUN_TEST(test_bar_is_empty_when_a_deduction_emptied_the_day);
     RUN_TEST(test_bar_full_when_remaining_equals_allocation);
     RUN_TEST(test_bar_full_when_remaining_exceeds_allocation);
     RUN_TEST(test_bar_zero_when_expired);

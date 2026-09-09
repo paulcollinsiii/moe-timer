@@ -183,6 +183,12 @@ void setUp(void) {
 
 void tearDown(void) {}
 
+static void select_slot(int slot) {
+    while (timer_active_slot() != slot) {
+        TEST_ASSERT_TRUE(timer_select_next());
+    }
+}
+
 /* ---- no-window / failure paths ----------------------------------------- */
 
 void test_finish_without_window_is_idle_and_consumes_nothing(void) {
@@ -296,6 +302,109 @@ void test_grant_applied_while_idle_reports_changed(void) {
     TEST_ASSERT_EQUAL(NET_FINISH_CHANGED, net_apply_finish());
 }
 
+/* ...but only when the adjusted slot is what the panel is about to
+   draw. The bonus always targets slot 0 while the panel renders
+   timer_active_slot(), so adjusting Screen with Piano selected repainted
+   a screen on which nothing had changed — a visible e-ink flash and a
+   full refresh of battery for no information. */
+void test_screen_bonus_while_an_extra_is_selected_does_not_repaint(void) {
+    select_slot(1); /* Piano is what the panel draws */
+    TEST_ASSERT_TRUE(net_apply_open());
+    mock_ha_bonus_pending = true;
+    mock_ha_bonus_target = -2700;
+    TEST_ASSERT_EQUAL(NET_FINISH_IDLE, net_apply_finish());
+    /* Applied all the same — this is about the repaint, not the apply. */
+    TEST_ASSERT_EQUAL_INT32(-2700, timer_screen_bonus_applied());
+    TEST_ASSERT_EQUAL_INT32(-2700, timer_slot_banked_bonus(0));
+}
+
+void test_grant_to_a_background_slot_does_not_repaint(void) {
+    select_slot(1);
+    TEST_ASSERT_TRUE(net_apply_open());
+    mock_ha_grant_pending = true;
+    mock_ha_grant_slot = 3; /* Meditation: enabled, but not selected */
+    mock_ha_grant_sec = 600;
+    TEST_ASSERT_EQUAL(NET_FINISH_IDLE, net_apply_finish());
+    TEST_ASSERT_EQUAL_INT32(600, timer_slot_banked_bonus(3));
+}
+
+void test_grant_to_the_selected_extra_still_repaints(void) {
+    select_slot(1);
+    TEST_ASSERT_TRUE(net_apply_open());
+    mock_ha_grant_pending = true;
+    mock_ha_grant_slot = 1;
+    mock_ha_grant_sec = 600;
+    TEST_ASSERT_EQUAL(NET_FINISH_CHANGED, net_apply_finish());
+}
+
+/* Two adjustments in one window, only one of them on screen: the visible
+   one must still carry the repaint. A gate that took the LAST answer
+   rather than the union would lose it. */
+void test_invisible_screen_bonus_never_masks_a_visible_grant(void) {
+    select_slot(1);
+    TEST_ASSERT_TRUE(net_apply_open());
+    mock_ha_bonus_pending = true;
+    mock_ha_bonus_target = -2700; /* slot 0: off-screen */
+    mock_ha_grant_pending = true;
+    mock_ha_grant_slot = 1; /* Piano: on-screen */
+    mock_ha_grant_sec = 600;
+    TEST_ASSERT_EQUAL(NET_FINISH_CHANGED, net_apply_finish());
+}
+
+/* The mirror ordering, and the one the union actually needs: the visible
+   adjustment is applied FIRST and the invisible one second. Without it
+   the case above passes under a plain `=` too — the grant happens to be
+   the last write and happens to be the visible slot, so last-write-wins
+   lands on the right bit by luck. Here the bonus (slot 0, selected) must
+   survive a later grant to slot 3, which only a union does. */
+void test_invisible_grant_never_masks_a_visible_screen_bonus(void) {
+    TEST_ASSERT_EQUAL_INT(0, timer_active_slot()); /* Screen is on screen */
+    TEST_ASSERT_TRUE(net_apply_open());
+    mock_ha_bonus_pending = true;
+    mock_ha_bonus_target = -2700; /* slot 0: ON-screen, applied first */
+    mock_ha_grant_pending = true;
+    mock_ha_grant_slot = 3; /* Meditation: off-screen, applied second */
+    mock_ha_grant_sec = 600;
+    TEST_ASSERT_EQUAL(NET_FINISH_CHANGED, net_apply_finish());
+    TEST_ASSERT_EQUAL_INT32(-2700, timer_slot_banked_bonus(0));
+    TEST_ASSERT_EQUAL_INT32(600, timer_slot_banked_bonus(3));
+}
+
+/* The two slot-0 states that could in principle leak onto a panel drawn
+   for another slot, pinned so the narrow gate stays honest.
+
+   1. A BREAK behind a selected extra draws the header's BREAK chip, and
+      the chip counts break_expiry_wall — which timer_adjust never
+      touches (it moves remaining_at_pause and allocation_sec). */
+void test_screen_adjust_behind_a_break_leaves_the_chip_alone(void) {
+    timer_start_break(T0, 900);
+    TEST_ASSERT_TRUE(timer_select_next()); /* -> Piano; the chip is drawn */
+    int32_t chip_before = timer_break_remaining(T0 + 60);
+    TEST_ASSERT_TRUE(net_apply_open());
+    mock_ha_bonus_pending = true;
+    mock_ha_bonus_target = 600;
+    TEST_ASSERT_EQUAL(NET_FINISH_IDLE, net_apply_finish());
+    TEST_ASSERT_EQUAL_INT32(chip_before, timer_break_remaining(T0 + 60));
+    TEST_ASSERT_EQUAL(TIMER_BREAK, timer_slot_state(0)); /* still a break: the chip stays */
+    TEST_ASSERT_EQUAL_INT32(600, g_rtc_state.slots[0].remaining_at_pause);
+}
+
+/* 2. A grant against an EXPIRED slot 0 flips it to PAUSED. That state is
+      read by nothing the panel draws while another slot is selected —
+      break_banner asks for BREAK, and every other field is the active
+      slot's. */
+void test_screen_grant_that_unexpires_slot_zero_is_still_invisible(void) {
+    timer_start(T0, 600);
+    timer_tick(T0 + 700);
+    TEST_ASSERT_EQUAL(TIMER_EXPIRED, timer_slot_state(0));
+    select_slot(1);
+    TEST_ASSERT_TRUE(net_apply_open());
+    mock_ha_bonus_pending = true;
+    mock_ha_bonus_target = 900;
+    TEST_ASSERT_EQUAL(NET_FINISH_IDLE, net_apply_finish());
+    TEST_ASSERT_EQUAL(TIMER_PAUSED, timer_slot_state(0)); /* flipped, off-screen */
+}
+
 void test_locate_pending_fires_locate_after_apply(void) {
     TEST_ASSERT_TRUE(net_apply_open());
     mock_ha_locate = true;
@@ -310,12 +419,6 @@ void test_no_locate_when_not_pending(void) {
 }
 
 /* ---- def reconcile fan-out ---------------------------------------------- */
-
-static void select_slot(int slot) {
-    while (timer_active_slot() != slot) {
-        TEST_ASSERT_TRUE(timer_select_next());
-    }
-}
 
 void test_unchanged_defs_reconcile_to_idle(void) {
     select_slot(1);
@@ -532,6 +635,13 @@ int main(void) {
     RUN_TEST(test_bonus_applied_while_idle_reports_changed_for_the_repaint);
     RUN_TEST(test_bonus_replay_that_changes_nothing_stays_idle);
     RUN_TEST(test_grant_applied_while_idle_reports_changed);
+    RUN_TEST(test_screen_bonus_while_an_extra_is_selected_does_not_repaint);
+    RUN_TEST(test_grant_to_a_background_slot_does_not_repaint);
+    RUN_TEST(test_grant_to_the_selected_extra_still_repaints);
+    RUN_TEST(test_invisible_screen_bonus_never_masks_a_visible_grant);
+    RUN_TEST(test_invisible_grant_never_masks_a_visible_screen_bonus);
+    RUN_TEST(test_screen_adjust_behind_a_break_leaves_the_chip_alone);
+    RUN_TEST(test_screen_grant_that_unexpires_slot_zero_is_still_invisible);
     RUN_TEST(test_bonus_must_not_downgrade_an_alerted_reconcile);
     RUN_TEST(test_locate_pending_fires_locate_after_apply);
     RUN_TEST(test_no_locate_when_not_pending);

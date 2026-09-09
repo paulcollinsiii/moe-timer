@@ -328,10 +328,34 @@ the retained command, so an adjustment never carries into tomorrow.
 
 An adjustment that lands while the Screen timer is still IDLE is held until
 the day's first start folds it into the allocation — but the panel and the
-`limit`/`remaining` sensors show the adjusted figure straight away, and the
-sync that applies it repaints the idle screen itself. So a `-45` set in the
-morning is visible before anyone presses A, rather than appearing as a jump
-from X to Y at the moment the timer starts.
+`limit`/`remaining` sensors report the adjusted figure without waiting for
+that (see the sensor timing note below), and the sync that applies it
+repaints the idle screen itself. So a `-45` set in the morning is visible
+before anyone presses A, rather than appearing as a jump from X to Y at the
+moment the timer starts.
+
+The panel reports the two halves separately: the status line reads
+`Weekday - 60 min (-45 min today)`, so the day's normal allowance is still
+legible on a day that was adjusted, and the countdown and the progress bar
+show what is actually left. With no adjustment the parenthetical is absent
+and the line is just `Weekday - 60 min`. The bar's scale stays the day's
+default, so a grant simply fills it rather than quietly redrawing the day
+against a different yardstick.
+
+The repaint follows the **selected** timer. Screen's adjustment redraws the
+panel when Screen is what the panel is showing; adjust it while Piano is
+selected and nothing on screen has changed, so the device does not spend a
+full e-ink refresh saying so. It will be there the moment you swap back.
+The adjustment itself is applied either way — this is about the refresh,
+not about the apply.
+
+One timing wrinkle on the sensors: the stats snapshot that feeds
+`limit`/`remaining` is collected *before* the deferred adjustment is
+applied, so in the very window that carries an adjustment those two
+sensors still publish the pre-adjustment figures and catch up on the next
+sync. Only the `act` confirmation carries the new target immediately. If
+an automation has to act on the new limit in the same breath, key it on
+`act`, not on `limit`.
 
 ### Bulk config document (holidays, scripted setup)
 

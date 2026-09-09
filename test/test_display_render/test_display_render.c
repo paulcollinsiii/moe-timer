@@ -428,6 +428,138 @@ void test_no_version_renders_the_row_unchanged(void) {
     TEST_ASSERT_TRUE_MESSAGE(batt_right > bare, "the version added no width - it is not being rendered");
 }
 
+/* ---- the status row: mode line + state word share one row ----
+
+   The row now carries a SECOND caller-supplied string (the adjustment
+   suffix) on top of the HA-supplied timer name, against a state word
+   right-aligned on the same baseline. Same two-limit defence as the
+   battery row: the format's own arithmetic bounds the buffer, and a hard
+   geometric cap bounds the drawing — a character budget cannot, because
+   the row's content is proportional text. */
+static void measure_status_row(const display_state_t *st, int32_t *mode_right, int32_t *state_left) {
+    display_screens_build_main(st);
+    lv_obj_t *scr = lv_screen_active();
+    lv_obj_update_layout(scr);
+    /* The mode label is the left-aligned one below the battery row (x=4,
+       y=66); the state word is the right-most label sharing its row. */
+    int32_t mode_y = -1;
+    *mode_right = -1;
+    *state_left = -1;
+    uint32_t n = lv_obj_get_child_count(scr);
+    for (uint32_t i = 0; i < n; i++) {
+        lv_obj_t *o = lv_obj_get_child(scr, i);
+        if (!lv_obj_check_type(o, &lv_label_class))
+            continue;
+        if (lv_obj_get_x(o) == 4 && lv_obj_get_y(o) > 80) {
+            mode_y = lv_obj_get_y(o);
+            *mode_right = lv_obj_get_x(o) + lv_obj_get_width(o);
+        }
+    }
+    TEST_ASSERT_NOT_EQUAL_MESSAGE(-1, *mode_right, "mode line label not found");
+    for (uint32_t i = 0; i < n; i++) {
+        lv_obj_t *o = lv_obj_get_child(scr, i);
+        if (!lv_obj_check_type(o, &lv_label_class))
+            continue;
+        if (lv_obj_get_y(o) == mode_y && lv_obj_get_x(o) > 4)
+            *state_left = lv_obj_get_x(o);
+    }
+    TEST_ASSERT_NOT_EQUAL_MESSAGE(-1, *state_left, "state label not found");
+}
+
+/* Reachable extremes, not imagined ones: the day allocation is bounded by
+   CFG_BOUND_ALLOC_HI (1440 min) and an extra timer's name by the config
+   text field, and "TIME'S UP" is the widest state word.
+
+   The adjustment has no such bound. ±240 min bounds ONE adjustment (HA's
+   number and a single cmd grant each), but the suffix reports the day's
+   running total and cmd grants repeat once per network window, so the
+   last rows drive it far past that — up to the week the snapshot
+   validator will still restore. The cap is a geometric backstop, so this
+   passing at 10080 min is the property, not a coincidence of the bound. */
+void test_mode_row_fits_beside_the_state_word(void) {
+    static const struct {
+        const char *name;
+        uint16_t completions;
+        bool reloadable;
+        uint32_t alloc;
+        int32_t adjust;
+        timer_state_t state;
+        const char *what;
+    } CASES[] = {
+        {NULL, 0, false, 3600, 0, TIMER_IDLE, "plain weekday"},
+        {NULL, 0, false, 3600, -1800, TIMER_RUNNING, "weekday, -30 today"},
+        {NULL, 0, false, 3600, 14400, TIMER_EXPIRED, "weekday, +240 today"},
+        {NULL, 0, false, 86400, -14400, TIMER_EXPIRED, "1440 min day, -240 today (both maxima)"},
+        {"Meditation", 0, false, 600, 0, TIMER_IDLE, "extra timer, unadjusted"},
+        {"Laundry folding", 12, true, 5400, 14400, TIMER_EXPIRED, "long name + counter + max grant"},
+        {"WWWWWWWWWWWWWWWW", 99, true, 5400, -14400, TIMER_EXPIRED, "widest glyphs a name field allows"},
+        {NULL, 0, false, 86400, 604800, TIMER_EXPIRED, "1440 min day, +10080 today (accumulated grants)"},
+        {"WWWWWWWWWWWWWWWW", 99, true, 5400, -604800, TIMER_EXPIRED, "widest name + a week of deductions"},
+    };
+    for (size_t i = 0; i < sizeof(CASES) / sizeof(CASES[0]); i++) {
+        display_state_t st = base_state();
+        st.timer_name = CASES[i].name;
+        st.completions = CASES[i].completions;
+        st.reloadable = CASES[i].reloadable;
+        st.allocation_sec = CASES[i].alloc;
+        st.adjust_sec = CASES[i].adjust;
+        st.timer_state = CASES[i].state;
+        int32_t mode_right, state_left;
+        measure_status_row(&st, &mode_right, &state_left);
+        printf("status row [%-40s] mode ends x=%3d, state starts x=%3d, gap=%d px\n", CASES[i].what, (int)mode_right,
+               (int)state_left, (int)(state_left - mode_right));
+        char msg[160];
+        snprintf(msg, sizeof(msg), "%s: mode line ends at x=%d, state word starts at x=%d", CASES[i].what,
+                 (int)mode_right, (int)state_left);
+        TEST_ASSERT_TRUE_MESSAGE(mode_right < state_left, msg);
+    }
+}
+
+/* And the cap bounds the DRAWING, not merely the object — the same
+   property test_version_cap_clips_the_drawing_not_just_the_object pins
+   for the battery row, and the one that could differ between LVGL
+   versions. Mirrored as literals for the same reason it is there: a test
+   that recomputed the corridor from the source constants would move in
+   lockstep with a mistake in them. */
+#define MODE_ROW_CAP_RIGHT 224 /* x=4 + MODE_ROW_MAX_W */
+#define STATE_WORD_LEFT 230    /* "TIME'S UP" right-aligned at x=292 */
+
+void test_mode_row_cap_clips_the_drawing_not_just_the_object(void) {
+    display_state_t st = base_state();
+    st.timer_state = TIMER_EXPIRED;
+    st.timer_name = "WWWWWWWWWWWWWWWW";
+    st.completions = 99;
+    st.reloadable = true;
+    st.allocation_sec = 5400;
+    st.adjust_sec = -14400;
+    int32_t mode_right, state_left;
+    measure_status_row(&st, &mode_right, &state_left);
+    lv_refr_now(s_disp);
+    printf("mode cap check: object ends x=%d, state word starts x=%d\n", (int)mode_right, (int)state_left);
+    TEST_ASSERT_TRUE_MESSAGE(mode_right <= MODE_ROW_CAP_RIGHT, "capped mode line is wider than the cap allows");
+    TEST_ASSERT_TRUE_MESSAGE(state_left >= STATE_WORD_LEFT, "state word starts further left than the cap assumes");
+    for (int32_t y = 92; y <= 110; y++) {
+        for (int32_t x = MODE_ROW_CAP_RIGHT; x < STATE_WORD_LEFT; x++) {
+            int bit = (s_captured[y * (HOR / 8) + x / 8] >> (7 - (x & 7))) & 1;
+            char msg[96];
+            snprintf(msg, sizeof(msg), "ink at x=%d y=%d - capped mode line spilled past x=%d", (int)x, (int)y,
+                     MODE_ROW_CAP_RIGHT);
+            TEST_ASSERT_EQUAL_HEX8_MESSAGE(1, bit, msg); /* LVGL I1: 1 = white */
+        }
+    }
+}
+
+/* The adjusted Screen day line, rendered. The unadjusted one is
+   main_idle_weekday, and the pair is the whole feature: same day, same
+   default, one of them 30 minutes shorter and saying so. */
+void test_main_idle_weekday_adjusted(void) {
+    display_state_t st = base_state();
+    st.adjust_sec = -1800;   /* HA: "Screen adjust (min) today" = -30 */
+    st.remaining_sec = 1800; /* ...which is what is actually left */
+    display_screens_build_main(&st);
+    assert_matches_golden("main_idle_weekday_adjusted");
+}
+
 void test_ota_screen(void) {
     /* Firmware update, full refresh: both versions, direction-neutral verb
        (the policy deliberately supports downgrades). */
@@ -518,6 +650,9 @@ int main(void) {
     RUN_TEST(test_start_available_only_changes_button_a);
     RUN_TEST(test_break_screen_no_eligible);
     RUN_TEST(test_main_low_battery_warn_badge);
+    RUN_TEST(test_main_idle_weekday_adjusted);
+    RUN_TEST(test_mode_row_fits_beside_the_state_word);
+    RUN_TEST(test_mode_row_cap_clips_the_drawing_not_just_the_object);
     RUN_TEST(test_version_fits_the_battery_row);
     RUN_TEST(test_version_cap_clips_the_drawing_not_just_the_object);
     RUN_TEST(test_no_version_renders_the_row_unchanged);

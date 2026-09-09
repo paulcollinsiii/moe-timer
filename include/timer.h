@@ -88,6 +88,22 @@ typedef struct {
     uint16_t completions;      /* runs that reached expiry today */
     int32_t bonus_sec;         /* HA grant banked while IDLE; folded in at timer_start */
     int32_t bonus_applied;     /* total HA "bonus today" reconciled (idempotent target tracking) */
+    /* Signed running total of every adjustment that LANDED on this slot
+       today — the panel's "(-30 min today)". Tracked rather than derived,
+       and neither of the two fields above can stand in for it:
+       bonus_sec is ZEROED by timer_start's fold, and bonus_applied is the
+       idempotent reconcile's baseline (a cmd-topic grant folded into it
+       would corrupt the next delta the HA number computes). Deriving it
+       instead as "today's limit minus the day's default" was the original
+       bug: the default is read live from config while the limit is frozen
+       at start, so an ordinary edit of the weekday minutes, a holiday
+       landing mid-run, or a day-type flip all manufactured an adjustment
+       nobody made — and rewrote a real one.
+       Records what was ASKED for, not what survived clamping: the display
+       seam clamps for presentation, this stays the truthful record.
+       Resets with the day (timer_reset), and with the slot itself
+       (timer_reload / a reconcile RESET both memset it away). */
+    int32_t adjust_today_sec;
 } timer_slot_state_t;
 
 /* Self-validation for rtc_state_t, and the one path it exists for.
@@ -121,7 +137,8 @@ typedef struct {
  * magic but disagree on the offsets behind it are exactly the case the
  * magic alone cannot catch. */
 #define RTC_STATE_MAGIC 0x4D414754u /* "MAGT", legible in a memory dump */
-#define RTC_STATE_VERSION 1
+/* v2: timer_slot_state_t gained adjust_today_sec */
+#define RTC_STATE_VERSION 2
 
 typedef struct {
     /* First two fields, deliberately: a struct whose head is its own
@@ -171,7 +188,9 @@ bool timer_rtc_state_guard(void);
    day's entire allocation. Bump the version on any layout change — the
    XOR checksum (carried over from the MicroPython predecessor) then
    invalidates stale-layout blobs even if NVS hands them back intact. */
-#define TIMER_SNAPSHOT_VERSION 6 /* v6: + break_interrupted_slot, break_prev_state, run_segment_slot */
+/* v7: + adjust_today_sec
+   v6: + break_interrupted_slot, break_prev_state, run_segment_slot */
+#define TIMER_SNAPSHOT_VERSION 7
 
 typedef struct {
     uint8_t state; /* timer_state_t */
@@ -184,6 +203,7 @@ typedef struct {
     uint16_t completions;
     int32_t bonus_sec;
     int32_t bonus_applied;
+    int32_t adjust_today_sec;
 } timer_snapshot_slot_t;
 
 typedef struct {
@@ -351,6 +371,17 @@ int32_t timer_screen_bonus_applied(void); /* slot 0 HA bonus reconciled today */
    applied before the day's first start is invisible on every surface
    until someone presses A. */
 int32_t timer_slot_banked_bonus(int slot);
+/* Signed seconds of adjustment that landed on this slot TODAY, across
+   every source (the HA number's reconciled deltas and cmd-topic grants),
+   and across every state transition the day makes — timer_start's fold of
+   the bank does not disturb it. 0 means the slot is running on its
+   configured/scheduled default, which is what lets the status line drop
+   the parenthetical entirely on the common day.
+   This is what was ASKED for. A deduction deeper than the day is recorded
+   in full even though the timer clamped at empty, so the value can be
+   more negative than the day's default; callers that render it beside the
+   default must clamp for presentation (app_state_display does). */
+int32_t timer_slot_adjust_today(int slot);
 const char *timer_current_date(void); /* "YYYY-MM-DD"; "" until first record */
 /* Display-facing remaining seconds for any slot, without ticking (no state
    change): RUNNING = expiry-now, PAUSED/BREAK = frozen remaining, IDLE =

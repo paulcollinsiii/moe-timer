@@ -299,6 +299,12 @@ int32_t timer_slot_banked_bonus(int slot) {
     return g_rtc_state.slots[slot].bonus_sec;
 }
 
+int32_t timer_slot_adjust_today(int slot) {
+    if (slot < 0 || slot >= TIMER_SLOT_COUNT)
+        return 0;
+    return g_rtc_state.slots[slot].adjust_today_sec;
+}
+
 const char *timer_current_date(void) {
     return g_rtc_state.last_date; /* "" until timer_record_date / restore */
 }
@@ -415,6 +421,12 @@ bool timer_adjust(int slot, int32_t sec) {
             sl->bonus_sec += sec;
             break;
     }
+    /* One site, after the switch, so every branch that returns true is
+       counted and the two that return false (zero/bad slot, a deduction
+       against an EXPIRED slot) are not. Deliberately the REQUESTED delta,
+       not the clamped one: this is the record of what the parent did, and
+       the panel does its own clamping against the day's default. */
+    sl->adjust_today_sec += sec;
     return true;
 }
 
@@ -783,6 +795,7 @@ void timer_make_snapshot(timer_snapshot_t *out) {
         os->completions = sl->completions;
         os->bonus_sec = sl->bonus_sec;
         os->bonus_applied = sl->bonus_applied;
+        os->adjust_today_sec = sl->adjust_today_sec;
     }
     memcpy(out->date, g_rtc_state.last_date, sizeof(out->date));
     out->checksum = timer_snapshot_checksum(out);
@@ -820,6 +833,12 @@ static bool snapshot_valid(const timer_snapshot_t *snap, time_t now) {
             return false;
         /* Signed since the adjust feature: a banked deduction is negative */
         if (sl->bonus_sec < -SNAPSHOT_MAX_HORIZON_SEC || sl->bonus_sec > SNAPSHOT_MAX_HORIZON_SEC)
+            return false;
+        /* Same bound, same reason. A running total of repeatable grants
+           has no natural ceiling of its own, so it borrows the horizon:
+           anything past a week of adjustment in one day is corruption,
+           not a parent. */
+        if (sl->adjust_today_sec < -SNAPSHOT_MAX_HORIZON_SEC || sl->adjust_today_sec > SNAPSHOT_MAX_HORIZON_SEC)
             return false;
         if (sl->state == TIMER_RUNNING) {
             int64_t delta = sl->expiry_wall_time - (int64_t)now;
@@ -864,6 +883,7 @@ bool timer_restore_snapshot(const timer_snapshot_t *snap, time_t now) {
         sl->completions = ss->completions;
         sl->bonus_sec = ss->bonus_sec;
         sl->bonus_applied = ss->bonus_applied;
+        sl->adjust_today_sec = ss->adjust_today_sec;
         /* Expiry passed while powered off (snapshot saved before the EXPIRED
            transition landed): restore directly as EXPIRED so the next tick
            does not re-transition and re-fire the already-heard alert. The
