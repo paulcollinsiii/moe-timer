@@ -36,9 +36,18 @@ uint8_t button_latch_take_masked(uint8_t mask) {
 }
 
 int button_latch_pick(uint8_t mask, uint8_t allowed_mask) {
-    /* A (0) first — start/pause is the time-sensitive action; then C (2)
-       select, B (1) reset, D (3) sync. */
-    static const int priority[BUTTON_LATCH_COUNT] = {0, 2, 1, 3};
+    /* B (1) first — start/pause/resume is the time-sensitive action; then
+       C (2) next timer, D (3) refresh, and A (0) LAST because it has no
+       binding at all this milestone.
+
+       The rule is "the time-sensitive action wins", not "the lowest index
+       wins": this list moved when the layout did (A used to be
+       start/pause). Leaving A at the front once it lost its binding made
+       an unbound button SWALLOW a real press — pick returns the first
+       candidate in this order, so A won, the dispatch's A arm did
+       nothing, and the B press was gone with it, taken by the same
+       unmasked take and dropped at sleep. */
+    static const int priority[BUTTON_LATCH_COUNT] = {1, 2, 3, 0};
     mask &= allowed_mask;
     for (int i = 0; i < BUTTON_LATCH_COUNT; i++) {
         if (mask & (1u << priority[i]))

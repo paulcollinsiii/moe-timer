@@ -343,7 +343,7 @@ The press is taken from the latch and then discarded, because pause is only
 meaningful while RUNNING — so the user's press does nothing and is gone.
 
 Confirmed and deliberately preserved through cycle 10. Pinned by
-`test_row6_a_press_while_not_running_is_eaten_KNOWN_BUG` in
+`test_row6_b_press_while_not_running_is_eaten_KNOWN_BUG` in
 `test/test_wake_flow/test_wake_flow.c`, named to make clear it documents a
 defect rather than blessing it; that test must fail loudly when the bug is
 fixed, and the fixing commit must rewrite it deliberately rather than delete

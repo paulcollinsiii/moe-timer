@@ -223,12 +223,12 @@ void enter_deep_sleep(wake_sleep_mode_t mode) {
    orchestration (pre-window def capture, post-join reconcile/apply) in
    net_apply.c. main.c only supplies the device effects below. */
 
-/* Residency 4. Join poll: Button A stays live while the MQTT tail drains
+/* Residency 4. Join poll: Button B stays live while the MQTT tail drains
    — the screen is already painted and a dropped press would read as
    broken. One line, no branch; which states a press acts on is decided in
    wake_flow. Never passed from the failsafe's esp_timer context. */
-static void poll_button_a_cb(void) {
-    (void)wake_flow_poll_button_a_action();
+static void poll_button_b_cb(void) {
+    (void)wake_flow_poll_button_b_action();
 }
 
 /* The composition root proper: wiring, and the one construct here with no
@@ -241,7 +241,7 @@ static void poll_button_a_cb(void) {
    own suite harder to stub rather than easier. That is the rule's purpose
    pointing the other way. */
 static const net_apply_ops_t NET_APPLY_OPS = {
-    .join_poll = poll_button_a_cb,
+    .join_poll = poll_button_b_cb,
     .on_config_applied = config_cache_invalidate,
     .on_active_reset_chirp = audio_break_over_chime,
     .on_active_expired_alert = wake_flow_fire_expiry_alert,

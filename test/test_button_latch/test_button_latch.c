@@ -128,16 +128,38 @@ void test_pick_single_button_returns_it(void) {
     TEST_ASSERT_EQUAL_INT(1, button_latch_pick(1u << 1, 0x0F));
 }
 
-void test_pick_priority_a_over_all(void) {
-    TEST_ASSERT_EQUAL_INT(0, button_latch_pick(0x0F, 0x0F));
+/* B (1) is the start/pause/resume button and therefore the time-sensitive
+   one, so it outranks everything — including A, which has no binding at
+   all this milestone. */
+void test_pick_priority_b_over_all(void) {
+    TEST_ASSERT_EQUAL_INT(1, button_latch_pick(0x0F, 0x0F));
 }
 
-void test_pick_priority_c_over_b_and_d(void) {
-    TEST_ASSERT_EQUAL_INT(2, button_latch_pick((1u << 1) | (1u << 2) | (1u << 3), 0x0F));
+/* THE swallowing case, and the reason the order had to move with the
+   layout. A is index 0, so an order that still led with it would let a
+   press of an UNBOUND button beat a genuine start/pause press: pick
+   returns A, the dispatch's A arm does nothing, and the B press is gone
+   — taken out of the latch by the same unmasked take and discarded at
+   sleep. The user presses start, nothing happens, and there is no
+   feedback to tell them why. */
+void test_pick_priority_b_over_a(void) {
+    TEST_ASSERT_EQUAL_INT(1, button_latch_pick((1u << 0) | (1u << 1), 0x0F));
 }
 
-void test_pick_priority_b_over_d(void) {
-    TEST_ASSERT_EQUAL_INT(1, button_latch_pick((1u << 1) | (1u << 3), 0x0F));
+void test_pick_priority_c_over_d_and_a(void) {
+    TEST_ASSERT_EQUAL_INT(2, button_latch_pick((1u << 0) | (1u << 2) | (1u << 3), 0x0F));
+}
+
+void test_pick_priority_d_over_a(void) {
+    TEST_ASSERT_EQUAL_INT(3, button_latch_pick((1u << 0) | (1u << 3), 0x0F));
+}
+
+/* A is last, not absent: it is still a valid pick when it is the only
+   thing latched. The callers that must never act on it drop it from the
+   ALLOWED mask instead (wake_flow's two drains), which is the case
+   below. */
+void test_pick_returns_a_when_it_is_the_only_button_latched(void) {
+    TEST_ASSERT_EQUAL_INT(0, button_latch_pick(1u << 0, 0x0F));
 }
 
 void test_pick_respects_allowed_mask(void) {
@@ -145,6 +167,9 @@ void test_pick_respects_allowed_mask(void) {
     TEST_ASSERT_EQUAL_INT(2, button_latch_pick((1u << 0) | (1u << 2), 1u << 2));
     /* Only disallowed buttons latched: none */
     TEST_ASSERT_EQUAL_INT(-1, button_latch_pick(1u << 3, (1u << 0) | (1u << 1) | (1u << 2)));
+    /* The wake_flow drains' allowed set, with A dropped: a latched A
+       alone picks nothing at all, so the drain never runs. */
+    TEST_ASSERT_EQUAL_INT(-1, button_latch_pick(1u << 0, (1u << 1) | (1u << 2)));
 }
 
 int main(void) {
@@ -166,9 +191,11 @@ int main(void) {
     RUN_TEST(test_take_masked_full_mask_equals_take);
     RUN_TEST(test_pick_empty_mask_returns_none);
     RUN_TEST(test_pick_single_button_returns_it);
-    RUN_TEST(test_pick_priority_a_over_all);
-    RUN_TEST(test_pick_priority_c_over_b_and_d);
-    RUN_TEST(test_pick_priority_b_over_d);
+    RUN_TEST(test_pick_priority_b_over_all);
+    RUN_TEST(test_pick_priority_b_over_a);
+    RUN_TEST(test_pick_priority_c_over_d_and_a);
+    RUN_TEST(test_pick_priority_d_over_a);
+    RUN_TEST(test_pick_returns_a_when_it_is_the_only_button_latched);
     RUN_TEST(test_pick_respects_allowed_mask);
     return UNITY_END();
 }

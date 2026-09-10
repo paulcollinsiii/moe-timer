@@ -83,17 +83,15 @@ credentials.**
         (before expiry) intentionally restores the in-flight countdown —
         that is crash recovery, not a refund; the run resumes with the
         remaining time it had.
-20. [ ] **Screen reset gate**: with Screen selected, a plain press of
-        Button B does nothing at all — no wake, no refresh, and no log
-        line. That is correct, not a fault: Screen carries no def, so it is
-        never reloadable, B is dropped from the EXT1 mask (case 13) and the
-        driver leaves the pad unconfigured, so a press on a sleeping device
-        is never seen. To observe the refusal itself, hold B down through a
-        periodic 55 s tick wake so the press rides in on that wake's latch —
-        the log then shows `Button B reset unavailable` and nothing resets;
-        the Screen allocation resets only on a day rollover. Swap to a
-        reloadable extra (not RUNNING) and the same press does reset that
-        timer to full.
+20. [ ] **Screen reset gate**: Screen carries no def, so it is never
+        reloadable — Button B can never reset it, and the Screen
+        allocation resets only on a genuine day rollover. To observe the
+        refusal, run the allocation down to zero so Screen is EXPIRED and
+        still selected, then hold B down through a periodic 55 s tick wake
+        so the press rides in on that wake's latch: the log then shows
+        `button B unavailable` and nothing resets. Swap to a reloadable
+        extra that is EXPIRED and the same press reloads that timer to
+        full instead.
 21. [ ] **Final-minute countdown**: the pre-expiry wake lands ~70 s out
         (planner); the display then steps through 00:01:00 / 00:00:45 /
         00:00:30 / 00:00:15 as partial refreshes, the last 15 s count down

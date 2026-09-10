@@ -186,7 +186,7 @@ void ota_flow_init(const ota_flow_ops_t *ops, const ota_flow_cfg_t *cfg);
    A buffered update is discarded only when this call arms a check, since
    a check may replace it. Arming for a trigger that will NOT check
    leaves any buffer alone: two windows in one wake is a routine path
-   (day rollover plus a Button A sync), and the second arm must not throw
+   (day rollover plus a Button D sync), and the second arm must not throw
    away what the first window found.
 
    KNOWN, ACCEPTED, AND DELIBERATELY NOT FIXED: the one wake that hits

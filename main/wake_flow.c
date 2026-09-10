@@ -366,8 +366,54 @@ bool wake_flow_dispatch_button_action(button_id_t btn, time_t *now, timer_state_
     *selection_changed = false;
     switch (btn) {
         case BTN_A:
+            /* Mode, and unbound this milestone: no action, no side effect,
+               nothing reported. No production caller can reach this arm
+               today — A is not in the EXT1 wake mask (buttons_policy.c),
+               the button-wake switch has no BTN_A case, and both drains
+               drop A from button_latch_pick's ALLOWED mask, so the pick
+               can never return it. It is kept as defence in depth for the
+               moment A gains a binding or a caller widens a mask, and the
+               suite exercises it by calling dispatch directly. Logged at
+               DEBUG on purpose: the design expects a week of mispresses
+               while the layout is learned, and an INFO line per mispress
+               is noise in every capture. */
+            ESP_LOGD(TAG, "button A pressed: no binding this milestone");
+            return false;
+        case BTN_B:
+            /* THE break guard — a short circuit and a diagnostic, NOT a
+               behavioural difference from the break gate inside
+               button_b_apply(). Do not talk yourself into believing the
+               painted and live states diverge here: all three production
+               callers capture `before` from timer_get_state() on the line
+               immediately before the dispatch call, with nothing in
+               between (wake_flow_handle_button_wake,
+               wake_flow_handle_timer_tick's latch drain, and
+               wake_flow_poll_break_buttons). And when `before` is
+               TIMER_BREAK the map refuses on every leg anyway
+               (BTN_B_NONE), so dispatch returns false with or without
+               this arm. What it buys is the INFO line naming the break as
+               the reason — the map's refusal below cannot tell a break
+               apart from an unreloadable expiry — and not walking into
+               the map for a press that has nothing to do.
+
+               `before` being by VALUE is load bearing all the same, just
+               not here: it is the RENDER policy's only record of which
+               layout is on the glass across a C swap during a break (see
+               wake_flow.h, and
+               test_row4_a_swap_during_a_break_renders_full_end_to_end).
+               So the parameter stays, and so does keying this guard on it
+               rather than on a second timer_get_state() call.
+
+               It does NOT block the EXPIRED reload the map now performs
+               during a break. TIMER_BREAK only ever lives on slot 0
+               (timer.c writes it to screen_slot() and nowhere else), while
+               `before` is the ACTIVE slot's state — so a break running
+               behind a selected reloadable extra arrives here as
+               TIMER_EXPIRED and walks straight through. The one case where
+               `before` IS TIMER_BREAK is slot 0 selected, and slot 0 is
+               Screen, which carries no def and can never reload anyway. */
             if (before == TIMER_BREAK) {
-                ESP_LOGI(TAG, "button A ignored during screen break");
+                ESP_LOGI(TAG, "button B ignored during screen break");
                 return false;
             }
             /* Start/resume immediately — waiting on NTP first confused
@@ -403,28 +449,36 @@ bool wake_flow_dispatch_button_action(button_id_t btn, time_t *now, timer_state_
                 case BTN_B_PAUSED:
                     return true;
                 case BTN_B_RELOADED:
-                    /* Bare, like the pause arm and like the reload the
-                       BTN_B arm below reaches: the slot really did move
+                    /* Bare, like the pause arm: the slot really did move
                        (EXPIRED -> IDLE at full duration), so the caller
-                       owes it an LED and a repaint. Reporting false here
-                       would let the same timer_reload() mean "acted" or
-                       "did nothing" depending only on which button got
-                       there. */
+                       owes it an LED and a repaint. This is where the old
+                       direct-reset arm's job went — narrowed on the way,
+                       from "any non-RUNNING reloadable slot" to EXPIRED
+                       only, which is the state where B has no start,
+                       pause or resume to do. */
                     return true;
                 default:
-                    return false; /* BTN_B_NONE — BREAK, or an EXPIRED slot that
-                                     cannot reload: renders only (wake path) */
+                    /* BTN_B_NONE: renders only (wake path). Two classes
+                       reach here from production callers — an EXPIRED
+                       slot the map cannot reload (Screen, which carries
+                       no def, or an extra with `reloadable` off), and a
+                       start the break gate refused because the selected
+                       activity is not break-eligible. A PAINTED
+                       TIMER_BREAK never gets this far; the guard above
+                       logs that one and returns. Hence plain
+                       "unavailable" rather than the old arm's "reset
+                       unavailable": a refused start is not a refused
+                       reset, and the state code carries the difference.
+
+                       Logged because the direct-reset arm this leg
+                       replaced logged its refusal, and because the
+                       refusal is otherwise completely silent: Screen
+                       expiring at the end of the day is the common case,
+                       and hardware_smoke_test.md case 20 reads this
+                       exact line off the monitor. */
+                    ESP_LOGI(TAG, "button B unavailable (state %d)", (int)before);
+                    return false;
             }
-        case BTN_B:
-            /* Reset the selected timer to full: only a reloadable extra
-               qualifies, and never while RUNNING (B is dropped from the
-               wake mask then, same as C; this guard covers presses that
-               ride in on another wake). */
-            if (!timer_reload_allowed() || !timer_reload()) {
-                ESP_LOGI(TAG, "Button B reset unavailable (state %d)", (int)before);
-                return false;
-            }
-            return true;
         case BTN_C:
             /* Swap timer type; refused only while RUNNING (pause first).
                A Screen Break deliberately does NOT refuse — going and
@@ -451,12 +505,12 @@ bool wake_flow_dispatch_button_action(button_id_t btn, time_t *now, timer_state_
 }
 
 bool wake_flow_poll_pause_button(void) {
-    /* Masked take: only the A bit is consumed — latched B/C presses stay
-       in the latch for the tick-wake drain (a poll during the grid wait
-       must not eat them).
+    /* Masked take: only the B bit is consumed — a latched C press stays in
+       the latch for the tick-wake drain (a poll during the grid wait must
+       not eat it).
 
        The take is unconditional and runs AHEAD of the state guard. That
-       ordering is observable in exactly one direction: an A press made
+       ordering is observable in exactly one direction: a B press made
        while the timer is not RUNNING is consumed here and thrown away,
        so nothing later in the wake can act on it.
 
@@ -466,23 +520,23 @@ bool wake_flow_poll_pause_button(void) {
        pauses exactly once too. The only thing the shipped order buys is
        the discarded press above, and that is a known latent defect, not
        a feature: wake_flow_wait_for_render_grid() can poll for up to
-       25 s, during which an A press while PAUSED/IDLE/EXPIRED does
+       25 s, during which a B press while PAUSED/IDLE/EXPIRED does
        nothing at all. Left exactly as it shipped and pinned by
-       test_row6_a_press_while_not_running_is_eaten_KNOWN_BUG (BUG-2 in
+       test_row6_b_press_while_not_running_is_eaten_KNOWN_BUG (BUG-2 in
        docs/planning/refactor.bugdiscoveries.md); fixing it is a behaviour
        change and belongs in its own commit, which must flip that test
        deliberately. */
-    bool a_pressed = buttons_take_pressed_mask(1u << BTN_A) != 0;
-    if (timer_get_state() != TIMER_RUNNING || !a_pressed)
+    bool b_pressed = buttons_take_pressed_mask(1u << BTN_B) != 0;
+    if (timer_get_state() != TIMER_RUNNING || !b_pressed)
         return false;
     time_t now = hal_time_now();
     timer_pause(now);
-    ESP_LOGI(TAG, "button A while awake: paused");
+    ESP_LOGI(TAG, "button B while awake: paused");
     return true;
 }
 
-bool wake_flow_poll_button_a_action(void) {
-    if (buttons_take_pressed_mask(1u << BTN_A) == 0)
+bool wake_flow_poll_button_b_action(void) {
+    if (buttons_take_pressed_mask(1u << BTN_B) == 0)
         return false;
     timer_state_t st = timer_get_state();
     /* The log line below is st's only reader, and it compiles away on the
@@ -494,7 +548,7 @@ bool wake_flow_poll_button_a_action(void) {
         return false;
     const timer_state_t after = timer_get_state(); /* post-apply half of the pair */
     (void)after;
-    ESP_LOGI(TAG, "button A during join: state %d -> %d", (int)st, (int)after);
+    ESP_LOGI(TAG, "button B during join: state %d -> %d", (int)st, (int)after);
     status_led_show_timer_state();
     return true;
 }
@@ -502,8 +556,12 @@ bool wake_flow_poll_button_a_action(void) {
 bool wake_flow_poll_break_buttons(void) {
     /* Unmasked take, unlike the two polls above: this is the last
        consumer before sleep, so anything left latched is discarded
-       anyway. D is excluded from the PICK rather than from the take. */
-    int pick = button_latch_pick(buttons_take_pressed(), (1u << BTN_A) | (1u << BTN_B) | (1u << BTN_C));
+       anyway. A and D are excluded from the PICK rather than from the
+       take — A because it has no binding, so admitting it would let it
+       win the pick and swallow the B or C press latched alongside it. The
+       take still clears A's bit, so a dropped A press is discarded here
+       rather than left pending for a later consumer. */
+    int pick = button_latch_pick(buttons_take_pressed(), (1u << BTN_B) | (1u << BTN_C));
     if (pick < 0)
         return false;
     time_t now = hal_time_now();
@@ -872,7 +930,7 @@ static void finish_action_and_render(button_id_t btn, timer_state_t before, time
        radio TX bursts must never coincide — brownout), then join, apply
        the buffered network→timer effects, reconcile a redefined timer.
        Re-render only when something changed what the panel shows (a
-       Button A action landed during the join, a config edit moved the
+       Button B action landed during the join, a config edit moved the
        timer, or the expiry passed while draining). */
     wake_flow_post_stats_snapshot();
     timer_state_t painted = timer_get_state();
@@ -1162,9 +1220,12 @@ void wake_flow_handle_timer_tick(void) {
        e-ink flush) is in the latch — act on it now or it evaporates at
        deep sleep (losing the start/pause race against the minute render).
        Same guards as a wake press via the shared dispatch; D stays
-       wake-press-only. Must run BEFORE maybe_wait_for_event: the
-       final-minute watch discards pre-watch latched presses at entry. */
-    int pick = button_latch_pick(buttons_take_pressed(), (1u << BTN_A) | (1u << BTN_B) | (1u << BTN_C));
+       wake-press-only, and A is out of the candidate set for the same
+       reason as in the break tail — no binding, so it could only win the
+       pick and swallow the press next to it. Must run BEFORE
+       maybe_wait_for_event: the final-minute watch discards pre-watch
+       latched presses at entry. */
+    int pick = button_latch_pick(buttons_take_pressed(), (1u << BTN_B) | (1u << BTN_C));
     if (pick >= 0) {
         timer_state_t painted = timer_get_state();
         bool swapped = false;
@@ -1210,7 +1271,11 @@ void wake_flow_handle_button_wake(void) {
     bool swapped = false;
 
     switch (btn) {
-        case BTN_A:
+        /* A is absent on purpose: it is not in the EXT1 wake mask, so the
+           decode cannot report it, and it has no action to run if the
+           silicon ever did. It falls to the default arm below and paints
+           the current state like any other undecoded wake, which is the
+           same nothing the dispatch's own A arm would do. */
         case BTN_B:
         case BTN_C:
             wake_flow_dispatch_button_action(btn, &now, before, true, &swapped);
@@ -1223,12 +1288,12 @@ void wake_flow_handle_button_wake(void) {
                the ota_on_sync runtime flag, which only NVS knows.
 
                Deliberately before net_apply_open, for the same reason as
-               the rollover, and deliberately NOT on Button A: A is the
+               the rollover, and deliberately NOT on Button B: B is the
                start/resume path, where the user is waiting on the panel
                and a manifest GET would sit between the press and the
                render. */
             ota_flow_arm(OTA_TRIGGER_SYNC, ota_batt_pct(), lock_gate_charge_locked());
-            /* NTP-gated paint, same as BTN A: sync now, MQTT after paint */
+            /* NTP-gated paint, same as BTN B: sync now, MQTT after paint */
             if (net_apply_open()) {
                 net_window_wait_ntp();
             }
@@ -1243,7 +1308,7 @@ void wake_flow_handle_button_wake(void) {
        above; its release bounce (or a second tap during the action) must
        not replay through the awake-press consumers below — e.g. a resume
        with <70 s remaining flows straight into the final-minute watch,
-       where a stale A edge would instantly re-pause. */
+       where a stale B edge would instantly re-pause. */
     buttons_take_pressed();
 
     finish_or_break(btn, before, now, swapped); /* e.g. resume with accrual already past the interval */

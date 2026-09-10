@@ -19,7 +19,7 @@ typedef enum {
 } net_finish_t;
 
 typedef struct {
-    void (*join_poll)(void);               /* nullable; keeps Button A live during the join */
+    void (*join_poll)(void);               /* nullable; keeps Button B live during the join */
     void (*on_config_applied)(void);       /* drop wake-scoped config caches */
     void (*on_active_reset_chirp)(void);   /* active slot redefined mid-run */
     void (*on_active_expired_alert)(void); /* owns the display: TIME'S UP + repaint */

@@ -77,7 +77,7 @@ menu "MagTag Timer"
         range 1 120
         help
             Length of the enforced Screen Break. When it ends the device
-            chimes and waits in PAUSED for a manual resume (Button A).
+            chimes and waits in PAUSED for a manual resume (Button B).
 
     comment "Extra timers (Button C swaps; empty name disables a slot)"
 
