@@ -761,9 +761,8 @@ void test_break_is_not_due_while_one_is_already_running(void) {
     TEST_ASSERT_EQUAL_INT32(0, timer_run_accum(T0 + 2000));
 }
 
-/* I9 names exactly two resets: break start and day rollover. Button B on
-   Screen (ParentTesting only) memsets the slot, which used to take the
-   balance with it. */
+/* I9 names exactly two resets: break start and day rollover. A reload of
+   Screen memsets the slot, which used to take the balance with it. */
 void test_reloading_screen_keeps_the_exposure_balance(void) {
     select_slot(SLOT_LAUNDRY);
     timer_start(T0, 3600);
@@ -1172,23 +1171,23 @@ void test_swap_allowed_false_without_extras(void) {
 }
 
 void test_reload_allowed_reloadable_timer_except_running(void) {
-    /* Drives the Button B wake mask: no ParentTesting needed on Piano */
+    /* Drives the Button B wake mask: a reloadable def qualifies */
     timer_select_next(); /* Piano (reloadable) */
-    TEST_ASSERT_TRUE(timer_reload_allowed(false));
+    TEST_ASSERT_TRUE(timer_reload_allowed());
     timer_start(T0, 900);
-    TEST_ASSERT_FALSE(timer_reload_allowed(false)); /* can't reset a running timer */
-    TEST_ASSERT_FALSE(timer_reload_allowed(true));  /* not even in parent mode */
+    TEST_ASSERT_FALSE(timer_reload_allowed()); /* can't reset a running timer */
     timer_pause(T0 + 100);
-    TEST_ASSERT_TRUE(timer_reload_allowed(false));
+    TEST_ASSERT_TRUE(timer_reload_allowed());
 }
 
-void test_reload_allowed_non_reloadable_needs_parent_testing(void) {
-    TEST_ASSERT_FALSE(timer_reload_allowed(false)); /* Screen, production */
-    TEST_ASSERT_TRUE(timer_reload_allowed(true));   /* Screen, parent mode */
+/* Screen (slot 0) carries no def, so it is never reloadable — the
+   property that stops a kid refunding their own screen time. No build
+   flag can turn it on any more; it is refused by construction. */
+void test_reload_allowed_non_reloadable_is_always_refused(void) {
+    TEST_ASSERT_FALSE(timer_reload_allowed()); /* Screen, IDLE */
     timer_start(T0, 3600);
     timer_start_break(T0 + 1800, 900);
-    TEST_ASSERT_FALSE(timer_reload_allowed(false));
-    TEST_ASSERT_TRUE(timer_reload_allowed(true)); /* parent escape from a break */
+    TEST_ASSERT_FALSE(timer_reload_allowed()); /* Screen, mid-break */
 }
 
 /* ---- multi-timer slots: per-slot independence ---- */
@@ -3025,7 +3024,7 @@ int main(void) {
     RUN_TEST(test_swap_allowed_tracks_state_and_extras);
     RUN_TEST(test_swap_allowed_false_without_extras);
     RUN_TEST(test_reload_allowed_reloadable_timer_except_running);
-    RUN_TEST(test_reload_allowed_non_reloadable_needs_parent_testing);
+    RUN_TEST(test_reload_allowed_non_reloadable_is_always_refused);
     RUN_TEST(test_slot_states_are_independent);
     RUN_TEST(test_expiry_wall_accessor_tracks_active_slot);
     RUN_TEST(test_break_due_follows_the_running_slots_eligibility);

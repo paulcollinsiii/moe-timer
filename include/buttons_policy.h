@@ -19,7 +19,7 @@ extern "C" {
 typedef struct {
     bool enable;         /* the sleep outcome's arm decision: false on a locked sleep */
     bool swap_allowed;   /* timer_swap_allowed() — gates BTN_C */
-    bool reload_allowed; /* timer_reload_allowed(PARENT_TESTING) — gates BTN_B */
+    bool reload_allowed; /* timer_reload_allowed() — gates BTN_B */
 } buttons_policy_in_t;
 
 /* Which buttons may wake the device from the sleep being entered. Bit n =

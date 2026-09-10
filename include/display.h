@@ -71,7 +71,7 @@ typedef struct {
     uint16_t completions;
     bool reloadable;
     bool swap_available;   /* Button C label (extras exist, state allows swap) */
-    bool reload_available; /* Button B label without ParentTesting */
+    bool reload_available; /* Button B label (selected timer reloadable) */
     /* Button A label: false while a Screen Break refuses to start this
        slot (not break_eligible). Same "label shows iff a press would
        work" convention as the two above. */

@@ -266,8 +266,9 @@ static void build_button_row(lv_obj_t *scr, const display_state_t *st) {
     if (a_sym && st->start_available) {
         make_label(scr, a_sym, &lv_font_montserrat_12, LV_ALIGN_BOTTOM_MID, BTN_MID_OFS(0), -2);
     }
-    /* reload_available already folds in ParentTesting and the not-RUNNING
-       rule (timer_reload_allowed) — label shows iff a press would work. */
+    /* reload_available already folds in the def's reloadable flag and the
+       not-RUNNING rule (timer_reload_allowed) — label shows iff a press
+       would work. */
     if (st->reload_available) {
         make_label(scr, "Reset", &lv_font_montserrat_12, LV_ALIGN_BOTTOM_MID, BTN_MID_OFS(1), -2);
     }

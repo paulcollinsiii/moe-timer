@@ -58,7 +58,7 @@ typedef enum {
 typedef struct {
     const char *name; /* NULL or "" = slot disabled */
     int32_t duration_sec;
-    bool reloadable; /* Button B reloads without ParentTesting */
+    bool reloadable; /* Button B may reload this timer the same day */
     /* "This activity is time away from a screen." One property, two
        consequences: the timer may be STARTED during a Screen Break, and
        its RUNNING time DRAINS the exposure balance instead of feeding it.
@@ -290,10 +290,10 @@ int timer_break_interrupted_slot(void);
    dedicated wake. */
 bool timer_any_extra_running(void);
 /* True when a Button B press would reset the active slot: never while
-   RUNNING; otherwise when the slot is reloadable or parent_testing is
-   compiled in. Also gates B as an EXT1 wake source (same rationale as
-   timer_swap_allowed). */
-bool timer_reload_allowed(bool parent_testing);
+   RUNNING, and otherwise only when the slot's def is reloadable. Screen
+   (slot 0) carries no def, so it never qualifies. Also gates B as an EXT1
+   wake source (same rationale as timer_swap_allowed). */
+bool timer_reload_allowed(void);
 /* Return the active slot to IDLE at full duration, keeping its completion
    counter. Refused (false) while RUNNING. */
 bool timer_reload(void);

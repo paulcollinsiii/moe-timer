@@ -30,15 +30,6 @@ menu "MagTag Timer"
         default ""
         depends on MAGTAG_MQTT_URI != ""
 
-    config MAGTAG_PARENT_TESTING
-        bool "Button B manually resets the timer"
-        default y
-        help
-            Testing convenience: Button B resets the timer to IDLE with the
-            full daily allocation. Disable for production builds so the
-            allocation only resets on day rollover — otherwise the timer's
-            user could refund their own screen time.
-
     config MAGTAG_WEEKDAY_MIN
         int "Weekday screen-time allocation (minutes)"
         default 60
@@ -113,9 +104,9 @@ menu "MagTag Timer"
         default n
         depends on MAGTAG_TIMER1_NAME != ""
         help
-            Button B resets this timer to full (same day, no ParentTesting
-            needed) whenever it is not RUNNING. The mode line then shows how
-            often it ran to completion today, e.g. "Piano (x2) - 15 min".
+            Button B resets this timer to full (same day) whenever it is not
+            RUNNING. The mode line then shows how often it ran to completion
+            today, e.g. "Piano (x2) - 15 min".
 
     config MAGTAG_TIMER1_BREAK_ELIGIBLE
         bool "Extra timer 1 is break-eligible"

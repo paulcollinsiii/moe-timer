@@ -5,8 +5,8 @@
    when a swap would actually succeed — extra timers exist and the active
    timer is not RUNNING (a Screen Break does NOT refuse, so C stays a wake
    source right through one). B likewise wakes only when a reset would
-   succeed — a reloadable selected timer or the parent-testing reset, and
-   never while RUNNING. A and D are unconditional.
+   succeed — the selected timer's def is reloadable — and never while
+   RUNNING. A and D are unconditional.
 
    Non-wake buttons are left out of the EXT1 mask AND unconfigured in the
    RTC domain by the driver: an open button on an isolated pad draws

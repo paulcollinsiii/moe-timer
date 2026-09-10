@@ -53,9 +53,9 @@ credentials.**
         IDLE with the new day's allocation.
 13. [ ] **Wake buttons**: A and D always wake the device. B and C wake only
         when their press would succeed (the EXT1 mask is rebuilt at every
-        sleep entry): B needs a reloadable selected timer or
-        `CONFIG_MAGTAG_PARENT_TESTING=y`, and never wakes mid-run (case 8);
-        C needs extra timers configured and no RUNNING/BREAK (case 10).
+        sleep entry): B needs a reloadable selected timer and never wakes
+        mid-run (case 8); C needs extra timers configured and no
+        RUNNING/BREAK (case 10).
 14. [ ] **Panel protection**: mash buttons rapidly — refreshes serialize, log
         shows `refresh rejected` if under 1 s apart, no crash.
 15. [ ] **Held-button dismissal**: dismiss the expiry alert while *holding*
@@ -76,15 +76,24 @@ credentials.**
         or power-cycle. On the next boot (after the boot sync corrects the
         clock, for power-on) the log shows `Timer state restored from NVS
         snapshot` and the countdown continues — the allocation is NOT
-        refunded. Refunding requires Button B (parent mode, case 20) or a
-        genuine day rollover. With WiFi unavailable on a power-on the
-        restore cannot validate (no clock) and the device fails open to
-        IDLE. Note: EN reset mid-run (before expiry) intentionally restores
-        the in-flight countdown — that is crash recovery, not a refund; the
-        run resumes with the remaining time it had.
-20. [ ] **Production reset gate**: with `CONFIG_MAGTAG_PARENT_TESTING=n`,
-        Button B logs `Button B reset disabled` and does not reset; the
-        allocation resets only on day rollover. (Default build: =y, B resets.)
+        refunded. Refunding the Screen allocation requires a genuine day
+        rollover — Button B reloads only a reloadable extra (case 20). With
+        WiFi unavailable on a power-on the restore cannot validate (no
+        clock) and the device fails open to IDLE. Note: EN reset mid-run
+        (before expiry) intentionally restores the in-flight countdown —
+        that is crash recovery, not a refund; the run resumes with the
+        remaining time it had.
+20. [ ] **Screen reset gate**: with Screen selected, a plain press of
+        Button B does nothing at all — no wake, no refresh, and no log
+        line. That is correct, not a fault: Screen carries no def, so it is
+        never reloadable, B is dropped from the EXT1 mask (case 13) and the
+        driver leaves the pad unconfigured, so a press on a sleeping device
+        is never seen. To observe the refusal itself, hold B down through a
+        periodic 55 s tick wake so the press rides in on that wake's latch —
+        the log then shows `Button B reset unavailable` and nothing resets;
+        the Screen allocation resets only on a day rollover. Swap to a
+        reloadable extra (not RUNNING) and the same press does reset that
+        timer to full.
 21. [ ] **Final-minute countdown**: the pre-expiry wake lands ~70 s out
         (planner); the display then steps through 00:01:00 / 00:00:45 /
         00:00:30 / 00:00:15 as partial refreshes, the last 15 s count down
@@ -111,8 +120,8 @@ credentials.**
         class — fires during quiet hours too); any button silences it.
         Break start may lag the interval by up to one 55 s tick.
 25. [ ] **Break is enforced**: during the break, Button A logs
-        `button A ignored during screen break` and nothing resumes. B
-        (parent mode) still resets; D still syncs.
+        `button A ignored during screen break` and nothing resumes. B does
+        nothing on Screen; D still syncs.
 26. [ ] **Break end**: at the end of the break (within ~1 s), double-beep
         chime, display returns to the normal layout showing PAUSED with the
         frozen remaining time; Button A resumes and accrual starts fresh

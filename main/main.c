@@ -36,12 +36,11 @@
    to (.claude/CLAUDE.md) is that it may contain wiring and device calls
    but may not contain a DECISION. Every symbol below with an executable
    statement names the numbered reason that admits it; the rest — the log
-   TAG, the PARENT_TESTING macro and the NET_APPLY_OPS and OTA_FLOW_OPS
-   tables — are pure wiring, admitted by the headline rule rather than by
-   a number, because a construct with nothing to execute has nothing to
-   decide. The numbered reasons, quoted from the rule rather than
-   paraphrased — the rule is not negotiable against the code that has to
-   satisfy it:
+   TAG and the NET_APPLY_OPS and OTA_FLOW_OPS tables — are pure wiring,
+   admitted by the headline rule rather than by a number, because a
+   construct with nothing to execute has nothing to decide. The numbered
+   reasons, quoted from the rule rather than paraphrased — the rule is not
+   negotiable against the code that has to satisfy it:
 
      1. Boot ordering is a hardware contract.
      2. It runs in an ISR or esp_timer context where a module API is not
@@ -85,12 +84,6 @@ static const char *TAG = "main";
 
 /* Timezone default lives in nvs_defaults.h (NVS_DEFAULT_TZ); the active TZ
    comes from NVS at boot so HA can change it (ProductOverview section 1). */
-/* Kconfig bool as a C expression (defined as 1 when =y, absent when =n) */
-#if CONFIG_MAGTAG_PARENT_TESTING
-#define PARENT_TESTING true
-#else
-#define PARENT_TESTING false
-#endif
 
 /* Residency 4. Adapts the wake-scoped quiet-hours cache to neopixel.c's
    bool(void) callback ABI, which has nowhere to take the clock from. One

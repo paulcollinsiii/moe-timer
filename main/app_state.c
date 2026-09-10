@@ -150,7 +150,7 @@ display_state_t app_state_display(const app_state_in_t *in, int32_t remaining, t
         .completions = timer_completions(),
         .reloadable = (def != NULL) && def->reloadable,
         .swap_available = timer_swap_allowed(),
-        .reload_available = timer_reload_allowed(in->parent_testing),
+        .reload_available = timer_reload_allowed(),
         .start_available = timer_start_allowed(),
         /* Rendered on the battery row. The app descriptor is a device
            read, so it arrives injected — app_state stays host-testable

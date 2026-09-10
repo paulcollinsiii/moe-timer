@@ -31,7 +31,6 @@ static const app_state_in_t IN_HEALTHY = {
     .batt_mv = 4100, /* well above the warn band */
     .light_mv = 321,
     .charge_locked = false,
-    .parent_testing = false,
     .fw_version = "1.2.3",
     .reset_reason = "DEEPSLEEP",
 };
@@ -40,7 +39,6 @@ static const app_state_in_t IN_LOW_BATT = {
     .batt_mv = 3200, /* deep in the warn band */
     .light_mv = 0,
     .charge_locked = true,
-    .parent_testing = false,
     .fw_version = "1.2.3",
     .reset_reason = "PANIC",
 };
@@ -307,12 +305,12 @@ void test_display_swap_blocked_while_running(void) {
     TEST_ASSERT_FALSE(app_state_display(&IN_HEALTHY, 0, T0).swap_available);
 }
 
-void test_display_reload_follows_parent_testing_gate(void) {
-    /* Screen (not reloadable) only resets under ParentTesting */
+void test_display_reload_follows_the_timer_gate(void) {
+    /* Screen carries no def, so it is never reloadable; Piano is. No
+       build flag can turn Screen on — it is refused by construction. */
     TEST_ASSERT_FALSE(app_state_display(&IN_HEALTHY, 0, T0).reload_available);
-    app_state_in_t parent = IN_HEALTHY;
-    parent.parent_testing = true;
-    TEST_ASSERT_TRUE(app_state_display(&parent, 0, T0).reload_available);
+    select_slot(1); /* Piano (reloadable) */
+    TEST_ASSERT_TRUE(app_state_display(&IN_HEALTHY, 0, T0).reload_available);
 }
 
 /* ---- background Screen Break --------------------------------------------
@@ -549,7 +547,7 @@ int main(void) {
     RUN_TEST(test_display_fw_version_passes_through);
     RUN_TEST(test_display_break_duration_from_nvs);
     RUN_TEST(test_display_swap_blocked_while_running);
-    RUN_TEST(test_display_reload_follows_parent_testing_gate);
+    RUN_TEST(test_display_reload_follows_the_timer_gate);
     RUN_TEST(test_display_break_remaining_survives_the_swap_to_an_extra);
     RUN_TEST(test_display_break_banner_only_when_screen_is_not_selected);
     RUN_TEST(test_display_break_banner_false_without_a_break);

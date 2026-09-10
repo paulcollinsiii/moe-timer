@@ -202,13 +202,11 @@ bool timer_any_extra_running(void) {
     return false;
 }
 
-bool timer_reload_allowed(bool parent_testing) {
+bool timer_reload_allowed(void) {
     if (active()->state == TIMER_RUNNING)
         return false; /* can't reset a running timer — pause first */
     const timer_def_t *def = timer_active_def();
-    if (def != NULL && def->reloadable)
-        return true;
-    return parent_testing; /* incl. the parent escape from a Screen Break */
+    return def != NULL && def->reloadable; /* Screen has no def: never */
 }
 
 bool timer_reload(void) {

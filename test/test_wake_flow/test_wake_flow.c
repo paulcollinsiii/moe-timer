@@ -363,8 +363,7 @@ static timer_state_t flow_state; /* the ACTIVE slot's state */
 static time_t flow_pause_arg;
 static btn_a_action_t flow_a_result;
 static time_t flow_a_apply_arg;
-static bool flow_slot_reloadable;  /* the selected def's reloadable flag */
-static int flow_reload_parent_arg; /* tri-state: -1 = never asked */
+static bool flow_slot_reloadable; /* the selected def's reloadable flag */
 static bool flow_reload_ok;
 static bool flow_select_ok;
 static int flow_select_slot;               /* where a successful swap lands */
@@ -451,18 +450,15 @@ btn_a_action_t button_a_apply(time_t at) {
 }
 
 /* timer.c's rule, modelled off the shipping implementation rather than
-   off a free switch: a RUNNING slot is never reloadable (pause first), a
-   reloadable def always is, and everything else falls back to the build
-   flag. Keeping the RUNNING half real is what makes row 19 a statement
-   about the shipping guard instead of about an injected bool. */
-bool timer_reload_allowed(bool parent_testing) {
-    flow_reload_parent_arg = parent_testing ? 1 : 0;
+   off a free switch: a RUNNING slot is never reloadable (pause first),
+   and only a reloadable def ever is. Keeping the RUNNING half real is
+   what makes row 19 a statement about the shipping guard instead of
+   about a free-floating flag. */
+bool timer_reload_allowed(void) {
     flow_log_push(EV_RELOAD_ALLOWED);
     if (flow_state == TIMER_RUNNING)
         return false;
-    if (flow_slot_reloadable)
-        return true;
-    return parent_testing;
+    return flow_slot_reloadable;
 }
 
 bool timer_reload(void) {
@@ -949,10 +945,8 @@ static bool flow_made_break_banner;
 static int32_t flow_made_break_remaining;
 
 /* What the assembly was handed. flow_assembled_mv is the ADC value that
-   travelled; flow_assembled_parent the compile-time flag, which the
-   ParentTesting twin binary is what proves both values of. */
+   travelled. */
 static int flow_assembled_mv;
-static bool flow_assembled_parent;
 /* The version string the assembly handed over. The main screen renders it
    on the battery row, so a paint that leaves it NULL blanks the version on
    hardware — which is exactly what shipped once, because this stub used to
@@ -999,7 +993,6 @@ int battery_percent_from_mv(int mv) {
 display_state_t app_state_display(const app_state_in_t *in, int32_t remaining, time_t now) {
     flow_log_push(EV_MAKE_STATE);
     flow_assembled_mv = in->batt_mv;
-    flow_assembled_parent = in->parent_testing;
     flow_assembled_fw = in->fw_version;
     /* Row 3's pair: the slot the selection was on when the state was
        assembled, and the number that went with it. A paint that runs
@@ -1435,7 +1428,6 @@ void setUp(void) {
     flow_batt_pct = 67;
     flow_batt_unreadable = false;
     flow_assembled_mv = -1;
-    flow_assembled_parent = true; /* poisoned: the shipping build is false */
     flow_assembled_fw = "poison"; /* not the descriptor's string */
     /* Wake-sticky on device (one wake is one boot), so the suite zeroes it
        directly — as test_lock_gate does with the lock flags — rather than
@@ -1567,7 +1559,6 @@ void setUp(void) {
 
     /* Poisoned: values the module cannot produce, so "never written" and
        "written with what we expected" can never be the same assertion. */
-    flow_reload_parent_arg = -1; /* never asked */
     flow_shift_arg = -424242;
     flow_delay_at_led = 0xFFFFFFFFu;
     flow_seen_interval_default = 0xFFFFu;
@@ -1964,22 +1955,13 @@ void test_the_state_assembly_hands_the_battery_read_to_app_state(void) {
     TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_MAKE_STATE));
 }
 
-/* The other field the assembly carries. PARENT_TESTING is a compile-time
-   Kconfig bool, so this case only proves one of its two values per binary
-   — which is exactly what the test_wake_flow_parent twin exists for. */
-void test_the_state_assembly_carries_the_parent_testing_flag(void) {
-    (void)make_display_state(0, flow_at(15, 0));
-    TEST_ASSERT_EQUAL_INT(PARENT_TESTING ? 1 : 0, flow_assembled_parent ? 1 : 0);
-}
-
-/* The third field, and the one with no compile-time excuse. The main
-   screen renders the running version on the battery row, so it has to
-   travel on the PAINT path, not just the stats path — and it did not:
+/* The other field the assembly carries. The main screen renders the
+   running version on the battery row, so it has to travel on the PAINT
+   path, not just the stats path — and it did not:
    make_display_state() left .fw_version implicitly NULL while
    stats_collect() set it, so every main-screen paint on device took the
    empty-version branch and rendered exactly as it had before the feature
-   existed. Nothing caught it because this stub recorded only batt_mv and
-   parent_testing.
+   existed. Nothing caught it because this stub recorded only batt_mv.
 
    Asserted against the descriptor stub's string rather than merely
    non-NULL, so substituting some other string on the way in fails too. */
@@ -2086,15 +2068,6 @@ void test_the_stat_gather_carries_the_charge_lock_either_way(void) {
     flow_charge_locked = false;
     stats_collect(&snap);
     TEST_ASSERT_FALSE(flow_stats_in.charge_locked);
-}
-
-/* PARENT_TESTING is a compile-time Kconfig bool, so this proves one of its
-   two values per binary — the test_wake_flow_parent twin is what proves
-   the other, the same arrangement the state assembly above uses. */
-void test_the_stat_gather_carries_the_parent_testing_flag(void) {
-    stats_snapshot_t snap;
-    stats_collect(&snap);
-    TEST_ASSERT_EQUAL_INT(PARENT_TESTING ? 1 : 0, flow_stats_in.parent_testing ? 1 : 0);
 }
 
 /* The firmware version has to come from the image description. A literal
@@ -2767,14 +2740,14 @@ void test_a_pause_neither_holds_nor_syncs_nor_moves_the_clock(void) {
 
 /* ---- ROW 19: Button B ---------------------------------------------------
 
-   B resets the selected timer to full. Reloadable extras allow it
-   outright; anything else needs the ParentTesting build flag — and
-   nothing allows it while the slot is RUNNING, because a reset that
-   refunds a running allocation is the trivial way around the whole
-   screen-time budget. B is dropped from the wake mask while RUNNING, so
-   this guard exists for presses that ride in on ANOTHER wake's latch. */
+   B resets the selected timer to full. Only a reloadable extra allows it
+   — Screen has no def and so never qualifies — and nothing allows it
+   while the slot is RUNNING, because a reset that refunds a running
+   allocation is the trivial way around the whole screen-time budget. B is
+   dropped from the wake mask while RUNNING, so this guard exists for
+   presses that ride in on ANOTHER wake's latch. */
 
-void test_row19_button_b_while_running_without_parent_testing_is_refused(void) {
+void test_row19_button_b_while_running_is_refused(void) {
     flow_state = TIMER_RUNNING;
     flow_slot_reloadable = false;
     mock_time_set(flow_at(16, 0));
@@ -2801,20 +2774,19 @@ void test_button_b_is_never_allowed_while_the_slot_is_running(void) {
     TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_RELOAD));
 }
 
-/* The gate is asked with the BUILD FLAG, not with a literal: hard-coding
-   true here would hand every device the parent escape, and hard-coding
-   false would break the parent build's reset of a non-reloadable slot.
-   PARENT_TESTING is visible in this TU (wake_flow.c defines it), so the
-   assertion tracks whichever way the build is configured. */
-void test_row19_the_reload_gate_is_asked_with_the_build_flag(void) {
+/* The dispatch takes the gate's verdict on a slot that is NOT running
+   either: Screen carries no reloadable def, so an IDLE press is refused
+   just the same. Short-circuiting the gate off the RUNNING check alone
+   would hand every device a reset of its own screen time. */
+void test_row19_a_non_reloadable_slot_is_refused_even_when_idle(void) {
     flow_state = TIMER_IDLE;
     flow_slot_reloadable = false;
     mock_time_set(flow_at(16, 0));
 
-    (void)flow_dispatch(BTN_B, flow_at(16, 0), TIMER_IDLE, true);
+    TEST_ASSERT_FALSE(flow_dispatch(BTN_B, flow_at(16, 0), TIMER_IDLE, true));
 
     TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_RELOAD_ALLOWED));
-    TEST_ASSERT_EQUAL_INT(PARENT_TESTING ? 1 : 0, flow_reload_parent_arg);
+    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_RELOAD)); /* never attempted */
 }
 
 void test_button_b_resets_a_reloadable_slot_when_the_rule_allows_it(void) {
@@ -3341,8 +3313,8 @@ void test_the_compile_time_defaults_stand_when_nvs_never_stored_them(void) {
 
 /* ZERO is the disable, and nothing else is. A guard widened by one (`<= 1`)
    keeps the row-22 case passing while silently switching eye rest off for
-   every device configured with a one-minute interval — which is what
-   ParentTesting demos actually use. Mutation testing is what surfaced it:
+   every device configured with a one-minute interval — which is what a
+   bench demo actually uses. Mutation testing is what surfaced it:
    `== 0` -> `<= 1` escaped a suite that only ever tried 0 and 30. */
 void test_row22_a_one_minute_interval_is_an_interval_not_a_disable(void) {
     flow_interval_min = 1;
@@ -5529,9 +5501,11 @@ void test_the_latch_drain_runs_before_the_event_watch(void) {
    no LED of its own, no render, no window drain. */
 void test_a_refused_latched_press_never_reaches_the_tail(void) {
     flow_tick_clock(flow_at(15, 0));
-    /* RUNNING is the refusal that holds under BOTH builds of this suite:
-       the parent escape can reset a non-reloadable slot, but nothing
-       resets a slot that is still running. */
+    /* RUNNING is refused by timer_reload_allowed()'s FIRST guard, before
+       it ever looks at the slot's def, so the refusal holds whether or not
+       the selected slot is reloadable — which is exactly what isolates the
+       latch-tail behaviour under test from the reloadable-ness of the
+       slot the case happens to select. */
     flow_state = TIMER_RUNNING;
     flow_slot_reloadable = true;
     flow_press(BTN_B);
@@ -6657,7 +6631,6 @@ int main(void) {
     RUN_TEST(test_the_repaint_happens_once_per_edge);
     RUN_TEST(test_a_silent_break_end_still_repaints);
     RUN_TEST(test_the_state_assembly_hands_the_battery_read_to_app_state);
-    RUN_TEST(test_the_state_assembly_carries_the_parent_testing_flag);
     RUN_TEST(test_the_state_assembly_carries_the_firmware_version);
     RUN_TEST(test_paint_carries_the_firmware_version);
     RUN_TEST(test_the_state_assembly_neither_ticks_nor_paints);
@@ -6665,7 +6638,6 @@ int main(void) {
     RUN_TEST(test_the_full_repaint_never_goes_partial);
     RUN_TEST(test_the_stat_gather_reads_both_adcs_into_their_own_fields);
     RUN_TEST(test_the_stat_gather_carries_the_charge_lock_either_way);
-    RUN_TEST(test_the_stat_gather_carries_the_parent_testing_flag);
     RUN_TEST(test_the_stat_gather_publishes_the_image_version);
     RUN_TEST(test_the_stat_gather_publishes_the_decoded_reset_reason);
     RUN_TEST(test_the_stat_gather_reads_the_injected_clock_not_the_wall_clock);
@@ -6706,9 +6678,9 @@ int main(void) {
     RUN_TEST(test_a_start_on_an_already_synced_wake_opens_no_second_window);
     RUN_TEST(test_a_resume_takes_exactly_the_same_path_as_a_start);
     RUN_TEST(test_a_pause_neither_holds_nor_syncs_nor_moves_the_clock);
-    RUN_TEST(test_row19_button_b_while_running_without_parent_testing_is_refused);
+    RUN_TEST(test_row19_button_b_while_running_is_refused);
     RUN_TEST(test_button_b_is_never_allowed_while_the_slot_is_running);
-    RUN_TEST(test_row19_the_reload_gate_is_asked_with_the_build_flag);
+    RUN_TEST(test_row19_a_non_reloadable_slot_is_refused_even_when_idle);
     RUN_TEST(test_button_b_resets_a_reloadable_slot_when_the_rule_allows_it);
     RUN_TEST(test_button_b_is_refused_when_the_reload_itself_declines);
     RUN_TEST(test_button_b_lights_nothing_and_opens_nothing_of_its_own);

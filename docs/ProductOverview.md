@@ -57,7 +57,7 @@ remaining = expiry_wall_time - time(NULL)
 
 This makes the countdown inherently drift-resistant: NTP syncs correct `time(NULL)` via SNTP, so remaining time recalculates correctly without ever modifying `expiry_wall_time`. The only time `expiry_wall_time` changes is at timer start (`IDLE → RUNNING`) or resume after pause (`PAUSED → RUNNING`: `expiry_wall_time = time(NULL) + remaining_at_pause`).
 
-Timer state and `expiry_wall_time` are stored in **RTC slow memory** (survives deep sleep) and additionally snapshotted to **NVS** on every state transition (XOR checksum + version + plausibility validation). After a panic, external reset, or power cycle the boot path restores the snapshot as long as its stored date is still today — so losing power does not refund the day's allocation. The allocation resets only on a genuine day rollover or via Button B when `CONFIG_MAGTAG_PARENT_TESTING` is enabled.
+Timer state and `expiry_wall_time` are stored in **RTC slow memory** (survives deep sleep) and additionally snapshotted to **NVS** on every state transition (XOR checksum + version + plausibility validation). After a panic, external reset, or power cycle the boot path restores the snapshot as long as its stored date is still today — so losing power does not refund the day's allocation. The allocation resets only on a genuine day rollover.
 
 ### 3 · Deep Sleep Architecture
 
@@ -157,7 +157,7 @@ a kid on a 15 min eye rest can go and run Piano or Violin.
   plus a swap hint over Button C. The break can be earned entirely by a
   non-eligible extra timer, with Screen never started that day.
 - During, with Screen selected: Button A is ignored (no early resume); B
-  (parent mode), C and D work.
+  does nothing (Screen is not reloadable); C and D work.
 - During, with an extra timer selected: the normal layout for that timer,
   with an inverted `BREAK m:ss` chip in the header where `Last sync`
   normally sits. A **break-eligible** timer starts, pauses, expires and
@@ -212,8 +212,8 @@ it.
 
 **Configure non-eligible timers with `RELOADABLE=n`.** One run of a chore
 timer is capped by its own duration, which is the earned-by-the-chore
-intent; but Button B reloads a reloadable timer without ParentTesting, so a
-reloadable chore can be re-earned without doing the chore again.
+intent; but Button B reloads a reloadable timer, so a reloadable chore can
+be re-earned without doing the chore again.
 
 A kid can of course leave Violin running without touching the violin. That
 is unfixable in principle — the device cannot see the room — and it is the
@@ -230,11 +230,11 @@ All state is persisted in **RTC slow memory** (survives deep sleep) with an NVS 
 | Button | GPIO | Action |
 |--------|------|--------|
 | A | 15 | Start (IDLE/PAUSED → RUNNING, immediate; NTP sync after) / Pause (RUNNING → PAUSED). During a Screen Break, a **start** is refused on any slot that is not break-eligible — including Screen — and the ▶ label is not drawn (see 5a/5b); pausing is never gated |
-| B | 14 | Reset the **selected** timer to IDLE at full duration — never while RUNNING (pause first): for a reloadable extra timer always, otherwise only when `CONFIG_MAGTAG_PARENT_TESTING=y` |
+| B | 14 | Reset the **selected** timer to IDLE at full duration — never while RUNNING (pause first), and only for a reloadable extra timer; Screen has no def and is never reloadable |
 | C | 12 | Swap timer type (Screen → extra 1 → … → Screen); refused while RUNNING (a Screen Break does **not** refuse — see 5a) |
 | D | 11 | Force NTP re-sync + full display refresh |
 
-Wake sources: A and D always; B and C only when their press would succeed, since the EXT1 mask is rebuilt at every sleep entry and a press that could only be refused must not burn battery or a panel refresh. B: the selected timer is reloadable or `CONFIG_MAGTAG_PARENT_TESTING=y`, and never while RUNNING (pause first). C: extra timers configured AND the active timer not RUNNING — a Screen Break leaves C live, so the mask keeps it as a wake source throughout. Buttons are debounced in software (10 ms).
+Wake sources: A and D always; B and C only when their press would succeed, since the EXT1 mask is rebuilt at every sleep entry and a press that could only be refused must not burn battery or a panel refresh. B: the selected timer is reloadable, and never while RUNNING (pause first). C: extra timers configured AND the active timer not RUNNING — a Screen Break leaves C live, so the mask keeps it as a wake source throughout. Buttons are debounced in software (10 ms).
 
 ### 6a · Extra timers (v1.3)
 
@@ -242,7 +242,7 @@ Up to four additional countdown timers (menuconfig: `MAGTAG_TIMER<n>_NAME/_MIN/_
 
 - No eye-rest breaks of *their own* — the break always belongs to the Screen slot — but a **non-eligible** timer feeds the shared screen-exposure balance (5b) and so can earn one, and a **break-eligible** timer stays usable during a break and drains the balance, which is what the break time is for (see 5a).
 - Fixed configured duration instead of the day-schedule allocation.
-- **Reloadable** timers reset to full via Button B on the same day, no ParentTesting needed. The mode line then counts the day's completed runs (reached 00:00): `Meditation (x2) - 10 min`. A mid-run reset does not count; non-reloadable timers never show a counter — once expired they stay depleted until rollover.
+- **Reloadable** timers reset to full via Button B on the same day. The mode line then counts the day's completed runs (reached 00:00): `Meditation (x2) - 10 min`. A mid-run reset does not count; non-reloadable timers never show a counter — once expired they stay depleted until rollover.
 - **Break-eligible** timers are genuine time away from a screen (see 5b). Configure chore timers non-eligible *and* `RELOADABLE=n`.
 - Day rollover resets every timer, clears the counters, and reverts the selection to Screen.
 
@@ -297,9 +297,9 @@ no button row.
 
 Button labels sit above the physical buttons: A shows the action a press
 will take (play when IDLE/PAUSED, pause when RUNNING, hidden when EXPIRED),
-"Reset" appears when `CONFIG_MAGTAG_PARENT_TESTING=y` or the selected timer
-is reloadable (and not RUNNING), C shows a swap arrow when extra timers are
-configured and the state allows swapping, D is the sync/refresh symbol.
+"Reset" appears when the selected timer is reloadable (and not RUNNING),
+C shows a swap arrow when extra timers are configured and the state allows
+swapping, D is the sync/refresh symbol.
 When an extra timer is selected, the bottom-left mode line shows its name,
 completion counter, and duration (e.g. `Meditation (x2) · 10 min`) instead
 of the day-type + allocation.

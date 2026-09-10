@@ -115,11 +115,7 @@ void buttons_configure_wakeup_if(bool enable) {
     buttons_policy_in_t pol = {
         .enable = enable,
         .swap_allowed = timer_swap_allowed(),
-#if CONFIG_MAGTAG_PARENT_TESTING
-        .reload_allowed = timer_reload_allowed(true),
-#else
-        .reload_allowed = timer_reload_allowed(false),
-#endif
+        .reload_allowed = timer_reload_allowed(),
     };
     uint8_t wake = buttons_policy_wake_mask(&pol);
     buttons_watch_end();

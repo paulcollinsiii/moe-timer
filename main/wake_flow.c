@@ -98,16 +98,6 @@ typedef enum {
 _Static_assert(ESP_SLEEP_WAKEUP_EXT1 == 3, "wake-cause decode assumes IDF's numbering; host fallback mirrors it");
 _Static_assert(ESP_SLEEP_WAKEUP_TIMER == 4, "wake-cause decode assumes IDF's numbering; host fallback mirrors it");
 
-/* Kconfig bool as a C expression (defined as 1 when =y, absent when =n),
-   the same shape main.c and buttons.c use. sdkconfig.h arrives with
-   timer.h on firmware; the host build has no sdkconfig and the flag reads
-   false there, which is the shipping configuration. */
-#if CONFIG_MAGTAG_PARENT_TESTING
-#define PARENT_TESTING true
-#else
-#define PARENT_TESTING false
-#endif
-
 /* IDLE shows only the clock — sync on the menuconfig cadence (default
    hourly) instead of every 10 min. The S2 has no crystal-backed RTC; its
    RC-oscillator timekeeping can drift minutes/day, so don't set this too
@@ -176,7 +166,6 @@ static display_state_t make_display_state(int32_t remaining, time_t now) {
     ESP_LOGD(TAG, "battery: %d mV (%d%%)", mv, batt_pct);
     app_state_in_t in = {
         .batt_mv = mv,
-        .parent_testing = PARENT_TESTING,
         .fw_version = esp_app_get_description()->version,
     };
     return app_state_display(&in, remaining, now);
@@ -417,11 +406,11 @@ bool wake_flow_dispatch_button_action(button_id_t btn, time_t *now, timer_state_
                     return false; /* EXPIRED: renders only (wake path) */
             }
         case BTN_B:
-            /* Reset the selected timer to full: reloadable extras without
-               ParentTesting, anything else with it — never while RUNNING
-               (B is dropped from the wake mask then, same as C; this guard
-               covers presses that ride in on another wake). */
-            if (!timer_reload_allowed(PARENT_TESTING) || !timer_reload()) {
+            /* Reset the selected timer to full: only a reloadable extra
+               qualifies, and never while RUNNING (B is dropped from the
+               wake mask then, same as C; this guard covers presses that
+               ride in on another wake). */
+            if (!timer_reload_allowed() || !timer_reload()) {
                 ESP_LOGI(TAG, "Button B reset unavailable (state %d)", (int)before);
                 return false;
             }
@@ -631,7 +620,7 @@ void wake_flow_handle_day_rollover(time_t *now) {
     *now = hal_time_now();
     /* Power cycling must not refund the allocation: with the clock now
        corrected, a same-day NVS snapshot beats a reset. Only a genuine
-       date change (or Button B in parent mode) resets the day. */
+       date change resets the day. */
     if (timer_persist_try_restore(*now)) {
         return;
     }
@@ -807,7 +796,6 @@ static void stats_collect(stats_snapshot_t *out) {
         .batt_mv = battery_read_mv(),
         .light_mv = light_read_mv(),
         .charge_locked = lock_gate_charge_locked(),
-        .parent_testing = PARENT_TESTING,
         .fw_version = esp_app_get_description()->version,
         .reset_reason = wake_flow_reset_reason_str(esp_reset_reason()),
     };
