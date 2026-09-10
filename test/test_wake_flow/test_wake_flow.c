@@ -361,8 +361,8 @@ void audio_break_over_chime(void) {
 
 static timer_state_t flow_state; /* the ACTIVE slot's state */
 static time_t flow_pause_arg;
-static btn_a_action_t flow_a_result;
-static time_t flow_a_apply_arg;
+static btn_b_action_t flow_b_result;
+static time_t flow_b_apply_arg;
 static bool flow_slot_reloadable; /* the selected def's reloadable flag */
 static bool flow_reload_ok;
 static bool flow_select_ok;
@@ -424,15 +424,15 @@ void timer_pause(time_t at) {
    is injected (that map is test_button_actions' business), but the
    transition it leaves behind is real, so a caller reading timer_get_state()
    after the call sees what the device would show. */
-btn_a_action_t button_a_apply(time_t at) {
-    flow_a_apply_arg = at;
+btn_b_action_t button_b_apply(time_t at) {
+    flow_b_apply_arg = at;
     flow_log_push(EV_A_APPLY);
-    switch (flow_a_result) {
-        case BTN_A_PAUSED:
+    switch (flow_b_result) {
+        case BTN_B_PAUSED:
             flow_state = TIMER_PAUSED;
             break;
-        case BTN_A_STARTED:
-        case BTN_A_RESUMED:
+        case BTN_B_STARTED:
+        case BTN_B_RESUMED:
             flow_state = TIMER_RUNNING;
             /* timer_any_extra_running() is a fact about the slots, not a
                free switch: starting a slot that is not Screen IS what
@@ -443,10 +443,16 @@ btn_a_action_t button_a_apply(time_t at) {
                 flow_extra_running = true;
             }
             break;
+        case BTN_B_RELOADED:
+            /* The real map reaches this through timer_reload(), which
+               returns the slot to IDLE at full duration rather than
+               running anything. */
+            flow_state = TIMER_IDLE;
+            break;
         default:
-            break; /* BTN_A_NONE: BREAK/EXPIRED, no transition */
+            break; /* BTN_B_NONE: no transition */
     }
-    return flow_a_result;
+    return flow_b_result;
 }
 
 /* timer.c's rule, modelled off the shipping implementation rather than
@@ -1438,8 +1444,8 @@ void setUp(void) {
     flow_edge_us = 1000000;
     flow_state = TIMER_IDLE;
     flow_pause_arg = 0;
-    flow_a_result = BTN_A_NONE;
-    flow_a_apply_arg = 0;
+    flow_b_result = BTN_B_NONE;
+    flow_b_apply_arg = 0;
     flow_slot_reloadable = false;
     flow_reload_ok = true;
     flow_select_ok = true;
@@ -2296,7 +2302,7 @@ void test_row5_a_refused_pause_poll_still_leaves_b_and_c_latched(void) {
 }
 
 void test_row5_the_join_poll_consumes_only_the_a_bit(void) {
-    flow_a_result = BTN_A_STARTED;
+    flow_b_result = BTN_B_STARTED;
     flow_press(BTN_A);
     flow_press(BTN_B);
     flow_press(BTN_C);
@@ -2406,7 +2412,7 @@ void test_the_pause_poll_pauses_at_most_once_per_press(void) {
    pauses and resumes the active slot — so calling it speculatively on
    every 100 ms join poll would start a timer nobody pressed for. */
 void test_the_join_poll_is_inert_without_a_latched_a(void) {
-    flow_a_result = BTN_A_STARTED;
+    flow_b_result = BTN_B_STARTED;
     mock_time_set(flow_at(14, 0));
 
     TEST_ASSERT_FALSE(wake_flow_poll_button_a_action());
@@ -2421,7 +2427,7 @@ void test_the_join_poll_is_inert_without_a_latched_a(void) {
    showing "heard you" when nothing happened is worse than silence. */
 void test_the_join_poll_reports_nothing_when_the_state_map_refuses(void) {
     flow_state = TIMER_BREAK;
-    flow_a_result = BTN_A_NONE;
+    flow_b_result = BTN_B_NONE;
     flow_press(BTN_A);
     mock_time_set(flow_at(14, 0));
 
@@ -2432,10 +2438,10 @@ void test_the_join_poll_reports_nothing_when_the_state_map_refuses(void) {
 }
 
 void test_the_join_poll_acks_on_the_leds_for_every_accepted_action(void) {
-    static const btn_a_action_t accepted[] = {BTN_A_STARTED, BTN_A_RESUMED, BTN_A_PAUSED};
+    static const btn_b_action_t accepted[] = {BTN_B_STARTED, BTN_B_RESUMED, BTN_B_PAUSED};
     for (int i = 0; i < (int)(sizeof(accepted) / sizeof(accepted[0])); i++) {
         setUp();
-        flow_a_result = accepted[i];
+        flow_b_result = accepted[i];
         flow_press(BTN_A);
         mock_time_set(flow_at(14, 0));
 
@@ -2450,7 +2456,7 @@ void test_the_join_poll_acks_on_the_leds_for_every_accepted_action(void) {
    there is no window to open either. The repaint rides the post-join
    changed-state re-render instead. */
 void test_the_join_poll_neither_paints_nor_syncs(void) {
-    flow_a_result = BTN_A_STARTED;
+    flow_b_result = BTN_B_STARTED;
     flow_press(BTN_A);
     mock_time_set(flow_at(14, 0));
 
@@ -2464,13 +2470,13 @@ void test_the_join_poll_neither_paints_nor_syncs(void) {
 }
 
 void test_the_join_poll_applies_the_map_at_the_current_clock(void) {
-    flow_a_result = BTN_A_STARTED;
+    flow_b_result = BTN_B_STARTED;
     flow_press(BTN_A);
     mock_time_set(flow_at(9, 5) + 41);
 
     TEST_ASSERT_TRUE(wake_flow_poll_button_a_action());
 
-    TEST_ASSERT_EQUAL_INT64(flow_at(9, 5) + 41, flow_a_apply_arg);
+    TEST_ASSERT_EQUAL_INT64(flow_at(9, 5) + 41, flow_b_apply_arg);
 }
 
 /* ---- ROW 18: Button A during a break ----------------------------------- */
@@ -2481,7 +2487,7 @@ void test_the_join_poll_applies_the_map_at_the_current_clock(void) {
    is never even asked, so nothing transitions. */
 void test_row18_button_a_during_a_break_is_refused_with_no_side_effects(void) {
     flow_state = TIMER_BREAK;
-    flow_a_result = BTN_A_STARTED; /* the map WOULD start it if asked */
+    flow_b_result = BTN_B_STARTED; /* the map WOULD start it if asked */
     mock_time_set(flow_at(16, 0));
 
     TEST_ASSERT_FALSE(flow_dispatch(BTN_A, flow_at(16, 0), TIMER_BREAK, true));
@@ -2504,7 +2510,7 @@ void test_row18_button_a_during_a_break_is_refused_with_no_side_effects(void) {
 void test_row18_the_refusal_keys_on_the_painted_state_not_the_live_one(void) {
     /* painted BREAK, live RUNNING: still refused */
     flow_state = TIMER_RUNNING;
-    flow_a_result = BTN_A_PAUSED;
+    flow_b_result = BTN_B_PAUSED;
     mock_time_set(flow_at(16, 0));
     TEST_ASSERT_FALSE(flow_dispatch(BTN_A, flow_at(16, 0), TIMER_BREAK, true));
     TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_A_APPLY));
@@ -2513,18 +2519,23 @@ void test_row18_the_refusal_keys_on_the_painted_state_not_the_live_one(void) {
        disguised read of timer_get_state() */
     setUp();
     flow_state = TIMER_BREAK;
-    flow_a_result = BTN_A_PAUSED;
+    flow_b_result = BTN_B_PAUSED;
     mock_time_set(flow_at(16, 0));
     TEST_ASSERT_TRUE(flow_dispatch(BTN_A, flow_at(16, 0), TIMER_RUNNING, true));
     TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_A_APPLY));
 }
 
-/* The refusal is keyed on BREAK alone. EXPIRED reaches the map and is
-   turned down there instead (BTN_A_NONE), which is a different arm with a
-   different outcome — no ack hold, no LED, but the map WAS consulted. */
-void test_button_a_on_an_expired_slot_is_refused_by_the_map_not_the_guard(void) {
+/* The refusal is keyed on BREAK alone. An EXPIRED slot the map cannot
+   reload — Screen, which carries no def, or a non-reloadable extra —
+   reaches the map and is turned down THERE instead (BTN_B_NONE), which is
+   a different arm with a different outcome: no ack hold, no LED, but the
+   map WAS consulted. Only that case. An EXPIRED *reloadable* slot is not
+   refused at all any more: the map reloads it and reports
+   BTN_B_RELOADED, which is a real action, pinned by
+   test_the_break_tail_treats_a_map_reload_as_a_real_action. */
+void test_button_a_on_a_non_reloadable_expired_slot_is_refused_by_the_map(void) {
     flow_state = TIMER_EXPIRED;
-    flow_a_result = BTN_A_NONE;
+    flow_b_result = BTN_B_NONE;
     mock_time_set(flow_at(16, 0));
 
     TEST_ASSERT_FALSE(flow_dispatch(BTN_A, flow_at(16, 0) - 30, TIMER_EXPIRED, true));
@@ -2544,12 +2555,12 @@ void test_button_a_on_an_expired_slot_is_refused_by_the_map_not_the_guard(void) 
    an allocation computed off a different second than the one the caller
    renders with drifts the expiry by that difference. */
 void test_a_start_applies_the_map_at_the_callers_clock(void) {
-    flow_a_result = BTN_A_STARTED;
+    flow_b_result = BTN_B_STARTED;
     mock_time_set(flow_at(16, 0));
 
     TEST_ASSERT_TRUE(flow_dispatch(BTN_A, flow_at(16, 0) - 30, TIMER_IDLE, false));
 
-    TEST_ASSERT_EQUAL_INT64(flow_at(16, 0) - 30, flow_a_apply_arg);
+    TEST_ASSERT_EQUAL_INT64(flow_at(16, 0) - 30, flow_b_apply_arg);
 }
 
 /* "Hold the pre-press colour briefly so the WHITE/AMBER -> GREEN
@@ -2557,7 +2568,7 @@ void test_a_start_applies_the_map_at_the_callers_clock(void) {
    after the colour has already changed, so its position is the point,
    not its existence. */
 void test_a_start_holds_the_pre_press_colour_before_the_led(void) {
-    flow_a_result = BTN_A_STARTED;
+    flow_b_result = BTN_B_STARTED;
     mock_time_set(flow_at(16, 0));
 
     TEST_ASSERT_TRUE(flow_dispatch(BTN_A, flow_at(16, 0), TIMER_IDLE, false));
@@ -2571,7 +2582,7 @@ void test_a_start_holds_the_pre_press_colour_before_the_led(void) {
    an LED that lights only after the sync settles is not an acknowledgement
    of anything. */
 void test_a_start_acks_before_it_opens_the_window(void) {
-    flow_a_result = BTN_A_STARTED;
+    flow_b_result = BTN_B_STARTED;
     mock_time_set(flow_at(16, 0));
 
     TEST_ASSERT_TRUE(flow_dispatch(BTN_A, flow_at(16, 0), TIMER_IDLE, true));
@@ -2590,7 +2601,7 @@ void test_a_start_acks_before_it_opens_the_window(void) {
    caller renders with what comes back, and rendering with the pre-window
    clock puts a stale time on the panel and mis-computes the remaining. */
 void test_a_start_hands_the_caller_the_post_window_clock(void) {
-    flow_a_result = BTN_A_RESUMED;
+    flow_b_result = BTN_B_RESUMED;
     flow_ntp_seconds = 7; /* the sync took seven seconds */
     mock_time_set(flow_at(16, 0));
 
@@ -2603,7 +2614,7 @@ void test_a_start_hands_the_caller_the_post_window_clock(void) {
    above can itself cross a second boundary — and one second is the whole
    resolution the panel renders in. */
 void test_a_start_without_a_window_still_re_reads_the_clock(void) {
-    flow_a_result = BTN_A_STARTED;
+    flow_b_result = BTN_B_STARTED;
     mock_time_set(flow_at(16, 0));
     hal_delay_ms(750); /* the poll loop that got here has already burned 750 ms */
 
@@ -2614,7 +2625,7 @@ void test_a_start_without_a_window_still_re_reads_the_clock(void) {
 }
 
 void test_a_synced_start_shifts_the_expiry_by_the_measured_step(void) {
-    flow_a_result = BTN_A_STARTED;
+    flow_b_result = BTN_B_STARTED;
     flow_ntp_ok = true;
     flow_clock_step = 4;
     mock_time_set(flow_at(16, 0));
@@ -2630,7 +2641,7 @@ void test_a_synced_start_shifts_the_expiry_by_the_measured_step(void) {
    fast, so the expiry must move EARLIER. A shift that dropped the sign
    (or took an absolute value) would extend the allocation instead. */
 void test_a_backwards_clock_step_shifts_the_expiry_backwards(void) {
-    flow_a_result = BTN_A_STARTED;
+    flow_b_result = BTN_B_STARTED;
     flow_ntp_ok = true;
     flow_clock_step = -9;
     mock_time_set(flow_at(16, 0));
@@ -2643,7 +2654,7 @@ void test_a_backwards_clock_step_shifts_the_expiry_backwards(void) {
 /* The step is a TAKE: reading it twice would hand the second reader a
    zero, and the shift is the only consumer on this path. */
 void test_the_measured_step_is_taken_exactly_once(void) {
-    flow_a_result = BTN_A_STARTED;
+    flow_b_result = BTN_B_STARTED;
     flow_clock_step = 3;
     mock_time_set(flow_at(16, 0));
 
@@ -2656,7 +2667,7 @@ void test_the_measured_step_is_taken_exactly_once(void) {
    sync may still settle during the MQTT tail, so the wake has to REMEMBER
    that it painted unsynced or the late step is never applied. */
 void test_a_start_that_misses_the_sync_notes_it_and_shifts_nothing(void) {
-    flow_a_result = BTN_A_STARTED;
+    flow_b_result = BTN_B_STARTED;
     flow_ntp_ok = false;
     flow_clock_step = 11; /* would be applied if the branch were inverted */
     mock_time_set(flow_at(16, 0));
@@ -2674,7 +2685,7 @@ void test_a_start_that_misses_the_sync_notes_it_and_shifts_nothing(void) {
    nothing to note. Waiting on a window that never opened would block for
    the full NTP settle timeout on every press made with no WiFi. */
 void test_a_start_whose_window_will_not_open_skips_the_sync_entirely(void) {
-    flow_a_result = BTN_A_STARTED;
+    flow_b_result = BTN_B_STARTED;
     flow_net_open = false;
     mock_time_set(flow_at(16, 0));
 
@@ -2691,7 +2702,7 @@ void test_a_start_whose_window_will_not_open_skips_the_sync_entirely(void) {
    a second window would cost another radio session and paint over the
    tail. The gate is checked BEFORE net_apply_open, so nothing is opened. */
 void test_a_start_on_an_already_synced_wake_opens_no_second_window(void) {
-    flow_a_result = BTN_A_STARTED;
+    flow_b_result = BTN_B_STARTED;
     flow_net_open = true; /* it WOULD open if asked */
     mock_time_set(flow_at(16, 0));
 
@@ -2706,10 +2717,10 @@ void test_a_start_on_an_already_synced_wake_opens_no_second_window(void) {
    sequence — an arm that fell through for only one of them would leave a
    resume unsynced and unacknowledged. */
 void test_a_resume_takes_exactly_the_same_path_as_a_start(void) {
-    static const btn_a_action_t both[] = {BTN_A_STARTED, BTN_A_RESUMED};
+    static const btn_b_action_t both[] = {BTN_B_STARTED, BTN_B_RESUMED};
     for (int i = 0; i < 2; i++) {
         setUp();
-        flow_a_result = both[i];
+        flow_b_result = both[i];
         flow_ntp_seconds = 2;
         mock_time_set(flow_at(16, 0));
 
@@ -2726,7 +2737,7 @@ void test_a_resume_takes_exactly_the_same_path_as_a_start(void) {
    reason to burn 250 ms of awake time on a battery-powered device. */
 void test_a_pause_neither_holds_nor_syncs_nor_moves_the_clock(void) {
     flow_state = TIMER_RUNNING;
-    flow_a_result = BTN_A_PAUSED;
+    flow_b_result = BTN_B_PAUSED;
     mock_time_set(flow_at(16, 0) + 55);
 
     TEST_ASSERT_TRUE(flow_dispatch(BTN_A, flow_at(16, 0), TIMER_RUNNING, true));
@@ -2978,7 +2989,7 @@ void test_every_arm_clears_the_selection_report_before_deciding(void) {
         setUp();
         /* every arm arranged to REFUSE, so nothing legitimately sets it */
         flow_state = TIMER_RUNNING;
-        flow_a_result = BTN_A_NONE;
+        flow_b_result = BTN_B_NONE;
         flow_slot_reloadable = false;
         flow_select_ok = false;
         mock_time_set(flow_at(16, 0));
@@ -2990,7 +3001,7 @@ void test_every_arm_clears_the_selection_report_before_deciding(void) {
 
 void test_only_a_successful_swap_reports_a_selection_change(void) {
     /* the accepting non-C arms */
-    flow_a_result = BTN_A_STARTED;
+    flow_b_result = BTN_B_STARTED;
     mock_time_set(flow_at(16, 0));
     TEST_ASSERT_TRUE(flow_dispatch(BTN_A, flow_at(16, 0), TIMER_IDLE, false));
     TEST_ASSERT_FALSE(flow_swapped_io);
@@ -3015,7 +3026,7 @@ void test_button_d_and_button_none_are_inert_in_the_dispatch(void) {
     static const button_id_t inert[] = {BTN_D, BTN_NONE};
     for (int i = 0; i < 2; i++) {
         setUp();
-        flow_a_result = BTN_A_STARTED;
+        flow_b_result = BTN_B_STARTED;
         flow_slot_reloadable = true;
         flow_select_ok = true;
         mock_time_set(flow_at(16, 0));
@@ -3115,6 +3126,32 @@ void test_the_break_tail_acts_on_a_lone_button_b_press(void) {
     TEST_ASSERT_EQUAL_HEX8(0, flow_latch_residue());
 }
 
+/* The SAME reset, reached through the state map instead of through the
+   BTN_B arm above, and it has to be worth the same. B on an EXPIRED
+   reloadable slot returns BTN_B_RELOADED: the slot really moves (EXPIRED
+   -> IDLE at full duration), so the press is a real action and owes the
+   panel a repaint. Reported as "nothing happened" it would reset the slot
+   silently — the panel keeps showing TIME'S UP and HA keeps the stale
+   state until the next tick wake. */
+void test_the_break_tail_treats_a_map_reload_as_a_real_action(void) {
+    /* the break runs on slot 0 behind a SELECTED extra, so the active
+       slot can legitimately be the EXPIRED one the press reloads */
+    flow_state = TIMER_EXPIRED;
+    flow_b_result = BTN_B_RELOADED;
+    flow_press(BTN_A);
+    mock_time_set(flow_at(16, 0));
+
+    TEST_ASSERT_TRUE(wake_flow_poll_break_buttons());
+
+    TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_A_APPLY));
+    TEST_ASSERT_EQUAL_INT(TIMER_IDLE, flow_state); /* the slot really was reset */
+    /* The tail ran: the poll's own ack, plus the one the render lights for
+       the resulting state. */
+    TEST_ASSERT_EQUAL_INT(2, flow_log_count(EV_LED));
+    TEST_ASSERT_EQUAL_INT(1, FLOW_RENDERS());
+    TEST_ASSERT_EQUAL_HEX8(0, flow_latch_residue());
+}
+
 /* One press per poll, by the latch's own A > C > B > D priority — the
    real button_latch_pick is compiled in, so this is the shipping order.
    C over B matters here: during a break, C is how you walk to another
@@ -3160,7 +3197,7 @@ void test_the_break_tail_never_opens_a_second_network_window(void) {
     /* the break runs on slot 0 behind a SELECTED extra, so the active
        slot can legitimately be IDLE and A can legitimately start it */
     flow_state = TIMER_IDLE;
-    flow_a_result = BTN_A_STARTED;
+    flow_b_result = BTN_B_STARTED;
     flow_net_open = true;
     flow_press(BTN_A);
     mock_time_set(flow_at(16, 0));
@@ -3177,7 +3214,7 @@ void test_the_break_tail_never_opens_a_second_network_window(void) {
    resolution. Set up so it crosses exactly. */
 void test_the_break_tail_hands_the_render_the_clock_the_action_left(void) {
     flow_state = TIMER_IDLE;
-    flow_a_result = BTN_A_STARTED;
+    flow_b_result = BTN_B_STARTED;
     flow_press(BTN_A);
     mock_time_set(flow_at(16, 0));
     hal_delay_ms(750); /* the tail's 250 ms poll loop has already run three times */
@@ -3196,7 +3233,7 @@ void test_the_break_tail_hands_the_render_the_clock_the_action_left(void) {
    caller also keeps watching, which is what the false return buys. */
 void test_a_refused_press_in_the_break_tail_neither_lights_nor_renders(void) {
     flow_state = TIMER_BREAK;
-    flow_a_result = BTN_A_STARTED;
+    flow_b_result = BTN_B_STARTED;
     flow_press(BTN_A); /* A during a break: refused by row 18 */
     mock_time_set(flow_at(16, 0));
 
@@ -4140,7 +4177,7 @@ void test_row2_button_a_on_a_break_eligible_extra_starts_it_and_suppresses_the_e
     mock_time_set(now);
     flow_arm_break(now + 20, FLOW_SCREEN, FLOW_PIANO);
     flow_state = TIMER_IDLE; /* Piano, selected but not started */
-    flow_a_result = BTN_A_STARTED;
+    flow_b_result = BTN_B_STARTED;
     flow_deferred_press_btn = BTN_A;
     flow_deferred_press_ms = 2000;
     wake_flow_watch_break_end();
@@ -5402,7 +5439,7 @@ void test_the_promoted_value_is_what_the_render_switch_reads(void) {
 void test_a_press_latched_during_the_wake_is_dispatched_before_sleep(void) {
     flow_tick_clock(flow_at(15, 0));
     flow_state = TIMER_IDLE;
-    flow_a_result = BTN_A_STARTED;
+    flow_b_result = BTN_B_STARTED;
     flow_press(BTN_A);
     /* the press really is in the latch */
     TEST_ASSERT_EQUAL_HEX8(1u << BTN_A, button_latch_take());
@@ -5453,7 +5490,7 @@ void test_a_synced_wake_denies_the_latched_press_a_second_window(void) {
     mock_time_set(flow_at(15, 0));
     flow_state = TIMER_IDLE;
     flow_last_ntp = flow_at(15, 0) - IDLE_SYNC_INTERVAL_SEC; /* sync is due */
-    flow_a_result = BTN_A_STARTED;
+    flow_b_result = BTN_B_STARTED;
     flow_press(BTN_A);
 
     TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_tick());
@@ -5467,7 +5504,7 @@ void test_an_unsynced_wake_lets_the_latched_press_open_its_own_window(void) {
     mock_time_set(flow_at(15, 0));
     flow_state = TIMER_IDLE;
     flow_last_ntp = flow_at(15, 0); /* no sync due */
-    flow_a_result = BTN_A_STARTED;
+    flow_b_result = BTN_B_STARTED;
     flow_press(BTN_A);
 
     TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_tick());
@@ -5486,7 +5523,7 @@ void test_the_latch_drain_runs_before_the_event_watch(void) {
     flow_state = TIMER_RUNNING;
     flow_expiry_wall = (int64_t)now + 3600; /* the watch declines, but reads first */
     flow_needs_sync = false;
-    flow_a_result = BTN_A_PAUSED;
+    flow_b_result = BTN_B_PAUSED;
     flow_press(BTN_A);
     TEST_ASSERT_EQUAL_HEX8(1u << BTN_A, button_latch_take());
     flow_press(BTN_A);
@@ -5545,7 +5582,7 @@ void test_row7_a_button_held_through_a_two_second_sleep_is_ignored(void) {
     flow_wakeup_btn = BTN_A;
     s_held_mask_at_sleep = 1u << BTN_A;
     s_sleep_entry_time = (int64_t)flow_at(15, 0) - 2;
-    flow_a_result = BTN_A_STARTED; /* would fire loudly if it were dispatched */
+    flow_b_result = BTN_B_STARTED; /* would fire loudly if it were dispatched */
 
     TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_button());
 
@@ -5568,7 +5605,7 @@ void test_row7_the_ignore_window_is_two_seconds_inclusive(void) {
         flow_wakeup_btn = BTN_A;
         s_held_mask_at_sleep = 1u << BTN_A;
         s_sleep_entry_time = (int64_t)flow_at(15, 0) - gap;
-        flow_a_result = BTN_A_STARTED;
+        flow_b_result = BTN_B_STARTED;
 
         TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_button());
 
@@ -5590,7 +5627,7 @@ void test_row7_a_different_button_inside_the_window_is_a_new_press(void) {
     flow_wakeup_btn = BTN_A;
     s_held_mask_at_sleep = 1u << BTN_B; /* B was held, A woke us */
     s_sleep_entry_time = (int64_t)flow_at(15, 0);
-    flow_a_result = BTN_A_STARTED;
+    flow_b_result = BTN_B_STARTED;
 
     TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_button());
 
@@ -5605,7 +5642,7 @@ void test_row7_an_empty_held_mask_never_ignores_anything(void) {
     flow_wakeup_btn = BTN_A;
     s_held_mask_at_sleep = 0;
     s_sleep_entry_time = (int64_t)flow_at(15, 0);
-    flow_a_result = BTN_A_STARTED;
+    flow_b_result = BTN_B_STARTED;
 
     TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_button());
 
@@ -5672,7 +5709,7 @@ void test_row7_the_guard_reads_back_what_the_sleep_entry_recorded(void) {
 
     mock_time_set(flow_at(15, 0) + 1); /* the level-triggered instant re-wake */
     flow_wakeup_btn = BTN_A;
-    flow_a_result = BTN_A_STARTED;
+    flow_b_result = BTN_B_STARTED;
 
     TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_button());
 
@@ -5686,7 +5723,7 @@ void test_row7_a_sleep_that_recorded_no_hold_lets_the_next_press_through(void) {
 
     mock_time_set(flow_at(15, 0) + 1);
     flow_wakeup_btn = BTN_A;
-    flow_a_result = BTN_A_STARTED;
+    flow_b_result = BTN_B_STARTED;
 
     TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_button());
 
@@ -5723,7 +5760,7 @@ void test_the_bed_time_gate_can_end_a_button_wake(void) {
     mock_time_set(flow_at(21, 0));
     flow_wakeup_btn = BTN_A;
     flow_bedtime_locks = true;
-    flow_a_result = BTN_A_STARTED;
+    flow_b_result = BTN_B_STARTED;
 
     TEST_ASSERT_EQUAL_INT(FLOW_WAKE_BEDTIME, flow_run_button());
 
@@ -5749,7 +5786,7 @@ void test_a_wake_press_is_dispatched_through_the_shared_guard_matrix(void) {
 void test_a_wake_press_is_always_allowed_its_network_window(void) {
     mock_time_set(flow_at(15, 0));
     flow_wakeup_btn = BTN_A;
-    flow_a_result = BTN_A_STARTED;
+    flow_b_result = BTN_B_STARTED;
     flow_net_open = true;
 
     TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_button());
@@ -5829,7 +5866,7 @@ void test_a_resume_into_the_final_minute_is_not_re_paused_by_its_own_bounce(void
     time_t now = flow_at(15, 0);
     mock_time_set(now);
     flow_wakeup_btn = BTN_A;
-    flow_a_result = BTN_A_RESUMED;
+    flow_b_result = BTN_B_RESUMED;
     flow_expiry_wall = (int64_t)now + 40; /* inside the watch window */
     flow_net_open = false;
     flow_press(BTN_A); /* the release bounce */
@@ -5859,7 +5896,7 @@ void test_a_button_wake_always_ends_in_deep_sleep_under_the_gates_mode(void) {
 void test_a_button_wake_whose_action_pushed_the_balance_over_breaks(void) {
     mock_time_set(flow_at(15, 0));
     flow_wakeup_btn = BTN_A;
-    flow_a_result = BTN_A_RESUMED;
+    flow_b_result = BTN_B_RESUMED;
     flow_net_open = false;
     flow_break_due_ret = true;
 
@@ -5910,7 +5947,7 @@ void test_row6_the_bug2_eat_also_happens_on_the_idle_sync_path_KNOWN_BUG(void) {
     mock_time_set(flow_at(15, 0) + 35); /* 25 s of residue to the wall minute */
     flow_state = TIMER_IDLE;
     flow_last_ntp = flow_at(15, 0) - IDLE_SYNC_INTERVAL_SEC;
-    flow_a_result = BTN_A_STARTED;
+    flow_b_result = BTN_B_STARTED;
     flow_deferred_press_btn = BTN_A;
     flow_deferred_press_ms = 5000; /* five seconds into the grid wait */
 
@@ -6070,7 +6107,7 @@ void test_the_latch_drain_runs_before_the_event_watch_can_discard_it(void) {
     flow_tick_clock(now);
     flow_state = TIMER_RUNNING;
     flow_expiry_wall = (int64_t)now + 40; /* INSIDE the watch window */
-    flow_a_result = BTN_A_PAUSED;
+    flow_b_result = BTN_B_PAUSED;
     flow_press(BTN_A);
     TEST_ASSERT_EQUAL_HEX8(1u << BTN_A, button_latch_take()); /* it is latched */
     flow_press(BTN_A);
@@ -6422,7 +6459,7 @@ void test_button_d_arms_a_sync_check_before_it_opens_its_window(void) {
 void test_button_a_opens_a_window_without_arming_a_check(void) {
     mock_time_set(flow_at(15, 0));
     flow_wakeup_btn = BTN_A;
-    flow_a_result = BTN_A_STARTED;
+    flow_b_result = BTN_B_STARTED;
 
     TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_button());
 
@@ -6664,7 +6701,7 @@ int main(void) {
     RUN_TEST(test_the_join_poll_applies_the_map_at_the_current_clock);
     RUN_TEST(test_row18_button_a_during_a_break_is_refused_with_no_side_effects);
     RUN_TEST(test_row18_the_refusal_keys_on_the_painted_state_not_the_live_one);
-    RUN_TEST(test_button_a_on_an_expired_slot_is_refused_by_the_map_not_the_guard);
+    RUN_TEST(test_button_a_on_a_non_reloadable_expired_slot_is_refused_by_the_map);
     RUN_TEST(test_a_start_applies_the_map_at_the_callers_clock);
     RUN_TEST(test_a_start_holds_the_pre_press_colour_before_the_led);
     RUN_TEST(test_a_start_acks_before_it_opens_the_window);
@@ -6699,6 +6736,7 @@ int main(void) {
     RUN_TEST(test_the_break_tail_poll_drains_the_whole_latch_including_d);
     RUN_TEST(test_a_lone_d_press_in_the_break_tail_is_consumed_and_ignored);
     RUN_TEST(test_the_break_tail_acts_on_a_lone_button_b_press);
+    RUN_TEST(test_the_break_tail_treats_a_map_reload_as_a_real_action);
     RUN_TEST(test_the_break_tail_acts_on_the_highest_priority_latched_press);
     RUN_TEST(test_the_break_tail_lets_button_c_move_to_another_timer);
     RUN_TEST(test_the_break_tail_never_opens_a_second_network_window);

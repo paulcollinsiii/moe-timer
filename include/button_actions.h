@@ -7,22 +7,24 @@ extern "C" {
 #endif
 
 typedef enum {
-    BTN_A_NONE = 0, /* BREAK/EXPIRED: wake-press-only contexts, no transition */
-    BTN_A_PAUSED,
-    BTN_A_STARTED,
-    BTN_A_RESUMED,
-} btn_a_action_t;
+    BTN_B_NONE = 0, /* BREAK, or an EXPIRED slot that cannot reload: no transition */
+    BTN_B_PAUSED,
+    BTN_B_STARTED,
+    BTN_B_RESUMED,
+    BTN_B_RELOADED, /* EXPIRED reloadable slot returned to IDLE at full duration */
+} btn_b_action_t;
 
-/* The one Button-A state map, shared by the EXT1 wake handler and the
+/* The one Button-B state map, shared by the EXT1 wake handler and the
    awake join-poll: RUNNING pauses, IDLE starts with the right allocation
    (selected extra timer's duration, else today's schedule), PAUSED
-   resumes. Applies the transition to the active slot and reports what it
-   did. */
-btn_a_action_t button_a_apply(time_t now);
+   resumes, and EXPIRED reloads when the slot's def is reloadable — the
+   one state where B would otherwise have no job at all. Applies the
+   transition to the active slot and reports what it did. */
+btn_b_action_t button_b_apply(time_t now);
 
 /* Allocation a fresh start gets: selected def's duration, else the
    day-schedule allocation. */
-int32_t button_a_start_allocation(time_t now);
+int32_t button_b_start_allocation(time_t now);
 
 #ifdef __cplusplus
 }

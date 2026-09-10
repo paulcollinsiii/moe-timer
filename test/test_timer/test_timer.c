@@ -4,7 +4,7 @@
 #include <unity.h>
 
 /* Single-TU compilation. button_actions.c (+ its schedule dependency) rides
-   along so the state matrix can assert the real Button A outcome per row
+   along so the state matrix can assert the real Button B outcome per row
    instead of re-deriving it here. */
 // clang-format off
 #include "mock_hal_time.c"
@@ -46,7 +46,7 @@ void setUp(void) {
     schedule_cache_invalidate();
     setenv("TZ", "UTC0", 1);
     tzset();
-    hal_nvs_write_u16("weekday_min", 60); /* Screen allocation for button_a_apply */
+    hal_nvs_write_u16("weekday_min", 60); /* Screen allocation for button_b_apply */
     timer_set_defs(TEST_DEFS, TIMER_SLOT_COUNT);
     timer_reset();
     mock_time_set(T0);
@@ -384,7 +384,7 @@ void test_row4_a_break_starts_an_eligible_timer_normally(void) {
     timer_start_break(T0 + 1800, 900);
     select_slot(SLOT_PIANO);
     TEST_ASSERT_TRUE(timer_start_allowed());
-    TEST_ASSERT_EQUAL(BTN_A_STARTED, button_a_apply(T0 + 1800));
+    TEST_ASSERT_EQUAL(BTN_B_STARTED, button_b_apply(T0 + 1800));
     TEST_ASSERT_EQUAL(TIMER_RUNNING, timer_slot_state(SLOT_PIANO));
 }
 
@@ -394,18 +394,18 @@ void test_row5_a_break_refuses_a_non_eligible_timer(void) {
     timer_start_break(T0 + 1800, 900);
     select_slot(SLOT_LAUNDRY);
     TEST_ASSERT_FALSE(timer_start_allowed());
-    TEST_ASSERT_EQUAL(BTN_A_NONE, button_a_apply(T0 + 1800));
+    TEST_ASSERT_EQUAL(BTN_B_NONE, button_b_apply(T0 + 1800));
     TEST_ASSERT_EQUAL(TIMER_IDLE, timer_slot_state(SLOT_LAUNDRY));
 }
 
 /* Row 6: Screen itself is never break-eligible, so the break screen's
-   Button A stays refused (unchanged behaviour, now via the same rule). */
+   Button B stays refused (unchanged behaviour, now via the same rule). */
 void test_row6_a_break_refuses_screen_itself(void) {
     timer_start(T0, 3600);
     timer_start_break(T0 + 1800, 900);
     TEST_ASSERT_EQUAL_INT(0, timer_active_slot());
     TEST_ASSERT_FALSE(timer_start_allowed());
-    TEST_ASSERT_EQUAL(BTN_A_NONE, button_a_apply(T0 + 1800));
+    TEST_ASSERT_EQUAL(BTN_B_NONE, button_b_apply(T0 + 1800));
     TEST_ASSERT_EQUAL(TIMER_BREAK, timer_slot_state(0));
 }
 
@@ -779,7 +779,7 @@ void test_start_allowed_outside_a_break_is_always_true(void) {
     TEST_ASSERT_TRUE(timer_start_allowed());
     select_slot(SLOT_LAUNDRY);
     TEST_ASSERT_TRUE(timer_start_allowed());
-    TEST_ASSERT_EQUAL(BTN_A_STARTED, button_a_apply(T0));
+    TEST_ASSERT_EQUAL(BTN_B_STARTED, button_b_apply(T0));
 }
 
 /* The break screen's swap hint promises a timer you can actually start. */
@@ -2294,8 +2294,8 @@ typedef struct {
     bool swap_allowed;           /* timer_swap_allowed() */
     bool break_active;           /* timer_break_active() */
     bool break_remaining_gt0;    /* timer_break_remaining(M_NOW) > 0 */
-    btn_a_action_t btn_a;        /* button_a_apply(M_NOW) */
-    timer_state_t state_after_a; /* active slot afterwards */
+    btn_b_action_t btn_b;        /* button_b_apply(M_NOW) */
+    timer_state_t state_after_b; /* active slot afterwards */
     /* Composition of the state fact (timer_any_extra_running) with the
        pure policy (wake_policy_break_chime, tested on its own in
        test_wake_policy). The snap back to Screen rides the same answer. */
@@ -2304,16 +2304,18 @@ typedef struct {
 
 static const matrix_case_t STATE_MATRIX[] = {
     /* --- break running (slot 0 == BREAK) --- */
-    {"break, Screen selected", S0_BREAK, 0, TIMER_BREAK, true, true, true, BTN_A_NONE, TIMER_BREAK, CHIME_YES},
-    {"break, extra IDLE", S0_BREAK, 1, TIMER_IDLE, true, true, true, BTN_A_STARTED, TIMER_RUNNING, CHIME_YES},
-    {"break, extra RUNNING", S0_BREAK, 1, TIMER_RUNNING, false, true, true, BTN_A_PAUSED, TIMER_PAUSED, CHIME_NO},
-    {"break, extra PAUSED", S0_BREAK, 1, TIMER_PAUSED, true, true, true, BTN_A_RESUMED, TIMER_RUNNING, CHIME_YES},
-    {"break, extra EXPIRED", S0_BREAK, 1, TIMER_EXPIRED, true, true, true, BTN_A_NONE, TIMER_EXPIRED, CHIME_YES},
+    {"break, Screen selected", S0_BREAK, 0, TIMER_BREAK, true, true, true, BTN_B_NONE, TIMER_BREAK, CHIME_YES},
+    {"break, extra IDLE", S0_BREAK, 1, TIMER_IDLE, true, true, true, BTN_B_STARTED, TIMER_RUNNING, CHIME_YES},
+    {"break, extra RUNNING", S0_BREAK, 1, TIMER_RUNNING, false, true, true, BTN_B_PAUSED, TIMER_PAUSED, CHIME_NO},
+    {"break, extra PAUSED", S0_BREAK, 1, TIMER_PAUSED, true, true, true, BTN_B_RESUMED, TIMER_RUNNING, CHIME_YES},
+    /* Piano is reloadable, so B's EXPIRED leg reloads it — and does so
+       even under a break, because a reload is not a start. */
+    {"break, extra EXPIRED", S0_BREAK, 1, TIMER_EXPIRED, true, true, true, BTN_B_RELOADED, TIMER_IDLE, CHIME_YES},
     /* --- no break running: the chime column does not apply --- */
-    {"post-break Screen PAUSED, extra RUNNING", S0_POST_BREAK, 1, TIMER_RUNNING, false, false, false, BTN_A_PAUSED,
+    {"post-break Screen PAUSED, extra RUNNING", S0_POST_BREAK, 1, TIMER_RUNNING, false, false, false, BTN_B_PAUSED,
      TIMER_PAUSED, CHIME_NA},
-    {"Screen RUNNING", S0_RUNNING, 0, TIMER_RUNNING, false, false, false, BTN_A_PAUSED, TIMER_PAUSED, CHIME_NA},
-    {"Screen IDLE, extra IDLE", S0_IDLE, 1, TIMER_IDLE, true, false, false, BTN_A_STARTED, TIMER_RUNNING, CHIME_NA},
+    {"Screen RUNNING", S0_RUNNING, 0, TIMER_RUNNING, false, false, false, BTN_B_PAUSED, TIMER_PAUSED, CHIME_NA},
+    {"Screen IDLE, extra IDLE", S0_IDLE, 1, TIMER_IDLE, true, false, false, BTN_B_STARTED, TIMER_RUNNING, CHIME_NA},
 };
 
 /* Put the ACTIVE slot into `st` (extra slots only — slot 0's state comes
@@ -2382,8 +2384,8 @@ void test_state_matrix(void) {
             TEST_ASSERT_EQUAL_INT_MESSAGE((int)c->chime_at_break_end, (int)got, c->name);
         }
 
-        TEST_ASSERT_EQUAL_MESSAGE(c->btn_a, button_a_apply(M_NOW), c->name);
-        TEST_ASSERT_EQUAL_MESSAGE(c->state_after_a, timer_get_state(), c->name);
+        TEST_ASSERT_EQUAL_MESSAGE(c->btn_b, button_b_apply(M_NOW), c->name);
+        TEST_ASSERT_EQUAL_MESSAGE(c->state_after_b, timer_get_state(), c->name);
         assert_state_legal();
     }
 }

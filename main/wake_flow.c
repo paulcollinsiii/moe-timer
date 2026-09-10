@@ -374,9 +374,9 @@ bool wake_flow_dispatch_button_action(button_id_t btn, time_t *now, timer_state_
                users. Sync runs after; any clock step is applied to the
                expiry via timer_shift_expiry (measured against the
                monotonic clock, which NTP cannot step). */
-            switch (button_a_apply(*now)) {
-                case BTN_A_STARTED:
-                case BTN_A_RESUMED:
+            switch (button_b_apply(*now)) {
+                case BTN_B_STARTED:
+                case BTN_B_RESUMED:
                     /* Hold the pre-press colour briefly so the WHITE/AMBER ->
                        GREEN transition is visible as an acknowledgement */
                     hal_delay_ms(250);
@@ -400,10 +400,20 @@ bool wake_flow_dispatch_button_action(button_id_t btn, time_t *now, timer_state_
                     }
                     *now = hal_time_now();
                     return true;
-                case BTN_A_PAUSED:
+                case BTN_B_PAUSED:
+                    return true;
+                case BTN_B_RELOADED:
+                    /* Bare, like the pause arm and like the reload the
+                       BTN_B arm below reaches: the slot really did move
+                       (EXPIRED -> IDLE at full duration), so the caller
+                       owes it an LED and a repaint. Reporting false here
+                       would let the same timer_reload() mean "acted" or
+                       "did nothing" depending only on which button got
+                       there. */
                     return true;
                 default:
-                    return false; /* EXPIRED: renders only (wake path) */
+                    return false; /* BTN_B_NONE — BREAK, or an EXPIRED slot that
+                                     cannot reload: renders only (wake path) */
             }
         case BTN_B:
             /* Reset the selected timer to full: only a reloadable extra
@@ -480,7 +490,7 @@ bool wake_flow_poll_button_a_action(void) {
        consumed rather than deleted: on device it is the pre-apply half of
        "state %d -> %d", which is how a mis-mapped press is diagnosed. */
     (void)st;
-    if (button_a_apply(hal_time_now()) == BTN_A_NONE)
+    if (button_b_apply(hal_time_now()) == BTN_B_NONE)
         return false;
     const timer_state_t after = timer_get_state(); /* post-apply half of the pair */
     (void)after;
