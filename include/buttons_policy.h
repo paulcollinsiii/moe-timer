@@ -13,21 +13,21 @@
 extern "C" {
 #endif
 
-/* Everything the decision reads. The two `*_allowed` flags are the timer
-   module's own gates taken raw at sleep entry — the mask is rebuilt on
-   every sleep, so it tracks the state machine rather than caching it. */
+/* Everything the decision reads. `swap_allowed` is the timer module's own
+   gate taken raw at sleep entry — the mask is rebuilt on every sleep, so it
+   tracks the state machine rather than caching it. */
 typedef struct {
-    bool enable;         /* the sleep outcome's arm decision: false on a locked sleep */
-    bool swap_allowed;   /* timer_swap_allowed() — gates BTN_C */
-    bool reload_allowed; /* timer_reload_allowed() — gates BTN_B */
+    bool enable;       /* the sleep outcome's arm decision: false on a locked sleep */
+    bool swap_allowed; /* timer_swap_allowed() — gates BTN_C */
 } buttons_policy_in_t;
 
 /* Which buttons may wake the device from the sleep being entered. Bit n =
    button n, matching buttons_scan_held(). Zero means arm NOTHING: a
    locked sleep must leave the RTC domain untouched rather than write an
-   empty wake mask. Because A and D are unconditional wake sources, a zero
+   empty wake mask. Because B and D are unconditional wake sources, a zero
    result can ONLY mean `enable` was false — the driver's early return
    therefore tests "arm nothing", never "no button happened to qualify".
+   (A is never a wake source at all, so it is not part of that guarantee.)
    Pure — host-tested. */
 uint8_t buttons_policy_wake_mask(const buttons_policy_in_t *in);
 

@@ -101,12 +101,14 @@ void buttons_init(void) {
 
 /* Which buttons earn a wake is policy and lives in buttons_policy.c; what
    stays here is the RTC/EXT1 plumbing. That plumbing is not host-tested —
-   nothing compiles this TU without ESP-IDF — so three seams below rest on
+   nothing compiles this TU without ESP-IDF — so four seams below rest on
    review alone: that the pad loop indexes BTN_GPIOS with the same bit the
-   policy set, that the timer gates are wired into the right policy
-   fields, and that the early return stays AHEAD of buttons_watch_end().
-   Closing them needs a host suite for this file (stubbed gpio/rtc_io/
-   esp_sleep/FreeRTOS), which is a bigger move than the policy carve. */
+   policy set, that timer_swap_allowed() is wired into the right policy
+   field, that the early return stays AHEAD of buttons_watch_end(), and
+   that buttons_get_wakeup_button()'s fallback level scan only ever blames
+   a pad the policy could have armed. Closing them needs a host suite for
+   this file (stubbed gpio/rtc_io/esp_sleep/FreeRTOS), which is a bigger
+   move than the policy carve. */
 void buttons_configure_wakeup_if(bool enable) {
     /* A locked sleep arms nothing: leave the RTC domain exactly as the
        last sleep left it, on a battery that cannot spare the work. */
@@ -115,7 +117,6 @@ void buttons_configure_wakeup_if(bool enable) {
     buttons_policy_in_t pol = {
         .enable = enable,
         .swap_allowed = timer_swap_allowed(),
-        .reload_allowed = timer_reload_allowed(),
     };
     uint8_t wake = buttons_policy_wake_mask(&pol);
     buttons_watch_end();
@@ -153,9 +154,34 @@ button_id_t buttons_get_wakeup_button(void) {
         }
     }
 
-    /* Fallback: latch was empty — debounce then scan levels */
+    /* Fallback: latch was empty — debounce then scan levels, but only
+       across pads that COULD have been armed. The maximal mask (every
+       gate open) is the set of buttons the policy will arm under some
+       condition; a button outside it — A, which never wakes — cannot have
+       caused this EXT1 wake whatever the user happens to be holding.
+       Without the filter, a wake genuinely caused by B, C or D while A is
+       also held returns BTN_A, because A is index 0 and wins the scan;
+       the real press is then discarded and A's dispatch runs instead.
+       Derived from the policy rather than hardcoding A here so that
+       buttons_policy.c stays the single source of truth, and so a button
+       that later becomes conditionally armed keeps being scanned — a
+       conditional button is still in the maximal mask. Nothing is
+       retained across the sleep: the armed mask was computed before it
+       and RAM is gone by now, so recomputing the bound is the only option
+       anyway. NB: designated initializer — a gate field added to
+       buttons_policy_in_t defaults to false here and would narrow this
+       below maximal; any new gate must be set true.
+       The primary path above needs no such filter: an unarmed pad can
+       never appear in the EXT1 status latch. */
+    const buttons_policy_in_t maximal = {
+        .enable = true,
+        .swap_allowed = true,
+    };
+    const uint8_t armable = buttons_policy_wake_mask(&maximal);
     esp_rom_delay_us(DEBOUNCE_US);
     for (int i = 0; i < 4; i++) {
+        if (!(armable & (1u << i)))
+            continue;
         if (gpio_get_level(BTN_GPIOS[i]) == 0) {
             return (button_id_t)i;
         }

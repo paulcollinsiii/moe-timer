@@ -3,8 +3,8 @@
 #include <stdint.h>
 
 typedef enum {
-    BTN_A = 0, /* GPIO 15 — Start/Pause */
-    BTN_B,     /* GPIO 14 — Reset the selected timer when reloadable */
+    BTN_A = 0, /* GPIO 15 — no binding yet; not a wake source until it has one */
+    BTN_B,     /* GPIO 14 — Start/Pause/Resume, or Reload once expired */
     BTN_C,     /* GPIO 12 — Swap timer type (v1.3) */
     BTN_D,     /* GPIO 11 — Force NTP sync */
     BTN_NONE,
