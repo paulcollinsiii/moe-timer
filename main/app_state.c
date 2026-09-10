@@ -128,7 +128,7 @@ display_state_t app_state_display(const app_state_in_t *in, int32_t remaining, t
     const timer_def_t *next_def = timer_slot_def(timer_next_slot());
     /* ...and during a break it must reflect whether a STARTABLE timer
        exists, not merely another enabled slot: offering a swap to a chore
-       that Button A will then refuse is worse than offering nothing. */
+       that Button B will then refuse is worse than offering nothing. */
     if (timer_break_active() && timer_eligible_extra_count() == 0) {
         next_def = NULL;
     }

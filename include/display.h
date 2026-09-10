@@ -70,11 +70,16 @@ typedef struct {
     const char *timer_name;
     uint16_t completions;
     bool reloadable;
-    bool swap_available;   /* Button C label (extras exist, state allows swap) */
-    bool reload_available; /* Button B label (selected timer reloadable) */
-    /* Button A label: false while a Screen Break refuses to start this
-       slot (not break_eligible). Same "label shows iff a press would
-       work" convention as the two above. */
+    bool swap_available; /* Button C label (extras exist, state allows swap) */
+    /* The raw timer_reload_allowed() gate: the selected timer is
+       reloadable and not RUNNING. NOT "B says Reload" — that is narrower,
+       because B resumes a PAUSED slot rather than reloading it. Only an
+       EXPIRED slot draws the reload label; display_button_b_label() owns
+       the narrowing. */
+    bool reload_available;
+    /* Button B's start/resume leg: false while a Screen Break refuses to
+       start this slot (not break_eligible). Same "label shows iff a press
+       would work" convention as the two above. */
     bool start_available;
     bool charge_warn; /* battery <= 15%: Charge Me!!! badge on the bar */
     /* Running firmware version, folded into the battery row's label
@@ -104,17 +109,27 @@ void display_bedtime(void);                              /* bed-time lock layout
    ("1.5.0"); the screen adds the "v". */
 void display_ota(const char *from_version, const char *to_version);
 
-/* Button A label: the action a press will take in the given state.
-   display.c maps these to LV_SYMBOL_PLAY/PAUSE (layout code stays LVGL-free). */
+/* Button B label: the action a press will take in the given state.
+   display_screens.c maps these to LV_SYMBOL_PLAY/PAUSE and the "Reload"
+   text (layout code stays LVGL-free). */
 typedef enum {
     DISPLAY_BTN_LABEL_NONE = 0,
     DISPLAY_BTN_LABEL_PLAY,
     DISPLAY_BTN_LABEL_PAUSE,
+    DISPLAY_BTN_LABEL_RELOAD,
 } display_btn_label_t;
 
 /* Pure layout math (display_layout.c) — host-tested */
-display_btn_label_t display_button_a_label(timer_state_t state);
-/* Battery icon bucket 0=empty..4=full; display.c maps to LV_SYMBOL_BATTERY_*. */
+/* The whole Button B decision, gates included, so that nothing is left
+   for the (goldens-only) screen builder to re-decide:
+     RUNNING            -> PAUSE  (pausing is never gated)
+     IDLE / PAUSED      -> PLAY   iff start_available
+     EXPIRED            -> RELOAD iff reload_available
+     anything else      -> NONE
+   start_available carries a Screen Break's per-slot refusal; note that it
+   gates only the start/resume legs, never the pause or the reload. */
+display_btn_label_t display_button_b_label(timer_state_t state, bool start_available, bool reload_available);
+/* Battery icon bucket 0=empty..4=full; display_screens.c maps to LV_SYMBOL_BATTERY_*. */
 int display_battery_icon_level(int pct);
 uint16_t display_bar_fill_px(int32_t remaining_sec, uint32_t allocation_sec);
 void display_format_remaining(char *buf, size_t len, int32_t remaining_sec);

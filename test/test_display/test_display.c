@@ -122,28 +122,80 @@ void test_battery_icon_boundaries(void) {
     TEST_ASSERT_EQUAL_INT(4, display_battery_icon_level(100));
 }
 
-/* ---- display_button_a_label: A shows the action a press will take ---- */
+/* ---- display_button_b_label: B shows the action a press will take ----
 
-void test_button_a_shows_play_when_idle(void) {
-    TEST_ASSERT_EQUAL(DISPLAY_BTN_LABEL_PLAY, display_button_a_label(TIMER_IDLE));
+   One function, three inputs, exactly one label: the whole decision lives
+   here rather than half here and half in the screen builder, because the
+   builder has no unit test of its own (only goldens). Every leg below is
+   a distinct row of the truth table, including the two "gate says no"
+   legs that draw nothing. */
+
+void test_button_b_shows_play_when_idle(void) {
+    TEST_ASSERT_EQUAL(DISPLAY_BTN_LABEL_PLAY, display_button_b_label(TIMER_IDLE, true, false));
 }
 
-void test_button_a_shows_play_when_paused(void) {
-    TEST_ASSERT_EQUAL(DISPLAY_BTN_LABEL_PLAY, display_button_a_label(TIMER_PAUSED));
+void test_button_b_shows_play_when_paused(void) {
+    TEST_ASSERT_EQUAL(DISPLAY_BTN_LABEL_PLAY, display_button_b_label(TIMER_PAUSED, true, false));
 }
 
-void test_button_a_shows_pause_when_running(void) {
-    TEST_ASSERT_EQUAL(DISPLAY_BTN_LABEL_PAUSE, display_button_a_label(TIMER_RUNNING));
+void test_button_b_resumes_a_paused_reloadable_slot(void) {
+    /* reload_available is the raw timer_reload_allowed() gate, which is
+       true for a PAUSED reloadable slot — but B resumes it, it does not
+       reload it. Only EXPIRED offers the reload. */
+    TEST_ASSERT_EQUAL(DISPLAY_BTN_LABEL_PLAY, display_button_b_label(TIMER_PAUSED, true, true));
 }
 
-void test_button_a_hidden_when_expired(void) {
-    /* A press does nothing in EXPIRED — advertising one would mislead */
-    TEST_ASSERT_EQUAL(DISPLAY_BTN_LABEL_NONE, display_button_a_label(TIMER_EXPIRED));
+void test_button_b_shows_play_on_the_screen_after_a_reload(void) {
+    /* The screen painted one press AFTER a Reload. timer_reload() returns
+       the slot to IDLE at full duration, and timer_reload_allowed() is
+       still true there (not RUNNING, def still reloadable) — so this
+       combination is not only reachable, it is what the device shows the
+       instant a Reload lands. B must offer PLAY: leaving "Reload" on
+       screen would advertise a press that no longer does anything.
+       reload_available true does NOT imply EXPIRED; do not delete this as
+       a duplicate of test_button_b_shows_play_when_idle. */
+    TEST_ASSERT_EQUAL(DISPLAY_BTN_LABEL_PLAY, display_button_b_label(TIMER_IDLE, true, true));
 }
 
-void test_button_a_hidden_during_break(void) {
+void test_button_b_hidden_when_idle_and_start_refused(void) {
+    /* Screen Break, slot not break_eligible: a press would do nothing */
+    TEST_ASSERT_EQUAL(DISPLAY_BTN_LABEL_NONE, display_button_b_label(TIMER_IDLE, false, false));
+}
+
+void test_button_b_hidden_when_paused_and_start_refused(void) {
+    TEST_ASSERT_EQUAL(DISPLAY_BTN_LABEL_NONE, display_button_b_label(TIMER_PAUSED, false, true));
+}
+
+void test_button_b_shows_pause_when_running(void) {
+    TEST_ASSERT_EQUAL(DISPLAY_BTN_LABEL_PAUSE, display_button_b_label(TIMER_RUNNING, true, false));
+}
+
+void test_button_b_pause_is_never_gated(void) {
+    /* A RUNNING slot during a break is break_eligible by construction, so
+       start_available cannot legitimately be false here — but pausing is
+       unconditional, and the label must not depend on the gate. */
+    TEST_ASSERT_EQUAL(DISPLAY_BTN_LABEL_PAUSE, display_button_b_label(TIMER_RUNNING, false, false));
+}
+
+void test_button_b_shows_reload_when_expired_and_reloadable(void) {
+    TEST_ASSERT_EQUAL(DISPLAY_BTN_LABEL_RELOAD, display_button_b_label(TIMER_EXPIRED, true, true));
+}
+
+void test_button_b_reload_ignores_the_start_gate(void) {
+    /* Reload is not a start: a break refusing to start this slot must not
+       hide the reload it would still accept. */
+    TEST_ASSERT_EQUAL(DISPLAY_BTN_LABEL_RELOAD, display_button_b_label(TIMER_EXPIRED, false, true));
+}
+
+void test_button_b_hidden_when_expired_and_not_reloadable(void) {
+    /* The Screen slot has no def and is never reloadable — a press does
+       nothing, so advertising one would mislead. */
+    TEST_ASSERT_EQUAL(DISPLAY_BTN_LABEL_NONE, display_button_b_label(TIMER_EXPIRED, true, false));
+}
+
+void test_button_b_hidden_during_break(void) {
     /* Cannot resume early during an enforced break */
-    TEST_ASSERT_EQUAL(DISPLAY_BTN_LABEL_NONE, display_button_a_label(TIMER_BREAK));
+    TEST_ASSERT_EQUAL(DISPLAY_BTN_LABEL_NONE, display_button_b_label(TIMER_BREAK, true, true));
 }
 
 /* display_fb_invert_dirty_rows: inverts band bytes only in rows where the
@@ -497,11 +549,18 @@ int main(void) {
     RUN_TEST(test_invert_byte_cols_full_width);
     RUN_TEST(test_invert_byte_cols_clamps_out_of_range);
     RUN_TEST(test_battery_icon_boundaries);
-    RUN_TEST(test_button_a_shows_play_when_idle);
-    RUN_TEST(test_button_a_shows_play_when_paused);
-    RUN_TEST(test_button_a_shows_pause_when_running);
-    RUN_TEST(test_button_a_hidden_when_expired);
-    RUN_TEST(test_button_a_hidden_during_break);
+    RUN_TEST(test_button_b_shows_play_when_idle);
+    RUN_TEST(test_button_b_shows_play_when_paused);
+    RUN_TEST(test_button_b_resumes_a_paused_reloadable_slot);
+    RUN_TEST(test_button_b_shows_play_on_the_screen_after_a_reload);
+    RUN_TEST(test_button_b_hidden_when_idle_and_start_refused);
+    RUN_TEST(test_button_b_hidden_when_paused_and_start_refused);
+    RUN_TEST(test_button_b_shows_pause_when_running);
+    RUN_TEST(test_button_b_pause_is_never_gated);
+    RUN_TEST(test_button_b_shows_reload_when_expired_and_reloadable);
+    RUN_TEST(test_button_b_reload_ignores_the_start_gate);
+    RUN_TEST(test_button_b_hidden_when_expired_and_not_reloadable);
+    RUN_TEST(test_button_b_hidden_during_break);
     RUN_TEST(test_invert_dirty_rows_only_touches_changed_rows);
     RUN_TEST(test_invert_dirty_rows_clamps_range);
     RUN_TEST(test_invert_dirty_rows_no_change_returns_zero);

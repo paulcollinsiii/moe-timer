@@ -38,7 +38,7 @@ bool net_window_wait_ntp(void);
 void net_window_post_snapshot(const stats_snapshot_t *snap);
 
 /* Join the window task; poll_cb (may be NULL) runs every 100 ms while
-   waiting — the orchestrator keeps Button A live during the MQTT tail.
+   waiting — the orchestrator keeps Button B live during the MQTT tail.
    false = the task is wedged past timeout_ms: it stays marked active and
    the awake failsafe is the backstop. Never pass a poll_cb from the
    failsafe's esp_timer context. */

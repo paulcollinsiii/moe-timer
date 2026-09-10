@@ -244,33 +244,32 @@ static void build_main_status(lv_obj_t *scr, const display_state_t *st) {
 }
 
 /* Button-label row along the bottom edge (geometry: see BTN_X0/BTN_PITCH).
-   A shows the action a press will take; B/C only when their press would
-   work; D = sync. */
+   Cell 0 (A) is deliberately blank: A is the mode key and is unbound
+   until the chore list exists. B shows the action a press will take;
+   C only when its press would work; D = sync, always.
+
+   Every decision about B lives in display_button_b_label() — this is a
+   plain switch over its answer, so no gate is re-tested here. */
 static void build_button_row(lv_obj_t *scr, const display_state_t *st) {
-    const char *a_sym = NULL;
-    switch (display_button_a_label(st->timer_state)) {
+    const char *b_text = NULL;
+    switch (display_button_b_label(st->timer_state, st->start_available, st->reload_available)) {
         case DISPLAY_BTN_LABEL_PLAY:
-            a_sym = LV_SYMBOL_PLAY;
+            b_text = LV_SYMBOL_PLAY;
             break;
         case DISPLAY_BTN_LABEL_PAUSE:
-            a_sym = LV_SYMBOL_PAUSE;
+            b_text = LV_SYMBOL_PAUSE;
             break;
-        default:
+        case DISPLAY_BTN_LABEL_RELOAD:
+            b_text = "Reload";
             break;
+        case DISPLAY_BTN_LABEL_NONE:
+            break; /* draw nothing */
     }
-    /* start_available carries the Screen Break's per-slot refusal: during
-       a break a non-eligible timer draws no play glyph, because a press
-       would do nothing. Pausing is never gated, and a RUNNING slot during
-       a break is break-eligible by construction (I6), so one flag covers
-       both labels. */
-    if (a_sym && st->start_available) {
-        make_label(scr, a_sym, &lv_font_montserrat_12, LV_ALIGN_BOTTOM_MID, BTN_MID_OFS(0), -2);
-    }
-    /* reload_available already folds in the def's reloadable flag and the
-       not-RUNNING rule (timer_reload_allowed) — label shows iff a press
-       would work. */
-    if (st->reload_available) {
-        make_label(scr, "Reset", &lv_font_montserrat_12, LV_ALIGN_BOTTOM_MID, BTN_MID_OFS(1), -2);
+    /* Every enumerator listed and no default: -Wswitch (an error under
+       IDF's -Wall -Werror) then catches a new label that nobody wired up
+       here, rather than letting it render as a blank cell. */
+    if (b_text) {
+        make_label(scr, b_text, &lv_font_montserrat_12, LV_ALIGN_BOTTOM_MID, BTN_MID_OFS(1), -2);
     }
     if (st->swap_available) {
         make_label(scr, LV_SYMBOL_RIGHT /* swap timer type */, &lv_font_montserrat_12, LV_ALIGN_BOTTOM_MID,
@@ -321,13 +320,20 @@ void display_screens_build_break(const display_state_t *st) {
     }
 
     /* Left: the frozen screen time (h:mm — it cannot change during the
-       break, and the row has three items to fit). */
+       break, and the row has three items to fit). At 16 pt this spans
+       x 5..91: all of cell A (x<54) AND most of cell B (54..128), ending
+       on B's button centre. Anything added to cell A of this row has to
+       account for that — the width is NOT one cell's worth. */
     display_format_hm(rem_buf, sizeof(rem_buf), st->remaining_sec);
     snprintf(buf, sizeof(buf), "Screen %s", rem_buf);
     make_label(scr, buf, &lv_font_montserrat_16, LV_ALIGN_BOTTOM_LEFT, 4, -2);
 
-    /* Over button C: the swap affordance. Button A stays deliberately
-       unlabelled — the break is still enforced for the Screen timer. */
+    /* Over button C: the swap affordance. This row is built here rather
+       than by build_button_row (16 pt, and the frozen screen time runs
+       across cells A and B in place of their labels), but it already
+       agrees with the new layout: A is unbound, and B is blank because
+       the break is still enforced for the Screen timer — TIMER_BREAK
+       yields no label from display_button_b_label() either. */
     char hint[DISPLAY_SWAP_HINT_MAX + 1];
     display_format_swap_hint(hint, sizeof(hint), st->swap_next_name);
     snprintf(buf, sizeof(buf), "%s %s", LV_SYMBOL_RIGHT, hint);

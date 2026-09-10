@@ -127,12 +127,17 @@ void test_main_paused_reloadable(void) {
     st.reloadable = true;
     st.allocation_sec = 900;
     st.remaining_sec = 700;
-    st.reload_available = true; /* Reset label visible */
+    /* The raw timer_reload_allowed() gate is true for a paused reloadable
+       slot, but B resumes rather than reloads: this golden pins the play
+       glyph over B, NOT a Reload label. */
+    st.reload_available = true;
     display_screens_build_main(&st);
     assert_matches_golden("main_paused_reloadable");
 }
 
 void test_main_expired(void) {
+    /* The Screen slot: no def, never reloadable, so B stays blank when
+       the day runs out. */
     display_state_t st = base_state();
     st.timer_state = TIMER_EXPIRED;
     st.remaining_sec = 0;
@@ -140,9 +145,26 @@ void test_main_expired(void) {
     assert_matches_golden("main_expired");
 }
 
+void test_main_expired_reloadable(void) {
+    /* An EXPIRED reloadable extra — the one screen that carries the
+       Reload label. B has no other job in this state, which is what lets
+       reload keep the same key rather than needing one of its own. */
+    display_state_t st = base_state();
+    st.timer_state = TIMER_EXPIRED;
+    st.timer_name = "Piano";
+    st.reloadable = true;
+    st.completions = 1;
+    st.allocation_sec = 900;
+    st.remaining_sec = 0;
+    st.reload_available = true;
+    display_screens_build_main(&st);
+    assert_matches_golden("main_expired_reloadable");
+}
+
 void test_break_screen(void) {
-    /* Break screen with extras configured: the bottom row offers the swap
-       (Button A stays unlabelled — the break is still enforced). */
+    /* Break screen with extras configured: the bottom row offers the swap.
+       A is unlabelled because it is the unbound mode key; B is unlabelled
+       because the break is still enforced (TIMER_BREAK yields no label). */
     display_state_t st = base_state();
     st.timer_state = TIMER_BREAK;
     st.remaining_sec = 5400; /* 1:30:00 of screen time frozen */
@@ -201,13 +223,15 @@ void test_main_break_chip(void) {
 
 void test_main_break_chip_no_start(void) {
     /* A break running behind a selected chore (not break_eligible):
-       Button A carries no play glyph, because a press would be refused.
+       Button B carries no play glyph, because a press would be refused.
+       reload_available is true here and still draws nothing — the slot is
+       PAUSED, not EXPIRED.
 
        This is a DIFFERENT scenario from test_main_break_chip, not a
        one-field variant of it — the two states differ in the timer name,
-       state, allocation, remaining and reload label as well, so do not
-       read a diff of the two goldens as "what start_available does".
-       test_start_available_only_changes_button_a below is what isolates
+       state, allocation and remaining as well, so do not read a diff of
+       the two goldens as "what start_available does".
+       test_start_available_only_changes_button_b below is what isolates
        that. */
     display_state_t st = base_state();
     st.timer_state = TIMER_PAUSED;
@@ -238,10 +262,10 @@ void test_break_screen_no_eligible(void) {
 }
 
 /* Isolates the flag itself: one state rendered twice, differing only in
-   start_available, must differ only inside Button A's cell. Catches a
+   start_available, must differ only inside Button B's cell. Catches a
    layout that reflows when the glyph disappears — which a golden pair of
    two different scenarios cannot. */
-void test_start_available_only_changes_button_a(void) {
+void test_start_available_only_changes_button_b(void) {
     static uint8_t with_glyph[FB_BYTES];
     display_state_t st = base_state();
     st.timer_state = TIMER_PAUSED;
@@ -261,8 +285,13 @@ void test_start_available_only_changes_button_a(void) {
     display_screens_build_main(&st);
     lv_refr_now(s_disp);
 
-    /* Button A's label is centred on x=17 (BTN_X0), so it lives in the
-       first four byte columns of the bottom label rows. */
+    /* Button B's label is centred on x=91 (BTN_X0 + BTN_PITCH); its cell
+       runs half a pitch either side, x=54..128. Byte columns 6..16 are
+       the minimal byte range CONTAINING that cell, and so are slightly
+       wider than it: byte 6 starts at x=48 and byte 16 ends at x=135.
+       Literals, not expressions over the source constants, so a mistake
+       in those constants cannot move the corridor in lockstep with the
+       bug. */
     int differing = 0;
     for (int r = 0; r < VER; r++) {
         for (int b = 0; b < HOR / 8; b++) {
@@ -271,11 +300,40 @@ void test_start_available_only_changes_button_a(void) {
                 continue;
             differing++;
             char msg[80];
-            snprintf(msg, sizeof(msg), "row %d byte %d changed outside Button A's cell", r, b);
-            TEST_ASSERT_TRUE_MESSAGE(r >= 112 && b < 4, msg);
+            snprintf(msg, sizeof(msg), "row %d byte %d changed outside Button B's cell", r, b);
+            TEST_ASSERT_TRUE_MESSAGE(r >= 112 && b >= 6 && b <= 16, msg);
         }
     }
     TEST_ASSERT_TRUE_MESSAGE(differing > 0, "start_available changed nothing at all");
+}
+
+/* "Reload" is text where every other cell in this row is a glyph, and it
+   replaced a shorter word ("Reset"), so its width is the one thing about
+   the new layout that could silently collide with a neighbour. The cell
+   is BTN_PITCH wide and centred, so half the label must fit in half a
+   pitch on each side. Measured against the real font this suite links,
+   not eyeballed from the golden. */
+void test_reload_label_fits_its_cell(void) {
+    display_state_t st = base_state();
+    st.timer_state = TIMER_EXPIRED;
+    st.timer_name = "Piano";
+    st.reloadable = true;
+    st.reload_available = true;
+    st.remaining_sec = 0;
+    display_screens_build_main(&st);
+    lv_obj_t *scr = lv_screen_active();
+    lv_obj_update_layout(scr);
+
+    int32_t w = -1;
+    uint32_t n = lv_obj_get_child_count(scr);
+    for (uint32_t i = 0; i < n; i++) {
+        lv_obj_t *o = lv_obj_get_child(scr, i);
+        if (lv_obj_check_type(o, &lv_label_class) && strcmp(lv_label_get_text(o), "Reload") == 0)
+            w = lv_obj_get_width(o);
+    }
+    TEST_ASSERT_NOT_EQUAL_MESSAGE(-1, w, "Reload label not found on an EXPIRED reloadable slot");
+    printf("Reload label is %d px wide; the cell is %d px\n", (int)w, BTN_PITCH);
+    TEST_ASSERT_TRUE_MESSAGE(w <= BTN_PITCH, "Reload label is wider than its button cell");
 }
 
 void test_main_low_battery_warn_badge(void) {
@@ -643,11 +701,13 @@ int main(void) {
     RUN_TEST(test_main_running_meditation_x2);
     RUN_TEST(test_main_paused_reloadable);
     RUN_TEST(test_main_expired);
+    RUN_TEST(test_main_expired_reloadable);
     RUN_TEST(test_break_screen);
     RUN_TEST(test_break_screen_no_extras);
     RUN_TEST(test_main_break_chip);
     RUN_TEST(test_main_break_chip_no_start);
-    RUN_TEST(test_start_available_only_changes_button_a);
+    RUN_TEST(test_start_available_only_changes_button_b);
+    RUN_TEST(test_reload_label_fits_its_cell);
     RUN_TEST(test_break_screen_no_eligible);
     RUN_TEST(test_main_low_battery_warn_badge);
     RUN_TEST(test_main_idle_weekday_adjusted);

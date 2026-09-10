@@ -359,7 +359,7 @@ void ota_flow_arm(ota_trigger_t trigger, int batt_pct, bool charge_locked) {
        rollover + mandatory start sync" as the routine example, and
        net_apply_open() has two call sites (wake_flow.c:349, :1068). The
        rollover window finds 1.6.0 and buffers it, the operator presses
-       Button A, the second window arms with a trigger that does not
+       Button B, the second window arms with a trigger that does not
        check, and the update vanishes silently until tomorrow.
 
        This used to clear unconditionally, justified by keeping a buffer

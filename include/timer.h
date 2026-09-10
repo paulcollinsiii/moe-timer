@@ -255,7 +255,7 @@ int timer_eligible_extra_count(void);
 /* Is `slot` a genuine break activity? Slot 0 (Screen), disabled and
    out-of-range slots are always false. */
 bool timer_slot_break_eligible(int slot);
-/* True when Button A may START or RESUME the active slot: refused only
+/* True when Button B may START or RESUME the active slot: refused only
    while a Screen Break runs on slot 0 and the active slot is not
    break_eligible (rule 7). Slot 0 is never eligible, so this also carries
    the existing "the break screen has no play glyph" behaviour. Pausing is

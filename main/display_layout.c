@@ -28,15 +28,31 @@ int display_battery_icon_level(int pct) {
     return 4;
 }
 
-display_btn_label_t display_button_a_label(timer_state_t state) {
+/* One label out, every gate folded in — see the header for the rule. The
+   alternative (state here, gates in the screen builder) put a three-input
+   decision in the one module with no unit test, only goldens. */
+display_btn_label_t display_button_b_label(timer_state_t state, bool start_available, bool reload_available) {
     switch (state) {
         case TIMER_RUNNING:
+            /* A RUNNING slot during a break is break_eligible by
+               construction (I6), so start_available is not consulted —
+               pausing is never refused. */
             return DISPLAY_BTN_LABEL_PAUSE;
         case TIMER_IDLE:
         case TIMER_PAUSED:
-            return DISPLAY_BTN_LABEL_PLAY;
+            /* start_available carries a Screen Break's per-slot refusal:
+               a non-eligible slot draws no glyph, because a press would
+               do nothing. reload_available may well be true here (the
+               slot is reloadable and not RUNNING), but B resumes a paused
+               slot — it does not reload it. */
+            return start_available ? DISPLAY_BTN_LABEL_PLAY : DISPLAY_BTN_LABEL_NONE;
+        case TIMER_EXPIRED:
+            /* Where B has no other job: reload if the slot allows it.
+               Screen (slot 0) has no def and is never reloadable, so a
+               kid still cannot reset their own screen timer. */
+            return reload_available ? DISPLAY_BTN_LABEL_RELOAD : DISPLAY_BTN_LABEL_NONE;
         default:
-            return DISPLAY_BTN_LABEL_NONE; /* EXPIRED: a press does nothing */
+            return DISPLAY_BTN_LABEL_NONE; /* BREAK: no early resume */
     }
 }
 
