@@ -90,7 +90,7 @@ time.
 Buttons are normally dispatched on EXT1 wake, which would make the device
 deaf while it is awake. While awake, a GPIO negative-edge ISR latches every
 press the moment it lands — even inside an e-ink flush or NTP sync — and
-the awake checkpoints consume the latch: Button A pauses from the
+the awake checkpoints consume the latch: Button B pauses from the
 render-grid wait and the final-minute event watch (cancelling the pending
 expiry), and any latched press dismisses the TIME'S UP / break alarms. The
 handlers detach at sleep entry before the pads move to the RTC mux;
@@ -156,13 +156,14 @@ a kid on a 15 min eye rest can go and run Piano or Violin.
   **inverted** SCREEN BREAK layout with its own countdown + draining bar,
   plus a swap hint over Button C. The break can be earned entirely by a
   non-eligible extra timer, with Screen never started that day.
-- During, with Screen selected: Button A is ignored (no early resume); B
-  does nothing (Screen is not reloadable); C and D work.
+- During, with Screen selected: Button B is ignored — no early resume, and
+  no reload either, since Screen is never reloadable; A has no binding;
+  C and D work.
 - During, with an extra timer selected: the normal layout for that timer,
   with an inverted `BREAK m:ss` chip in the header where `Last sync`
   normally sits. A **break-eligible** timer starts, pauses, expires and
   alerts as usual. A non-eligible one is fully visible and reachable by
-  Button C, but Button A is refused and draws no ▶ — a chore is not a break.
+  Button C, but Button B is refused and draws no ▶ — a chore is not a break.
 - The swap hint on the break screen is suppressed when no break-eligible
   timer is configured: the break has nothing to offer, so it behaves like
   the older locking break.
@@ -212,8 +213,8 @@ it.
 
 **Configure non-eligible timers with `RELOADABLE=n`.** One run of a chore
 timer is capped by its own duration, which is the earned-by-the-chore
-intent; but Button B reloads a reloadable timer, so a reloadable chore can
-be re-earned without doing the chore again.
+intent; but Button B reloads a reloadable timer once it has expired, so a
+reloadable chore can be re-earned without doing the chore again.
 
 A kid can of course leave Violin running without touching the violin. That
 is unfixable in principle — the device cannot see the room — and it is the
@@ -229,12 +230,14 @@ All state is persisted in **RTC slow memory** (survives deep sleep) with an NVS 
 
 | Button | GPIO | Action |
 |--------|------|--------|
-| A | 15 | Start (IDLE/PAUSED → RUNNING, immediate; NTP sync after) / Pause (RUNNING → PAUSED). During a Screen Break, a **start** is refused on any slot that is not break-eligible — including Screen — and the ▶ label is not drawn (see 5a/5b); pausing is never gated |
-| B | 14 | Reset the **selected** timer to IDLE at full duration — never while RUNNING (pause first), and only for a reloadable extra timer; Screen has no def and is never reloadable |
+| A | 15 | **Nothing.** Reserved as a mode key for a later feature: no action, no label, and not a wake source in this firmware |
+| B | 14 | Start (IDLE/PAUSED → RUNNING, immediate; NTP sync after) / Pause (RUNNING → PAUSED) / Resume. During a Screen Break, a **start** is refused on any slot that is not break-eligible — including Screen — and the ▶ label is not drawn (see 5a/5b); pausing is never gated. On an **EXPIRED** slot, where B has no start or pause job left that day, B instead **reloads** the timer to full duration when the slot is reloadable; Screen has no def and is never reloadable |
 | C | 12 | Swap timer type (Screen → extra 1 → … → Screen); refused while RUNNING (a Screen Break does **not** refuse — see 5a) |
 | D | 11 | Force NTP re-sync + full display refresh |
 
-Wake sources: A and D always; B and C only when their press would succeed, since the EXT1 mask is rebuilt at every sleep entry and a press that could only be refused must not burn battery or a panel refresh. B: the selected timer is reloadable, and never while RUNNING (pause first). C: extra timers configured AND the active timer not RUNNING — a Screen Break leaves C live, so the mask keeps it as a wake source throughout. Buttons are debounced in software (10 ms).
+Wake sources: B and D always; C only when its press would succeed, since the EXT1 mask is rebuilt at every sleep entry and a press that could only be refused must not burn battery or a panel refresh. C: extra timers configured AND the active timer not RUNNING — a Screen Break leaves C live, so the mask keeps it as a wake source throughout. **A never wakes the device, because it has no binding to act on**; a button that gains one later becomes a conditional wake source like C rather than an unconditional one. Buttons are debounced in software (10 ms).
+
+B is armed unconditionally even though a handful of states refuse it — an expired slot that is not reloadable, or Screen during a break. That is a deliberate overshoot of the "a press that could only be refused must not wake" rule, because the failure is asymmetric: arming B when it would do nothing costs a single wake, while failing to arm it when it *would* have acted makes the device's primary control dead to the press, with no feedback to tell that apart from a flat battery. C can be gated safely because a refused swap has a visible alternative.
 
 ### 6a · Extra timers (v1.3)
 
@@ -242,7 +245,9 @@ Up to four additional countdown timers (menuconfig: `MAGTAG_TIMER<n>_NAME/_MIN/_
 
 - No eye-rest breaks of *their own* — the break always belongs to the Screen slot — but a **non-eligible** timer feeds the shared screen-exposure balance (5b) and so can earn one, and a **break-eligible** timer stays usable during a break and drains the balance, which is what the break time is for (see 5a).
 - Fixed configured duration instead of the day-schedule allocation.
-- **Reloadable** timers reset to full via Button B on the same day. The mode line then counts the day's completed runs (reached 00:00): `Meditation (x2) - 10 min`. A mid-run reset does not count; non-reloadable timers never show a counter — once expired they stay depleted until rollover.
+- **Reloadable** timers reload to full via Button B on the same day, but only **once they have EXPIRED** — that is where B has no start/pause/resume job to do. The mode line then counts the day's completed runs (reached 00:00): `Meditation (x2) - 10 min`. Non-reloadable timers never show a counter — once expired they stay depleted until rollover.
+
+  There is no longer any way to reset a timer *before* it expires. Earlier firmware let Button B reset from any non-running state, including PAUSED; B now resumes a paused timer instead, and since a paused timer never expires on its own, a part-finished run cannot be restarted from the device. The `(x2)` counter is unaffected — its flow is expire-then-reload — and the parent-facing screen-time adjustment in Home Assistant remains the way to hand back time directly.
 - **Break-eligible** timers are genuine time away from a screen (see 5b). Configure chore timers non-eligible *and* `RELOADABLE=n`.
 - Day rollover resets every timer, clears the counters, and reverts the selection to Screen.
 
@@ -259,7 +264,7 @@ Only the selected timer can be RUNNING — swapping requires a pause, so pause/e
 │  ▮85%                       00:42:30             │  ← row 58–78 (battery left, remaining right)
 │                                                  │
 │  Weekday · 60 min                    RUNNING     │  ← status row (moved up)
-│     ⏸        Reset                  ⟳            │  ← button labels (A B _ D)
+│              ⏸                      ⟳            │  ← button labels (_ B _ D)
 └──────────────────────────────────────────────────┘
 ```
 
@@ -273,14 +278,16 @@ inside the header's clean band, so no other widget moves):
 │  ████████████████████░░░░░░░░░░░░░░░░░░░░░░░░░░  │
 │  ▮85%                       00:07:30             │
 │  Piano - 10 min                      RUNNING     │
-│     ⏸                               ⟳            │  ← C unlabelled: swap refused while RUNNING
+│              ⏸                      ⟳            │  ← C unlabelled: swap refused while RUNNING
 └──────────────────────────────────────────────────┘
 ```
 
 The break screen itself (Screen selected) carries a bottom row instead of
 its old centred footer whenever extra timers are configured — the frozen
 screen time on the left, the swap affordance over C, refresh over D.
-Button A stays deliberately unlabelled: the break is still enforced.
+Neither A nor B is labelled there, for different reasons: A has no
+binding at all, and B is blank because the break is still enforced — a
+press would be refused, so the panel does not offer it.
 
 ```
 ┌──────────────────────────────────────────────────┐
@@ -295,11 +302,19 @@ With no extra timers configured there is nothing to swap to, so the break
 screen keeps its original centred `Timer paused - 1:30:00 left` footer and
 no button row.
 
-Button labels sit above the physical buttons: A shows the action a press
-will take (play when IDLE/PAUSED, pause when RUNNING, hidden when EXPIRED),
-"Reset" appears when the selected timer is reloadable (and not RUNNING),
-C shows a swap arrow when extra timers are configured and the state allows
-swapping, D is the sync/refresh symbol.
+Button labels sit above the physical buttons. A is always blank — it has
+no binding. B shows the single action its press will take: play when
+IDLE/PAUSED (and only when a start would be allowed), pause when RUNNING,
+"Reload" when the slot is EXPIRED *and* reloadable, and nothing at all
+otherwise. C shows a swap arrow when extra timers are configured and the
+state allows swapping, D is the sync/refresh symbol.
+
+Because one cell carries all of B's actions, the label is decided by a
+single rule rather than by each drawing site, so the panel cannot offer
+something the press would refuse. Note "Reload" appears only on an
+EXPIRED slot: after you press it the timer returns to IDLE at full
+duration and the label goes back to play, even though the slot is still
+reloadable.
 When an extra timer is selected, the bottom-left mode line shows its name,
 completion counter, and duration (e.g. `Meditation (x2) · 10 min`) instead
 of the day-type + allocation.

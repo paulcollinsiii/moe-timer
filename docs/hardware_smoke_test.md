@@ -19,27 +19,39 @@ credentials.**
 3. [ ] **55 s tick**: device deep-sleeps, wakes ~55 s later, partial refresh
        (no black/white flash).
 4. [ ] **Anti-ghosting**: every 5th wake does a full refresh (visible flash).
-5. [ ] **Button A (start)**: timer starts immediately (state pixel WHITE ->
+5. [ ] **Button B (start)**: timer starts immediately (state pixel WHITE ->
        GREEN after ~250 ms), then WiFi joins and SNTP syncs (WiFi pixel blue);
        header shows sync time, bar full, state `RUNNING`. With bad WiFi creds:
        timer still starts (fail-open), WiFi pixel blinks red 3x, remaining
        time counts down on the uncorrected clock.
 6. [ ] **Countdown**: remaining decreases ~55 s per wake, shown as
        `HH:MM:SS`.
-7. [ ] **Button A (pause/resume)**: pause shows `PAUSED`, remaining freezes
+7. [ ] **Button B (pause/resume)**: pause shows `PAUSED`, remaining freezes
        across wakes; resume is immediate (AMBER -> GREEN after ~250 ms, sync
        after) and continues from the frozen value.
-8. [ ] **Button B (reset)**: with the timer PAUSED (or expired), returns to
-       IDLE with today's full allocation. While RUNNING, B is dropped from
-       the wake mask — pressing it does nothing (no wake, no refresh).
+8. [ ] **Button A does nothing**: A is reserved for a later mode key and has
+       no binding in this firmware. Test it **from sleep** — that is the
+       whole of its observable surface. With the timer IDLE and no alarm
+       sounding, press A: no wake, no refresh, no panel change at all.
+       Then press B from the same state as a positive control — the device
+       must wake and start the timer. Without that control, "nothing
+       happened" is indistinguishable from a dead switch or an unpopulated
+       pad.
+       Two things that are **not** failures. A silences a sounding alarm:
+       dismissal deliberately takes any button (cases 11, 15, 24), so never
+       test A against TIME'S UP or a break alarm. And a press made while
+       the device is already awake is dropped before dispatch — A is left
+       out of the press pick — so there is nothing to observe there either.
 9. [ ] **Button D (force sync)**: WiFi cycle + full refresh; sync time updates.
 10. [ ] **Button C**: with no extra timers configured (the default), does
         nothing at all — not a wake source (kept out of the EXT1 mask so
         mashing it cannot burn battery or refreshes). With an extra timer
         configured (`MAGTAG_TIMER1_NAME` etc.), swaps the selected timer.
-        While a timer is RUNNING or in a Screen Break, C is dropped from
-        the wake mask entirely — pressing it does nothing (no wake, no
-        refresh) until the timer is paused.
+        While a timer is RUNNING, C is dropped from the wake mask entirely
+        — pressing it does nothing (no wake, no refresh) until the timer is
+        paused. A Screen Break does **not** refuse: `timer_swap_allowed()`
+        gates on RUNNING alone, so C stays a wake source right through a
+        break, which is what makes going and doing Piano possible.
 11. [ ] **Expiry**: temporarily lower `NVS_DEFAULT_WEEKDAY_MIN` to 1-2 min (and
         erase NVS: `idf.py erase-flash`), let it expire: TIME'S UP screen,
         3 beeps x 5 cycles, red NeoPixel pulse; any button stops the alert
@@ -51,11 +63,14 @@ credentials.**
         snapshot exists (`python -m esptool --chip esp32s2 erase-region
         0x9000 0x6000`) or wait past midnight: wake re-syncs and resets to
         IDLE with the new day's allocation.
-13. [ ] **Wake buttons**: A and D always wake the device. B and C wake only
-        when their press would succeed (the EXT1 mask is rebuilt at every
-        sleep entry): B needs a reloadable selected timer and never wakes
-        mid-run (case 8); C needs extra timers configured and no
-        RUNNING/BREAK (case 10).
+13. [ ] **Wake buttons**: B and D always wake the device. C wakes only when
+        its press would succeed (the EXT1 mask is rebuilt at every sleep
+        entry): it needs extra timers configured and no RUNNING (case 10) —
+        a break does not refuse it. **A does not wake in this firmware**,
+        because it has no binding to act on — not a permanent property of
+        the button (case 8). Check A with every other gate open (IDLE,
+        extras configured) so a pass cannot be an accident of some other
+        refusal, and confirm B still wakes from the same state as a control.
 14. [ ] **Panel protection**: mash buttons rapidly — refreshes serialize, log
         shows `refresh rejected` if under 1 s apart, no crash.
 15. [ ] **Held-button dismissal**: dismiss the expiry alert while *holding*
@@ -87,17 +102,21 @@ credentials.**
         reloadable — Button B can never reset it, and the Screen
         allocation resets only on a genuine day rollover. To observe the
         refusal, run the allocation down to zero so Screen is EXPIRED and
-        still selected, then hold B down through a periodic 55 s tick wake
-        so the press rides in on that wake's latch: the log then shows
-        `button B unavailable` and nothing resets. Swap to a reloadable
-        extra that is EXPIRED and the same press reloads that timer to
-        full instead.
+        still selected, then press B: it is an unconditional wake source, so
+        an ordinary press wakes the device and logs
+        `button B unavailable (state 3)` with nothing reset. Swap to a
+        reloadable extra that is EXPIRED and the same press reloads that
+        timer to full instead.
+        Press and release normally — do not hold B down. A button already
+        held emits no negative edge, and `enter_deep_sleep` waits up to 3 s
+        for release before the next wake logs
+        `still held from previous wake - ignoring`.
 21. [ ] **Final-minute countdown**: the pre-expiry wake lands ~70 s out
         (planner); the display then steps through 00:01:00 / 00:00:45 /
         00:00:30 / 00:00:15 as partial refreshes, the last 15 s count down
         on the four pixels in binary (light green, dim; dark during quiet
         hours), and TIME'S UP + red pulse + beeps fire within ~1 s of the
-        expiry wall time. Pressing A anywhere in the final minute pauses
+        expiry wall time. Pressing B anywhere in the final minute pauses
         instead (PAUSED full refresh, no alarm) — presses are ISR-latched,
         so even a quick tap DURING one of the quarter-mark partial
         refreshes registers and pauses as soon as the flush completes;
@@ -117,12 +136,16 @@ credentials.**
         break alarm fires: 2-beep pattern + pulsing cyan NeoPixels (alert-
         class — fires during quiet hours too); any button silences it.
         Break start may lag the interval by up to one 55 s tick.
-25. [ ] **Break is enforced**: during the break, Button A logs
-        `button A ignored during screen break` and nothing resumes. B does
-        nothing on Screen; D still syncs.
+25. [ ] **Break is enforced**: during the break, Button B logs
+        `button B ignored during screen break` and nothing resumes — B is
+        also unlabelled on the panel for that reason. A resumes nothing and
+        produces no log line at any level — it is not a wake source and is
+        left out of the press pick, so its dispatch arm is never reached in
+        a shipped build. D still syncs. (If the break alarm is still
+        sounding, any button silences it, A included — let it finish first.)
 26. [ ] **Break end**: at the end of the break (within ~1 s), double-beep
         chime, display returns to the normal layout showing PAUSED with the
-        frozen remaining time; Button A resumes and accrual starts fresh
+        frozen remaining time; Button B resumes and accrual starts fresh
         (next break ~interval later).
 27. [ ] **Break persistence**: power-cycle mid-break -> after the boot sync
         the break resumes with the SAME end time (not restarted). Power
@@ -176,7 +199,7 @@ these items cover the on-hardware behaviour.
         confirms the empty-URI skip path.
 37. [ ] **Grant on hardware**: publish a grant to an EXPIRED Screen timer
         (see home_assistant.md); on the next window the panel shows PAUSED
-        holding the granted time and Button A starts it — the TIME'S UP
+        holding the granted time and Button B starts it — the TIME'S UP
         alarm does NOT re-fire. A grant while RUNNING extends the countdown
         in place.
 38. [ ] **Locate alarm**: publish a locate command; on the next window the
