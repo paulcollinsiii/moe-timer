@@ -80,7 +80,7 @@ void test_display_idle_shows_full_allocation(void) {
    An adjustment applied while Screen is IDLE sits in the bank until
    timer_start folds it, so today's REMAINING has to add it — otherwise a
    -45 set from HA in the morning shows nothing on the panel until the kid
-   presses A, which reads exactly like the set never landed.
+   presses B, which reads exactly like the set never landed.
 
    allocation_sec must NOT absorb it, though: it is the day's default, and
    the status line renders it as such. Folding the two together made a
@@ -105,7 +105,7 @@ void test_display_no_adjustment_reports_zero(void) {
 }
 
 /* The adjustment has to survive timer_start folding bonus_sec away —
-   otherwise the parenthetical vanishes the moment the kid presses A,
+   otherwise the parenthetical vanishes the moment the kid presses B,
    while the clock beside it still counts the adjusted day. Derived as
    (today's limit - the day's default) rather than read off the bank,
    precisely so the start fold cannot lose it. */
@@ -263,6 +263,48 @@ void test_display_adjustment_clears_at_the_day_rollover(void) {
     TEST_ASSERT_EQUAL_INT32(0, st.adjust_sec);
 }
 
+/* ---- the chore gate's release, seen from the display layer --------------
+
+   timer_release_gated is the second writer into slot 0 and the only one
+   that moves time WITHOUT recording an adjustment, which makes it the one
+   caller able to manufacture the state display.h rules out: adjust_sec ==
+   0 is documented to mean "the day is running on its default, and the
+   status line then renders exactly as it did before this field existed",
+   so a remaining_sec above allocation_sec + adjust_sec renders 90 minutes
+   against a 60 minute day with no parenthetical to explain it — and the
+   bar, which divides by the default, draws 150%.
+
+   timer.c's IDLE refusal is what keeps that unreachable, and bonus_sec is
+   RTC-persisted, so without it the overgrant survives deep sleep. This is
+   the display half of that guard; the timer half lives in test_timer. */
+static void assert_remaining_within_the_day(display_state_t st) {
+    TEST_ASSERT_TRUE_MESSAGE(st.remaining_sec <= (int32_t)st.allocation_sec + st.adjust_sec,
+                             "display.h: remaining_sec above allocation_sec + adjust_sec");
+}
+
+void test_display_gate_release_cannot_outrun_the_days_default(void) {
+    /* C5's day: Screen still IDLE, so the day's allocation is read live at
+       the next start and the gate's own latch already makes it full. */
+    TEST_ASSERT_EQUAL(TIMER_IDLE, timer_get_state());
+    TEST_ASSERT_TRUE(timer_release_gated(1800)); /* true = repaint, not "it moved" */
+
+    display_state_t st = app_state_display(&IN_HEALTHY, 0, T0);
+    TEST_ASSERT_EQUAL_UINT32(3600, st.allocation_sec); /* Monday, 60 min */
+    TEST_ASSERT_EQUAL_INT32(0, st.adjust_sec);         /* no parent asked for anything */
+    TEST_ASSERT_EQUAL_INT32(3600, st.remaining_sec);   /* not 5400 */
+    assert_remaining_within_the_day(st);
+
+    /* ...and across the day's first start, which is where a banked release
+       would have surfaced: timer_start folds bonus_sec, so the 90-minute
+       day appears here and nowhere earlier. */
+    timer_start(T0, 3600);
+    st = app_state_display(&IN_HEALTHY, timer_tick(T0), T0);
+    TEST_ASSERT_EQUAL_UINT32(3600, st.allocation_sec);
+    TEST_ASSERT_EQUAL_INT32(0, st.adjust_sec);
+    TEST_ASSERT_EQUAL_INT32(3600, st.remaining_sec);
+    assert_remaining_within_the_day(st);
+}
+
 void test_display_running_passes_remaining_through(void) {
     timer_start(T0, 3600);
     display_state_t st = app_state_display(&IN_HEALTHY, 1234, T0 + 100);
@@ -380,7 +422,7 @@ void test_display_swap_available_during_a_break(void) {
     TEST_ASSERT_TRUE(app_state_display(&IN_HEALTHY, 0, T0 + 800).swap_available);
 }
 
-/* ---- start_available: the break gates Button A per slot ---- */
+/* ---- start_available: the break gates Button B per slot ---- */
 
 void test_display_start_available_outside_a_break(void) {
     /* No break: every slot is startable, so the play glyph always shows. */
@@ -541,6 +583,7 @@ int main(void) {
     RUN_TEST(test_display_adjustment_is_read_from_the_drawn_slot_only);
     RUN_TEST(test_display_adjustment_accumulates_across_grants);
     RUN_TEST(test_display_adjustment_clears_at_the_day_rollover);
+    RUN_TEST(test_display_gate_release_cannot_outrun_the_days_default);
     RUN_TEST(test_display_running_passes_remaining_through);
     RUN_TEST(test_display_extra_timer_uses_def_duration_and_name);
     RUN_TEST(test_display_charge_warn_tracks_battery_band);

@@ -363,7 +363,7 @@ void timer_start(time_t now, int32_t allocation_sec) {
     sl->allocation_sec = allocation_sec;
     sl->expiry_wall_time = (int64_t)now + allocation_sec;
     /* G1: a start must NOT reset the balance. It once did, which under a
-       shared balance means folding laundry for 29 minutes and pressing A
+       shared balance means folding laundry for 29 minutes and pressing B
        on Piano puts the eye-rest clock back to zero. Only a break start
        and the day rollover reset it (I9); here we merely fold whatever
        was running and re-arm. */
@@ -374,7 +374,13 @@ void timer_start(time_t now, int32_t allocation_sec) {
 static void mark_expired(timer_slot_state_t *sl);
 static void expire_slot(int slot, time_t now);
 
-bool timer_adjust(int slot, int32_t sec) {
+/* The adjustment state machine, shared by the two bookkeeping policies
+   below. `record` is their ONLY difference and it gates exactly one line
+   (the adjust_today_sec site after the switch). Split rather than
+   duplicated deliberately: a second copy of these arms would drift, and
+   the EXPIRED and BREAK contracts here are subtle enough that the drift
+   would be silent. */
+static bool adjust_core(int slot, int32_t sec, bool record) {
     if (slot < 0 || slot >= TIMER_SLOT_COUNT || sec == 0)
         return false;
     timer_slot_state_t *sl = &g_rtc_state.slots[slot];
@@ -399,7 +405,7 @@ bool timer_adjust(int slot, int32_t sec) {
                    timer_reconcile_def). A BREAK stays intact and keeps its
                    frozen zero: it leaves the break in the state it entered
                    with (I7), so an emptied one comes back PAUSED holding
-                   nothing — pressing A then expires it by the normal path.
+                   nothing — pressing B then expires it by the normal path.
                    PAUSED has no live segment, so no fold is owed. */
                 if (sl->state == TIMER_PAUSED)
                     mark_expired(sl);
@@ -409,7 +415,7 @@ bool timer_adjust(int slot, int32_t sec) {
             if (sec < 0)
                 return false; /* nothing left to reclaim */
             /* Chores-done grant after time ran out: hold it PAUSED so the
-               kid presses A to start — never auto-run, and the expiry
+               kid presses B to start — never auto-run, and the expiry
                alert (already heard) must not re-fire. */
             sl->state = TIMER_PAUSED;
             sl->remaining_at_pause = sec;
@@ -423,9 +429,50 @@ bool timer_adjust(int slot, int32_t sec) {
        counted and the two that return false (zero/bad slot, a deduction
        against an EXPIRED slot) are not. Deliberately the REQUESTED delta,
        not the clamped one: this is the record of what the parent did, and
-       the panel does its own clamping against the day's default. */
-    sl->adjust_today_sec += sec;
+       the panel does its own clamping against the day's default.
+
+       `record` gates THIS LINE ONLY. A chore-gate release runs every arm
+       above and writes nothing here: that field means "what a parent
+       asked for" and drives the panel's "(-30 min today)", so a gate
+       writing into it would manufacture an adjustment nobody made. */
+    if (record)
+        sl->adjust_today_sec += sec;
     return true;
+}
+
+bool timer_adjust(int slot, int32_t sec) {
+    return adjust_core(slot, sec, true);
+}
+
+bool timer_release_gated(int32_t sec) {
+    /* Slot 0 always: the gate withholds screen time, and a break lives on
+       slot 0 whichever slot is selected. record = false is the whole
+       difference — see the header for why the release must not simply be
+       timer_adjust(0, +withheld).
+
+       IDLE is refused before the state machine ever runs: a gate release
+       owes an IDLE timer nothing, because C5's allocation is read live at
+       the next start and the gate's own `released` latch already makes it
+       full. Banking it there — which is what the shared IDLE arm would do
+       — hands timer_start a second copy of the same remainder, an
+       RTC-persisted 90 min against a 60 min day that no adjust_today_sec
+       explains and that display.h says cannot exist.
+
+       A PRECONDITION ON THIS WRAPPER, deliberately, rather than a fourth
+       arm inside adjust_core: timer_adjust must still bank while IDLE
+       (that is the parent-adjustment contract), and the justification
+       above belongs to the gate alone — it holds whatever that shared arm
+       later becomes.
+
+       It returns TRUE all the same. Nothing moved in the timer, but the
+       PANEL moved: the locked block goes and the bar fills, with no state
+       change for a diff to catch — the same case, and the same answer, as
+       timer_adjust's IDLE bank. sec == 0 stays with adjust_core's own
+       refusal even here: a day whose gate was off never drew a locked
+       block, so it has no repaint to ask for. */
+    if (sec != 0 && g_rtc_state.slots[0].state == TIMER_IDLE)
+        return true;
+    return adjust_core(0, sec, false);
 }
 
 bool timer_bonus_reconcile(int slot, int32_t target_sec) {

@@ -478,7 +478,7 @@ void test_row11_expiry_folds_the_segment_and_stops_the_balance(void) {
 }
 
 /* Row 12 (G1): starting ANY timer must not reset the balance. Fold 25 min
-   of laundry, press A on Piano, and the eye-rest clock is back to zero —
+   of laundry, press B on Piano, and the eye-rest clock is back to zero —
    the cheapest exploit there is, and one a kid finds by accident. */
 void test_row12_starting_a_timer_does_not_reset_the_balance(void) {
     select_slot(SLOT_LAUNDRY);
@@ -487,7 +487,7 @@ void test_row12_starting_a_timer_does_not_reset_the_balance(void) {
     TEST_ASSERT_EQUAL_INT32(1500, timer_run_accum(T0 + 1500));
 
     select_slot(0);
-    timer_start(T0 + 1500, 3600); /* press A on Screen */
+    timer_start(T0 + 1500, 3600); /* press B on Screen */
     TEST_ASSERT_EQUAL_INT32(1500, timer_run_accum(T0 + 1500));
     TEST_ASSERT_TRUE(timer_break_due(T0 + 1800, 1800)); /* 5 more minutes */
 }
@@ -1607,7 +1607,7 @@ void test_grant_paused_extends_remaining(void) {
 
 void test_grant_expired_becomes_paused_holding_grant(void) {
     /* The chores-done case: time already ran out, +15 min → PAUSED,
-       press A to use it (never auto-RUNNING, alert never re-fires). */
+       press B to use it (never auto-RUNNING, alert never re-fires). */
     timer_start(T0, 100);
     timer_tick(T0 + 200); /* EXPIRED */
     timer_adjust(0, 900);
@@ -1703,7 +1703,7 @@ void test_bonus_reconcile_stale_replay_across_rollover_is_noop(void) {
 /* The banked read the IDLE allocation displays are built on: an
    adjustment applied before the day's first start lives in bonus_sec
    until timer_start folds it, so every reader of an IDLE allocation has
-   to add it or the adjustment is invisible until someone presses A. */
+   to add it or the adjustment is invisible until someone presses B. */
 void test_banked_bonus_is_readable_until_start_folds_it(void) {
     TEST_ASSERT_EQUAL_INT32(0, timer_slot_banked_bonus(0));
     timer_bonus_reconcile(0, -2700); /* HA: -45 min, Screen still IDLE */
@@ -1963,6 +1963,223 @@ void test_adjust_today_survives_snapshot_roundtrip(void) {
     TEST_ASSERT_TRUE(timer_restore_snapshot(&snap, T0 + 100));
     TEST_ASSERT_EQUAL_INT32(-1800, timer_slot_adjust_today(0));
     TEST_ASSERT_EQUAL_INT32(600, timer_slot_adjust_today(SLOT_PIANO));
+}
+
+/* ---- the chore gate's release: timer_adjust's state machine, none of
+       its bookkeeping ----
+
+   The gate withholds part of the day's screen time until the chores are
+   acked; the last ack releases the remainder. The obvious implementation,
+   timer_adjust(0, +withheld), is wrong: adjust_today_sec is the truthful
+   record of what a PARENT asked for and drives the panel's "(-30 min
+   today)". A gate writing +40 into it would manufacture an adjustment
+   nobody made -- verbatim the bug that field was introduced to fix.
+
+   So timer_release_gated runs the SAME state machine (one adjust_core,
+   two wrappers) with record = false. "Invisible" here means invisible to
+   that one line only: the locked block vanishing and the bar going full
+   width is loud, immediate feedback. */
+
+void test_release_gated_moves_time_without_recording_an_adjustment(void) {
+    /* THE headline row. Asserted, not argued from the code: the seconds
+       land on the timer and adjust_today_sec is exactly what it was. */
+    timer_start(T0, 3600);
+    timer_pause(T0 + 600); /* 3000 held */
+    int32_t adjust_before = timer_slot_adjust_today(0);
+    TEST_ASSERT_EQUAL_INT32(0, adjust_before);
+
+    bool moved = timer_release_gated(2400);
+    TEST_ASSERT_EQUAL_INT32(5400, g_rtc_state.slots[0].remaining_at_pause); /* it moved */
+    TEST_ASSERT_EQUAL_INT32(6000, g_rtc_state.slots[0].allocation_sec);
+    TEST_ASSERT_EQUAL_INT32(adjust_before, timer_slot_adjust_today(0)); /* ...silently */
+    TEST_ASSERT_TRUE(moved);
+
+    /* The paired POSITIVE CONTROL: the same amount through timer_adjust
+       does record. Without this the assertion above would also pass on a
+       release that did nothing at all. */
+    TEST_ASSERT_TRUE(timer_adjust(0, 2400));
+    TEST_ASSERT_EQUAL_INT32(7800, g_rtc_state.slots[0].remaining_at_pause);
+    TEST_ASSERT_EQUAL_INT32(adjust_before + 2400, timer_slot_adjust_today(0));
+}
+
+void test_release_gated_expired_holds_it_paused_for_button_b(void) {
+    /* C4: the last chore acked after the screen time ran out. The
+       remainder is released, the slot comes back PAUSED holding it -- never
+       auto-running, so the expiry alert (already heard) cannot re-fire --
+       and B is what starts it. */
+    timer_start(T0, 600);
+    timer_tick(T0 + 700);
+    TEST_ASSERT_EQUAL(TIMER_EXPIRED, timer_get_state());
+
+    /* The first half of the claim below, asserted rather than assumed:
+       Screen carries no def, so timer_reload_allowed() is false and B's
+       EXPIRED leg short-circuits to BTN_B_NONE. timer_reload() never
+       runs, so this is a pure read with no transition to undo. */
+    TEST_ASSERT_EQUAL(BTN_B_NONE, button_b_apply(T0 + 700));
+    TEST_ASSERT_EQUAL(TIMER_EXPIRED, timer_get_state());
+
+    timer_release_gated(1800);
+    TEST_ASSERT_EQUAL(TIMER_PAUSED, timer_get_state());
+    TEST_ASSERT_EQUAL_INT32(1800, g_rtc_state.slots[0].remaining_at_pause);
+    TEST_ASSERT_EQUAL_INT32(0, timer_slot_adjust_today(0));
+
+    /* "Press B", asserted through the real button map rather than a
+       comment: an EXPIRED slot 0 gives B no job at all, a PAUSED one
+       resumes. */
+    TEST_ASSERT_EQUAL(BTN_B_RESUMED, button_b_apply(T0 + 800));
+    TEST_ASSERT_EQUAL_INT32(1800, timer_tick(T0 + 800));
+    TEST_ASSERT_EQUAL_INT32(0, timer_slot_adjust_today(0));
+}
+
+void test_release_gated_paused_adds_to_the_held_remainder(void) {
+    /* C6: acked mid-pause. Same arm timer_adjust uses -- remaining and
+       allocation both move, the state does not. */
+    timer_start(T0, 3600);
+    timer_pause(T0 + 1200); /* 2400 held */
+    timer_release_gated(1800);
+    TEST_ASSERT_EQUAL(TIMER_PAUSED, timer_get_state());
+    TEST_ASSERT_EQUAL_INT32(4200, g_rtc_state.slots[0].remaining_at_pause);
+    TEST_ASSERT_EQUAL_INT32(5400, g_rtc_state.slots[0].allocation_sec);
+    TEST_ASSERT_EQUAL_INT32(0, timer_slot_adjust_today(0));
+    timer_resume(T0 + 1300);
+    TEST_ASSERT_EQUAL_INT32(4200, timer_tick(T0 + 1300));
+}
+
+void test_release_gated_during_a_break_leaves_the_break_end_alone(void) {
+    /* C7: acked during an eye-rest break. The release applies to slot 0's
+       FROZEN remainder; the break's wall end is not the gate's business
+       and must not move. */
+    timer_start(T0, 3600);
+    timer_start_break(T0 + 1800, 900); /* 1800 frozen, break ends T0+2700 */
+    int64_t break_end = g_rtc_state.slots[0].break_expiry_wall;
+    TEST_ASSERT_EQUAL_INT64((int64_t)T0 + 2700, break_end);
+
+    timer_release_gated(1200);
+    /* Re-baseline the I5 witness. Nothing trips TODAY, and saying
+       otherwise would be a false justification: the witness only compares
+       once it already holds an observation of THIS break_expiry_wall, and
+       nothing observes between timer_start_break and the release -- so
+       tearDown's is the FIRST observation of this break and has nothing
+       to report drift against. Removing this call leaves the suite green.
+       It is here because it becomes load-bearing the moment anyone adds
+       an observation before the release: a deliberate move of the frozen
+       value is then the documented FALSE POSITIVE (see the KNOWN
+       LIMITATION block above setUp), not the drift I5 exists to catch. */
+    assert_state_legal();
+
+    TEST_ASSERT_EQUAL(TIMER_BREAK, timer_get_state()); /* break intact */
+    TEST_ASSERT_EQUAL_INT32(3000, g_rtc_state.slots[0].remaining_at_pause);
+    TEST_ASSERT_EQUAL_INT64(break_end, g_rtc_state.slots[0].break_expiry_wall);
+    TEST_ASSERT_EQUAL_INT32(900, timer_break_remaining(T0 + 1800));
+    TEST_ASSERT_EQUAL_INT32(0, timer_slot_adjust_today(0));
+}
+
+void test_release_gated_is_not_owed_a_call_when_screen_never_started(void) {
+    /* C5, the reading it actually rests on: with Screen still IDLE the
+       day's allocation is read LIVE at the next start and the gate's own
+       `released` latch is what makes it full. Nothing is owed to the
+       timer, so the day's first start is simply the whole allocation. */
+    TEST_ASSERT_EQUAL(TIMER_IDLE, timer_get_state());
+    timer_start(T0, 3600);
+    TEST_ASSERT_EQUAL_INT32(3600, g_rtc_state.slots[0].allocation_sec);
+    TEST_ASSERT_EQUAL_INT32(3600, timer_tick(T0));
+    TEST_ASSERT_EQUAL_INT32(0, timer_slot_adjust_today(0));
+}
+
+void test_release_gated_while_idle_is_refused_and_still_reports_a_repaint(void) {
+    /* ...and what the primitive DOES if C5 fires anyway. The WRAPPER
+       refuses it: nothing is banked, nothing is recorded, and the day's
+       first start is still exactly the live allocation. Letting the
+       shared IDLE arm bank it instead granted 5400 against a 3600 day --
+       RTC-persisted, so it outlived deep sleep -- with no adjust_today_sec
+       to explain it, which is a remaining_sec above allocation_sec +
+       adjust_sec that display.h says cannot exist (pinned at the display
+       layer in test_app_state). */
+    TEST_ASSERT_EQUAL(TIMER_IDLE, timer_get_state());
+
+    /* TRUE, deliberately, and not a claim that the timer moved: it did
+       not, but the PANEL did -- the locked block goes and the bar fills --
+       and no state change exists for a diff to catch. Exactly the case
+       timer_adjust already returns true for on its IDLE bank, and the
+       only signal net_apply's moved_slots has to paint it. */
+    TEST_ASSERT_TRUE(timer_release_gated(1800));
+
+    TEST_ASSERT_EQUAL(TIMER_IDLE, timer_get_state());
+    TEST_ASSERT_EQUAL_INT32(0, g_rtc_state.slots[0].bonus_sec); /* NOT banked */
+    TEST_ASSERT_EQUAL_INT32(0, timer_slot_adjust_today(0));
+    timer_start(T0, 3600);
+    TEST_ASSERT_EQUAL_INT32(3600, g_rtc_state.slots[0].allocation_sec); /* C5, not 5400 */
+    TEST_ASSERT_EQUAL_INT32(3600, timer_tick(T0));
+
+    /* The paired POSITIVE CONTROL: timer_adjust's IDLE arm still banks.
+       Same slot, same state, same seconds, opposite outcome -- so the row
+       above is pinning a refusal, not an arm that stopped working.
+       It does NOT pin WHERE the refusal lives: a guard pushed down into
+       adjust_core's IDLE arm and gated on `record` is behaviourally
+       identical for both of today's entry points and passes this suite
+       untouched (measured). The wrapper is chosen for the reason the
+       header gives -- the justification is the gate's, not the state
+       machine's -- and that is a maintenance argument no test can make. */
+    timer_reset();
+    TEST_ASSERT_EQUAL(TIMER_IDLE, timer_get_state());
+    TEST_ASSERT_TRUE(timer_adjust(0, 1800));
+    TEST_ASSERT_EQUAL_INT32(1800, g_rtc_state.slots[0].bonus_sec);
+}
+
+void test_release_gated_zero_is_a_refused_no_op(void) {
+    /* A day whose gate is off (chore_free >= allocation) still reaches the
+       release edge and fires a zero-second release -- chores.h says so in
+       as many words. It must be harmless and must report that nothing
+       moved, on the same terms as timer_adjust(slot, 0). */
+    timer_start(T0, 3600);
+    timer_pause(T0 + 600);
+    TEST_ASSERT_FALSE(timer_release_gated(0));
+    TEST_ASSERT_EQUAL_INT32(3000, g_rtc_state.slots[0].remaining_at_pause);
+    TEST_ASSERT_EQUAL_INT32(3600, g_rtc_state.slots[0].allocation_sec);
+    TEST_ASSERT_EQUAL_INT32(0, timer_slot_adjust_today(0));
+}
+
+void test_release_gated_negative_runs_the_same_machine_unrecorded(void) {
+    /* ASSUMPTION, pinned so a reviewer can overrule it in one place: the
+       wrapper is thin, so a negative deduction is not special-cased -- it
+       runs the same arms timer_adjust would, including emptying a PAUSED
+       slot into EXPIRED and refusing outright against an already-EXPIRED
+       one. No caller can produce one today (chores_withheld_sec returns
+       uint32_t), and a guard here would be a second contract to keep in
+       step with the one in adjust_core. What matters either way is that
+       none of it is recorded as a parent's adjustment. */
+    timer_start(T0, 3600);
+    timer_pause(T0 + 600); /* 3000 held */
+    timer_release_gated(-600);
+    TEST_ASSERT_EQUAL_INT32(2400, g_rtc_state.slots[0].remaining_at_pause);
+
+    timer_release_gated(-2400); /* empties it */
+    TEST_ASSERT_EQUAL(TIMER_EXPIRED, timer_get_state());
+    TEST_ASSERT_EQUAL_INT32(0, g_rtc_state.slots[0].remaining_at_pause);
+
+    TEST_ASSERT_FALSE(timer_release_gated(-600)); /* nothing left to reclaim */
+    TEST_ASSERT_EQUAL_INT32(0, timer_slot_adjust_today(0));
+}
+
+void test_bonus_reconcile_still_records_after_the_split(void) {
+    /* The regression guard on the split: timer_bonus_reconcile is the one
+       existing caller that goes through timer_adjust, and it must keep
+       recording. Only the gate release passes record = false. */
+    timer_start(T0, 3600);
+    TEST_ASSERT_TRUE(timer_bonus_reconcile(0, 900));
+    TEST_ASSERT_EQUAL_INT32(900, timer_slot_adjust_today(0));
+    TEST_ASSERT_TRUE(timer_bonus_reconcile(0, 300)); /* target lowered */
+    TEST_ASSERT_EQUAL_INT32(300, timer_slot_adjust_today(0));
+    /* ...and a release alongside it leaves that total alone. */
+    int64_t expiry_before = g_rtc_state.slots[0].expiry_wall_time;
+    timer_release_gated(1200);
+    TEST_ASSERT_EQUAL_INT32(300, timer_slot_adjust_today(0));
+    TEST_ASSERT_EQUAL_INT32(5100, g_rtc_state.slots[0].allocation_sec);
+    /* The RUNNING arm's expiry move, asserted through the RELEASE and not
+       only through timer_adjust: deleting `sl->expiry_wall_time += sec`
+       from that arm kills six rows and, without this line, not one of
+       them is a release row. */
+    TEST_ASSERT_EQUAL_INT64(expiry_before + 1200, g_rtc_state.slots[0].expiry_wall_time);
 }
 
 void test_snapshot_with_an_absurd_adjust_today_is_refused(void) {
@@ -2930,6 +3147,15 @@ int main(void) {
     RUN_TEST(test_adjust_today_clears_when_the_slot_is_reloaded);
     RUN_TEST(test_adjust_today_clears_when_a_reconcile_replaces_the_timer);
     RUN_TEST(test_adjust_today_survives_snapshot_roundtrip);
+    RUN_TEST(test_release_gated_moves_time_without_recording_an_adjustment);
+    RUN_TEST(test_release_gated_expired_holds_it_paused_for_button_b);
+    RUN_TEST(test_release_gated_paused_adds_to_the_held_remainder);
+    RUN_TEST(test_release_gated_during_a_break_leaves_the_break_end_alone);
+    RUN_TEST(test_release_gated_is_not_owed_a_call_when_screen_never_started);
+    RUN_TEST(test_release_gated_while_idle_is_refused_and_still_reports_a_repaint);
+    RUN_TEST(test_release_gated_zero_is_a_refused_no_op);
+    RUN_TEST(test_release_gated_negative_runs_the_same_machine_unrecorded);
+    RUN_TEST(test_bonus_reconcile_still_records_after_the_split);
     RUN_TEST(test_snapshot_with_an_absurd_adjust_today_is_refused);
     RUN_TEST(test_bonus_applied_survives_snapshot_roundtrip);
     RUN_TEST(test_reset_state_is_idle);

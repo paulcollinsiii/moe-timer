@@ -106,7 +106,7 @@ display_state_t app_state_display(const app_state_in_t *in, int32_t remaining, t
     }
     /* IDLE shows today's whole allocation rather than 0 (ProductOverview),
        and the EFFECTIVE one: an adjustment banked before the day's first
-       start would otherwise show nowhere until someone presses A, which
+       start would otherwise show nowhere until someone presses B, which
        reads exactly like a set that never landed. Note this is no longer
        the same thing as a full BAR — the bar divides by `base`, so an
        idle day with -30 on it draws half a bar, which is the point of the

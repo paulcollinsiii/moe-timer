@@ -304,7 +304,7 @@ bool timer_reload(void);
    PAUSED timer expires it (same contract as timer_reconcile_def), an
    emptied RUNNING timer expires on its next tick, a BREAK keeps its
    frozen zero until the post-break resume. EXPIRED: a grant becomes
-   PAUSED holding it (press A to use it); a deduction is a no-op. Works
+   PAUSED holding it (press B to use it); a deduction is a no-op. Works
    on any slot — no now needed (RUNNING adjusts the stored wall expiry;
    the rest store durations). */
 /* Returns whether anything actually moved: false for a zero/bad-slot call
@@ -318,6 +318,64 @@ bool timer_adjust(int slot, int32_t sec);
    either direction, so re-delivering the same retained target every wake
    is a no-op. bonus_applied resets at timer_reset (day rollover). */
 bool timer_bonus_reconcile(int slot, int32_t target_sec); /* true when a delta landed */
+
+/* Release the chore gate's withheld seconds onto the Screen timer (slot 0).
+   Runs timer_adjust's STATE MACHINE without its BOOKKEEPING: the seconds
+   land exactly as a grant would (PAUSED/BREAK extend the held remainder,
+   EXPIRED comes back PAUSED holding them for Button B), but
+   adjust_today_sec is NOT touched.
+
+   That is the whole point of the separate entry. adjust_today_sec is the
+   truthful record of what a PARENT asked for and is what the panel's
+   "(-30 min today)" renders; a gate release is not a screen adjustment,
+   and a second writer into that line would manufacture an adjustment
+   nobody made -- verbatim the bug that field was introduced to fix. It is
+   not "hidden" from the user either way: the locked block vanishing and
+   the bar going full width is loud, immediate feedback.
+
+   Slot 0 only -- the gate withholds screen time, and TIMER_BREAK lives on
+   slot 0 regardless of the selection. Returns whether the caller owes a
+   REPAINT, on the same terms as timer_adjust: false for sec == 0 (which a
+   day with the gate off legitimately produces, see chores_release_due)
+   and for a deduction against an already-EXPIRED slot; true otherwise --
+   including the IDLE case below, where nothing moved at all.
+
+   IDLE is REFUSED HERE, not by the caller, and reported as true. There
+   the day's allocation is read live at the next start and the gate's own
+   `released` latch already makes it full, so the release owes the timer
+   nothing; the seconds are dropped rather than banked, because banking
+   them would hand timer_start a SECOND copy of a remainder the live
+   allocation already carries -- a 90 min day against a 60 min default,
+   RTC-persisted so it survives deep sleep, and a remaining_sec above
+   allocation_sec + adjust_sec, which display.h's adjust_sec == 0 contract
+   says cannot happen (the panel would show 90 against 60 with no
+   parenthetical, and the bar, which divides by the default, would draw
+   150%).
+
+   The true is not a lie about the timer. It is the same answer, for the
+   same reason, that timer_adjust gives for its IDLE bank: the PANEL
+   changes -- the locked block vanishes, the bar goes full width -- while
+   no timer state does, so a state diff cannot see it. A false would tell
+   a repaint-driven caller (net_apply's moved_slots) to skip the one paint
+   the release exists to trigger. sec == 0 is still left to adjust_core's
+   own refusal, IDLE or not: with the gate off there was never a locked
+   block to vanish, so there is no paint to ask for.
+
+   The refusal is a precondition on THIS wrapper rather than a fourth arm
+   in the shared state machine: timer_adjust's IDLE contract is still to
+   bank (that is the parent-adjustment policy), and "a gate release owes
+   an IDLE timer nothing, because C5's allocation is read live at the next
+   start" is the gate's reasoning alone -- it stays true whatever that
+   shared arm later does.
+
+   M2 CALL SITE: chores_withheld_sec() returns uint32_t and this takes
+   int32_t, so write the narrowing out -- timer_release_gated((int32_t)w).
+   Neither build enables -Wconversion and cppcheck does not flag it, so an
+   implicit conversion here is silent; it is safe only because schedule
+   minutes are uint16_t (so alloc_sec <= 3,932,100 s, far under
+   INT32_MAX), a bound enforced two modules away. The explicit cast is
+   what keeps that reliance visible at the seam that depends on it. */
+bool timer_release_gated(int32_t sec);
 
 /* Outcome of reconciling a slot against an HA config edit that changed its
    definition mid-run (timer_reconcile_def). */
@@ -369,7 +427,7 @@ int32_t timer_screen_bonus_applied(void); /* slot 0 HA bonus reconciled today */
    to fold it into the allocation. Anyone rendering an IDLE allocation has
    to add this (and clamp at 0, as timer_start does), or an adjustment
    applied before the day's first start is invisible on every surface
-   until someone presses A. */
+   until someone presses B. */
 int32_t timer_slot_banked_bonus(int slot);
 /* Signed seconds of adjustment that landed on this slot TODAY, across
    every source (the HA number's reconciled deltas and cmd-topic grants),
