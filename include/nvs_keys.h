@@ -87,3 +87,15 @@
    every wake. */
 #define NVS_KEY_PANIC_CNT "panic_cnt"
 #define NVS_KEY_PANIC_REC "panic_rec"
+/* The chore checklist (chore_store.c). Two blobs, on opposite sides of the
+   settings/state line drawn above: `chores` is the name list, written by
+   config_apply from the HA config document (document-only — no accessor
+   pair, no registry row, no HA entity of its own), while `chore_ack` is
+   the day-stamped ack record, device-owned state like ota_result — written
+   on every ack toggle, never editable from Home Assistant, never
+   published. Both go through hal_nvs directly for the same reason
+   panic_cnt does: nvs_config's registry would have to grow rows that exist
+   only to leave them alone.
+   6 and 9 chars — inside the 15-char NVS cap noted at the top. */
+#define NVS_KEY_CHORES "chores"
+#define NVS_KEY_CHORE_ACK "chore_ack"
