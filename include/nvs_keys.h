@@ -99,3 +99,15 @@
    6 and 9 chars — inside the 15-char NVS cap noted at the top. */
 #define NVS_KEY_CHORES "chores"
 #define NVS_KEY_CHORE_ACK "chore_ack"
+/* The chore gate's free slice, one key per day type, mirroring the four
+   allocation keys at the top of this file. Minutes, like those — the
+   seconds conversion happens in schedule.c at the same point the
+   allocation's does. 13-14 chars, inside the 15-char cap noted above.
+
+   Settings, HA-editable, but DELIBERATELY absent from the seeded-defaults
+   registry — see the NVS_DEFAULT_CHORE_FREE_WD comment in nvs_defaults.h
+   for why adding them there would reseed every deployed device. */
+#define NVS_KEY_CHORE_FREE_WD "chore_free_wd"
+#define NVS_KEY_CHORE_FREE_WE "chore_free_we"
+#define NVS_KEY_CHORE_FREE_HOL "chore_free_hol"
+#define NVS_KEY_CHORE_FREE_SUM "chore_free_sum"

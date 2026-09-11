@@ -28,6 +28,8 @@ static struct {
     char school_end[16];
     bool alloc_loaded[SCHED_DAY_TYPES];
     uint16_t alloc_min[SCHED_DAY_TYPES];
+    bool free_loaded[SCHED_DAY_TYPES];
+    uint16_t free_min[SCHED_DAY_TYPES];
 } s_cache;
 
 void schedule_cache_invalidate(void) {
@@ -118,40 +120,89 @@ day_type_t schedule_get_day_type(time_t now) {
     return DAY_WEEKDAY;
 }
 
-uint32_t schedule_get_allocation_sec(day_type_t day_type) {
-    const char *key;
-    uint16_t default_min;
-    unsigned idx;
+/* Per-day-type NVS rows: the allocation and the chore gate's free slice
+   side by side, because they are one pair and every reader has to see
+   them that way. Indexed by day_type_t through day_type_index() below,
+   with designated initializers so a row cannot silently shift if the enum
+   is ever reordered — and, more to the point, so the chore lookup cannot
+   drift out of step with the allocation lookup, which is what a second
+   four-arm switch would have invited. Minutes, as stored; the seconds
+   conversion happens once, at the two accessors. */
+static const struct {
+    const char *alloc_key;
+    uint16_t alloc_default_min;
+    const char *free_key;
+    uint16_t free_default_min;
+} s_day_rows[SCHED_DAY_TYPES] = {
+    [DAY_WEEKDAY] = {NVS_KEY_WEEKDAY_MIN, NVS_DEFAULT_WEEKDAY_MIN, NVS_KEY_CHORE_FREE_WD, NVS_DEFAULT_CHORE_FREE_WD},
+    [DAY_WEEKEND] = {NVS_KEY_WEEKEND_MIN, NVS_DEFAULT_WEEKEND_MIN, NVS_KEY_CHORE_FREE_WE, NVS_DEFAULT_CHORE_FREE_WE},
+    [DAY_HOLIDAY] = {NVS_KEY_HOLIDAY_MIN, NVS_DEFAULT_HOLIDAY_MIN, NVS_KEY_CHORE_FREE_HOL, NVS_DEFAULT_CHORE_FREE_HOL},
+    [DAY_SUMMER] = {NVS_KEY_SUMMER_MIN, NVS_DEFAULT_SUMMER_MIN, NVS_KEY_CHORE_FREE_SUM, NVS_DEFAULT_CHORE_FREE_SUM},
+};
 
+/* day_type_t -> row index. An out-of-range enum resolves to weekday, which
+   is what the allocation lookup's default arm has always done: the least
+   generous day is the safe answer to a question that should not have been
+   asked. */
+static unsigned day_type_index(day_type_t day_type) {
     switch (day_type) {
         case DAY_WEEKEND:
-            key = NVS_KEY_WEEKEND_MIN;
-            default_min = NVS_DEFAULT_WEEKEND_MIN;
-            idx = DAY_WEEKEND;
-            break;
         case DAY_HOLIDAY:
-            key = NVS_KEY_HOLIDAY_MIN;
-            default_min = NVS_DEFAULT_HOLIDAY_MIN;
-            idx = DAY_HOLIDAY;
-            break;
         case DAY_SUMMER:
-            key = NVS_KEY_SUMMER_MIN;
-            default_min = NVS_DEFAULT_SUMMER_MIN;
-            idx = DAY_SUMMER;
-            break;
+            return (unsigned)day_type;
         case DAY_WEEKDAY:
         default:
-            key = NVS_KEY_WEEKDAY_MIN;
-            default_min = NVS_DEFAULT_WEEKDAY_MIN;
-            idx = DAY_WEEKDAY;
-            break;
+            return (unsigned)DAY_WEEKDAY;
     }
+}
 
-    if (!s_cache.alloc_loaded[idx]) {
-        uint16_t minutes = default_min;
+/* One wake-scoped minutes read: the slot is filled from NVS on first use,
+   and the compile-time default stands in when the key is absent. Absent
+   is the NORMAL state for the chore_free_* keys — they are deliberately
+   left out of the seeded-defaults registry (see nvs_defaults.h), so on
+   every device in the field today this returns 0. */
+static uint16_t read_cached_min(const char *key, uint16_t def, bool *loaded, uint16_t *slot) {
+    if (!*loaded) {
+        uint16_t minutes = def;
         hal_nvs_read_u16(key, &minutes);
-        s_cache.alloc_min[idx] = minutes;
-        s_cache.alloc_loaded[idx] = true;
+        *slot = minutes;
+        *loaded = true;
     }
-    return (uint32_t)s_cache.alloc_min[idx] * 60u;
+    return *slot;
+}
+
+uint32_t schedule_get_allocation_sec(day_type_t day_type) {
+    unsigned idx = day_type_index(day_type);
+    uint16_t minutes = read_cached_min(s_day_rows[idx].alloc_key, s_day_rows[idx].alloc_default_min,
+                                       &s_cache.alloc_loaded[idx], &s_cache.alloc_min[idx]);
+    return (uint32_t)minutes * 60u;
+}
+
+uint32_t schedule_get_chore_free_sec(day_type_t day_type) {
+    unsigned idx = day_type_index(day_type);
+    uint16_t minutes = read_cached_min(s_day_rows[idx].free_key, s_day_rows[idx].free_default_min,
+                                       &s_cache.free_loaded[idx], &s_cache.free_min[idx]);
+    uint32_t free_sec = (uint32_t)minutes * 60u;
+    uint32_t alloc_sec = schedule_get_allocation_sec(day_type);
+
+    /* BELT, NOT THE RULE — read this before citing it.
+
+       `chore_free <= allocation` is a CONFIG rule, and it is enforced
+       where config is validated, which reports the bad pair as a config
+       error the operator can see. A pair that fails it never becomes live
+       config. This line reports nothing and cannot: it only makes a bad
+       pair harmless, and it exists for the paths that reach here having
+       skipped the validator entirely — a value already sitting in NVS
+       from an older firmware, or some later caller wired straight to the
+       setter.
+
+       What it prevents is specific: every consumer downstream computes
+       `allocation - chore_free` on unsigned values, so free > alloc would
+       not go negative, it would WRAP, and a ~136-year withholding is
+       indistinguishable from a device that has bricked the timer. Equal
+       values are deliberately untouched — chore_free == allocation means
+       nothing is withheld, which is the per-day-type off switch and a
+       legitimate configuration, one character away from the case being
+       clamped here. */
+    return free_sec > alloc_sec ? alloc_sec : free_sec;
 }
