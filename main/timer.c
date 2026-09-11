@@ -307,9 +307,46 @@ const char *timer_current_date(void) {
     return g_rtc_state.last_date; /* "" until timer_record_date / restore */
 }
 
+/* ---- chore checklist state (see timer.h) -------------------------------- */
+
+uint8_t timer_chore_acked(void) {
+    return g_rtc_state.chore_acked;
+}
+
+/* Stored exactly as handed over, bits above the configured count and all.
+   See timer.h: chore_store_load_ack() makes the same choice for the same
+   value, and chores.c is what bounds every bit that is read. */
+void timer_chore_set_acked(uint8_t mask) {
+    g_rtc_state.chore_acked = mask;
+}
+
+bool timer_chore_released(void) {
+    return g_rtc_state.chore_released;
+}
+
+void timer_chore_set_released(bool released) {
+    g_rtc_state.chore_released = released;
+}
+
+app_mode_t timer_mode(void) {
+    return (app_mode_t)g_rtc_state.mode;
+}
+
+/* Stored as the caller's byte, unclamped, like the ack mask above: see
+   app_mode_t in timer.h for why the RTC field is not the place to bound
+   it. test_timer pins the round trip. */
+void timer_set_mode(app_mode_t mode) {
+    g_rtc_state.mode = (uint8_t)mode;
+}
+
 void timer_reset(void) {
     memset(&g_rtc_state, 0, sizeof(g_rtc_state));
-    /* all slots IDLE (=0), active_slot 0 (Screen), counters cleared */
+    /* all slots IDLE (=0), active_slot 0 (Screen), counters cleared.
+       Row C13 rides on this one memset and deliberately adds nothing:
+       chore_acked and chore_released go to 0/false, and `mode` goes to
+       APP_MODE_TIMERS because that enumerator IS 0 (see app_mode_t). An
+       explicit re-clear here would be a second site to keep in step with
+       a struct that already grew fields once. */
     s_break_ended_latched = false; /* never chime yesterday's break */
     s_break_ended_wall = 0;
 }

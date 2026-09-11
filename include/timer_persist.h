@@ -10,6 +10,7 @@
  */
 #pragma once
 #include <stdbool.h>
+#include <stdint.h>
 #include <time.h>
 
 #ifdef __cplusplus
@@ -63,6 +64,102 @@ void timer_persist_save(void);
    with no table every extra slot reads as disabled and the selection is
    dragged to Screen. */
 bool timer_persist_try_restore(time_t now);
+
+/* Put today's chore acks back into RTC from the "chore_ack" NVS record —
+   design row C14: a power cycle, a panic or an OTA reboot must never cost
+   the kid their chores.
+
+   `now` is the device's best current wall time — the same value handed to
+   timer_persist_try_restore() — and the ISO date the record is matched
+   against is derived from it in here, with the same localtime_r() +
+   date_fmt_iso() pair timer_record_date() uses. A PARAMETER, exactly as
+   try_restore's is: nothing in here reads a clock, and nothing in here
+   reads a date out of RTC behind the caller's back. `current_hash` is
+   chores_list_hash() of the chore list as it is NOW, handed straight to
+   the loader so the C10 list-edit rule is applied there rather than
+   restated here.
+
+   IT TAKES A time_t AND NOT A DATE STRING, and that is a bug fix rather
+   than a matter of taste. timer_current_date() is the only date string a
+   caller has to hand, and it is the WRONG one at the one moment that
+   matters: on a rollover wake RTC memory is intact and still holds
+   YESTERDAY, so a string-taking version fed from it loaded yesterday's
+   record and wrote yesterday's acks AND yesterday's `released` latch into
+   RTC as today's. The new day would then start unlocked, and a `released`
+   latch brought forward lets C8's withheld remainder be granted twice.
+   (On the esp_restart path the same argument is "" instead, which was
+   merely refused, and deferred the restore by a wake.) Deriving the date
+   from `now` makes both unrepresentable: the day this asks flash about is
+   the day the caller believes it is.
+
+   Returns true only when acks were actually written into RTC. A false
+   return means "no usable record" — nothing stored yet, or a blob whose
+   length or version byte could not be believed — and on every one of those
+   paths g_rtc_state is untouched and no flash is written, so a device
+   that has never had a chore configured keeps its live copy instead of
+   being cleared. Repeating the call is idempotent: the second one lands
+   what the first one did. Idempotent is NOT the same as harmless, and the
+   distinction is the whole of the note below — it is the FIRST call that
+   can lose state.
+
+   What must never follow a false return is a chore_store_save_ack() built
+   on the RTC's zeros: that is the one sequence that destroys a good
+   record (chore_store.h, WHERE `today` MUST COME FROM). A false return
+   means DEFER, not "nothing acked today" — the record in flash is
+   untouched, so a later wake gets the real answer at no cost.
+
+   WHY IT EXISTS, and it is the one thing the RTC copy cannot do:
+   RTC_DATA_ATTR survives deep sleep only. esp_restart() reloads .rtc.data
+   from the image as zeros, so on the wake after an OTA reboot today's
+   acks exist in exactly one place — flash — and this is what fetches
+   them.
+
+   WHERE M2 MUST CALL IT. Two requirements, and with the date derived from
+   `now` they are the only two:
+
+       timer_rtc_state_guard();                  // zeroes a foreign image
+       timer_defs_install();
+       timer_persist_try_restore(now);           // restores the timer day
+       timer_persist_restore_chore_acks(now, hash);
+
+   (1) AFTER timer_rtc_state_guard(). The guard memsets the whole of
+   g_rtc_state when it rejects an image, so acks restored ahead of it are
+   thrown away. (2) BEFORE anything that paints the checklist or gates on
+   an ack, which is what it is for. It does NOT have to follow
+   try_restore: try_restore writes only the snapshot's own fields (it does
+   not memset g_rtc_state) and reads only last_date, which this function
+   neither reads nor writes. The block above is main.c's boot sequence as
+   it stands with the one line added, and that is the natural place.
+
+   THE ONE ASYMMETRY, stated rather than buried. Flash is the AUTHORITY,
+   so wherever the record and the live RTC copy disagree the record wins —
+   and that is true of BOTH shapes of record, not only of a date mismatch:
+     - stamped with the day this was asked about, it replaces the RTC copy
+       with its own acks and its own `released`, so anything that reached
+       RTC and never reached flash is gone;
+     - stamped with another day, it makes chore_store_load_ack() return
+       ESP_OK with a CLEARED record, and those zeros are written just the
+       same — over `chore_released` as well as over the acks.
+   Three ways to arrive at a disagreement, and only the first is benign:
+     - a genuine day rollover, where clearing is CORRECT and is row C13: a
+       new day starts locked, whatever yesterday achieved;
+     - a toggle whose flash write failed while its RTC write succeeded —
+       an ack that was never durable, and that the next reboot would have
+       lost anyway;
+     - a clock correction that lands `now` and the stored stamp on
+       opposite sides of midnight: NTP fixing a fast or slow RTC, or a
+       timezone change. No flash failure anywhere, and acks plus a
+       release earned under the old reading are dropped. (A DST shift
+       reaches it only in a zone whose transition is at midnight.)
+   That is the deliberate trade: one authority that can be stale beats two
+   that diverge silently. It is also why REPEATING the call is the cheap
+   half — the first call is where a divergence dies.
+
+   `mode` is NOT restored and has no NVS row — design §5.1 persists the
+   ack record and nothing else, so a restart legitimately comes back
+   painting Timers. C16 is about the device SLEEPING, which RTC already
+   covers. */
+bool timer_persist_restore_chore_acks(time_t now, uint16_t current_hash);
 
 #ifdef __cplusplus
 }

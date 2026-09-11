@@ -7,6 +7,9 @@
 
 #include <string.h>
 
+#include "chore_store.h"
+#include "chores.h"
+#include "date_fmt.h"
 #include "nvs_config.h"
 #include "timer.h"
 
@@ -50,5 +53,49 @@ bool timer_persist_try_restore(time_t now) {
     const timer_state_t st = timer_get_state();
     (void)st;
     ESP_LOGW(TAG, "Timer state restored from NVS snapshot, state=%d", (int)st);
+    return true;
+}
+
+/* Lives here rather than in timer.c, where the two RTC fields it writes
+   live, because it CALLS chore_store_load_ack(). main/timer.c is compiled
+   into nine host suites and eight of them link no chore_store.c —
+   test_timer, test_app_state, test_button_actions, test_net_apply,
+   test_cmd_apply, test_config_apply, test_timer_defs, test_ha_config — so
+   putting the call in timer.c ends in eight "undefined reference to
+   chore_store_load_ack" link failures unless every one of those suites
+   grows a stub. (test_wake_flow is NOT one of them: it does not compile
+   timer.c at all.) timer_persist.c already includes both sides, which is
+   what this file is for. */
+bool timer_persist_restore_chore_acks(time_t now, uint16_t current_hash) {
+    /* The date is DERIVED from the caller's `now` rather than taken as a
+       string, and that IS the contract — see timer_persist.h, IT TAKES A
+       time_t AND NOT A DATE STRING. Same idiom as timer_record_date() and
+       timer_restore_snapshot(), so the day the record is matched against
+       is the day every other date comparison in the firmware computes
+       from the same `now`.
+
+       No date guard here, and none can be needed: date_fmt_iso()
+       NUL-terminates into this 11-byte buffer and its format cannot
+       render fewer than ten characters, so `today` is always a
+       ten-character date and every one of chore_store_load_ack()'s date
+       refusals — NULL, short, overlong — is unreachable from this caller.
+       The NULL guard this function used to carry went with the string
+       parameter that made it reachable. */
+    struct tm tm_now;
+    localtime_r(&now, &tm_now);
+    char today[11];
+    date_fmt_iso(today, sizeof(today), &tm_now);
+
+    chore_ack_t ack;
+    /* Anything but ESP_OK means the record could not be believed at all —
+       never written, or a foreign layout — and the live RTC copy is then
+       a better answer than zeros, so it is left alone. ESP_OK covers the
+       rollover case too (a cleared record for another day), and writing
+       those zeros IS correct there: a new day starts locked (C13). */
+    if (chore_store_load_ack(today, current_hash, &ack) != ESP_OK) {
+        return false;
+    }
+    timer_chore_set_acked(ack.acked);
+    timer_chore_set_released(ack.released);
     return true;
 }

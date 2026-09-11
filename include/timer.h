@@ -106,6 +106,42 @@ typedef struct {
     int32_t adjust_today_sec;
 } timer_slot_state_t;
 
+/* WHICH SCREEN THE DEVICE PAINTS (design row C16). A UI concept and only
+ * that: the mode selects the paint, never the wake logic — no timer runs,
+ * expires, accrues or sleeps differently because of it.
+ *
+ * WHY IT IS DECLARED HERE, in the timer header, when it is a UI value:
+ * because this is where it is STORED — rtc_state_t below holds the byte
+ * and timer_mode()/timer_set_mode() are the only accessors — so the enum
+ * has to be visible wherever that field's meaning is. Every consumer
+ * already includes timer.h to reach timer_mode(). It deliberately does
+ * NOT live in chores.h: that header is the pure chore model, and making
+ * timer.h include it would couple the timer to the chore feature for the
+ * sake of two enumerators.
+ *
+ * APP_MODE_TIMERS MUST BE 0, and that is load-bearing rather than
+ * cosmetic. timer_reset() clears the day by memset'ing the whole of
+ * g_rtc_state, which is exactly what makes row C13 ("a day rollover takes
+ * the mode back to Timers") cost nothing and adds no second clearing site
+ * to keep in step. Reorder these enumerators and every midnight silently
+ * lands the device in chore mode instead. The memset is in timer.c, a
+ * long way from this enum, so the rule is restated at that site too —
+ * two comments deliberately, because a reader standing at the memset has
+ * no reason to come and open this header. test_timer pins both halves:
+ * the enumerator's value, and what the memset leaves behind.
+ *
+ * NOT clamped anywhere. timer_set_mode() stores the byte it is given, so
+ * a value outside these enumerators round-trips out of timer_mode()
+ * unchanged, exactly as the ack mask does — pinned by test_timer for the
+ * same reason the mask's rawness is: the byte crosses an RTC layout that
+ * a different firmware build reads back, and a silent clamp would be a
+ * second place for the mode's meaning to live. Painting code therefore
+ * must treat any value that is not APP_MODE_CHORES as Timers. */
+typedef enum {
+    APP_MODE_TIMERS = 0, /* the ordinary timer screen */
+    APP_MODE_CHORES,     /* the chore checklist */
+} app_mode_t;
+
 /* Self-validation for rtc_state_t, and the one path it exists for.
  *
  * RTC memory normally comes back one of two ways, and BOTH are already
@@ -137,8 +173,9 @@ typedef struct {
  * magic but disagree on the offsets behind it are exactly the case the
  * magic alone cannot catch. */
 #define RTC_STATE_MAGIC 0x4D414754u /* "MAGT", legible in a memory dump */
-/* v2: timer_slot_state_t gained adjust_today_sec */
-#define RTC_STATE_VERSION 2
+/* v3: + chore_acked, chore_released, mode (the chore checklist)
+   v2: timer_slot_state_t gained adjust_today_sec */
+#define RTC_STATE_VERSION 3
 
 typedef struct {
     /* First two fields, deliberately: a struct whose head is its own
@@ -163,6 +200,29 @@ typedef struct {
        would otherwise invert a drain into an accrual. */
     uint8_t run_segment_slot;
     char last_date[11]; /* "YYYY-MM-DD\0" */
+    /* ---- the chore checklist (design §5.1) ------------------------------
+       All three are DAY-SCOPED and all three are cleared by the one
+       memset in timer_reset(), which IS row C13 — acks gone, release
+       gone, mode back to APP_MODE_TIMERS. Nothing else clears them.
+
+       WHY RTC: they are read on the paint path of every wake, and a
+       deep-sleep wake keeps .rtc.data for free, which is all row C16 asks
+       of the mode.
+
+       WHY NVS AS WELL, for the two ack fields and only them: RTC memory
+       is not enough. RTC_DATA_ATTR survives deep sleep ONLY — an
+       esp_restart() reloads this segment from the image as zeros — and
+       row C14 says a firmware update must not cost the kid their chores.
+       So chore_store's "chore_ack" record is the AUTHORITY and these two
+       are the working copy; timer_persist_restore_chore_acks() is what
+       refills them. `mode` has no NVS row by design, so a restart
+       legitimately comes back painting Timers. */
+    uint8_t chore_acked; /* bit i = chore i acked today; CHORE_MAX is 3, so 3 bits are used */
+    bool chore_released; /* latched: today's withheld remainder has been granted */
+    /* app_mode_t, stored as a fixed byte rather than as the enum: an
+       enum's width is implementation-defined and this struct's layout is
+       read back by a different build of the firmware. */
+    uint8_t mode;
     int64_t next_ntp_sync;
 } rtc_state_t;
 
@@ -441,6 +501,41 @@ int32_t timer_slot_banked_bonus(int slot);
    default must clamp for presentation (app_state_display does). */
 int32_t timer_slot_adjust_today(int slot);
 const char *timer_current_date(void); /* "YYYY-MM-DD"; "" until first record */
+
+/* ---- chore checklist state (design §5.1) --------------------------------
+   Accessor pairs so no other module reaches into g_rtc_state, for the same
+   reason timer_current_date() and timer_slot_adjust_today() exist. They
+   are storage and nothing else: every RULE about these values lives in
+   chores.c (what a mask means) or in chore_store.c (when a record may be
+   believed), and none of it is restated here. */
+
+/* Today's ack bits, RAW. Bits at or above the configured chore count are
+   returned exactly as stored and are NOT masked here — the same choice
+   chore_store_load_ack() documents for the same value, and for the same
+   reason: masking would destroy acks that a restored list would make
+   meaningful again. So read every bit through chores_is_acked(mask, i, n)
+   and never test one directly, or a stale bit left by a longer list
+   renders as a tick. The setter stores what it is given, unmasked, for
+   the same reason. */
+uint8_t timer_chore_acked(void);
+void timer_chore_set_acked(uint8_t mask);
+
+/* The day's LATCHED release flag (chore_ack_t.released): the withheld
+   remainder has been granted. Latched, so nothing a later ack toggle does
+   can re-lock the day (C8). */
+bool timer_chore_released(void);
+void timer_chore_set_released(bool released);
+
+/* The painted mode (C16). Survives deep sleep; reverts to APP_MODE_TIMERS
+   on the day rollover for free (the timer_reset() memset, which is why
+   APP_MODE_TIMERS is 0); does NOT survive an esp_restart, having no NVS
+   row. The setter stores the byte it is given and does not clamp it —
+   see app_mode_t. The other two edges C16 names — a break end and an
+   emptied chore list — belong to the wake flow: call
+   timer_set_mode(APP_MODE_TIMERS) there. Nothing in timer.c moves the
+   mode on its own. */
+app_mode_t timer_mode(void);
+void timer_set_mode(app_mode_t mode);
 /* Display-facing remaining seconds for any slot, without ticking (no state
    change): RUNNING = expiry-now, PAUSED/BREAK = frozen remaining, IDLE =
    idle_fallback (caller's allocation), EXPIRED = 0; clamped >= 0. */

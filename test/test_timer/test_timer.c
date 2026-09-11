@@ -3117,6 +3117,108 @@ void test_snapshot_restore_folds_a_powered_off_expiry(void) {
     TEST_ASSERT_EQUAL_INT64(0, g_rtc_state.slots[0].run_started_wall);
 }
 
+/* ---- chore checklist state in RTC (design §5.1, rows C13 and C16) -------
+
+   Storage, not policy. What a mask MEANS is chores.c's and is tested
+   there; what is asserted here is that the three fields exist as three
+   distinct bytes of RTC state, that the day rollover clears them with the
+   memset it already had, and that a deep-sleep wake does not. */
+
+void test_chore_state_round_trips_through_its_accessors(void) {
+    timer_chore_set_acked(0x05);
+    timer_chore_set_released(true);
+    timer_set_mode(APP_MODE_CHORES);
+    TEST_ASSERT_EQUAL_UINT8(0x05, timer_chore_acked());
+    TEST_ASSERT_TRUE(timer_chore_released());
+    TEST_ASSERT_EQUAL_INT(APP_MODE_CHORES, timer_mode());
+
+    /* Three fields and not one aliased byte: clearing one must leave the
+       other two standing, which is what a transposed accessor would
+       break. */
+    timer_chore_set_released(false);
+    TEST_ASSERT_FALSE(timer_chore_released());
+    TEST_ASSERT_EQUAL_UINT8(0x05, timer_chore_acked());
+    TEST_ASSERT_EQUAL_INT(APP_MODE_CHORES, timer_mode());
+}
+
+void test_ack_bits_above_the_configured_count_are_stored_unmasked(void) {
+    /* The same rule chore_store_load_ack() documents for the same value:
+       the RTC field is storage, and bounding a mask by the configured
+       count is chores.c's job. Masking here would destroy acks that a
+       restored list would make meaningful again. */
+    timer_chore_set_acked(0xFF);
+    TEST_ASSERT_EQUAL_UINT8(0xFF, timer_chore_acked());
+}
+
+void test_a_mode_outside_the_enum_round_trips_unclamped(void) {
+    /* The mode gets the ack mask's treatment, and it is pinned for the
+       same reason the mask's rawness is: the RTC field is storage, the
+       byte crosses a layout that a different firmware build reads back,
+       and a clamp here would be a second place for the mode's meaning to
+       live. So an out-of-range value comes back exactly as stored rather
+       than folded to APP_MODE_TIMERS, and it is painting code that must
+       treat anything which is not APP_MODE_CHORES as Timers. Documented
+       in timer.h above app_mode_t; this is what keeps that true. */
+    timer_set_mode((app_mode_t)200);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(200, (int)timer_mode(), "timer_set_mode clamped or dropped an out-of-range mode");
+
+    /* And a wild value is not sticky: the rollover memset still clears
+       it, which is the one guarantee C13 actually needs. */
+    timer_reset();
+    TEST_ASSERT_EQUAL_INT(APP_MODE_TIMERS, timer_mode());
+}
+
+void test_a_day_rollover_clears_the_acks_the_release_and_the_mode(void) {
+    /* Row C13. The point is that timer_reset() needs no new code to do
+       it: the memset that clears the slots clears these too, on the one
+       edge, so there is no second clearing site to keep in step. */
+    timer_chore_set_acked(0x07);
+    timer_chore_set_released(true);
+    timer_set_mode(APP_MODE_CHORES);
+
+    timer_reset();
+
+    TEST_ASSERT_EQUAL_UINT8(0, timer_chore_acked());
+    TEST_ASSERT_FALSE(timer_chore_released());
+    TEST_ASSERT_EQUAL_INT_MESSAGE(APP_MODE_TIMERS, timer_mode(), "a day rollover left the device painting chore mode");
+}
+
+void test_timers_is_the_zero_mode_so_a_zeroed_struct_paints_timers(void) {
+    /* The reordering guard, and it is not pedantry: C13's "mode reverts
+       to Timers" is true ONLY because APP_MODE_TIMERS is what a memset
+       leaves behind. Swap the enumerators and every midnight silently
+       lands the device in chore mode with nothing to notice it.
+       Asserted twice on purpose — the enumerator's value, and the
+       memset's observable result through the accessor. */
+    TEST_ASSERT_EQUAL_INT_MESSAGE(0, (int)APP_MODE_TIMERS, "APP_MODE_TIMERS must be the zero enumerator");
+    TEST_ASSERT_TRUE_MESSAGE((int)APP_MODE_CHORES != 0, "APP_MODE_CHORES must not be the zero enumerator");
+
+    memset(&g_rtc_state, 0, sizeof(g_rtc_state));
+    TEST_ASSERT_EQUAL_INT(APP_MODE_TIMERS, timer_mode());
+}
+
+void test_the_mode_and_acks_survive_a_deep_sleep_wake(void) {
+    /* Row C16: chore mode is still chore mode after the device sleeps.
+       A deep-sleep wake preserves .rtc.data, so the guard must leave a
+       stamped image alone — and an ordinary run and tick must not disturb
+       the three fields either, since the mode selects the paint and never
+       the wake logic. This is the case C14 (an esp_restart) is NOT; see
+       test_timer_persist for that half. */
+    TEST_ASSERT_TRUE(timer_rtc_state_guard()); /* stamps the cold image */
+    timer_record_date(T0);
+    timer_chore_set_acked(0x03);
+    timer_chore_set_released(true);
+    timer_set_mode(APP_MODE_CHORES);
+
+    TEST_ASSERT_FALSE_MESSAGE(timer_rtc_state_guard(), "a stamped RTC image was thrown away");
+    timer_start(T0, 600);
+    (void)timer_tick(T0 + 60);
+
+    TEST_ASSERT_EQUAL_UINT8(0x03, timer_chore_acked());
+    TEST_ASSERT_TRUE(timer_chore_released());
+    TEST_ASSERT_EQUAL_INT_MESSAGE(APP_MODE_CHORES, timer_mode(), "a tick moved the painted mode");
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_bonus_reconcile_grants_only_the_delta);
@@ -3350,5 +3452,11 @@ int main(void) {
     RUN_TEST(test_snapshot_rejects_a_wild_break_prev_state);
     RUN_TEST(test_snapshot_rejects_an_out_of_range_run_segment_slot);
     RUN_TEST(test_snapshot_powered_off_expiry_clears_the_banked_remaining);
+    RUN_TEST(test_chore_state_round_trips_through_its_accessors);
+    RUN_TEST(test_ack_bits_above_the_configured_count_are_stored_unmasked);
+    RUN_TEST(test_a_mode_outside_the_enum_round_trips_unclamped);
+    RUN_TEST(test_a_day_rollover_clears_the_acks_the_release_and_the_mode);
+    RUN_TEST(test_timers_is_the_zero_mode_so_a_zeroed_struct_paints_timers);
+    RUN_TEST(test_the_mode_and_acks_survive_a_deep_sleep_wake);
     return UNITY_END();
 }
