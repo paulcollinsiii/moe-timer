@@ -1,5 +1,6 @@
 #pragma once
 #include <stdbool.h>
+#include <stdint.h>
 
 /* Shared config field validators — pure, host-tested. Used by both the
    bulk config-document applier (config_apply.c) and the per-field HA
@@ -47,11 +48,110 @@ bool config_is_ota_url(const char *s);
    which is interpolated into all three config_ack emissions. */
 bool config_is_clean_str(const char *s);
 
+/* The chore gate's cross-field rule: is this `chore_free_*` value usable
+   with the allocation it is paired with? Both arguments are MINUTES, the
+   unit config is stored and edited in (`weekday_min`, `chore_free_wd`,
+   and the CFG_BOUND_* numbers below are all minutes).
+
+   MINUTES, NOT SECONDS — the other half of this feature is a seconds
+   domain and both are live at once. schedule_get_chore_free_sec() and
+   schedule_get_allocation_sec() return SECONDS; handing their values to
+   this predicate compiles (firmware is -Wall -Werror with no -Wconversion,
+   host tests are -Wall -Wextra, and uint32_t -> uint16_t is silent in
+   both), never trips a bound, and silently answers a different question.
+   The 60x does NOT cancel out, and the hazard is present rather than
+   hypothetical: (1100, 1000) in minutes is INVALID, but the same pair in
+   seconds is (66000, 60000), and 66000 through a uint16_t parameter
+   arrives as 464 — VALID, the opposite answer. Nor does the truncation
+   announce itself: 1440*60 = 86400 arrives as 20864, an in-range,
+   plausible-looking minute count. Convert at the call site, or better,
+   call this before anything reaches the seconds domain at all.
+
+   The rule is `chore_free <= allocation`, and the `==` case is VALID:
+   nothing is withheld, which is the per-day-type off switch (design 3.3)
+   and needs no extra key. Only `chore_free > allocation` is rejected —
+   withholding more than a day grants cannot mean anything, so the device
+   refuses to guess.
+
+   ONE predicate, TWO consumers that must NOT agree on what to do about a
+   false, and that asymmetry is the design, not an oversight:
+     - the chore_free_* setter REJECTS the write and names the field in
+       the config_ack errors list;
+     - the allocation setter CLAMPS the paired chore_free_* down and says
+       so in the ack. Blocking a parent who is lowering screen time on
+       account of a chore setting they are not thinking about would be the
+       wrong answer.
+   The clamp target falls out of the boundary above: the largest valid
+   chore_free for an allocation is the allocation itself. Both directions
+   do the kind thing, which is what makes the invalid state unreachable by
+   ordinary operation — the blocking config-error screen exists for the
+   config that got there some other way (older firmware, NVS oddity, a bug
+   in either setter).
+
+   THE CALL SHAPE FOR EACH SETTER, because both parameters are uint16_t: a
+   swapped call compiles silently and inverts the answer, and the two
+   setters have opposite habits — the new value is the FIRST argument at
+   one site and the SECOND at the other. Copy these, do not infer them:
+     - chore_free_* setter:
+         config_is_valid_chore_free_min(candidate, current_allocation)
+     - allocation setter:
+         config_is_valid_chore_free_min(current_chore_free, candidate)
+   A swap at the allocation site is the dangerous one: a parent lowering
+   the allocation to 30 while chore_free is 60 evaluates (30, 60) -> VALID,
+   no clamp fires, and NVS is left holding the invalid pair.
+
+   ONE SHARED PREDICATE IS NOT TOTAL COVERAGE. It does earn its keep — a
+   setter hand-written with `<` instead of `<=` would reject the off
+   switch, a user-visible design violation — but three gaps are real and
+   are NOT closed by sharing this rule:
+     - the CLAMP TARGET is prose above, not code. The allocation setter
+       hand-writes alloc_min; it is shareable and is not shared.
+     - schedule.c's chore-free resolver already encodes this same boundary
+       independently, in SECONDS, and cannot call this. Two implementations
+       of one rule are in-tree.
+     - the config-error gate cannot get its input from the accessor it
+       would naturally reach for: schedule_get_chore_free_sec() CLAMPS, and
+       the clamp is lossy and irreversible — the legitimate off switch
+       (60, 60) and the broken pair (90, 60) both come back as
+       free_sec == alloc_sec, so a gate built on it would never fire. The
+       gate must read the raw chore_free_* and allocation MINUTE keys and
+       call this predicate on the unconverted values. */
+bool config_is_valid_chore_free_min(uint16_t chore_free_min, uint16_t alloc_min);
+
 /* Shared field bounds: ha_config.c advertises them in HA discovery
    (number entity min/max) and config_apply.c enforces them on the
    retained config document — one definition so they cannot drift. */
 #define CFG_BOUND_ALLOC_LO 1
 #define CFG_BOUND_ALLOC_HI 1440
+/* The chore-free slice of an allocation. NOTE THE ASYMMETRY WITH THE
+   ALLOCATION BOUNDS ABOVE, and do not "tidy" it: CFG_BOUND_ALLOC_LO is 1
+   because an allocation of zero is not a thing anyone means, but a
+   chore_free of 0 is the DEFAULT (nvs_defaults.h, and deliberately left
+   out of the seeded-defaults registry, so an absent key reads 0) and the
+   fully-gated setting, so its LO is 0. Copying the allocation LO here
+   would NOT retroactively fail anything already stored — nothing
+   re-validates a value sitting in NVS — but it would break the default
+   two other ways: an incoming config document carrying `chore_free_*: 0`
+   would be rejected and the field named in the ack (config_apply.c's
+   apply_u16 range-checks the incoming document), and 0 would become
+   unselectable in HA (ha_config.c's NUM_U16 advertises lo/hi as the
+   number entity's min/max). The one value every device is running would
+   become the one value an operator cannot set.
+
+   The HI must EQUAL the allocation HI — `<=` is not enough, which is why
+   the assert below is `==`. Above it, chore_free's top values could never
+   satisfy config_is_valid_chore_free_min, so HA would advertise numbers
+   the setter is bound to reject. Below it, `chore_free == allocation` —
+   the per-day-type off switch (design 3.3) — becomes unreachable for
+   every allocation above this ceiling, because HA would never offer the
+   matching number and the gate could not be turned off for that day type
+   at all. Only equality rules out both. */
+#define CFG_BOUND_CHORE_FREE_LO 0 /* 0 = fully gated: the default, and every device in the field */
+#define CFG_BOUND_CHORE_FREE_HI 1440
+_Static_assert(CFG_BOUND_CHORE_FREE_HI == CFG_BOUND_ALLOC_HI,
+               "the chore_free and allocation ceilings must be equal: a higher chore_free ceiling advertises top "
+               "values that can never validate, and a lower one makes chore_free == allocation (the per-day-type "
+               "off switch) unreachable for every allocation above it");
 #define CFG_BOUND_BREAK_INT_LO 0 /* 0 = breaks disabled */
 #define CFG_BOUND_BREAK_INT_HI 480
 #define CFG_BOUND_BREAK_DUR_LO 1
