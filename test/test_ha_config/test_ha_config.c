@@ -210,24 +210,48 @@ static void fill_escapable(char *dst, size_t cap) {
 
 void test_state_json_worst_case_fits_firmware_buffer(void) {
     char ack[128];
-    /* Every numeric field at its widest rendering. */
-    ha_config_set("weekday_min", "1440", ack, sizeof(ack));
-    ha_config_set("weekend_min", "1440", ack, sizeof(ack));
-    ha_config_set("holiday_min", "1440", ack, sizeof(ack));
-    ha_config_set("summer_min", "1440", ack, sizeof(ack));
-    ha_config_set("break_interval_min", "480", ack, sizeof(ack));
-    ha_config_set("break_duration_min", "120", ack, sizeof(ack));
-    ha_config_set("quiet_start", "2359", ack, sizeof(ack));
-    ha_config_set("quiet_end", "2359", ack, sizeof(ack));
-    ha_config_set("bedtime", "2359", ack, sizeof(ack));
-    ha_config_set("alert_volume", "200", ack, sizeof(ack));
+    /* EVERY u16-rendered field at 65535, which is the widest `%u` can
+       print and NOT the bound the registry advertises. These are plain
+       NVS keys: ha_config_set bounds an EDIT, but the state builder
+       renders whatever the getter returns, and a key written by a
+       firmware with different bounds still has to render — ha_config.c's
+       CFG_BOOL and CFG_ENUM cases reason about exactly that case for
+       their own kinds. Written through the accessors for that reason;
+       routed through ha_config_set instead, each of these would cap at
+       its advertised bound and this guard would sit 17 B under the truth.
+
+       That includes the four chore pairs, which land at 65535/65535 —
+       slice equal to allocation, the legitimate off switch. A pair the
+       gate would REFUSE renders too: design row C11 is about a device
+       that has one stored, and the cfg document has to carry it. Layer 1
+       is not in the way here because these do not go through the set
+       path, so the allocation-before-slice ordering the set path needs
+       does not apply. */
+    nvs_config_set_weekday_min(65535);
+    nvs_config_set_weekend_min(65535);
+    nvs_config_set_holiday_min(65535);
+    nvs_config_set_summer_min(65535);
+    nvs_config_set_chore_free_wd(65535);
+    nvs_config_set_chore_free_we(65535);
+    nvs_config_set_chore_free_hol(65535);
+    nvs_config_set_chore_free_sum(65535);
+    nvs_config_set_break_interval_min(65535);
+    nvs_config_set_break_duration_min(65535);
+    nvs_config_set_quiet_start(65535);
+    nvs_config_set_quiet_end(65535);
+    nvs_config_set_bedtime(65535);
+    nvs_config_set_alert_volume(65535);
     /* Selects render the OPTION STRING, so all three go to the longest
        one — two of the defaults are shorter, which is part of why this
        guard used to read ~190 B under the truth. */
     ha_config_set("tone_expiry", "Marimba arpeggio", ack, sizeof(ack));
     ha_config_set("tone_break", "Marimba arpeggio", ack, sizeof(ack));
     ha_config_set("tone_bed", "Marimba arpeggio", ack, sizeof(ack));
-    ha_config_set("ota_on_sync", "ON", ack, sizeof(ack));
+    /* OFF, not ON: every switch in the registry renders one of the two
+       literals and "OFF" is the longer by a byte. Nine switches — this
+       one plus reload and break_eligible on all four slots — so the ON
+       shape of this fixture read 9 B under the truth. */
+    ha_config_set("ota_on_sync", "OFF", ack, sizeof(ack));
 
     /* Strings: maxed to their declared bound AND made of characters the
        escaper doubles. ha_config_set rejects quote/backslash, but the
@@ -248,9 +272,23 @@ void test_state_json_worst_case_fits_firmware_buffer(void) {
     defs.version = TIMER_DEFS_BLOB_VERSION;
     for (int i = 0; i < TIMER_EXTRA_SLOTS; i++) {
         fill_escapable(defs.defs[i].name, sizeof(defs.defs[i].name));
-        defs.defs[i].min = 1440;
-        defs.defs[i].reload = 1;
-        defs.defs[i].break_eligible = 1;
+        /* 65535, not the CFG_TMIN bound of 1440: same argument as the u16
+           keys above — the state builder prints the stored blob field, and
+           the blob is validated for size and version only.
+
+           ONE AXIS IS DELIBERATELY NOT PUSHED, and it is the reason this
+           number is a ceiling under a stated assumption rather than an
+           absolute one: `min` is int32_t, so a blob holding a negative
+           value would render up to 11 characters and cost another 28 B
+           across the four slots. No in-tree writer can produce it
+           (ha_config_set's CFG_TMIN takes 1..1440, config_apply's
+           apply_timers bounds it too) and the blob version gate limits
+           what a foreign firmware can hand us, so it is out of scope
+           here. If a writer ever admits a wider or signed value, this
+           guard has to move with it. */
+        defs.defs[i].min = 65535;
+        defs.defs[i].reload = 0; /* "OFF" renders a byte wider than "ON" */
+        defs.defs[i].break_eligible = 0;
     }
     nvs_config_set_timer_defs(&defs);
 
@@ -269,7 +307,17 @@ void test_state_json_worst_case_fits_firmware_buffer(void) {
     TEST_ASSERT_EQUAL_INT((int)strlen(buf), ret);
     /* Headroom the firmware buffer actually has, so a future field
        addition trips here rather than silently knocking every editable
-       control offline (a truncated doc is never published). */
+       control offline (a truncated doc is never published).
+
+       THE REACHABLE MAXIMUM IS 1164 / 1280 B — headroom 116, not the 146
+       an earlier shape of this fixture reported. Every axis above is at
+       its widest: 65535 on all fourteen u16/HHMM keys, 65535 on all four
+       timer minutes, "OFF" on all nine switches, the longest option string
+       on all three selects, and every string maxed AND filled with
+       characters the escaper doubles. A fixture that renders the SHORTER
+       option on an axis it controls does not understate the document
+       harmlessly — it inflates the headroom a future field is measured
+       against, which is the number this printf exists to publish. */
     printf("  worst-case cfg state: %d / %d bytes\n", ret, HA_CONFIG_STATE_MAX);
 }
 
@@ -1258,6 +1306,406 @@ void test_every_config_discovery_payload_carries_def_ent_id_and_fits(void) {
     assert_config_discovery(quoted, fw, "config discovery headroom below 128 B (63 quotes, escaped to 126 B)");
 }
 
+/* ---- the chore gate's cross-field rule (design 5.3, layers 1 and 2) ----
+
+   The pairing is written out BY HAND here rather than read from
+   ha_config.c's own table: this TU #includes ha_config.c, so borrowing its
+   table would make a mispairing (summer clamped against the weekend)
+   agree with itself and pass. An independent list is the only thing that
+   can disagree. */
+typedef struct {
+    const char *free_key;
+    const char *alloc_key;
+    esp_err_t (*get_free)(uint16_t *);
+    esp_err_t (*get_alloc)(uint16_t *);
+} pair_ref_t;
+
+static const pair_ref_t PAIR_REFS[] = {
+    {"chore_free_wd", "weekday_min", nvs_config_get_chore_free_wd, nvs_config_get_weekday_min},
+    {"chore_free_we", "weekend_min", nvs_config_get_chore_free_we, nvs_config_get_weekend_min},
+    {"chore_free_hol", "holiday_min", nvs_config_get_chore_free_hol, nvs_config_get_holiday_min},
+    {"chore_free_sum", "summer_min", nvs_config_get_chore_free_sum, nvs_config_get_summer_min},
+};
+#define PAIR_REF_COUNT (sizeof(PAIR_REFS) / sizeof(PAIR_REFS[0]))
+
+void test_chore_free_fields_accept_the_full_range(void) {
+    char ack[128];
+    for (size_t i = 0; i < PAIR_REF_COUNT; i++) {
+        const pair_ref_t *p = &PAIR_REFS[i];
+        /* 1440 is only a legal slice of a 1440-minute day, so open the
+           allocation first: the cross-field rule is not the range rule,
+           and this case is about the range. */
+        TEST_ASSERT_EQUAL_MESSAGE(HA_CFG_OK, ha_config_set(p->alloc_key, "1440", ack, sizeof(ack)), p->alloc_key);
+        TEST_ASSERT_EQUAL_MESSAGE(HA_CFG_OK, ha_config_set(p->free_key, "1440", ack, sizeof(ack)), p->free_key);
+        uint16_t v = 1;
+        p->get_free(&v);
+        TEST_ASSERT_EQUAL_UINT16_MESSAGE(1440, v, p->free_key);
+        /* 0 = fully gated, the default and the one value every deployed
+           device is running. It must stay settable. */
+        TEST_ASSERT_EQUAL_MESSAGE(HA_CFG_OK, ha_config_set(p->free_key, "0", ack, sizeof(ack)), p->free_key);
+        p->get_free(&v);
+        TEST_ASSERT_EQUAL_UINT16_MESSAGE(0, v, p->free_key);
+        TEST_ASSERT_EQUAL_MESSAGE(HA_CFG_REJECTED, ha_config_set(p->free_key, "1441", ack, sizeof(ack)), p->free_key);
+        TEST_ASSERT_NOT_NULL_MESSAGE(strstr(ack, "\"err\":\"range\""), p->free_key);
+    }
+}
+
+/* Four DISTINCT allocations, one per pair, and the distinctness is the
+   point rather than tidiness: the layer-1 cases below read an allocation
+   through the pairing, so if all four sat at one shared value a setter
+   consulting the WRONG partner would read that same value and every
+   assertion would pass anyway. A mutation run proved this is not
+   theoretical — `chore_free_sum` mispaired against `weekend_min` SURVIVED
+   the shared-60 version of the test below, because both allocations were
+   60. Spread them out and one of the two arithmetic cases always flips. */
+static const struct {
+    const char *text;
+    uint16_t value;
+} SPREAD_ALLOCS[] = {{"100", 100}, {"200", 200}, {"300", 300}, {"400", 400}};
+
+/* LAYER 1. The free slice is the side that gets refused, because a slice
+   bigger than the day it comes out of cannot mean anything. Both
+   arithmetic cases are here on purpose: a mispairing that reads a SMALLER
+   partner refuses the legal `alloc - 1`, and one that reads a LARGER
+   partner accepts the illegal `alloc + 1`, so between them no mispairing
+   in either direction survives. */
+void test_chore_free_above_its_allocation_is_refused_and_nvs_untouched(void) {
+    char ack[128];
+    /* Every allocation first: each pair has to be judged in a tree where
+       the other three allocations are numbers its own is not. */
+    for (size_t i = 0; i < PAIR_REF_COUNT; i++)
+        TEST_ASSERT_EQUAL_MESSAGE(HA_CFG_OK,
+                                  ha_config_set(PAIR_REFS[i].alloc_key, SPREAD_ALLOCS[i].text, ack, sizeof(ack)),
+                                  PAIR_REFS[i].alloc_key);
+    for (size_t i = 0; i < PAIR_REF_COUNT; i++) {
+        const pair_ref_t *p = &PAIR_REFS[i];
+        char want[64], text[8];
+        uint16_t free_min = 0, alloc_min = 0;
+        /* One under its own allocation: accepted and stored. */
+        snprintf(text, sizeof(text), "%u", (unsigned)(SPREAD_ALLOCS[i].value - 1));
+        TEST_ASSERT_EQUAL_MESSAGE(HA_CFG_OK, ha_config_set(p->free_key, text, ack, sizeof(ack)), p->free_key);
+        p->get_free(&free_min);
+        TEST_ASSERT_EQUAL_UINT16_MESSAGE(SPREAD_ALLOCS[i].value - 1, free_min, p->free_key);
+        /* One over: refused. */
+        snprintf(text, sizeof(text), "%u", (unsigned)(SPREAD_ALLOCS[i].value + 1));
+        TEST_ASSERT_EQUAL_MESSAGE(HA_CFG_REJECTED, ha_config_set(p->free_key, text, ack, sizeof(ack)), p->free_key);
+        /* Named in the ack: on this path the ack's own `key` IS the field
+           name, and the refusal carries a reason of its own so "too big a
+           slice" is not confused with "out of range". */
+        snprintf(want, sizeof(want), "\"key\":\"%s\"", p->free_key);
+        TEST_ASSERT_NOT_NULL_MESSAGE(strstr(ack, want), p->free_key);
+        TEST_ASSERT_NOT_NULL_MESSAGE(strstr(ack, "\"ok\":false"), p->free_key);
+        TEST_ASSERT_NOT_NULL_MESSAGE(strstr(ack, "\"err\":\"pair\""), p->free_key);
+        /* A refusal stores NOTHING — neither half moves. */
+        p->get_free(&free_min);
+        p->get_alloc(&alloc_min);
+        TEST_ASSERT_EQUAL_UINT16_MESSAGE(SPREAD_ALLOCS[i].value - 1, free_min, p->free_key);
+        TEST_ASSERT_EQUAL_UINT16_MESSAGE(SPREAD_ALLOCS[i].value, alloc_min, p->alloc_key);
+    }
+}
+
+/* chore_free == allocation is the per-day-type OFF SWITCH (design 3.3) and
+   needs no extra key, so it is VALID. Pinned right beside the `>` case
+   above so the boundary is held from both sides: a setter hand-written
+   with `<` instead of `<=` would refuse the off switch. */
+void test_chore_free_equal_to_its_allocation_is_the_off_switch(void) {
+    char ack[128];
+    /* Spread again, for the reason SPREAD_ALLOCS records: the exact-match
+       case is the one a mispaired setter is most likely to get right by
+       accident, since a shared allocation makes every partner the right
+       partner. */
+    for (size_t i = 0; i < PAIR_REF_COUNT; i++)
+        TEST_ASSERT_EQUAL_MESSAGE(HA_CFG_OK,
+                                  ha_config_set(PAIR_REFS[i].alloc_key, SPREAD_ALLOCS[i].text, ack, sizeof(ack)),
+                                  PAIR_REFS[i].alloc_key);
+    for (size_t i = 0; i < PAIR_REF_COUNT; i++) {
+        const pair_ref_t *p = &PAIR_REFS[i];
+        char text[8];
+        uint16_t v = 0;
+        snprintf(text, sizeof(text), "%u", (unsigned)SPREAD_ALLOCS[i].value);
+        TEST_ASSERT_EQUAL_MESSAGE(HA_CFG_OK, ha_config_set(p->free_key, text, ack, sizeof(ack)), p->free_key);
+        p->get_free(&v);
+        TEST_ASSERT_EQUAL_UINT16_MESSAGE(SPREAD_ALLOCS[i].value, v, p->free_key);
+        snprintf(text, sizeof(text), "%u", (unsigned)(SPREAD_ALLOCS[i].value + 1));
+        TEST_ASSERT_EQUAL_MESSAGE(HA_CFG_REJECTED, ha_config_set(p->free_key, text, ack, sizeof(ack)), p->free_key);
+    }
+}
+
+/* LAYER 2, and the case that matters most. The allocation setter CLAMPS
+   its paired slice down instead of refusing: a parent lowering screen time
+   must not be blocked by a chore setting they are not thinking about.
+   This is also the test that fails if config_is_valid_chore_free_min's
+   arguments are swapped at the allocation site — (30, 120) reads VALID,
+   no clamp fires, and nothing downstream would ever say so, because
+   schedule_get_chore_free_sec() clamps and the stored invalid pair reads
+   back identically to the legitimate off switch. */
+void test_lowering_an_allocation_clamps_the_paired_chore_free(void) {
+    char ack[128];
+    TEST_ASSERT_EQUAL(HA_CFG_OK, ha_config_set("weekday_min", "120", ack, sizeof(ack)));
+    TEST_ASSERT_EQUAL(HA_CFG_OK, ha_config_set("chore_free_wd", "120", ack, sizeof(ack)));
+    TEST_ASSERT_EQUAL(HA_CFG_OK, ha_config_set("weekday_min", "30", ack, sizeof(ack)));
+    uint16_t alloc_min = 0, free_min = 0;
+    nvs_config_get_weekday_min(&alloc_min);
+    nvs_config_get_chore_free_wd(&free_min);
+    TEST_ASSERT_EQUAL_UINT16(30, alloc_min);
+    TEST_ASSERT_EQUAL_UINT16(30, free_min); /* clamped to the new allocation */
+    /* A clamp is not silent: the ack reports which field moved and to
+       what, on top of the success it is reporting. */
+    TEST_ASSERT_NOT_NULL(strstr(ack, "\"ok\":true"));
+    TEST_ASSERT_NOT_NULL(strstr(ack, "\"clamped\":\"chore_free_wd\""));
+    TEST_ASSERT_NOT_NULL(strstr(ack, "\"clamped_to\":30"));
+}
+
+/* The same boundary from the allocation side: landing exactly ON the
+   stored slice is the off switch, not a violation, so nothing is written
+   and the ack stays plain. */
+void test_an_allocation_equal_to_its_chore_free_does_not_clamp(void) {
+    char ack[128];
+    TEST_ASSERT_EQUAL(HA_CFG_OK, ha_config_set("weekday_min", "120", ack, sizeof(ack)));
+    TEST_ASSERT_EQUAL(HA_CFG_OK, ha_config_set("chore_free_wd", "60", ack, sizeof(ack)));
+    TEST_ASSERT_EQUAL(HA_CFG_OK, ha_config_set("weekday_min", "60", ack, sizeof(ack)));
+    uint16_t free_min = 0;
+    nvs_config_get_chore_free_wd(&free_min);
+    TEST_ASSERT_EQUAL_UINT16(60, free_min);
+    TEST_ASSERT_NULL(strstr(ack, "clamped"));
+}
+
+void test_raising_an_allocation_leaves_the_chore_free_alone(void) {
+    char ack[128];
+    TEST_ASSERT_EQUAL(HA_CFG_OK, ha_config_set("weekday_min", "60", ack, sizeof(ack)));
+    TEST_ASSERT_EQUAL(HA_CFG_OK, ha_config_set("chore_free_wd", "30", ack, sizeof(ack)));
+    TEST_ASSERT_EQUAL(HA_CFG_OK, ha_config_set("weekday_min", "1440", ack, sizeof(ack)));
+    uint16_t free_min = 0;
+    nvs_config_get_chore_free_wd(&free_min);
+    TEST_ASSERT_EQUAL_UINT16(30, free_min);
+    TEST_ASSERT_NULL(strstr(ack, "clamped"));
+}
+
+/* One lowering pass over all four pairs: `slice[]` is each pair's
+   pre-clamp free slice, `lower_to[]` what its allocation is then lowered
+   to. Both are per-pair and DISTINCT, for the reason SPREAD_ALLOCS above
+   records and this test learned the hard way in its own right.
+
+   THE FLAT VERSION OF THIS TEST WAS BLIND, and not in a subtle place: it
+   set all four slices to the same 600 before lowering each allocation to
+   a value unique to it. The lower-to values being distinct was not enough,
+   because the CLAMP DECISION reads the slice, not the allocation — with
+   every slice at 600, a setter consulting the wrong partner read 600 too,
+   reached the same decision, and clamped. A mutation run over all twelve
+   single-pointer mispairings of the pairing table this file used to have
+   found two surviving the entire suite, one of which stored
+   `holiday_min: 100` beside `chore_free_hol: 600` under ok:true — the
+   exact state this layer exists to prevent, with every test green.
+
+   WHAT MAKES A SWAP VISIBLE. Each lower_to[i] sits BETWEEN its own pair's
+   slice and the next slice below it, so the clamp DECISION differs between
+   the right partner (fires) and every wrong partner holding a smaller
+   slice (does not fire, the ack carries no "clamped", the assertion
+   fails). A wrong partner holding a LARGER slice still fires, so the
+   decision alone cannot separate it — and cannot be made to, for the
+   lowest-sliced pair no lower_to exists that is below its own slice and
+   above every other. Two things close that half:
+     - the full-vector check after EVERY lowering, which catches a clamp
+       that landed on the wrong slice even when the decision agreed;
+     - the caller running this pass TWICE with the spread reversed, so a
+       partner that was larger in one pass is smaller in the other. The
+       union of the two passes flips the decision for all twelve
+       mispairings; neither pass alone flips more than six. */
+static void clamp_pass(const uint16_t *slice, const uint16_t *lower_to, const char *pass) {
+    char ack[128], text[16], msg[96];
+    uint16_t cur[PAIR_REF_COUNT];
+    /* Open every allocation first. The spread below is a RANGE question,
+       not a pairing question, and a 400-minute slice needs a day that
+       holds it; raising an allocation never clamps. */
+    for (size_t i = 0; i < PAIR_REF_COUNT; i++) {
+        snprintf(msg, sizeof(msg), "%s: %s", pass, PAIR_REFS[i].alloc_key);
+        TEST_ASSERT_EQUAL_MESSAGE(HA_CFG_OK, ha_config_set(PAIR_REFS[i].alloc_key, "1440", ack, sizeof(ack)), msg);
+    }
+    for (size_t i = 0; i < PAIR_REF_COUNT; i++) {
+        snprintf(text, sizeof(text), "%u", (unsigned)slice[i]);
+        snprintf(msg, sizeof(msg), "%s: %s", pass, PAIR_REFS[i].free_key);
+        TEST_ASSERT_EQUAL_MESSAGE(HA_CFG_OK, ha_config_set(PAIR_REFS[i].free_key, text, ack, sizeof(ack)), msg);
+        cur[i] = slice[i];
+    }
+    for (size_t i = 0; i < PAIR_REF_COUNT; i++) {
+        char want[64];
+        snprintf(text, sizeof(text), "%u", (unsigned)lower_to[i]);
+        snprintf(msg, sizeof(msg), "%s: %s", pass, PAIR_REFS[i].alloc_key);
+        TEST_ASSERT_EQUAL_MESSAGE(HA_CFG_OK, ha_config_set(PAIR_REFS[i].alloc_key, text, ack, sizeof(ack)), msg);
+        /* The clamp fired, it named THIS pair's slice, and it landed on
+           the new allocation. */
+        snprintf(want, sizeof(want), "\"clamped\":\"%s\",\"clamped_to\":%u", PAIR_REFS[i].free_key,
+                 (unsigned)lower_to[i]);
+        TEST_ASSERT_NOT_NULL_MESSAGE(strstr(ack, want), msg);
+        cur[i] = lower_to[i];
+        /* And NOTHING ELSE MOVED — all four slices, after every single
+           lowering. Checking only at the end of the loop would let a clamp
+           land on a pair that is lowered later anyway and be overwritten
+           before anyone looked. */
+        for (size_t j = 0; j < PAIR_REF_COUNT; j++) {
+            uint16_t v = 0xFFFF;
+            PAIR_REFS[j].get_free(&v);
+            snprintf(msg, sizeof(msg), "%s: %s after %s", pass, PAIR_REFS[j].free_key, PAIR_REFS[i].alloc_key);
+            TEST_ASSERT_EQUAL_UINT16_MESSAGE(cur[j], v, msg);
+        }
+    }
+}
+
+void test_each_allocation_clamps_only_its_own_partner(void) {
+    /* Ascending, then descending. Each lower_to is its own pair's slice
+       minus 50, which puts it above the next slice down in both shapes. */
+    static const uint16_t ASC_SLICE[] = {100, 200, 300, 400};
+    static const uint16_t ASC_LOWER[] = {50, 150, 250, 350};
+    static const uint16_t DESC_SLICE[] = {400, 300, 200, 100};
+    static const uint16_t DESC_LOWER[] = {350, 250, 150, 50};
+    clamp_pass(ASC_SLICE, ASC_LOWER, "ascending slices");
+    clamp_pass(DESC_SLICE, DESC_LOWER, "descending slices");
+}
+
+/* THE PAIRING, ASSERTED DIRECTLY, not only through arithmetic. Since the
+   pairing became one alloc_key string per chore_free_* row, a mispairing
+   is a wrong string — and a wrong string leaves the allocation it stole
+   the slice from with no slice at all, so the behavioural cases above see
+   it as a clamp that never fired. This test says it in one line instead,
+   and adds the two things arithmetic cannot see: a string that resolves to
+   NOTHING (a rename on either side, which would make both layers silent
+   no-ops on a build that still compiles) and a pairing graph that is not
+   four disjoint pairs. The expected pairing comes from PAIR_REFS, the
+   hand-written list, which is the only thing in this TU that can disagree
+   with ha_config.c's registry. */
+void test_every_chore_free_row_names_its_own_allocation(void) {
+    int n = 0;
+    const cfg_field_t *fields = ha_config_fields(&n);
+    int paired = 0;
+    for (int i = 0; i < n; i++) {
+        if (fields[i].alloc_key == NULL)
+            continue;
+        paired++;
+        const cfg_field_t *alloc = field_by_key(fields[i].alloc_key);
+        TEST_ASSERT_NOT_NULL_MESSAGE(alloc, fields[i].alloc_key);       /* resolves */
+        TEST_ASSERT_EQUAL_MESSAGE(CFG_U16, alloc->kind, fields[i].key); /* to a number */
+        /* An allocation must not itself be somebody's slice, or the graph
+           is a chain and one write can cascade. */
+        TEST_ASSERT_NULL_MESSAGE(alloc->alloc_key, fields[i].key);
+    }
+    TEST_ASSERT_EQUAL_INT(PAIR_REF_COUNT, paired); /* exactly four pairs, no more */
+    for (size_t i = 0; i < PAIR_REF_COUNT; i++) {
+        const cfg_field_t *f = field_by_key(PAIR_REFS[i].free_key);
+        TEST_ASSERT_NOT_NULL_MESSAGE(f, PAIR_REFS[i].free_key);
+        TEST_ASSERT_EQUAL_STRING_MESSAGE(PAIR_REFS[i].alloc_key, f->alloc_key, PAIR_REFS[i].free_key);
+    }
+}
+
+/* The clamp write goes FIRST, before the allocation's own write, so a
+   failing NVS leaves BOTH halves as they were. The other order would
+   commit the new allocation and then fail to clamp — persisting exactly
+   the invalid pair this layer exists to prevent.
+
+   THE OUTCOME DOES NOT PROVE THE ORDER, and this test used to assert only
+   the outcome. mock_nvs_fail_writes(1) refuses whichever write goes
+   first, so "both halves unchanged after one injected failure" holds under
+   EITHER order — a mutation that moved the allocation write ahead of the
+   clamp survived that version of this test. The per-key ATTEMPT counts are
+   what pin it (mock_nvs_write_count counts attempts, injected failures
+   included): the clamp was attempted and refused, and the allocation was
+   never attempted at all. */
+void test_a_failed_clamp_write_leaves_both_halves_alone(void) {
+    char ack[128];
+    TEST_ASSERT_EQUAL(HA_CFG_OK, ha_config_set("weekday_min", "120", ack, sizeof(ack)));
+    TEST_ASSERT_EQUAL(HA_CFG_OK, ha_config_set("chore_free_wd", "120", ack, sizeof(ack)));
+    const int alloc_writes = mock_nvs_write_count(NVS_KEY_WEEKDAY_MIN);
+    const int free_writes = mock_nvs_write_count(NVS_KEY_CHORE_FREE_WD);
+    mock_nvs_fail_writes(1);
+    TEST_ASSERT_EQUAL(HA_CFG_REJECTED, ha_config_set("weekday_min", "30", ack, sizeof(ack)));
+    TEST_ASSERT_NOT_NULL(strstr(ack, "\"err\":\"nvs\""));
+    TEST_ASSERT_EQUAL_INT(free_writes + 1, mock_nvs_write_count(NVS_KEY_CHORE_FREE_WD));
+    TEST_ASSERT_EQUAL_INT(alloc_writes, mock_nvs_write_count(NVS_KEY_WEEKDAY_MIN));
+    uint16_t alloc_min = 0, free_min = 0;
+    nvs_config_get_weekday_min(&alloc_min);
+    nvs_config_get_chore_free_wd(&free_min);
+    TEST_ASSERT_EQUAL_UINT16(120, alloc_min);
+    TEST_ASSERT_EQUAL_UINT16(120, free_min);
+}
+
+void test_chore_free_discovery_advertises_the_gated_bounds(void) {
+    char ack[128];
+    for (size_t i = 0; i < PAIR_REF_COUNT; i++) {
+        const cfg_field_t *f = field_by_key(PAIR_REFS[i].free_key);
+        char buf[700], want[128];
+        TEST_ASSERT_NOT_NULL_MESSAGE(f, PAIR_REFS[i].free_key);
+        TEST_ASSERT_EQUAL_STRING_MESSAGE("number", f->component, PAIR_REFS[i].free_key);
+        ha_config_discovery(buf, sizeof(buf), "magtag-a1b2c3", "Kitchen MagTag", "fw", f);
+        /* min 0, not the allocations' 1: 0 is the default every device is
+           running, and an advertised min of 1 makes it unselectable. */
+        TEST_ASSERT_NOT_NULL_MESSAGE(strstr(buf, "\"min\":0"), PAIR_REFS[i].free_key);
+        /* max EQUAL to the allocation ceiling, or the off switch is
+           unreachable for every allocation above it. */
+        TEST_ASSERT_NOT_NULL_MESSAGE(strstr(buf, "\"max\":1440"), PAIR_REFS[i].free_key);
+        TEST_ASSERT_NOT_NULL_MESSAGE(strstr(buf, "\"step\":1"), PAIR_REFS[i].free_key);
+        TEST_ASSERT_NOT_NULL_MESSAGE(strstr(buf, "\"unit_of_meas\":\"min\""), PAIR_REFS[i].free_key);
+        TEST_ASSERT_NOT_NULL_MESSAGE(strstr(buf, "\"ent_cat\":\"config\""), PAIR_REFS[i].free_key);
+        snprintf(want, sizeof(want), "\"cmd_t\":\"magtag/magtag-a1b2c3/set/%s\"", PAIR_REFS[i].free_key);
+        TEST_ASSERT_NOT_NULL_MESSAGE(strstr(buf, want), PAIR_REFS[i].free_key);
+    }
+    /* And the cfg state document carries all four, or HA renders every
+       one of these controls from a missing value. */
+    TEST_ASSERT_EQUAL(HA_CFG_OK, ha_config_set("weekday_min", "120", ack, sizeof(ack)));
+    TEST_ASSERT_EQUAL(HA_CFG_OK, ha_config_set("chore_free_wd", "45", ack, sizeof(ack)));
+    char state[HA_CONFIG_STATE_MAX];
+    ha_config_state_json(state, sizeof(state));
+    TEST_ASSERT_NOT_NULL(strstr(state, "\"chore_free_wd\":45"));
+    TEST_ASSERT_NOT_NULL(strstr(state, "\"chore_free_we\":0"));
+    TEST_ASSERT_NOT_NULL(strstr(state, "\"chore_free_hol\":0"));
+    TEST_ASSERT_NOT_NULL(strstr(state, "\"chore_free_sum\":0"));
+}
+
+/* HA does not re-read a retained discovery config it has already seen,
+   and ha_config_discovery_stale() is what decides whether mqtt_ha.c sends
+   one again. The schema version is one of its two inputs: it ORs the
+   version against ha_config_discovery_hash(), which folds the firmware
+   version string, so any release that changes `fw` republishes all three
+   discovery documents whether or not anyone bumped. The bump is still
+   required — a same-version reflash moves neither input, and it is the
+   only explicit signal — but "without a bump HA never learns" is too
+   strong, and the four keys are the thing to pin here.
+
+   They arrived in v21; >= rather than == so a later bump for an unrelated
+   entity does not have to edit this line. The joint COUNT+VERSION pin for
+   this registry is the test below, and the one for the stat entity table
+   is in test_stats_json. */
+void test_chore_free_entities_need_the_discovery_schema_bump(void) {
+    for (size_t i = 0; i < PAIR_REF_COUNT; i++)
+        TEST_ASSERT_NOT_NULL_MESSAGE(field_by_key(PAIR_REFS[i].free_key), PAIR_REFS[i].free_key);
+    TEST_ASSERT_TRUE(STATS_JSON_DISC_SCHEMA_VER >= 21);
+}
+
+/* THE CONFIG REGISTRY'S BUMP, pinned to the registry it describes — the
+   joint pin test_stats_json makes for ENTITIES, which the config registry
+   did not have. Without it, the >= assertion above is a one-time pin for
+   four specific keys: field #38 could ship with the version left alone and
+   pass every test in the tree, and on every device that has already
+   published discovery at this firmware version HA would never be told the
+   new control exists. Nothing appears, nothing errors.
+
+   The two numbers are asserted TOGETHER, and that is the whole mechanism:
+   neither can be edited without landing in this test, where the rule is
+   written down. Adding an editable field fails the count; correcting the
+   count puts the version on the next line under the author's eyes. It is a
+   forcing function, not an implication — a determined editor can change
+   both numbers and bump nothing — so: A NEW EDITABLE FIELD MUST BUMP
+   STATS_JSON_DISC_SCHEMA_VER.
+
+   HA_CONFIG_SET_SLOTS is the other number the count feeds (ha_config.c
+   static-asserts count + 2 <= 48, so the headroom is 9 fields). Do NOT
+   raise it to make room: it also sizes mqtt_ha.c's set transport, which
+   lives on the net_win task's window heap. */
+void test_config_registry_count_moves_with_the_discovery_schema(void) {
+    int n = 0;
+    (void)ha_config_fields(&n);
+    TEST_ASSERT_EQUAL_INT(37, n);
+    TEST_ASSERT_EQUAL_INT(21, STATS_JSON_DISC_SCHEMA_VER);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_set_timer_name_enables_slot);
@@ -1342,5 +1790,18 @@ int main(void) {
     RUN_TEST(test_discovery_hash_falls_back_to_the_installed_table);
     RUN_TEST(test_state_json_shows_a_name_only_slot);
     RUN_TEST(test_discovery_hash_is_stable_for_a_name_only_slot);
+    /* the chore gate's cross-field rule (design 5.3, layers 1 and 2) */
+    RUN_TEST(test_chore_free_fields_accept_the_full_range);
+    RUN_TEST(test_chore_free_above_its_allocation_is_refused_and_nvs_untouched);
+    RUN_TEST(test_chore_free_equal_to_its_allocation_is_the_off_switch);
+    RUN_TEST(test_lowering_an_allocation_clamps_the_paired_chore_free);
+    RUN_TEST(test_an_allocation_equal_to_its_chore_free_does_not_clamp);
+    RUN_TEST(test_raising_an_allocation_leaves_the_chore_free_alone);
+    RUN_TEST(test_each_allocation_clamps_only_its_own_partner);
+    RUN_TEST(test_every_chore_free_row_names_its_own_allocation);
+    RUN_TEST(test_a_failed_clamp_write_leaves_both_halves_alone);
+    RUN_TEST(test_chore_free_discovery_advertises_the_gated_bounds);
+    RUN_TEST(test_chore_free_entities_need_the_discovery_schema_bump);
+    RUN_TEST(test_config_registry_count_moves_with_the_discovery_schema);
     return UNITY_END();
 }

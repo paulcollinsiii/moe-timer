@@ -214,8 +214,33 @@ typedef struct {
    about that. It changes the SYMPTOM: HA's async_generate_entity_id
    appends _2 to a taken entity_id, so the second device lands on
    ..._2 ids that read as a cosmetic naming quirk rather than as the MAC
-   clash they are. */
-#define STATS_JSON_DISC_SCHEMA_VER 20
+   clash they are.
+
+   v21: + the four chore_free_* number entities (the chore gate's free
+        slice, one per day type). Those are ha_config.c REGISTRY rows, not
+        rows in the ENTITIES table below, so the ENTITIES count does not
+        move for this bump — but the republish gate is the same one
+        (mqtt_ha.c compares this number for every discovery document it
+        publishes, config entities included). The joint count+version pin
+        for the config registry is in test_ha_config, beside the one for
+        this table in test_stats_json.
+
+        WHY BUMP, stated without the overstatement an earlier draft of
+        this note carried: it is NOT true that a device which has
+        published discovery once would "never republish" without it.
+        ha_config_discovery_stale() ORs this version against
+        ha_config_discovery_hash(dev_name, fw), and that hash folds the
+        firmware version string — so any release whose `fw` differs
+        republishes all three discovery documents, bump or no bump
+        (mqtt_ha.c:474-484). What the bump covers is the case the hash
+        cannot see: a SAME-VERSION reflash or an in-place image, where
+        neither input moves and HA is never told the four controls exist.
+        It is also the only explicit, reviewable signal that discovery
+        changed. Costs the usual retained-discovery burst; the def_ent_id
+        note above still applies, and these four register for the first
+        time here so they get their MAC-derived entity_ids straight
+        away. */
+#define STATS_JSON_DISC_SCHEMA_VER 21
 
 /* Buffer the stat/summary/discovery payloads are built into (mqtt_ha.c).
    Named here because stats_json_stat is what can outgrow it, and a stat

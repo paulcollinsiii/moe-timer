@@ -63,6 +63,14 @@ typedef struct {
        disagree about what a valid value is. NULL = length + cleanliness
        are the whole rule. */
     bool (*validate_str)(const char *);
+    /* The chore gate's cross-field partner (design 5.3), set on the four
+       chore_free_* rows ONLY: the key of the ALLOCATION that slice is
+       carved out of. This one string IS the pairing table — a row that
+       HAS an alloc_key is a free slice, a row NAMED by one is an
+       allocation, and both of ha_config.c's pair lookups derive from it.
+       See the layer-1/layer-2 note there for why the relation has to be
+       declared and why it is a key rather than a set of accessors. */
+    const char *alloc_key;
 } cfg_field_t;
 
 typedef enum { HA_CFG_OK = 0, HA_CFG_REJECTED, HA_CFG_UNKNOWN } ha_cfg_result_t;

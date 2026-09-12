@@ -76,6 +76,16 @@ uint16_t ha_config_device_hash(const char *dev_name, const char *fw) {
         .key = k, .component = "number", .name = nm, .unit = un, .kind = CFG_U16, .lo = lo_, .hi = hi_, .step = st, \
         .set_u16 = set, .get_u16 = get                                                                              \
     }
+/* A chore-gate free slice: a bounded u16 that also NAMES the allocation it
+   is carved out of. Bounds are not parameters — both come from the shared
+   CFG_BOUND_CHORE_FREE_*, so discovery advertises exactly what
+   ha_config_set accepts, and all four rows are identical but for the key,
+   the label and the partner. */
+#define NUM_CHORE_FREE(k, nm, alloc, set, get)                                                                      \
+    {                                                                                                               \
+        .key = k, .component = "number", .name = nm, .unit = "min", .kind = CFG_U16, .lo = CFG_BOUND_CHORE_FREE_LO, \
+        .hi = CFG_BOUND_CHORE_FREE_HI, .step = 1, .set_u16 = set, .get_u16 = get, .alloc_key = alloc                \
+    }
 #define NUM_HHMM(k, nm, set, get)                                                                                      \
     {                                                                                                                  \
         .key = k, .component = "number", .name = nm, .kind = CFG_HHMM, .lo = 0, .hi = 2359, .step = 1, .set_u16 = set, \
@@ -167,6 +177,23 @@ static const cfg_field_t FIELDS[] = {
             nvs_config_set_holiday_min, nvs_config_get_holiday_min),
     NUM_U16("summer_min", "Summer allocation", "min", CFG_BOUND_ALLOC_LO, CFG_BOUND_ALLOC_HI, 1,
             nvs_config_set_summer_min, nvs_config_get_summer_min),
+    /* The chore gate's free slice, one per day type, each NAMING the
+       allocation directly above it that it is carved out of — that third
+       argument is the whole pairing, read from both ends by the two
+       lookups below. LO is 0, not the allocations' 1 (config_validate.h
+       says why: 0 is the default every deployed device is running, and an
+       advertised min of 1 would make it unselectable in HA), and HI must
+       EQUAL the allocation HI or `chore_free == allocation` — the
+       per-day-type off switch — becomes unreachable for the tallest
+       allocations. */
+    NUM_CHORE_FREE("chore_free_wd", "Weekday chore-free", "weekday_min", nvs_config_set_chore_free_wd,
+                   nvs_config_get_chore_free_wd),
+    NUM_CHORE_FREE("chore_free_we", "Weekend chore-free", "weekend_min", nvs_config_set_chore_free_we,
+                   nvs_config_get_chore_free_we),
+    NUM_CHORE_FREE("chore_free_hol", "Holiday chore-free", "holiday_min", nvs_config_set_chore_free_hol,
+                   nvs_config_get_chore_free_hol),
+    NUM_CHORE_FREE("chore_free_sum", "Summer chore-free", "summer_min", nvs_config_set_chore_free_sum,
+                   nvs_config_get_chore_free_sum),
     NUM_HHMM("quiet_start", "Quiet hours start (HHMM)", nvs_config_set_quiet_start, nvs_config_get_quiet_start),
     NUM_HHMM("quiet_end", "Quiet hours end (HHMM)", nvs_config_set_quiet_end, nvs_config_get_quiet_end),
     NUM_HHMM_V("bedtime", "Bed time (HHMM, 0=off)", nvs_config_set_bedtime, nvs_config_get_bedtime, bedtime_hhmm_valid),
@@ -226,6 +253,65 @@ static const cfg_field_t *find_field(const char *key) {
         return NULL;
     for (size_t i = 0; i < sizeof(FIELDS) / sizeof(FIELDS[0]); i++)
         if (strcmp(FIELDS[i].key, key) == 0)
+            return &FIELDS[i];
+    return NULL;
+}
+
+/* ---- the chore gate's cross-field rule (design 5.3, layers 1 and 2) ----
+
+   NO PAIRING TABLE. The pairing is ONE string per pair — cfg_field_t's
+   alloc_key, set on the four chore_free_* rows and nowhere else — and both
+   lookups below derive from it through the registry.
+
+   There used to be a second table here, a row per pair holding
+   {free_key, alloc_key, set_free, get_free, get_alloc}, and every one of
+   those five members was bit-identical to something already in FIELDS. It
+   was therefore five chances per pair to name the wrong partner, silent in
+   a build that still compiles: a review ran all twelve single-pointer
+   mispairings and found two of them surviving the entire host suite, one
+   of which stored `holiday_min: 100` next to `chore_free_hol: 600` under
+   ok:true. Derivation collapses that surface from twelve pointers to four
+   strings, and a wrong string cannot desynchronise the two layers — they
+   read the SAME string from opposite ends, so they always agree about who
+   is paired with whom.
+
+   Why the pairing has to be declared at all: the two halves of a pair are
+   different registry rows and the relation is not in the keys
+   (`chore_free_wd` and `weekday_min` share no stem). And a mistake is
+   silent at runtime as well as at compile time — summer clamped against
+   the weekend allocation stores a plausible number and nothing downstream
+   complains, because schedule_get_chore_free_sec() clamps and an invalid
+   stored pair reads back identically to the legitimate off switch.
+
+   TWO LOOKUPS, one per direction, and neither substitutes for the other:
+   the two ends of a pair do OPPOSITE things with a false from the shared
+   predicate (the slice is refused; the allocation clamps its slice), so
+   the setter has to know which end it is standing on. That is what
+   alloc_key encodes — a row that HAS one is a slice, a row NAMED by one is
+   an allocation. See the DO NOT UNIFY note in config_validate.h: the bulk
+   applier is a third consumer with a third behaviour, and unifying the
+   three would remove design rows C11 and C12's subject matter.
+   config_apply.c keeps its own pairing table for that path and is
+   deliberately left alone — with this table gone it is the only other
+   copy in the FIRMWARE. test_ha_config's PAIR_REFS is a third writing of
+   the pairing on purpose: an independent list is the only thing that can
+   disagree with this one, so it is the check, not a duplicate.
+
+   A pair's two keys must stay real registry rows: a rename on either side
+   makes a lookup miss and BOTH layers quietly become no-ops on a build
+   that still compiles. strcmp rules out a static assert, so the guard is
+   in test_ha_config — every non-NULL alloc_key must resolve to a real
+   CFG_U16 row, over a pairing written out BY HAND there, since a table
+   borrowed from here would agree with its own mispairing. */
+static const cfg_field_t *chore_alloc_of(const cfg_field_t *slice) {
+    return (slice->alloc_key != NULL) ? find_field(slice->alloc_key) : NULL;
+}
+
+/* The same string from the other end: the slice carved out of THIS
+   allocation, or NULL if no row names it. */
+static const cfg_field_t *chore_slice_of(const cfg_field_t *alloc) {
+    for (size_t i = 0; i < sizeof(FIELDS) / sizeof(FIELDS[0]); i++)
+        if (FIELDS[i].alloc_key != NULL && strcmp(FIELDS[i].alloc_key, alloc->key) == 0)
             return &FIELDS[i];
     return NULL;
 }
@@ -485,8 +571,160 @@ ha_cfg_result_t ha_config_set(const char *key, const char *value, char *ack, siz
                 return reject(ack, ack_len, key, "nan");
             if (v < f->lo || v > f->hi)
                 return reject(ack, ack_len, key, "range");
+            /* LAYER 1 — this field IS a chore-free slice (it names an
+               allocation): refuse a slice bigger than the day it comes out
+               of. A distinct err from "range" because the value is
+               perfectly in range and the operator needs to know it was the
+               OTHER field that made it impossible. Nothing is written, so
+               neither half moves.
+
+               A refusal LEAVES THE SET RETAINED. mqtt_ha.c clears
+               set/<key> only on HA_CFG_OK, so a retained
+               `set/chore_free_wd: 120` refused here is re-delivered and
+               re-refused every window, indefinitely, until the operator
+               raises the allocation or clears the topic. That is the
+               intended trade — a rejected value stays visible rather than
+               vanishing — but it is a standing per-window cost on a
+               battery device; M3 owns whether a repeatedly-refused
+               retained set should be cleared. */
+            const cfg_field_t *alloc = chore_alloc_of(f);
+            if (alloc != NULL) {
+                uint16_t alloc_min = 0;
+                /* Return code deliberately unchecked, as in
+                   config_apply.c's check_chore_free_pairs(): every
+                   nvs_config getter fills *out on every path
+                   (get_u16_with_default, nvs_config.c), so an unreadable
+                   key reads as its COMPILE-TIME DEFAULT rather than as
+                   garbage.
+
+                   THAT IS THE MECHANISM, NOT A FAIL-SAFE ARGUMENT, and an
+                   earlier version of this comment claimed a read fault
+                   "fails towards refusing". It does not. The candidate is
+                   judged against NVS_DEFAULT_*_MIN instead of the stored
+                   allocation, so the direction depends on which side of
+                   the default the stored allocation sits: ABOVE it a legal
+                   slice is falsely refused, BELOW it an illegal slice is
+                   ACCEPTED and the invalid pair is persisted under
+                   ok:true. Below is ordinary, not exotic —
+                   CFG_BOUND_ALLOC_LO is 1, and `weekday_min: 30` against
+                   the 60-minute default is design 5.3's own worked
+                   example. Layer 2 reads the same way for the same reason
+                   (a faulted slice reads 0, so no clamp fires), and the
+                   backstop for both is the same: design row C11's
+                   config-error gate (M2), which re-reads the stored pair
+                   later and is not fooled by a fault that happened here.
+                   Until C11 lands the consequence is bounded rather than
+                   absent — schedule_get_chore_free_sec() clamps, so a
+                   stored invalid pair behaves as the per-day-type off
+                   switch; the operator's setting is wrong, the device is
+                   not. */
+                alloc->get_u16(&alloc_min);
+                /* Argument order copied verbatim from config_validate.h:
+                   at THIS site the candidate is the FIRST argument. Both
+                   parameters are uint16_t, so a swap compiles silently
+                   and inverts the answer for every unequal pair. */
+                if (!config_is_valid_chore_free_min((uint16_t)v, alloc_min))
+                    return reject(ack, ack_len, key, "pair");
+            }
+            /* LAYER 2 — this field is an ALLOCATION: clamp its paired
+               slice down instead of refusing. A parent lowering screen
+               time must not be blocked by a chore setting they are not
+               thinking about (design 5.3), and the clamp target falls out
+               of the boundary: the largest valid slice of an allocation is
+               the allocation itself.
+
+               THE CLAMP WRITE GOES FIRST, before the allocation's own.
+               The other order commits the new allocation and can then
+               fail to clamp, persisting exactly the invalid pair this
+               layer exists to prevent; this order's failure mode is a
+               slice lowered under an allocation that stayed put, which is
+               still valid. */
+            const cfg_field_t *slice = chore_slice_of(f);
+            bool clamped = false;
+            if (slice != NULL) {
+                uint16_t free_min = 0;
+                slice->get_u16(&free_min); /* unchecked, same reasoning as above */
+                /* And at THIS site the candidate is the SECOND argument.
+                   A swap here is the dangerous one: lowering to 30 with a
+                   slice of 60 would evaluate (30, 60) -> VALID, no clamp
+                   would fire, and NVS would keep the invalid pair. */
+                if (!config_is_valid_chore_free_min(free_min, (uint16_t)v)) {
+                    /* The clamp target is hand-written here as the new
+                       allocation, which config_validate.h lists as an
+                       acknowledged gap ("the CLAMP TARGET is prose above,
+                       not code"). Still hand-written, deliberately: this
+                       is the only CLAMPING consumer in the tree — the bulk
+                       applier neither clamps nor refuses, it names the
+                       field in its ack and leaves the broken pair standing
+                       (design rows C11/C12) — so a shared helper would be
+                       an identity function with a single caller. Revisit
+                       if a second clamping consumer appears.
+
+                       KNOWN ASYMMETRY, flagged for M3. This write is
+                       committed before the allocation's own, so the
+                       sequence "clamp lands, allocation write fails" is
+                       reachable: the ack then reads
+                       {"key":"holiday_min","ok":false,"err":"nvs"} while
+                       chore_free_hol has moved permanently — 600 ("gate
+                       off") to 100 ("gated for 500 of 600 minutes") — and
+                       nothing names it. The operator is told the edit
+                       failed, and it did; a field they were not editing
+                       moved anyway. The PAIR stays valid, which is why
+                       this order is still right: the other order persists
+                       the invalid pair this layer exists to prevent, which
+                       is strictly worse. Do not restructure to avoid it.
+                       M3 decides whether a reject ack should carry the
+                       clamp annotation too.
+
+                       Not covered by a host test, and not for want of
+                       trying: mock_nvs_fail_writes(N) refuses the NEXT N
+                       writes, so "the first write succeeds and the second
+                       fails" cannot be expressed without per-key injection
+                       the mock does not have. */
+                    if (slice->set_u16((uint16_t)v) != ESP_OK)
+                        return reject(ack, ack_len, key, "nvs");
+                    clamped = true;
+                }
+            }
             if (f->set_u16((uint16_t)v) != ESP_OK)
                 return reject(ack, ack_len, key, "nvs");
+            /* A clamp is not silent, but MIND WHERE THE SIGNAL GOES. This
+               ack is never published: mqtt_ha.c:370 hands it to
+               ESP_LOGI("set %s: %s") and nothing else, and the retained
+               config_ack topic carries only config_apply's and cmd_apply's
+               acks. The annotation is therefore a SERIAL-ONLY record, and
+               design 5.3's "says so in the ack" is satisfied on serial
+               only. The operator's real MQTT signal is the cfg state
+               republish at the tail of this same apply_sets() call, which
+               carries the clamped value — HA's number control simply
+               moves.
+
+               ok:true is load-bearing, not cosmetic: mqtt_ha.c clears the
+               retained set/<key> only on HA_CFG_OK and config discovery
+               emits retain:true, so reporting a clamp as REJECTED would
+               leave the edit retained and re-applied every window forever.
+
+               This is also the longest ack the function writes, and it
+               fits with room to spare: 76 B plus the NUL at
+               holiday_min/chore_free_hol (the widest key pair) with a
+               four-digit clamped_to, which is the ceiling because `v` has
+               already passed the CFG_BOUND_ALLOC_HI range check above.
+               mqtt_ha.c's buffer is 256 B.
+
+               A SAME-WAKE COLLISION IS REAL AND UNTESTED (recorded for
+               M2/M3 — do not fix the ordering here): apply_incoming() runs
+               config_apply and publishes the retained config_ack FIRST
+               (mqtt_ha.c:545-548), then apply_sets (line 576). A retained
+               bulk document carrying chore_free_wd:120 plus a retained
+               set/weekday_min:30 therefore ends the window with a VALID
+               pair — this clamp fixed it — behind a retained config_ack
+               that still says ok:false,errors:["chore_free_wd"], and the
+               operator's 120 silently overwritten by 30. */
+            if (clamped) {
+                snprintf(ack, ack_len, "{\"key\":\"%s\",\"ok\":true,\"clamped\":\"%s\",\"clamped_to\":%u}", key,
+                         slice->key, (unsigned)v);
+                return HA_CFG_OK;
+            }
             break;
         }
         case CFG_HHMM: {

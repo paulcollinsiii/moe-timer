@@ -175,7 +175,20 @@ void test_discovery_schema_version_moves_with_the_entity_table(void) {
     int count = 0;
     (void)stats_json_entities(&count);
     TEST_ASSERT_EQUAL_INT(28 + 3 * TIMER_EXTRA_SLOTS, count);
-    TEST_ASSERT_EQUAL_INT(20, STATS_JSON_DISC_SCHEMA_VER);
+    /* 21 with the entity count unchanged: v21 added four ha_config
+       REGISTRY rows (the chore_free_* controls), which ride the same
+       republish gate but are not rows in ENTITIES.
+
+       THIS LINE HAD TO CHANGE, and the reason is the joint assertion
+       above, not a one-directional rule. The pin is exact and the two
+       numbers are asserted together, so it forbids a bump without a count
+       change exactly as much as the reverse: any move in either number
+       lands the author in this test, which is the point of pinning them
+       side by side. A bump whose cause is outside ENTITIES is legitimate
+       and is recorded here as such — that is what an edit to this line
+       means, and it is not evidence the pin is too strict. The config
+       registry has a joint pin of its own in test_ha_config. */
+    TEST_ASSERT_EQUAL_INT(21, STATS_JSON_DISC_SCHEMA_VER);
 }
 
 /* ---- the OTA leg of the stat payload ---- */
