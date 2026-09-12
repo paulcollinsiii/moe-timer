@@ -1,7 +1,14 @@
 /* Apply an HA config document to NVS. Pure over nvs_config and the shared
    validators, plus one read of the compile-time timer table
    (timer_defs_compiled) for the bottom rung of apply_timers()' optional-key
-   ladder. Host-tested. */
+   ladder. Host-tested.
+
+   ONE EXCEPTION to "pure over nvs_config", and it is deliberate:
+   apply_chores() also reads and writes the LIVE RTC chore acks, through
+   timer_chore_acked()/timer_chore_set_acked(). Editing the chore list
+   invalidates positional ack bits that this wake may still repaint from,
+   and nothing else reconciles them before the next boot. The reasoning is
+   at apply_chores(). */
 #include "config_apply.h"
 
 #include <stdio.h>
@@ -9,6 +16,8 @@
 
 #include "bedtime.h" /* bedtime_hhmm_valid */
 #include "cJSON.h"
+#include "chore_store.h"
+#include "chores.h"
 #include "config_validate.h" /* config_is_iso_date */
 #include "nvs_config.h"
 #include "quiet_hours.h" /* quiet_hhmm_valid */
@@ -174,6 +183,299 @@ static void apply_holidays(const cJSON *root, err_acc_t *e) {
         err_add(e, "holidays");
     if (nvs_config_set_holidays(blob, pos) != ESP_OK)
         err_add(e, "holidays");
+}
+
+/* ---- the chore checklist (design 1.2; rows C1, C10, C11, C12) ---- */
+
+/* The chore list. Document-only, exactly like `holidays` above: no
+   accessor pair, no HA entity of its own, CHORE_MAX entries of at most
+   CHORE_NAME_MAX bytes.
+
+   IT DOES NOT TRUNCATE, and that is the one place it departs from
+   apply_holidays() above, which `break`s when its blob fills and flags
+   NOTHING — a dropped holiday is invisible in the ack. Design 1.2
+   requires the opposite here ("enforced with a named error in the
+   config_ack, never truncated: a fourth chore is an `errors` entry"), so
+   an over-cap count, an over-long name, an empty name and a non-string
+   entry are all named. Copying the holidays template verbatim would have
+   inherited the silent drop.
+
+   AND IT WRITES NOTHING on any of those, rather than keeping the entries
+   that were fine. Same reasoning as apply_timers()' whole-array rejection:
+   a list that is half the operator's intent is worse than the list that
+   was already there, because the acks are positional against it and a kid
+   would be ticking rows nobody asked for.
+
+   ABSENT AND EMPTY ARE DIFFERENT STATEMENTS. Absent = the document says
+   nothing about the list, so the stored list stands — the durability rule
+   every optional field in this file obeys, and what stops a document that
+   predates the feature from wiping a configured list. `"chores": []` = the
+   document says there are none, which is the documented way to turn the
+   feature off (row C1: no chores configured, the gate is inert), so it
+   writes the empty list. Refusing `[]` would leave no way to switch the
+   feature off from the bulk document at all.
+
+   config_is_clean_str() IS HYGIENE AT THE POINT OF ENTRY, and it is
+   explicitly NOT justified by a downstream escaper this function does not
+   control. Two facts, because an earlier version of this comment got both
+   wrong: (1) no chore name reaches a JSON builder today at all —
+   chore_store_load_names() has two callers, this file and chore_store.c,
+   and nothing in stats_json.c, mqtt_ha.c or ha_config.c touches a name;
+   (2) when one does, it will be escaped, not corrupting, because
+   stats_json.c runs every embedded string through jesc() and states the
+   contract in as many words — "NO string reaching it can break the JSON,
+   and a field that is safe only because of what some other module
+   currently does is a field that stops being safe the day that module
+   changes".
+
+   What the check buys, beside the 20-BYTE storage cap, is a name that is
+   RENDERABLE and a rejection the operator can see: no control byte to
+   smear a panel row or a log line, and a bad name named in the ack rather
+   than stored and discovered later on the device. Keeping it also keeps
+   this function's contract independent of stats_json.c's, which is the
+   direction that file's own comment argues for.
+
+   apply_timers() above does NOT hold timer names to this rule. That is
+   pre-existing, and with jesc() in the path closing it would be
+   belt-on-braces — so it is neither a precedent to copy nor a gap this
+   function is compensating for. */
+static void apply_chores(const cJSON *root, err_acc_t *e) {
+    const cJSON *arr = cJSON_GetObjectItemCaseSensitive(root, "chores");
+    if (arr == NULL)
+        return;
+    if (!cJSON_IsArray(arr)) {
+        err_add(e, "chores");
+        return;
+    }
+    char names[CHORE_MAX][CHORE_NAME_BUF];
+    memset(names, 0, sizeof(names));
+    uint8_t n = 0;
+    const cJSON *item;
+    cJSON_ArrayForEach(item, arr) {
+        /* n >= CHORE_MAX is FIRST, so a fourth entry is refused before
+           anything indexes names[3]; the rest is the per-entry contract.
+           CHORE_NAME_MAX is a BYTE count (chores.h) and strlen counts
+           bytes, so a 16-character German name in 17 bytes is measured as
+           17 — which is the storage question the cap answers. */
+        if (n >= CHORE_MAX || !cJSON_IsString(item) || item->valuestring[0] == '\0' ||
+            strlen(item->valuestring) > CHORE_NAME_MAX || !config_is_clean_str(item->valuestring)) {
+            err_add(e, "chores");
+            return;
+        }
+        /* memcpy, not snprintf: snprintf would silently truncate, which is
+           the one behaviour this function exists to avoid. The length was
+           just bounded at CHORE_NAME_MAX, so the terminator fits inside
+           CHORE_NAME_BUF by construction. */
+        memcpy(names[n], item->valuestring, strlen(item->valuestring) + 1);
+        n++;
+    }
+
+    /* The list that is about to be replaced, for the ack reconcile below.
+       chore_store_load_names() writes both outputs on every path, so a
+       missing or rejected blob reads as the empty list rather than
+       leaving stack garbage to hash. */
+    char prev[CHORE_MAX][CHORE_NAME_BUF];
+    uint8_t prev_n = 0;
+    chore_store_load_names(prev, &prev_n);
+    uint16_t prev_hash = chores_list_hash(prev, prev_n);
+
+    if (chore_store_save_names(names, n) != ESP_OK) {
+        err_add(e, "chores");
+        return; /* the stored list did not move, so the acks still mean what they meant */
+    }
+
+    /* THE LIVE ACKS, and this is the half that is easy to miss. Ack bits
+       are POSITIONAL (chores.h) and this apply runs inside the network
+       window, so from here on the RTC holds a mask positional to the list
+       that just went away while the panel may still repaint in this same
+       wake — it would tick the wrong rows.
+       chore_store_load_ack() applies row C10's rule on the next boot, from
+       the hash stored beside the record, and the record in flash is left
+       alone here precisely because that reconcile is what heals it. What
+       nothing else heals is RTC, so it is healed here.
+       The rule itself is chores_reconcile()'s and is not restated: acks
+       cleared because the bits stop meaning anything, `released`
+       PRESERVED because a list edit must never re-lock a day that has
+       already released. An unchanged list hashes the same and comes back
+       untouched, so this needs no "did it change?" test of its own.
+
+       THE LAYERING HERE IS A KNOWN TRADE-OFF, recorded rather than
+       hidden. net_apply_finish() (main/net_apply.c) is arguably the
+       better home: it already holds reconcile_defs(), whose job is
+       exactly "the MQTT window changed persisted config, reconcile the
+       derived live state, and tell the caller whether to re-render", and
+       this placement makes config_apply.c the SECOND writer of the RTC
+       chore acks (timer_persist.c is the first). The cost is real and
+       paid: config_apply.c now depends on chores.c and chore_store.c, so
+       every single-TU host suite that includes it inherits both.
+
+       WHAT MAKES THE MOVE NON-TRIVIAL, and the reason it was not made:
+       net_apply_finish() runs AFTER this function, by which point the old
+       list is gone from NVS, so it cannot compute prev_hash the way this
+       function does (read-before-write). The only other source is the ack
+       record's stored list_hash, whose provenance is DIFFERENT — that is
+       the hash as of the last TOGGLE, not the last list EDIT, so two list
+       edits with no toggle between them leave it stale in a way the
+       read-before-write here cannot be. An apparently-cleaner design with
+       a bug waiting in it.
+
+       Why RTC and only RTC: a repaint genuinely can follow this apply in
+       the same wake (wake_flow.c opens the network window; net_apply.c
+       joins it and can drive a re-render), and timer_persist.c is
+       boot-time only, so nothing else reconciles RTC before the next
+       boot. The flash ack record is deliberately left alone because
+       chore_store_load_ack() re-derives from its stored hash at boot. */
+    chore_ack_t live = {.acked = timer_chore_acked(), .released = timer_chore_released()};
+    chore_ack_t next = chores_reconcile(live, prev_hash, chores_list_hash(names, n));
+    timer_chore_set_acked(next.acked);
+    timer_chore_set_released(next.released);
+}
+
+/* The four chore_free_* minute keys, each with the allocation it is paired
+   with. ONE table rather than two hand-written lists of four, because the
+   apply pass and the cross-field pass below have to agree on the pairing —
+   separate lists would be two chances to pair summer with the weekend, and
+   a mispairing is silent. */
+typedef struct {
+    const char *free_field;
+    const char *alloc_field;
+    esp_err_t (*set_free)(uint16_t);
+    esp_err_t (*get_free)(uint16_t *);
+    esp_err_t (*get_alloc)(uint16_t *);
+} chore_free_pair_t;
+
+static const chore_free_pair_t k_chore_free_pairs[] = {
+    {"chore_free_wd", "weekday_min", nvs_config_set_chore_free_wd, nvs_config_get_chore_free_wd,
+     nvs_config_get_weekday_min},
+    {"chore_free_we", "weekend_min", nvs_config_set_chore_free_we, nvs_config_get_chore_free_we,
+     nvs_config_get_weekend_min},
+    {"chore_free_hol", "holiday_min", nvs_config_set_chore_free_hol, nvs_config_get_chore_free_hol,
+     nvs_config_get_holiday_min},
+    {"chore_free_sum", "summer_min", nvs_config_set_chore_free_sum, nvs_config_get_chore_free_sum,
+     nvs_config_get_summer_min},
+};
+#define CHORE_FREE_PAIRS (sizeof(k_chore_free_pairs) / sizeof(k_chore_free_pairs[0]))
+
+/* Range only. The CROSS-FIELD rule is a separate pass on purpose — see
+   check_chore_free_pairs(). LO is 0 and that is not a typo: 0 is fully
+   gated, the default and the state every device in the field is in. */
+static void apply_chore_free(const cJSON *root, err_acc_t *e) {
+    for (size_t i = 0; i < CHORE_FREE_PAIRS; i++) {
+        apply_u16(root, k_chore_free_pairs[i].free_field, CFG_BOUND_CHORE_FREE_LO, CFG_BOUND_CHORE_FREE_HI,
+                  k_chore_free_pairs[i].set_free, e);
+    }
+}
+
+/* Is `field` already in the errors list? The entries are whole quoted
+   names, so match the quotes. */
+static bool err_has(const err_acc_t *e, const char *field) {
+    char quoted[32];
+    snprintf(quoted, sizeof(quoted), "\"%s\"", field);
+    return strstr(e->errors, quoted) != NULL;
+}
+
+/* The cross-field rule `chore_free <= allocation`, for all four pairs.
+
+   THE ORDERING REQUIREMENT, stated exactly: it must run after the four
+   ALLOCATIONS and the four chore_free_* have been applied — those eight
+   fields, and no more. It is CALLED last in the apply pass only because
+   that is the simplest place satisfying the requirement; nothing between
+   apply_chore_free() and the call site touches either side of any pair,
+   and moving the call up to sit directly after apply_chore_free() changes
+   no behaviour (measured, not assumed). What DOES break it is running it
+   before the allocations land, which is the mutation the key-order test
+   below kills. Do not read "called last" as "must be last".
+
+   WHY NOT AS THE FIELD IS APPLIED: a single document can carry both
+   `weekday_min` and `chore_free_wd`, cJSON preserves key order, and a
+   check performed at apply time compares against whichever allocation
+   happens to be in NVS at that instant. {"weekday_min":1440,
+   "chore_free_wd":1000} would then be VALID with the allocation first and
+   INVALID with the free slice first — the same document, two answers,
+   decided by the order HA happened to serialise its keys in. Running the
+   check once, at the end, over the values that actually landed makes the
+   answer a function of the document's CONTENT. Both orders are pinned in
+   test_config_apply.
+
+   ALL FOUR PAIRS, whatever day it is (row C12). A broken summer pair in
+   December is still a named error, it is just dormant: "the device does
+   not block in December over a broken summer setting" is the BLOCKING
+   gate's rule (M2's config-error screen, which reads today's day type),
+   not this ack's. This function has no clock and needs none.
+
+   C12's "NAMED BUT DORMANT" IS NOT DURABLE, and that is a design-level
+   gap for M2/M3 rather than a defect here. The config_ack is published
+   RETAINED (mqtt_ha.c), so the naming does persist in MQTT — but only
+   until the NEXT document overwrites that topic, typically with
+   ok:true. After that a broken NON-TODAY pair is invisible everywhere:
+   this ack is gone, and C11's blocking screen only reads TODAY's day
+   type. So "named in the config_ack; dormant" is satisfied at the moment
+   of the edit, not durably. If a broken summer pair should still be
+   discoverable in December, the place for it is the stat payload (a
+   config-warning field), which is M2/M3's call — deliberately not made
+   here, because inventing a second channel for it would be scope this
+   task does not own.
+
+   WHAT IT DOES NOT DO: it does not reject the write and it does not clamp.
+   The values stay exactly as the document set them and the pair is left
+   standing in NVS, because rows C11 and C12 both describe a device that
+   HAS the broken pair — C11's config-error screen has to have something
+   to fire on, and C12's "dormant" is only meaningful if the broken
+   setting persists. The per-entity setter path (ha_config.c) is the one
+   the design gives the reject/clamp asymmetry to; see config_validate.h.
+
+   THAT IS A DELIBERATE DIVERGENCE FROM apply_str()'s stated principle
+   above — "the bulk document and the per-entity set path accept exactly
+   the same values" — and M1-T8 must not "fix" it by unifying them.
+   Concretely, for `weekday_min: 30` arriving while chore_free_wd holds
+   120: the per-entity allocation setter CLAMPS chore_free_wd to 30 and
+   NVS ends consistent, while this path leaves chore_free_wd at 120,
+   names it in the ack, and NVS holds the invalid pair. Two routes, two
+   outcomes, on purpose — config_validate.h assigns the reject/clamp
+   asymmetry to the per-entity setters by name and never to the bulk
+   applier, and C11/C12 need the broken pair to survive. The divergence
+   is recorded at both ends: here, and in config_validate.h.
+
+   ONLY PAIRS THE DOCUMENT SPEAKS TO. Nothing re-validates a value sitting
+   in NVS (config_validate.h says so in as many words), and errors[] is a
+   statement about THIS document — re-reporting a pre-existing broken pair
+   would make every unrelated document ack ok:false forever. EITHER key
+   counts, because the document can break a pair from either side: by
+   raising the free slice, or by lowering the allocation under it. */
+static void check_chore_free_pairs(const cJSON *root, err_acc_t *e) {
+    for (size_t i = 0; i < CHORE_FREE_PAIRS; i++) {
+        const chore_free_pair_t *p = &k_chore_free_pairs[i];
+        if (cJSON_GetObjectItemCaseSensitive(root, p->free_field) == NULL &&
+            cJSON_GetObjectItemCaseSensitive(root, p->alloc_field) == NULL)
+            continue;
+        /* The STORED pair, so a value the range check refused is judged on
+           what is actually in NVS. Both getters fill *out on every path
+           (nvs_config.c's get_u16_with_default), so an unwritten or
+           unreadable key reads as its default rather than as garbage —
+           which is why neither return code is checked, the same
+           conflation apply_timers() makes below.
+           The cost, stated so it is not a surprise: on an NVS READ FAULT
+           the pair reads as free=0 against the allocation default, which
+           is VALID, so a genuinely broken pair goes UNNAMED that window.
+           Silent-and-permissive is the right failure direction here (the
+           alternative is naming a field the document may not even have
+           mentioned), and the next document re-runs the check. */
+        uint16_t free_min = 0;
+        uint16_t alloc_min = 0;
+        p->get_free(&free_min);
+        p->get_alloc(&alloc_min);
+        /* Argument order copied verbatim from config_validate.h: the free
+           slice is the SUBJECT and goes FIRST. Both parameters are
+           uint16_t, so a swap compiles silently and inverts the answer. */
+        if (config_is_valid_chore_free_min(free_min, alloc_min))
+            continue;
+        /* Named once. apply_chore_free() may already have named this field
+           for being out of range, in which case the stored value it left
+           behind can also break the pair; two entries for one key read as
+           two faults and cost the 160-byte list twice. */
+        if (!err_has(e, p->free_field))
+            err_add(e, p->free_field);
+    }
 }
 
 static void apply_timers(const cJSON *root, err_acc_t *e) {
@@ -456,6 +758,7 @@ config_result_t config_apply(const char *json, char *ack, size_t ack_len) {
     apply_u16(root, "weekend_min", CFG_BOUND_ALLOC_LO, CFG_BOUND_ALLOC_HI, nvs_config_set_weekend_min, &e);
     apply_u16(root, "holiday_min", CFG_BOUND_ALLOC_LO, CFG_BOUND_ALLOC_HI, nvs_config_set_holiday_min, &e);
     apply_u16(root, "summer_min", CFG_BOUND_ALLOC_LO, CFG_BOUND_ALLOC_HI, nvs_config_set_summer_min, &e);
+    apply_chore_free(root, &e);
     apply_hhmm(root, "quiet_start", quiet_hhmm_valid, nvs_config_set_quiet_start, &e);
     apply_hhmm(root, "quiet_end", quiet_hhmm_valid, nvs_config_set_quiet_end, &e);
     apply_hhmm(root, "bedtime", bedtime_hhmm_valid, nvs_config_set_bedtime, &e);
@@ -482,7 +785,14 @@ config_result_t config_apply(const char *json, char *ack, size_t ack_len) {
     apply_str(root, "ota_url", CFG_BOUND_OTA_URL_MAX, config_is_ota_url, nvs_config_set_ota_url, &e);
     apply_bool(root, "ota_on_sync", nvs_config_set_ota_on_sync, &e);
     apply_holidays(root, &e);
+    apply_chores(root, &e);
     apply_timers(root, &e);
+    /* Called last because that is the simplest place that satisfies the
+       ordering rule, which is NARROWER than "last": after the four
+       allocations and the four chore_free_* above, and nothing else.
+       Directly after apply_chore_free() would also be correct. See
+       check_chore_free_pairs(). */
+    check_chore_free_pairs(root, &e);
 
     /* Record the version last: a power cut mid-apply leaves cfg_ver stale,
        so the (idempotent) document simply re-applies next window. */

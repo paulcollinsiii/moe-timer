@@ -49,6 +49,14 @@
 #include "mock_hal_time.c"
 #include "../../main/timer.c"
 #include "../../main/nvs_config.c"
+/* This suite tests timer_defs, not chores. These two are here because
+   config_apply.c below reconciles the RTC chore acks after a chore-list
+   edit and so now links against chores.c + chore_store.c — the dependency
+   cost of keeping that reconcile in config_apply.c rather than in
+   net_apply_finish(), recorded and justified at apply_chores(). Every
+   single-TU suite that includes config_apply.c inherits this pair. */
+#include "../../main/chores.c"
+#include "../../main/chore_store.c"
 #include "../../main/quiet_hours.c"
 #include "../../main/bedtime.c"
 #include "../../main/config_validate.c"

@@ -83,10 +83,34 @@ bool config_is_clean_str(const char *s);
        wrong answer.
    The clamp target falls out of the boundary above: the largest valid
    chore_free for an allocation is the allocation itself. Both directions
-   do the kind thing, which is what makes the invalid state unreachable by
-   ordinary operation — the blocking config-error screen exists for the
-   config that got there some other way (older firmware, NVS oddity, a bug
-   in either setter).
+   do the kind thing, and between them THE PER-ENTITY PATH cannot leave an
+   invalid pair behind.
+
+   THAT IS NOT THE SAME AS THE INVALID STATE BEING UNREACHABLE, and this
+   sentence used to claim it was. The BULK config document is an ordinary
+   route to the invalid pair, by design: config_apply.c's
+   check_chore_free_pairs() neither rejects nor clamps — it names the
+   field in the config_ack and leaves the broken pair standing in NVS,
+   because design rows C11 and C12 both describe a device that HAS the
+   broken pair (C11's blocking screen needs something to fire on, and
+   C12's "dormant" is only meaningful if the setting persists). So the
+   blocking config-error screen is the NORMAL consequence of a bulk
+   document naming a bad pair, not only a backstop for the config that got
+   there some other way (older firmware, NVS oddity, a bug in a setter).
+
+   THE RESULTING DIVERGENCE IS DELIBERATE — DO NOT UNIFY IT. The
+   reject/clamp asymmetry above is assigned to the per-entity setters and
+   to nothing else; the bulk applier is a third consumer with a third
+   behaviour. For `weekday_min: 30` arriving while chore_free_wd holds
+   120:
+     - per-entity (the allocation setter): chore_free_wd is CLAMPED to 30,
+       so NVS ends consistent;
+     - bulk document (config_apply.c): chore_free_wd STAYS 120, the ack
+       names it, and NVS holds the invalid pair for the gate to find.
+   This knowingly breaks config_apply.c's own stated principle that the
+   bulk document and the per-entity path "accept exactly the same values";
+   that file records the divergence at check_chore_free_pairs(). A future
+   task that unifies the two would remove C11's and C12's subject matter.
 
    THE CALL SHAPE FOR EACH SETTER, because both parameters are uint16_t: a
    swapped call compiles silently and inverts the answer, and the two

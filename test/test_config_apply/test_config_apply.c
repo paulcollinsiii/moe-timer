@@ -18,6 +18,8 @@
 #include "mock_hal_time.c"
 #include "../../main/timer.c"
 #include "../../main/nvs_config.c"
+#include "../../main/chores.c"
+#include "../../main/chore_store.c"
 #include "../../main/quiet_hours.c"
 #include "../../main/bedtime.c"
 #include "../../main/config_validate.c"
@@ -558,14 +560,35 @@ void test_bulk_ota_fields_reject_wrong_types(void) {
    ack is lost — not just the one that overflowed. The OTA fields sort
    last and so were the first to be dropped. */
 
-/* Every field present and wrong-typed: the worst case for the error list. */
+/* Every field present and wrong-typed: the worst case for the error list.
+   THE CHORE FIELDS BELONG IN HERE. ERR_LIST_CAP (160 B) was sized against
+   the 22 fields this document used to carry; the chore checklist adds five
+   more nameable ones and the list is the resource they compete for, so a
+   document that omits them stopped being the worst case the moment they
+   landed. With 27 wrong fields the ack still surfaces 12 entries — the
+   four 13-14 byte chore_free_* names sort early (right after the
+   allocations) and consume ~68 of the 160 bytes, so 15 fields are now
+   dropped rather than 10.
+
+   ONE CONSEQUENCE WORTH KNOWING BEFORE IT SURPRISES SOMEONE: "chores"
+   itself is applied near the end of the pass and is therefore among the
+   displaced — the flagship field of the feature is INVISIBLE in a
+   maximally-wrong ack. That is not a correctness break (the four tests
+   below pin what actually matters: the ack is valid JSON, flagged
+   errors_truncated, terminated cleanly with no partial name, and inside
+   CONFIG_ACK_MIN), and per-field tests cover "chores" on its own. It is
+   recorded here because the alternative — discovering it from a support
+   thread — is worse. Widening ERR_LIST_CAP is a size/ack-budget decision
+   above this task. */
 static const char *const ALL_WRONG =
     "{\"ver\":\"1\",\"name\":1,\"tz\":2,\"weekday_min\":\"x\",\"weekend_min\":\"x\","
-    "\"holiday_min\":\"x\",\"summer_min\":\"x\",\"quiet_start\":\"x\",\"quiet_end\":\"x\","
+    "\"holiday_min\":\"x\",\"summer_min\":\"x\","
+    "\"chore_free_wd\":\"x\",\"chore_free_we\":\"x\",\"chore_free_hol\":\"x\","
+    "\"chore_free_sum\":\"x\",\"quiet_start\":\"x\",\"quiet_end\":\"x\","
     "\"bedtime\":\"x\",\"break_interval_min\":\"x\",\"break_duration_min\":\"x\","
     "\"tone_expiry\":1,\"tone_break\":1,\"tone_bed\":1,\"alert_volume\":\"x\","
     "\"summer_start\":1,\"school_start\":1,\"school_end\":1,"
-    "\"ota_url\":42,\"ota_on_sync\":1,\"holidays\":5,\"timers\":5}";
+    "\"ota_url\":42,\"ota_on_sync\":1,\"holidays\":5,\"chores\":5,\"timers\":5}";
 
 void test_worst_case_ack_is_parseable_json(void) {
     char ack[CONFIG_ACK_MIN];
@@ -595,6 +618,14 @@ void test_worst_case_ack_fits_the_declared_minimum(void) {
     /* Fits WHOLE, with the NUL inside the buffer — not merely "snprintf
        didn't crash". */
     TEST_ASSERT_TRUE(strlen(ack) < sizeof(ack));
+    /* The headroom, stated rather than implied: 216 of CONFIG_ACK_MIN's 256
+       bytes with the chore fields in the document (12 entries surfaced of
+       27 wrong fields). Asserted as a bound, not an equality — the exact
+       figure moves with any field rename — but a change that eats the
+       remaining 40 bytes should have to come here and say so, because the
+       byte after the cap is where err_add's clean-termination guarantee is
+       the only thing standing between HA and an unparseable ack. */
+    TEST_ASSERT_TRUE_MESSAGE(strlen(ack) <= 232, ack);
 }
 
 /* Every named error must be a complete field name, never a fragment. */
@@ -701,6 +732,468 @@ void test_ota_url_nvs_write_failure_is_reported(void) {
     TEST_ASSERT_NOT_NULL_MESSAGE(strstr(ack, "ota_url"), ack);
 }
 
+/* ---- the chore checklist: the list, the free slice, the cross-field rule ----
+   Design 1.2 (cap 3, name cap 20 BYTES, enforced with a named error in the
+   config_ack and NEVER by truncation) and rows C1/C10/C11/C12. */
+
+static uint8_t stored_chores(char names[CHORE_MAX][CHORE_NAME_BUF]) {
+    uint8_t n = 0xFF;
+    chore_store_load_names(names, &n);
+    return n;
+}
+
+/* The errors list holds WHOLE quoted names, so match the quotes: a bare
+   substring test would let "chore_free_wd" answer for a longer key and
+   would also hit the ack's own object keys. */
+static bool ack_names(const char *ack, const char *field) {
+    char quoted[40];
+    snprintf(quoted, sizeof(quoted), "\"%s\"", field);
+    return strstr(ack, quoted) != NULL;
+}
+
+void test_chores_three_applied_and_readable_back(void) {
+    char ack[CONFIG_ACK_MIN];
+    TEST_ASSERT_EQUAL(CONFIG_APPLIED, apply("{\"ver\":\"1\",\"chores\":[\"Dishes away\",\"Trash out\",\"Homework\"]}",
+                                            ack, sizeof(ack)));
+    TEST_ASSERT_NOT_NULL_MESSAGE(strstr(ack, "\"ok\":true"), ack);
+    char names[CHORE_MAX][CHORE_NAME_BUF];
+    TEST_ASSERT_EQUAL_UINT8(3, stored_chores(names));
+    TEST_ASSERT_EQUAL_STRING("Dishes away", names[0]);
+    TEST_ASSERT_EQUAL_STRING("Trash out", names[1]);
+    TEST_ASSERT_EQUAL_STRING("Homework", names[2]);
+}
+
+/* The plan row's central requirement: a fourth chore is an ERROR, not a
+   silently dropped entry, and nothing partial reaches NVS. */
+void test_chores_a_fourth_entry_is_an_error_and_writes_nothing(void) {
+    char ack[CONFIG_ACK_MIN];
+    apply("{\"ver\":\"1\",\"chores\":[\"Dishes\",\"Trash\"]}", ack, sizeof(ack));
+    apply("{\"ver\":\"2\",\"chores\":[\"Dishes\",\"Trash\",\"Homework\",\"Laundry\"]}", ack, sizeof(ack));
+    TEST_ASSERT_TRUE_MESSAGE(ack_names(ack, "chores"), ack);
+    TEST_ASSERT_NOT_NULL_MESSAGE(strstr(ack, "\"ok\":false"), ack);
+    char names[CHORE_MAX][CHORE_NAME_BUF];
+    TEST_ASSERT_EQUAL_UINT8(2, stored_chores(names)); /* not 3, and not the first three */
+    TEST_ASSERT_EQUAL_STRING("Dishes", names[0]);
+    TEST_ASSERT_EQUAL_STRING("Trash", names[1]);
+    TEST_ASSERT_EQUAL_STRING("", names[2]);
+}
+
+/* 21 bytes is one past CHORE_NAME_MAX: an error, never a 20-byte stump. */
+void test_chores_overlong_name_is_an_error_not_a_truncation(void) {
+    char ack[CONFIG_ACK_MIN];
+    apply("{\"ver\":\"1\",\"chores\":[\"123456789012345678901\"]}", ack, sizeof(ack));
+    TEST_ASSERT_TRUE_MESSAGE(ack_names(ack, "chores"), ack);
+    char names[CHORE_MAX][CHORE_NAME_BUF];
+    TEST_ASSERT_EQUAL_UINT8(0, stored_chores(names));
+    TEST_ASSERT_EQUAL_STRING("", names[0]);
+}
+
+void test_chores_name_at_the_cap_is_accepted_whole(void) {
+    char ack[CONFIG_ACK_MIN];
+    apply("{\"ver\":\"1\",\"chores\":[\"12345678901234567890\"]}", ack, sizeof(ack)); /* exactly 20 */
+    TEST_ASSERT_NOT_NULL_MESSAGE(strstr(ack, "\"ok\":true"), ack);
+    char names[CHORE_MAX][CHORE_NAME_BUF];
+    TEST_ASSERT_EQUAL_UINT8(1, stored_chores(names));
+    TEST_ASSERT_EQUAL_STRING("12345678901234567890", names[0]);
+}
+
+void test_chores_non_string_entry_is_an_error_and_writes_nothing(void) {
+    char ack[CONFIG_ACK_MIN];
+    apply("{\"ver\":\"1\",\"chores\":[\"Dishes\",7]}", ack, sizeof(ack));
+    TEST_ASSERT_TRUE_MESSAGE(ack_names(ack, "chores"), ack);
+    char names[CHORE_MAX][CHORE_NAME_BUF];
+    TEST_ASSERT_EQUAL_UINT8(0, stored_chores(names));
+}
+
+void test_chores_empty_name_is_an_error(void) {
+    char ack[CONFIG_ACK_MIN];
+    apply("{\"ver\":\"1\",\"chores\":[\"\",\"Trash\"]}", ack, sizeof(ack));
+    TEST_ASSERT_TRUE_MESSAGE(ack_names(ack, "chores"), ack);
+    char names[CHORE_MAX][CHORE_NAME_BUF];
+    TEST_ASSERT_EQUAL_UINT8(0, stored_chores(names));
+}
+
+/* A name reaches the hand-built JSON of the HA layer, so it is held to the
+   same rule `ver` is: config_is_clean_str. */
+void test_chores_name_with_a_quote_is_rejected(void) {
+    char ack[CONFIG_ACK_MIN];
+    apply("{\"ver\":\"1\",\"chores\":[\"Say \\\"hi\\\"\"]}", ack, sizeof(ack));
+    TEST_ASSERT_TRUE_MESSAGE(ack_names(ack, "chores"), ack);
+    char names[CHORE_MAX][CHORE_NAME_BUF];
+    TEST_ASSERT_EQUAL_UINT8(0, stored_chores(names));
+    cJSON *root = cJSON_Parse(ack); /* and the ack itself still parses */
+    TEST_ASSERT_NOT_NULL_MESSAGE(root, ack);
+    cJSON_Delete(root);
+}
+
+void test_chores_non_array_is_an_error(void) {
+    char ack[CONFIG_ACK_MIN];
+    apply("{\"ver\":\"1\",\"chores\":\"Dishes\"}", ack, sizeof(ack));
+    TEST_ASSERT_TRUE_MESSAGE(ack_names(ack, "chores"), ack);
+    char names[CHORE_MAX][CHORE_NAME_BUF];
+    TEST_ASSERT_EQUAL_UINT8(0, stored_chores(names));
+}
+
+/* Absent is a no-op, like every other field: a document that says nothing
+   about the list must not clear it. */
+void test_chores_absent_leaves_an_existing_list_alone(void) {
+    char ack[CONFIG_ACK_MIN];
+    apply("{\"ver\":\"1\",\"chores\":[\"Dishes\",\"Trash\"]}", ack, sizeof(ack));
+    apply("{\"ver\":\"2\",\"weekday_min\":45}", ack, sizeof(ack));
+    TEST_ASSERT_NOT_NULL_MESSAGE(strstr(ack, "\"ok\":true"), ack);
+    char names[CHORE_MAX][CHORE_NAME_BUF];
+    TEST_ASSERT_EQUAL_UINT8(2, stored_chores(names));
+    TEST_ASSERT_EQUAL_STRING("Dishes", names[0]);
+}
+
+/* An EXPLICIT empty array is the documented way to turn the feature off
+   (row C1), and it is not the same statement as saying nothing. */
+void test_chores_explicit_empty_array_clears_the_list(void) {
+    char ack[CONFIG_ACK_MIN];
+    apply("{\"ver\":\"1\",\"chores\":[\"Dishes\",\"Trash\"]}", ack, sizeof(ack));
+    apply("{\"ver\":\"2\",\"chores\":[]}", ack, sizeof(ack));
+    TEST_ASSERT_NOT_NULL_MESSAGE(strstr(ack, "\"ok\":true"), ack);
+    char names[CHORE_MAX][CHORE_NAME_BUF];
+    TEST_ASSERT_EQUAL_UINT8(0, stored_chores(names));
+    TEST_ASSERT_EQUAL_STRING("", names[0]);
+}
+
+void test_chores_nvs_write_failure_is_reported_and_keeps_the_live_acks(void) {
+    char ack[CONFIG_ACK_MIN];
+    timer_chore_set_acked(0x1);
+    timer_chore_set_released(false);
+    mock_nvs_fail_writes(1);
+    apply("{\"ver\":\"1\",\"chores\":[\"Dishes\"]}", ack, sizeof(ack));
+    TEST_ASSERT_TRUE_MESSAGE(ack_names(ack, "chores"), ack);
+    /* The list on flash did not move, so the positional acks still mean
+       what they meant. */
+    TEST_ASSERT_EQUAL_UINT8(0x1, timer_chore_acked());
+}
+
+/* Judgement call (b): the live RTC acks are POSITIONAL and this apply runs
+   mid-wake, so a list edit has to reconcile them here — row C10's rule,
+   acks cleared and `released` PRESERVED. chore_store_load_ack() applies the
+   same rule on the next boot; nothing but this applies it to RTC. */
+void test_a_chore_list_edit_clears_the_live_acks_and_keeps_the_release(void) {
+    char ack[CONFIG_ACK_MIN];
+    apply("{\"ver\":\"1\",\"chores\":[\"Dishes\",\"Trash\"]}", ack, sizeof(ack));
+    timer_chore_set_acked(0x3);
+    timer_chore_set_released(true);
+    apply("{\"ver\":\"2\",\"chores\":[\"Dishes\",\"Homework\"]}", ack, sizeof(ack));
+    TEST_ASSERT_EQUAL_UINT8(0, timer_chore_acked());
+    TEST_ASSERT_TRUE(timer_chore_released());
+}
+
+void test_re_applying_the_same_chore_list_leaves_the_live_acks_alone(void) {
+    char ack[CONFIG_ACK_MIN];
+    apply("{\"ver\":\"1\",\"chores\":[\"Dishes\",\"Trash\"]}", ack, sizeof(ack));
+    timer_chore_set_acked(0x2);
+    timer_chore_set_released(false);
+    apply("{\"ver\":\"2\",\"chores\":[\"Dishes\",\"Trash\"]}", ack, sizeof(ack));
+    TEST_ASSERT_EQUAL_UINT8(0x2, timer_chore_acked());
+    TEST_ASSERT_FALSE(timer_chore_released());
+}
+
+/* A number (7) was the only non-string entry covered. These are the other
+   four JSON types a hand-written document or a HA template can produce,
+   and each must be refused WHOLE rather than coerced or skipped. The
+   nested array is the realistic one: a template with one extra level of
+   brackets. The last case puts a good entry first, so "reject the array"
+   is distinguished from "reject from the bad entry onward". */
+void test_chores_structured_entries_are_errors_and_write_nothing(void) {
+    static const char *const docs[] = {
+        "{\"ver\":\"1\",\"chores\":[[\"Dishes\"]]}",
+        "{\"ver\":\"1\",\"chores\":[{\"name\":\"Dishes\"}]}",
+        "{\"ver\":\"1\",\"chores\":[null]}",
+        "{\"ver\":\"1\",\"chores\":[true]}",
+        "{\"ver\":\"1\",\"chores\":[\"Dishes\",null]}",
+    };
+    for (size_t i = 0; i < sizeof(docs) / sizeof(docs[0]); i++) {
+        mock_nvs_reset();
+        char ack[CONFIG_ACK_MIN];
+        apply(docs[i], ack, sizeof(ack));
+        TEST_ASSERT_TRUE_MESSAGE(ack_names(ack, "chores"), docs[i]);
+        char names[CHORE_MAX][CHORE_NAME_BUF];
+        TEST_ASSERT_EQUAL_UINT8_MESSAGE(0, stored_chores(names), docs[i]);
+    }
+}
+
+/* CHORE_MAX is 3 and names[] has exactly three rows, so the count test has
+   to come FIRST in the per-entry contract — five entries is the case that
+   writes names[3] and names[4] if it does not, and the suite runs under
+   ASan, so that is a failure rather than silent corruption. */
+void test_chores_five_entries_are_rejected_and_store_nothing(void) {
+    char ack[CONFIG_ACK_MIN];
+    apply("{\"ver\":\"1\",\"chores\":[\"A\",\"B\",\"C\",\"D\",\"E\"]}", ack, sizeof(ack));
+    TEST_ASSERT_TRUE_MESSAGE(ack_names(ack, "chores"), ack);
+    char names[CHORE_MAX][CHORE_NAME_BUF];
+    TEST_ASSERT_EQUAL_UINT8(0, stored_chores(names));
+}
+
+/* The quote is tested above; these are the other two classes
+   config_is_clean_str() refuses (backslash, and any byte below 0x20). */
+void test_chores_name_with_a_backslash_or_control_byte_is_rejected(void) {
+    char ack[CONFIG_ACK_MIN];
+    char names[CHORE_MAX][CHORE_NAME_BUF];
+    apply("{\"ver\":\"1\",\"chores\":[\"C:\\\\Dishes\"]}", ack, sizeof(ack));
+    TEST_ASSERT_TRUE_MESSAGE(ack_names(ack, "chores"), ack);
+    TEST_ASSERT_EQUAL_UINT8(0, stored_chores(names));
+    mock_nvs_reset();
+    apply("{\"ver\":\"1\",\"chores\":[\"Dish\\tes\"]}", ack, sizeof(ack));
+    TEST_ASSERT_TRUE_MESSAGE(ack_names(ack, "chores"), ack);
+    TEST_ASSERT_EQUAL_UINT8(0, stored_chores(names));
+}
+
+/* CHORE_NAME_MAX IS A BYTE COUNT, which apply_chores() asserts in a comment
+   and nothing pinned. Seven U+6D17 are seven CHARACTERS and twenty-one
+   BYTES, so the name is over the cap and refused whole. The failure this
+   guards against is not the rejection but the alternative: keeping twenty
+   bytes of it, which splits the seventh codepoint and stores a name no
+   renderer can draw. Written as \u escapes so the assertion does not
+   depend on this file's source encoding. */
+void test_chores_a_21_byte_utf8_name_is_rejected_whole(void) {
+    char ack[CONFIG_ACK_MIN];
+    apply("{\"ver\":\"1\",\"chores\":[\"\\u6d17\\u6d17\\u6d17\\u6d17\\u6d17\\u6d17\\u6d17\"]}", ack, sizeof(ack));
+    TEST_ASSERT_TRUE_MESSAGE(ack_names(ack, "chores"), ack);
+    char names[CHORE_MAX][CHORE_NAME_BUF];
+    TEST_ASSERT_EQUAL_UINT8(0, stored_chores(names));
+    TEST_ASSERT_EQUAL_STRING("", names[0]); /* no 20-byte prefix left behind */
+}
+
+/* Per-field independence: a rejected `chores` must not take the rest of the
+   document down with it, and must not damage the list already stored. This
+   is the shape that makes the ack actionable — fix the one named field and
+   re-send. */
+void test_a_rejected_chores_array_leaves_the_other_fields_applied(void) {
+    char ack[CONFIG_ACK_MIN];
+    apply("{\"ver\":\"1\",\"chores\":[\"Dishes\",\"Trash\"]}", ack, sizeof(ack));
+    apply("{\"ver\":\"2\",\"chores\":[\"A\",\"B\",\"C\",\"D\"],\"weekday_min\":120,\"chore_free_wd\":45}", ack,
+          sizeof(ack));
+    TEST_ASSERT_TRUE_MESSAGE(ack_names(ack, "chores"), ack);
+    TEST_ASSERT_FALSE_MESSAGE(ack_names(ack, "chore_free_wd"), ack);
+    uint16_t v = 0;
+    nvs_config_get_chore_free_wd(&v);
+    TEST_ASSERT_EQUAL_UINT16(45, v);
+    nvs_config_get_weekday_min(&v);
+    TEST_ASSERT_EQUAL_UINT16(120, v);
+    char names[CHORE_MAX][CHORE_NAME_BUF];
+    TEST_ASSERT_EQUAL_UINT8(2, stored_chores(names));
+    TEST_ASSERT_EQUAL_STRING("Dishes", names[0]);
+    TEST_ASSERT_EQUAL_STRING("Trash", names[1]);
+}
+
+/* The write-failure test above pins the live ACKS. THE OLD LIST SURVIVING
+   is the other half, and it was unpinned: "nothing partial reaches NVS"
+   has to mean the previous list is still readable, not merely that the new
+   one is absent. That is also what makes the preserved acks correct — they
+   are positional against this list. */
+void test_a_failed_chore_save_leaves_the_previous_list_readable(void) {
+    char ack[CONFIG_ACK_MIN];
+    apply("{\"ver\":\"1\",\"chores\":[\"Dishes\",\"Trash\"]}", ack, sizeof(ack));
+    mock_nvs_fail_writes(1); /* the chores blob is this document's first write */
+    apply("{\"ver\":\"2\",\"chores\":[\"Homework\"]}", ack, sizeof(ack));
+    TEST_ASSERT_TRUE_MESSAGE(ack_names(ack, "chores"), ack);
+    char names[CHORE_MAX][CHORE_NAME_BUF];
+    TEST_ASSERT_EQUAL_UINT8(2, stored_chores(names));
+    TEST_ASSERT_EQUAL_STRING("Dishes", names[0]);
+    TEST_ASSERT_EQUAL_STRING("Trash", names[1]);
+}
+
+/* DUPLICATES ARE ACCEPTED. This test exists so that is a decision on
+   record rather than an accident: nothing anywhere rejects them — there is
+   no duplicate-name guard in chores.c, chore_store.c or config_apply.c —
+   and three identical names store as three rows with an ok:true ack.
+   NOT a correctness break: the ack bits are POSITIONAL, so each row ticks
+   independently, and chores_list_hash() is well defined over duplicates.
+   IT IS AN UNRESOLVED USABILITY HOLE: three identical rows on the panel
+   with no way for a kid to tell which one they just ticked. Rejecting is a
+   policy choice design 1.2 does not make, and the chore screen belongs to
+   M2 — so M2 owns the decision (dedupe on entry, dedupe in the UI, or
+   leave it). If the answer becomes "reject", invert this test. */
+void test_duplicate_chore_names_are_accepted_as_distinct_rows(void) {
+    char ack[CONFIG_ACK_MIN];
+    TEST_ASSERT_EQUAL(CONFIG_APPLIED,
+                      apply("{\"ver\":\"1\",\"chores\":[\"Dishes\",\"Dishes\",\"Dishes\"]}", ack, sizeof(ack)));
+    TEST_ASSERT_NOT_NULL_MESSAGE(strstr(ack, "\"ok\":true"), ack);
+    char names[CHORE_MAX][CHORE_NAME_BUF];
+    TEST_ASSERT_EQUAL_UINT8(3, stored_chores(names));
+    TEST_ASSERT_EQUAL_STRING("Dishes", names[0]);
+    TEST_ASSERT_EQUAL_STRING("Dishes", names[1]);
+    TEST_ASSERT_EQUAL_STRING("Dishes", names[2]);
+}
+
+/* ---- the four chore_free_* minute keys ---- */
+
+void test_chore_free_applies_at_both_bounds(void) {
+    char ack[CONFIG_ACK_MIN];
+    apply(
+        "{\"ver\":\"1\",\"weekday_min\":1440,\"weekend_min\":1440,\"holiday_min\":1440,\"summer_min\":1440,"
+        "\"chore_free_wd\":0,\"chore_free_we\":1440,\"chore_free_hol\":15,\"chore_free_sum\":1440}",
+        ack, sizeof(ack));
+    TEST_ASSERT_NOT_NULL_MESSAGE(strstr(ack, "\"ok\":true"), ack);
+    uint16_t v = 0xFFFF;
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_chore_free_wd(&v));
+    TEST_ASSERT_EQUAL_UINT16(0, v);
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_chore_free_we(&v));
+    TEST_ASSERT_EQUAL_UINT16(1440, v);
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_chore_free_hol(&v));
+    TEST_ASSERT_EQUAL_UINT16(15, v);
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_chore_free_sum(&v));
+    TEST_ASSERT_EQUAL_UINT16(1440, v);
+}
+
+void test_chore_free_above_the_ceiling_is_named_and_not_stored(void) {
+    char ack[CONFIG_ACK_MIN];
+    apply(
+        "{\"ver\":\"1\",\"chore_free_wd\":1441,\"chore_free_we\":1441,"
+        "\"chore_free_hol\":1441,\"chore_free_sum\":1441}",
+        ack, sizeof(ack));
+    TEST_ASSERT_TRUE_MESSAGE(ack_names(ack, "chore_free_wd"), ack);
+    TEST_ASSERT_TRUE_MESSAGE(ack_names(ack, "chore_free_we"), ack);
+    TEST_ASSERT_TRUE_MESSAGE(ack_names(ack, "chore_free_hol"), ack);
+    TEST_ASSERT_TRUE_MESSAGE(ack_names(ack, "chore_free_sum"), ack);
+    uint16_t v = 0xFFFF;
+    nvs_config_get_chore_free_wd(&v);
+    TEST_ASSERT_EQUAL_UINT16(0, v);
+    nvs_config_get_chore_free_sum(&v);
+    TEST_ASSERT_EQUAL_UINT16(0, v);
+}
+
+void test_chore_free_wrong_type_is_named(void) {
+    char ack[CONFIG_ACK_MIN];
+    apply("{\"ver\":\"1\",\"chore_free_wd\":\"30\"}", ack, sizeof(ack));
+    TEST_ASSERT_TRUE_MESSAGE(ack_names(ack, "chore_free_wd"), ack);
+}
+
+/* ---- the cross-field rule (C11 / C12) ---- */
+
+/* C11's pair, weekday being the day type a school-term Monday resolves to.
+   config_apply names it; whether the device BLOCKS on it is the M2 gate's
+   question, which is why the broken pair is left standing in NVS for that
+   gate to find. */
+void test_chore_free_over_its_allocation_is_named(void) {
+    char ack[CONFIG_ACK_MIN];
+    apply("{\"ver\":\"1\",\"weekday_min\":60,\"chore_free_wd\":90}", ack, sizeof(ack));
+    TEST_ASSERT_TRUE_MESSAGE(ack_names(ack, "chore_free_wd"), ack);
+    TEST_ASSERT_NOT_NULL_MESSAGE(strstr(ack, "\"ok\":false"), ack);
+    uint16_t v = 0;
+    nvs_config_get_chore_free_wd(&v);
+    TEST_ASSERT_EQUAL_UINT16(90, v); /* dormant, durable, and visible to the gate */
+    nvs_config_get_weekday_min(&v);
+    TEST_ASSERT_EQUAL_UINT16(60, v);
+}
+
+/* C12: "the device does not block in December over a broken summer
+   setting" — but it is still NAMED. So every pair is validated regardless
+   of which day type is today's, and only the summer one is named here. */
+void test_a_broken_non_today_pair_is_named_too(void) {
+    char ack[CONFIG_ACK_MIN];
+    apply(
+        "{\"ver\":\"1\",\"weekday_min\":120,\"chore_free_wd\":30,"
+        "\"summer_min\":60,\"chore_free_sum\":90}",
+        ack, sizeof(ack));
+    TEST_ASSERT_TRUE_MESSAGE(ack_names(ack, "chore_free_sum"), ack);
+    TEST_ASSERT_FALSE_MESSAGE(ack_names(ack, "chore_free_wd"), ack);
+}
+
+/* `chore_free == allocation` is the per-day-type off switch (design 3.3),
+   so `==` must be VALID — a hand-written `<` would reject it. */
+void test_chore_free_equal_to_its_allocation_is_valid(void) {
+    char ack[CONFIG_ACK_MIN];
+    apply("{\"ver\":\"1\",\"weekend_min\":60,\"chore_free_we\":60}", ack, sizeof(ack));
+    TEST_ASSERT_NOT_NULL_MESSAGE(strstr(ack, "\"ok\":true"), ack);
+}
+
+/* Judgement call (a). cJSON preserves key order, so a cross-field check
+   performed AS the field is applied compares against whichever allocation
+   happens to be in NVS at that instant — and the same document then gives
+   two different answers. Both orders, both directions, one test. */
+void test_the_cross_field_result_is_independent_of_key_order(void) {
+    char valid_a[CONFIG_ACK_MIN], valid_b[CONFIG_ACK_MIN];
+    char broken_a[CONFIG_ACK_MIN], broken_b[CONFIG_ACK_MIN];
+    uint16_t fa = 0, fb = 0, aa = 0, ab = 0;
+
+    /* VALID pair. 1000 exceeds the unwritten weekday_min default (60), so
+       validating the free slice before the allocation lands answers
+       "invalid" — the regression this pins. */
+    apply("{\"ver\":\"1\",\"weekday_min\":1440,\"chore_free_wd\":1000}", valid_a, sizeof(valid_a));
+    nvs_config_get_chore_free_wd(&fa);
+    nvs_config_get_weekday_min(&aa);
+    mock_nvs_reset();
+    apply("{\"ver\":\"1\",\"chore_free_wd\":1000,\"weekday_min\":1440}", valid_b, sizeof(valid_b));
+    nvs_config_get_chore_free_wd(&fb);
+    nvs_config_get_weekday_min(&ab);
+    TEST_ASSERT_EQUAL_STRING(valid_a, valid_b);
+    TEST_ASSERT_NOT_NULL_MESSAGE(strstr(valid_a, "\"ok\":true"), valid_a);
+    TEST_ASSERT_EQUAL_UINT16(fa, fb);
+    TEST_ASSERT_EQUAL_UINT16(aa, ab);
+    TEST_ASSERT_EQUAL_UINT16(1000, fa);
+    TEST_ASSERT_EQUAL_UINT16(1440, aa);
+
+    /* BROKEN pair, same treatment: named in both orders. */
+    mock_nvs_reset();
+    apply("{\"ver\":\"1\",\"weekday_min\":30,\"chore_free_wd\":1000}", broken_a, sizeof(broken_a));
+    mock_nvs_reset();
+    apply("{\"ver\":\"1\",\"chore_free_wd\":1000,\"weekday_min\":30}", broken_b, sizeof(broken_b));
+    TEST_ASSERT_EQUAL_STRING(broken_a, broken_b);
+    TEST_ASSERT_TRUE_MESSAGE(ack_names(broken_a, "chore_free_wd"), broken_a);
+}
+
+/* The other direction of the same pair: the document moves the ALLOCATION
+   and says nothing about the free slice. Naming the chore_free_* key is
+   deliberate — it is the actionable half. */
+void test_lowering_an_allocation_names_the_stale_chore_free(void) {
+    char ack[CONFIG_ACK_MIN];
+    apply("{\"ver\":\"1\",\"weekday_min\":120,\"chore_free_wd\":120}", ack, sizeof(ack));
+    TEST_ASSERT_NOT_NULL_MESSAGE(strstr(ack, "\"ok\":true"), ack);
+    apply("{\"ver\":\"2\",\"weekday_min\":30}", ack, sizeof(ack));
+    TEST_ASSERT_TRUE_MESSAGE(ack_names(ack, "chore_free_wd"), ack);
+}
+
+/* Nothing re-validates a value sitting in NVS (config_validate.h says so
+   in as many words), so errors[] stays a statement about THIS document: a
+   pair the document does not speak to is not re-reported every window. */
+void test_a_pair_the_document_does_not_touch_is_not_revalidated(void) {
+    char ack[CONFIG_ACK_MIN];
+    apply("{\"ver\":\"1\",\"weekday_min\":120,\"chore_free_wd\":120}", ack, sizeof(ack));
+    apply("{\"ver\":\"2\",\"weekday_min\":30}", ack, sizeof(ack)); /* leaves 30/120 stored */
+    apply("{\"ver\":\"3\",\"bedtime\":1900}", ack, sizeof(ack));
+    TEST_ASSERT_NOT_NULL_MESSAGE(strstr(ack, "\"ok\":true"), ack);
+    TEST_ASSERT_FALSE_MESSAGE(ack_names(ack, "chore_free_wd"), ack);
+}
+
+/* One field, one entry. The range check and the cross-field check can both
+   fire on the same key (the value is refused, so the STORED one is what
+   the pair is judged on), and a duplicate entry wastes the 160-byte error
+   list and reads as two separate faults. */
+void test_a_field_that_fails_both_checks_is_named_once(void) {
+    char ack[CONFIG_ACK_MIN];
+    apply("{\"ver\":\"1\",\"weekday_min\":120,\"chore_free_wd\":120}", ack, sizeof(ack));
+    apply("{\"ver\":\"2\",\"weekday_min\":30,\"chore_free_wd\":1441}", ack, sizeof(ack));
+    const char *first = strstr(ack, "chore_free_wd");
+    TEST_ASSERT_NOT_NULL_MESSAGE(first, ack);
+    TEST_ASSERT_NULL_MESSAGE(strstr(first + 1, "chore_free_wd"), ack);
+}
+
+/* The whole feature in one document, which is also the CONFIG_BUF_MAX
+   headroom case: three 20-byte names plus all four minute keys. 1024 is
+   CONFIG_BUF_MAX in mqtt_ha.c, which is private to that file. */
+void test_a_full_chore_document_applies_whole(void) {
+    char ack[CONFIG_ACK_MIN];
+    const char *doc =
+        "{\"ver\":\"20260909\","
+        "\"chores\":[\"12345678901234567890\",\"12345678901234567890\",\"12345678901234567890\"],"
+        "\"weekday_min\":1440,\"weekend_min\":1440,\"holiday_min\":1440,\"summer_min\":1440,"
+        "\"chore_free_wd\":1440,\"chore_free_we\":1440,\"chore_free_hol\":1440,"
+        "\"chore_free_sum\":1440}";
+    TEST_ASSERT_TRUE_MESSAGE(strlen(doc) < 1024, doc);
+    TEST_ASSERT_EQUAL(CONFIG_APPLIED, apply(doc, ack, sizeof(ack)));
+    TEST_ASSERT_NOT_NULL_MESSAGE(strstr(ack, "\"ok\":true"), ack);
+    char names[CHORE_MAX][CHORE_NAME_BUF];
+    TEST_ASSERT_EQUAL_UINT8(3, stored_chores(names));
+    TEST_ASSERT_EQUAL_STRING("12345678901234567890", names[2]);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_full_document_applies_and_stores_ver);
@@ -754,5 +1247,36 @@ int main(void) {
     RUN_TEST(test_clean_ver_still_applies);
     RUN_TEST(test_nvs_write_failure_is_reported_not_swallowed);
     RUN_TEST(test_ota_url_nvs_write_failure_is_reported);
+    RUN_TEST(test_chores_three_applied_and_readable_back);
+    RUN_TEST(test_chores_a_fourth_entry_is_an_error_and_writes_nothing);
+    RUN_TEST(test_chores_overlong_name_is_an_error_not_a_truncation);
+    RUN_TEST(test_chores_name_at_the_cap_is_accepted_whole);
+    RUN_TEST(test_chores_non_string_entry_is_an_error_and_writes_nothing);
+    RUN_TEST(test_chores_empty_name_is_an_error);
+    RUN_TEST(test_chores_name_with_a_quote_is_rejected);
+    RUN_TEST(test_chores_non_array_is_an_error);
+    RUN_TEST(test_chores_absent_leaves_an_existing_list_alone);
+    RUN_TEST(test_chores_explicit_empty_array_clears_the_list);
+    RUN_TEST(test_chores_nvs_write_failure_is_reported_and_keeps_the_live_acks);
+    RUN_TEST(test_a_chore_list_edit_clears_the_live_acks_and_keeps_the_release);
+    RUN_TEST(test_re_applying_the_same_chore_list_leaves_the_live_acks_alone);
+    RUN_TEST(test_chores_structured_entries_are_errors_and_write_nothing);
+    RUN_TEST(test_chores_five_entries_are_rejected_and_store_nothing);
+    RUN_TEST(test_chores_name_with_a_backslash_or_control_byte_is_rejected);
+    RUN_TEST(test_chores_a_21_byte_utf8_name_is_rejected_whole);
+    RUN_TEST(test_a_rejected_chores_array_leaves_the_other_fields_applied);
+    RUN_TEST(test_a_failed_chore_save_leaves_the_previous_list_readable);
+    RUN_TEST(test_duplicate_chore_names_are_accepted_as_distinct_rows);
+    RUN_TEST(test_chore_free_applies_at_both_bounds);
+    RUN_TEST(test_chore_free_above_the_ceiling_is_named_and_not_stored);
+    RUN_TEST(test_chore_free_wrong_type_is_named);
+    RUN_TEST(test_chore_free_over_its_allocation_is_named);
+    RUN_TEST(test_a_broken_non_today_pair_is_named_too);
+    RUN_TEST(test_chore_free_equal_to_its_allocation_is_valid);
+    RUN_TEST(test_the_cross_field_result_is_independent_of_key_order);
+    RUN_TEST(test_lowering_an_allocation_names_the_stale_chore_free);
+    RUN_TEST(test_a_pair_the_document_does_not_touch_is_not_revalidated);
+    RUN_TEST(test_a_field_that_fails_both_checks_is_named_once);
+    RUN_TEST(test_a_full_chore_document_applies_whole);
     return UNITY_END();
 }

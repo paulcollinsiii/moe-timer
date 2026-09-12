@@ -23,6 +23,35 @@ esp_err_t nvs_config_set_holiday_min(uint16_t val);
 esp_err_t nvs_config_get_summer_min(uint16_t *out);
 esp_err_t nvs_config_set_summer_min(uint16_t val);
 
+/* The chore gate's free slice of each day's allocation, in MINUTES, one
+   key per day type and paired one-for-one with the four allocations
+   above. MINUTES is the contract: config_is_valid_chore_free_min() takes
+   minutes, and schedule_get_chore_free_sec() is the seconds accessor —
+   handing seconds to the validator compiles and silently answers a
+   different question (see config_validate.h).
+
+   Two things these are NOT, and both are load-bearing:
+
+   NOT SEEDED, and deliberately absent from the defaults fingerprint (see
+   the NVS_DEFAULT_CHORE_FREE_* comment in nvs_defaults.h). An unwritten
+   key reads back as its compile-time default of 0 — fully gated, and
+   inert anyway while no chore is configured (design row C1) — which is
+   the state every device in the field is in today. A row in
+   NVS_SEEDED_U16S would change the fingerprint, reseed every deployed
+   device and revert every HA-managed key with it.
+
+   NOT the value the gate should be BUILT on without its allocation
+   beside it: `chore_free > allocation` is a config error, so these are
+   only ever meaningful as the pair config_apply.c resolves them in. */
+esp_err_t nvs_config_get_chore_free_wd(uint16_t *out);
+esp_err_t nvs_config_set_chore_free_wd(uint16_t val);
+esp_err_t nvs_config_get_chore_free_we(uint16_t *out);
+esp_err_t nvs_config_set_chore_free_we(uint16_t val);
+esp_err_t nvs_config_get_chore_free_hol(uint16_t *out);
+esp_err_t nvs_config_set_chore_free_hol(uint16_t val);
+esp_err_t nvs_config_get_chore_free_sum(uint16_t *out);
+esp_err_t nvs_config_set_chore_free_sum(uint16_t val);
+
 /* MQTT broker (HA integration). Empty URI = MQTT disabled. */
 esp_err_t nvs_config_get_mqtt_uri(char *buf, size_t len);
 esp_err_t nvs_config_set_mqtt_uri(const char *uri);
