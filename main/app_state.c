@@ -7,6 +7,8 @@
 
 #include "battery.h"
 #include "battery_policy.h"
+#include "chore_store.h"
+#include "chores.h"
 #include "nvs_config.h"
 #include "nvs_defaults.h"
 #include "schedule.h"
@@ -132,7 +134,7 @@ display_state_t app_state_display(const app_state_in_t *in, int32_t remaining, t
     if (timer_break_active() && timer_eligible_extra_count() == 0) {
         next_def = NULL;
     }
-    return (display_state_t){
+    display_state_t st = (display_state_t){
         .remaining_sec = remaining,
         .allocation_sec = base,
         .adjust_sec = adjust,
@@ -157,6 +159,58 @@ display_state_t app_state_display(const app_state_in_t *in, int32_t remaining, t
            and display_screens stays ESP-free. */
         .fw_version = in->fw_version,
     };
+
+    /* ---- the chore checklist block ------------------------------------
+       Filled after the literal rather than inside it because the count has
+       to be read before anything that is bounded by it, and because the
+       names are COPIED into the struct (display.h says why) — there is no
+       initialiser form for that. The designated literal above names none
+       of these fields, so C value-initialises all seven: empty rows and a
+       count of 0, which is exactly the inert C1 default. Every assignment
+       below therefore overwrites a defined value, never stack garbage.
+
+       These are not device reads and so are not injected: chore_store sits
+       on hal_nvs and the rest are RTC accessors, all three host-testable
+       with the mocks this module already runs under. app_state_in_t stays
+       reserved for the ADC, the app descriptor and the reset reason. */
+
+    /* Reads every row on every path — a missing, stale or malformed blob
+       leaves the rows "" and the count 0, which is the inert no-chores
+       default (C1), so the return code carries nothing this layer acts
+       on. */
+    chore_store_load_names(st.chore_names, &st.chore_count);
+
+    /* RAW, exactly as timer.h documents it: bits at or above the
+       configured count are still set in here. Every chores.c call below is
+       handed this byte rather than the masked copy just built, so the
+       bounding stays where chores.c keeps it — a test against app_state
+       then proves that bounding end to end, instead of proving only that
+       app_state masked before asking. (chores_withheld_sec takes the mask
+       and ignores it: it is not a term in the formula. It is passed for
+       consistency, not because the value matters there.) */
+    uint8_t acked_raw = timer_chore_acked();
+    for (uint8_t i = 0; i < CHORE_MAX; i++) {
+        if (chores_is_acked(acked_raw, i, st.chore_count)) {
+            st.chore_acked |= (uint8_t)(1u << i);
+        }
+    }
+    st.chore_outstanding = chores_outstanding(acked_raw, st.chore_count);
+    st.chore_released = timer_chore_released();
+    /* schedule_get_allocation_sec(dt), NOT `base` above — and the two are
+       the same number only while Screen is the selected slot. `base` is
+       the ACTIVE slot's allocation, so with an extra timer selected it is
+       that timer's fixed configured duration; taking the gate from it
+       would subtract the DAY's chore_free tranche from a 15-minute piano
+       practice and report a withholding that belongs to no day at all.
+       The gate is a statement about slot 0's day allocation and nothing
+       else, which is why this reads the schedule a second time rather
+       than reusing the figure already in hand. Both lookups are cached
+       per wake inside schedule.c, so the second ask costs a branch.
+       Seconds in, seconds out: both accessors speak seconds. */
+    st.chore_withheld_sec = chores_withheld_sec(schedule_get_allocation_sec(dt), schedule_get_chore_free_sec(dt),
+                                                acked_raw, st.chore_count, st.chore_released);
+    st.app_mode = timer_mode();
+    return st;
 }
 
 void app_state_stats(const app_state_in_t *in, time_t now, stats_snapshot_t *out) {

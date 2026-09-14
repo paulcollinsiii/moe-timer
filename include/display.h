@@ -3,6 +3,7 @@
 #include <stdint.h>
 #include <time.h>
 
+#include "chores.h" /* CHORE_MAX, CHORE_NAME_BUF for the checklist block below */
 #include "schedule.h"
 #include "timer.h"
 
@@ -92,6 +93,85 @@ typedef struct {
        string: display_screens.c never calls esp_app_get_description(),
        which is what keeps the goldens deterministic. */
     const char *fw_version;
+
+    /* ---- the chore checklist (design §2.4, §4.1) -----------------------
+       One snapshot of the gate per paint, because three screens read it —
+       the chore list, the Screen bar's locked block and the break
+       screen's prompt — and three re-derivations from the store and the
+       RTC would be three chances to disagree about the same day. */
+
+    /* The configured list, COPIED rather than pointed at, which is the one
+       departure from timer_name / swap_next_name / fw_version above and is
+       deliberate. Those borrow storage that outlives the state on its own:
+       a timer def in timer_defs.c's file-statics (timer.c holds only a
+       pointer to that array), the app descriptor in flash. A chore name
+       has no such home — chore_store_load_names() reads NVS into a buffer
+       the CALLER owns — so a pointer here could only point at a
+       file-static inside app_state.c, and then every snapshot ever taken
+       would alias that one buffer. Two states built either side of a list
+       edit would silently agree about the list. 63 bytes buys a field that
+       means what it says, on a struct that lives on one stack frame for
+       the length of a paint.
+       Rows at and above chore_count are "", and EVERY row is
+       NUL-terminated (chore_store_load_names guarantees that even for a
+       stored row that filled all CHORE_NAME_MAX bytes), so a renderer may
+       hand any row to str* without first checking the count. It does NOT
+       bound rendered width — see CHORE_NAME_MAX in chores.h, which
+       measured exactly that trap; the geometric cap is the screen
+       builder's. */
+    char chore_names[CHORE_MAX][CHORE_NAME_BUF];
+    /* How many of those rows are configured, 0..CHORE_MAX, straight from
+       the store. THE off switch, and the state every device in the field
+       is in today: 0 makes the whole block inert (design row C1) — no
+       gate, nothing withheld, nothing to paint — so read this before any
+       other chore field. */
+    uint8_t chore_count;
+    /* Today's acks, bit i = chore i, MASKED to chore_count here. That is
+       the one thing this differs from timer_chore_acked() in, and the
+       asymmetry is the point: storage keeps the byte raw so a restored
+       list can make an old bit meaningful again, while a render view has
+       no such duty and gains nothing from a bit it must never draw. The
+       masking happens once at this seam instead of asking every renderer
+       to remember chores_is_acked(), so a renderer may walk these bits
+       directly. */
+    uint8_t chore_acked;
+    /* Configured chores still un-acked, 0..chore_count. NOT a synonym for
+       "the gate is shut": with chore_count == 0 this is also 0 and nothing
+       was ever done. The "n of 3" header is (chore_count -
+       chore_outstanding) and means nothing until chore_count > 0. */
+    uint8_t chore_outstanding;
+    /* Seconds of today's SCREEN allocation held back until every chore is
+       acked — chores_withheld_sec() over the day's allocation and its
+       chore_free tranche.
+       Always slot 0's day, whichever timer is selected. allocation_sec
+       above follows the selection and this does not, so the two disagree
+       while an extra timer is drawn; that is correct, because the gate is
+       a statement about the day and not about the timer on screen. The
+       locked block is this over the day's allocation, so only Screen's
+       paint has any use for it.
+       0 collapses three situations — no chores configured, the day already
+       released, and the gate off for this day type (chore_free >=
+       allocation, which includes an allocation of 0) — so it cannot be
+       read as "is the gate armed?"; chore_count and chore_released answer
+       that. chores.h states the same three at chores_withheld_sec().
+       uint32_t, matching that function's return, so nothing narrows on the
+       way to the panel. The int32_t narrowing timer.h flags at its "M2
+       CALL SITE" note belongs to the RELEASE path — timer_release_gated()
+       — and not to this field. */
+    uint32_t chore_withheld_sec;
+    /* The day's LATCHED release: the withheld remainder has already been
+       granted, so the locked block is gone for the rest of the day
+       whatever the acks do afterwards (C8). Deliberately not the same as
+       chore_outstanding == 0, which is the tick BEFORE the latch and still
+       withholds the whole remainder — that figure is what the release
+       owes. */
+    bool chore_released;
+    /* Which screen to paint (C16), read live from the RTC on every paint.
+       A UI value and only that: no timer runs, expires or sleeps
+       differently because of it. Not clamped anywhere on the way here (see
+       app_mode_t in timer.h), so a painter must treat anything that is not
+       APP_MODE_CHORES as Timers rather than switch on it exhaustively. */
+    app_mode_t app_mode;
 } display_state_t;
 
 #ifdef __cplusplus

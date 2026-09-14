@@ -40,19 +40,20 @@ extern "C" {
 
    Bytes, not characters, and the difference is reachable: names arrive
    from an MQTT config payload as UTF-8, so "Räum dein Zimmer" is 16
-   characters in 17 bytes and an emoji costs four. include/display.h:155-158
-   documents the identical distinction for DISPLAY_VERSION_MAX.
+   characters in 17 bytes and an emoji costs four. DISPLAY_VERSION_MAX's
+   comment (include/display.h:235-238) documents the identical
+   distinction.
 
    And it does NOT bound rendered width — it must never be read as if it
-   did. This project already wrote that trap down, measured, at
-   include/display.h:164-167: a character budget cannot bound rendered
-   width on its own, because glyph advances differ. The same measurement
-   for this font and this row, taken from lv_font_montserrat_16's own
-   glyph table: 'W' advances exactly 18.00 px, so 20 of them render
-   360 px — 64 px past a bare 296 px panel, and only 14 fit once a 32 px
-   tick column is subtracted. So the display layer has to carry its own
-   GEOMETRIC cap on top of this one. That is M2's job; no constant here
-   can do it. */
+   did. This project already wrote that trap down, measured, in that same
+   comment (include/display.h:244-247): a character budget cannot bound
+   rendered width on its own, because glyph advances differ. The same
+   measurement for this font and this row, taken from
+   lv_font_montserrat_16's own glyph table: 'W' advances exactly 18.00 px,
+   so 20 of them render 360 px — 64 px past a bare 296 px panel, and only
+   14 fit once a 32 px tick column is subtracted. So the display layer has
+   to carry its own GEOMETRIC cap on top of this one. That is M2's job; no
+   constant here can do it. */
 #define CHORE_NAME_MAX 20
 #define CHORE_NAME_BUF (CHORE_NAME_MAX + 1)
 

@@ -5,7 +5,13 @@
 
 /* Single-TU: the state-assembly rules over the real timer, schedule and
    nvs_config modules (mock HAL underneath); ADC/app-descriptor reads are
-   injected through app_state_in_t. */
+   injected through app_state_in_t.
+
+   chores.c and chore_store.c join the TU for the same reason the rest of
+   it is real: the chore block on display_state_t is an assembly of THEIR
+   answers, so asserting it against stubs would only prove that app_state
+   calls something. The mock flash underneath is what lets a test set the
+   list up by saving it, exactly as config_apply will. */
 // clang-format off
 #include "mock_hal_time.c"
 #include "mock_hal_nvs.c"
@@ -14,6 +20,8 @@
 #include "../../main/nvs_config.c"
 #include "../../main/battery_soc.c"
 #include "../../main/battery_policy.c"
+#include "../../main/chores.c"
+#include "../../main/chore_store.c"
 #include "../../main/app_state.c"
 // clang-format on
 
@@ -467,6 +475,219 @@ void test_display_swap_hint_survives_when_an_eligible_extra_exists(void) {
     TEST_ASSERT_EQUAL_STRING("Piano", app_state_display(&IN_HEALTHY, 0, T0 + 800).swap_next_name);
 }
 
+/* ---- the chore checklist, on the render state ---------------------------
+
+   M2-T1 puts the whole checklist on display_state_t so every M2 screen
+   reads one snapshot instead of each re-deriving the gate. The three
+   sources are deliberately different in kind — the names come from flash
+   (chore_store), the acks/release/mode from the RTC accessors, and the
+   withheld seconds from arithmetic over the SCHEDULE — and each has its
+   own way of going wrong, which is what the tests below separate. */
+
+/* Configure `n` chores named "C1".."Cn" in the mock NVS. */
+static void set_chores(uint8_t n) {
+    char names[CHORE_MAX][CHORE_NAME_BUF];
+    memset(names, 0, sizeof(names));
+    for (uint8_t i = 0; i < n && i < CHORE_MAX; i++) {
+        names[i][0] = 'C';
+        names[i][1] = (char)('1' + i);
+    }
+    TEST_ASSERT_EQUAL(ESP_OK, chore_store_save_names(names, n));
+}
+
+/* THE off switch. Every other field on the block is meaningless until
+   chore_count has been read, and `chore_outstanding == 0` in particular
+   must never be mistaken for "all chores done" — with no list there is
+   nothing to do and nothing to release (design row C1). */
+void test_display_no_chores_leaves_the_whole_block_inert(void) {
+    display_state_t st = app_state_display(&IN_HEALTHY, 0, T0);
+    TEST_ASSERT_EQUAL_UINT8(0, st.chore_count);
+    TEST_ASSERT_EQUAL_UINT8(0, st.chore_acked);
+    TEST_ASSERT_EQUAL_UINT8(0, st.chore_outstanding);
+    TEST_ASSERT_EQUAL_UINT32(0, st.chore_withheld_sec);
+    TEST_ASSERT_EQUAL_STRING("", st.chore_names[0]);
+    TEST_ASSERT_EQUAL_STRING("", st.chore_names[1]);
+    TEST_ASSERT_EQUAL_STRING("", st.chore_names[2]);
+    /* ...and outstanding == 0 here is NOT all-acked. */
+    TEST_ASSERT_FALSE(chores_all_acked(st.chore_acked, st.chore_count));
+}
+
+/* The C1 guard specifically: a fully-gated day (chore_free 0 against a
+   60 min allocation) withholds NOTHING while no chore is configured,
+   because no ack could ever release it. */
+void test_display_no_chores_withholds_nothing_on_a_fully_gated_day(void) {
+    hal_nvs_write_u16("chore_free_wd", 0);
+    schedule_cache_invalidate();
+    display_state_t st = app_state_display(&IN_HEALTHY, 0, T0);
+    TEST_ASSERT_EQUAL_UINT32(3600, st.allocation_sec);
+    TEST_ASSERT_EQUAL_UINT32(0, st.chore_withheld_sec);
+}
+
+void test_display_chore_names_and_count_come_from_the_store(void) {
+    set_chores(2);
+    display_state_t st = app_state_display(&IN_HEALTHY, 0, T0);
+    TEST_ASSERT_EQUAL_UINT8(2, st.chore_count);
+    TEST_ASSERT_EQUAL_STRING("C1", st.chore_names[0]);
+    TEST_ASSERT_EQUAL_STRING("C2", st.chore_names[1]);
+    TEST_ASSERT_EQUAL_STRING("", st.chore_names[2]); /* the unused row stays empty */
+}
+
+/* A full-width name must arrive whole and terminated: CHORE_NAME_BUF is
+   sized for exactly this and a row one byte short would truncate it. */
+void test_display_a_full_width_chore_name_survives_whole(void) {
+    char names[CHORE_MAX][CHORE_NAME_BUF];
+    memset(names, 0, sizeof(names));
+    memcpy(names[0], "12345678901234567890", CHORE_NAME_MAX); /* 20 bytes */
+    TEST_ASSERT_EQUAL(ESP_OK, chore_store_save_names(names, 1));
+    display_state_t st = app_state_display(&IN_HEALTHY, 0, T0);
+    TEST_ASSERT_EQUAL_STRING("12345678901234567890", st.chore_names[0]);
+}
+
+/* The names are COPIED into the state, not pointed at. The struct is
+   returned by value and its string neighbours (timer_name, fw_version)
+   are borrowed pointers, so this is the one field whose storage could
+   not be borrowed: chore_store_load_names writes into the caller's
+   buffer. A second assembly with a different list must therefore leave
+   the first snapshot's names standing. */
+void test_display_chore_names_are_copied_not_borrowed(void) {
+    set_chores(2);
+    display_state_t first = app_state_display(&IN_HEALTHY, 0, T0);
+    set_chores(1); /* the list is edited under the first snapshot */
+    display_state_t second = app_state_display(&IN_HEALTHY, 0, T0);
+    TEST_ASSERT_EQUAL_STRING("C1", second.chore_names[0]);
+    TEST_ASSERT_EQUAL_STRING("", second.chore_names[1]);
+    TEST_ASSERT_EQUAL_STRING("C1", first.chore_names[0]);
+    TEST_ASSERT_EQUAL_STRING("C2", first.chore_names[1]); /* unchanged by the edit */
+    TEST_ASSERT_EQUAL_UINT8(2, first.chore_count);
+}
+
+/* timer_chore_acked() returns the mask RAW — bits at or above the
+   configured count included, because storage must not destroy acks a
+   restored list would make meaningful again. The render state is a
+   derived view with no such duty, so it is masked here and a renderer
+   may walk its bits directly. */
+void test_display_ack_mask_is_masked_to_the_configured_count(void) {
+    set_chores(2);
+    timer_chore_set_acked(0x07); /* bit 2 is a leftover from a longer list */
+    display_state_t st = app_state_display(&IN_HEALTHY, 0, T0);
+    TEST_ASSERT_EQUAL_UINT8(0x03, st.chore_acked);
+    TEST_ASSERT_EQUAL_UINT8(0x07, timer_chore_acked()); /* storage untouched */
+}
+
+/* The other end of the same rule, and it needs its own case: every test
+   above configures fewer chores than CHORE_MAX, so nothing in them can
+   tell a mask built over all three rows from one built over the first
+   two. A full list with only the LAST chore acked is the shape that can
+   — bit 2 must survive here exactly as it was dropped above. */
+void test_display_a_full_list_keeps_the_top_ack_bit(void) {
+    set_chores(CHORE_MAX);
+    timer_chore_set_acked(0x04); /* only the third chore is done */
+    display_state_t st = app_state_display(&IN_HEALTHY, 0, T0);
+    TEST_ASSERT_EQUAL_UINT8(CHORE_MAX, st.chore_count);
+    TEST_ASSERT_EQUAL_STRING("C3", st.chore_names[2]);
+    TEST_ASSERT_EQUAL_UINT8(0x04, st.chore_acked);
+    TEST_ASSERT_EQUAL_UINT8(2, st.chore_outstanding);
+}
+
+void test_display_outstanding_counts_only_configured_chores(void) {
+    set_chores(2);
+    timer_chore_set_acked(0x05); /* chore 1 acked, plus a stale bit 2 */
+    display_state_t st = app_state_display(&IN_HEALTHY, 0, T0);
+    TEST_ASSERT_EQUAL_UINT8(1, st.chore_outstanding);
+    timer_chore_set_acked(0x03);
+    TEST_ASSERT_EQUAL_UINT8(0, app_state_display(&IN_HEALTHY, 0, T0).chore_outstanding);
+}
+
+void test_display_withheld_is_the_days_remainder(void) {
+    set_chores(1);
+    hal_nvs_write_u16("chore_free_wd", 10); /* 10 free of the 60 min weekday */
+    schedule_cache_invalidate();
+    display_state_t st = app_state_display(&IN_HEALTHY, 0, T0);
+    TEST_ASSERT_EQUAL_UINT32(3600 - 600, st.chore_withheld_sec);
+}
+
+/* THE TRAP. `base` is the ACTIVE slot's allocation — an extra timer's
+   fixed configured duration when one is selected. The chore gate is
+   about the SCREEN timer's day allocation, so the withheld figure must
+   come from schedule_get_allocation_sec(dt) and never from `base`.
+   Computed from Piano's 900 s against a 600 s free slice it would read
+   300; the day's own remainder is 3000. Nothing else in this suite
+   selects an extra while chores are outstanding, so without this test
+   the substitution is silent. */
+void test_display_withheld_ignores_the_selected_extra_timers_duration(void) {
+    set_chores(1);
+    hal_nvs_write_u16("chore_free_wd", 10);
+    schedule_cache_invalidate();
+    select_slot(1); /* Piano: 900 s configured, and 900 - 600 = 300 */
+    display_state_t st = app_state_display(&IN_HEALTHY, 0, T0);
+    TEST_ASSERT_EQUAL_UINT32(900, st.allocation_sec); /* the bar still divides by Piano */
+    TEST_ASSERT_EQUAL_UINT32(3000, st.chore_withheld_sec);
+}
+
+/* Both halves of the arithmetic must be looked up for the SAME day type
+   as `now`, or a weekend paint withholds a weekday's remainder. */
+void test_display_withheld_follows_the_day_type_of_now(void) {
+    set_chores(1);
+    hal_nvs_write_u16("chore_free_wd", 10); /* only the weekday key is set */
+    schedule_cache_invalidate();
+    time_t saturday = T0 + 5 * 86400;
+    display_state_t st = app_state_display(&IN_HEALTHY, 0, saturday);
+    TEST_ASSERT_EQUAL_UINT32(7200, st.allocation_sec);     /* weekend: 120 min */
+    TEST_ASSERT_EQUAL_UINT32(7200, st.chore_withheld_sec); /* weekend free defaults to 0 */
+}
+
+/* `mask` is not a term in the withheld formula. All chores acked with
+   the latch still clear STILL reports the remainder — that number IS
+   what the release owes, and reporting 0 early would hand the release a
+   grant of nothing. */
+void test_display_all_acked_before_the_latch_still_withholds(void) {
+    set_chores(2);
+    hal_nvs_write_u16("chore_free_wd", 10);
+    schedule_cache_invalidate();
+    timer_chore_set_acked(0x03);
+    display_state_t st = app_state_display(&IN_HEALTHY, 0, T0);
+    TEST_ASSERT_EQUAL_UINT8(0, st.chore_outstanding);
+    TEST_ASSERT_FALSE(st.chore_released);
+    TEST_ASSERT_EQUAL_UINT32(3000, st.chore_withheld_sec);
+}
+
+void test_display_the_release_latch_clears_the_withheld_figure(void) {
+    set_chores(2);
+    hal_nvs_write_u16("chore_free_wd", 10);
+    schedule_cache_invalidate();
+    timer_chore_set_released(true);
+    display_state_t st = app_state_display(&IN_HEALTHY, 0, T0);
+    TEST_ASSERT_TRUE(st.chore_released);
+    TEST_ASSERT_EQUAL_UINT32(0, st.chore_withheld_sec);
+    /* ...and the release does not retouch the acks. Released here with
+       nothing ticked is reachable (C8: a released day stays released
+       through a later un-tick), and the list screen must still be able to
+       say which chores are undone. */
+    TEST_ASSERT_EQUAL_UINT8(2, st.chore_outstanding);
+    TEST_ASSERT_EQUAL_UINT8(0, st.chore_acked);
+}
+
+/* chore_free == allocation is the per-day-type off switch: armed list,
+   nothing withheld. */
+void test_display_a_day_type_with_the_gate_off_withholds_nothing(void) {
+    set_chores(2);
+    hal_nvs_write_u16("chore_free_wd", 60); /* the whole 60 min weekday is free */
+    schedule_cache_invalidate();
+    display_state_t st = app_state_display(&IN_HEALTHY, 0, T0);
+    TEST_ASSERT_EQUAL_UINT8(2, st.chore_outstanding);
+    TEST_ASSERT_EQUAL_UINT32(0, st.chore_withheld_sec);
+}
+
+/* Which screen paints. APP_MODE_TIMERS is 0, so the day rollover's
+   memset reverts it for free — the default below is that same 0. */
+void test_display_mode_passes_through(void) {
+    TEST_ASSERT_EQUAL(APP_MODE_TIMERS, app_state_display(&IN_HEALTHY, 0, T0).app_mode);
+    timer_set_mode(APP_MODE_CHORES);
+    TEST_ASSERT_EQUAL(APP_MODE_CHORES, app_state_display(&IN_HEALTHY, 0, T0).app_mode);
+    timer_reset();
+    TEST_ASSERT_EQUAL(APP_MODE_TIMERS, app_state_display(&IN_HEALTHY, 0, T0).app_mode);
+}
+
 /* ---- stats snapshot ----------------------------------------------------- */
 
 void test_stats_disabled_slot_reports_zero_zero(void) {
@@ -603,6 +824,21 @@ int main(void) {
     RUN_TEST(test_display_start_available_tracks_break_eligible_during_a_break);
     RUN_TEST(test_display_swap_hint_suppressed_when_no_eligible_extra);
     RUN_TEST(test_display_swap_hint_survives_when_an_eligible_extra_exists);
+    RUN_TEST(test_display_no_chores_leaves_the_whole_block_inert);
+    RUN_TEST(test_display_no_chores_withholds_nothing_on_a_fully_gated_day);
+    RUN_TEST(test_display_chore_names_and_count_come_from_the_store);
+    RUN_TEST(test_display_a_full_width_chore_name_survives_whole);
+    RUN_TEST(test_display_chore_names_are_copied_not_borrowed);
+    RUN_TEST(test_display_ack_mask_is_masked_to_the_configured_count);
+    RUN_TEST(test_display_a_full_list_keeps_the_top_ack_bit);
+    RUN_TEST(test_display_outstanding_counts_only_configured_chores);
+    RUN_TEST(test_display_withheld_is_the_days_remainder);
+    RUN_TEST(test_display_withheld_ignores_the_selected_extra_timers_duration);
+    RUN_TEST(test_display_withheld_follows_the_day_type_of_now);
+    RUN_TEST(test_display_all_acked_before_the_latch_still_withholds);
+    RUN_TEST(test_display_the_release_latch_clears_the_withheld_figure);
+    RUN_TEST(test_display_a_day_type_with_the_gate_off_withholds_nothing);
+    RUN_TEST(test_display_mode_passes_through);
     RUN_TEST(test_stats_disabled_slot_reports_zero_zero);
     RUN_TEST(test_stats_idle_screen_falls_back_to_schedule);
     RUN_TEST(test_stats_idle_screen_allocation_folds_a_banked_adjustment);
