@@ -40,8 +40,34 @@ static EventGroupHandle_t s_eg;
 
 static volatile int s_pub_acks;
 
-#define CONFIG_BUF_MAX 1024
+/* Largest retained config document the window will take. MEASURED, not
+   guessed: every documented field at its longest honoured form, minified,
+   is 1708 B — 1097 B of scalar and string fields plus 46 holiday dates,
+   which is what HOLIDAY_BLOB_CAP (512) / 11 B per date allows. 2048 is the
+   next power of two above that, and the gate in mqtt_rx.c is
+   `total_len < config_cap`, so the largest document actually accepted is
+   2047 B and the real headroom is 339 B.
+
+   A document past that is now REFUSED OUT LOUD (config_ack "too_long")
+   rather than dropped into the same MQTT_RX_IGNORED bucket as a topic that
+   was never ours — a retained over-size document used to be re-delivered
+   and re-dropped on every reconnect, forever, with no log and no ack. */
+#define CONFIG_BUF_MAX 2048
 #define CMD_BUF_MAX 256
+
+/* MQTT packet bytes the receive buffer must hold ON TOP of the document:
+   1 control byte + up to 4 remaining-length bytes + the 2-byte topic-length
+   field + the topic + the 2-byte QoS-1 packet identifier. Our topics are
+   built into 96-byte slots, so 128 covers the worst of it.
+
+   This is not decoration — see the buffer.size note at the client config.
+   esp-mqtt only fills in `topic` on the FIRST data event of a fragmented
+   message unless CONFIG_MQTT_TOPIC_PRESENT_ALL_DATA_EVENTS is set, and it
+   is not set (it needs MQTT_USE_CUSTOM_CONFIG, also off). Every later
+   fragment therefore arrives with topic == NULL, which mqtt_rx correctly
+   ignores — so a document that fragments can never be reassembled here. */
+#define MQTT_PACKET_OVERHEAD 128
+
 /* Registry fields + screen_bonus + locate, with headroom so a duplicate
    (retained + a fresh in-window edit) can't silently drop. No longer a
    hand-counted number: ha_config.c static-asserts its own FIELDS array
@@ -53,9 +79,14 @@ static volatile int s_pub_acks;
 
 /* Window-scoped buffers: allocated at window start, freed at teardown —
    the radio is off (and none of this is needed) for the vast majority of
-   every wake, so these ~11 KB (sizeof(window_mem_t), which SET_MAX
+   every wake, so these ~12.4 KB (sizeof(window_mem_t), which SET_MAX
    dominates) no longer sit in .bss permanently. The pointer doubles as
-   the "window open" flag for the event handler. */
+   the "window open" flag for the event handler.
+
+   The two incoming topic strings live here, rather than on
+   subscribe_incoming's stack as they used to, because mqtt_rx now matches
+   the delivered topic against them BY CONTENT and so needs them for the
+   whole window — the same lifetime config_buf already has. */
 typedef struct {
     char topic[128];
     char payload[STATS_JSON_PAYLOAD_MAX]; /* stat/summary/discovery payloads */
@@ -63,15 +94,48 @@ typedef struct {
     char cfg_state[HA_CONFIG_STATE_MAX];
     char config_buf[CONFIG_BUF_MAX]; /* retained config document (HA→device) */
     char cmd_buf[CMD_BUF_MAX];       /* retained command document */
-    mqtt_set_kv_t sets[SET_MAX];     /* editable-config sets (set/<key>) */
+    char config_topic[96];           /* subscribed topic, matched by content */
+    char cmd_topic[96];
+    mqtt_set_kv_t sets[SET_MAX]; /* editable-config sets (set/<key>) */
 } window_mem_t;
 
 /* Per-window heap budget. CFG_STR_MAX multiplies through the sets array
    (x SET_MAX), so the ceiling silently controls this figure: at 128 the
-   struct is ~11 KB, at 512 it would be ~29 KB with nothing else failing.
+   struct is ~12.4 KB, at 512 it would be ~30 KB with nothing else failing.
    Allocation failure here disables the whole MQTT window, so the growth
-   has to be a deliberate edit rather than a side effect. */
-_Static_assert(sizeof(window_mem_t) <= 12288, "window_mem_t outgrew its per-window heap budget");
+   has to be a deliberate edit rather than a side effect.
+
+   RAISED 12288 -> 13312, deliberately, and here is the arithmetic it is
+   meant to force someone to write down. config_buf went 1024 -> 2048 and
+   cfg_state 1280 -> 1536 (both measured — see their own definitions), and
+   the two 96-byte topic strings moved in from the stack: 128 + 1024 + 256
+   + 1536 + 2048 + 256 + 96 + 96 + 48*152 = 12736 B. 13312 leaves 576 B,
+   which is room for a field or two without re-arguing the budget and not
+   enough to absorb another kilobyte-scale buffer unnoticed.
+
+   THE ASSERT CANNOT SEE THE WHOLE COST, so the rest is written down here.
+   The same change also grows esp-mqtt's own receive buffer: .buffer.size
+   goes from the 1024 B library default to CONFIG_BUF_MAX +
+   MQTT_PACKET_OVERHEAD = 2176 B, heap_caps_malloc'd inside
+   esp_mqtt_client_init() — which runs AFTER the calloc below and is freed
+   only at client destroy, so the two are live together for the whole
+   window and their costs add. (The 1024 B transmit buffer does not move:
+   .buffer.out_size is pinned, see the note at the client config.) Peak
+   heap delta for this change is therefore 1472 + 1152 = 2624 B, not the
+   1472 B the arithmetic above accounts for.
+
+   Why 2.6 KB more heap is safe to spend here, rather than merely small:
+   both allocations are freed at window teardown, and the same wake already
+   runs ota_flow_check() BEFORE mqtt_ha_window() (net_window.c), a TLS
+   handshake whose gate refuses to start below CONFIG_MAGTAG_OTA_MIN_FREE_HEAP
+   = 40960 B with a structural floor of 32768 B. The two never overlap —
+   the download runs in a later window, after MQTT has closed — so this
+   window is being measured against headroom the device is already required
+   to have an order of magnitude more of. And the failure mode is loud
+   either way: the calloc below is checked and logs its size, and a failed
+   in_buffer malloc makes esp_mqtt_client_init return NULL, which is
+   checked too. */
+_Static_assert(sizeof(window_mem_t) <= 13312, "window_mem_t outgrew its per-window heap budget");
 /* config_apply.h says callers must not pass less than CONFIG_ACK_MIN; this
    is the only caller, and it was exactly 256 by coincidence. */
 _Static_assert(sizeof(((window_mem_t *)0)->ack) >= CONFIG_ACK_MIN, "ack buffer is below CONFIG_ACK_MIN");
@@ -155,6 +219,18 @@ static void mqtt_event_handler(void *arg, esp_event_base_t base, int32_t event_i
                incl. the set/tz-vs-config same-length misroute case). */
             if (s_mem == NULL)
                 break;
+            /* NO `default:` HERE, deliberately. Every enumerator is
+               listed, so the next result added to mqtt_rx_result_t FAILS
+               THE BUILD (-Werror=switch; verified by adding a sentinel
+               enumerator and watching this line refuse to compile) rather
+               than becoming a value this handler drops on the floor. The
+               error names the file, the line and the enumerator, so the
+               person adding the result is told where to decide what it
+               means. A `default: break;` sat here until now, and it is a
+               fair description of how MQTT_RX_IGNORED came to mean both
+               "not my topic" and "my topic, document too big": the second
+               needed a case, and a catch-all meant nobody had to write
+               one. */
             switch (mqtt_rx_on_data(&s_rx, ev->topic, ev->topic_len, ev->data, ev->data_len, ev->total_data_len,
                                     ev->current_data_offset)) {
                 case MQTT_RX_SETS_FULL:
@@ -163,7 +239,27 @@ static void mqtt_event_handler(void *arg, esp_event_base_t base, int32_t event_i
                 case MQTT_RX_SET_TOO_LONG:
                     ESP_LOGW(TAG, "set key/value too long, edit dropped");
                     break;
-                default:
+                case MQTT_RX_CONFIG_TOO_LONG:
+                    /* Logged here, ACKED from apply_incoming. This runs on
+                       the mqtt client task; every publish in this file is
+                       counted by drain_acks, which the window task owns. */
+                    ESP_LOGW(TAG, "config document too long (%d B, max %d), refused", ev->total_data_len,
+                             CONFIG_BUF_MAX - 1);
+                    break;
+                case MQTT_RX_CMD_TOO_LONG:
+                    ESP_LOGW(TAG, "command document too long (%d B, max %d), refused", ev->total_data_len,
+                             CMD_BUF_MAX - 1);
+                    break;
+                case MQTT_RX_BAD_CHUNK:
+                    /* Unreachable with correct framing — mqtt_rx checks it
+                       so the copies are safe by inspection, not by trust.
+                       If this ever prints, the broker or the client library
+                       is the story, not the config. */
+                    ESP_LOGW(TAG, "malformed chunk (offset %d, %d B, total %d), dropped", ev->current_data_offset,
+                             ev->data_len, ev->total_data_len);
+                    break;
+                case MQTT_RX_OK:
+                case MQTT_RX_IGNORED:
                     break;
             }
             break;
@@ -428,14 +524,29 @@ static int apply_sets(esp_mqtt_client_handle_t client, const stats_snapshot_t *s
    every editable field. Subscribing FIRST lets the broker's retained
    delivery overlap the stat publishes (no separate wait). */
 static void subscribe_incoming(esp_mqtt_client_handle_t client) {
-    char config_topic[96], cmd_topic[96], set_topic[96];
+    char set_topic[96];
+    /* The two document topics are stored, not just measured. The routing
+       used to keep only strlen and match `topic_len ==`, which made any
+       same-length topic the broker delivered — a sibling device's
+       magtag/<other-id>/config, say — indistinguishable from our own. That
+       was survivable while the worst outcome was a silent drop; it is not
+       now that an over-size document publishes a RETAINED config_ack, which
+       would otherwise accuse an operator of a document they never sent.
+
+       Storing the string also closes a quieter hole: mqtt_topic returns the
+       would-be length (snprintf semantics), so a device id long enough to
+       truncate used to leave config_topic_len LARGER than the topic
+       actually subscribed to, and the length match could then never fire.
+       Subscribing to and matching the same bytes cannot drift that way. */
+    mqtt_topic(s_mem->config_topic, sizeof(s_mem->config_topic), device_id(), "config");
+    mqtt_topic(s_mem->cmd_topic, sizeof(s_mem->cmd_topic), device_id(), "cmd");
     s_rx = (mqtt_rx_t){
         .config_buf = s_mem->config_buf,
         .config_cap = CONFIG_BUF_MAX,
-        .config_topic_len = mqtt_topic(config_topic, sizeof(config_topic), device_id(), "config"),
+        .config_topic = s_mem->config_topic,
         .cmd_buf = s_mem->cmd_buf,
         .cmd_cap = CMD_BUF_MAX,
-        .cmd_topic_len = mqtt_topic(cmd_topic, sizeof(cmd_topic), device_id(), "cmd"),
+        .cmd_topic = s_mem->cmd_topic,
         .sets = s_mem->sets,
         .sets_cap = SET_MAX,
         .set_prefix_len = mqtt_topic(set_topic, sizeof(set_topic), device_id(), "set/"),
@@ -444,8 +555,8 @@ static void subscribe_incoming(esp_mqtt_client_handle_t client) {
         set_topic[s_rx.set_prefix_len] = '+'; /* single-level wildcard */
         set_topic[s_rx.set_prefix_len + 1] = '\0';
     }
-    esp_mqtt_client_subscribe(client, config_topic, 1);
-    esp_mqtt_client_subscribe(client, cmd_topic, 1);
+    esp_mqtt_client_subscribe(client, s_mem->config_topic, 1);
+    esp_mqtt_client_subscribe(client, s_mem->cmd_topic, 1);
     esp_mqtt_client_subscribe(client, set_topic, 1);
 }
 
@@ -534,9 +645,63 @@ static int apply_incoming(esp_mqtt_client_handle_t client, const stats_snapshot_
     /* Retained config + cmd arrive right after subscribe; give them a
        moment past the publish drain to land. */
     int cfg_wait = 0;
-    while (!(s_rx.config_done && s_rx.cmd_done) && cfg_wait < RETAINED_RX_TIMEOUT_MS) {
+    /* "Settled" per topic, not "done": a refusal is as final an answer as a
+       complete document, and waiting out the rest of the timeout for a
+       document the receiver has already refused is pure latency on a
+       battery device. Per topic rather than one blanket exit, because a
+       config refusal says nothing about a cmd that is still inbound —
+       leaving early on it would drop a grant.
+
+       Unchanged, and worth saying plainly: a topic with NO retained message
+       at all never settles, so a device whose broker holds neither document
+       still pays the full RETAINED_RX_TIMEOUT_MS. That is the existing
+       behaviour and this loop is not where it gets fixed. */
+    while (!((s_rx.config_done || s_rx.config_too_long) && (s_rx.cmd_done || s_rx.cmd_too_long)) &&
+           cfg_wait < RETAINED_RX_TIMEOUT_MS) {
         vTaskDelay(pdMS_TO_TICKS(100));
         cfg_wait += 100;
+    }
+
+    /* The refusals publish from HERE, not from the event handler that
+       detected them: the handler runs on the mqtt client task, and every
+       publish in this file is counted by drain_acks, which this task owns.
+       An ack enqueued off-task would be waited for by nobody and could be
+       cut off by the disconnect at window teardown.
+
+       Config refusal goes to config_ack RETAINED, the same slot a normal
+       config result uses, so the answer outlives this window and is there
+       when the operator next looks. WHAT CLEARS IT is worth stating
+       exactly, because nothing here does: the retained ack is overwritten
+       only by the NEXT ack published to that topic, and the config block
+       below publishes one only when config_apply returns something other
+       than CONFIG_SKIPPED. config_apply skips whenever the document's
+       `ver` matches the stored cfg_ver (config_apply.c), so an operator
+       who reverts an over-size document back to the exact content the
+       device already applied gets no ack at all, and the refusal stands
+       against a document that is now fine. Bumping `ver` is what clears
+       it — docs/home_assistant.md tells the operator to, and that is the
+       whole mechanism. Deliberate: the alternative is publishing an ack
+       for every skipped document on every wake.
+
+       Command refusal goes to event UNRETAINED, the same slot a normal
+       command result uses — a stale "your command was too long" pinned on
+       the broker would be worse than none.
+
+       Placed BEFORE the apply blocks on purpose. Both can fire in one
+       window (a good retained document lands, then an over-size one is
+       published live), and config_ack is a retained topic where the last
+       publish wins: this order lets the applied result overwrite the
+       refusal, rather than a refusal of the second document burying the
+       outcome of the first. */
+    if (s_rx.config_too_long) {
+        config_ack_too_long(s_mem->ack, sizeof(s_mem->ack), s_rx.config_too_long_len, CONFIG_BUF_MAX - 1);
+        mqtt_topic(s_mem->topic, sizeof(s_mem->topic), device_id(), "config_ack");
+        published += publish(client, s_mem->topic, s_mem->ack, 1);
+    }
+    if (s_rx.cmd_too_long) {
+        config_ack_too_long(s_mem->ack, sizeof(s_mem->ack), s_rx.cmd_too_long_len, CMD_BUF_MAX - 1);
+        mqtt_topic(s_mem->topic, sizeof(s_mem->topic), device_id(), "event");
+        published += publish(client, s_mem->topic, s_mem->ack, 0);
     }
 
     if (s_rx.config_done) {
@@ -605,10 +770,41 @@ void mqtt_ha_window(const stats_snapshot_t *snap) {
         goto out_mem;
     s_pub_acks = 0;
 
+    /* buffer.size is SET, not defaulted, and this is load-bearing.
+       esp-mqtt's default receive buffer is 1024 B (mqtt_config.h
+       MQTT_BUFFER_SIZE_BYTE; CONFIG_MQTT_BUFFER_SIZE needs
+       MQTT_USE_CUSTOM_CONFIG, which is off), and a PUBLISH whose whole
+       packet exceeds it is delivered in fragments. Only the FIRST fragment
+       carries `topic` — the rest arrive with topic == NULL and topic_len 0,
+       because filling them in needs CONFIG_MQTT_TOPIC_PRESENT_ALL_DATA_EVENTS
+       and that is off too (deliver_publish() in mqtt_client.c). mqtt_rx
+       ignores a fragment it cannot route, which is correct and which also
+       means a fragmented document can never be reassembled here.
+
+       So a receive buffer smaller than the document ceiling does not
+       truncate loudly: it drops the tail in silence, config_done is never
+       set, config_too_long is never set either (the total fits the buffer
+       it never reached), and the retained document is re-dropped on every
+       reconnect. That is precisely the silent paralysis this whole change
+       exists to remove, and raising CONFIG_BUF_MAX alone would have moved
+       it one buffer along rather than fixing it.
+
+       Sized so every ACCEPTED document arrives in one event. A document
+       past the ceiling still fragments, but fragment zero carries both the
+       topic and the true total_data_len, so it is refused out loud.
+
+       out_size is pinned at the old default instead of being left to follow
+       buffer.size, which would silently double this allocation. Outgoing
+       messages do not need it: esp_mqtt_client_publish fragments a payload
+       larger than the buffer itself and sends the remainder from the
+       caller's memory, which is how the 1164 B worst-case cfg_state already
+       goes out through a 1024 B buffer. */
     esp_mqtt_client_config_t cfg = {
         .broker.address.uri = uri,
         .credentials.username = (user[0] != '\0') ? user : NULL,
         .credentials.authentication.password = (pass[0] != '\0') ? pass : NULL,
+        .buffer.size = CONFIG_BUF_MAX + MQTT_PACKET_OVERHEAD,
+        .buffer.out_size = 1024,
     };
     esp_mqtt_client_handle_t client = esp_mqtt_client_init(&cfg);
     if (client == NULL)

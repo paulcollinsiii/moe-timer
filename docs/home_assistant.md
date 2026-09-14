@@ -369,6 +369,18 @@ list but never blocks the others. If more fields fail than the ack can
 name, it carries `"errors_truncated": true` alongside the ones it did —
 so a shortened list never reads as "everything else was fine".
 
+**The document has a size limit: 2047 bytes.** Every documented field at
+its longest, including 46 holidays, comes to 1708, so the limit is not
+one a real document meets by accident. A document past it is refused
+whole — nothing in it is applied — and the refusal is published to
+`config_ack` as `{"ok":false,"err":"too_long","len":<size>,"max":2047}`,
+where `len` is the size of the document you published. Because a retained
+document is re-delivered on every reconnect, an over-size one would
+otherwise be refused again on every wake for the life of the retained
+message with no sign of it anywhere; the ack is that sign. Shorten the
+document (the holiday list is usually the reason) and republish with a
+new `ver`.
+
 ```json
 {
   "ver": "20260708",
@@ -441,7 +453,13 @@ so a shortened list never reads as "everything else was fine".
   mirror the native controls above, and — like `reload`/`break` — **an
   omitted one leaves the stored value alone**: a document written before
   OTA existed will not clear an endpoint you set from the HA card.
-- `holidays` replaces the stored list (rolling ~45-date cap).
+- `holidays` replaces the stored list. The cap is **46 dates**, exactly:
+  the store is 512 bytes and each date costs 11 of them (`YYYY-MM-DD` plus
+  a separator), so a 47th does not fit. Dates past the 46th are **dropped
+  without being named in the ack** — unlike `chores`, which refuses rather
+  than truncates — so publish the next twelve months rather than every
+  date you know. 46 dates cost about 600 bytes of the document, which
+  leaves the whole rest of the schema inside the size limit below.
 
 The same fields are available here as on the native controls (`name`, `tz`,
 `weekday_min`, …, and a `timers` array), so scripted/bulk setup stays

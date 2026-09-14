@@ -658,6 +658,10 @@ static void apply_timers(const cJSON *root, err_acc_t *e) {
         err_add(e, "timers");
 }
 
+int config_ack_too_long(char *ack, size_t ack_len, int len, int max) {
+    return snprintf(ack, ack_len, "{\"ok\":false,\"err\":\"too_long\",\"len\":%d,\"max\":%d}", len, max);
+}
+
 config_result_t config_apply(const char *json, char *ack, size_t ack_len) {
     cJSON *root = cJSON_Parse(json);
     if (root == NULL) {

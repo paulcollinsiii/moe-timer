@@ -76,13 +76,24 @@ typedef struct {
 typedef enum { HA_CFG_OK = 0, HA_CFG_REJECTED, HA_CFG_UNKNOWN } ha_cfg_result_t;
 
 /* Buffer size the firmware must give ha_config_state_json: the whole field
-   registry serialized (worst case ~860 B with maxed strings, the tone
-   option strings and a maxed OTA URL) plus headroom. Callers must check
-   the return value against this before publishing — a truncated document
-   is never published, which knocks every editable control offline, so the
-   headroom is deliberate and test_state_json_worst_case_fits_firmware_buffer
-   prints the live figure. */
-#define HA_CONFIG_STATE_MAX 1280
+   registry serialized, plus headroom. Callers must check the return value
+   against this before publishing — a truncated document is never
+   published, which knocks every editable control offline, so the headroom
+   is deliberate and test_state_json_worst_case_fits_firmware_buffer prints
+   the live figure.
+
+   The worst case is 1164 B, MEASURED by that test with every axis at its
+   widest: 65535 on all fourteen u16/HHMM keys, 65535 on all four timer
+   minutes, "OFF" on all nine switches, the longest option string on all
+   three selects, and every string field maxed AND filled with characters
+   the escaper doubles. (An earlier version of this comment said "~860 B",
+   which was a hand estimate from before the fixture maxed every axis.)
+
+   1280 left 116 B — under one more string field — so this is 1536, for
+   372 B of headroom. It is part of the per-window heap struct in
+   mqtt_ha.c, which static-asserts the total; growing it again is a
+   deliberate edit there as well as here. */
+#define HA_CONFIG_STATE_MAX 1536
 
 /* Set-buffer slots the MQTT window must provide (mqtt_ha.c's SET_MAX).
    Every registry field can arrive as a retained set/<key> in a single

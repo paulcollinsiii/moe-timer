@@ -232,7 +232,7 @@ typedef struct {
         ha_config_discovery_hash(dev_name, fw), and that hash folds the
         firmware version string — so any release whose `fw` differs
         republishes all three discovery documents, bump or no bump
-        (mqtt_ha.c:474-484). What the bump covers is the case the hash
+        (mqtt_ha.c:585-595). What the bump covers is the case the hash
         cannot see: a SAME-VERSION reflash or an in-place image, where
         neither input moves and HA is never told the four controls exist.
         It is also the only explicit, reviewable signal that discovery

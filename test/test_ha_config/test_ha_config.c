@@ -309,8 +309,10 @@ void test_state_json_worst_case_fits_firmware_buffer(void) {
        addition trips here rather than silently knocking every editable
        control offline (a truncated doc is never published).
 
-       THE REACHABLE MAXIMUM IS 1164 / 1280 B — headroom 116, not the 146
-       an earlier shape of this fixture reported. Every axis above is at
+       THE REACHABLE MAXIMUM IS 1164 / 1536 B — headroom 372. It was 116
+       against the old 1280 ceiling (and 146 by an earlier, wronger shape
+       of this fixture); 1280 was raised because 116 B is less than one
+       more string field. Every axis above is at
        its widest: 65535 on all fourteen u16/HHMM keys, 65535 on all four
        timer minutes, "OFF" on all nine switches, the longest option string
        on all three selects, and every string maxed AND filled with

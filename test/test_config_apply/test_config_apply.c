@@ -1176,8 +1176,12 @@ void test_a_field_that_fails_both_checks_is_named_once(void) {
 }
 
 /* The whole feature in one document, which is also the CONFIG_BUF_MAX
-   headroom case: three 20-byte names plus all four minute keys. 1024 is
-   CONFIG_BUF_MAX in mqtt_ha.c, which is private to that file. */
+   headroom case: three 20-byte names plus all four minute keys. 2048 is
+   CONFIG_BUF_MAX in mqtt_ha.c, which is private to that file — and the
+   gate there is `total_len < CONFIG_BUF_MAX`, so the largest document
+   that is actually accepted is 2047 bytes. The `<` below is therefore the
+   right comparison against 2048 by luck rather than by reasoning; it is
+   two orders of magnitude clear of the real ceiling either way. */
 void test_a_full_chore_document_applies_whole(void) {
     char ack[CONFIG_ACK_MIN];
     const char *doc =
@@ -1186,12 +1190,35 @@ void test_a_full_chore_document_applies_whole(void) {
         "\"weekday_min\":1440,\"weekend_min\":1440,\"holiday_min\":1440,\"summer_min\":1440,"
         "\"chore_free_wd\":1440,\"chore_free_we\":1440,\"chore_free_hol\":1440,"
         "\"chore_free_sum\":1440}";
-    TEST_ASSERT_TRUE_MESSAGE(strlen(doc) < 1024, doc);
+    TEST_ASSERT_TRUE_MESSAGE(strlen(doc) < 2048, doc);
     TEST_ASSERT_EQUAL(CONFIG_APPLIED, apply(doc, ack, sizeof(ack)));
     TEST_ASSERT_NOT_NULL_MESSAGE(strstr(ack, "\"ok\":true"), ack);
     char names[CHORE_MAX][CHORE_NAME_BUF];
     TEST_ASSERT_EQUAL_UINT8(3, stored_chores(names));
     TEST_ASSERT_EQUAL_STRING("12345678901234567890", names[2]);
+}
+
+/* The refusal ack lives here rather than in mqtt_ha.c because mqtt_ha.c
+   has no host suite, and these exact bytes are what an operator — and any
+   HA template sensor built on config_ack — reads. Shape follows the parse
+   failure above it: no "ver", because a document that never fit the
+   receive buffer was never parsed and has no version to echo. */
+void test_the_too_long_ack_states_the_size_and_the_ceiling(void) {
+    char ack[CONFIG_ACK_MIN];
+    int n = config_ack_too_long(ack, sizeof(ack), 2500, 2047);
+    TEST_ASSERT_EQUAL_STRING("{\"ok\":false,\"err\":\"too_long\",\"len\":2500,\"max\":2047}", ack);
+    TEST_ASSERT_EQUAL_INT((int)strlen(ack), n);
+}
+
+/* The ack must fit CONFIG_ACK_MIN WHOLE — config_apply.h says a truncated
+   ack is unparseable JSON and HA loses the whole message. Nothing bounds
+   the length an MQTT broker may declare, so the numbers are pinned at the
+   widest an int can print rather than at a plausible payload size. */
+void test_the_too_long_ack_fits_the_minimum_ack_buffer(void) {
+    char ack[CONFIG_ACK_MIN];
+    int n = config_ack_too_long(ack, sizeof(ack), 2147483647, -2147483647 - 1);
+    TEST_ASSERT_TRUE_MESSAGE(n < CONFIG_ACK_MIN, ack);
+    TEST_ASSERT_EQUAL_INT((int)strlen(ack), n);
 }
 
 int main(void) {
@@ -1278,5 +1305,7 @@ int main(void) {
     RUN_TEST(test_a_pair_the_document_does_not_touch_is_not_revalidated);
     RUN_TEST(test_a_field_that_fails_both_checks_is_named_once);
     RUN_TEST(test_a_full_chore_document_applies_whole);
+    RUN_TEST(test_the_too_long_ack_states_the_size_and_the_ceiling);
+    RUN_TEST(test_the_too_long_ack_fits_the_minimum_ack_buffer);
     return UNITY_END();
 }

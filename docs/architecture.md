@@ -121,14 +121,14 @@ The driver→layer-2 calls worth knowing about (illustrative, per the note above
 - `buttons.c` — reads `timer_swap_allowed()` to fill the `buttons_policy`
   input struct. Reads only. It no longer reads `timer_reload_allowed()`:
   Button B is armed unconditionally, so that gate left the struct with it.
-- `mqtt_ha.c:219` — reads `timer_slot_def(slot)` to publish discovery. Reads only.
-- `mqtt_ha.c:450` — `ota_flow_stat(&ota)` for the stat payload's OTA leg. Reads
+- `mqtt_ha.c:316` — reads `timer_slot_def(slot)` to publish discovery. Reads only.
+- `mqtt_ha.c:607` — `ota_flow_stat(&ota)` for the stat payload's OTA leg. Reads
   only, and it has to be read *here* rather than carried in the snapshot; the
   OTA reporting note below says why.
 - `mqtt_ha.c` is the densest caller, and an "exceptions" framing hides it.
-  Besides the two above it drives the whole `ha_config` registry (`:258`,
-  `:260`, `:261`, `:280`, `:339`, `:372`, `:428`, `:432`) and applies both
-  retained HA documents (`config_apply` at `:483`, `cmd_apply` at `:493`).
+  Besides the two above it drives the whole `ha_config` registry (`:362`,
+  `:364`, `:365`, `:393`, `:465`, `:514`, `:585`, `:589`) and applies both
+  retained HA documents (`config_apply` at `:710`, `cmd_apply` at `:720`).
   `ha_config_set`, `config_apply` and `cmd_apply` are **mutators**. This is not
   an oversight: the HA session is where those documents arrive, and the parsing
   and validation they delegate to is layer 1 and host-tested — but it does mean
@@ -177,7 +177,7 @@ the impure call is one line over it:
 | `main/wifi_session.c/h` | WiFi station lifecycle for the periodic network window (begin/connect, end/teardown) |
 | `main/net_window.c/h` | Network-window mechanics: the dedicated `net_win` task, the NTP-settled + window-done signals, the measured clock step (consume-once), the snapshot rendezvous, the bounded `net_window_join()`, and the OTA check placed between the rendezvous and the MQTT phase |
 | `main/mqtt_ha.c/h` | HA MQTT session riding the network window: discovery, retained stat/summary publishes (best-effort) |
-| `main/mqtt_rx.c` | Pure inbound-MQTT router: retained config document vs `set/<key>` field vs command, with chunked-payload reassembly — host-tested |
+| `main/mqtt_rx.c` | Pure inbound-MQTT router: retained config document vs `set/<key>` field vs command, matched by topic **content**; over-capacity on one of our own topics is a distinct refusal result, not the "not mine" ignore. Reassembles chunked payloads, though `mqtt_ha.c` sizes the client receive buffer so an accepted document never fragments — see the note there — host-tested |
 | `main/mqtt_topics.c` | Pure topic formatters (`magtag/<id>/...`, `homeassistant/<component>/...`) — host-tested |
 | `main/stats_json.c/h` | Pure JSON builders for stat/summary/discovery payloads — host-tested. The OTA leg arrives as a separate `ota_stat_t` argument rather than as `stats_snapshot_t` fields (see the OTA reporting note below), and `STATS_JSON_DISC_SCHEMA_VER` lives here beside the entity table it versions — pinned against the row count by `test_stats_json`, because a new HA entity does not appear at all until the retained discovery documents are republished |
 | `main/ha_config.c/h` | HA-editable config field registry (bounds, discovery, state docs) — host-tested |
