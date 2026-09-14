@@ -106,6 +106,13 @@ typedef enum {
     EV_CHECK_BEDTIME,
     EV_PROMOTE_RENDER,
     EV_WAKEUP_BUTTON,
+    /* the painted mode (C16). Logged rather than only sampled because two
+       of the cases below are about a store that must NOT happen — the
+       final ack, and the rollover, which gets its clear from
+       timer_reset()'s memset and must not acquire a second one here. A
+       final-value check cannot tell "never written" apart from "written
+       with the value it already had". */
+    EV_SET_MODE,
     /* the OTA call sites */
     EV_OTA_ARM,
     EV_OTA_APPLY,
@@ -727,6 +734,31 @@ static bool flow_reset_called;
 static time_t flow_clock_after_window; /* 0 = the window does not step the clock */
 static int flow_state_after_window;    /* -1 = the window leaves the state alone */
 
+/* ---- the chore checklist's live state (design rows C16, C17) ------------
+
+   Two RTC-backed reads the paint depends on, declared here because
+   timer_reset()'s stub below has to clear the first of them the way the
+   real memset does.
+
+   flow_mode is the stored byte behind timer_mode()/timer_set_mode().
+   flow_chore_count is what chore_store_load_names() would have reported
+   into display_state_t.chore_count — 0 is the shipped default (row C1: no
+   chores configured), so a case has to opt INTO having a list at all, the
+   same way it opts into a new day or an open window. */
+static app_mode_t flow_mode;
+static uint8_t flow_chore_count;
+static int flow_set_mode_calls;
+static app_mode_t flow_painted_mode; /* what actually reached the panel */
+/* The two fields a WRONG emptied-list guard would key on instead of the
+   count — "everything is ticked" and "the day has released". Carried on
+   the assembled state purely so the final-ack case can set the count to a
+   configured list and these to the all-done values at the same time; with
+   them absent, a guard written as `chore_outstanding == 0` would be
+   indistinguishable from the shipped one and the case that exists to
+   reject it could not fail. */
+static uint8_t flow_chore_outstanding;
+static bool flow_chore_released;
+
 bool timer_is_new_day(time_t now) {
     flow_log_push(EV_IS_NEW_DAY);
     flow_new_day_arg = now;
@@ -797,12 +829,43 @@ bool timer_persist_try_restore(time_t now) {
 void timer_reset(void) {
     flow_log_push(EV_TIMER_RESET);
     flow_reset_called = true;
+    /* MODELS THE MEMSET, and that is the whole reason this line is here.
+       The real timer_reset() is one `memset(&g_rtc_state, 0, ...)`
+       (main/timer.c:343) and `mode` is a field of that struct, so the day
+       rollover takes the painted mode back to APP_MODE_TIMERS without
+       wake_flow.c writing anything — which is exactly what C13/C16's
+       rollover edge rides on, and why APP_MODE_TIMERS has to stay 0.
+       A stub that left flow_mode alone would make the rollover case below
+       pass only if wake_flow added a redundant explicit clear, i.e. it
+       would test for the opposite of what M1-T6 decided. The enumerator's
+       value and the memset itself are pinned in test_timer
+       (test_a_day_rollover_clears_the_acks_the_release_and_the_mode,
+       test_timers_is_the_zero_mode_so_a_zeroed_struct_paints_timers); this
+       models the consequence so the wake-flow side can be asked about it.
+       Deliberately NOT logged as EV_SET_MODE: nothing called the setter. */
+    flow_mode = APP_MODE_TIMERS;
     mock_time_set(hal_time_now() + 5);
 }
 
 void timer_record_date(time_t now) {
     flow_log_push(EV_RECORD_DATE);
     flow_record_date_arg = now;
+}
+
+/* ---- the painted mode (C16) --------------------------------------------
+
+   One RTC byte behind an accessor pair (include/timer.h), so the stub is
+   the byte. Unclamped on device — timer_set_mode() stores what it is
+   given — and unclamped here for the same reason: a stub that bounded the
+   value would hide a caller passing something outside the enum. */
+app_mode_t timer_mode(void) {
+    return flow_mode;
+}
+
+void timer_set_mode(app_mode_t mode) {
+    flow_log_push(EV_SET_MODE);
+    flow_mode = mode;
+    flow_set_mode_calls++;
 }
 
 /* ---- the injected watch model -------------------------------------------
@@ -1013,6 +1076,17 @@ display_state_t app_state_display(const app_state_in_t *in, int32_t remaining, t
     st.timer_state = flow_made_state_kind;
     st.break_banner = flow_made_break_banner;
     st.break_remaining_sec = flow_made_break_remaining;
+    /* The two chore fields the emptied-list guard reads, assembled the way
+       main/app_state.c:212 and :180 assemble them: the mode comes from the
+       LIVE accessor rather than from a fixture variable of its own, and the
+       count from the store. Taking the mode live is what makes the guard's
+       coupling real here — a guard that reverted the stored byte but handed
+       the painter a stale one, or vice versa, shows up as a disagreement
+       between flow_mode and flow_painted_mode instead of passing twice. */
+    st.app_mode = timer_mode();
+    st.chore_count = flow_chore_count;
+    st.chore_outstanding = flow_chore_outstanding;
+    st.chore_released = flow_chore_released;
     return st;
 }
 
@@ -1021,6 +1095,7 @@ void display_full_refresh(const display_state_t *st) {
     flow_full_remaining = st->remaining_sec;
     flow_full_wall = st->wall_time;
     flow_full_break_remaining = st->break_remaining_sec;
+    flow_painted_mode = st->app_mode;
 }
 
 /* Both halves are recorded. The countdown marks are PINNED values, so the
@@ -1030,6 +1105,7 @@ void display_full_refresh(const display_state_t *st) {
 void display_update(const display_state_t *st) {
     flow_log_push(EV_PARTIAL);
     flow_partial_break_remaining = st->break_remaining_sec;
+    flow_painted_mode = st->app_mode;
     if (flow_partial_n < (int)(sizeof flow_partial_seen / sizeof flow_partial_seen[0])) {
         flow_partial_at[flow_partial_n] = st->wall_time;
         flow_partial_seen[flow_partial_n++] = st->remaining_sec;
@@ -1477,6 +1553,20 @@ void setUp(void) {
     flow_screen_used = 1234;
     flow_restore_ok = false;
     flow_reset_called = false;
+
+    /* The chore checklist. The shipped default on every device in the
+       field: the timer screen, no list configured (row C1). A case opts
+       into chore mode and into having chores exactly as it opts into a new
+       day above. flow_painted_mode is POISONED rather than zeroed —
+       APP_MODE_TIMERS is 0 and is a value a paint can genuinely produce,
+       so zeroing it would make "nothing was painted" and "Timers was
+       painted" the same assertion. */
+    flow_mode = APP_MODE_TIMERS;
+    flow_chore_count = 0;
+    flow_chore_outstanding = 0;
+    flow_chore_released = false;
+    flow_set_mode_calls = 0;
+    flow_painted_mode = (app_mode_t)-1;
     flow_clock_after_window = 0;
     flow_state_after_window = -1;
     flow_completion_asks = 0;
@@ -6523,7 +6613,19 @@ void test_row13_a_wake_that_drained_its_break_reports_nothing_at_sleep(void) {
    and must not set the wake-sticky break-ended flag — every one of those
    would be a side effect landing after the panel has already gone to
    sleep. Pinned because "reuse the owner instead" is the obvious tidy-up
-   and it is wrong here. */
+   and it is wrong here.
+
+   ONE side effect is deliberately exempt from that rule and is asserted a
+   few cases further down instead: the C16 mode revert. It is not a THIS
+   WAKE effect at all — it writes an RTC byte the NEXT wake's paint reads
+   — so "lands after the panel has gone to sleep" is not an argument
+   against it. See test_c16_an_undrained_break_end_at_sleep_still_reverts
+   for the whole argument. The four absences below are unaffected, and the
+   exemption is BOUNDED rather than merely named: the last two assertions
+   pin the exempt write at exactly one AND the whole effect log at that
+   one entry, so a SECOND write added here — a timer_chore_set_released
+   (false), say — still fails a test whose name says "beyond the take"
+   and is meant to mean it. */
 void test_row13_the_sleep_drain_has_no_side_effects_beyond_the_take(void) {
     mock_time_set(flow_at(15, 0));
     flow_latched = true;
@@ -6545,6 +6647,401 @@ void test_row13_the_sleep_drain_has_no_side_effects_beyond_the_take(void) {
        slot catches one that somehow bypassed the stub's logging. */
     TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_SNAP_BACK));
     TEST_ASSERT_EQUAL_INT(FLOW_PIANO, flow_active_slot);
+    /* BOUNDS the exemption the header names, rather than restating it.
+       The four assertions above pin four NAMED absences; what the header
+       permits is a CATEGORY ("an RTC byte the next wake reads"), and a
+       category cannot be pinned by absences — a second write of that kind
+       would be a new side effect wearing the exemption's coat while every
+       assertion above still passed.
+
+       Two assertions, because either one alone leaves the hole open. The
+       first bounds the exempt write to the ONE the C16 revert costs. It
+       counts CALLS and not changes — the stub logs every timer_set_mode()
+       whatever value is stored — so it is exactly 1 however setUp left
+       flow_mode. But it sees only MODE writes, and the obvious next
+       arrival is not one: a timer_chore_set_released(false) added here
+       would sail straight past it, which is the exact shape this is here
+       to stop. So the second bounds the WHOLE effect log to that single
+       entry. The take itself logs nothing (its stub only clears the
+       latch), so "one event, and it is the mode write" is precisely the
+       claim the function's name makes.
+
+       Residual hole, written down so it is not mistaken for coverage: an
+       RTC accessor whose stub does not log is invisible to both. Every
+       setter stub in this file logs — that is the convention these two
+       assertions lean on, and a new setter stub that skips it is the
+       thing to catch in review. */
+    TEST_ASSERT_EQUAL_INT_MESSAGE(1, flow_log_count(EV_SET_MODE),
+                                  "the sleep drain grew a second mode write beyond the C16 revert");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(1, flow_log_n, "the sleep drain grew a side effect beyond the C16 mode revert");
+}
+
+/* ---- M2-T2: the painted mode and its reverts (design rows C16, C17) -----
+
+   One RTC byte says which screen the device paints. This module owns
+   three of the four edges that move it, and — far more important — owns
+   the guarantee that it moves NOTHING ELSE.
+
+   THE EDGES (design 4.2, restated only as far as the wake flow is
+   concerned):
+
+     day rollover   reverts, and does so through timer_reset()'s memset.
+                    wake_flow.c must not add a second explicit clear:
+                    APP_MODE_TIMERS is 0, the memset already lands on it,
+                    and a redundant clear is a second site to keep in step.
+     break end      reverts, at BOTH points where the latch is consumed.
+     emptied list   reverts, at paint time, when a stored chore mode meets
+                    a list that is no longer configured.
+     the final ack  does NOT revert. This is the one that gets written
+                    backwards, because "all done, back to timers" is the
+                    intuitive behaviour and is explicitly not what the
+                    design wants: bouncing out on the last tick would make
+                    a mis-press cost a trip back through the mode button.
+
+   AND THE NON-EDGE, which is the part worth more than all four: the mode
+   is a RENDER SELECTOR. Every wake still does its day rollover, its
+   bedtime gate, its tick, its break-end drain and its network window
+   whichever screen is showing. The tempting implementation is an early
+   return into a chore-screen handler, and that exact shape has already
+   stranded the break-end latch once in this codebase — and `take` in
+   timer_break_take_ended is a CONSUMING read, so a stranded edge is lost
+   permanently rather than merely deferred. Hence
+   test_c16_a_chore_mode_tick_wake_runs_exactly_the_same_effects, which
+   compares two whole wakes event for event. */
+
+/* The effect log with the one legitimately mode-dependent entry removed,
+   so two wakes in different modes can be compared as sequences. EV_SET_MODE
+   is the ONLY event allowed to differ; anything else that varies with the
+   mode is the bug this section exists to catch. */
+static int flow_log_without_mode_stores(flow_event_t *out, int cap) {
+    int n = 0;
+    for (int i = 0; i < flow_log_n && n < cap; i++) {
+        if (flow_log[i] == EV_SET_MODE)
+            continue;
+        out[n++] = flow_log[i];
+    }
+    return n;
+}
+
+/* A deliberately BUSY tick wake, armed identically in either mode: a
+   break that has already ended (the latch this section is really about),
+   an NTP sync that is due, and a configured chore list so the
+   emptied-list guard stays out of it. Everything else is setUp's default
+   deep-sleep tick wake. */
+static void flow_arm_busy_tick_wake(app_mode_t mode) {
+    flow_tick_clock(flow_at(15, 0));
+    flow_last_ntp = flow_at(15, 0) - 4 * 3600; /* well past IDLE_SYNC_INTERVAL_SEC */
+    flow_mode = mode;
+    flow_chore_count = 3;
+    flow_chore_outstanding = 1;
+    flow_arm_break(flow_at(14, 59), FLOW_PIANO, FLOW_SCREEN);
+}
+
+/* --- the break-end edge --- */
+
+void test_c16_a_break_end_takes_the_mode_back_to_timers(void) {
+    mock_time_set(flow_at(15, 0));
+    flow_mode = APP_MODE_CHORES;
+    flow_arm_break(flow_at(14, 59), FLOW_PIANO, FLOW_SCREEN);
+
+    TEST_ASSERT_TRUE(wake_flow_break_end());
+
+    TEST_ASSERT_EQUAL_INT_MESSAGE(APP_MODE_TIMERS, (int)flow_mode,
+                                  "a break ended and left the device painting the chore screen");
+    TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_SET_MODE));
+}
+
+/* The silent end — an extra timer is running, so wake_policy_break_chime
+   refuses and the owner returns early down a second path. The revert has
+   to sit ABOVE that branch: the break is just as over either way, the
+   wake-sticky flag has already been set so the panel gets a full refresh
+   either way, and a revert that only fired when the chime did would leave
+   chore mode standing on exactly the wake that repaints without
+   explaining itself. */
+void test_c16_a_silently_ended_break_reverts_the_mode_too(void) {
+    mock_time_set(flow_at(15, 0));
+    flow_mode = APP_MODE_CHORES;
+    flow_extra_running = true; /* the violin is going: no chime */
+    flow_arm_break(flow_at(14, 59), FLOW_PIANO, FLOW_SCREEN);
+
+    TEST_ASSERT_TRUE(wake_flow_break_end());
+
+    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_CHIME)); /* the premise */
+    TEST_ASSERT_EQUAL_INT_MESSAGE(APP_MODE_TIMERS, (int)flow_mode,
+                                  "the revert was hung off the chime instead of off the break end");
+}
+
+/* The guard, and the mutation this section most wants to kill: a
+   timer_set_mode() hoisted ABOVE the take fires on every wake, which
+   would make chore mode impossible to stay in for more than one wake and
+   would look exactly like "the toggle does not work" in the field. */
+void test_c16_a_wake_with_no_break_edge_leaves_the_mode_alone(void) {
+    mock_time_set(flow_at(15, 0));
+    flow_mode = APP_MODE_CHORES;
+    /* No break running and nothing latched: the take returns false. */
+
+    TEST_ASSERT_FALSE(wake_flow_break_end());
+
+    TEST_ASSERT_EQUAL_INT_MESSAGE(APP_MODE_CHORES, (int)flow_mode, "a wake with no break end still moved the mode");
+    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_SET_MODE));
+}
+
+/* The SECOND consumption site, and the reason it needs one: `take` is a
+   consuming read, so an edge eaten here is gone. If only the owner
+   reverted, a break that ended after the last drain point in the wake —
+   during the pre-sleep event watch, or inside the second network window —
+   would be consumed by this safety net with the mode left in chores, and
+   nothing afterwards would ever revert it. "A consumed break end always
+   leaves Timers" then holds at both sites rather than at one.
+
+   This is the one side effect the raw take is allowed, and the case above
+   it (test_row13_the_sleep_drain_has_no_side_effects_beyond_the_take)
+   carries the boundary: the four things forbidden there are all effects
+   on THIS wake's panel, audio or selection, landing after the panel has
+   finished. An RTC byte is not one of those — it is read by the NEXT
+   wake's paint, which is the earliest moment anything could act on it
+   anyway. It is also safe from the awake failsafe's esp_timer context,
+   where the forbidden four are not: a single-byte store into RTC memory
+   takes no lock and allocates nothing. */
+void test_c16_an_undrained_break_end_at_sleep_still_reverts(void) {
+    mock_time_set(flow_at(15, 0));
+    flow_mode = APP_MODE_CHORES;
+    flow_latched = true; /* an edge nothing serviced this wake */
+    flow_latched_wall = flow_at(14, 59);
+
+    TEST_ASSERT_TRUE(wake_flow_report_undrained_break_end());
+
+    TEST_ASSERT_EQUAL_INT_MESSAGE(APP_MODE_TIMERS, (int)flow_mode,
+                                  "a break end consumed at sleep left chore mode standing forever");
+}
+
+void test_c16_a_sleep_with_no_undrained_edge_leaves_the_mode_alone(void) {
+    mock_time_set(flow_at(15, 0));
+    flow_mode = APP_MODE_CHORES;
+
+    TEST_ASSERT_FALSE(wake_flow_report_undrained_break_end());
+
+    TEST_ASSERT_EQUAL_INT_MESSAGE(APP_MODE_CHORES, (int)flow_mode,
+                                  "every sleep reverted the mode, not just a drained one");
+    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_SET_MODE));
+}
+
+/* --- the day-rollover edge --- */
+
+/* Two assertions, and the second is the point. The rollover reverts —
+   but through timer_reset()'s memset, which this suite's stub models
+   (see its comment), NOT through a clear wake_flow.c writes itself.
+   M1-T6 established that adding an explicit clear here changes no test
+   and buys a second site to keep in step with a struct that has already
+   grown fields once, so the absence is pinned rather than left to
+   reviewer memory. */
+void test_c16_a_day_rollover_reverts_the_mode_through_timer_reset(void) {
+    time_t now = flow_at(0, 1);
+    mock_time_set(now);
+    flow_mode = APP_MODE_CHORES;
+    flow_new_day = true;
+    flow_restore_ok = false; /* a genuine date change, not a power cycle */
+
+    wake_flow_handle_day_rollover(&now);
+
+    TEST_ASSERT_TRUE(flow_reset_called); /* the premise: the reset path ran */
+    TEST_ASSERT_EQUAL_INT_MESSAGE(APP_MODE_TIMERS, (int)flow_mode,
+                                  "a day rollover left the device painting chore mode");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        0, flow_log_count(EV_SET_MODE),
+        "the rollover clears the mode via the timer_reset memset; a second explicit clear was added");
+}
+
+/* Row 13's path: the date looked new but a same-day NVS snapshot came
+   back, so no day actually rolled over and the reset never runs. Nothing
+   about that is a reason to throw the user off the chore screen — it is a
+   power cycle with a corrected clock, not midnight. */
+void test_c16_a_same_day_restore_is_not_a_rollover_and_keeps_chore_mode(void) {
+    time_t now = flow_at(0, 1);
+    mock_time_set(now);
+    flow_mode = APP_MODE_CHORES;
+    flow_new_day = true;
+    flow_restore_ok = true; /* the snapshot wins */
+
+    wake_flow_handle_day_rollover(&now);
+
+    TEST_ASSERT_FALSE(flow_reset_called); /* the premise */
+    TEST_ASSERT_EQUAL_INT_MESSAGE(APP_MODE_CHORES, (int)flow_mode,
+                                  "a same-day restore threw the user off the chore screen");
+}
+
+/* --- the emptied-list edge --- */
+
+/* Design 4.2 calls this "a guard at paint time, not a stored revert",
+   and the plan's M2-T2 row calls it a revert; it is written as both,
+   inside the wake flow's one paint-time choke point, and this case is why
+   that is not a fudge. The guard STORES as well as fixing up the state it
+   is handed, because timer_mode() is what M2-T3's Button A toggle will
+   read: a render-only fallback would leave the stored byte saying CHORES
+   while the panel says Timers, and the first press of A would toggle from
+   the stale value back to Timers — i.e. appear to do nothing. Both halves
+   are asserted here for that reason. */
+void test_c16_an_emptied_chore_list_reverts_the_mode_at_paint_time(void) {
+    mock_time_set(flow_at(15, 0));
+    flow_mode = APP_MODE_CHORES;
+    flow_chore_count = 0; /* the list was emptied from Home Assistant */
+
+    wake_flow_repaint_current_state();
+
+    TEST_ASSERT_EQUAL_INT_MESSAGE(APP_MODE_TIMERS, (int)flow_mode, "the emptied list left the stored mode in chores");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(APP_MODE_TIMERS, (int)flow_painted_mode,
+                                  "the emptied list painted a chore screen with no chores on it");
+    TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_SET_MODE));
+}
+
+/* Idempotent, and cheaply so: the second paint finds the mode already
+   reverted and stores nothing. A guard that fired unconditionally would
+   be invisible on device and would show up here as two stores. */
+void test_c16_the_emptied_list_guard_stores_once_not_on_every_paint(void) {
+    mock_time_set(flow_at(15, 0));
+    flow_mode = APP_MODE_CHORES;
+    flow_chore_count = 0;
+
+    wake_flow_repaint_current_state();
+    wake_flow_repaint_current_state();
+
+    TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_SET_MODE));
+}
+
+/* The state every device in the field is in today, and the reason the
+   guard tests the MODE as well as the count: no chores configured, the
+   timer screen showing. There is nothing to revert, so nothing may be
+   stored. A guard written as `chore_count == 0` alone is behaviourally
+   invisible — it would only ever store the value already there — but it
+   would put an RTC write in the path of every paint on every device that
+   has never used the feature, which is all of them. */
+void test_c16_the_shipped_default_paints_timers_and_stores_nothing(void) {
+    mock_time_set(flow_at(15, 0));
+    /* setUp's defaults ARE the shipped default: APP_MODE_TIMERS, no list. */
+
+    wake_flow_repaint_current_state();
+
+    TEST_ASSERT_EQUAL_INT(APP_MODE_TIMERS, (int)flow_painted_mode);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(0, flow_log_count(EV_SET_MODE),
+                                  "the emptied-list guard stores on every paint of a device with no chores configured");
+}
+
+/* THE ONE THAT GETS WRITTEN BACKWARDS. Every chore is ticked, the day has
+   released, the screen says "Screen time unlocked" — and the mode stays
+   in chores, waiting for A. The fixture sets chore_outstanding to 0 and
+   chore_released to true precisely so that a guard keyed on either of
+   them, rather than on the count, fails here instead of shipping. */
+void test_c16_the_final_ack_does_not_revert_the_mode(void) {
+    mock_time_set(flow_at(15, 0));
+    flow_mode = APP_MODE_CHORES;
+    flow_chore_count = 3;
+    flow_chore_outstanding = 0; /* all three ticked */
+    flow_chore_released = true; /* the day's remainder has been granted */
+
+    wake_flow_repaint_current_state();
+
+    TEST_ASSERT_EQUAL_INT_MESSAGE(APP_MODE_CHORES, (int)flow_mode, "the last ack bounced the user out of chore mode");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(APP_MODE_CHORES, (int)flow_painted_mode, "the last ack painted the timer screen");
+    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_SET_MODE));
+}
+
+/* --- the non-edge: the mode selects the paint and nothing else --- */
+
+/* THE HEADLINE CASE. The same busy wake run twice, once in each mode,
+   compared event for event with only the mode stores filtered out. A
+   break that has ended, a sync that is due, a grid wait, a tick, a paint,
+   the post-render break re-check, the pre-sleep watch, the OTA tail and
+   the sleep — if any of that learns to care which screen is showing, the
+   sequences diverge and this fails.
+
+   setUp() is called between the runs rather than the fixture being
+   unpicked by hand: it is a plain function, it resets the mock clock, the
+   latch, the effect log and every fixture variable, and re-deriving the
+   second run from a hand-rolled subset is exactly how a case like this
+   rots into comparing two different wakes. */
+void test_c16_a_chore_mode_tick_wake_runs_exactly_the_same_effects(void) {
+    flow_event_t timers_log[1024];
+    int timers_n;
+
+    flow_arm_busy_tick_wake(APP_MODE_TIMERS);
+    TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_tick());
+    timers_n = flow_log_without_mode_stores(timers_log, (int)(sizeof timers_log / sizeof timers_log[0]));
+    TEST_ASSERT_GREATER_THAN_INT(10, timers_n); /* the premise: a wake worth comparing */
+
+    setUp();
+
+    flow_arm_busy_tick_wake(APP_MODE_CHORES);
+    TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_tick());
+
+    flow_event_t chores_log[1024];
+    int chores_n = flow_log_without_mode_stores(chores_log, (int)(sizeof chores_log / sizeof chores_log[0]));
+
+    TEST_ASSERT_EQUAL_INT_MESSAGE(timers_n, chores_n,
+                                  "chore mode changed how much the wake did, not just what it painted");
+    for (int i = 0; i < timers_n; i++) {
+        TEST_ASSERT_EQUAL_INT_MESSAGE((int)timers_log[i], (int)chores_log[i],
+                                      "chore mode changed the wake's effect sequence");
+    }
+}
+
+/* The same guarantee stated directly at the latch, because the sequence
+   comparison above would still pass if BOTH wakes stranded the edge.
+   Three separate observations, because they fail differently: the chime
+   is the audible half, the snap back is the visible half, and the second
+   take is the one that proves the latch was CONSUMED rather than left for
+   a safety net to find. */
+void test_c16_a_chore_mode_tick_wake_still_drains_the_break_end(void) {
+    flow_arm_busy_tick_wake(APP_MODE_CHORES);
+
+    TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_tick());
+
+    TEST_ASSERT_EQUAL_INT_MESSAGE(1, flow_log_count(EV_CHIME), "a chore-mode wake swallowed the break-over chime");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(1, flow_log_count(EV_SNAP_BACK),
+                                  "a chore-mode wake skipped the snap back to the interrupted timer");
+    TEST_ASSERT_TRUE_MESSAGE(wake_flow_break_ended_this_wake(), "a chore-mode wake did not mark the break as ended");
+    TEST_ASSERT_FALSE_MESSAGE(wake_flow_report_undrained_break_end(),
+                              "a chore-mode wake left the break-end latch for the sleep safety net");
+}
+
+/* And on the other entry point. A button wake reaches the drain through a
+   different prologue (the held-through-sleep guard, the EXT1 decode, the
+   immediate LED ack), so it is a separate path to strand the latch on. */
+void test_c16_a_chore_mode_button_wake_still_drains_the_break_end(void) {
+    flow_tick_clock(flow_at(15, 0));
+    flow_mode = APP_MODE_CHORES;
+    flow_chore_count = 3;
+    flow_wakeup_btn = BTN_B;
+    flow_arm_break(flow_at(14, 59), FLOW_PIANO, FLOW_SCREEN);
+
+    TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_button());
+
+    TEST_ASSERT_EQUAL_INT_MESSAGE(1, flow_log_count(EV_CHIME),
+                                  "a chore-mode button wake swallowed the break-over chime");
+    TEST_ASSERT_FALSE_MESSAGE(wake_flow_report_undrained_break_end(),
+                              "a chore-mode button wake left the break-end latch undrained");
+}
+
+/* Row C17. An unattended wake — the RTC alarm, nobody in the room —
+   repaints whatever screen is showing and leaves the NeoPixels dark. The
+   pixel half is already true by construction (the LED call is gated on
+   the reset reason not being a deep-sleep exit) and this is what stops
+   M2-T8 from quietly contradicting it while adding ack feedback: the
+   pixels are a BUTTON-wake affordance, and a chore screen on the panel is
+   not a reason to light them. */
+void test_c17_an_unattended_chore_mode_wake_repaints_with_the_pixels_dark(void) {
+    flow_tick_clock(flow_at(15, 0));
+    flow_mode = APP_MODE_CHORES;
+    flow_chore_count = 3;
+    flow_chore_outstanding = 2;
+    flow_reset_reason = ESP_RST_DEEPSLEEP; /* the alarm, not a power-on */
+
+    TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_tick());
+
+    TEST_ASSERT_GREATER_THAN_INT_MESSAGE(0, flow_log_count(EV_FULL_REFRESH) + flow_log_count(EV_PARTIAL),
+                                         "an unattended chore-mode wake painted nothing at all");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(APP_MODE_CHORES, (int)flow_painted_mode,
+                                  "an unattended wake painted the timer screen over the chore screen");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(0, flow_log_count(EV_LED), "an unattended chore-mode wake lit the pixels");
 }
 
 /* ---- the OTA call sites -------------------------------------------------
@@ -7135,6 +7632,22 @@ int main(void) {
     RUN_TEST(test_row13_the_undrained_take_actually_consumes_the_latch);
     RUN_TEST(test_row13_a_wake_that_drained_its_break_reports_nothing_at_sleep);
     RUN_TEST(test_row13_the_sleep_drain_has_no_side_effects_beyond_the_take);
+    /* M2-T2: the painted mode and its reverts (C16, C17) */
+    RUN_TEST(test_c16_a_break_end_takes_the_mode_back_to_timers);
+    RUN_TEST(test_c16_a_silently_ended_break_reverts_the_mode_too);
+    RUN_TEST(test_c16_a_wake_with_no_break_edge_leaves_the_mode_alone);
+    RUN_TEST(test_c16_an_undrained_break_end_at_sleep_still_reverts);
+    RUN_TEST(test_c16_a_sleep_with_no_undrained_edge_leaves_the_mode_alone);
+    RUN_TEST(test_c16_a_day_rollover_reverts_the_mode_through_timer_reset);
+    RUN_TEST(test_c16_a_same_day_restore_is_not_a_rollover_and_keeps_chore_mode);
+    RUN_TEST(test_c16_an_emptied_chore_list_reverts_the_mode_at_paint_time);
+    RUN_TEST(test_c16_the_emptied_list_guard_stores_once_not_on_every_paint);
+    RUN_TEST(test_c16_the_shipped_default_paints_timers_and_stores_nothing);
+    RUN_TEST(test_c16_the_final_ack_does_not_revert_the_mode);
+    RUN_TEST(test_c16_a_chore_mode_tick_wake_runs_exactly_the_same_effects);
+    RUN_TEST(test_c16_a_chore_mode_tick_wake_still_drains_the_break_end);
+    RUN_TEST(test_c16_a_chore_mode_button_wake_still_drains_the_break_end);
+    RUN_TEST(test_c17_an_unattended_chore_mode_wake_repaints_with_the_pixels_dark);
     RUN_TEST(test_a_day_rollover_arms_an_update_check_before_it_opens_the_window);
     RUN_TEST(test_a_day_that_has_not_rolled_over_arms_nothing);
     RUN_TEST(test_the_rollover_arm_carries_the_battery_and_the_charge_lock);

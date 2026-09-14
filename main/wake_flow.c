@@ -151,7 +151,19 @@ static void render_action_result(button_id_t btn, timer_state_t before, time_t n
 
    Unchanged by the move APART FROM THE LOG TAG: the debug line below used
    to print under main.c's TAG="main" and now prints under "wake_flow".
-   Serial output only. */
+   Serial output only.
+
+   ONE assembly rule is this function's rather than app_state.c's, and it
+   is the one that CAN WRITE: C16's emptied-list mode revert at the bottom.
+   So this is no longer a pure assembly — on the wake where a chore list is
+   emptied it stores an RTC byte. It lives here because app_state.c builds
+   a state and owns no live state to correct, and because this is the one
+   choke point every display_state_t in this module passes through; the
+   argument in full is at the guard itself. It is a render selection and
+   nothing more: the guard below is the ONLY read of st.app_mode in this
+   module — callers of this function do branch on the state they are
+   handed (the tick handler on TIMER_BREAK, for the countdown snap), but
+   never on the mode — and no tick, expiry or sleep decision reads it. */
 static display_state_t make_display_state(int32_t remaining, time_t now) {
     int mv = battery_read_mv();
     /* Hoisted out of the ESP_LOGD argument (HAZ-1). This one is the live
@@ -168,7 +180,51 @@ static display_state_t make_display_state(int32_t remaining, time_t now) {
         .batt_mv = mv,
         .fw_version = esp_app_get_description()->version,
     };
-    return app_state_display(&in, remaining, now);
+    display_state_t st = app_state_display(&in, remaining, now);
+    /* C16's third edge: chore mode is stored but the list is no longer
+       configured, so there is nothing to paint a checklist from. Design
+       4.2 asks for "a guard at paint time, not a stored revert" and the
+       plan's M2-T2 row asks for a revert; this is both, and deliberately.
+
+       PAINT TIME, because that is the only place that catches the edit
+       that causes it. A list is emptied by an MQTT config payload
+       (config_apply.c's apply_chores), which runs on the NETWORK task
+       inside the same wake that may repaint afterwards — net_apply.c can
+       drive a re-render off the join. A guard at wake entry would paint a
+       chore screen with no chores on it exactly once, on the wake the edit
+       arrived in. And every display_state_t this module builds comes
+       through here, so one site covers every paint.
+
+       STORED, because timer_mode() is what the mode button reads. A
+       render-only fallback would leave the byte saying CHORES while the
+       panel says Timers, and the first press of A would toggle from the
+       stale value straight back to Timers — a button that visibly does
+       nothing. Fixing the struct too, rather than re-reading, keeps the
+       state handed to the painter equal to the state that was stored.
+
+       Keyed on the COUNT, and on no other chore field. chore_outstanding
+       == 0 and chore_released are what an "all done, back to timers"
+       reading would test, and both are true on the final ack, which is
+       explicitly NOT a revert (design 4.2): bouncing out on the last tick
+       would make a mis-press cost a trip back through the mode button.
+
+       The mode half of the test is not redundant with the count half.
+       Without it the guard would still be behaviourally correct — it can
+       only ever store the value already there — but it would put an RTC
+       write in the path of every paint on every device with no chores
+       configured, which today is all of them. The break-end revert in
+       wake_flow_break_end() stores UNCONDITIONALLY and is right to: the
+       frequency argument that pays for this test does not reach a site a
+       break end gates. That comment carries the comparison.
+
+       Not a control-flow branch: this changes which screen is selected and
+       returns the same state to the same caller. Nothing above or below it
+       is skipped. */
+    if (st.app_mode == APP_MODE_CHORES && st.chore_count == 0) {
+        timer_set_mode(APP_MODE_TIMERS);
+        st.app_mode = APP_MODE_TIMERS;
+    }
+    return st;
 }
 
 /* Tick the timer and full-refresh the panel with the result. Reached by
@@ -296,6 +352,44 @@ bool wake_flow_break_end(void) {
         return false;
     }
     s_break_ended = true;
+    /* Design row C16's break-end revert, and it belongs HERE — inside the
+       take, above the chime decision — for two separate reasons.
+       INSIDE THE TAKE, because the take is what makes this a break END
+       rather than merely a wake during a break. Hoisted above the
+       `if (!...)` it would fire on every wake and chore mode could never
+       survive one, which reads in the field as "the mode button does
+       nothing".
+       ABOVE THE CHIME, because the break is just as over when
+       wake_policy_break_chime refuses (an extra is running, or the end was
+       observed late) and that path returns early a few lines below. The
+       wake-sticky flag set on the line above already forces a full refresh
+       on both paths, so a revert hung off the chime would leave chore mode
+       standing on exactly the repaint that has no other explanation.
+       The mode is a render selector, so this changes the PAINT and nothing
+       else: no tick, no expiry, no sleep plan reads it. The other two
+       edges are timer_reset()'s memset (day rollover, which is why
+       APP_MODE_TIMERS is 0 — timer.h) and the emptied-list guard in
+       make_display_state(). The final ack is deliberately not an edge.
+
+       AND IT IS UNCONDITIONAL — no `if (timer_mode() != APP_MODE_TIMERS)`
+       — which is the opposite of how the emptied-list guard 150 lines up
+       reasons, so the difference is written down rather than left to look
+       like one of the two sites was not thought about.
+       That guard tests the mode to keep an RTC write out of the path of
+       EVERY PAINT ON EVERY DEVICE with no chores configured, which today
+       is all of them: without the test it would store on a code path the
+       whole fleet runs several times a day, forever. This site is the
+       opposite shape. It is reached only by a break that has just ENDED —
+       a handful of times on a day a break was earned, never on most days
+       at all — so the write it saves is unmeasurable, while the test it
+       would add is a branch no test can distinguish from its absence
+       (the stored byte is identical either way). That is an unpinned
+       guard, and an unpinned guard is the more expensive of the two.
+       Frequency is the whole of the difference: where the cost argument
+       bites, pay for it with a branch; where it does not, do not buy one.
+       The two sites reason oppositely because their traffic differs by
+       four orders of magnitude, not because the rule changed. */
+    timer_set_mode(APP_MODE_TIMERS);
 
     bool extra_running = timer_any_extra_running();
     if (!wake_policy_break_chime(extra_running, overdue)) {
@@ -339,6 +433,25 @@ bool wake_flow_report_undrained_break_end(void) {
     if (!timer_break_take_ended(hal_time_now(), &overdue)) {
         return false;
     }
+    /* The ONE exception to the raw-take rule in this function's header
+       comment, and the exception is principled rather than convenient.
+       Everything that rule refuses is an effect on THIS wake — a tick, a
+       chime, a selection snap, the wake-sticky flag — all of which would
+       land after the panel has finished and be seen by nobody. C16's mode
+       is not in that category:
+       it is an RTC byte the NEXT wake's paint reads, and the next wake is
+       the earliest moment anything could act on it in any case.
+       It has to be here because `take` CONSUMES. A break that ends after
+       the last drain point in the wake — inside the pre-sleep event watch,
+       or the second network window — is eaten by this safety net, and if
+       only wake_flow_break_end() reverted, that edge would leave chore
+       mode standing with nothing left to revert it, permanently. Both
+       consumption sites revert, so "a consumed break end always leaves
+       Timers" is one invariant rather than one-and-a-hole.
+       Safe from the awake failsafe's esp_timer context, where the audio
+       this function already refuses is not: a single-byte store into RTC
+       memory takes no lock and allocates nothing. */
+    timer_set_mode(APP_MODE_TIMERS);
     ESP_LOGW(TAG, "break end reached sleep undrained (%ld s late)", (long)overdue);
     return true;
 }
