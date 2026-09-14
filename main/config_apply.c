@@ -324,7 +324,41 @@ static void apply_chores(const cJSON *root, err_acc_t *e) {
        joins it and can drive a re-render), and timer_persist.c is
        boot-time only, so nothing else reconciles RTC before the next
        boot. The flash ack record is deliberately left alone because
-       chore_store_load_ack() re-derives from its stored hash at boot. */
+       chore_store_load_ack() re-derives from its stored hash at boot.
+
+       FOLLOWS, NOT OVERLAPS — and so the save above and the push below do
+       NOT have to be atomic. That is not obvious, and reading "a repaint
+       can follow" as "a repaint can interleave" turns it into a bug
+       report, so the argument is written out rather than left implied.
+       The worry is fair on its face: from M2-T1 on,
+       app_state_display() reads the names blob and the RTC mask as a
+       PAIR, so a paint landing between the two writes would draw the new
+       list against the old bits — a tick against a chore nobody did,
+       which fails PERMISSIVE, the wrong direction for a gate whose whole
+       job is withholding screen time.
+
+       No paint can land there. config_apply() has exactly one caller
+       (mqtt_ha.c, inside mqtt_ha_window), which has exactly one caller
+       (net_window.c), and that call sits behind the snapshot rendezvous —
+       xQueueReceive(..., portMAX_DELAY) — which the main task releases
+       only once its e-ink paint has finished. net_window.c states that
+       intent and names these very flash writes: panel refresh current and
+       radio TX must never coincide, or the rail browns out. In the only
+       interval where this function can run at all — between that post and
+       the join — the main task is inside net_window_join running nothing
+       but join_poll (poll_button_b_cb), which drives the status LED and
+       never builds a display_state_t.
+
+       WHAT WOULD BREAK IT: a repaint added to that join poll. M2 adds a
+       chore screen and an ack button, so that is a reachable mistake and
+       not a hypothetical one. Anyone putting a paint there must make
+       these two writes atomic first.
+
+       And the save stays FIRST for the failed-save contract below, which
+       test_config_apply pins: a save that fails must leave the live acks
+       exactly as they were, and only a save already known to have
+       succeeded can promise that. Reversing the pair to "fix" the
+       non-race would trade it for a real regression on that path. */
     chore_ack_t live = {.acked = timer_chore_acked(), .released = timer_chore_released()};
     chore_ack_t next = chores_reconcile(live, prev_hash, chores_list_hash(names, n));
     timer_chore_set_acked(next.acked);
