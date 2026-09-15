@@ -29,19 +29,32 @@ credentials.**
 7. [ ] **Button B (pause/resume)**: pause shows `PAUSED`, remaining freezes
        across wakes; resume is immediate (AMBER -> GREEN after ~250 ms, sync
        after) and continues from the frozen value.
-8. [ ] **Button A does nothing**: A is reserved for a later mode key and has
-       no binding in this firmware. Test it **from sleep** — that is the
-       whole of its observable surface. With the timer IDLE and no alarm
-       sounding, press A: no wake, no refresh, no panel change at all.
-       Then press B from the same state as a positive control — the device
-       must wake and start the timer. Without that control, "nothing
-       happened" is indistinguishable from a dead switch or an unpopulated
-       pad.
-       Two things that are **not** failures. A silences a sounding alarm:
-       dismissal deliberately takes any button (cases 11, 15, 24), so never
-       test A against TIME'S UP or a break alarm. And a press made while
-       the device is already awake is dropped before dispatch — A is left
-       out of the press pick — so there is nothing to observe there either.
+8. [ ] **Button A (Timers/Chores mode toggle)**: A switches which screen is
+       painted. It is a **conditional** wake source — armed only when the
+       press would be honoured, which needs BOTH no RUNNING timer on the
+       active slot AND a configured chore list. With no chore list (the
+       shipped default, and the state of a device that has never had one
+       pushed from Home Assistant) A does nothing at all: no wake, no
+       refresh, no panel change. Test that **from sleep**, with the timer
+       IDLE, then press B from the same state as a positive control — the
+       device must wake and start the timer. Without that control,
+       "nothing happened" is indistinguishable from a dead switch or an
+       unpopulated pad.
+       With a chore list configured and no timer running, a press from
+       sleep **wakes the device and repaints the timer screen**, and the
+       log names the mode it just selected: `button A: painting the chore
+       checklist`, then `button A: back to the timer screen` on the next
+       press. That log pair alternating is the pass condition for this
+       build. **The panel must NOT be expected to change** — no painter
+       branches on the mode yet (the chore screen is M2-T4/T5), so the
+       toggle is stored and logged but nothing on the glass differs. A
+       tester who marks this FAILED for "the screen did not change" is
+       reading the wrong build; update this case when the chore screen
+       lands. While a timer is RUNNING, A is dropped from the wake mask
+       entirely — pause with B first.
+       One thing that is **not** a failure: A silences a sounding alarm,
+       because dismissal deliberately takes any button (cases 11, 15, 24),
+       so never test A against TIME'S UP or a break alarm.
 9. [ ] **Button D (force sync)**: WiFi cycle + full refresh; sync time updates.
 10. [ ] **Button C**: with no extra timers configured (the default), does
         nothing at all — not a wake source (kept out of the EXT1 mask so
@@ -66,11 +79,12 @@ credentials.**
 13. [ ] **Wake buttons**: B and D always wake the device. C wakes only when
         its press would succeed (the EXT1 mask is rebuilt at every sleep
         entry): it needs extra timers configured and no RUNNING (case 10) —
-        a break does not refuse it. **A does not wake in this firmware**,
-        because it has no binding to act on — not a permanent property of
-        the button (case 8). Check A with every other gate open (IDLE,
-        extras configured) so a pass cannot be an accident of some other
-        refusal, and confirm B still wakes from the same state as a control.
+        a break does not refuse it. **A wakes only when its toggle would be
+        honoured** — no RUNNING timer AND a configured chore list (case 8);
+        on a device with no chore list it never wakes at all. Check A with
+        every other gate open (IDLE, chores configured) so a pass cannot be
+        an accident of some other refusal, and confirm B still wakes from
+        the same state as a control.
 14. [ ] **Panel protection**: mash buttons rapidly — refreshes serialize, log
         shows `refresh rejected` if under 1 s apart, no crash.
 15. [ ] **Held-button dismissal**: dismiss the expiry alert while *holding*
@@ -138,11 +152,18 @@ credentials.**
         Break start may lag the interval by up to one 55 s tick.
 25. [ ] **Break is enforced**: during the break, Button B logs
         `button B ignored during screen break` and nothing resumes — B is
-        also unlabelled on the panel for that reason. A resumes nothing and
-        produces no log line at any level — it is not a wake source and is
-        left out of the press pick, so its dispatch arm is never reached in
-        a shipped build. D still syncs. (If the break alarm is still
-        sounding, any button silences it, A included — let it finish first.)
+        also unlabelled on the panel for that reason. A resumes nothing
+        either — it only chooses which screen is painted — but a BREAK is
+        not RUNNING, so with a chore list configured A stays live right
+        through the break, which is the point of having it. What to check
+        is the log, not the glass: `button A: painting the chore
+        checklist` on the press and `button A: back to the timer screen`
+        on the next one. As in case 8, no painter branches on the mode in
+        this build, so the break screen itself does not change — that is
+        expected, not a failure. With no chore list A is refused and
+        produces no wake. D still syncs. (If
+        the break alarm is still sounding, any button silences it, A
+        included — let it finish first.)
 26. [ ] **Break end**: at the end of the break (within ~1 s), double-beep
         chime, display returns to the normal layout showing PAUSED with the
         frozen remaining time; Button B resumes and accrual starts fresh

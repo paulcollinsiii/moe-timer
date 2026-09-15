@@ -37,16 +37,20 @@ uint8_t button_latch_take_masked(uint8_t mask) {
 
 int button_latch_pick(uint8_t mask, uint8_t allowed_mask) {
     /* B (1) first — start/pause/resume is the time-sensitive action; then
-       C (2) next timer, D (3) refresh, and A (0) LAST because it has no
-       binding at all this milestone.
+       C (2) next timer, D (3) refresh, and A (0) LAST: the mode toggle
+       only chooses which screen is painted, so it is the one press that
+       loses nothing by yielding to a press that moves a timer.
 
        The rule is "the time-sensitive action wins", not "the lowest index
        wins": this list moved when the layout did (A used to be
-       start/pause). Leaving A at the front once it lost its binding made
-       an unbound button SWALLOW a real press — pick returns the first
-       candidate in this order, so A won, the dispatch's A arm did
-       nothing, and the B press was gone with it, taken by the same
-       unmasked take and dropped at sleep. */
+       start/pause). Leaving A at the front once it lost start/pause made
+       it SWALLOW a real press — pick returns the first candidate in this
+       order, so A won, the dispatch's A arm did nothing (it had no
+       binding then), and the B press was gone with it, taken by the same
+       unmasked take and dropped at sleep. A has a binding again as of
+       M2-T3, which is what let both drains admit it to their ALLOWED
+       masks; keeping it last here is what makes that safe, so the two
+       facts are load bearing together. */
     static const int priority[BUTTON_LATCH_COUNT] = {1, 2, 3, 0};
     mask &= allowed_mask;
     for (int i = 0; i < BUTTON_LATCH_COUNT; i++) {

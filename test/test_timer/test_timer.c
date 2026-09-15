@@ -3,14 +3,19 @@
 #include <time.h>
 #include <unity.h>
 
-/* Single-TU compilation. button_actions.c (+ its schedule dependency) rides
-   along so the state matrix can assert the real Button B outcome per row
-   instead of re-deriving it here. */
+/* Single-TU compilation. button_actions.c (+ its schedule and chore-store
+   dependencies) rides along so the state matrix can assert the real
+   Button B outcome per row instead of re-deriving it here. chore_store.c
+   arrived with Button A, whose "no chores configured" refusal reads the
+   names blob; nothing in this file drives it, but a TU that compiles
+   button_actions.c has to link what it calls. */
 // clang-format off
 #include "mock_hal_time.c"
 #include "mock_hal_nvs.c"
 #include "../../main/timer.c"
 #include "../../main/schedule.c"
+#include "../../main/chores.c"
+#include "../../main/chore_store.c"
 #include "../../main/button_actions.c"
 #include "../../main/wake_policy.c"
 // clang-format on

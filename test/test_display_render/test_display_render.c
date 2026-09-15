@@ -163,8 +163,9 @@ void test_main_expired_reloadable(void) {
 
 void test_break_screen(void) {
     /* Break screen with extras configured: the bottom row offers the swap.
-       A is unlabelled because it is the unbound mode key; B is unlabelled
-       because the break is still enforced (TIMER_BREAK yields no label). */
+       A is unlabelled because the mode toggle has no label yet (it gained
+       its binding in M2-T3 but not a label); B is unlabelled because the
+       break is still enforced (TIMER_BREAK yields no label). */
     display_state_t st = base_state();
     st.timer_state = TIMER_BREAK;
     st.remaining_sec = 5400; /* 1:30:00 of screen time frozen */

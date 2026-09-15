@@ -129,19 +129,22 @@ void test_pick_single_button_returns_it(void) {
 }
 
 /* B (1) is the start/pause/resume button and therefore the time-sensitive
-   one, so it outranks everything — including A, which has no binding at
-   all this milestone. */
+   one, so it outranks everything — including A, whose binding (the
+   Timers/Chores mode toggle) only chooses which screen is painted and so
+   loses nothing by waiting for the next press. */
 void test_pick_priority_b_over_all(void) {
     TEST_ASSERT_EQUAL_INT(1, button_latch_pick(0x0F, 0x0F));
 }
 
 /* THE swallowing case, and the reason the order had to move with the
    layout. A is index 0, so an order that still led with it would let a
-   press of an UNBOUND button beat a genuine start/pause press: pick
-   returns A, the dispatch's A arm does nothing, and the B press is gone
-   — taken out of the latch by the same unmasked take and discarded at
-   sleep. The user presses start, nothing happens, and there is no
-   feedback to tell them why. */
+   press of the mode toggle beat a genuine start/pause press: pick returns
+   A, the dispatch changes which screen is painted, and the B press is
+   gone — taken out of the latch by the same unmasked take and discarded
+   at sleep. The user presses start, nothing happens, and there is no
+   feedback to tell them why. This mattered more once A gained a binding,
+   not less: both drains admit A to their allowed masks now (M2-T3), so
+   this priority is the only thing left standing between the two presses. */
 void test_pick_priority_b_over_a(void) {
     TEST_ASSERT_EQUAL_INT(1, button_latch_pick((1u << 0) | (1u << 1), 0x0F));
 }

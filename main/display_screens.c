@@ -244,9 +244,13 @@ static void build_main_status(lv_obj_t *scr, const display_state_t *st) {
 }
 
 /* Button-label row along the bottom edge (geometry: see BTN_X0/BTN_PITCH).
-   Cell 0 (A) is deliberately blank: A is the mode key and is unbound
-   until the chore list exists. B shows the action a press will take;
-   C only when its press would work; D = sync, always.
+   Cell 0 (A) is blank. A is the Timers/Chores mode toggle and has been
+   bound since M2-T3, so "unbound" is no longer the reason; what it has
+   not got yet is a LABEL. When one is added it must be gated on
+   button_a_toggle_allowed() (button_actions.h) — the same predicate that
+   arms A as a wake source — so the label never offers a press the map
+   would refuse. B shows the action a press will take; C only when its
+   press would work; D = sync, always.
 
    Every decision about B lives in display_button_b_label() — this is a
    plain switch over its answer, so no gate is re-tested here. */
@@ -331,9 +335,10 @@ void display_screens_build_break(const display_state_t *st) {
     /* Over button C: the swap affordance. This row is built here rather
        than by build_button_row (16 pt, and the frozen screen time runs
        across cells A and B in place of their labels), but it already
-       agrees with the new layout: A is unbound, and B is blank because
-       the break is still enforced for the Screen timer — TIMER_BREAK
-       yields no label from display_button_b_label() either. */
+       agrees with the new layout: A carries no label yet (see
+       build_button_row), and B is blank because the break is still
+       enforced for the Screen timer — TIMER_BREAK yields no label from
+       display_button_b_label() either. */
     char hint[DISPLAY_SWAP_HINT_MAX + 1];
     display_format_swap_hint(hint, sizeof(hint), st->swap_next_name);
     snprintf(buf, sizeof(buf), "%s %s", LV_SYMBOL_RIGHT, hint);

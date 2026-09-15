@@ -19,6 +19,12 @@ extern "C" {
 typedef struct {
     bool enable;       /* the sleep outcome's arm decision: false on a locked sleep */
     bool swap_allowed; /* timer_swap_allowed() — gates BTN_C */
+    /* button_a_toggle_allowed() — gates BTN_A. Taken raw at sleep entry
+       like swap_allowed above, and composite for the same reason: the
+       whole predicate (not RUNNING, and a configured chore list) lives in
+       button_actions.c so the wake mask and the press itself can never
+       disagree about what A would do. */
+    bool mode_toggle_allowed;
 } buttons_policy_in_t;
 
 /* Which buttons may wake the device from the sleep being entered. Bit n =
@@ -27,7 +33,11 @@ typedef struct {
    empty wake mask. Because B and D are unconditional wake sources, a zero
    result can ONLY mean `enable` was false — the driver's early return
    therefore tests "arm nothing", never "no button happened to qualify".
-   (A is never a wake source at all, so it is not part of that guarantee.)
+   The guarantee rests on B and D ALONE: A and C are both conditional and
+   both can be absent from a perfectly ordinary mask, so neither is part
+   of it, and gating B or D would break it. Swept in test_buttons_policy
+   (test_enabled_is_never_an_empty_mask) across the full cross product of
+   the two gates rather than argued.
    Pure — host-tested. */
 uint8_t buttons_policy_wake_mask(const buttons_policy_in_t *in);
 

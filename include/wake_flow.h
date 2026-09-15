@@ -97,10 +97,10 @@ bool wake_flow_break_ended_this_wake(void);
 
 /* ---- the button guard matrix ------------------------------------------- */
 
-/* Apply one button action (B = Start/Pause/Resume/Reload, C = Next timer;
-   A is Mode and inert this milestone, D is wake-only). Shared by the EXT1
-   wake handler, the tick-wake latch drain and the break tail, so all
-   three honour the same state guards.
+/* Apply one button action (A = Timers/Chores mode toggle, B =
+   Start/Pause/Resume/Reload, C = Next timer; D is wake-only). Shared by
+   the EXT1 wake handler, the tick-wake latch drain and the break tail, so
+   all three honour the same state guards.
 
    The signature is the contract, and every part of it encodes a shipped
    defect — do not "clean it up":
@@ -127,8 +127,18 @@ bool wake_flow_break_ended_this_wake(void);
 
    allow_net_window gates the NTP window on a start/resume: a wake that
    already ran a window skips the redundant second one (clock corrected,
-   buffered HA effects already applied). Returns true when the press
-   changed timer state (the caller must render). */
+   buffered HA effects already applied).
+
+   RETURNS true when the press left something the panel has to show, i.e.
+   "the caller must render" — which is NOT the same as "timer state
+   changed", though it was until M2-T3 and the old wording said so. B and
+   C earn their true by moving timer state; A earns its true having moved
+   NONE — it stores an app_mode_t and nothing else, and the repaint it
+   owes the panel is a change of which screen is selected, not of what the
+   timer is doing. So do not use the return value as a proxy for a state
+   transition (e.g. to decide whether to re-plan sleep or re-post stats):
+   read timer_get_state() for that. False means the press was refused or
+   ignored and the panel already shows the truth. */
 bool wake_flow_dispatch_button_action(button_id_t btn, time_t *now, timer_state_t before, bool allow_net_window,
                                       bool *selection_changed);
 

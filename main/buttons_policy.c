@@ -1,18 +1,29 @@
 /* Pure button wake-source policy — no ESP dependencies; host-tested.
 
-   Layout: A = unbound this milestone, B = Start/Pause/Resume/Reload,
+   Layout: A = Timers/Chores mode toggle, B = Start/Pause/Resume/Reload,
    C = Next timer, D = Refresh.
 
    UX rule (button mashing must not burn battery or refreshes): a button
    whose action could only be refused is not worth a wake.
 
-   - A never wakes: it has no binding at all this milestone, so every press
-     is a refusal. Waking to do nothing costs a panel refresh and the
-     battery behind it.
+   - A wakes only when the mode toggle would actually be honoured — the
+     active slot is not RUNNING and a chore list is configured. Both
+     conditions arrive already folded into one gate by
+     button_a_toggle_allowed(), which is also what the dispatch's A arm
+     acts on, so the mask and the press can never disagree. On the fleet
+     as it ships today — no chore list configured anywhere — that gate is
+     false and A is armed on nothing, which is the point: the feature
+     costs no wakes until it is used.
    - C wakes only when a swap would actually succeed — extra timers exist
      and the active timer is not RUNNING (a Screen Break does NOT refuse,
      so C stays a wake source right through one).
    - B and D are unconditional.
+
+   A and C are gated SEPARATELY even though both refuse while RUNNING.
+   Folding them is the obvious saving and it is wrong: swap_allowed also
+   requires extra timers to exist, and design 4.2 is explicit that the
+   mode gate does not inherit that condition. A shared gate would take the
+   chore screen away from every device with no extra timers configured.
 
    B is the one deliberate overshoot of the rule above, and it is worth
    naming because it looks like an oversight. button_b_apply() returns
@@ -61,7 +72,7 @@
 static bool wake_source(button_id_t btn, const buttons_policy_in_t *in) {
     switch (btn) {
         case BTN_A:
-            return false;
+            return in->mode_toggle_allowed;
         case BTN_C:
             return in->swap_allowed;
         default:

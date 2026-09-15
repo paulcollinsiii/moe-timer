@@ -62,6 +62,7 @@ typedef enum {
        That seam is wake_flow.c's own static now, so the repaint appears in
        the log as its body instead — see flow_repaint_at() below. */
     /* the guard matrix */
+    EV_A_APPLY,
     EV_B_APPLY,
     EV_PAUSE,
     EV_LED,
@@ -368,6 +369,12 @@ void audio_break_over_chime(void) {
 
 static timer_state_t flow_state; /* the ACTIVE slot's state */
 static time_t flow_pause_arg;
+/* button_a_toggle_allowed()'s answer, injected. The predicate itself —
+   refused while the active slot is RUNNING, refused with no chores
+   configured — is test_button_actions' subject; what this suite owns is
+   what the wake flow DOES with the answer, and in particular the order it
+   does it in relative to the break-end drain. */
+static bool flow_a_allowed;
 static btn_b_action_t flow_b_result;
 static time_t flow_b_apply_arg;
 static bool flow_slot_reloadable; /* the selected def's reloadable flag */
@@ -425,6 +432,22 @@ void timer_pause(time_t at) {
     flow_pause_arg = at;
     flow_state = TIMER_PAUSED;
     flow_log_push(EV_PAUSE);
+}
+
+/* The mode toggle, modelled the same way as B's map below: the GATE is
+   injected, the transition it leaves behind is real. Reading flow_mode and
+   writing the other value through timer_set_mode() is what makes the
+   break-end collision observable here — a drain that reverts to
+   APP_MODE_TIMERS after this ran is a store this stub cannot see, so only
+   the ORDER of the two writes can tell the two implementations apart. */
+btn_a_action_t button_a_apply(void) {
+    flow_log_push(EV_A_APPLY);
+    if (!flow_a_allowed) {
+        return BTN_A_NONE;
+    }
+    const app_mode_t next = (timer_mode() == APP_MODE_CHORES) ? APP_MODE_TIMERS : APP_MODE_CHORES;
+    timer_set_mode(next);
+    return (next == APP_MODE_CHORES) ? BTN_A_CHORES : BTN_A_TIMERS;
 }
 
 /* button_actions.c's map, modelled rather than switched: what it RETURNS
@@ -1520,6 +1543,12 @@ void setUp(void) {
     flow_edge_us = 1000000;
     flow_state = TIMER_IDLE;
     flow_pause_arg = 0;
+    /* Default ALLOWED, unlike flow_b_result's inert default: A's refusal
+       is the narrow case here (a RUNNING timer or a device with no chore
+       list), and every case that cares about the refusal says so. The
+       cases that do not care are about the plumbing — the wake mask, the
+       pick masks, the ordering — and they need the press to land. */
+    flow_a_allowed = true;
     flow_b_result = BTN_B_NONE;
     flow_b_apply_arg = 0;
     flow_slot_reloadable = false;
@@ -2907,13 +2936,16 @@ void test_a_pause_neither_holds_nor_syncs_nor_moves_the_clock(void) {
     TEST_ASSERT_FALSE(flow_swapped_io);
 }
 
-/* ---- ROW 19: Button A, the inert arm ------------------------------------
+/* ---- ROW 19: Button A, the mode toggle ----------------------------------
 
-   A is Mode and has no binding this milestone. It is out of the EXT1 wake
-   mask (buttons_policy.c) and out of both drains' allowed masks, so the
-   only way it reaches this function at all is a press LATCHED on someone
-   else's wake — which is exactly the path a "just leave the old arm
-   there, it does no harm" argument forgets.
+   A was the inert arm until M2-T3; it is the Timers/Chores toggle now,
+   and these two cases changed with it. What they assert did not: A still
+   touches NO TIMER MACHINERY. The mode is a render selector, so an A
+   press must never start, pause, reload or swap a slot, never open a
+   network window, never hold for an LED ack and never step the caller's
+   clock — every one of which would be a fall-through into B's or C's arm
+   wearing A's name. The arm's own effect (the stored mode) is asserted in
+   the M2-T3 section at the bottom of this file.
 
    The direct-reset arm that used to live under BTN_B is gone: reset now
    reaches the slot through button_b_apply()'s EXPIRED leg, which is a
@@ -2922,9 +2954,9 @@ void test_a_pause_neither_holds_nor_syncs_nor_moves_the_clock(void) {
    business now; what remains this file's business is that B's arm reports
    BTN_B_RELOADED as a real action, pinned below and in the break tail. */
 
-void test_row19_button_a_does_nothing_at_all(void) {
-    /* Every arm armed to SUCCEED, so a fall-through into any of them is
-       loud rather than silent. */
+void test_row19_button_a_touches_no_timer_machinery(void) {
+    /* Every OTHER arm armed to SUCCEED, so a fall-through into any of
+       them is loud rather than silent. */
     flow_state = TIMER_IDLE;
     flow_b_result = BTN_B_STARTED;
     flow_slot_reloadable = true;
@@ -2933,7 +2965,7 @@ void test_row19_button_a_does_nothing_at_all(void) {
     flow_net_open = true;
     mock_time_set(flow_at(16, 0));
 
-    TEST_ASSERT_FALSE(flow_dispatch(BTN_A, flow_at(16, 0) - 30, TIMER_IDLE, true));
+    TEST_ASSERT_TRUE(flow_dispatch(BTN_A, flow_at(16, 0) - 30, TIMER_IDLE, true));
 
     TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_B_APPLY));
     TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_RELOAD_ALLOWED));
@@ -2947,10 +2979,13 @@ void test_row19_button_a_does_nothing_at_all(void) {
     TEST_ASSERT_FALSE(flow_swapped_io);
 }
 
-/* Inert in every state, not just the convenient one: a leftover guard
-   keyed on TIMER_BREAK (the shape A's arm had before the swap) would let
-   A through everywhere else. */
-void test_button_a_is_inert_in_every_state(void) {
+/* In every state, not just the convenient one: a leftover guard keyed on
+   TIMER_BREAK (the shape A's arm had before the button swap) would change
+   what A does in one state and not the others. The gate that DOES depend
+   on the state — refused while RUNNING — lives in button_actions.c and is
+   injected here, so this sweep is about the arm reaching no slot, not
+   about the predicate. */
+void test_button_a_touches_no_slot_in_any_state(void) {
     static const timer_state_t states[] = {TIMER_IDLE, TIMER_RUNNING, TIMER_PAUSED, TIMER_EXPIRED, TIMER_BREAK};
     for (unsigned i = 0; i < sizeof states / sizeof states[0]; i++) {
         setUp();
@@ -2961,7 +2996,7 @@ void test_button_a_is_inert_in_every_state(void) {
         flow_select_ok = true;
         mock_time_set(flow_at(16, 0));
 
-        TEST_ASSERT_FALSE(flow_dispatch(BTN_A, flow_at(16, 0), states[i], true));
+        TEST_ASSERT_TRUE(flow_dispatch(BTN_A, flow_at(16, 0), states[i], true));
 
         TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_B_APPLY));
         TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_RELOAD));
@@ -3115,8 +3150,13 @@ void test_every_arm_clears_the_selection_report_before_deciding(void) {
     static const button_id_t all[] = {BTN_A, BTN_B, BTN_C, BTN_D, BTN_NONE};
     for (int i = 0; i < (int)(sizeof(all) / sizeof(all[0])); i++) {
         setUp();
-        /* every arm arranged to REFUSE, so nothing legitimately sets it */
+        /* every arm arranged to REFUSE, so nothing legitimately sets it.
+           A's refusal is its own knob rather than a consequence of
+           flow_state: the gate lives in button_actions.c and is injected
+           here, so leaving it at setUp's permissive default would let A's
+           arm succeed and stop testing the refusal path it is listed for. */
         flow_state = TIMER_RUNNING;
+        flow_a_allowed = false;
         flow_b_result = BTN_B_NONE;
         flow_slot_reloadable = false;
         flow_select_ok = false;
@@ -3327,18 +3367,26 @@ void test_the_break_tail_never_lets_a_latched_a_press_swallow_a_b_press(void) {
     TEST_ASSERT_EQUAL_HEX8(0, flow_latch_residue()); /* the A bit was dropped, not left */
 }
 
-/* A latched ALONE picks nothing at all — the drain never runs — and is
-   still taken out of the latch rather than left pending for a consumer
-   that will not come. */
-void test_a_lone_a_press_in_the_break_tail_is_consumed_and_ignored(void) {
+/* A lone A press the toggle REFUSES — a timer running behind the break,
+   or no chore list configured. It reaches the dispatch (A is in the
+   allowed mask now, unlike D above), is turned away there, and is still
+   taken out of the latch rather than left pending for a consumer that
+   will not come. Nothing is painted: a refused press must not cost the
+   refresh, which is the whole reason the wake mask drops A in the same
+   two conditions. The HONOURED lone press is the C3 section's
+   test_c3_the_break_tail_poll_acts_on_a_lone_button_a_press. */
+void test_a_lone_refused_a_press_in_the_break_tail_is_consumed_and_ignored(void) {
     flow_state = TIMER_IDLE;
-    flow_b_result = BTN_B_STARTED; /* would fire loudly if A reached the dispatch */
+    flow_a_allowed = false;
+    flow_b_result = BTN_B_STARTED; /* would fire loudly on a fall-through into B's arm */
     flow_press(BTN_A);
     mock_time_set(flow_at(16, 0));
 
     TEST_ASSERT_FALSE(wake_flow_poll_break_buttons());
 
+    TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_A_APPLY)); /* it DID reach the dispatch */
     TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_B_APPLY));
+    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_LED));
     TEST_ASSERT_EQUAL_INT(0, FLOW_RENDERS());
     TEST_ASSERT_EQUAL_HEX8(0, flow_latch_residue());
 }
@@ -5624,22 +5672,21 @@ void test_a_press_latched_during_the_wake_is_dispatched_before_sleep(void) {
     TEST_ASSERT_EQUAL_INT(TIMER_RUNNING, flow_state);
 }
 
-/* THE swallowing case, end to end on the tick path. A press on a button
-   with no binding at all must not cost the user the start press made
-   alongside it. Two independent things stop it, and THIS CASE PINS ONLY
-   THE FIRST: A is out of the drain's ALLOWED mask, so pick can never
-   return it. Restore A to that mask and this case starts the timer never
-   — pick returns A, the dispatch does nothing, and the B press is gone
+/* THE swallowing case, end to end on the tick path. A press of the mode
+   toggle must not cost the user the start press made alongside it — a
+   screen selector is never worth a start/pause. ONE thing stops it now:
+   A last in button_latch_pick's priority order. Until M2-T3 there were
+   two, because A was also out of this drain's ALLOWED mask; admitting it
+   (a bound button's press has to reach its arm) spent the belt and left
+   the braces, so this case is load bearing in a way it was not before.
+   Revert priority[] to its old A-first value and this case starts the
+   timer never: pick returns A, the toggle runs, and the B press is gone
    with it because the drain's take is unmasked.
 
-   The second half — A last in button_latch_pick's priority order — is
-   invisible from here: with A masked out, the order is irrelevant to this
-   scenario, and reverting priority[] to its old A-first value leaves this
-   case green. That half is pinned by test_button_latch's
-   test_pick_priority_b_over_a and test_pick_priority_b_over_all (direct,
-   on the real pick) and, in this file, by
-   test_the_break_tail_acts_on_the_highest_priority_latched_press. Do not
-   read a green run here as cover for touching that array.
+   Also pinned directly on the real pick by test_button_latch's
+   test_pick_priority_b_over_a and test_pick_priority_b_over_all, and in
+   this file by test_the_break_tail_acts_on_the_highest_priority_latched_press
+   and test_c3_a_button_b_press_still_beats_a_button_a_press.
 
    The symptom is the worst kind: the device's primary control appears
    dead, with no feedback and no way to tell it from a flat battery. */
@@ -5660,19 +5707,24 @@ void test_a_latched_a_press_never_swallows_the_b_press_beside_it(void) {
     TEST_ASSERT_EQUAL_INT(TIMER_RUNNING, flow_state);
 }
 
-/* A latched ALONE picks nothing, so the drain body never runs — and the
-   bit is still cleared rather than left pending, because the take is
-   unmasked and happens whatever the pick decides. */
-void test_a_latched_a_press_alone_is_taken_and_discarded_by_the_tick_drain(void) {
+/* A latched ALONE now wins the pick and runs its own arm — and that arm
+   reaches the mode and nothing else. The B map is armed to START so a
+   fall-through out of A's arm into B's would move the slot loudly; the
+   bit is still cleared either way, because the take is unmasked and
+   happens whatever the pick decides. The mode half is asserted in the
+   C3 section (test_c3_the_tick_wake_latch_drain_acts_on_a_latched_button_a_press);
+   what is here is the slot NOT moving. */
+void test_a_latched_a_press_alone_reaches_its_own_arm_and_no_slot(void) {
     flow_tick_clock(flow_at(15, 0));
     flow_state = TIMER_IDLE;
-    flow_b_result = BTN_B_STARTED; /* would fire loudly if A were dispatched */
+    flow_b_result = BTN_B_STARTED; /* would fire loudly on a fall-through into B */
     flow_press(BTN_A);
     TEST_ASSERT_EQUAL_HEX8(1u << BTN_A, button_latch_take());
     flow_press(BTN_A);
 
     TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_tick());
 
+    TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_A_APPLY));
     TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_B_APPLY));
     TEST_ASSERT_EQUAL_INT(TIMER_IDLE, flow_state);
     TEST_ASSERT_EQUAL_HEX8(0, flow_latch_residue()); /* taken, then dropped */
@@ -5893,9 +5945,9 @@ void test_row7_an_undecoded_wake_is_never_treated_as_a_continuation(void) {
 }
 
 /* Each of the four buttons is guarded on its own bit — A included, even
-   though it never wakes: the guard is a pure mask test and must not grow
-   a special case. B and C are the ones a hold is least likely to be
-   noticed on, since neither opens a window of its own. */
+   though it wakes only conditionally: the guard is a pure mask test and
+   must not grow a special case. B and C are the ones a hold is least
+   likely to be noticed on, since neither opens a window of its own. */
 void test_row7_every_button_is_guarded_on_its_own_bit(void) {
     static const button_id_t BTNS[] = {BTN_A, BTN_B, BTN_C, BTN_D};
     for (unsigned i = 0; i < sizeof BTNS / sizeof BTNS[0]; i++) {
@@ -6023,15 +6075,15 @@ void test_a_wake_press_on_button_b_runs_the_state_map(void) {
     TEST_ASSERT_EQUAL_INT(1, FLOW_RENDERS());
 }
 
-/* A is not a wake source at all this milestone (buttons_policy.c leaves
-   it out of the EXT1 mask), so the decode cannot report it — but the
-   handler must not depend on that. Forced through here: the wake arm
-   falls to the default, nothing is dispatched, and the wake ends the way
-   any undecoded one does, with a paint and a sleep.
-
-   The map is armed to START so a surviving `case BTN_A:` fall-through
-   into B's arm would be loud rather than silent. */
-void test_a_wake_press_on_button_a_does_nothing(void) {
+/* A shares B and C's arm in the wake decode, so the thing to pin here is
+   that sharing the ARM does not mean sharing the BODY: nothing B or C
+   does may run for an A press. The B map is armed to START and the swap
+   to succeed, so a fall-through past A's `case` into either would be loud
+   rather than silent — which is the failure mode of grouping cases in a
+   switch, and the reason this case survives the binding that made
+   A's decode real. The mode assertion is the C3 section's
+   (test_c3_a_button_a_ext1_wake_toggles_the_mode). */
+void test_a_wake_press_on_button_a_moves_no_timer(void) {
     mock_time_set(flow_at(15, 0));
     flow_wakeup_btn = BTN_A;
     flow_state = TIMER_IDLE;
@@ -7044,6 +7096,366 @@ void test_c17_an_unattended_chore_mode_wake_repaints_with_the_pixels_dark(void) 
     TEST_ASSERT_EQUAL_INT_MESSAGE(0, flow_log_count(EV_LED), "an unattended chore-mode wake lit the pixels");
 }
 
+/* ---- M2-T3: Button A reaches the toggle, on every path (row C3) ---------
+
+   Four separate things had to change before a press of A could do
+   anything at all, and wake_flow.c owned three of them. Each has a case
+   below, because each fails silently and identically in the field — the
+   button does nothing — while every other test in this suite still
+   passes:
+
+     the EXT1 switch     wake_flow_handle_button_wake's decode had no
+                         BTN_A case, so a wake caused by A fell to the
+                         default arm and only repainted.
+     the two pick masks  wake_flow_poll_break_buttons (the break tail) and
+                         the tick-wake latch drain both passed an ALLOWED
+                         mask of B|C, so button_latch_pick could never
+                         return A whatever was latched.
+     the dispatch arm    the arm itself, which logged at DEBUG and
+                         returned false.
+
+   The fourth is the wake mask in buttons_policy.c, which is where A is
+   armed at sleep entry; test_buttons_policy owns that one. */
+
+/* --- the dispatch arm --- */
+
+void test_c3_button_a_toggles_the_mode_in_the_dispatch(void) {
+    flow_mode = APP_MODE_TIMERS;
+    mock_time_set(flow_at(16, 0));
+
+    TEST_ASSERT_TRUE(flow_dispatch(BTN_A, flow_at(16, 0), TIMER_IDLE, true));
+
+    TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_A_APPLY));
+    TEST_ASSERT_EQUAL_INT_MESSAGE(APP_MODE_CHORES, (int)flow_mode, "Button A did not reach the mode toggle");
+    /* The out-param contract, which every arm owes: cleared, and the
+       clock handed back untouched. A is a render selector — it starts no
+       timer, so it opens no network window and steps no clock. */
+    TEST_ASSERT_FALSE(flow_swapped_io);
+    TEST_ASSERT_EQUAL_INT64(flow_at(16, 0), flow_now_io);
+    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_NET_OPEN));
+    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_B_APPLY));
+    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_SELECT_NEXT));
+}
+
+void test_c3_button_a_toggles_back_out_of_chore_mode(void) {
+    flow_mode = APP_MODE_CHORES;
+    mock_time_set(flow_at(16, 0));
+
+    TEST_ASSERT_TRUE(flow_dispatch(BTN_A, flow_at(16, 0), TIMER_IDLE, true));
+
+    TEST_ASSERT_EQUAL_INT(APP_MODE_TIMERS, (int)flow_mode);
+}
+
+/* A REFUSED press reports false and stores nothing — the same shape as a
+   refused B or C. False is what stops the caller spending a paint on a
+   press that did nothing; the mode assertion is what stops a refusal that
+   toggled anyway. */
+void test_c3_a_refused_button_a_reports_false_and_stores_nothing(void) {
+    flow_a_allowed = false; /* a RUNNING timer, or no chores configured */
+    flow_mode = APP_MODE_TIMERS;
+    mock_time_set(flow_at(16, 0));
+
+    TEST_ASSERT_FALSE(flow_dispatch(BTN_A, flow_at(16, 0), TIMER_RUNNING, true));
+
+    TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_A_APPLY)); /* the map WAS asked */
+    TEST_ASSERT_EQUAL_INT(APP_MODE_TIMERS, (int)flow_mode);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(0, flow_log_count(EV_SET_MODE), "a refused Button A still wrote the mode");
+}
+
+/* --- HAZARD: the break-end / toggle collision --- */
+
+/* THE CASE THIS TASK MOST NEEDS. On the button path the action runs
+   first, and render_action_result() drains the break end BEFORE the
+   paint — where M2-T2's revert stores APP_MODE_TIMERS UNCONDITIONALLY
+   (wake_flow.c, and deliberately so: see the comment there). So the
+   obvious A arm produces:
+
+       press A  -> toggle writes APP_MODE_CHORES
+       drain    -> break end writes APP_MODE_TIMERS
+       paint    -> Timers
+
+   The press is silently undone and the panel shows exactly what it showed
+   before — the "mode button does nothing" failure, arriving from the
+   opposite direction to the one M2-T2's emptied-list guard was written to
+   prevent.
+
+   Draining first instead only ROTATES that failure onto the other
+   direction (the toggle would flip from the reverted value, so a press
+   made in chore mode lands back in chores), which is why the arm applies,
+   drains, and then re-asserts what the press chose. This case and the one
+   below it are the two directions, and BOTH have to pass — either pure
+   ordering passes one and fails the other.
+
+   Driven through the break tail poll rather than through flow_dispatch,
+   because the collision is only reachable where render_action_result()
+   runs — the dispatch alone would pass with either order. */
+void test_c3_a_break_end_in_the_same_wake_does_not_undo_the_toggle(void) {
+    mock_time_set(flow_at(15, 0));
+    flow_mode = APP_MODE_TIMERS;
+    flow_chore_count = 3;
+    flow_state = TIMER_PAUSED;
+    flow_arm_break(flow_at(14, 59), FLOW_PIANO, FLOW_SCREEN); /* an end nothing has drained */
+    flow_press(BTN_A);
+
+    TEST_ASSERT_TRUE(wake_flow_poll_break_buttons());
+
+    TEST_ASSERT_EQUAL_INT_MESSAGE(1, flow_log_count(EV_CHIME), "the premise: the break end really was drained here");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(APP_MODE_CHORES, (int)flow_mode,
+                                  "the break-end revert landed on top of the toggle and undid the press");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(APP_MODE_CHORES, (int)flow_painted_mode,
+                                  "the panel painted Timers over a press of the mode button");
+}
+
+/* THE OTHER DIRECTION, and the case that rejects "just drain first". The
+   panel is showing the chore screen, a break ends in the same wake, and
+   the kid presses A to go back to Timers. Drain-first would revert to
+   Timers and then toggle INTO chores — the press appears dead again, from
+   the third side. Apply-drain-reassert lands on Timers, which is both what
+   the press asked for and what the break end wanted. */
+void test_c3_a_break_end_still_reverts_when_the_press_leaves_chore_mode(void) {
+    mock_time_set(flow_at(15, 0));
+    flow_mode = APP_MODE_CHORES;
+    flow_chore_count = 3;
+    flow_state = TIMER_PAUSED;
+    flow_arm_break(flow_at(14, 59), FLOW_PIANO, FLOW_SCREEN);
+    flow_press(BTN_A);
+
+    TEST_ASSERT_TRUE(wake_flow_poll_break_buttons());
+
+    TEST_ASSERT_EQUAL_INT_MESSAGE(APP_MODE_TIMERS, (int)flow_mode,
+                                  "a break end plus a press of A left the device in chore mode");
+}
+
+/* THE STRANDING GUARD. The arm returns BEFORE it drains when the toggle
+   is refused, so a refused A leaves the break-end edge exactly where a
+   refused B leaves it — latched, for a later consumer or the sleep safety
+   net. Draining and then reporting false would eat the edge and paint
+   nothing: `take` is a consuming read, so the chime, the snap back and
+   the wake-sticky full refresh would be gone together. That is the
+   stranded-latch failure this codebase has shipped once already, and it
+   is why the refusal is tested first rather than after the drain. */
+void test_c3_a_refused_button_a_leaves_the_break_end_latched(void) {
+    mock_time_set(flow_at(15, 0));
+    flow_a_allowed = false; /* a timer is running behind the break */
+    flow_mode = APP_MODE_TIMERS;
+    flow_state = TIMER_PAUSED;
+    flow_arm_break(flow_at(14, 59), FLOW_PIANO, FLOW_SCREEN);
+    flow_press(BTN_A);
+
+    TEST_ASSERT_FALSE(wake_flow_poll_break_buttons());
+
+    TEST_ASSERT_EQUAL_INT_MESSAGE(0, flow_log_count(EV_CHIME), "a refused Button A drained the break end and ate it");
+    TEST_ASSERT_FALSE(wake_flow_break_ended_this_wake());
+    TEST_ASSERT_EQUAL_INT_MESSAGE(APP_MODE_TIMERS, (int)flow_mode, "a refused press moved the mode after all");
+    /* THE assertion, and it has to be the owner rather than the sleep
+       safety net: the latch is set by timer_break_tick(), which the owner
+       runs and the raw take at sleep does not, so a net that saw nothing
+       would prove only that nothing had ticked yet. Asking the owner
+       afterwards is the direct question — is the edge still there? — and
+       it comes back with the chime and the snap back intact. */
+    TEST_ASSERT_TRUE_MESSAGE(wake_flow_break_end(),
+                             "the refused press consumed the break end a later consumer was owed");
+    TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_CHIME));
+}
+
+/* --- the two pick masks --- */
+
+/* The break tail's ALLOWED mask. 2.6 wants chore mode reachable
+   THROUGHOUT a break, and this poll is the only consumer of a press
+   latched during one — so A being outside the mask here is the difference
+   between "the checklist is where you do chores while the screen is
+   locked" and a dead button for the whole break. */
+void test_c3_the_break_tail_poll_acts_on_a_lone_button_a_press(void) {
+    flow_state = TIMER_BREAK;
+    flow_mode = APP_MODE_TIMERS;
+    flow_chore_count = 3;
+    flow_press(BTN_A);
+    mock_time_set(flow_at(16, 0));
+
+    TEST_ASSERT_TRUE(wake_flow_poll_break_buttons());
+
+    TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_A_APPLY));
+    TEST_ASSERT_EQUAL_INT(APP_MODE_CHORES, (int)flow_mode);
+    TEST_ASSERT_EQUAL_INT(1, FLOW_RENDERS());
+    TEST_ASSERT_EQUAL_HEX8(0, flow_latch_residue());
+}
+
+/* PRIORITY, which admitting A to the mask does not change: button_latch_pick
+   runs B > C > D > A, so a B press latched alongside an A press still
+   wins. This is the property that made adding A to the mask safe at all —
+   the old comment at both sites said A was excluded so it could not
+   swallow a real press, and that reason died when the priority table
+   moved A to last. Pinned here so the mask and the table cannot drift. */
+void test_c3_a_button_b_press_still_beats_a_button_a_press(void) {
+    flow_state = TIMER_PAUSED;
+    flow_b_result = BTN_B_STARTED;
+    flow_press(BTN_A);
+    flow_press(BTN_B);
+    mock_time_set(flow_at(16, 0));
+
+    TEST_ASSERT_TRUE(wake_flow_poll_break_buttons());
+
+    TEST_ASSERT_EQUAL_INT_MESSAGE(1, flow_log_count(EV_B_APPLY), "Button A swallowed a Button B press");
+    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_A_APPLY));
+    TEST_ASSERT_EQUAL_INT_MESSAGE(APP_MODE_TIMERS, (int)flow_mode, "the swallowed press toggled the mode anyway");
+}
+
+/* The tick-wake latch drain: a press made while the wake was already
+   awake (a sync, a grid wait, an e-ink flush). Without A in this mask the
+   press evaporates at deep sleep — which is the same nothing as before
+   the binding existed, on the path a kid is most likely to use it from
+   (the panel is visibly busy, so they press again). */
+void test_c3_the_tick_wake_latch_drain_acts_on_a_latched_button_a_press(void) {
+    flow_tick_clock(flow_at(15, 0));
+    flow_mode = APP_MODE_TIMERS;
+    flow_chore_count = 3;
+    flow_press(BTN_A);
+
+    TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_tick());
+
+    TEST_ASSERT_EQUAL_INT_MESSAGE(1, flow_log_count(EV_A_APPLY),
+                                  "a Button A press latched during the wake never reached the toggle");
+    TEST_ASSERT_EQUAL_INT(APP_MODE_CHORES, (int)flow_mode);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(APP_MODE_CHORES, (int)flow_painted_mode,
+                                  "the toggle landed but the wake painted the old screen");
+}
+
+/* --- the EXT1 decode --- */
+
+/* A wake CAUSED by A. The decode has to name it or the press only ever
+   repaints the screen it was pressed to leave. */
+void test_c3_a_button_a_ext1_wake_toggles_the_mode(void) {
+    flow_tick_clock(flow_at(15, 0));
+    flow_mode = APP_MODE_TIMERS;
+    flow_chore_count = 3;
+    flow_wakeup_btn = BTN_A;
+
+    TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_button());
+
+    TEST_ASSERT_EQUAL_INT_MESSAGE(1, flow_log_count(EV_A_APPLY), "the EXT1 decode has no Button A case");
+    TEST_ASSERT_EQUAL_INT(APP_MODE_CHORES, (int)flow_mode);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(APP_MODE_CHORES, (int)flow_painted_mode,
+                                  "a Button A wake repainted the timer screen it was pressed to leave");
+}
+
+/* THE RESIDUAL, pinned so it is recorded behaviour rather than an
+   accident waiting to be "fixed" into something worse. A caller that
+   drains the break end in its prologue, ABOVE the dispatch, leaves the
+   arm's re-assert nothing to rescue: the mode is already Timers by the
+   time button_a_apply() reads it, so the press toggles INTO chores rather
+   than out of them.
+
+   IT IS NOT ONE PATH. An earlier revision of this comment said "the two
+   latch-drain paths do not have that prologue and get the press they were
+   given", and that is false for one of them:
+   wake_flow_handle_timer_tick calls wake_flow_break_end() twice
+   UNCONDITIONALLY (once after rollover + bedtime, once after the grid
+   wait) and only then drains its latch, so it has exactly the prologue
+   this one does. The next test is its twin and exists because the diff
+   that added this one asserted the tick path was clean. Only
+   wake_flow_poll_break_buttons has no prologue, which is why the break
+   tail is the one caller the arm's ordering fully protects.
+
+   Left alone deliberately, on both paths. Moving those drains below the
+   dispatch would change what `before` is for Button B and Button C as
+   well — their position is what lets a snap back ride the wake-sticky
+   promotion instead of confusing the state diff — and the cost is one
+   extra press in a wake where the break ended and the kid pressed A
+   before the scheduled break-end wake could repaint. */
+void test_c3_an_ext1_wake_that_also_drains_a_break_end_toggles_from_timers(void) {
+    flow_tick_clock(flow_at(15, 0));
+    flow_mode = APP_MODE_CHORES;
+    flow_chore_count = 3;
+    flow_wakeup_btn = BTN_A;
+    flow_arm_break(flow_at(14, 59), FLOW_PIANO, FLOW_SCREEN);
+
+    TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_button());
+
+    TEST_ASSERT_EQUAL_INT_MESSAGE(1, flow_log_count(EV_CHIME), "the premise: the prologue really drained the edge");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(APP_MODE_CHORES, (int)flow_mode,
+                                  "the EXT1 residual changed: the press now toggles from the pre-revert mode");
+}
+
+/* THE SECOND OCCURRENCE of the residual above, on the tick-wake latch
+   drain. Same shape, same cost, same reason for being left alone — the
+   only difference is that the prologue here is two unconditional
+   wake_flow_break_end() calls rather than one.
+
+   This test exists because the change that introduced the A arm asserted
+   the opposite in two places at once (the arm's own comment and the EXT1
+   call site both said the latch-drain callers had no prologue), which
+   would have sent the next reader looking for a bug that is not there —
+   or, worse, "fixing" the tick drain's ordering, which moves `before` for
+   Button B and Button C too. Pinning it is the cheap half of that. */
+void test_c3_a_tick_latch_drain_after_a_break_end_toggles_from_timers(void) {
+    flow_tick_clock(flow_at(15, 0));
+    flow_mode = APP_MODE_CHORES;
+    flow_chore_count = 3;
+    flow_arm_break(flow_at(14, 59), FLOW_PIANO, FLOW_SCREEN);
+    flow_press(BTN_A);
+
+    TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_tick());
+
+    TEST_ASSERT_EQUAL_INT_MESSAGE(1, flow_log_count(EV_CHIME),
+                                  "the premise: the tick prologue really drained the edge before the latch drain");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(1, flow_log_count(EV_A_APPLY), "the latched Button A press never reached the toggle");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(APP_MODE_CHORES, (int)flow_mode,
+                                  "the tick-drain residual changed: the press now toggles from the pre-revert mode");
+}
+
+/* A refused A wake still paints — the handler's tail runs regardless of
+   what the dispatch reported, exactly as it does for a refused B. The
+   press cost a wake here because the device was already awake enough to
+   decode it; what stops that costing a wake in the ordinary case is the
+   wake mask, one layer down (test_buttons_policy). */
+void test_c3_a_refused_button_a_wake_repaints_the_current_screen(void) {
+    flow_tick_clock(flow_at(15, 0));
+    flow_a_allowed = false;
+    flow_mode = APP_MODE_CHORES;
+    flow_chore_count = 3;
+    flow_wakeup_btn = BTN_A;
+
+    TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_button());
+
+    TEST_ASSERT_EQUAL_INT_MESSAGE(APP_MODE_CHORES, (int)flow_mode, "a refused Button A wake moved the mode");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(APP_MODE_CHORES, (int)flow_painted_mode,
+                                  "a refused Button A wake painted the other screen");
+}
+
+/* --- the emptied-list guard, from the other side (hazard 2) --- */
+
+/* M2-T2's guard runs at PAINT time and STORES: if the list reads back
+   empty it writes APP_MODE_TIMERS. So it can, in principle, clobber a
+   toggle made earlier in the same wake — the second way round to the same
+   "does nothing" failure.
+
+   It cannot in practice, and this is where that is written down: the
+   predicate behind button_a_toggle_allowed() refuses a toggle INTO chore
+   mode when no chores are configured, so the guard never meets a toggle
+   it would have to undo. What remains is the genuinely racy case — a list
+   emptied by an MQTT config edit that lands AFTER the press, in the same
+   wake — where the guard is correct to win: there is nothing to paint a
+   checklist from. That is this case, and the guard winning is the
+   assertion, not the bug. */
+void test_c3_a_config_edit_that_empties_the_list_after_the_press_still_wins(void) {
+    flow_tick_clock(flow_at(15, 0));
+    flow_mode = APP_MODE_TIMERS;
+    flow_chore_count = 3; /* a list, at the moment of the press */
+    flow_press(BTN_A);
+
+    /* The edit lands between the action and the paint, exactly as
+       config_apply's apply_chores does on the network task. */
+    flow_chore_count = 0;
+
+    TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_tick());
+
+    TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_A_APPLY)); /* the press landed */
+    TEST_ASSERT_EQUAL_INT_MESSAGE(APP_MODE_TIMERS, (int)flow_painted_mode,
+                                  "a chore screen with no chores on it reached the panel");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(APP_MODE_TIMERS, (int)flow_mode,
+                                  "the emptied-list guard rendered the fallback but left the stored mode in chores");
+}
+
 /* ---- the OTA call sites -------------------------------------------------
 
    Four things, and only the first two of the four are decisions this
@@ -7393,8 +7805,8 @@ int main(void) {
     RUN_TEST(test_a_start_on_an_already_synced_wake_opens_no_second_window);
     RUN_TEST(test_a_resume_takes_exactly_the_same_path_as_a_start);
     RUN_TEST(test_a_pause_neither_holds_nor_syncs_nor_moves_the_clock);
-    RUN_TEST(test_row19_button_a_does_nothing_at_all);
-    RUN_TEST(test_button_a_is_inert_in_every_state);
+    RUN_TEST(test_row19_button_a_touches_no_timer_machinery);
+    RUN_TEST(test_button_a_touches_no_slot_in_any_state);
     RUN_TEST(test_row20_a_swap_onto_an_expired_slot_reports_the_change);
     RUN_TEST(test_row20_the_reported_swap_suppresses_the_expiry_alert);
     RUN_TEST(test_row4_a_swap_during_a_break_renders_full_end_to_end);
@@ -7413,7 +7825,7 @@ int main(void) {
     RUN_TEST(test_the_break_tail_treats_a_map_reload_as_a_real_action);
     RUN_TEST(test_the_break_tail_acts_on_the_highest_priority_latched_press);
     RUN_TEST(test_the_break_tail_never_lets_a_latched_a_press_swallow_a_b_press);
-    RUN_TEST(test_a_lone_a_press_in_the_break_tail_is_consumed_and_ignored);
+    RUN_TEST(test_a_lone_refused_a_press_in_the_break_tail_is_consumed_and_ignored);
     RUN_TEST(test_the_break_tail_lets_button_c_move_to_another_timer);
     RUN_TEST(test_the_break_tail_never_opens_a_second_network_window);
     RUN_TEST(test_the_break_tail_hands_the_render_the_clock_the_action_left);
@@ -7578,7 +7990,7 @@ int main(void) {
     RUN_TEST(test_the_promoted_value_is_what_the_render_switch_reads);
     RUN_TEST(test_a_press_latched_during_the_wake_is_dispatched_before_sleep);
     RUN_TEST(test_a_latched_a_press_never_swallows_the_b_press_beside_it);
-    RUN_TEST(test_a_latched_a_press_alone_is_taken_and_discarded_by_the_tick_drain);
+    RUN_TEST(test_a_latched_a_press_alone_reaches_its_own_arm_and_no_slot);
     RUN_TEST(test_a_latched_d_press_is_never_dispatched_by_the_tick_drain);
     RUN_TEST(test_a_synced_wake_denies_the_latched_press_a_second_window);
     RUN_TEST(test_an_unsynced_wake_lets_the_latched_press_open_its_own_window);
@@ -7599,7 +8011,7 @@ int main(void) {
     RUN_TEST(test_the_bed_time_gate_can_end_a_button_wake);
     RUN_TEST(test_a_wake_press_is_dispatched_through_the_shared_guard_matrix);
     RUN_TEST(test_a_wake_press_on_button_b_runs_the_state_map);
-    RUN_TEST(test_a_wake_press_on_button_a_does_nothing);
+    RUN_TEST(test_a_wake_press_on_button_a_moves_no_timer);
     RUN_TEST(test_a_wake_press_is_always_allowed_its_network_window);
     RUN_TEST(test_button_d_syncs_before_the_paint_and_re_reads_the_clock);
     RUN_TEST(test_button_d_with_no_window_available_skips_the_ntp_wait);
@@ -7648,6 +8060,22 @@ int main(void) {
     RUN_TEST(test_c16_a_chore_mode_tick_wake_still_drains_the_break_end);
     RUN_TEST(test_c16_a_chore_mode_button_wake_still_drains_the_break_end);
     RUN_TEST(test_c17_an_unattended_chore_mode_wake_repaints_with_the_pixels_dark);
+
+    /* M2-T3: Button A reaches the toggle, on every path (row C3) */
+    RUN_TEST(test_c3_button_a_toggles_the_mode_in_the_dispatch);
+    RUN_TEST(test_c3_button_a_toggles_back_out_of_chore_mode);
+    RUN_TEST(test_c3_a_refused_button_a_reports_false_and_stores_nothing);
+    RUN_TEST(test_c3_a_break_end_in_the_same_wake_does_not_undo_the_toggle);
+    RUN_TEST(test_c3_a_break_end_still_reverts_when_the_press_leaves_chore_mode);
+    RUN_TEST(test_c3_a_refused_button_a_leaves_the_break_end_latched);
+    RUN_TEST(test_c3_the_break_tail_poll_acts_on_a_lone_button_a_press);
+    RUN_TEST(test_c3_a_button_b_press_still_beats_a_button_a_press);
+    RUN_TEST(test_c3_the_tick_wake_latch_drain_acts_on_a_latched_button_a_press);
+    RUN_TEST(test_c3_a_button_a_ext1_wake_toggles_the_mode);
+    RUN_TEST(test_c3_an_ext1_wake_that_also_drains_a_break_end_toggles_from_timers);
+    RUN_TEST(test_c3_a_tick_latch_drain_after_a_break_end_toggles_from_timers);
+    RUN_TEST(test_c3_a_refused_button_a_wake_repaints_the_current_screen);
+    RUN_TEST(test_c3_a_config_edit_that_empties_the_list_after_the_press_still_wins);
     RUN_TEST(test_a_day_rollover_arms_an_update_check_before_it_opens_the_window);
     RUN_TEST(test_a_day_that_has_not_rolled_over_arms_nothing);
     RUN_TEST(test_the_rollover_arm_carries_the_battery_and_the_charge_lock);

@@ -478,20 +478,91 @@ bool wake_flow_dispatch_button_action(button_id_t btn, time_t *now, timer_state_
                                       bool *selection_changed) {
     *selection_changed = false;
     switch (btn) {
-        case BTN_A:
-            /* Mode, and unbound this milestone: no action, no side effect,
-               nothing reported. No production caller can reach this arm
-               today — A is not in the EXT1 wake mask (buttons_policy.c),
-               the button-wake switch has no BTN_A case, and both drains
-               drop A from button_latch_pick's ALLOWED mask, so the pick
-               can never return it. It is kept as defence in depth for the
-               moment A gains a binding or a caller widens a mask, and the
-               suite exercises it by calling dispatch directly. Logged at
-               DEBUG on purpose: the design expects a week of mispresses
-               while the layout is learned, and an INFO line per mispress
-               is noise in every capture. */
-            ESP_LOGD(TAG, "button A pressed: no binding this milestone");
-            return false;
+        case BTN_A: {
+            /* The Timers/Chores mode toggle (design 4.2, row C3). Reached
+               from all three callers: the EXT1 decode below, the break
+               tail poll, and the tick-wake latch drain — A is in both
+               pick masks and in the wake mask (buttons_policy.c).
+
+               THE THREE LINES AFTER THE REFUSAL ARE THE WHOLE ARM, and
+               their order is the point. render_action_result() drains a
+               pending break end before it paints, and that drain stores
+               APP_MODE_TIMERS UNCONDITIONALLY (the long comment at
+               wake_flow_break_end says why it is right to). So an arm that
+               toggled and left the drain to the tail produces: toggle
+               writes CHORES, drain writes TIMERS, panel paints Timers —
+               the press silently undone, which in the field is
+               indistinguishable from a dead mode button.
+
+               Simply draining FIRST does not fix it, it only rotates it:
+               the toggle would then flip from the reverted value, so a
+               press made in chore mode would land back in chores. Both
+               pure orderings have exactly one direction in which the panel
+               ends up showing what it already showed. What has neither is
+               apply, drain, then RE-ASSERT WHAT THE PRESS CHOSE, which is
+               what these lines do — the drain's other effects (the chime,
+               the snap back, the wake-sticky full refresh) all stand, and
+               only its mode store is overruled.
+
+               Overruling it is not a quarrel with C16. Design 4.2 justifies
+               the break-end revert with "the kid did not press anything",
+               and in this arm the kid just did. An explicit press beats an
+               automatic revert; every other path into that revert is
+               untouched.
+
+               The drain has to happen HERE rather than being left to the
+               tail, because re-asserting after the tail is not possible —
+               the tail paints. Calling it twice is free: timer_break_take_ended
+               is a consuming read, so the tail's call finds nothing.
+
+               RESIDUAL, recorded rather than left to be found: it applies
+               to any caller that has ALREADY drained the break end before
+               entering the dispatch. Then the arm's own drain finds
+               nothing, `chosen` was computed from the reverted mode, and a
+               press made in chore mode during that one wake lands back in
+               chores. It costs one more press, never a press that does
+               nothing at all.
+
+               There are TWO such callers, not one. Both are pinned:
+                 - wake_flow_handle_button_wake (EXT1), which drains just
+                   above its `before` capture. Pinned by
+                   test_c3_an_ext1_wake_that_also_drains_a_break_end_toggles_from_timers.
+                 - wake_flow_handle_timer_tick's latch drain, which is
+                   reached only AFTER two unconditional wake_flow_break_end()
+                   calls (:1289 and :1343). An earlier revision of the
+                   comment at the EXT1 call site asserted this path had no
+                   such prologue; it has one, and the residual is therefore
+                   identical here. Pinned by
+                   test_c3_a_tick_latch_drain_after_a_break_end_toggles_from_timers.
+
+               wake_flow_poll_break_buttons is the only caller with no
+               prologue, and so the only one the arm's ordering fully
+               protects. Not fixed in either place: moving those drains is
+               a change to B and C as well, since their position feeds
+               `before`. */
+            const btn_a_action_t act = button_a_apply();
+            if (act == BTN_A_NONE) {
+                /* A RUNNING active slot, or no chore list configured
+                   (button_actions.h). Both are ordinarily kept off this
+                   path by the wake mask, so an INFO line here is rare
+                   rather than the per-mispress noise the unbound arm this
+                   replaces was demoted to DEBUG for.
+
+                   Returning before the drain, so a refused A leaves the
+                   break-end edge exactly where a refused B leaves it —
+                   latched, for a later consumer or the sleep safety net.
+                   A refusal must not consume an edge it then cannot get
+                   painted. */
+                ESP_LOGI(TAG, "button A refused (state %d)", (int)before);
+                return false;
+            }
+            const app_mode_t chosen = timer_mode(); /* read back, so the mapping has one home */
+            (void)wake_flow_break_end();
+            timer_set_mode(chosen);
+            ESP_LOGI(TAG, "button A: %s",
+                     (act == BTN_A_CHORES) ? "painting the chore checklist" : "back to the timer screen");
+            return true;
+        }
         case BTN_B:
             /* THE break guard — a short circuit and a diagnostic, NOT a
                behavioural difference from the break gate inside
@@ -669,12 +740,18 @@ bool wake_flow_poll_button_b_action(void) {
 bool wake_flow_poll_break_buttons(void) {
     /* Unmasked take, unlike the two polls above: this is the last
        consumer before sleep, so anything left latched is discarded
-       anyway. A and D are excluded from the PICK rather than from the
-       take — A because it has no binding, so admitting it would let it
-       win the pick and swallow the B or C press latched alongside it. The
-       take still clears A's bit, so a dropped A press is discarded here
-       rather than left pending for a later consumer. */
-    int pick = button_latch_pick(buttons_take_pressed(), (1u << BTN_B) | (1u << BTN_C));
+       anyway. D alone is excluded from the PICK rather than from the
+       take; it reaches the dispatch's outer default arm and is refused
+       there in any case, so the exclusion is documentation more than
+       behaviour (see the test that says so).
+
+       A IS IN THE MASK, and this poll is where that matters most: 2.6
+       wants the chore checklist reachable throughout a screen break, and
+       a press made during one has no other consumer. Admitting A cannot
+       swallow a real press — button_latch_pick runs B > C > D > A, so a B
+       or C press latched alongside it still wins. That priority table is
+       what made this safe; the old exclusion here predates it. */
+    int pick = button_latch_pick(buttons_take_pressed(), (1u << BTN_A) | (1u << BTN_B) | (1u << BTN_C));
     if (pick < 0)
         return false;
     time_t now = hal_time_now();
@@ -1333,12 +1410,12 @@ void wake_flow_handle_timer_tick(void) {
        e-ink flush) is in the latch — act on it now or it evaporates at
        deep sleep (losing the start/pause race against the minute render).
        Same guards as a wake press via the shared dispatch; D stays
-       wake-press-only, and A is out of the candidate set for the same
-       reason as in the break tail — no binding, so it could only win the
-       pick and swallow the press next to it. Must run BEFORE
-       maybe_wait_for_event: the final-minute watch discards pre-watch
-       latched presses at entry. */
-    int pick = button_latch_pick(buttons_take_pressed(), (1u << BTN_B) | (1u << BTN_C));
+       wake-press-only, and A is in the candidate set for the same reason
+       as in the break tail — it has a binding now, and the pick's
+       B > C > D > A priority keeps it from swallowing the press next to
+       it. Must run BEFORE maybe_wait_for_event: the final-minute watch
+       discards pre-watch latched presses at entry. */
+    int pick = button_latch_pick(buttons_take_pressed(), (1u << BTN_A) | (1u << BTN_B) | (1u << BTN_C));
     if (pick >= 0) {
         timer_state_t painted = timer_get_state();
         bool swapped = false;
@@ -1384,11 +1461,26 @@ void wake_flow_handle_button_wake(void) {
     bool swapped = false;
 
     switch (btn) {
-        /* A is absent on purpose: it is not in the EXT1 wake mask, so the
-           decode cannot report it, and it has no action to run if the
-           silicon ever did. It falls to the default arm below and paints
-           the current state like any other undecoded wake, which is the
-           same nothing the dispatch's own A arm would do. */
+        /* A rides with B and C: same dispatch, same tail. It shares their
+           arm rather than getting one of its own because there is nothing
+           of the wake to special-case — the mode is a render selector, so
+           a toggle owes the panel the same repaint a swap does and
+           nothing more. `allow_net_window` is passed true for the same
+           reason it is for C: the A arm never consults it (only B's start
+           and resume open a window), so the value is uniform here rather
+           than encoding a distinction that does not exist.
+
+           A break end is drained above, before `before` is captured, so
+           the drain inside the dispatch's A arm finds nothing on this
+           path. That arm's ordering exists for
+           wake_flow_poll_break_buttons (the break tail), which is the
+           ONLY caller with no such prologue — do not write "the two
+           latch-drain callers" here, which an earlier revision did and
+           which is false: wake_flow_handle_timer_tick drains at :1289 and
+           again at :1343, both unconditional and both above its own latch
+           drain, so the tick path has the same prologue this one does and
+           carries the same residual (see the A arm). */
+        case BTN_A:
         case BTN_B:
         case BTN_C:
             wake_flow_dispatch_button_action(btn, &now, before, true, &swapped);

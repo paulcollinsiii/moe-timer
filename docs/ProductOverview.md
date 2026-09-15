@@ -157,8 +157,9 @@ a kid on a 15 min eye rest can go and run Piano or Violin.
   plus a swap hint over Button C. The break can be earned entirely by a
   non-eligible extra timer, with Screen never started that day.
 - During, with Screen selected: Button B is ignored — no early resume, and
-  no reload either, since Screen is never reloadable; A has no binding;
-  C and D work.
+  no reload either, since Screen is never reloadable; A switches to the
+  chore checklist when one is configured (a BREAK is not RUNNING, so the
+  mode toggle stays live right through a break); C and D work.
 - During, with an extra timer selected: the normal layout for that timer,
   with an inverted `BREAK m:ss` chip in the header where `Last sync`
   normally sits. A **break-eligible** timer starts, pauses, expires and
@@ -230,12 +231,12 @@ All state is persisted in **RTC slow memory** (survives deep sleep) with an NVS 
 
 | Button | GPIO | Action |
 |--------|------|--------|
-| A | 15 | **Nothing.** Reserved as a mode key for a later feature: no action, no label, and not a wake source in this firmware |
+| A | 15 | **Mode toggle**: switches the panel between the timer screen and the chore checklist. Refused — and not a wake source, and no label — while the active slot is RUNNING or when no chore list is configured. No label yet even when it *is* allowed |
 | B | 14 | Start (IDLE/PAUSED → RUNNING, immediate; NTP sync after) / Pause (RUNNING → PAUSED) / Resume. During a Screen Break, a **start** is refused on any slot that is not break-eligible — including Screen — and the ▶ label is not drawn (see 5a/5b); pausing is never gated. On an **EXPIRED** slot, where B has no start or pause job left that day, B instead **reloads** the timer to full duration when the slot is reloadable; Screen has no def and is never reloadable |
 | C | 12 | Swap timer type (Screen → extra 1 → … → Screen); refused while RUNNING (a Screen Break does **not** refuse — see 5a) |
 | D | 11 | Force NTP re-sync + full display refresh |
 
-Wake sources: B and D always; C only when its press would succeed, since the EXT1 mask is rebuilt at every sleep entry and a press that could only be refused must not burn battery or a panel refresh. C: extra timers configured AND the active timer not RUNNING — a Screen Break leaves C live, so the mask keeps it as a wake source throughout. **A never wakes the device, because it has no binding to act on**; a button that gains one later becomes a conditional wake source like C rather than an unconditional one. Buttons are debounced in software (10 ms).
+Wake sources: B and D always; A and C only when their press would succeed, since the EXT1 mask is rebuilt at every sleep entry and a press that could only be refused must not burn battery or a panel refresh. C: extra timers configured AND the active timer not RUNNING — a Screen Break leaves C live, so the mask keeps it as a wake source throughout. A: a chore list configured AND the active slot not RUNNING — a Screen Break leaves A live too, which is what makes the checklist reachable during a break. **A's two gates are deliberately not C's**: the mode toggle does not inherit C's "extra timers must exist" condition, so a device with no extra timers still reaches its chore list. On a device that has never had a chore list pushed to it — which is every device until Home Assistant sends one — A never wakes at all. Buttons are debounced in software (10 ms).
 
 B is armed unconditionally even though a handful of states refuse it — an expired slot that is not reloadable, or Screen during a break. That is a deliberate overshoot of the "a press that could only be refused must not wake" rule, because the failure is asymmetric: arming B when it would do nothing costs a single wake, while failing to arm it when it *would* have acted makes the device's primary control dead to the press, with no feedback to tell that apart from a flat battery. C can be gated safely because a refused swap has a visible alternative.
 
@@ -302,8 +303,8 @@ With no extra timers configured there is nothing to swap to, so the break
 screen keeps its original centred `Timer paused - 1:30:00 left` footer and
 no button row.
 
-Button labels sit above the physical buttons. A is always blank — it has
-no binding. B shows the single action its press will take: play when
+Button labels sit above the physical buttons. A is always blank — the mode
+toggle has a binding but no label yet. B shows the single action its press will take: play when
 IDLE/PAUSED (and only when a start would be allowed), pause when RUNNING,
 "Reload" when the slot is EXPIRED *and* reloadable, and nothing at all
 otherwise. C shows a swap arrow when extra timers are configured and the
