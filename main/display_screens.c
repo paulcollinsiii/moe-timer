@@ -178,17 +178,177 @@ static void build_main_header(lv_obj_t *scr, const display_state_t *st) {
     lv_obj_set_style_text_letter_space(sync, 1, 0);
 }
 
-/* Row 26-50: progress bar (+ low-battery badge riding it) */
+/* The main progress bar's box. LV_ALIGN_TOP_MID on a 296 px panel puts
+   the 284 px bar at x=6, and lv_bar maps its 0..280 range across that
+   whole 284 px — the indicator starts at the bar's OUTER edge and the
+   2 px border is painted over its ends (measured, and pinned by
+   test_the_free_tranche_drains_at_the_same_rate_as_an_ungated_bar).
+
+   So 280 is a scale, not a pixel count, and the locked block below is
+   placed in the same scale from the same origin: it is a bar-value wide
+   plus the two borders it carries. That is what keeps it aligned with a
+   fill it does not compute. The 280 here and BAR_FILL_MAX_PX in
+   display_layout.c are the same number and must stay so.
+
+   The break and TIME'S UP bars are 284x16 boxes of their own and do not
+   use these: nothing is ever laid over them. */
+#define MAIN_BAR_W 284
+#define MAIN_BAR_H 24
+#define MAIN_BAR_Y 26
+#define MAIN_BAR_BORDER 2
+#define MAIN_BAR_X ((DISP_HOR - MAIN_BAR_W) / 2)
+#define MAIN_BAR_INNER_W (MAIN_BAR_W - 2 * MAIN_BAR_BORDER)
+/* The locked label's inset inside the block, each side. A margin, and
+   NOT the threshold below which the label disappears: 2 * PAD is 8 px,
+   and a 9 px block clears it while being nowhere near wide enough to
+   hold a word. What actually decides whether a label is drawn is
+   build_locked_block's fit ladder below, and the threshold is the
+   MEASURED width of the narrowest rung, so it moves with the figure:
+   "40 min" is 43 px and needs a 51 px block, a one-digit "9 min" 34 px
+   and 42, "240 min" 50 px and 58. Below its own threshold each figure
+   draws nothing at all.
+
+   An empty outline is a true statement, and a lossy one: the withheld
+   figure is on no other screen. The status row carries the day's DEFAULT
+   ("Weekday - 60 min") and the checklist carries acks, so all that
+   survives a suppressed label is the block's own share of the bar. That
+   is still the better trade — a fragment of a glyph reads as damage on
+   an outline rather than as a word, and a clipped figure is worse again,
+   because it reads as a number. */
+#define LOCKED_LABEL_PAD 4
+
+/* The chore gate on the bar (§4.1): an outlined, UNFILLED block held at
+   the left, with the free tranche draining to its right.
+
+   Built as an empty lv_bar so it takes style_bar()'s exact frame. The
+   block shares the bar's left, top and bottom border and its own right
+   border IS the divider, which is why the box is locked_px + two borders
+   wide: at locked_px == 280 that makes it 284, the bar itself, so a fully
+   gated day needs no special case in the GEOMETRY here — the two right
+   borders land on the same pixels rather than leaving a sliver. Its TEXT
+   is special-cased, and elsewhere: display_format_locked_block switches
+   wording on withheld >= allocation, because a block that is the whole
+   bar has no draining region beside it to say what the chores are for.
+
+   Nothing re-anchors the fill. The bar's value is the split's
+   fill_end_px, measured from the bar's own left edge as any bar value is,
+   and this block is simply laid over the part of it that is not free.
+   LVGL lays the bar's 280 units across the object's whole 284 px while
+   the block is placed in units 1:1, so below the fully gated end the
+   divider sits 4 - locked_px/70 px into the free fill: 4 px for any block
+   up to 69 px, 1 px by 210, and none at 280. The free tranche pays that
+   at its LEFT edge, where nothing is read, and keeps its RIGHT edge —
+   the one that moves.
+
+   So §4.1's "pixels-per-second stays uniform across the whole bar" is
+   exact at the seconds-to-UNITS conversion, which bar_px() in
+   display_layout.c is the single expression of, and holds to within those
+   4 px once LVGL has laid the units on glass: the free tranche's STATIC
+   width can be up to 4 px short of the same seconds on an ungated bar,
+   while its DRAIN RATE is the ungated one, both edges coming from the one
+   value-to-pixel map.
+
+   Unfilled, and black-on-white: a label over a filled bar would be
+   half-inverted (§4.1), and white-on-black at 12 pt is what the break
+   chip already had to abandon on this panel. 12 pt is PROVISIONAL —
+   M2-HW1 is a look at the real glass.
+
+   THE LABEL MUST NOT BE CLIPPED. The block's width is a config decision
+   (withheld / allocation of 280 px), not a layout one, and §4.1's
+   sentence needs a 127 px block for a two-digit figure and 134 for a
+   three-digit one; a 60 min day with chore_free 40
+   gives 93 px, where clipping renders "0/3 Chores - 2" for 20 locked
+   minutes — a complete, plausible, wrong number, which is worse than no
+   number. So the label degrades in steps instead (display_locked_form_t,
+   widest first) and this measures each one against the room there is,
+   keeping the first that fits whole and drawing nothing if none does.
+   Measured and not estimated: the widths are font metrics, and a
+   character budget cannot bound them (the same trap as CHORE_NAME_MAX_W
+   above).
+
+   NO cap_width() here, deliberately, and it is not an oversight to
+   "fix": a width cap is a CLIPPING mechanism, which is the one thing
+   this block must never do to a figure. The ladder already guarantees
+   the chosen string fits, so a cap could only ever be reached if the
+   ladder were broken — and then it would clip the number rather than
+   catch the fault, which is the bug this code exists to prevent. Mutation
+   confirmed it: with the ladder in place, deleting the cap changed no
+   pixel in any of the 44 render tests (mutant S3, m2t5-mutate.py), so it
+   was unreachable code that could only do harm. The margin before the
+   divider comes from the fit itself — the label sits at LOCKED_LABEL_PAD
+   and is no wider than locked_px - 2*PAD — and LVGL's clip to the parent
+   remains as the structural backstop, bounded by the block rather than
+   by a style. */
+static void build_locked_block(lv_obj_t *scr, const display_state_t *st, uint16_t locked_px) {
+    lv_obj_t *blk = lv_bar_create(scr);
+    lv_obj_set_size(blk, locked_px + 2 * MAIN_BAR_BORDER, MAIN_BAR_H);
+    lv_obj_align(blk, LV_ALIGN_TOP_LEFT, MAIN_BAR_X, MAIN_BAR_Y);
+    lv_bar_set_range(blk, 0, MAIN_BAR_INNER_W);
+    lv_bar_set_value(blk, 0, LV_ANIM_OFF); /* outlined and empty: the block is not a second countdown */
+    style_bar(blk, false);
+
+    const int32_t max_w = (int32_t)locked_px - 2 * LOCKED_LABEL_PAD;
+    if (max_w <= 0)
+        return;
+
+    /* A CHILD of the block, so the label centres on the block's own
+       height whatever 12 pt measures, and LVGL's clip to the parent backs
+       up the width cap. One label re-texted down the ladder rather than
+       one per rung: lv_obj_update_layout() re-measures it in place, and
+       the loser rungs never exist as objects. */
+    char buf[48];
+    lv_obj_t *lbl = make_label(blk, "", &lv_font_montserrat_12, LV_ALIGN_LEFT_MID, LOCKED_LABEL_PAD, 0);
+    for (int form = 0; form < DISPLAY_LOCKED_FORM_COUNT; form++) {
+        display_format_locked_block(buf, sizeof(buf), (display_locked_form_t)form, st->chore_acked, st->chore_count,
+                                    st->chore_withheld_sec, st->allocation_sec);
+        lv_label_set_text(lbl, buf);
+        lv_obj_update_layout(lbl);
+        /* The natural width, because no cap is ever put on this label — a
+           max-width style would make lv_obj_get_width() answer with the
+           cap and this comparison would be true of every string. */
+        if (lv_obj_get_width(lbl) <= max_w) {
+            return;
+        }
+    }
+    lv_obj_delete(lbl); /* not even the narrowest rung fits: the outline alone */
+}
+
+/* Row 26-50: progress bar (+ the chore gate's locked block, + low-battery
+   badge riding both) */
 static void build_main_bar(lv_obj_t *scr, const display_state_t *st) {
+    /* The gate is a statement about the DAY — always slot 0's allocation,
+       whichever timer is selected (see chore_withheld_sec in display.h).
+       This bar's denominator follows the SELECTION, so with an extra
+       timer drawn the two are different scales and a block measured in
+       one and painted against the other would be a fraction of the wrong
+       thing. Screen is the slot with no name, decided here exactly as
+       build_main_status decides which status line to write.
+       chore_count is re-tested because it is THE off switch (row C1) and
+       nothing else on this screen reads it; the released day needs no
+       test of its own, because chores_withheld_sec() has already
+       returned 0 for it. */
+    const bool screen_selected = (st->timer_name == NULL || st->timer_name[0] == '\0');
+    const uint32_t withheld = (screen_selected && st->chore_count > 0) ? st->chore_withheld_sec : 0;
+    const display_bar_split_t split = display_bar_split(st->remaining_sec, st->allocation_sec, withheld);
+
     lv_obj_t *bar = lv_bar_create(scr);
-    lv_obj_set_size(bar, 284, 24);
-    lv_obj_align(bar, LV_ALIGN_TOP_MID, 0, 26);
-    lv_bar_set_range(bar, 0, 280);
-    lv_bar_set_value(bar, display_bar_fill_px(st->remaining_sec, st->allocation_sec), LV_ANIM_OFF);
+    lv_obj_set_size(bar, MAIN_BAR_W, MAIN_BAR_H);
+    lv_obj_align(bar, LV_ALIGN_TOP_MID, 0, MAIN_BAR_Y);
+    lv_bar_set_range(bar, 0, MAIN_BAR_INNER_W);
+    lv_bar_set_value(bar, split.fill_end_px, LV_ANIM_OFF);
     style_bar(bar, false);
 
+    /* With nothing withheld fill_end_px IS display_bar_fill_px() and no
+       block is built, so every ungated screen renders byte-for-byte as it
+       did before the gate existed — which is what the untouched goldens
+       assert. */
+    if (split.locked_px > 0)
+        build_locked_block(scr, st, split.locked_px);
+
     /* Low battery (<= 15%): badge riding the bar — white background so it
-       reads over both the filled (black) and empty parts of the bar */
+       reads over both the filled (black) and empty parts of the bar.
+       Built last, so it rides over the locked block too rather than
+       disappearing under it. */
     if (st->charge_warn) {
         lv_obj_t *warn = make_label(scr, "Charge Me!!!", &lv_font_montserrat_16, LV_ALIGN_TOP_MID, 0, 29);
         lv_obj_set_style_text_color(warn, lv_color_black(), 0);

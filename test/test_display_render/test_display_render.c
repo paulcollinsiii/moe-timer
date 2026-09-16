@@ -906,6 +906,499 @@ void test_the_chore_button_row_fits_its_cells(void) {
     }
 }
 
+/* ---- the Screen bar's locked block (design §4.1) ----
+
+   §4.1's own worked day throughout: 60 min, chore_free 20 min, three
+   chores, so 2400 s are withheld and the block is 2400 * 280 / 3600 =
+   186 px of the bar's 280 px interior.
+
+   The bar painter reads three chore fields and no others — chore_count,
+   chore_acked and chore_withheld_sec — plus allocation_sec, which is the
+   denominator. chore_released is deliberately NOT one of them:
+   chores_withheld_sec() already returns 0 for a released day, so the
+   release reaches the panel as "nothing withheld" and there is one
+   source of truth rather than two that could disagree. */
+static display_state_t gated_state(uint8_t count, uint8_t acked, uint32_t withheld) {
+    display_state_t st = base_state();
+    st.chore_count = count;
+    st.chore_acked = acked;
+    st.chore_withheld_sec = withheld;
+    return st;
+}
+
+void test_main_chore_gated(void) {
+    /* IDLE on a gated day: remaining is the day's whole effective hour
+       (app_state.c), so the fill saturates at the divider and the free
+       tranche shows full — 40 min locked behind the chores, 20 min ready
+       to start. */
+    display_state_t st = gated_state(3, 0x00, 2400);
+    display_screens_build_main(&st);
+    assert_matches_golden("main_chore_gated");
+}
+
+void test_main_chore_gated_running(void) {
+    /* §4.1's screen: ten of the twenty free minutes spent, one chore
+       ticked. RUNNING, so the swap is refused and C carries no label. */
+    display_state_t st = gated_state(3, 0x01, 2400);
+    st.timer_state = TIMER_RUNNING;
+    st.remaining_sec = 600;
+    st.swap_available = false;
+    display_screens_build_main(&st);
+    assert_matches_golden("main_chore_gated_running");
+}
+
+void test_main_chore_fully_gated(void) {
+    /* chore_free == 0: the block is the whole bar, there is no draining
+       region, and the bar is just the text. */
+    display_state_t st = gated_state(3, 0x00, 3600);
+    display_screens_build_main(&st);
+    assert_matches_golden("main_chore_fully_gated");
+}
+
+/* A block too NARROW for §4.1's sentence — the case the other three
+   goldens all miss, and the reason the clipping bug shipped past them.
+   main_chore_gated and main_chore_gated_running both carry a 186 px block
+   and main_chore_fully_gated a 280 px one, which are the only two widths
+   on this screen where "0/3 Chores - NN min" fits whole; every golden
+   therefore agreed with a painter that clipped everything else.
+
+   60 min day with chore_free 40 — a perfectly ordinary configuration —
+   withholds 20 min, and withheld/allocation of 280 px is 93. The full
+   sentence needs 127 px there, so the old painter drew "0/3 Chores - 2":
+   a complete, plausible statement that 2 minutes were locked when 20
+   were. This golden holds the rung the ladder drops to instead,
+   "0/3 - 20 min" at 72 px inside the 85 px the block allots. */
+void test_main_chore_gated_narrow(void) {
+    display_state_t st = gated_state(3, 0x00, 1200);
+    display_screens_build_main(&st);
+    assert_matches_golden("main_chore_gated_narrow");
+}
+
+/* Rightmost ink in the bar's middle row, within the interior the 2 px
+   border leaves (x 8..287). The label sits to the LEFT of the fill inside
+   the block, so the rightmost black pixel is the free tranche's draining
+   edge whether or not a block is drawn. */
+static int32_t bar_fill_right_edge(const display_state_t *st) {
+    display_screens_build_main(st);
+    lv_refr_now(s_disp);
+    int32_t edge = -1;
+    for (int32_t x = 8; x <= 287; x++) {
+        int bit = (s_captured[37 * (HOR / 8) + x / 8] >> (7 - (x & 7))) & 1;
+        if (bit == 0) /* LVGL I1: 0 = black */
+            edge = x;
+    }
+    return edge;
+}
+
+/* THE invariant, measured on the glass rather than in the arithmetic:
+   "px/sec must be uniform across the boundary; a rescaled free tranche
+   silently changes the bar's meaning."
+
+   Spending 1040 s moves the draining edge by the SAME distance whether
+   those seconds came out of a 20-minute free tranche beside a locked
+   block or out of the whole undivided hour. A free tranche scaled to its
+   own width against the day would move it about 27 px instead of 82.
+   Deltas, not absolute positions: the test says nothing about where the
+   divider is, only that a second is worth the same distance either side
+   of it.
+
+   Both figures sit inside the free tranche and neither saturates the bar,
+   which matters — a fill at the bar's far end cannot be measured past the
+   2 px border, which is black whatever the fill is doing.
+
+   One pixel of tolerance, and exactly one. lv_bar maps its 0..280 range
+   across the object's whole 284 px (measured: the indicator starts at
+   x=6, the bar's outer edge, and the border is painted over its ends), so
+   a value converts to pixels with a truncation of its own on top of the
+   seconds->value truncation. Offsetting the free tranche by the block
+   lands that second truncation differently, and the residue is ±1 px. A
+   rate error is not: 2% over this span is already 2 px. */
+void test_the_free_tranche_drains_at_the_same_rate_as_an_ungated_bar(void) {
+    display_state_t gated = gated_state(3, 0x00, 2400);
+    gated.remaining_sec = 1100; /* nearly the whole 1200 s free tranche */
+    int32_t gated_hi = bar_fill_right_edge(&gated);
+    gated.remaining_sec = 60; /* nearly all of it spent */
+    int32_t gated_lo = bar_fill_right_edge(&gated);
+
+    display_state_t plain = base_state();
+    plain.remaining_sec = 1100;
+    int32_t plain_hi = bar_fill_right_edge(&plain);
+    plain.remaining_sec = 60;
+    int32_t plain_lo = bar_fill_right_edge(&plain);
+
+    int32_t gated_travel = gated_hi - gated_lo, plain_travel = plain_hi - plain_lo;
+    printf("gated edge %d -> %d (%d px), ungated %d -> %d (%d px)\n", (int)gated_hi, (int)gated_lo, (int)gated_travel,
+           (int)plain_hi, (int)plain_lo, (int)plain_travel);
+    TEST_ASSERT_TRUE_MESSAGE(gated_travel > 0, "the gated bar did not drain");
+    int32_t slip = gated_travel - plain_travel;
+    if (slip < 0)
+        slip = -slip;
+    char msg[128];
+    snprintf(msg, sizeof(msg), "1040 s moved the free tranche %d px and the undivided bar %d px", (int)gated_travel,
+             (int)plain_travel);
+    TEST_ASSERT_TRUE_MESSAGE(slip <= 1, msg);
+    /* And the block really was there — otherwise the two bars above are
+       the same bar and the equality is vacuous. */
+    TEST_ASSERT_TRUE_MESSAGE(gated_lo > plain_lo, "no locked block was drawn; the rate test proves nothing");
+}
+
+/* §4.1: "on release the block simply vanishes and the bar goes full width
+   with the ordinary remaining/allocation fill". Byte-identical to a day
+   that never had chores, which is the strongest form of "vanishes". */
+void test_the_locked_block_vanishes_when_the_day_releases(void) {
+    static uint8_t ungated[FB_BYTES];
+    /* Both ends of the bar, because they hide different mistakes. A full
+       bar is black from its own left edge, so anything drawn at zero
+       width there is black on black and invisible; an empty one shows it.
+       (Measured: a mutant that built the block unconditionally survived
+       the full-bar case alone and was caught only by an unrelated
+       golden.) */
+    static const int32_t REMAINING[] = {3600, 0};
+    for (size_t i = 0; i < sizeof(REMAINING) / sizeof(REMAINING[0]); i++) {
+        display_state_t plain = base_state();
+        plain.remaining_sec = REMAINING[i];
+        display_screens_build_main(&plain);
+        lv_refr_now(s_disp);
+        memcpy(ungated, s_captured, FB_BYTES);
+
+        /* Absolute, not relative: an emptied ungated bar has nothing
+           inside its border at all. The comparisons below cannot say
+           this — a block drawn unconditionally appears on BOTH frames and
+           cancels — and outside the goldens nothing else would. */
+        if (REMAINING[i] == 0) {
+            for (int32_t y = 28; y <= 47; y++) {
+                for (int32_t x = 8; x <= 287; x++) {
+                    int bit = (ungated[y * (HOR / 8) + x / 8] >> (7 - (x & 7))) & 1;
+                    char msg[96];
+                    snprintf(msg, sizeof(msg), "ink at x=%d y=%d inside an empty ungated bar", (int)x, (int)y);
+                    TEST_ASSERT_EQUAL_HEX8_MESSAGE(1, bit, msg);
+                }
+            }
+        }
+
+        display_state_t shut = gated_state(3, 0x00, 2400);
+        shut.remaining_sec = REMAINING[i];
+        display_screens_build_main(&shut);
+        lv_refr_now(s_disp);
+        TEST_ASSERT_TRUE_MESSAGE(memcmp(ungated, s_captured, FB_BYTES) != 0,
+                                 "the gate changed no pixel - the block never painted");
+
+        display_state_t open = gated_state(3, 0x07, 0); /* released: nothing withheld */
+        open.remaining_sec = REMAINING[i];
+        open.chore_released = true;
+        display_screens_build_main(&open);
+        lv_refr_now(s_disp);
+        char msg[80];
+        snprintf(msg, sizeof(msg), "a released day with %ld s left still carries the locked block", (long)REMAINING[i]);
+        TEST_ASSERT_EQUAL_MEMORY_MESSAGE(ungated, s_captured, FB_BYTES, msg);
+    }
+}
+
+/* Row C1's off switch, re-tested on the panel. chores_withheld_sec()
+   already returns 0 for an empty list, so this state cannot arrive from
+   app_state.c — the painter re-tests it because it is handed a snapshot
+   it cannot re-derive, and "0/0 Chores" is the one string this screen
+   could never mean.
+
+   It is also, deliberately, what the panel does about S2: a list emptied
+   mid-day leaves the withheld remainder stranded in the MODEL, and no
+   painter can invent a block for a list with no rows to tick. The bar
+   going back to undivided is the correct drawing of a wrong day; the
+   shortfall belongs to whoever fixes the mechanism. */
+void test_an_emptied_list_draws_no_block(void) {
+    static uint8_t ungated[FB_BYTES];
+    display_state_t plain = base_state();
+    display_screens_build_main(&plain);
+    lv_refr_now(s_disp);
+    memcpy(ungated, s_captured, FB_BYTES);
+
+    display_state_t emptied = gated_state(0, 0x00, 2400);
+    display_screens_build_main(&emptied);
+    lv_refr_now(s_disp);
+    TEST_ASSERT_EQUAL_MEMORY_MESSAGE(ungated, s_captured, FB_BYTES, "a list with no rows still drew a locked block");
+}
+
+/* The badge is built after the block so it rides over it, exactly as it
+   already rides over the fill. Its background is opaque, so its whole
+   bounding box must render identically gated and ungated — the box is
+   derived here by diffing a badged frame against an unbadged one rather
+   than guessed, and it straddles the divider at the worked day's 186 px,
+   which is what gives the test its teeth. Painted the other way round,
+   the block's white interior and its divider would come back through. */
+void test_the_charge_me_badge_still_rides_over_the_locked_block(void) {
+    static uint8_t plain_badge[FB_BYTES], plain_bare[FB_BYTES];
+    display_state_t plain = base_state();
+    display_screens_build_main(&plain);
+    lv_refr_now(s_disp);
+    memcpy(plain_bare, s_captured, FB_BYTES);
+    plain.charge_warn = true;
+    display_screens_build_main(&plain);
+    lv_refr_now(s_disp);
+    memcpy(plain_badge, s_captured, FB_BYTES);
+
+    int32_t x0 = HOR, x1 = -1, y0 = VER, y1 = -1;
+    for (int32_t y = 0; y < VER; y++) {
+        for (int32_t x = 0; x < HOR; x++) {
+            size_t i = (size_t)y * (HOR / 8) + (size_t)x / 8;
+            int b = 7 - (x & 7);
+            if (((plain_badge[i] >> b) & 1) == ((plain_bare[i] >> b) & 1))
+                continue;
+            if (x < x0)
+                x0 = x;
+            if (x > x1)
+                x1 = x;
+            if (y < y0)
+                y0 = y;
+            if (y > y1)
+                y1 = y;
+        }
+    }
+    printf("Charge Me!!! badge box x %d..%d y %d..%d (divider at x=194)\n", (int)x0, (int)x1, (int)y0, (int)y1);
+    TEST_ASSERT_TRUE_MESSAGE(x1 > x0 && y1 > y0, "the badge changed nothing - nothing to compare");
+    TEST_ASSERT_TRUE_MESSAGE(x1 >= 190, "the badge does not reach the divider; this test would prove nothing");
+
+    display_state_t gated = gated_state(3, 0x00, 2400);
+    gated.charge_warn = true;
+    display_screens_build_main(&gated);
+    lv_refr_now(s_disp);
+    for (int32_t y = y0; y <= y1; y++) {
+        for (int32_t x = x0; x <= x1; x++) {
+            size_t i = (size_t)y * (HOR / 8) + (size_t)x / 8;
+            int b = 7 - (x & 7);
+            char msg[96];
+            snprintf(msg, sizeof(msg), "x=%d y=%d differs - the locked block painted over the badge", (int)x, (int)y);
+            TEST_ASSERT_EQUAL_HEX8_MESSAGE((plain_badge[i] >> b) & 1, (s_captured[i] >> b) & 1, msg);
+        }
+    }
+}
+
+/* The trap the M2 notes flagged for T1, arriving on the panel: the gate is
+   always slot 0's DAY, while allocation_sec follows the SELECTION. With an
+   extra timer drawn, 2400 s against its 10 minutes would swallow the whole
+   bar and mean nothing. The block belongs to Screen's paint only. */
+void test_an_extra_timer_never_carries_the_days_locked_block(void) {
+    static uint8_t meditation[FB_BYTES];
+    display_state_t st = gated_state(3, 0x00, 0);
+    st.timer_name = "Meditation";
+    st.timer_state = TIMER_RUNNING;
+    st.allocation_sec = 600;
+    st.remaining_sec = 400;
+    st.swap_available = false;
+    display_screens_build_main(&st);
+    lv_refr_now(s_disp);
+    memcpy(meditation, s_captured, FB_BYTES);
+
+    st.chore_withheld_sec = 2400; /* the day's gate, not this timer's */
+    display_screens_build_main(&st);
+    lv_refr_now(s_disp);
+    TEST_ASSERT_EQUAL_MEMORY_MESSAGE(meditation, s_captured, FB_BYTES,
+                                     "the day's locked block reached an extra timer's bar");
+}
+
+/* The cap clips the DRAWING, not just the object — the same property the
+   version and mode rows are pinned for. A 10 min withholding of a 60 min
+   day is a 46 px block (46 * 3600 / 280 -> the design's own rate) holding
+   a label that wants ~100 px, and the corridor to its right has to stay
+   white or black text lands on the draining fill.
+
+   Bounds are spelled out rather than measured: the block's box is
+   BAR_X=6 plus its 2 px border, 46 px of interior and the 2 px divider,
+   so it ends at x=55 and the scan starts at 56. Rows are the bar's
+   interior, 28..47, the border rows 26/27 and 48/49 being black by
+   design. remaining_sec = 0 so the free tranche is empty and the whole
+   corridor is white; the state word above it is not what is under test. */
+/* The label the locked block is holding, or NULL if it holds none. The
+   block is the only lv_bar on the main screen with a child object: the
+   progress bar it is laid over has none (LVGL draws a bar's indicator as
+   a draw part, not an object), and the two otherwise share x, y and
+   sometimes width, so a child is the only thing that tells them apart. */
+static lv_obj_t *locked_label(void) {
+    lv_obj_t *scr = lv_screen_active();
+    for (uint32_t i = 0; i < lv_obj_get_child_count(scr); i++) {
+        lv_obj_t *o = lv_obj_get_child(scr, i);
+        if (!lv_obj_check_type(o, &lv_bar_class) || lv_obj_get_child_count(o) == 0)
+            continue;
+        lv_obj_t *c = lv_obj_get_child(o, 0);
+        if (lv_obj_check_type(c, &lv_label_class))
+            return c;
+    }
+    return NULL;
+}
+
+/* The margin between the last glyph and the divider, on the TIGHTEST
+   block the config domain can produce — an 8 min day with chore_free 6
+   withholds 2 min, which is 70 px of the 280, allotting exactly 62 px,
+   and "0/1 - 2 min" measures exactly 62. Zero slack anywhere in the
+   sweep, so the margin here is precisely LOCKED_LABEL_PAD on each side
+   and one pixel of drift in either direction fails.
+
+   Deliberately NOT the 46 px block this test used before the fit ladder
+   landed. 46 px allots 38 px and the narrowest rung ("10 min") needs 39,
+   so the painter now draws NO LABEL there — and a corridor scan with no
+   label in it passes for the wrong reason. The old version asserted the
+   margin of a label that, before the ladder, was a half-rendered "0/3 C"
+   and, after it, does not exist. Hence the explicit text assertion
+   below: this test must fail, not pass, if the ladder ever stops
+   drawing here. */
+void test_the_locked_label_cannot_overstrike_the_free_tranche(void) {
+    display_state_t st = gated_state(1, 0x00, 120);
+    st.allocation_sec = 480;
+    st.remaining_sec = 0;
+    display_screens_build_main(&st);
+    lv_refr_now(s_disp);
+
+    /* Anti-vacuity: the corridor below is white whether the label fits or
+       was never drawn, so pin which rung is on the glass. */
+    lv_obj_t *lbl = locked_label();
+    TEST_ASSERT_NOT_NULL_MESSAGE(lbl, "no label on a 70 px block - the corridor scan below would pass vacuously");
+    TEST_ASSERT_EQUAL_STRING_MESSAGE("0/1 - 2 min", lv_label_get_text(lbl),
+                                     "the tightest-fitting rung is not the one being measured");
+
+    /* With the free tranche empty the divider is the ONLY thing marking
+       the boundary — everywhere else it is the left edge of the fill and
+       black on black. Row 29 is above the label, so the block's interior
+       is clean there and the two border columns stand alone.
+       Block object is 70 + 2*2 = 74 px at x=6, so it spans x=6..79 and
+       its right border — the divider — is x=78,79. */
+    static const struct {
+        int32_t x;
+        int expect;
+    } EDGE[] = {{77, 1}, {78, 0}, {79, 0}, {80, 1}}; /* interior | divider | free */
+    for (size_t i = 0; i < sizeof(EDGE) / sizeof(EDGE[0]); i++) {
+        int bit = (s_captured[29 * (HOR / 8) + EDGE[i].x / 8] >> (7 - (EDGE[i].x & 7))) & 1;
+        char msg[96];
+        snprintf(msg, sizeof(msg), "x=%d should be %s - the block's right edge is not where it belongs", (int)EDGE[i].x,
+                 EDGE[i].expect ? "white" : "black");
+        TEST_ASSERT_EQUAL_HEX8_MESSAGE(EDGE[i].expect, bit, msg);
+    }
+
+    /* Two corridors, because LVGL clips a child to its parent and the cap
+       does something the clip does not. The clip alone stops the label at
+       the block's outer edge — which is the divider, black on black, so
+       an uncapped label reaching it is invisible there and a mutant that
+       drops the cap survives a scan of the free tranche. The cap's real
+       job is the margin: LOCKED_LABEL_PAD of clean white between the last
+       glyph and the divider, so the block reads as a box with a word in
+       it rather than as text wedged against a line.
+
+       x 74..77 is that margin (block interior 8..77, label from x=12 and
+       exactly 62 px wide, so ink ends at x=73); x 80..287 is the free
+       tranche, which the clip and the fit both have to keep white.
+       Bounds are the constants, not measured edges. */
+    for (int32_t y = 28; y <= 47; y++) {
+        for (int32_t x = 74; x <= 287; x++) {
+            if (x > 77 && x < 80)
+                continue; /* the divider itself: black by design */
+            int bit = (s_captured[y * (HOR / 8) + x / 8] >> (7 - (x & 7))) & 1;
+            char msg[112];
+            snprintf(msg, sizeof(msg), "ink at x=%d y=%d - the locked label spilled out of a 70 px block%s", (int)x,
+                     (int)y, (x <= 77) ? " (into the divider's margin)" : "");
+            TEST_ASSERT_EQUAL_HEX8_MESSAGE(1, bit, msg); /* LVGL I1: 1 = white */
+        }
+    }
+
+    /* And the LEFT inset, x 8..11 — the block's interior before the
+       label starts. Asserted here because the corridor above cannot see
+       it: drop LOCKED_LABEL_PAD from the label's offset and every glyph
+       shifts 4 px LEFT, which moves ink out of the right margin rather
+       than into it, so the scan above goes greener rather than redder.
+       Only the goldens caught that, and a golden says "a pixel moved",
+       not "the label lost its inset". */
+    for (int32_t y = 28; y <= 47; y++) {
+        for (int32_t x = 8; x <= 11; x++) {
+            int bit = (s_captured[y * (HOR / 8) + x / 8] >> (7 - (x & 7))) & 1;
+            char msg[112];
+            snprintf(msg, sizeof(msg), "ink at x=%d y=%d - the label lost its %d px inset from the block's left edge",
+                     (int)x, (int)y, LOCKED_LABEL_PAD);
+            TEST_ASSERT_EQUAL_HEX8_MESSAGE(1, bit, msg);
+        }
+    }
+}
+
+/* Width of `txt` at 12 pt with nothing constraining it — the width the
+   block has to find room for if the whole string is to be drawn.
+   Deliberately measured on a THROWAWAY label rather than on the painter's
+   own: lv_obj_get_width() of a label carrying a max-width style returns
+   the cap, so asking the real label how wide it is would answer "no wider
+   than its cap" whatever it holds, and the assertion below would pass on
+   a string cut in half. */
+static int32_t text_w_12(const char *txt) {
+    lv_obj_t *probe = lv_label_create(lv_screen_active());
+    lv_label_set_text(probe, txt);
+    lv_obj_set_style_text_font(probe, &lv_font_montserrat_12, 0);
+    lv_obj_update_layout(probe);
+    int32_t w = lv_obj_get_width(probe);
+    lv_obj_delete(probe);
+    return w;
+}
+
+/* THE invariant for the block's label: no rendered label may state a
+   number the day does not have.
+
+   Clipping is not a cosmetic failure here. "0/3 Chores - 20 min" cut at
+   a 93 px block reads "0/3 Chores - 2", which is a complete, plausible
+   and wrong statement about the same day — worse than no figure at all.
+   So the property is that whatever string the painter chose FITS whole,
+   swept over every block width a configured day can produce rather than
+   sampled at the two comfortable ones the goldens happen to use.
+
+   Allocation runs to 240 min (four hours of screen time is already well
+   past anything this schedule offers) in the 5 min steps the config is
+   entered in, and chore_free over every value it can take for each. The
+   four chore lists cover the digits the string can carry and both
+   forms — 8/8 on a released-looking list is the widest, 0/0 the widest
+   minutes figure. */
+void test_no_block_width_can_truncate_the_locked_label(void) {
+    static const struct {
+        uint8_t count;
+        uint8_t acked;
+    } LIST[] = {{3, 0x00}, {3, 0x01}, {8, 0xFF}, {1, 0x00}};
+    for (size_t l = 0; l < sizeof(LIST) / sizeof(LIST[0]); l++) {
+        for (uint32_t alloc_min = 5; alloc_min <= 240; alloc_min += 5) {
+            for (uint32_t free_min = 0; free_min <= alloc_min; free_min += 5) {
+                const uint32_t alloc = alloc_min * 60, withheld = (alloc_min - free_min) * 60;
+                display_state_t st = gated_state(LIST[l].count, LIST[l].acked, withheld);
+                st.allocation_sec = alloc;
+                st.remaining_sec = (int32_t)alloc;
+                display_screens_build_main(&st);
+
+                lv_obj_t *lbl = locked_label();
+                if (lbl == NULL)
+                    continue; /* no label drawn states no number: honest by construction */
+                const display_bar_split_t sp = display_bar_split((int32_t)alloc, alloc, withheld);
+                const int32_t allotted = (int32_t)sp.locked_px - 2 * LOCKED_LABEL_PAD;
+                const int32_t need = text_w_12(lv_label_get_text(lbl));
+                char msg[192];
+                snprintf(msg, sizeof(msg),
+                         "%u min day, chore_free %u, %u chores: a %u px block allots %d px but \"%s\" needs %d - the "
+                         "figure is cut",
+                         (unsigned)alloc_min, (unsigned)free_min, (unsigned)LIST[l].count, (unsigned)sp.locked_px,
+                         (int)allotted, lv_label_get_text(lbl), (int)need);
+                TEST_ASSERT_TRUE_MESSAGE(need <= allotted, msg);
+            }
+        }
+    }
+}
+
+/* display.c's CLEAN_BANDS gives the bar {26, 49} — "progress bar (y=26,
+   h=24) + Charge Me!!! badge". The block shares the bar's box exactly, so
+   that table needs no entry of its own; this is what keeps it true. A
+   block or label that grew a row either way would be inverted twice by
+   the ghost-cleaning double partial, or not at all. */
+void test_the_locked_block_stays_inside_the_progress_bar_band(void) {
+    display_state_t st = gated_state(3, 0x00, 2400);
+    display_screens_build_main(&st);
+    lv_refr_now(s_disp);
+    assert_rows_blank(18, 25);
+    assert_rows_blank(50, 57);
+
+    st.chore_withheld_sec = 3600; /* fully gated: the block is the whole bar */
+    display_screens_build_main(&st);
+    lv_refr_now(s_disp);
+    assert_rows_blank(18, 25);
+    assert_rows_blank(50, 57);
+}
+
 int main(void) {
     lv_init();
     lv_tick_set_cb(tick_cb);
@@ -947,5 +1440,17 @@ int main(void) {
     RUN_TEST(test_a_pathological_chore_name_cannot_overstrike_the_panel);
     RUN_TEST(test_a_stale_ack_bit_above_the_count_changes_no_pixel);
     RUN_TEST(test_the_chore_button_row_fits_its_cells);
+    RUN_TEST(test_main_chore_gated);
+    RUN_TEST(test_main_chore_gated_running);
+    RUN_TEST(test_main_chore_fully_gated);
+    RUN_TEST(test_main_chore_gated_narrow);
+    RUN_TEST(test_the_free_tranche_drains_at_the_same_rate_as_an_ungated_bar);
+    RUN_TEST(test_the_locked_block_vanishes_when_the_day_releases);
+    RUN_TEST(test_an_emptied_list_draws_no_block);
+    RUN_TEST(test_the_charge_me_badge_still_rides_over_the_locked_block);
+    RUN_TEST(test_an_extra_timer_never_carries_the_days_locked_block);
+    RUN_TEST(test_the_locked_label_cannot_overstrike_the_free_tranche);
+    RUN_TEST(test_no_block_width_can_truncate_the_locked_label);
+    RUN_TEST(test_the_locked_block_stays_inside_the_progress_bar_band);
     return UNITY_END();
 }

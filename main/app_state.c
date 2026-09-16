@@ -1,6 +1,7 @@
 /* Display-state and stats-snapshot assembly, moved from main.c so the
-   mapping rules (IDLE full bar, per-slot allocation fallbacks, warn
-   badge, button availability) are host-tested (test_app_state). */
+   mapping rules (IDLE reporting the day's whole effective allocation,
+   per-slot allocation fallbacks, warn badge, button availability) are
+   host-tested (test_app_state). */
 #include "app_state.h"
 
 #include <string.h>
@@ -109,10 +110,16 @@ display_state_t app_state_display(const app_state_in_t *in, int32_t remaining, t
     /* IDLE shows today's whole allocation rather than 0 (ProductOverview),
        and the EFFECTIVE one: an adjustment banked before the day's first
        start would otherwise show nowhere until someone presses B, which
-       reads exactly like a set that never landed. Note this is no longer
-       the same thing as a full BAR — the bar divides by `base`, so an
-       idle day with -30 on it draws half a bar, which is the point of the
-       split. */
+       reads exactly like a set that never landed.
+
+       This is no longer the same thing as a full BAR, and on a gated day
+       it is not a proportional one either. The bar divides by `base`, so
+       an idle day with -30 against a 60 min default draws half a bar
+       UNGATED. Gated, display_bar_split clamps the free tranche to the
+       room the locked block leaves, so 30 effective minutes against a
+       20 min tranche saturate and the tranche draws FULL. The bar is a
+       statement about the DAY's split, not about the deduction; the
+       counter and the status row are what carry that. */
     if (timer_get_state() == TIMER_IDLE) {
         remaining = (int32_t)effective;
     }

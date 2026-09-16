@@ -8,12 +8,91 @@
 
 #define BAR_FILL_MAX_PX 280u
 
-uint16_t display_bar_fill_px(int32_t remaining_sec, uint32_t allocation_sec) {
-    if (allocation_sec == 0 || remaining_sec <= 0)
+/* Seconds -> bar pixels. THE conversion this bar has, and the only one:
+   the draining fill and the chore gate's locked block both come through
+   here, so "pixels-per-second stays uniform across the whole bar" (§4.1)
+   is structural rather than a comment — there is no second expression
+   for it to drift away from. A free tranche given its own denominator
+   would still look like a bar and would silently mean something else.
+
+   Saturates at the full width so neither end can overrun the bar object,
+   and 0 for a zero allocation (a day with no screen time has no scale to
+   draw against). */
+static uint16_t bar_px(uint32_t sec, uint32_t allocation_sec) {
+    if (allocation_sec == 0 || sec == 0)
         return 0;
-    if ((uint32_t)remaining_sec >= allocation_sec)
+    if (sec >= allocation_sec)
         return BAR_FILL_MAX_PX;
-    return (uint16_t)((uint32_t)remaining_sec * BAR_FILL_MAX_PX / allocation_sec);
+    return (uint16_t)(sec * BAR_FILL_MAX_PX / allocation_sec);
+}
+
+uint16_t display_bar_fill_px(int32_t remaining_sec, uint32_t allocation_sec) {
+    return (remaining_sec <= 0) ? 0 : bar_px((uint32_t)remaining_sec, allocation_sec);
+}
+
+/* The bar split in two by the chore gate (§4.1): a locked block held at
+   the LEFT and the free tranche draining to its right. Both measured in
+   the same 280 px at the same rate, so the boundary between them is a
+   divider and not a change of scale.
+
+   `withheld_sec` is chores_withheld_sec() for the DAY. It is already 0
+   for every ungated case — no chores configured, the gate off for this
+   day type, the day released — so a caller has no second condition to
+   remember, and with 0 the result is exactly the bar that existed before
+   the gate did: locked_px 0 and fill_end_px == display_bar_fill_px().
+   `allocation_sec` must be the SAME day the withholding was computed
+   against; the screen builder suppresses the block when an extra timer's
+   duration is on this axis instead.
+
+   The fill SATURATES at the divider rather than drawing over the block,
+   and that is what makes a gated IDLE day honest. app_state.c reports the
+   day's whole effective allocation as `remaining` while it is idle
+   (ProductOverview: an idle day shows what it has), so the unsplit fill
+   would be the full 280 px and would claim the locked part is available
+   to spend now. Saturated, the panel reads "40 min locked behind the
+   chores, 20 min free and full", which is the point of carrying the split
+   on the bar instead of shrinking the number.
+
+   The two sum to the day's DEFAULT — `allocation_sec`, this function's
+   own denominator — and NOT to whatever the big counter says. They
+   coincide only while adjust_sec is 0. Bank -30 on the same 60/20 day
+   and the counter reads 30 min while the bar still shows 40 locked and a
+   full 20 min tranche: 30 effective minutes against a 20 min tranche
+   saturate, so the deduction lands on the counter and the status row and
+   is not visible here at all. That is deliberate — the block is a
+   statement about how the DAY is split, not about what is left — but it
+   is the reason the bar alone does not reconstruct the counter.
+
+   And it is NOT the whole story, so do not read the saturation as a
+   licence to leave the mechanism alone. On that same gated 60/20 day
+   with -30 banked there are THREE readings of one day and no two agree:
+   the bar says 60 (40 locked + a full 20 min tranche), the counter says
+   00:30:00, and pressing B starts 0 s — button_b_start_allocation()
+   returns alloc - withheld = 1200 s, then timer_start() folds in the
+   banked bonus_sec of -1800 and clamps at zero. The third is the one
+   nobody can see coming, and none of the three is fixable here: they are
+   the S1/S2 root cause (the gate is a capped allocation FROZEN at
+   timer_start, with the remainder added back on release), tracked in
+   m2-notes.md under "S1 + S2 ARE ONE PROBLEM". This split makes the BAR
+   honest about the day; it does not make the mechanism coherent.
+
+   Rounding: both ends truncate, so a completely full free tranche can
+   land one pixel short of the bar's end (186 + 93 = 279). A pixel of
+   white at the far end is cheaper than either half lying about its own
+   length, and the test pins the gap at no more than one.
+
+   And a withholding worth less than a pixel draws no block at all — five
+   minutes of a 24 h day. Deliberate: a minimum width would buy that
+   sliver by breaking the one invariant this split exists to keep. */
+display_bar_split_t display_bar_split(int32_t remaining_sec, uint32_t allocation_sec, uint32_t withheld_sec) {
+    display_bar_split_t split = {0, 0};
+    split.locked_px = bar_px(withheld_sec, allocation_sec);
+    uint16_t room = (uint16_t)(BAR_FILL_MAX_PX - split.locked_px);
+    uint16_t free_px = display_bar_fill_px(remaining_sec, allocation_sec);
+    if (free_px > room)
+        free_px = room;
+    split.fill_end_px = (uint16_t)(split.locked_px + free_px);
+    return split;
 }
 
 int display_battery_icon_level(int pct) {
@@ -178,6 +257,58 @@ static uint8_t chore_acked_count(uint8_t acked, uint8_t count) {
 void display_format_chore_count(char *buf, size_t len, uint8_t acked, uint8_t count) {
     unsigned cfg = (count > CHORE_MAX) ? CHORE_MAX : count;
     snprintf(buf, len, "%u of %u", (unsigned)chore_acked_count(acked, count), cfg);
+}
+
+/* The label the Screen bar's locked block holds (§4.1). Same acked/count
+   pair as the checklist header and the same masking, but "0/3" rather
+   than "0 of 3": this one shares a 24 px bar with a figure in minutes and
+   a draining fill, where the checklist header has a row of its own.
+
+   FULL has two wordings, because a fully gated day (chore_free == 0) has
+   no draining region beside the text to explain it — the block is the
+   whole bar, so the text is the only thing on it and has to say what the
+   chores are for. Partially gated, the bar to the right already says it.
+
+   The narrower rungs have one wording each. A fully gated day can only
+   reach them if 272 px will not hold "…to unlock…", which no list and no
+   allocation can manage today; they are written to be true there anyway
+   rather than to be unreachable, because "0/3 - 60 min" on a block that
+   is the whole bar still states two numbers the day has.
+
+   " - " and not the design's "·": the built-in Montserrat faces carry
+   ASCII, and display_format_mode_line already spells the same separator
+   this way on the row below. A middle dot would render as a missing
+   glyph on the one screen the family reads every day.
+
+   Minutes truncate, and cannot mislead: both allocation and chore_free
+   are configured in whole minutes, so withheld_sec is a whole number of
+   them. That is what makes every rung safe to shorten — the figure is
+   exact at any width, so dropping words around it drops context and
+   never precision. */
+void display_format_locked_block(char *buf, size_t len, display_locked_form_t form, uint8_t acked, uint8_t count,
+                                 uint32_t withheld_sec, uint32_t allocation_sec) {
+    unsigned cfg = (count > CHORE_MAX) ? CHORE_MAX : count;
+    unsigned done = (unsigned)chore_acked_count(acked, count);
+    unsigned min = (unsigned)(withheld_sec / 60);
+    switch (form) {
+        case DISPLAY_LOCKED_FORM_FULL:
+            if (allocation_sec > 0 && withheld_sec >= allocation_sec) {
+                snprintf(buf, len, "%u/%u Chores to unlock %u min", done, cfg, min);
+            } else {
+                snprintf(buf, len, "%u/%u Chores - %u min", done, cfg, min);
+            }
+            break;
+        case DISPLAY_LOCKED_FORM_PAIR:
+            snprintf(buf, len, "%u/%u - %u min", done, cfg, min);
+            break;
+        case DISPLAY_LOCKED_FORM_MINUTES:
+            snprintf(buf, len, "%u min", min);
+            break;
+        default:
+            if (len > 0)
+                buf[0] = '\0';
+            break;
+    }
 }
 
 bool display_chore_unlocked(uint8_t acked, uint8_t count, bool released) {

@@ -15,11 +15,18 @@ typedef struct {
     /* Today's EFFECTIVE remaining, adjustment included. IDLE reports the
        whole effective allocation (ProductOverview: an idle day shows what
        it has, not 0), which is what lets it exceed allocation_sec below.
-       That is a FULL bar only on an unadjusted day: the bar's denominator
-       is allocation_sec, the day's default, so an idle day carrying -30
-       against a 60 min default draws the bar HALF full, and one carrying
-       a grant pins it full with time to spare. Both ends are clamped by
-       display_bar_fill_px. */
+       What that draws depends on whether the chore gate is holding part
+       of the day, so there is no single answer any more:
+         UNGATED, the bar's denominator is allocation_sec, the day's
+         default, so an idle day carrying -30 against a 60 min default
+         draws the bar HALF full (fill edge x=147), and one carrying a
+         grant pins it full with time to spare.
+         GATED, display_bar_split saturates the free tranche at the room
+         the locked block leaves, so that same -30 day draws the tranche
+         FULL (fill_end_px 280) — 30 effective minutes against a 20 min
+         tranche has nowhere shorter to go. The deduction is then visible
+         on the status row and the counter, not on the bar.
+       Both ends are clamped by display_bar_fill_px. */
     int32_t remaining_sec;
     /* The day's DEFAULT — the scheduled figure for the day type, or an
        extra timer's configured duration. NOT today's effective limit:
@@ -212,6 +219,25 @@ display_btn_label_t display_button_b_label(timer_state_t state, bool start_avail
 /* Battery icon bucket 0=empty..4=full; display_screens.c maps to LV_SYMBOL_BATTERY_*. */
 int display_battery_icon_level(int pct);
 uint16_t display_bar_fill_px(int32_t remaining_sec, uint32_t allocation_sec);
+/* The Screen bar split in two by the chore gate (design §4.1), in the
+   bar's own 280 px:
+     locked_px    the outlined, unfilled block held at the LEFT — the
+                  withheld part of the day. 0 = no block at all.
+     fill_end_px  the RIGHT edge of the free tranche's fill, measured
+                  from the bar's left edge like any other bar value, so
+                  the screen builder sets it as the value and lays the
+                  block over the part that is not free.
+   The free tranche is therefore (fill_end_px - locked_px) px wide and is
+   drawn at the SAME pixels-per-second as the block and as an ungated
+   bar — the scale does not change at the divider. Both fields come from
+   one conversion in display_layout.c; see it for the idle-day saturation,
+   the one pixel truncation can cost, and why a sub-pixel withholding
+   draws nothing. */
+typedef struct {
+    uint16_t locked_px;
+    uint16_t fill_end_px;
+} display_bar_split_t;
+display_bar_split_t display_bar_split(int32_t remaining_sec, uint32_t allocation_sec, uint32_t withheld_sec);
 void display_format_remaining(char *buf, size_t len, int32_t remaining_sec);
 /* Coarse duration, "1:30" (h:mm, truncated). Used for the frozen screen
    time on the break screen, where the value cannot change for the whole
@@ -347,6 +373,46 @@ bool display_chore_row_ticked(uint8_t acked, uint8_t count, uint8_t idx);
    header can never disagree with the rows underneath it. count is the
    configured list length, so a two-chore list reads "1 of 2". */
 void display_format_chore_count(char *buf, size_t len, uint8_t acked, uint8_t count);
+
+/* How much of the locked block's label there is room to say. The block is
+   `withheld / allocation` of a 280 px bar, so its width is a config
+   decision, not a layout one, and on an ordinary day — 60 min with
+   chore_free 40 — it is 93 px, which the full sentence does not fit in.
+   Clipping it is not an option: "0/3 Chores - 20 min" cut to the width
+   reads "0/3 Chores - 2", a complete and plausible statement of a number
+   the day does not have. So the label degrades in steps instead, and the
+   painter picks the widest step that fits whole (display_screens.c).
+
+   Ordered WIDEST FIRST: the ladder's order is this enum's order, and
+   DISPLAY_LOCKED_FORM_COUNT is the rung past the last one, where the
+   answer is to draw no label at all. Every rung states only numbers the
+   day actually has, so any of them is honest; they differ in how much
+   context they can afford. */
+typedef enum {
+    /* "0/3 Chores - 40 min", or "0/3 Chores to unlock 60 min" when
+       chore_free == 0 and the block IS the bar, where the text is all
+       there is and has to say what the chores are for. §4.1's form. */
+    DISPLAY_LOCKED_FORM_FULL = 0,
+    /* "0/3 - 40 min": both figures, the noun dropped. Roughly 46 px
+       narrower, and the step that carries the common 93 px block. */
+    DISPLAY_LOCKED_FORM_PAIR,
+    /* "40 min": the figure the block's own width is a picture of, so the
+       last rung that adds anything a reader cannot already see. Below
+       this the outline alone is the statement — a bare "0/3" with no noun
+       and no unit inside a 60 px sliver reads as damage, not as a word. */
+    DISPLAY_LOCKED_FORM_MINUTES,
+    DISPLAY_LOCKED_FORM_COUNT
+} display_locked_form_t;
+
+/* The label inside the Screen bar's locked block (§4.1), at the given
+   rung. Same acks, same masking and same cap on `count` as the checklist
+   header above; the minutes are `withheld_sec`, the part of the day the
+   chores are holding, NOT what is left to spend. `allocation_sec` picks
+   between the two FULL wordings and nothing else, so pass the day the
+   withholding was computed against. A rung at or past
+   DISPLAY_LOCKED_FORM_COUNT yields "". */
+void display_format_locked_block(char *buf, size_t len, display_locked_form_t form, uint8_t acked, uint8_t count,
+                                 uint32_t withheld_sec, uint32_t allocation_sec);
 
 /* Whether the screen says "Screen time unlocked" (design §2.4: the mode
    does not bounce you out on the last ack, so the screen has to say that

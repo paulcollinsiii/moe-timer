@@ -643,6 +643,250 @@ void test_unlocked_ignores_bits_above_the_configured_count(void) {
     TEST_ASSERT_FALSE(display_chore_unlocked(0x04, 2, false));
 }
 
+/* ---- display_bar_split: the locked block and the free tranche (§4.1) ----
+
+   The worked example throughout is the design's own: a 60 min day
+   (3600 s) with chore_free 20 min, so 2400 s are withheld and 1200 s are
+   free. 2400 * 280 / 3600 = 186.67 -> a 186 px block, leaving 94 px of
+   bar for a tranche worth 1200 s (93 px at the same rate, so one pixel of
+   rounding headroom and never a pixel short). */
+
+#define DAY 3600u
+#define WITHHELD 2400u /* chore_free = 1200 */
+
+/* THE invariant the plan's reviewer named: "px/sec must be uniform across
+   the boundary; a rescaled free tranche silently changes the bar's
+   meaning." Stated as the strongest form of it — a second is worth the
+   same pixels whether it sits in the locked block or in the free tranche,
+   for every second of the day. */
+void test_a_second_is_worth_the_same_pixels_on_both_sides_of_the_boundary(void) {
+    static const uint32_t SECS[] = {0, 1, 60, 300, 600, 900, 1200, 1799, 1800, 2400, 3000, 3599, 3600};
+    for (size_t i = 0; i < sizeof(SECS) / sizeof(SECS[0]); i++) {
+        char msg[80];
+        snprintf(msg, sizeof(msg), "%u s converts differently in the block than in the fill", (unsigned)SECS[i]);
+        TEST_ASSERT_EQUAL_UINT16_MESSAGE(display_bar_fill_px((int32_t)SECS[i], DAY),
+                                         display_bar_split(0, DAY, SECS[i]).locked_px, msg);
+    }
+}
+
+/* The rejection this test exists for: scaling the free tranche into its
+   own width against the DAY's denominator — remaining * free_width /
+   allocation — which compresses it and makes the bar mean two different
+   things left and right of the divider. At 10 minutes left it draws 15 px
+   where the bar's own rate says 46. */
+void test_the_free_tranche_is_not_rescaled_to_its_own_width(void) {
+    display_bar_split_t s = display_bar_split(600, DAY, WITHHELD);
+    TEST_ASSERT_EQUAL_UINT16(186, s.locked_px);
+    TEST_ASSERT_EQUAL_UINT16_MESSAGE(46, (uint16_t)(s.fill_end_px - s.locked_px),
+                                     "the free tranche is not drawn at the bar's own rate");
+    /* 600 * (280 - 186) / 3600 = 15: the rescale, named so the test says
+       what it is refusing and not only what it wants. */
+    TEST_ASSERT_NOT_EQUAL_UINT16(15, (uint16_t)(s.fill_end_px - s.locked_px));
+}
+
+/* Ten minutes of the free tranche spent, as in §4.1's worked screen: the
+   block has not moved and only the fill has. */
+void test_the_block_does_not_move_while_the_free_tranche_drains(void) {
+    uint16_t prev = 0;
+    for (int32_t remaining = 1200; remaining >= 0; remaining -= 120) {
+        display_bar_split_t s = display_bar_split(remaining, DAY, WITHHELD);
+        TEST_ASSERT_EQUAL_UINT16_MESSAGE(186, s.locked_px, "the locked block moved as the free tranche drained");
+        if (remaining < 1200)
+            TEST_ASSERT_TRUE_MESSAGE(s.fill_end_px < prev, "the fill did not drain");
+        prev = s.fill_end_px;
+    }
+}
+
+/* A freshly started gated day: the whole free tranche is left, so the fill
+   reaches the far end of the bar (bar the one pixel the two truncations
+   can cost between them) and the block holds the rest. */
+void test_a_gated_day_that_has_spent_nothing_fills_to_the_end_of_the_bar(void) {
+    display_bar_split_t s = display_bar_split(1200, DAY, WITHHELD);
+    TEST_ASSERT_EQUAL_UINT16(186, s.locked_px);
+    TEST_ASSERT_EQUAL_UINT16(279, s.fill_end_px);
+    TEST_ASSERT_TRUE_MESSAGE(280 - s.fill_end_px <= 1, "more than a pixel of the bar went missing at the boundary");
+}
+
+/* S1's display half. On a gated IDLE day remaining is the day's WHOLE
+   effective allocation (app_state.c sets remaining = effective), so the
+   unsplit fill is the full 280 px. The free tranche is what is actually
+   available to start, so the fill saturates at the boundary instead of
+   painting over the block: 40 min locked, 20 min free and full, and the
+   two still add up to the hour the big counter is showing. */
+void test_an_idle_gated_day_fills_the_free_tranche_and_not_the_block(void) {
+    display_bar_split_t s = display_bar_split(3600, DAY, WITHHELD);
+    TEST_ASSERT_EQUAL_UINT16(186, s.locked_px);
+    TEST_ASSERT_EQUAL_UINT16_MESSAGE(280, s.fill_end_px, "the free tranche is not full on an idle gated day");
+    TEST_ASSERT_EQUAL_UINT16(94, (uint16_t)(s.fill_end_px - s.locked_px));
+}
+
+/* And the same saturation for any remaining above the free tranche — an
+   idle day carrying a grant, or the model's own disagreement when a
+   deduction leaves less in the day than the gate withholds. The fill can
+   never reach left of the divider. */
+void test_the_fill_never_reaches_into_the_locked_block(void) {
+    static const int32_t REMAINING[] = {1201, 1800, 3000, 3600, 4500, 86400};
+    for (size_t i = 0; i < sizeof(REMAINING) / sizeof(REMAINING[0]); i++) {
+        display_bar_split_t s = display_bar_split(REMAINING[i], DAY, WITHHELD);
+        char msg[80];
+        snprintf(msg, sizeof(msg), "remaining %ld drew over the block", (long)REMAINING[i]);
+        TEST_ASSERT_TRUE_MESSAGE(s.fill_end_px >= s.locked_px, msg);
+        TEST_ASSERT_TRUE_MESSAGE(s.fill_end_px <= 280, msg);
+    }
+}
+
+/* Row C1 and the released day: nothing withheld, so no block and a bar
+   that is byte-for-byte the one that existed before the gate did. */
+void test_nothing_withheld_leaves_the_bar_exactly_as_it_was(void) {
+    static const int32_t REMAINING[] = {-1, 0, 900, 1800, 3600, 4500};
+    for (size_t i = 0; i < sizeof(REMAINING) / sizeof(REMAINING[0]); i++) {
+        display_bar_split_t s = display_bar_split(REMAINING[i], DAY, 0);
+        TEST_ASSERT_EQUAL_UINT16_MESSAGE(0, s.locked_px, "a block was drawn with nothing withheld");
+        TEST_ASSERT_EQUAL_UINT16(display_bar_fill_px(REMAINING[i], DAY), s.fill_end_px);
+    }
+}
+
+/* The release: the caller stops withholding and the block vanishes, the
+   bar going full width with the ordinary remaining/allocation fill. That
+   jump is the feedback (§4.1), so it is the jump that gets pinned. */
+void test_the_block_vanishes_when_the_day_releases(void) {
+    display_bar_split_t shut = display_bar_split(1200, DAY, WITHHELD);
+    display_bar_split_t open = display_bar_split(1200, DAY, 0);
+    TEST_ASSERT_EQUAL_UINT16(186, shut.locked_px);
+    TEST_ASSERT_EQUAL_UINT16(0, open.locked_px);
+    TEST_ASSERT_EQUAL_UINT16(93, open.fill_end_px); /* 1200/3600 of the bar */
+    TEST_ASSERT_TRUE_MESSAGE(open.fill_end_px < shut.fill_end_px, "the released bar did not redraw from the left");
+}
+
+/* chore_free == 0: the block is the whole bar, so there is no draining
+   region at all and the screen builder has only the text to draw. */
+void test_a_fully_gated_day_has_no_draining_region(void) {
+    static const int32_t REMAINING[] = {0, 600, 3600};
+    for (size_t i = 0; i < sizeof(REMAINING) / sizeof(REMAINING[0]); i++) {
+        display_bar_split_t s = display_bar_split(REMAINING[i], DAY, DAY);
+        TEST_ASSERT_EQUAL_UINT16(280, s.locked_px);
+        TEST_ASSERT_EQUAL_UINT16_MESSAGE(0, (uint16_t)(s.fill_end_px - s.locked_px),
+                                         "a fully gated day drew a draining region");
+    }
+}
+
+/* chores_withheld_sec() saturates at the allocation, so this is a
+   defensive clamp rather than a reachable state — but it is the one that
+   would overrun the bar object if it ever stopped being. */
+void test_withholding_past_the_day_cannot_overrun_the_bar(void) {
+    display_bar_split_t s = display_bar_split(600, DAY, 7200);
+    TEST_ASSERT_EQUAL_UINT16(280, s.locked_px);
+    TEST_ASSERT_EQUAL_UINT16(280, s.fill_end_px);
+}
+
+void test_a_zero_allocation_splits_nothing(void) {
+    display_bar_split_t s = display_bar_split(600, 0, 600);
+    TEST_ASSERT_EQUAL_UINT16(0, s.locked_px);
+    TEST_ASSERT_EQUAL_UINT16(0, s.fill_end_px);
+}
+
+/* Documented rather than special-cased: on a 24 h day five withheld
+   minutes are worth less than one pixel, and the uniform rate is what
+   says so. A minimum block width would buy visibility by breaking the
+   very invariant this screen exists to keep. */
+void test_a_sub_pixel_withholding_draws_no_block(void) {
+    TEST_ASSERT_EQUAL_UINT16(0, display_bar_split(86400, 86400u, 300u).locked_px);
+    TEST_ASSERT_EQUAL_UINT16(1, display_bar_split(86400, 86400u, 400u).locked_px);
+}
+
+/* ---- display_format_locked_block: the label the block holds ---- */
+
+void test_the_locked_label_names_the_acks_and_the_withheld_minutes(void) {
+    char buf[48];
+    display_format_locked_block(buf, sizeof(buf), DISPLAY_LOCKED_FORM_FULL, 0x00, 3, WITHHELD, DAY);
+    TEST_ASSERT_EQUAL_STRING("0/3 Chores - 40 min", buf);
+    display_format_locked_block(buf, sizeof(buf), DISPLAY_LOCKED_FORM_FULL, 0x03, 3, WITHHELD, DAY);
+    TEST_ASSERT_EQUAL_STRING("2/3 Chores - 40 min", buf);
+}
+
+/* The narrower rungs the painter drops to when §4.1's sentence will not
+   fit the block whole (display_screens.c). Each drops CONTEXT and never
+   precision: the same two figures, then the one the block's own width is
+   a picture of. A rung that rounded, abbreviated or re-based a number
+   would defeat the point of having rungs at all — the alternative to a
+   short form here is a clipped long one, which is the thing that states
+   a number the day does not have. */
+void test_the_narrower_rungs_drop_words_and_never_figures(void) {
+    char buf[48];
+    display_format_locked_block(buf, sizeof(buf), DISPLAY_LOCKED_FORM_PAIR, 0x03, 3, WITHHELD, DAY);
+    TEST_ASSERT_EQUAL_STRING("2/3 - 40 min", buf);
+    display_format_locked_block(buf, sizeof(buf), DISPLAY_LOCKED_FORM_MINUTES, 0x03, 3, WITHHELD, DAY);
+    TEST_ASSERT_EQUAL_STRING("40 min", buf);
+    /* masking and the CHORE_MAX cap hold on every rung that shows acks */
+    display_format_locked_block(buf, sizeof(buf), DISPLAY_LOCKED_FORM_PAIR, 0x07, 9, 1200u, DAY);
+    TEST_ASSERT_EQUAL_STRING("3/3 - 20 min", buf);
+}
+
+/* The ladder is ordered widest first — the painter walks it by index, so
+   the ORDER is the contract, not just the membership. Asserted on
+   rendered length rather than on the enum values, because a reordering
+   that kept the values would still break the painter. */
+void test_the_rungs_are_ordered_widest_first(void) {
+    char prev[48], cur[48];
+    display_format_locked_block(prev, sizeof(prev), DISPLAY_LOCKED_FORM_FULL, 0x00, 3, WITHHELD, DAY);
+    for (int f = DISPLAY_LOCKED_FORM_PAIR; f < DISPLAY_LOCKED_FORM_COUNT; f++) {
+        display_format_locked_block(cur, sizeof(cur), (display_locked_form_t)f, 0x00, 3, WITHHELD, DAY);
+        char msg[192]; /* both rungs are char[48], so 128 could truncate the message itself */
+        snprintf(msg, sizeof(msg), "rung %d is \"%s\", no shorter than the rung above it (\"%s\")", f, cur, prev);
+        TEST_ASSERT_TRUE_MESSAGE(strlen(cur) < strlen(prev), msg);
+        memcpy(prev, cur, sizeof(prev));
+    }
+    /* Past the last rung there is no label at all, and the painter's loop
+       must never reach a form that silently repeats the one before it. */
+    display_format_locked_block(cur, sizeof(cur), (display_locked_form_t)DISPLAY_LOCKED_FORM_COUNT, 0x00, 3, WITHHELD,
+                                DAY);
+    TEST_ASSERT_EQUAL_STRING("", cur);
+}
+
+/* §4.1: with no draining region the bar is just the text, so the text has
+   to carry what the gate is for — "to unlock", not a bare figure beside a
+   bar that is not there. */
+void test_a_fully_gated_day_says_what_the_chores_unlock(void) {
+    char buf[48];
+    display_format_locked_block(buf, sizeof(buf), DISPLAY_LOCKED_FORM_FULL, 0x00, 3, DAY, DAY);
+    TEST_ASSERT_EQUAL_STRING("0/3 Chores to unlock 60 min", buf);
+    display_format_locked_block(buf, sizeof(buf), DISPLAY_LOCKED_FORM_FULL, 0x01, 3, DAY, DAY);
+    TEST_ASSERT_EQUAL_STRING("1/3 Chores to unlock 60 min", buf);
+    /* Only FULL carries the wording; the narrow rungs have one form each
+       and stay true on a fully gated day, where the figure IS the day. */
+    display_format_locked_block(buf, sizeof(buf), DISPLAY_LOCKED_FORM_PAIR, 0x01, 3, DAY, DAY);
+    TEST_ASSERT_EQUAL_STRING("1/3 - 60 min", buf);
+}
+
+/* The same masking rule as the checklist header: a bit left over from a
+   longer list is not an ack of a row that exists. */
+void test_the_locked_label_counts_only_configured_acks(void) {
+    char buf[48];
+    display_format_locked_block(buf, sizeof(buf), DISPLAY_LOCKED_FORM_FULL, 0x05, 2, 1200u, DAY);
+    TEST_ASSERT_EQUAL_STRING("1/2 Chores - 20 min", buf);
+    /* and a count past the hardware cap reports the cap, not the count */
+    display_format_locked_block(buf, sizeof(buf), DISPLAY_LOCKED_FORM_FULL, 0x07, 9, 1200u, DAY);
+    TEST_ASSERT_EQUAL_STRING("3/3 Chores - 20 min", buf);
+}
+
+void test_the_locked_label_respects_a_small_buffer(void) {
+    char buf[8];
+    memset(buf, (char)0xAA, sizeof(buf));
+    display_format_locked_block(buf, sizeof(buf), DISPLAY_LOCKED_FORM_FULL, 0x00, 3, WITHHELD, DAY);
+    TEST_ASSERT_EQUAL_STRING("0/3 Cho", buf);
+    memset(buf, (char)0xAA, sizeof(buf));
+    display_format_locked_block(buf, 0, DISPLAY_LOCKED_FORM_FULL, 0x00, 3, WITHHELD, DAY);
+    TEST_ASSERT_EQUAL_HEX8_MESSAGE((char)0xAA, buf[0], "a zero-length buffer was written to");
+    /* the empty rung past the ladder must not write a zero-length buffer
+       either — it is the one branch that writes buf[0] by hand */
+    memset(buf, (char)0xAA, sizeof(buf));
+    display_format_locked_block(buf, 0, (display_locked_form_t)DISPLAY_LOCKED_FORM_COUNT, 0x00, 3, WITHHELD, DAY);
+    TEST_ASSERT_EQUAL_HEX8_MESSAGE((char)0xAA, buf[0], "a zero-length buffer was written to");
+}
+
+#undef DAY
+#undef WITHHELD
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_break_chip_is_minutes_and_seconds);
@@ -716,5 +960,23 @@ int main(void) {
     RUN_TEST(test_unlocked_stays_true_after_an_ack_is_toggled_back_off);
     RUN_TEST(test_no_chores_is_never_unlocked);
     RUN_TEST(test_unlocked_ignores_bits_above_the_configured_count);
+    RUN_TEST(test_a_second_is_worth_the_same_pixels_on_both_sides_of_the_boundary);
+    RUN_TEST(test_the_free_tranche_is_not_rescaled_to_its_own_width);
+    RUN_TEST(test_the_block_does_not_move_while_the_free_tranche_drains);
+    RUN_TEST(test_a_gated_day_that_has_spent_nothing_fills_to_the_end_of_the_bar);
+    RUN_TEST(test_an_idle_gated_day_fills_the_free_tranche_and_not_the_block);
+    RUN_TEST(test_the_fill_never_reaches_into_the_locked_block);
+    RUN_TEST(test_nothing_withheld_leaves_the_bar_exactly_as_it_was);
+    RUN_TEST(test_the_block_vanishes_when_the_day_releases);
+    RUN_TEST(test_a_fully_gated_day_has_no_draining_region);
+    RUN_TEST(test_withholding_past_the_day_cannot_overrun_the_bar);
+    RUN_TEST(test_a_zero_allocation_splits_nothing);
+    RUN_TEST(test_a_sub_pixel_withholding_draws_no_block);
+    RUN_TEST(test_the_locked_label_names_the_acks_and_the_withheld_minutes);
+    RUN_TEST(test_the_narrower_rungs_drop_words_and_never_figures);
+    RUN_TEST(test_the_rungs_are_ordered_widest_first);
+    RUN_TEST(test_a_fully_gated_day_says_what_the_chores_unlock);
+    RUN_TEST(test_the_locked_label_counts_only_configured_acks);
+    RUN_TEST(test_the_locked_label_respects_a_small_buffer);
     return UNITY_END();
 }
