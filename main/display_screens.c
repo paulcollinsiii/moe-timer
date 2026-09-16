@@ -348,6 +348,88 @@ void display_screens_build_break(const display_state_t *st) {
     make_label(scr, LV_SYMBOL_REFRESH, &lv_font_montserrat_16, LV_ALIGN_BOTTOM_MID, BTN_MID_OFS(3), -2);
 }
 
+/* ---- the chore checklist (design §2.4) ----------------------------------
+
+   Geometry, top to bottom on the 128 px panel:
+
+     y=2    "CHORES" (16 pt)                      "n of 3" (12 pt, right)
+     y=24   "Screen time unlocked" (16 pt, centred) — only once unlocked
+     y=46   row 0   tick column at x=6, name at x=CHORE_NAME_X
+     y=68   row 1
+     y=90   row 2
+     bottom "Timers"   "OK 1"   "OK 2"   "OK 3"   (12 pt, over the buttons)
+
+   THREE FIXED ROWS is the whole point (§2.4): nothing slides, nothing
+   refills, row order never changes, which is what makes B/C/D unambiguous
+   and lets the NeoPixels mirror the rows one-for-one (§2.5). So the row y
+   values are constants and a shorter list leaves the spare rows blank —
+   never a list that closes up. */
+#define CHORE_TICK_X 6
+#define CHORE_NAME_X 32
+/* Geometric cap for a name, which is the ONLY thing that can bound its
+   rendered width: chores.h measured exactly this trap (a byte budget
+   cannot, because glyph advances differ — 20 'W' at 16 pt render 360 px
+   against a 296 px panel). From the name column to a 4 px right margin:
+   296 - 32 - 4. cap_width() clips rather than wraps, so an over-long name
+   cannot push itself down into the next row's band. */
+#define CHORE_NAME_MAX_W 260
+static const int32_t CHORE_ROW_Y[CHORE_MAX] = {46, 68, 90};
+
+void display_screens_build_chores(const display_state_t *st) {
+    lv_obj_t *scr = fresh_screen(false);
+    char buf[64];
+
+    /* Not inverted, unlike the break screen. The checklist is a place the
+       kid reads names off and presses buttons at, not a "the device is
+       withholding something" takeover; 12 pt white-on-black is illegible
+       on this panel (see the break chip), and the tick column needs the
+       small font to stay in its cell. */
+    make_label(scr, "CHORES", &lv_font_montserrat_16, LV_ALIGN_TOP_LEFT, 4, 2);
+
+    display_format_chore_count(buf, sizeof(buf), st->chore_acked, st->chore_count);
+    lv_obj_t *count = make_label(scr, buf, &lv_font_montserrat_12, LV_ALIGN_TOP_RIGHT, -4, 5);
+    lv_obj_set_style_text_letter_space(count, 1, 0); /* as the main header */
+
+    /* §2.4: the mode does not bounce you out on the last ack, so the
+       screen has to say that something happened. Absent otherwise — the
+       row is blank in the design's own sketch. */
+    if (display_chore_unlocked(st->chore_acked, st->chore_count, st->chore_released)) {
+        make_label(scr, "Screen time unlocked", &lv_font_montserrat_16, LV_ALIGN_TOP_MID, 0, 24);
+    }
+
+    for (uint8_t i = 0; i < CHORE_MAX; i++) {
+        if (i >= st->chore_count)
+            break; /* a spare row stays blank; the rows below do not move up */
+        if (display_chore_row_ticked(st->chore_acked, st->chore_count, i)) {
+            make_label(scr, LV_SYMBOL_OK, &lv_font_montserrat_16, LV_ALIGN_TOP_LEFT, CHORE_TICK_X, CHORE_ROW_Y[i]);
+        }
+        /* chore_names rows are always NUL-terminated (display.h), so this
+           needs no length check of its own — only the width cap. */
+        lv_obj_t *name = make_label(scr, st->chore_names[i], &lv_font_montserrat_16, LV_ALIGN_TOP_LEFT, CHORE_NAME_X,
+                                    CHORE_ROW_Y[i]);
+        cap_width(name, CHORE_NAME_MAX_W);
+    }
+
+    /* The button row. Unlike build_button_row's, every cell here is
+       unconditional for a configured row: display_screen_for() has already
+       established that chores are configured and no timer is RUNNING, which
+       is exactly button_a_toggle_allowed()'s rule, so A really will act.
+       A's label is LEFT-ALIGNED, not centred on its button like the other
+       three. Button A's centre is only 17 px in (BTN_X0), so a 41 px
+       "Timers" centred there starts at x=-4 and loses its first glyph off
+       the panel — measured, by test_the_chore_button_row_fits_its_cells
+       before this line read BOTTOM_LEFT. The break screen's bottom row
+       already anchors its cell-A item at x=4 for the same reason, and
+       §2.4's own sketch draws "Timers" flush left. */
+    make_label(scr, "Timers", &lv_font_montserrat_12, LV_ALIGN_BOTTOM_LEFT, 4, -2);
+    for (uint8_t i = 0; i < CHORE_MAX; i++) {
+        if (i >= st->chore_count)
+            break; /* an unconfigured ack button is not a chore button (C1) */
+        snprintf(buf, sizeof(buf), "%s %u", LV_SYMBOL_OK, (unsigned)(i + 1));
+        make_label(scr, buf, &lv_font_montserrat_12, LV_ALIGN_BOTTOM_MID, BTN_MID_OFS(i + 1), -2);
+    }
+}
+
 void display_screens_build_timesup(void) {
     lv_obj_t *scr = fresh_screen(false);
 

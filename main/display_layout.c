@@ -142,6 +142,52 @@ void display_format_day_line(char *buf, size_t len, const char *day_type, uint32
     append_adjust(buf, len, adjust_sec);
 }
 
+/* ---- the chore checklist screen (design §2.4) --------------------------- */
+
+/* The order of the three tests IS the precedence — see the header for why
+   chores outrank the break screen and why RUNNING falls back rather than
+   painting a checklist nobody could leave. */
+display_screen_t display_screen_for(timer_state_t timer_state, app_mode_t mode, uint8_t chore_count) {
+    if (mode == APP_MODE_CHORES && chore_count > 0 && timer_state != TIMER_RUNNING)
+        return DISPLAY_SCREEN_CHORES;
+    if (timer_state == TIMER_BREAK)
+        return DISPLAY_SCREEN_BREAK;
+    return DISPLAY_SCREEN_MAIN;
+}
+
+bool display_chore_row_ticked(uint8_t acked, uint8_t count, uint8_t idx) {
+    /* CHORE_MAX bounds the shift as well as the count: `count` arrives
+       from a store that clamps it, but a wider value must still never
+       reach a shift wider than the mask. */
+    if (idx >= count || idx >= CHORE_MAX)
+        return false;
+    return ((acked >> idx) & 1u) != 0u;
+}
+
+/* Configured rows carrying a tick. Bounded by display_chore_row_ticked, so
+   there is one masking rule on this screen and not two. */
+static uint8_t chore_acked_count(uint8_t acked, uint8_t count) {
+    uint8_t n = 0;
+    for (uint8_t i = 0; i < CHORE_MAX; i++) {
+        if (display_chore_row_ticked(acked, count, i))
+            n++;
+    }
+    return n;
+}
+
+void display_format_chore_count(char *buf, size_t len, uint8_t acked, uint8_t count) {
+    unsigned cfg = (count > CHORE_MAX) ? CHORE_MAX : count;
+    snprintf(buf, len, "%u of %u", (unsigned)chore_acked_count(acked, count), cfg);
+}
+
+bool display_chore_unlocked(uint8_t acked, uint8_t count, bool released) {
+    if (count == 0)
+        return false; /* C1: nothing was ever locked */
+    if (released)
+        return true;
+    return chore_acked_count(acked, count) == ((count > CHORE_MAX) ? CHORE_MAX : count);
+}
+
 void display_format_hm(char *buf, size_t len, int32_t sec) {
     if (sec < 0)
         sec = 0;

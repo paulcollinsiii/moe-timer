@@ -242,11 +242,24 @@ static void render(ssd1680_refresh_mode_t mode) {
     panic_diag_exit(PANIC_PHASE_RENDER, prev);
 }
 
+/* A plain switch over display_screen_for() and nothing else: the
+   precedence between the three layouts — in particular that chore mode
+   outranks the break screen, so §2.6's "A -> Chores" prompt leads
+   somewhere — lives in that pure function, where test_display can reach
+   it. Every enumerator listed and no default, so -Wswitch (an error under
+   IDF's -Wall -Werror) catches a fourth screen kind that nobody wired up
+   here rather than letting it paint the timer screen. */
 static void build_for_state(const display_state_t *st) {
-    if (st->timer_state == TIMER_BREAK) {
-        display_screens_build_break(st);
-    } else {
-        display_screens_build_main(st);
+    switch (display_screen_for(st->timer_state, st->app_mode, st->chore_count)) {
+        case DISPLAY_SCREEN_CHORES:
+            display_screens_build_chores(st);
+            break;
+        case DISPLAY_SCREEN_BREAK:
+            display_screens_build_break(st);
+            break;
+        case DISPLAY_SCREEN_MAIN:
+            display_screens_build_main(st);
+            break;
     }
 }
 

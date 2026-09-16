@@ -689,6 +689,223 @@ void test_bedtime_screen(void) {
     assert_matches_golden("bedtime");
 }
 
+/* ---- the chore checklist (design §2.4) ---------------------------------- */
+
+/* The checklist reads only the chore block, so its fixture starts from
+   base_state() and fills that block in. IDLE and a break-free day:
+   display_screen_for() has already refused RUNNING before this screen is
+   ever built, and none of the timer fields below reach the panel. */
+static display_state_t chore_state(uint8_t count, uint8_t acked) {
+    display_state_t st = base_state();
+    st.app_mode = APP_MODE_CHORES;
+    st.chore_count = count;
+    st.chore_acked = acked;
+    static const char *NAMES[CHORE_MAX] = {"Dishes away", "Trash out", "Homework"};
+    for (uint8_t i = 0; i < count && i < CHORE_MAX; i++)
+        snprintf(st.chore_names[i], CHORE_NAME_BUF, "%s", NAMES[i]);
+    return st;
+}
+
+/* Design §2.4's own sketch: three rows, "1 of 3" in the header, one tick,
+   and the Timers / OK 1 / OK 2 / OK 3 button row. */
+void test_chore_screen_one_acked(void) {
+    display_state_t st = chore_state(3, 0x01);
+    display_screens_build_chores(&st);
+    assert_matches_golden("chores_one_acked");
+}
+
+/* The last ack: the header reads "3 of 3" and the count line appears. */
+void test_chore_screen_all_acked(void) {
+    display_state_t st = chore_state(3, 0x07);
+    st.chore_released = true;
+    display_screens_build_chores(&st);
+    assert_matches_golden("chores_all_acked");
+}
+
+/* A two-chore list. Row 2 is BLANK and rows 0/1 do not move — three fixed
+   rows is the property the NeoPixel mapping and the B/C/D binding both
+   rest on — and D carries no ack label, because an unconfigured ack
+   button is not a chore button (C1). */
+void test_chore_screen_two_chores(void) {
+    display_state_t st = chore_state(2, 0x02);
+    display_screens_build_chores(&st);
+    assert_matches_golden("chores_two_rows");
+}
+
+/* The rows are FIXED, and this is the assertion that says so without a
+   byte-compare: every configured row lands on the same y whatever the
+   count or the acks. A layout that closed up around a shorter list would
+   pass three goldens and still break the one-for-one row/button/pixel
+   mapping §2.4 and §2.5 are built on. */
+static void collect_row_ys(const display_state_t *st, int32_t *ys, int *n) {
+    display_screens_build_chores(st);
+    lv_obj_t *scr = lv_screen_active();
+    lv_obj_update_layout(scr);
+    *n = 0;
+    uint32_t kids = lv_obj_get_child_count(scr);
+    for (uint32_t i = 0; i < kids; i++) {
+        lv_obj_t *o = lv_obj_get_child(scr, i);
+        if (!lv_obj_check_type(o, &lv_label_class))
+            continue;
+        if (lv_obj_get_x(o) != 32) /* CHORE_NAME_X: the name column only */
+            continue;
+        ys[(*n)++] = lv_obj_get_y(o);
+    }
+}
+
+void test_chore_rows_are_fixed_whatever_the_list_holds(void) {
+    int32_t ys[CHORE_MAX + 4];
+    int n;
+
+    display_state_t three = chore_state(3, 0x00);
+    collect_row_ys(&three, ys, &n);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(3, n, "a three-chore list did not draw three name rows");
+    int32_t r0 = ys[0], r1 = ys[1], r2 = ys[2];
+    printf("chore name rows at y=%d,%d,%d\n", (int)r0, (int)r1, (int)r2);
+    TEST_ASSERT_TRUE_MESSAGE(r0 < r1 && r1 < r2, "chore rows are not in list order");
+
+    /* Acking everything must not move a row (the ticks share the band). */
+    display_state_t acked = chore_state(3, 0x07);
+    acked.chore_released = true;
+    collect_row_ys(&acked, ys, &n);
+    TEST_ASSERT_EQUAL_INT(3, n);
+    TEST_ASSERT_EQUAL_INT32_MESSAGE(r0, ys[0], "acking moved row 0");
+    TEST_ASSERT_EQUAL_INT32_MESSAGE(r1, ys[1], "acking moved row 1");
+    TEST_ASSERT_EQUAL_INT32_MESSAGE(r2, ys[2], "acking moved row 2");
+
+    /* A shorter list leaves the spare row blank rather than closing up. */
+    display_state_t two = chore_state(2, 0x00);
+    collect_row_ys(&two, ys, &n);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(2, n, "a two-chore list did not draw exactly two name rows");
+    TEST_ASSERT_EQUAL_INT32_MESSAGE(r0, ys[0], "a shorter list moved row 0");
+    TEST_ASSERT_EQUAL_INT32_MESSAGE(r1, ys[1], "a shorter list moved row 1");
+
+    display_state_t one = chore_state(1, 0x01);
+    collect_row_ys(&one, ys, &n);
+    TEST_ASSERT_EQUAL_INT(1, n);
+    TEST_ASSERT_EQUAL_INT32_MESSAGE(r0, ys[0], "a one-chore list moved row 0");
+}
+
+/* chores.h states the trap and refuses to solve it: CHORE_NAME_MAX is a
+   STORAGE cap in bytes and cannot bound rendered width — 20 'W' at 16 pt
+   measure 360 px against a 296 px panel. So the display layer carries a
+   geometric cap, and this is the measurement that says it holds. Both
+   halves are asserted: the object stops at the cap, and the DRAWING stops
+   with it (LV_LABEL_LONG_CLIP, not LONG_DOT, which would wrap a
+   content-sized label down into the next row's band). */
+#define CHORE_NAME_CAP_RIGHT (32 + 260) /* CHORE_NAME_X + CHORE_NAME_MAX_W */
+
+void test_a_pathological_chore_name_cannot_overstrike_the_panel(void) {
+    display_state_t st = chore_state(3, 0x00);
+    for (int i = 0; i < CHORE_MAX; i++)
+        memset(st.chore_names[i], 'W', CHORE_NAME_MAX); /* 20 'W', NUL already there */
+    display_screens_build_chores(&st);
+    lv_obj_t *scr = lv_screen_active();
+    lv_obj_update_layout(scr);
+
+    int rows = 0;
+    uint32_t kids = lv_obj_get_child_count(scr);
+    for (uint32_t i = 0; i < kids; i++) {
+        lv_obj_t *o = lv_obj_get_child(scr, i);
+        if (!lv_obj_check_type(o, &lv_label_class) || lv_obj_get_x(o) != 32)
+            continue;
+        rows++;
+        int32_t right = lv_obj_get_x(o) + lv_obj_get_width(o);
+        printf("20-'W' chore name at y=%d ends x=%d (cap %d, panel %d)\n", (int)lv_obj_get_y(o), (int)right,
+               CHORE_NAME_CAP_RIGHT, HOR);
+        char msg[96];
+        snprintf(msg, sizeof(msg), "uncapped chore name ends at x=%d", (int)right);
+        TEST_ASSERT_TRUE_MESSAGE(right <= CHORE_NAME_CAP_RIGHT, msg);
+        TEST_ASSERT_TRUE_MESSAGE(right <= HOR, "chore name runs off the right edge");
+    }
+    TEST_ASSERT_EQUAL_INT_MESSAGE(3, rows, "the pathological names did not reach the panel at all");
+
+    /* And the drawing, not just the object: the corridor from the cap to
+       the panel edge stays white. Bounds are the CONSTANTS — deriving them
+       from the measured edge would make the scan vacuous exactly when the
+       cap has failed. */
+    lv_refr_now(s_disp);
+    for (int32_t y = 46; y <= 107; y++) {
+        for (int32_t x = CHORE_NAME_CAP_RIGHT; x < HOR; x++) {
+            int bit = (s_captured[y * (HOR / 8) + x / 8] >> (7 - (x & 7))) & 1;
+            char msg[96];
+            snprintf(msg, sizeof(msg), "ink at x=%d y=%d - a chore name spilled past x=%d", (int)x, (int)y,
+                     CHORE_NAME_CAP_RIGHT);
+            TEST_ASSERT_EQUAL_HEX8_MESSAGE(1, bit, msg); /* LVGL I1: 1 = white */
+        }
+    }
+    /* Nothing wrapped down onto the button row either. */
+    assert_rows_blank(108, 110);
+}
+
+/* The masking, proved on the panel rather than only in test_display: a
+   list shortened from three to two leaves bit 2 set in the stored mask,
+   and the frame must be identical to the one drawn with that bit clear.
+   A renderer that walked the bits raw would tick a row that is not a
+   chore any more — except there IS no row 2 here, so the tick would land
+   in the blank band under the list. */
+void test_a_stale_ack_bit_above_the_count_changes_no_pixel(void) {
+    static uint8_t clean[FB_BYTES];
+    display_state_t st = chore_state(2, 0x01);
+    display_screens_build_chores(&st);
+    lv_refr_now(s_disp);
+    memcpy(clean, s_captured, FB_BYTES);
+
+    st.chore_acked = 0x05; /* bit 2: a stale ack from the three-chore list */
+    display_screens_build_chores(&st);
+    lv_refr_now(s_disp);
+    TEST_ASSERT_EQUAL_MEMORY_MESSAGE(clean, s_captured, FB_BYTES,
+                                     "a stale ack bit above the configured count reached the panel");
+}
+
+/* The bottom row is four independent items on a 296 px panel, and the one
+   that can go wrong is cell A: "Timers" is 41 px of text where the main
+   screen's A cell is empty, and button A's centre is only 17 px in
+   (BTN_X0), so CENTRING it on its button starts it at x=-4 and eats the
+   'T'. This test is what caught that — it failed on the first build and is
+   why the label is left-aligned. Written as on-panel + non-overlapping
+   rather than "narrower than BTN_PITCH", because a left-anchored cell is
+   not centred in a pitch and the property that matters is that no two
+   labels touch. */
+void test_the_chore_button_row_fits_its_cells(void) {
+    display_state_t st = chore_state(3, 0x00);
+    display_screens_build_chores(&st);
+    lv_obj_t *scr = lv_screen_active();
+    lv_obj_update_layout(scr);
+
+    int32_t left[8], right[8];
+    int found = 0;
+    uint32_t kids = lv_obj_get_child_count(scr);
+    for (uint32_t i = 0; i < kids; i++) {
+        lv_obj_t *o = lv_obj_get_child(scr, i);
+        if (!lv_obj_check_type(o, &lv_label_class))
+            continue;
+        if (lv_obj_get_y(o) < VER - 20) /* the bottom row only */
+            continue;
+        TEST_ASSERT_TRUE_MESSAGE(found < 8, "more bottom-row labels than the row can hold");
+        int32_t x = lv_obj_get_x(o), w = lv_obj_get_width(o);
+        printf("chore button cell '%s' x=%d..%d (%d px)\n", lv_label_get_text(o), (int)x, (int)(x + w), (int)w);
+        char msg[112];
+        snprintf(msg, sizeof(msg), "'%s' spans x=%d..%d, off a %d px panel", lv_label_get_text(o), (int)x, (int)(x + w),
+                 HOR);
+        TEST_ASSERT_TRUE_MESSAGE(x >= 0, msg);
+        TEST_ASSERT_TRUE_MESSAGE(x + w <= HOR, msg);
+        left[found] = x;
+        right[found] = x + w;
+        found++;
+    }
+    TEST_ASSERT_EQUAL_INT_MESSAGE(4, found, "the chore button row is not four cells");
+
+    /* Built left to right, so a plain sweep settles it: nothing overlaps
+       the cell after it. */
+    for (int i = 1; i < found; i++) {
+        char msg[112];
+        snprintf(msg, sizeof(msg), "cell %d ends at x=%d and cell %d starts at x=%d", i - 1, (int)right[i - 1], i,
+                 (int)left[i]);
+        TEST_ASSERT_TRUE_MESSAGE(right[i - 1] < left[i], msg);
+    }
+}
+
 int main(void) {
     lv_init();
     lv_tick_set_cb(tick_cb);
@@ -723,5 +940,12 @@ int main(void) {
     RUN_TEST(test_timesup_screen);
     RUN_TEST(test_sync_failed_screen);
     RUN_TEST(test_bedtime_screen);
+    RUN_TEST(test_chore_screen_one_acked);
+    RUN_TEST(test_chore_screen_all_acked);
+    RUN_TEST(test_chore_screen_two_chores);
+    RUN_TEST(test_chore_rows_are_fixed_whatever_the_list_holds);
+    RUN_TEST(test_a_pathological_chore_name_cannot_overstrike_the_panel);
+    RUN_TEST(test_a_stale_ack_bit_above_the_count_changes_no_pixel);
+    RUN_TEST(test_the_chore_button_row_fits_its_cells);
     return UNITY_END();
 }

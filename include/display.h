@@ -268,6 +268,72 @@ void display_format_mode_line(char *buf, size_t len, const char *name, uint16_t 
    resolved label (display_screens.c owns that mapping; this file stays
    free of anything but string math). */
 void display_format_day_line(char *buf, size_t len, const char *day_type, uint32_t allocation_sec, int32_t adjust_sec);
+
+/* ---- the chore checklist screen (design §2.4) --------------------------- */
+
+/* Which of the three full-screen layouts a paint selects. display.c's
+   build_for_state() is a plain switch over this and decides nothing of its
+   own, so the precedence below has exactly one home. */
+typedef enum {
+    DISPLAY_SCREEN_MAIN = 0, /* the ordinary timer screen */
+    DISPLAY_SCREEN_BREAK,    /* the inverted Screen Break screen */
+    DISPLAY_SCREEN_CHORES,   /* the chore checklist */
+} display_screen_t;
+
+/* The precedence rule, and the two reasons it is shaped this way.
+
+   CHORES OUTRANKS BREAK. Design §2.6 puts an "A -> Chores" cell on the
+   break screen precisely because "a break is the natural moment to do
+   chores", and §4.2 lets chore mode in throughout a break because a BREAK
+   is not RUNNING. If the break screen outranked chore mode, that press
+   would repaint the break screen and the prompt would lead nowhere. So the
+   break screen is what APP_MODE_TIMERS paints during a break — which is
+   exactly the screen M2-T6 decorates — and A moves off it to here.
+
+   RUNNING FALLS BACK TO THE TIMER SCREEN rather than painting a checklist.
+   §4.2: "you cannot tick off dishes away while the TV clock ticks". The
+   same rule arms Button A (button_a_toggle_allowed(), button_actions.h),
+   and the two MUST agree: if this painted a checklist in a state where A
+   is refused, the panel would show a screen with a "Timers" label on a
+   button that would not act — a device stuck on the chore screen for as
+   long as the timer runs. Agreeing is what lets the screen builder draw
+   that label unconditionally instead of re-deriving the gate a third time.
+   The stored mode is deliberately NOT reverted here: this is a paint
+   decision, and the day's mode byte is the wake flow's (C16, C17).
+
+   chore_count == 0 is row C1's off switch: with no list there is nothing
+   to paint, so an unreadable or emptied list degrades to the timer screen
+   rather than to a blank checklist. `mode` is not clamped anywhere on the
+   way here (app_mode_t in timer.h), hence the == test rather than a
+   switch. */
+display_screen_t display_screen_for(timer_state_t timer_state, app_mode_t mode, uint8_t chore_count);
+
+/* Whether row idx draws a tick. chores_is_acked()'s rule, restated here
+   ONLY because chores.c is not linked into either display test binary
+   (both are single-TU builds over display_layout.c) — the masking itself
+   must not be dropped: bits at or above the configured count are stored
+   RAW, so testing one directly renders a stale tick from a longer list. */
+bool display_chore_row_ticked(uint8_t acked, uint8_t count, uint8_t idx);
+
+/* The header's right-hand count, "n of 3". n is derived from the SAME mask
+   the ticks are drawn from rather than from chore_outstanding, so the
+   header can never disagree with the rows underneath it. count is the
+   configured list length, so a two-chore list reads "1 of 2". */
+void display_format_chore_count(char *buf, size_t len, uint8_t acked, uint8_t count);
+
+/* Whether the screen says "Screen time unlocked" (design §2.4: the mode
+   does not bounce you out on the last ack, so the screen has to say that
+   something happened).
+
+   An OR of two terms, and both are needed. All-acked covers the last ack
+   itself, whose paint can run before the release latch is written. And
+   `released` covers what comes after: acks TOGGLE, so un-ticking a chore
+   afterwards puts a row back outstanding while the day's screen time stays
+   granted (C8, a latch and not a recomputation) — dropping the line there
+   would claim the gate had re-shut. With no chores configured neither term
+   applies: nothing was ever locked. */
+bool display_chore_unlocked(uint8_t acked, uint8_t count, bool released);
+
 /* Invert byte columns [b0..b1] (clamped) of every row in a row-major 1bpp
    framebuffer — builds the inverse pass of the ghost-cleaning double partial. */
 void display_fb_invert_byte_cols(uint8_t *fb, int rows, int row_bytes, int b0, int b1);

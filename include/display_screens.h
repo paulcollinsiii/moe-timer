@@ -12,6 +12,13 @@ extern "C" {
 
 void display_screens_build_main(const display_state_t *st);
 void display_screens_build_break(const display_state_t *st);
+/* The chore checklist (design §2.4). Reads chore_names / chore_acked /
+   chore_count / chore_released and nothing else about the timer, because
+   display_screen_for() has already decided this screen is the right one —
+   in particular that no timer is RUNNING, which is what makes the Button A
+   "Timers" label honest without re-deriving button_a_toggle_allowed()
+   here. Never call it directly: go through display.c's build_for_state(). */
+void display_screens_build_chores(const display_state_t *st);
 void display_screens_build_timesup(void);
 void display_screens_build_sync_failed(void);
 void display_screens_build_charge_me(void);

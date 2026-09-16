@@ -505,6 +505,144 @@ void test_version_respects_a_small_buffer(void) {
     TEST_ASSERT_EQUAL_STRING("1.5", buf);
 }
 
+/* ---- display_screen_for: which full-screen layout a paint selects -------
+
+   This is the whole precedence rule, and the golden suite cannot test it:
+   the goldens call the three builders directly, so nothing over there ever
+   exercises the dispatch. These do. ---- */
+
+/* CHORES over BREAK, the fork M2-T4 had to settle. Design §2.6 puts an
+   "A -> Chores" cell on the break screen and §4.2 lets chore mode in
+   throughout a break (a BREAK is not RUNNING); if BREAK outranked CHORES,
+   that press would repaint the break screen and the prompt would lead
+   nowhere. */
+void test_chore_mode_outranks_the_break_screen(void) {
+    TEST_ASSERT_EQUAL_INT(DISPLAY_SCREEN_CHORES, display_screen_for(TIMER_BREAK, APP_MODE_CHORES, 3));
+    /* The negative control: the same break in Timers mode is still the
+       break screen — the screen M2-T6 decorates. */
+    TEST_ASSERT_EQUAL_INT(DISPLAY_SCREEN_BREAK, display_screen_for(TIMER_BREAK, APP_MODE_TIMERS, 3));
+}
+
+/* §4.2: "you cannot tick off dishes away while the TV clock ticks". Falls
+   back to the timer screen rather than painting a checklist whose Timers
+   label sits on a button button_a_toggle_allowed() would refuse. */
+void test_a_running_timer_falls_back_to_the_timer_screen(void) {
+    TEST_ASSERT_EQUAL_INT(DISPLAY_SCREEN_MAIN, display_screen_for(TIMER_RUNNING, APP_MODE_CHORES, 3));
+    /* Every other state chore mode is reachable from still paints it, so
+       the fallback is RUNNING's alone and not a blanket refusal. */
+    TEST_ASSERT_EQUAL_INT(DISPLAY_SCREEN_CHORES, display_screen_for(TIMER_IDLE, APP_MODE_CHORES, 3));
+    TEST_ASSERT_EQUAL_INT(DISPLAY_SCREEN_CHORES, display_screen_for(TIMER_PAUSED, APP_MODE_CHORES, 3));
+    TEST_ASSERT_EQUAL_INT(DISPLAY_SCREEN_CHORES, display_screen_for(TIMER_EXPIRED, APP_MODE_CHORES, 3));
+}
+
+/* Row C1's off switch. An emptied or unreadable list arrives here as
+   count 0 (chore_store_load_names zeroes the count on any failure), and
+   must degrade to the timer screen, not to an empty checklist. */
+void test_no_configured_chores_never_paints_the_checklist(void) {
+    TEST_ASSERT_EQUAL_INT(DISPLAY_SCREEN_MAIN, display_screen_for(TIMER_IDLE, APP_MODE_CHORES, 0));
+    TEST_ASSERT_EQUAL_INT(DISPLAY_SCREEN_BREAK, display_screen_for(TIMER_BREAK, APP_MODE_CHORES, 0));
+    TEST_ASSERT_EQUAL_INT(DISPLAY_SCREEN_CHORES, display_screen_for(TIMER_IDLE, APP_MODE_CHORES, 1));
+}
+
+/* The stored mode byte is NOT clamped (app_mode_t, timer.h), so anything
+   that is not APP_MODE_CHORES has to paint Timers rather than fall through
+   a switch into the checklist. */
+void test_an_out_of_range_mode_byte_paints_the_timer_screen(void) {
+    TEST_ASSERT_EQUAL_INT(DISPLAY_SCREEN_MAIN, display_screen_for(TIMER_IDLE, (app_mode_t)7, 3));
+    TEST_ASSERT_EQUAL_INT(DISPLAY_SCREEN_BREAK, display_screen_for(TIMER_BREAK, (app_mode_t)7, 3));
+}
+
+/* ---- display_chore_row_ticked ---- */
+
+void test_chore_rows_draw_their_own_ack_bits(void) {
+    TEST_ASSERT_TRUE(display_chore_row_ticked(0x01, 3, 0));
+    TEST_ASSERT_FALSE(display_chore_row_ticked(0x01, 3, 1));
+    TEST_ASSERT_FALSE(display_chore_row_ticked(0x01, 3, 2));
+    TEST_ASSERT_TRUE(display_chore_row_ticked(0x06, 3, 1));
+    TEST_ASSERT_TRUE(display_chore_row_ticked(0x06, 3, 2));
+}
+
+/* THE trap this helper exists for: the stored mask keeps bits at and above
+   the configured count RAW, so a list shortened from three to two leaves
+   bit 2 set. Testing it directly would render a tick against a row that is
+   not a chore any more. */
+void test_a_stale_bit_above_the_count_never_draws_a_tick(void) {
+    TEST_ASSERT_FALSE(display_chore_row_ticked(0x07, 2, 2));
+    TEST_ASSERT_FALSE(display_chore_row_ticked(0x07, 0, 0));
+    TEST_ASSERT_FALSE(display_chore_row_ticked(0xFF, 1, 1));
+    /* and the rows that ARE configured still tick */
+    TEST_ASSERT_TRUE(display_chore_row_ticked(0x07, 2, 0));
+    TEST_ASSERT_TRUE(display_chore_row_ticked(0x07, 2, 1));
+}
+
+void test_a_row_index_past_the_hardware_cap_is_refused(void) {
+    TEST_ASSERT_FALSE(display_chore_row_ticked(0xFF, CHORE_MAX, CHORE_MAX));
+    TEST_ASSERT_FALSE(display_chore_row_ticked(0xFF, 200, 200));
+}
+
+/* ---- display_format_chore_count ---- */
+
+void test_chore_count_reads_n_of_the_configured_length(void) {
+    char buf[16];
+    display_format_chore_count(buf, sizeof(buf), 0x00, 3);
+    TEST_ASSERT_EQUAL_STRING("0 of 3", buf);
+    display_format_chore_count(buf, sizeof(buf), 0x01, 3);
+    TEST_ASSERT_EQUAL_STRING("1 of 3", buf);
+    display_format_chore_count(buf, sizeof(buf), 0x05, 3);
+    TEST_ASSERT_EQUAL_STRING("2 of 3", buf);
+    /* §2.4: on the last ack the header becomes "3 of 3". */
+    display_format_chore_count(buf, sizeof(buf), 0x07, 3);
+    TEST_ASSERT_EQUAL_STRING("3 of 3", buf);
+}
+
+void test_chore_count_follows_a_shorter_list(void) {
+    char buf[16];
+    display_format_chore_count(buf, sizeof(buf), 0x01, 2);
+    TEST_ASSERT_EQUAL_STRING("1 of 2", buf);
+    /* the stale high bit is not counted either — the header would
+       otherwise read "2 of 2" over a screen showing one tick */
+    display_format_chore_count(buf, sizeof(buf), 0x05, 2);
+    TEST_ASSERT_EQUAL_STRING("1 of 2", buf);
+}
+
+void test_chore_count_with_a_zero_length_buffer_touches_nothing(void) {
+    char buf[4];
+    memset(buf, (char)0xAA, sizeof(buf));
+    display_format_chore_count(buf, 0, 0x07, 3);
+    TEST_ASSERT_EQUAL_HEX8((char)0xAA, buf[0]);
+}
+
+/* ---- display_chore_unlocked ---- */
+
+void test_unlocked_on_the_last_ack_before_the_latch_is_written(void) {
+    TEST_ASSERT_TRUE(display_chore_unlocked(0x07, 3, false));
+    TEST_ASSERT_FALSE(display_chore_unlocked(0x03, 3, false));
+    TEST_ASSERT_FALSE(display_chore_unlocked(0x00, 3, false));
+}
+
+/* C8: acks toggle, the release latches. Un-ticking a chore after the day
+   released puts a row back outstanding while the screen time stays
+   granted — the line must not claim the gate re-shut. */
+void test_unlocked_stays_true_after_an_ack_is_toggled_back_off(void) {
+    TEST_ASSERT_TRUE(display_chore_unlocked(0x03, 3, true));
+    TEST_ASSERT_TRUE(display_chore_unlocked(0x00, 3, true));
+}
+
+/* With no chores nothing was ever locked, so nothing is unlocked — and a
+   stale mask against an emptied list must not announce otherwise. */
+void test_no_chores_is_never_unlocked(void) {
+    TEST_ASSERT_FALSE(display_chore_unlocked(0x00, 0, false));
+    TEST_ASSERT_FALSE(display_chore_unlocked(0x07, 0, false));
+    TEST_ASSERT_FALSE(display_chore_unlocked(0x07, 0, true));
+}
+
+/* A shortened list: bits above the count are raw, so all-acked has to be
+   decided over the configured rows only. */
+void test_unlocked_ignores_bits_above_the_configured_count(void) {
+    TEST_ASSERT_TRUE(display_chore_unlocked(0x07, 2, false)); /* both real rows acked */
+    TEST_ASSERT_FALSE(display_chore_unlocked(0x04, 2, false));
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_break_chip_is_minutes_and_seconds);
@@ -564,5 +702,19 @@ int main(void) {
     RUN_TEST(test_invert_dirty_rows_only_touches_changed_rows);
     RUN_TEST(test_invert_dirty_rows_clamps_range);
     RUN_TEST(test_invert_dirty_rows_no_change_returns_zero);
+    RUN_TEST(test_chore_mode_outranks_the_break_screen);
+    RUN_TEST(test_a_running_timer_falls_back_to_the_timer_screen);
+    RUN_TEST(test_no_configured_chores_never_paints_the_checklist);
+    RUN_TEST(test_an_out_of_range_mode_byte_paints_the_timer_screen);
+    RUN_TEST(test_chore_rows_draw_their_own_ack_bits);
+    RUN_TEST(test_a_stale_bit_above_the_count_never_draws_a_tick);
+    RUN_TEST(test_a_row_index_past_the_hardware_cap_is_refused);
+    RUN_TEST(test_chore_count_reads_n_of_the_configured_length);
+    RUN_TEST(test_chore_count_follows_a_shorter_list);
+    RUN_TEST(test_chore_count_with_a_zero_length_buffer_touches_nothing);
+    RUN_TEST(test_unlocked_on_the_last_ack_before_the_latch_is_written);
+    RUN_TEST(test_unlocked_stays_true_after_an_ack_is_toggled_back_off);
+    RUN_TEST(test_no_chores_is_never_unlocked);
+    RUN_TEST(test_unlocked_ignores_bits_above_the_configured_count);
     return UNITY_END();
 }
