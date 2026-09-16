@@ -14,11 +14,18 @@
    device does. bedtime.c (with the quiet-hours HHMM helpers it leans on)
    is what makes row 21 a statement about the real crossing arithmetic
    rather than about an injected bool. The mock clock comes along because
-   every decision here is a wall-time comparison. Everything with a device
-   behind it gets a link-time spy stub in the preamble below. */
+   every decision here is a wall-time comparison. display_layout.c joins
+   them for display_screen_for() alone: the render path now promotes a
+   change of SCREEN KIND to a full refresh, and a stub of that function
+   would make every such row an assertion about the stub's precedence
+   rather than about the painter's. It is pure (no LVGL, no device) and
+   collides with none of the display stubs below, which cover the paint
+   entry points and not the layout rules. Everything with a device behind
+   it gets a link-time spy stub in the preamble below. */
 // clang-format off
 #include "../../main/bedtime.c"
 #include "../../main/button_latch.c"
+#include "../../main/display_layout.c"
 #include "../../main/quiet_hours.c"
 #include "../../main/wake_policy.c"
 #include "mock_hal_time.c"
@@ -64,6 +71,13 @@ typedef enum {
     /* the guard matrix */
     EV_A_APPLY,
     EV_B_APPLY,
+    /* button_chore_ack_apply(): B, C or D ticking a checkbox instead of
+       doing its timer job (design 2.4). Logged rather than only counted
+       because several cases below are about the ack NOT happening — a
+       press that fell through to the timer action instead — and a final
+       mask check cannot tell "never acked" apart from "acked and toggled
+       back". */
+    EV_CHORE_ACK,
     EV_PAUSE,
     EV_LED,
     EV_NET_OPEN,
@@ -448,6 +462,29 @@ btn_a_action_t button_a_apply(void) {
     const app_mode_t next = (timer_mode() == APP_MODE_CHORES) ? APP_MODE_TIMERS : APP_MODE_CHORES;
     timer_set_mode(next);
     return (next == APP_MODE_CHORES) ? BTN_A_CHORES : BTN_A_TIMERS;
+}
+
+/* The ack, modelled the same way as the two maps around it: WHAT it does
+   to the mask, the flash record and the Screen timer is
+   test_button_actions' subject, because that is where the real chores.c,
+   chore_store.c and timer.c are linked. What this suite owns is the
+   ROUTING — which button reaches it, with which row index, in which mode,
+   and what the wake does around it (the break-end drain, the render
+   policy, the latch). So the stub records the call and returns an
+   injected verdict.
+
+   flow_ack_result defaults to BTN_ACK_NONE, matching the shipped fleet
+   (no chore list, never in chore mode): a case that wants the ack to LAND
+   has to say so, the same way it has to opt into a chore list at all. */
+static btn_ack_action_t flow_ack_result;
+static int flow_ack_idx;    /* the row the flow asked for; -1 = never asked */
+static time_t flow_ack_now; /* the clock it was handed */
+
+btn_ack_action_t button_chore_ack_apply(uint8_t idx, time_t now) {
+    flow_log_push(EV_CHORE_ACK);
+    flow_ack_idx = (int)idx;
+    flow_ack_now = now;
+    return flow_ack_result;
 }
 
 /* button_actions.c's map, modelled rather than switched: what it RETURNS
@@ -1538,6 +1575,8 @@ void setUp(void) {
        directly — as test_lock_gate does with the lock flags — rather than
        making wake_flow carry a reset entry point production never calls. */
     s_break_ended = false;
+    s_mode_toggled = false; /* wake-sticky on device, same as s_break_ended */
+    s_chore_acked = false;  /* likewise: one wake is one boot */
 
     button_latch_reset();
     flow_edge_us = 1000000;
@@ -1549,6 +1588,9 @@ void setUp(void) {
        cases that do not care are about the plumbing — the wake mask, the
        pick masks, the ordering — and they need the press to land. */
     flow_a_allowed = true;
+    flow_ack_result = BTN_ACK_NONE; /* the shipped fleet: no list, no chore mode */
+    flow_ack_idx = -1;              /* poisoned: "never asked" must not read as row 0 */
+    flow_ack_now = 0;
     flow_b_result = BTN_B_NONE;
     flow_b_apply_arg = 0;
     flow_slot_reloadable = false;
@@ -3664,13 +3706,15 @@ void test_a_started_break_runs_the_break_alarm_not_the_expiry_one(void) {
    caught too. The four in the middle are the break-start paint's own body,
    which wake_flow.c has owned since the residency audit — before that this
    case saw one stubbed event where it now sees the real ones, and the
-   ordering inside them was untested anywhere. */
+   ordering inside them was untested anywhere.
+   EV_SET_MODE is C16's break-START revert, and its POSITION carries the
+   rule: after the break exists, before the paint that has to show it. */
 void test_the_started_break_effect_order_is_pinned_end_to_end(void) {
     flow_break_due_ret = true;
     (void)flow_run_break_gate(flow_at(14, 0));
     static const flow_event_t expect[] = {EV_CFG_INTERVAL, EV_CFG_DURATION, EV_BREAK_DUE,  EV_START_BREAK,
-                                          EV_PERSIST_SAVE, EV_TIMER_TICK,   EV_MAKE_STATE, EV_LED,
-                                          EV_FULL_REFRESH, EV_ALERT_BREAK};
+                                          EV_SET_MODE,     EV_PERSIST_SAVE, EV_TIMER_TICK, EV_MAKE_STATE,
+                                          EV_LED,          EV_FULL_REFRESH, EV_ALERT_BREAK};
     TEST_ASSERT_EQUAL_INT((int)(sizeof expect / sizeof expect[0]), flow_log_n);
     for (int i = 0; i < flow_log_n; i++) {
         TEST_ASSERT_EQUAL_INT((int)expect[i], (int)flow_log[i]);
@@ -7456,6 +7500,221 @@ void test_c3_a_config_edit_that_empties_the_list_after_the_press_still_wins(void
                                   "the emptied-list guard rendered the fallback but left the stored mode in chores");
 }
 
+/* --- M2-T4: a mode toggle must not be painted as a PARTIAL --- */
+
+/* THE hazard M2-T4 inherited. The A arm returns true with
+   *selection_changed false and moves no timer, so before == after with no
+   break end — and wake_policy_render's button leg answers PARTIAL. That
+   was harmless while both modes painted the same screen. It stopped being
+   harmless the moment display_screen_for() gave chore mode a layout of its
+   own: a partial diff across a whole-screen layout change ghosts the
+   panel, which is the very hazard wake_policy_render's own break-chip
+   comment names for the other full-screen layout.
+
+   The negative control is inline and is the point of the test: the shipped
+   policy, asked about this exact state pair, still says PARTIAL. So the
+   full refresh below can only be coming from the force_full promotion. */
+void test_a_mode_toggle_is_painted_full_not_partial(void) {
+    flow_mode = APP_MODE_TIMERS;
+    flow_chore_count = 3;
+    flow_state = TIMER_IDLE;
+    mock_time_set(flow_at(16, 0));
+
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        WAKE_RENDER_PARTIAL, wake_policy_render(TIMER_IDLE, TIMER_IDLE, true, false, false),
+        "the policy no longer calls this pair partial - this test's negative control has gone vacuous");
+
+    TEST_ASSERT_TRUE(flow_dispatch(BTN_A, flow_at(16, 0), TIMER_IDLE, true));
+    render_action_result(BTN_A, TIMER_IDLE, flow_at(16, 0), false);
+
+    TEST_ASSERT_EQUAL_INT_MESSAGE(1, flow_log_count(EV_FULL_REFRESH), "a mode toggle was painted as a partial diff");
+    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_PARTIAL));
+    /* and it really was the chore screen that got painted */
+    TEST_ASSERT_EQUAL_INT(APP_MODE_CHORES, (int)flow_painted_mode);
+}
+
+/* The other direction across the same boundary — chores back to timers —
+   because both crossings ghost, exactly as both crossings of the break
+   screen do (test_row4_a_swap_back_onto_the_break_screen_renders_full). */
+void test_a_toggle_back_out_of_chore_mode_is_also_full(void) {
+    flow_mode = APP_MODE_CHORES;
+    flow_chore_count = 3;
+    flow_state = TIMER_IDLE;
+    mock_time_set(flow_at(16, 0));
+
+    TEST_ASSERT_TRUE(flow_dispatch(BTN_A, flow_at(16, 0), TIMER_IDLE, true));
+    render_action_result(BTN_A, TIMER_IDLE, flow_at(16, 0), false);
+
+    TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_FULL_REFRESH));
+    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_PARTIAL));
+    TEST_ASSERT_EQUAL_INT(APP_MODE_TIMERS, (int)flow_painted_mode);
+}
+
+/* A REFUSED press must NOT be promoted. It leaves the panel showing the
+   screen it already showed, and the tail paints it anyway
+   (test_c3_a_refused_button_a_wake_repaints_the_current_screen), so a full
+   refresh there would spend two seconds of panel time on an unchanged
+   frame. This is what stops the promotion being written as
+   `btn == BTN_A`. */
+void test_a_refused_button_a_is_not_promoted_to_a_full_refresh(void) {
+    flow_a_allowed = false; /* a RUNNING timer, or no chore list */
+    flow_mode = APP_MODE_TIMERS;
+    flow_state = TIMER_IDLE;
+    mock_time_set(flow_at(16, 0));
+
+    TEST_ASSERT_FALSE(flow_dispatch(BTN_A, flow_at(16, 0), TIMER_IDLE, true));
+    render_action_result(BTN_A, TIMER_IDLE, flow_at(16, 0), false);
+
+    TEST_ASSERT_EQUAL_INT_MESSAGE(0, flow_log_count(EV_FULL_REFRESH),
+                                  "a refused mode toggle burned a full panel refresh");
+    TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_PARTIAL));
+}
+
+/* The promotion is wake-sticky, so it also covers the RE-render after the
+   network join: a config edit that empties the list mid-wake sends
+   make_display_state's guard back to the timer screen, which is a second
+   screen-kind change in the same wake and would ghost the same way. */
+void test_the_toggle_promotion_survives_into_the_post_join_repaint(void) {
+    flow_mode = APP_MODE_TIMERS;
+    flow_chore_count = 3;
+    flow_state = TIMER_IDLE;
+    mock_time_set(flow_at(16, 0));
+
+    TEST_ASSERT_TRUE(flow_dispatch(BTN_A, flow_at(16, 0), TIMER_IDLE, true));
+    flow_net_finish = NET_FINISH_CHANGED; /* the join changed what the panel shows */
+    flow_chore_count = 0;                 /* ...by emptying the list */
+
+    finish_action_and_render(BTN_A, TIMER_IDLE, flow_at(16, 0), false);
+
+    TEST_ASSERT_EQUAL_INT_MESSAGE(2, flow_log_count(EV_FULL_REFRESH),
+                                  "the post-join repaint across the same boundary went partial");
+    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_PARTIAL));
+    TEST_ASSERT_EQUAL_INT(APP_MODE_TIMERS, (int)flow_painted_mode);
+}
+
+/* --- the general rule: ANY change of screen kind is a full refresh --- */
+
+/* The two toggle cases above are one instance of a larger rule, and
+   leaving only them fixed leaves the rule resting on an emergent
+   invariant: today no press can reach a chore-mode RUNNING (B's start is
+   rebound, C no longer swaps, the join poll is guarded, HA cannot start a
+   timer, and a break end restores slot 0 PAUSED), so the timer state
+   cannot move the screen kind on its own. Every one of those is a fact
+   about a DIFFERENT file, and nothing stops a later task changing one.
+
+   So the promotion asks display_screen_for() — the painter's own choice —
+   instead of enumerating the presses that can reach it, which is what
+   design 2.5's "the transition out of chore mode stays a full refresh"
+   actually means. These cases drive render_action_result() at its own
+   seam with a state pair whose screen kind moves, deliberately WITHOUT
+   claiming a press that produces it: the seam is where the rule lives,
+   and a test routed through the bindings would be re-asserting their
+   current shape instead of the rule.
+
+   Negative control inline, as the toggle cases have: the shipped policy
+   still calls this pair PARTIAL, so the full refresh can only be the
+   promotion. */
+void test_a_screen_kind_change_from_the_timer_state_alone_is_painted_full(void) {
+    flow_mode = APP_MODE_CHORES;
+    flow_chore_count = 3;
+    flow_state = TIMER_PAUSED; /* after: the checklist */
+    mock_time_set(flow_at(16, 0));
+
+    TEST_ASSERT_EQUAL_INT_MESSAGE(DISPLAY_SCREEN_MAIN, (int)display_screen_for(TIMER_RUNNING, APP_MODE_CHORES, 3),
+                                  "the fixture's `before` is not the timer screen");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(DISPLAY_SCREEN_CHORES, (int)display_screen_for(TIMER_PAUSED, APP_MODE_CHORES, 3),
+                                  "the fixture's `after` is not the chore screen");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        WAKE_RENDER_PARTIAL, wake_policy_render(TIMER_RUNNING, TIMER_PAUSED, true, false, false),
+        "the policy no longer calls this pair partial - this test's negative control has gone vacuous");
+
+    render_action_result(BTN_B, TIMER_RUNNING, flow_at(16, 0), false);
+
+    TEST_ASSERT_EQUAL_INT_MESSAGE(1, flow_log_count(EV_FULL_REFRESH),
+                                  "a whole-screen layout change was painted as a partial diff");
+    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_PARTIAL));
+}
+
+/* The other direction across the same boundary, because both crossings
+   ghost — the same reason the two mode-toggle directions are both pinned. */
+void test_the_other_direction_of_a_screen_kind_change_is_full_too(void) {
+    flow_mode = APP_MODE_CHORES;
+    flow_chore_count = 3;
+    flow_state = TIMER_RUNNING; /* after: back to the timer screen */
+    mock_time_set(flow_at(16, 0));
+
+    render_action_result(BTN_B, TIMER_PAUSED, flow_at(16, 0), false);
+
+    TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_FULL_REFRESH));
+    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_PARTIAL));
+}
+
+/* And the half that stops the promotion being "any state change at all".
+   A pause on the timer screen moves the state and keeps the layout, so it
+   must still go partial — otherwise every ordinary press costs a full
+   panel refresh and design 2.5's whole budget is gone. */
+void test_a_state_change_that_keeps_the_same_screen_stays_partial(void) {
+    flow_mode = APP_MODE_TIMERS;
+    flow_chore_count = 3;
+    flow_state = TIMER_PAUSED;
+    mock_time_set(flow_at(16, 0));
+
+    render_action_result(BTN_B, TIMER_RUNNING, flow_at(16, 0), false);
+
+    TEST_ASSERT_EQUAL_INT_MESSAGE(0, flow_log_count(EV_FULL_REFRESH), "an ordinary pause burned a full panel refresh");
+    TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_PARTIAL));
+}
+
+/* --- C16: a break that STARTS in chore mode has to announce itself --- */
+
+/* display_screen_for() puts CHORES above BREAK unconditionally and
+   paint_break_started() renders through that same choice, so a break
+   starting while the stored mode is CHORES painted the CHECKLIST: no
+   SCREEN BREAK title, no countdown, no bar. The alarm sounds and the
+   panel never says why.
+   The revert is the break-END revert's argument applied to the other edge
+   of the same event — the kid did not press anything, and the repaint is
+   a full refresh with an alarm behind it whose whole job is to show the
+   new situation. Nothing is lost: 2.6's break screen carries its own
+   "A → Chores" prompt, so the way back in is the press 2.6 asks for. */
+void test_c16_a_break_that_starts_in_chore_mode_reverts_to_timers(void) {
+    flow_mode = APP_MODE_CHORES;
+    flow_chore_count = 3;
+    flow_break_due_ret = true;
+
+    TEST_ASSERT_EQUAL_INT(FLOW_GATE_STARTED, flow_run_break_gate(flow_at(14, 0)));
+
+    TEST_ASSERT_EQUAL_INT_MESSAGE(APP_MODE_TIMERS, (int)flow_mode,
+                                  "a break started and left the device painting the chore screen");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(APP_MODE_TIMERS, (int)flow_painted_mode,
+                                  "the break screen paint still went out in chore mode");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(DISPLAY_SCREEN_BREAK,
+                                  (int)display_screen_for(TIMER_BREAK, flow_painted_mode, flow_chore_count),
+                                  "the painter would still have chosen the checklist over the break screen");
+}
+
+/* The revert has to land AFTER the chore-ack arm's re-assert, not merely
+   after a mode toggle: M2-T4a made the ack arm store APP_MODE_CHORES
+   again once the break-end drain has run, which is what widened this. The
+   dispatch has returned by the time finish_or_break() reaches the break
+   gate, so the ordering holds — asserted rather than reasoned about. */
+void test_c16_the_break_start_revert_survives_an_ack_earlier_in_the_wake(void) {
+    flow_mode = APP_MODE_CHORES;
+    flow_chore_count = 3;
+    flow_ack_result = BTN_ACK_TOGGLED;
+    flow_state = TIMER_IDLE;
+    mock_time_set(flow_at(14, 0));
+
+    TEST_ASSERT_TRUE(flow_dispatch(BTN_B, flow_at(14, 0), TIMER_IDLE, true));
+    TEST_ASSERT_EQUAL_INT_MESSAGE(APP_MODE_CHORES, (int)flow_mode, "the ack arm did not re-assert chore mode");
+
+    flow_break_due_ret = true;
+    TEST_ASSERT_EQUAL_INT(FLOW_GATE_STARTED, flow_run_break_gate(flow_at(14, 0)));
+
+    TEST_ASSERT_EQUAL_INT_MESSAGE(APP_MODE_TIMERS, (int)flow_mode,
+                                  "the ack's re-assert outlived the break start and hid the break screen");
+}
+
 /* ---- the OTA call sites -------------------------------------------------
 
    Four things, and only the first two of the four are decisions this
@@ -7726,6 +7985,310 @@ void test_the_apply_carries_the_charge_lock_it_sampled(void) {
     TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_tick());
 
     TEST_ASSERT_FALSE(flow_ota_apply_locked);
+}
+
+/* ======================================================================
+   M2-T4a — B, C and D BOUND TO THE CHORE ACKS (design 2.4, 2.5)
+   ======================================================================
+
+   The routing half of the ack. What a toggle does to the mask, to flash
+   and to the Screen timer is test_button_actions' subject; what lives
+   here is which button reaches the ack with which row, what happens to
+   the timer action it displaced, and what the wake does around it. */
+
+/* Chore mode rebinds B to the first checkbox. The timer job it displaced
+   must not ALSO run: a press that both ticked a chore and started the
+   screen timer would be the worst of both, and design 4.2 only lets the
+   device into chore mode because nothing is running. */
+void test_c4a_b_in_chore_mode_acks_row_1_instead_of_starting(void) {
+    flow_mode = APP_MODE_CHORES;
+    flow_chore_count = 3;
+    flow_ack_result = BTN_ACK_TOGGLED;
+    flow_b_result = BTN_B_STARTED; /* armed, so a fall-through would be loud */
+    mock_time_set(flow_at(16, 0));
+
+    TEST_ASSERT_TRUE(flow_dispatch(BTN_B, flow_at(16, 0), TIMER_IDLE, true));
+
+    TEST_ASSERT_EQUAL_INT_MESSAGE(1, flow_log_count(EV_CHORE_ACK), "B did not reach the ack in chore mode");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(0, flow_ack_idx, "B ticked the wrong row");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(0, flow_log_count(EV_B_APPLY), "the ack fell through to the timer action");
+    TEST_ASSERT_EQUAL_INT(TIMER_IDLE, flow_state);
+    TEST_ASSERT_EQUAL_INT64(flow_at(16, 0), flow_ack_now);
+}
+
+/* C is the middle checkbox, and the swap it displaced must not happen —
+   a timer selection changing invisibly behind the checklist is exactly
+   the ambiguity the three fixed rows exist to remove (design 2.4). */
+void test_c4a_c_in_chore_mode_acks_row_2_instead_of_swapping(void) {
+    flow_mode = APP_MODE_CHORES;
+    flow_chore_count = 3;
+    flow_ack_result = BTN_ACK_TOGGLED;
+    flow_select_ok = true; /* armed */
+    mock_time_set(flow_at(16, 0));
+
+    TEST_ASSERT_TRUE(flow_dispatch(BTN_C, flow_at(16, 0), TIMER_IDLE, true));
+
+    TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_CHORE_ACK));
+    TEST_ASSERT_EQUAL_INT_MESSAGE(1, flow_ack_idx, "C ticked the wrong row");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(0, flow_log_count(EV_SELECT_NEXT), "the ack fell through to the swap");
+    TEST_ASSERT_FALSE_MESSAGE(flow_swapped_io, "an ack reported a selection change");
+}
+
+/* A REFUSED ack (a row that is not configured — two chores means no row
+   3) must not fall back to the timer action either. In chore mode B, C
+   and D ARE the ack buttons; a C press that silently swapped the selected
+   timer because row 2 happened not to exist would be the same ambiguity
+   arriving by a side door. */
+void test_c4a_a_refused_ack_does_not_fall_through_to_the_timer_action(void) {
+    const button_id_t btns[] = {BTN_B, BTN_C};
+    for (int i = 0; i < 2; i++) {
+        setUp();
+        flow_mode = APP_MODE_CHORES;
+        flow_chore_count = 2;
+        flow_ack_result = BTN_ACK_NONE; /* the row is not configured */
+        flow_b_result = BTN_B_STARTED;
+        flow_select_ok = true;
+        mock_time_set(flow_at(16, 0));
+
+        TEST_ASSERT_FALSE(flow_dispatch(btns[i], flow_at(16, 0), TIMER_IDLE, true));
+
+        TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_CHORE_ACK));
+        TEST_ASSERT_EQUAL_INT_MESSAGE(0, flow_log_count(EV_B_APPLY), "a refused ack started a timer");
+        TEST_ASSERT_EQUAL_INT_MESSAGE(0, flow_log_count(EV_SELECT_NEXT), "a refused ack swapped the timer");
+    }
+}
+
+/* The other side of the same switch, and the one that matters to every
+   device in the field: outside chore mode nothing is rebound at all. */
+void test_c4a_outside_chore_mode_b_and_c_keep_their_timer_jobs(void) {
+    flow_mode = APP_MODE_TIMERS;
+    flow_ack_result = BTN_ACK_TOGGLED; /* armed, so a wrong route would be loud */
+    flow_b_result = BTN_B_STARTED;
+    mock_time_set(flow_at(16, 0));
+
+    TEST_ASSERT_TRUE(flow_dispatch(BTN_B, flow_at(16, 0), TIMER_IDLE, true));
+
+    TEST_ASSERT_EQUAL_INT_MESSAGE(0, flow_log_count(EV_CHORE_ACK), "a timer-mode press reached the ack");
+    TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_B_APPLY));
+    TEST_ASSERT_EQUAL_INT(TIMER_RUNNING, flow_state);
+}
+
+/* Design 2.6 wants the checklist reachable THROUGHOUT a screen break, so
+   the ack has to sit ahead of B's break guard. That guard refuses a start
+   during a break, which is right for a start and wrong for a tick. */
+void test_c4a_an_ack_is_not_refused_during_a_screen_break(void) {
+    flow_mode = APP_MODE_CHORES;
+    flow_chore_count = 3;
+    flow_ack_result = BTN_ACK_TOGGLED;
+    flow_state = TIMER_BREAK;
+    mock_time_set(flow_at(16, 0));
+
+    TEST_ASSERT_TRUE(flow_dispatch(BTN_B, flow_at(16, 0), TIMER_BREAK, true));
+
+    TEST_ASSERT_EQUAL_INT_MESSAGE(1, flow_log_count(EV_CHORE_ACK), "B's break guard swallowed a chore ack");
+}
+
+/* M2-T3's apply -> drain -> RE-ASSERT, inherited. render_action_result()
+   drains a pending break end before it paints and that drain stores
+   APP_MODE_TIMERS unconditionally, so an ack that left the drain to the
+   tail would tick the box and then paint the timer screen — the press
+   visibly undone. The arm therefore drains here and re-asserts the mode
+   the press was made in, exactly as the Button A arm does, and the
+   drain's other effects (the chime, the snap back, the wake-sticky full
+   refresh) all stand.
+
+   Driven through the break-tail poll because that is the ONE caller with
+   no drain in its prologue, and so the only one where the ordering is
+   observable at all. */
+void test_c4a_an_ack_drains_a_pending_break_end_and_keeps_chore_mode(void) {
+    flow_mode = APP_MODE_CHORES;
+    flow_chore_count = 3;
+    flow_ack_result = BTN_ACK_TOGGLED;
+    flow_state = TIMER_BREAK;
+    flow_arm_break(flow_at(16, 0), FLOW_PIANO, FLOW_SCREEN);
+    mock_time_set(flow_at(16, 0) + 3);
+    flow_press(BTN_B);
+
+    TEST_ASSERT_TRUE(wake_flow_poll_break_buttons());
+
+    TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_CHORE_ACK));
+    TEST_ASSERT_EQUAL_INT_MESSAGE(1, flow_log_count(EV_CHIME), "the ack arm stranded the break-end latch");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(APP_MODE_CHORES, (int)flow_mode, "the drain's unconditional revert undid the press");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(APP_MODE_CHORES, (int)flow_painted_mode,
+                                  "the panel painted the screen the press was made to leave");
+}
+
+/* And a REFUSED ack returns before the drain, so the edge stays latched
+   for a later consumer or the pre-sleep safety net. A refusal must never
+   consume an edge it then cannot get painted — the same rule the refused
+   Button A arm follows, and the shape that stranded this latch once
+   already. */
+void test_c4a_a_refused_ack_leaves_the_break_end_latched(void) {
+    flow_mode = APP_MODE_CHORES;
+    flow_chore_count = 2;
+    flow_ack_result = BTN_ACK_NONE;
+    flow_state = TIMER_BREAK;
+    flow_arm_break(flow_at(16, 0), FLOW_PIANO, FLOW_SCREEN);
+    mock_time_set(flow_at(16, 0) + 3);
+    flow_press(BTN_B);
+
+    TEST_ASSERT_FALSE(wake_flow_poll_break_buttons());
+
+    TEST_ASSERT_EQUAL_INT_MESSAGE(0, flow_log_count(EV_CHIME), "a refused ack consumed the break end");
+    /* The edge is not merely un-chimed, it is still THERE: the refusal
+       returned above the drain, so nothing has ticked the elapsed break
+       yet and the next consumer still finds it. Asserted by draining it
+       here, which is the only way to tell "left for later" apart from
+       "silently swallowed". */
+    TEST_ASSERT_TRUE_MESSAGE(flow_break_running, "a refused ack ticked the break");
+    TEST_ASSERT_TRUE_MESSAGE(wake_flow_break_end(), "the break-end edge was eaten by a press that did nothing");
+    TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_CHIME));
+}
+
+/* D is the third checkbox, and in chore mode it is NOT the sync button:
+   an update check and a network window are not what the row promises. */
+void test_c4a_d_in_chore_mode_acks_row_3_instead_of_checking_for_an_update(void) {
+    flow_tick_clock(flow_at(15, 0));
+    flow_mode = APP_MODE_CHORES;
+    flow_chore_count = 3;
+    flow_ack_result = BTN_ACK_TOGGLED;
+    flow_wakeup_btn = BTN_D;
+
+    TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_button());
+
+    TEST_ASSERT_EQUAL_INT_MESSAGE(1, flow_log_count(EV_CHORE_ACK), "the D wake arm has no ack case");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(2, flow_ack_idx, "D ticked the wrong row");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(0, flow_log_count(EV_OTA_ARM), "the ack also armed an update check");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(0, flow_log_count(EV_NET_OPEN), "the ack also opened a network window");
+}
+
+/* Outside chore mode D is the sync button exactly as it was. */
+void test_c4a_d_outside_chore_mode_still_checks_for_an_update(void) {
+    flow_tick_clock(flow_at(15, 0));
+    flow_mode = APP_MODE_TIMERS;
+    flow_ack_result = BTN_ACK_TOGGLED; /* armed */
+    flow_wakeup_btn = BTN_D;
+
+    TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_button());
+
+    TEST_ASSERT_EQUAL_INT_MESSAGE(0, flow_log_count(EV_CHORE_ACK), "a timer-mode D press reached the ack");
+    TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_OTA_ARM));
+}
+
+/* D STAYS WAKE-PRESS-ONLY. It is excluded from both latch pick masks, so
+   a D press that merely rode in on another wake is taken and thrown away
+   — before this binding and after it. Pinned because D now HAS an action
+   for the first time, which is the condition both mask comments name as
+   the moment they would become load bearing. They are not: the binding
+   lives in the EXT1 decode, not in the dispatch, so the dispatch still
+   has no BTN_D arm and both masks stay documentation. */
+void test_c4a_a_latched_d_press_in_chore_mode_still_never_acks(void) {
+    flow_tick_clock(flow_at(15, 0));
+    flow_mode = APP_MODE_CHORES;
+    flow_chore_count = 3;
+    flow_ack_result = BTN_ACK_TOGGLED;
+    flow_state = TIMER_IDLE;
+    flow_press(BTN_D);
+
+    TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_tick());
+
+    TEST_ASSERT_EQUAL_INT_MESSAGE(0, flow_log_count(EV_CHORE_ACK), "a latched D press acked");
+    TEST_ASSERT_EQUAL_HEX8(0, flow_latch_residue()); /* taken, then dropped */
+}
+
+/* Design 2.5: "an ack is a partial refresh", and the transition OUT of
+   chore mode stays full. D is the one ack button that would otherwise
+   have forced a full one — it is the user-facing "refresh everything"
+   button and rides the force_full channel — so a D ack has to suppress
+   that. Three acks at ~3 s each is the ~9 s the design rejects. */
+void test_c4a_an_ack_renders_a_partial_not_a_full(void) {
+    flow_tick_clock(flow_at(15, 0));
+    flow_mode = APP_MODE_CHORES;
+    flow_chore_count = 3;
+    flow_ack_result = BTN_ACK_TOGGLED;
+    flow_wakeup_btn = BTN_D;
+
+    TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_button());
+
+    TEST_ASSERT_EQUAL_INT_MESSAGE(0, FLOW_RENDER_FLUSHES(),
+                                  "an ack spent a full refresh - design 2.5 makes it a partial");
+    TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_PARTIAL));
+}
+
+/* The negative control for the case above: with no ack in the wake, D is
+   still the refresh button and still forces a full one. A suppression
+   written as an unconditional drop would pass the partial case and fail
+   this one. */
+void test_c4a_d_outside_chore_mode_still_forces_a_full_refresh(void) {
+    flow_tick_clock(flow_at(15, 0));
+    flow_mode = APP_MODE_TIMERS;
+    flow_wakeup_btn = BTN_D;
+
+    TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_button());
+
+    TEST_ASSERT_EQUAL_INT_MESSAGE(1, FLOW_RENDER_FLUSHES(), "Button D stopped forcing a full refresh");
+}
+
+/* The suppression is wake-sticky, so it also covers the RE-render after
+   the network join — the same layout, painted a second time, and
+   promoting THAT one would spend the seconds design 2.5 is saving a few
+   lines later. Mirror of test_the_toggle_promotion_survives_into_the_post_
+   join_repaint, which asserts the opposite for the opposite press. */
+void test_c4a_the_ack_suppression_survives_into_the_post_join_repaint(void) {
+    flow_mode = APP_MODE_CHORES;
+    flow_chore_count = 3;
+    flow_ack_result = BTN_ACK_TOGGLED;
+    flow_state = TIMER_IDLE;
+    mock_time_set(flow_at(16, 0));
+
+    TEST_ASSERT_TRUE(wake_flow_apply_chore_ack(BUTTON_CHORE_IDX_D, flow_at(16, 0)));
+    flow_net_finish = NET_FINISH_CHANGED; /* the join changed what the panel shows */
+
+    finish_action_and_render(BTN_D, TIMER_IDLE, flow_at(16, 0), false);
+
+    TEST_ASSERT_EQUAL_INT_MESSAGE(0, flow_log_count(EV_FULL_REFRESH),
+                                  "the post-join repaint after an ack spent a full refresh");
+    TEST_ASSERT_EQUAL_INT(2, flow_log_count(EV_PARTIAL));
+}
+
+/* The awake join poll (main.c calls it from inside the MQTT join) must
+   not apply B's TIMER action from the chore screen: that would start the
+   screen timer with the checklist on the panel, the one outcome design
+   4.2 rules out by only admitting chore mode while nothing is running.
+   It does not ack either — it runs after the render and could not paint
+   one — so the press is LEFT IN THE LATCH rather than eaten, which is
+   what the residue assertion is for. */
+void test_c4a_the_join_poll_neither_starts_nor_acks_in_chore_mode(void) {
+    flow_mode = APP_MODE_CHORES;
+    flow_b_result = BTN_B_STARTED; /* armed, so a fall-through would be loud */
+    flow_ack_result = BTN_ACK_TOGGLED;
+    flow_state = TIMER_IDLE;
+    flow_press(BTN_B);
+    mock_time_set(flow_at(16, 0));
+
+    TEST_ASSERT_FALSE(wake_flow_poll_button_b_action());
+
+    TEST_ASSERT_EQUAL_INT_MESSAGE(0, flow_log_count(EV_B_APPLY), "the join poll started a timer from the chore screen");
+    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_CHORE_ACK));
+    TEST_ASSERT_EQUAL_INT(TIMER_IDLE, flow_state);
+    TEST_ASSERT_EQUAL_HEX8_MESSAGE((uint8_t)(1u << BTN_B), flow_latch_residue(),
+                                   "the press was eaten by a poll that did nothing with it");
+}
+
+/* The negative control: outside chore mode the join poll is exactly what
+   it was. A guard written as an unconditional early return would pass the
+   case above and fail this one. */
+void test_c4a_the_join_poll_outside_chore_mode_still_applies_b(void) {
+    flow_mode = APP_MODE_TIMERS;
+    flow_b_result = BTN_B_STARTED;
+    flow_state = TIMER_IDLE;
+    flow_press(BTN_B);
+    mock_time_set(flow_at(16, 0));
+
+    TEST_ASSERT_TRUE(wake_flow_poll_button_b_action());
+
+    TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_B_APPLY));
+    TEST_ASSERT_EQUAL_INT(TIMER_RUNNING, flow_state);
 }
 
 int main(void) {
@@ -8076,6 +8639,15 @@ int main(void) {
     RUN_TEST(test_c3_a_tick_latch_drain_after_a_break_end_toggles_from_timers);
     RUN_TEST(test_c3_a_refused_button_a_wake_repaints_the_current_screen);
     RUN_TEST(test_c3_a_config_edit_that_empties_the_list_after_the_press_still_wins);
+    RUN_TEST(test_a_mode_toggle_is_painted_full_not_partial);
+    RUN_TEST(test_a_toggle_back_out_of_chore_mode_is_also_full);
+    RUN_TEST(test_a_refused_button_a_is_not_promoted_to_a_full_refresh);
+    RUN_TEST(test_the_toggle_promotion_survives_into_the_post_join_repaint);
+    RUN_TEST(test_a_screen_kind_change_from_the_timer_state_alone_is_painted_full);
+    RUN_TEST(test_the_other_direction_of_a_screen_kind_change_is_full_too);
+    RUN_TEST(test_a_state_change_that_keeps_the_same_screen_stays_partial);
+    RUN_TEST(test_c16_a_break_that_starts_in_chore_mode_reverts_to_timers);
+    RUN_TEST(test_c16_the_break_start_revert_survives_an_ack_earlier_in_the_wake);
     RUN_TEST(test_a_day_rollover_arms_an_update_check_before_it_opens_the_window);
     RUN_TEST(test_a_day_that_has_not_rolled_over_arms_nothing);
     RUN_TEST(test_the_rollover_arm_carries_the_battery_and_the_charge_lock);
@@ -8092,5 +8664,21 @@ int main(void) {
     RUN_TEST(test_the_apply_samples_the_battery_again_instead_of_reusing_the_arms);
     RUN_TEST(test_the_apply_runs_after_the_pre_sleep_event_watch);
     RUN_TEST(test_the_apply_carries_the_charge_lock_it_sampled);
+    /* M2-T4a — B, C and D bound to the chore acks */
+    RUN_TEST(test_c4a_b_in_chore_mode_acks_row_1_instead_of_starting);
+    RUN_TEST(test_c4a_c_in_chore_mode_acks_row_2_instead_of_swapping);
+    RUN_TEST(test_c4a_a_refused_ack_does_not_fall_through_to_the_timer_action);
+    RUN_TEST(test_c4a_outside_chore_mode_b_and_c_keep_their_timer_jobs);
+    RUN_TEST(test_c4a_an_ack_is_not_refused_during_a_screen_break);
+    RUN_TEST(test_c4a_an_ack_drains_a_pending_break_end_and_keeps_chore_mode);
+    RUN_TEST(test_c4a_a_refused_ack_leaves_the_break_end_latched);
+    RUN_TEST(test_c4a_d_in_chore_mode_acks_row_3_instead_of_checking_for_an_update);
+    RUN_TEST(test_c4a_d_outside_chore_mode_still_checks_for_an_update);
+    RUN_TEST(test_c4a_a_latched_d_press_in_chore_mode_still_never_acks);
+    RUN_TEST(test_c4a_an_ack_renders_a_partial_not_a_full);
+    RUN_TEST(test_c4a_d_outside_chore_mode_still_forces_a_full_refresh);
+    RUN_TEST(test_c4a_the_ack_suppression_survives_into_the_post_join_repaint);
+    RUN_TEST(test_c4a_the_join_poll_neither_starts_nor_acks_in_chore_mode);
+    RUN_TEST(test_c4a_the_join_poll_outside_chore_mode_still_applies_b);
     return UNITY_END();
 }

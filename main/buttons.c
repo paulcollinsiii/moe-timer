@@ -119,8 +119,13 @@ void buttons_configure_wakeup_if(bool enable) {
        last sleep left it, on a battery that cannot spare the work. */
     if (!enable)
         return;
-    /* THE ONE NVS READ ON THIS PATH, and it is worth naming because of
-       where it lands. button_a_toggle_allowed() asks the chore names blob
+    /* THE NVS READS ON THIS PATH, and they are worth naming because of
+       where they land. Two gates below reach the names blob and BOTH
+       short-circuit before they do — button_a_toggle_allowed() on the
+       timer state, button_chore_ack_allowed() on the RTC mode byte — so
+       an ordinary sleep off the chore screen reaches flash at most once
+       and a sleep while a timer runs not at all.
+       button_a_toggle_allowed() asks the chore names blob
        whether a list is configured — the count exists nowhere else, the
        RTC block holding only the acks, the release and the mode (timer.h)
        — and main.c has already called hal_nvs_close() by the time it gets
@@ -145,6 +150,13 @@ void buttons_configure_wakeup_if(bool enable) {
         .enable = enable,
         .swap_allowed = timer_swap_allowed(),
         .mode_toggle_allowed = button_a_toggle_allowed(),
+        /* C's chore binding (design 2.4): the middle checkbox. A SECOND
+           reader of the names blob on this path, and it is bounded — it
+           short-circuits on the RTC mode byte, so it reaches flash only
+           while the device is actually on the chore screen, which is also
+           the only time the gate above can have said yes. Off the
+           checklist it costs one comparison. */
+        .chore_ack_allowed = button_chore_ack_allowed(BUTTON_CHORE_IDX_C),
     };
     uint8_t wake = buttons_policy_wake_mask(&pol);
     buttons_watch_end();
@@ -233,6 +245,12 @@ button_id_t buttons_get_wakeup_button(void) {
         .enable = true,
         .swap_allowed = true,
         .mode_toggle_allowed = true,
+        /* Set for the rule above, not because it widens anything: C is
+           already in the mask through swap_allowed, so the ack gate adds
+           no pad. It is here so the literal stays MAXIMAL by
+           construction — the next gate to arrive may be the one that
+           does. */
+        .chore_ack_allowed = true,
     };
     const uint8_t armable = buttons_policy_wake_mask(&maximal);
     esp_rom_delay_us(DEBOUNCE_US);

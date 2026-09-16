@@ -421,7 +421,28 @@ static bool adjust_core(int slot, int32_t sec, bool record) {
     if (slot < 0 || slot >= TIMER_SLOT_COUNT || sec == 0)
         return false;
     timer_slot_state_t *sl = &g_rtc_state.slots[slot];
-    switch (sl->state) {
+    /* A BREAK is slot 0 PARKED, and I7 says it comes back holding the
+       state it ENTERED with. So when that state is EXPIRED the arms below
+       have to run the EXPIRED contract and write through break_prev_state
+       — the frozen BREAK one is the wrong answer and loses the seconds
+       outright. Taking the PAUSED/BREAK arm there puts the grant in
+       remaining_at_pause; timer_break_tick() then overwrites sl->state
+       back to EXPIRED, and timer_slot_remaining() reports 0 for EXPIRED.
+       The seconds land in a field nobody reads, and `released` is latched
+       by then, so the grant can never be offered a second time.
+
+       Reachable straight off design §2.6 rather than by contrivance: the
+       free tranche runs out, Screen EXPIRES, the kid runs an extra timer,
+       earns an eye-rest break, and does the chores DURING it.
+
+       Only EXPIRED is redirected, not the whole arm. A break over an IDLE
+       screen must keep taking the BREAK arm: timer_release_gated()'s IDLE
+       refusal is a precondition on the WRAPPER (it tests slots[0].state,
+       which reads BREAK here), so routing the break case to the shared
+       IDLE arm would bank the release into bonus_sec — precisely the
+       second copy of the remainder that refusal exists to prevent. */
+    const bool parked_expired = (sl->state == TIMER_BREAK && g_rtc_state.break_prev_state == (uint8_t)TIMER_EXPIRED);
+    switch (parked_expired ? (int)TIMER_EXPIRED : (int)sl->state) {
         case TIMER_RUNNING:
             /* A deduction past zero expires on the next tick — the normal
                expiry path, alert included. */
@@ -453,8 +474,20 @@ static bool adjust_core(int slot, int32_t sec, bool record) {
                 return false; /* nothing left to reclaim */
             /* Chores-done grant after time ran out: hold it PAUSED so the
                kid presses B to start — never auto-run, and the expiry
-               alert (already heard) must not re-fire. */
-            sl->state = TIMER_PAUSED;
+               alert (already heard) must not re-fire.
+
+               Written through break_prev_state while the slot is parked
+               in a break: the break itself must still run to its end
+               (rule 7 does not let a chore ack cut it short), and
+               break_prev_state is the state it will restore when it does.
+               remaining_at_pause is set either way, so the grant is
+               visible as screen time DURING the break too — mark_expired
+               left it at 0, so this is the only writer. */
+            if (parked_expired) {
+                g_rtc_state.break_prev_state = (uint8_t)TIMER_PAUSED;
+            } else {
+                sl->state = TIMER_PAUSED;
+            }
             sl->remaining_at_pause = sec;
             sl->allocation_sec += sec;
             break;

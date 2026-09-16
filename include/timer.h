@@ -366,7 +366,18 @@ bool timer_reload(void);
    frozen zero until the post-break resume. EXPIRED: a grant becomes
    PAUSED holding it (press B to use it); a deduction is a no-op. Works
    on any slot — no now needed (RUNNING adjusts the stored wall expiry;
-   the rest store durations). */
+   the rest store durations).
+
+   A BREAK ENTERED FROM EXPIRED takes the EXPIRED rules, not the BREAK
+   ones, and that is not a special case so much as the only reading of
+   rule 7 that is not a silent loss: a break is slot 0 PARKED, it hands
+   the slot back in the state it entered with, and "adjust in place" on a
+   state that is about to be overwritten means the seconds are written
+   where nothing reads them (timer_slot_remaining reports 0 for EXPIRED).
+   So the grant is written through break_prev_state — the break still
+   runs to its own end, and comes back PAUSED holding the grant — and a
+   deduction is the same no-op it is on a bare EXPIRED slot. A break over
+   IDLE is unaffected and keeps the BREAK rules; see adjust_core. */
 /* Returns whether anything actually moved: false for a zero/bad-slot call
    and for a deduction against an already-EXPIRED slot, true otherwise.
    The orchestrator needs that answer to decide on a repaint — an

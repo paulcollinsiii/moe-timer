@@ -1160,6 +1160,129 @@ void test_the_painted_mode_is_not_restored_from_flash(void) {
     TEST_ASSERT_EQUAL_INT_MESSAGE(APP_MODE_TIMERS, timer_mode(), "a restart came back painting chore mode");
 }
 
+/* ---- C14 is WIRED: the day restore brings the acks with it -------------- */
+
+/* The list as the device would actually have it — in flash, under the
+   names key — because the restore now derives its own hash and no test
+   hands it one. Without this the loader reads "no chores configured",
+   hashes the empty list, and the C10 arm clears what came back. */
+static void store_names(void) {
+    TEST_ASSERT_EQUAL(ESP_OK, chore_store_save_names((const char(*)[CHORE_NAME_BUF])g_chore_names, CHORE_MAX));
+}
+
+static int ack_reads(void) {
+    return mock_nvs_read_count(NVS_KEY_CHORE_ACK);
+}
+
+static int names_reads(void) {
+    return mock_nvs_read_count(NVS_KEY_CHORES);
+}
+
+/* THE regression, and it is a money bug rather than a cosmetic one.
+   Pulling the battery on a spent day used to bring the timer day back
+   from the snapshot while leaving `chore_released` false, so the gate
+   re-armed: the kid re-ticks three boxes and the withheld remainder is
+   granted a SECOND time, on top of an allocation that already contains
+   it. 100 minutes on a 60-minute day, repeatable per reset, with the
+   day-line still reading "Weekday · 60 min" and adjust_today_sec 0 —
+   the state timer.h:406 says cannot happen.
+
+   Asserted through timer_persist_try_restore() ALONE, with no direct
+   call to the ack restore, because "is it wired" is the whole question:
+   a restore_chore_acks() that works perfectly and is called from nowhere
+   is exactly what shipped. */
+void test_a_restored_day_cannot_take_the_release_a_second_time(void) {
+    store_names();
+    arm_rich_state(NOON);
+    store_ack(TODAY_ISO, 0x07, true); /* all three done, remainder granted */
+    timer_chore_set_acked(0x07);
+    timer_chore_set_released(true);
+    timer_persist_save();
+
+    wipe_rtc(); /* the battery pull */
+    TEST_ASSERT_EQUAL_STRING("", timer_current_date());
+    TEST_ASSERT_FALSE(timer_chore_released());
+
+    TEST_ASSERT_TRUE_MESSAGE(timer_persist_try_restore(NOON), "the day did not come back");
+    TEST_ASSERT_EQUAL_STRING(TODAY_ISO, timer_current_date());
+
+    TEST_ASSERT_TRUE_MESSAGE(timer_chore_released(), "the gate re-armed: the release can be farmed by a reset");
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(0x07, timer_chore_acked(), "the day came back but the ticks did not");
+    /* The harm itself, stated in the terms the button path uses: with the
+       latch back nothing is owed, so there is no second grant to take and
+       no re-ack can produce one. Both halves, because `released` alone is
+       a flag and this is about seconds. */
+    TEST_ASSERT_FALSE_MESSAGE(chores_release_due(timer_chore_acked(), CHORE_MAX, timer_chore_released()),
+                              "a second release was due on a day that had already released");
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE(
+        0, chores_withheld_sec(3600, 1200, timer_chore_acked(), CHORE_MAX, timer_chore_released()),
+        "the restored day still owes a withheld remainder it already granted");
+}
+
+/* The other half of the same wiring, and the one that protects the flash
+   record rather than the seconds: chore_store.h names "a save built on
+   the RTC's zeros" as the one sequence that destroys a good record. With
+   the acks back in RTC the first ack after a restart is a toggle of the
+   restored mask, not of zero. */
+void test_the_first_ack_after_a_restart_builds_on_the_restored_mask(void) {
+    store_names();
+    arm_rich_state(NOON);
+    store_ack(TODAY_ISO, 0x03, false);
+    timer_chore_set_acked(0x03);
+    timer_persist_save();
+
+    wipe_rtc();
+    TEST_ASSERT_TRUE(timer_persist_try_restore(NOON));
+
+    /* What button_chore_ack_apply() would compute for the third row. */
+    const uint8_t next = chores_toggle_ack(timer_chore_acked(), 2, CHORE_MAX);
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(0x07, next, "the ack was built on a zeroed mask and would erase the record");
+}
+
+/* And the case the wiring must NOT disturb: an ordinary deep-sleep wake.
+   RTC is intact, so try_restore returns at its first guard and neither
+   chore key is touched. Reading them here would cost two flash reads on
+   every wake AND apply the header's flash-wins asymmetry continuously,
+   which would silently drop any ack whose own flash write had failed. */
+void test_an_ordinary_wake_does_not_read_the_chore_keys(void) {
+    store_names();
+    arm_rich_state(NOON);
+    store_ack(TODAY_ISO, 0x07, true);
+    timer_chore_set_acked(0x05); /* deliberately AHEAD of flash */
+    timer_chore_set_released(false);
+    timer_persist_save();
+    const int acks = ack_reads();
+    const int names = names_reads();
+
+    TEST_ASSERT_FALSE_MESSAGE(timer_persist_try_restore(NOON), "RTC was intact: the snapshot must be refused");
+
+    TEST_ASSERT_EQUAL_INT_MESSAGE(acks, ack_reads(), "an ordinary wake read the ack record");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(names, names_reads(), "an ordinary wake read the chore names");
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(0x05, timer_chore_acked(), "the live RTC mask was overwritten from flash");
+    TEST_ASSERT_FALSE(timer_chore_released());
+}
+
+/* A names blob that cannot be read degrades to "re-tick the boxes" and
+   never to "farm a second allocation". The restore hashes the empty list,
+   which mismatches the stored hash and takes chores_reconcile()'s C10
+   arm — acks cleared, `released` PRESERVED. That asymmetry is the reason
+   the names read's return code can be discarded at all. */
+void test_an_unreadable_names_blob_still_keeps_the_release_latched(void) {
+    /* No store_names(): the key is absent, exactly as a wiped or
+       never-configured names blob reads. */
+    arm_rich_state(NOON);
+    store_ack(TODAY_ISO, 0x07, true);
+    timer_chore_set_acked(0x07);
+    timer_chore_set_released(true);
+    timer_persist_save();
+
+    wipe_rtc();
+    TEST_ASSERT_TRUE(timer_persist_try_restore(NOON));
+
+    TEST_ASSERT_TRUE_MESSAGE(timer_chore_released(), "a missing names blob re-armed the gate");
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(0, timer_chore_acked(), "C10: a hash mismatch must clear the acks");
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_first_save_on_a_blank_store_writes_once);
@@ -1213,5 +1336,9 @@ int main(void) {
     RUN_TEST(test_a_restored_mask_from_a_longer_list_never_reads_as_an_ack);
     RUN_TEST(test_a_list_edit_clears_restored_acks_but_keeps_the_release);
     RUN_TEST(test_the_painted_mode_is_not_restored_from_flash);
+    RUN_TEST(test_a_restored_day_cannot_take_the_release_a_second_time);
+    RUN_TEST(test_the_first_ack_after_a_restart_builds_on_the_restored_mask);
+    RUN_TEST(test_an_ordinary_wake_does_not_read_the_chore_keys);
+    RUN_TEST(test_an_unreadable_names_blob_still_keeps_the_release_latched);
     return UNITY_END();
 }

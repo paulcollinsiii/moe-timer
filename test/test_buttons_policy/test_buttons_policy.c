@@ -17,13 +17,26 @@ void tearDown(void) {}
    gate would narrow the fallback level scan below the set of pads the
    policy can arm. Both are designated initializers over the same struct;
    this one is caught by a failing sweep, that one by nothing. */
-static uint8_t wake_mask_for(bool enable, bool swap_allowed, bool mode_toggle_allowed) {
+static uint8_t mask4(bool enable, bool swap_allowed, bool mode_toggle_allowed, bool chore_ack_allowed) {
     buttons_policy_in_t in = {
         .enable = enable,
         .swap_allowed = swap_allowed,
         .mode_toggle_allowed = mode_toggle_allowed,
+        .chore_ack_allowed = chore_ack_allowed,
     };
     return buttons_policy_wake_mask(&in);
+}
+
+/* The three-gate form the cases below this line were written against.
+   Kept rather than rewritten into every call site because the chore-ack
+   gate is FALSE on every device that is not on the chore screen — the
+   whole fleet, most of the time — so "the ack gate is off" is the
+   baseline those expectations are about, and spelling it out twenty
+   times would bury the gate each case actually drives. The cases that do
+   drive it call mask4() directly, and the two exhaustive sweeps were
+   widened to the new dimension rather than left at this default. */
+static uint8_t wake_mask_for(bool enable, bool swap_allowed, bool mode_toggle_allowed) {
+    return mask4(enable, swap_allowed, mode_toggle_allowed, false);
 }
 
 /* ---- the arm/don't-arm decision --------------------------------------- */
@@ -45,7 +58,9 @@ void test_disabled_arms_nothing(void) {
 void test_enabled_is_never_an_empty_mask(void) {
     for (int swap = 0; swap <= 1; swap++) {
         for (int mode = 0; mode <= 1; mode++) {
-            TEST_ASSERT_NOT_EQUAL_UINT8(0, wake_mask_for(true, swap, mode));
+            for (int ack = 0; ack <= 1; ack++) {
+                TEST_ASSERT_NOT_EQUAL_UINT8(0, mask4(true, swap, mode, ack));
+            }
         }
     }
 }
@@ -85,11 +100,49 @@ void test_a_still_does_not_wake_on_a_locked_sleep(void) {
 void test_b_and_d_always_wake(void) {
     for (int swap = 0; swap <= 1; swap++) {
         for (int mode = 0; mode <= 1; mode++) {
-            uint8_t m = wake_mask_for(true, swap, mode);
-            TEST_ASSERT_TRUE(m & M(BTN_B));
-            TEST_ASSERT_TRUE(m & M(BTN_D));
+            for (int ack = 0; ack <= 1; ack++) {
+                uint8_t m = mask4(true, swap, mode, ack);
+                TEST_ASSERT_TRUE(m & M(BTN_B));
+                TEST_ASSERT_TRUE(m & M(BTN_D));
+            }
         }
     }
+}
+
+/* ---- C's second reason to wake: the middle checkbox (design 2.4) ------- */
+
+/* THE CASE THAT KEEPS THE MIDDLE CHECKBOX ALIVE. In chore mode B, C and D
+   are the three ack buttons, and B and D are unconditional — so if C kept
+   only its swap gate, a device with no extra timers configured (where
+   swap_allowed is false forever) would have a working checkbox 1 and 3
+   and a dead checkbox 2, reachable only by waking the device some other
+   way first. That is the exact "primary control dead to the press"
+   failure this module's policy exists to avoid. */
+void test_c_wakes_for_a_chore_ack_with_no_swap_available(void) {
+    TEST_ASSERT_TRUE(mask4(true, false, false, true) & M(BTN_C));
+    TEST_ASSERT_TRUE(mask4(true, false, true, true) & M(BTN_C));
+}
+
+/* The two reasons are an OR and neither is the other's precondition: a
+   swap with no ack still wakes C (the timer screen, unchanged), and an
+   ack with no swap wakes it too (the case above). With neither, C sleeps. */
+void test_c_sleeps_only_when_neither_a_swap_nor_an_ack_is_available(void) {
+    TEST_ASSERT_FALSE(mask4(true, false, false, false) & M(BTN_C));
+    TEST_ASSERT_TRUE(mask4(true, true, false, false) & M(BTN_C));
+}
+
+/* The ack gate is C's alone. A must not follow it — A's own gate already
+   covers the chore screen and is refused for different reasons — and B
+   and D are unconditional, so the whole-mask form is what says so. */
+void test_the_ack_gate_moves_only_button_c(void) {
+    TEST_ASSERT_EQUAL_UINT8(M(BTN_B) | M(BTN_C) | M(BTN_D), mask4(true, false, false, true));
+    TEST_ASSERT_EQUAL_UINT8(M(BTN_A) | M(BTN_B) | M(BTN_C) | M(BTN_D), mask4(true, false, true, true));
+}
+
+/* A locked sleep arms nothing, the ack gate included: the chore screen is
+   not a reason to spend a refresh the battery cannot afford. */
+void test_an_ack_does_not_wake_on_a_locked_sleep(void) {
+    TEST_ASSERT_EQUAL_UINT8(0, mask4(false, false, false, true));
 }
 
 /* C is the next-timer button: no wake when a swap would be refused. The
@@ -145,6 +198,10 @@ int main(void) {
     RUN_TEST(test_a_still_does_not_wake_on_a_locked_sleep);
     RUN_TEST(test_b_and_d_always_wake);
     RUN_TEST(test_c_follows_swap_allowed);
+    RUN_TEST(test_c_wakes_for_a_chore_ack_with_no_swap_available);
+    RUN_TEST(test_c_sleeps_only_when_neither_a_swap_nor_an_ack_is_available);
+    RUN_TEST(test_the_ack_gate_moves_only_button_c);
+    RUN_TEST(test_an_ack_does_not_wake_on_a_locked_sleep);
     RUN_TEST(test_mask_is_exactly_the_qualifying_buttons);
     RUN_TEST(test_bit_positions_match_the_button_ids);
     return UNITY_END();

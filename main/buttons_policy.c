@@ -14,9 +14,19 @@
      as it ships today — no chore list configured anywhere — that gate is
      false and A is armed on nothing, which is the point: the feature
      costs no wakes until it is used.
-   - C wakes only when a swap would actually succeed — extra timers exist
-     and the active timer is not RUNNING (a Screen Break does NOT refuse,
-     so C stays a wake source right through one).
+   - C wakes when a swap would actually succeed — extra timers exist and
+     the active timer is not RUNNING (a Screen Break does NOT refuse, so C
+     stays a wake source right through one) — OR when it would tick a
+     chore. In chore mode B, C and D are the three ack buttons (design
+     2.4), and the second reason is what keeps the MIDDLE CHECKBOX alive:
+     B and D are unconditional below, so without it a device with no extra
+     timers configured — swap_allowed false forever — would have a working
+     ✓1 and ✓3 and a dead ✓2. That is the "primary control dead to the
+     press" failure this module's policy exists to avoid, and it is worth
+     more than the wake an over-armed C can cost.
+     The two reasons are an OR and neither implies the other: outside
+     chore mode only the swap arms C, and on the chore screen only the ack
+     does.
    - B and D are unconditional.
 
    A and C are gated SEPARATELY even though both refuse while RUNNING.
@@ -74,7 +84,7 @@ static bool wake_source(button_id_t btn, const buttons_policy_in_t *in) {
         case BTN_A:
             return in->mode_toggle_allowed;
         case BTN_C:
-            return in->swap_allowed;
+            return in->swap_allowed || in->chore_ack_allowed;
         default:
             return true;
     }

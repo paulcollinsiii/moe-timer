@@ -392,6 +392,442 @@ void test_the_gate_and_the_map_never_disagree(void) {
     }
 }
 
+/* ======================================================================
+   BUTTONS B, C and D IN CHORE MODE — the ack (design 2.4, 5.1, 5.2)
+   ====================================================================== */
+
+/* The list hash the ack record is stamped with, rebuilt from the SAME
+   rows with_chores() writes. Not read back out of the names blob,
+   deliberately: the point of the stored hash is that the record can be
+   checked against a list the caller builds itself, and a helper that
+   re-read the blob would pass even if the apply stamped the record with
+   something else entirely. */
+static uint16_t chore_hash_for(uint8_t n) {
+    char names[CHORE_MAX][CHORE_NAME_BUF];
+    memset(names, 0, sizeof names);
+    for (uint8_t i = 0; i < n && i < CHORE_MAX; i++) {
+        snprintf(names[i], CHORE_NAME_BUF, "chore %u", (unsigned)(i + 1));
+    }
+    return chores_list_hash(names, n);
+}
+
+/* The weekday chore_free tranche, in minutes. Invalidates the schedule
+   cache because schedule.c reads each key once per wake and T0 is a
+   Monday, so a write that landed after the first read would be invisible. */
+static void with_chore_free_min(uint16_t minutes) {
+    TEST_ASSERT_EQUAL(ESP_OK, hal_nvs_write_u16(NVS_KEY_CHORE_FREE_WD, minutes));
+    schedule_cache_invalidate();
+}
+
+/* A gated day in chore mode: 60 min allocation, 20 min free, so 2400 s
+   are withheld until all three chores are acked. */
+static void with_gated_day(void) {
+    with_chores(3);
+    with_chore_free_min(20);
+    timer_set_mode(APP_MODE_CHORES);
+}
+
+static chore_ack_t stored_ack(uint8_t n) {
+    chore_ack_t out = {0xFF, true}; /* poisoned: a load that writes nothing must not read as {0,false} */
+    TEST_ASSERT_EQUAL(ESP_OK, chore_store_load_ack("2026-01-05", chore_hash_for(n), &out));
+    return out;
+}
+
+/* ---- the gate ---------------------------------------------------------- */
+
+/* Outside chore mode B, C and D keep their timer jobs. The mode byte is
+   the routing decision and it is checked here as well as in the wake
+   flow: this function is also reached from Button D's own wake arm, which
+   is not routed through the dispatch. */
+void test_an_ack_is_refused_outside_chore_mode(void) {
+    with_chores(3);
+    TEST_ASSERT_EQUAL(APP_MODE_TIMERS, timer_mode()); /* the premise */
+
+    TEST_ASSERT_FALSE(button_chore_ack_allowed(BUTTON_CHORE_IDX_B));
+    TEST_ASSERT_EQUAL(BTN_ACK_NONE, button_chore_ack_apply(BUTTON_CHORE_IDX_B, T0));
+    TEST_ASSERT_EQUAL_UINT8(0, timer_chore_acked());
+}
+
+/* Row C1's off switch reaches the ack buttons too. Chore mode is not
+   supposed to be reachable with no list, but the mode byte survives deep
+   sleep and a list can be emptied from HA under it. */
+void test_an_ack_is_refused_with_no_chores_configured(void) {
+    timer_set_mode(APP_MODE_CHORES);
+
+    TEST_ASSERT_FALSE(button_chore_ack_allowed(BUTTON_CHORE_IDX_B));
+    TEST_ASSERT_EQUAL(BTN_ACK_NONE, button_chore_ack_apply(BUTTON_CHORE_IDX_B, T0));
+    TEST_ASSERT_EQUAL_UINT8(0, timer_chore_acked());
+}
+
+/* Two chores means no row 3, so D is unlabelled on the panel (design 2.4)
+   and must do nothing when pressed. THE BOUND IS THE CONFIGURED COUNT and
+   not CHORE_MAX: an out-of-range press that reached chores_toggle_ack()
+   would be returned unchanged anyway, but it must not reach flash either,
+   because a write is what makes the refusal observable as a real one. */
+void test_an_ack_is_refused_for_a_row_that_is_not_configured(void) {
+    with_chores(2);
+    timer_set_mode(APP_MODE_CHORES);
+
+    TEST_ASSERT_TRUE(button_chore_ack_allowed(BUTTON_CHORE_IDX_C));
+    TEST_ASSERT_FALSE(button_chore_ack_allowed(BUTTON_CHORE_IDX_D));
+    TEST_ASSERT_EQUAL(BTN_ACK_NONE, button_chore_ack_apply(BUTTON_CHORE_IDX_D, T0));
+    TEST_ASSERT_EQUAL_UINT8(0, timer_chore_acked());
+    /* nothing was stamped into flash either */
+    chore_ack_t rec = {0xFF, true};
+    TEST_ASSERT_NOT_EQUAL(ESP_OK, chore_store_load_ack("2026-01-05", chore_hash_for(2), &rec));
+}
+
+/* The same invariant Button A carries, for the same reason: this
+   predicate is what arms Button C as a wake source (buttons_policy.c), so
+   a gate that disagreed with the apply would either arm C for a press
+   that is then refused or leave the middle checkbox dead from sleep. */
+void test_the_ack_gate_and_the_ack_map_never_disagree(void) {
+    for (int chores = 0; chores <= 3; chores++) {
+        for (int mode = 0; mode <= 1; mode++) {
+            for (uint8_t idx = 0; idx < CHORE_MAX; idx++) {
+                timer_reset();
+                mock_nvs_reset();
+                schedule_cache_invalidate();
+                hal_nvs_write_u16("weekday_min", 60);
+                with_chores((uint8_t)chores);
+                timer_set_mode(mode ? APP_MODE_CHORES : APP_MODE_TIMERS);
+
+                const bool allowed = button_chore_ack_allowed(idx);
+                const btn_ack_action_t act = button_chore_ack_apply(idx, T0);
+                TEST_ASSERT_EQUAL_MESSAGE(allowed, act != BTN_ACK_NONE,
+                                          "the wake-source gate and the ack map disagreed");
+            }
+        }
+    }
+}
+
+/* ---- the toggle, RTC and flash (design 5.1) ---------------------------- */
+
+/* B is row 1, C is row 2, D is row 3 — the fixed mapping the three fixed
+   rows buy (design 2.4). Each button moves its OWN bit and no other. */
+void test_each_ack_button_ticks_its_own_row(void) {
+    const uint8_t idx[3] = {BUTTON_CHORE_IDX_B, BUTTON_CHORE_IDX_C, BUTTON_CHORE_IDX_D};
+    for (int i = 0; i < 3; i++) {
+        timer_reset();
+        mock_nvs_reset();
+        with_chores(3);
+        timer_set_mode(APP_MODE_CHORES);
+
+        TEST_ASSERT_EQUAL(BTN_ACK_TOGGLED, button_chore_ack_apply(idx[i], T0));
+        TEST_ASSERT_EQUAL_UINT8_MESSAGE((uint8_t)(1u << idx[i]), timer_chore_acked(),
+                                        "an ack button moved the wrong row's bit");
+    }
+}
+
+/* Flash is the AUTHORITY and RTC the working copy (design 5.1), so both
+   have to move on every toggle. The record carries today's date and the
+   current list hash, which is what lets the next boot believe it. */
+void test_an_ack_reaches_rtc_and_flash(void) {
+    with_chores(3);
+    timer_set_mode(APP_MODE_CHORES);
+
+    TEST_ASSERT_EQUAL(BTN_ACK_TOGGLED, button_chore_ack_apply(BUTTON_CHORE_IDX_C, T0));
+
+    TEST_ASSERT_EQUAL_UINT8(0x02, timer_chore_acked());
+    const chore_ack_t rec = stored_ack(3);
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(0x02, rec.acked, "the ack never reached flash");
+    TEST_ASSERT_FALSE(rec.released);
+}
+
+/* "Acks toggle, so a mis-press is undone by pressing the same button
+   again" (design 2.4). The un-ack has to reach flash too, or a reboot
+   restores a tick the kid took back. */
+void test_a_second_press_of_the_same_button_un_acks(void) {
+    with_chores(3);
+    timer_set_mode(APP_MODE_CHORES);
+
+    TEST_ASSERT_EQUAL(BTN_ACK_TOGGLED, button_chore_ack_apply(BUTTON_CHORE_IDX_B, T0));
+    TEST_ASSERT_EQUAL(BTN_ACK_TOGGLED, button_chore_ack_apply(BUTTON_CHORE_IDX_B, T0 + 5));
+
+    TEST_ASSERT_EQUAL_UINT8(0, timer_chore_acked());
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(0, stored_ack(3).acked, "the un-ack never reached flash");
+}
+
+/* ---- the release (design 5.2, rows C4-C8) ------------------------------ */
+
+/* THE CASE THE WHOLE FEATURE EXISTS FOR, and the one that kills both
+   traps at once.
+
+   The day is 60 min with a 20 min free tranche, so 2400 s are withheld.
+   Screen was started on the free tranche and paused with 900 s of it
+   left; the third ack has to hand over the other 2400.
+
+   TRAP: the amount must be read while `released` is still FALSE.
+   chores_withheld_sec() returns 0 once the flag is latched, so an
+   implementation that latches first grants nothing — and every assertion
+   that only checks "released is true" still passes. The remaining and
+   allocation figures below are what tell the two orders apart. */
+void test_the_last_ack_releases_the_withheld_seconds(void) {
+    with_gated_day();
+    TEST_ASSERT_EQUAL(BTN_B_STARTED, button_b_apply(T0));
+    TEST_ASSERT_EQUAL_INT32_MESSAGE(1200, g_rtc_state.slots[0].allocation_sec,
+                                    "the premise: a gated start gets the free tranche only");
+    timer_pause(T0 + 300); /* 900 s of the free tranche left */
+
+    TEST_ASSERT_EQUAL(BTN_ACK_TOGGLED, button_chore_ack_apply(0, T0 + 400));
+    TEST_ASSERT_EQUAL(BTN_ACK_TOGGLED, button_chore_ack_apply(1, T0 + 401));
+    TEST_ASSERT_EQUAL_MESSAGE(BTN_ACK_RELEASED, button_chore_ack_apply(2, T0 + 402),
+                              "the last ack did not report a release");
+
+    TEST_ASSERT_TRUE(timer_chore_released());
+    TEST_ASSERT_EQUAL_INT32_MESSAGE(900 + 2400, g_rtc_state.slots[0].remaining_at_pause,
+                                    "the withheld seconds were not granted - was `released` latched first?");
+    TEST_ASSERT_EQUAL_INT32_MESSAGE(3600, g_rtc_state.slots[0].allocation_sec,
+                                    "the bar's denominator did not go back to the whole day");
+}
+
+/* TRAP ONE, design 5.2, verbatim: the release must not be an adjustment.
+   adjust_today_sec is the truthful record of what a PARENT asked for and
+   is what paints the panel's "(+40 min today)" parenthetical; a gate
+   writing into it manufactures an adjustment nobody made, which is
+   exactly the bug that field was introduced to fix. This is the case that
+   rejects timer_adjust(0, +withheld). */
+void test_the_release_is_not_recorded_as_an_adjustment(void) {
+    with_gated_day();
+    TEST_ASSERT_EQUAL(BTN_B_STARTED, button_b_apply(T0));
+    timer_pause(T0 + 300);
+
+    (void)button_chore_ack_apply(0, T0 + 400);
+    (void)button_chore_ack_apply(1, T0 + 401);
+    TEST_ASSERT_EQUAL(BTN_ACK_RELEASED, button_chore_ack_apply(2, T0 + 402));
+
+    TEST_ASSERT_EQUAL_INT32_MESSAGE(0, timer_slot_adjust_today(0),
+                                    "the release was recorded as a screen adjustment (timer_adjust, not "
+                                    "timer_release_gated) - it will paint a phantom parenthetical");
+}
+
+/* The amount comes from the DAY's Screen allocation (slot 0), never from
+   the active slot's. An extra timer's fixed duration is not the day's
+   gate: Piano is selected and paused on 900 s here, and if that number
+   reached chores_withheld_sec() the grant would be 0 (900 saturates
+   against a 1200 s free tranche) instead of 2400. The extra must also be
+   left completely alone - timer_release_gated() is slot 0 only. */
+void test_the_release_reads_the_days_screen_allocation_not_the_active_slots(void) {
+    with_gated_day();
+    /* Slot 0 is driven with an EXPLICIT allocation rather than through
+       button_b_apply(), so this case says nothing about the start cap and
+       cannot be satisfied by it: the two numbers below would otherwise
+       coincide under the mutant that reads the active slot's allocation
+       (the start would hand slot 0 the whole day, and a release of 0
+       would land on the same total). Verified by mutation — that mutant
+       was killed by other cases but NOT by this one until the start was
+       taken out of it. */
+    timer_start(T0, 1200); /* Screen, on the free tranche */
+    timer_pause(T0 + 300);
+    TEST_ASSERT_EQUAL_INT32(900, g_rtc_state.slots[0].remaining_at_pause);
+    g_rtc_state.active_slot = 1; /* Piano, 900 s */
+    timer_start(T0 + 310, 900);
+    timer_pause(T0 + 320);
+    TEST_ASSERT_EQUAL_INT32(900, g_rtc_state.slots[1].allocation_sec); /* the premise */
+
+    (void)button_chore_ack_apply(0, T0 + 400);
+    (void)button_chore_ack_apply(1, T0 + 401);
+    TEST_ASSERT_EQUAL(BTN_ACK_RELEASED, button_chore_ack_apply(2, T0 + 402));
+
+    TEST_ASSERT_EQUAL_INT32_MESSAGE(900 + 2400, g_rtc_state.slots[0].remaining_at_pause,
+                                    "the release was sized from the wrong allocation");
+    TEST_ASSERT_EQUAL_INT32_MESSAGE(900, g_rtc_state.slots[1].allocation_sec,
+                                    "the release landed on the active slot instead of Screen");
+    TEST_ASSERT_EQUAL_INT32(890, g_rtc_state.slots[1].remaining_at_pause);
+}
+
+/* Row C8: `released` is LATCHED. Un-ticking a chore after the release
+   re-arms nothing and claws nothing back - there is nothing to game. */
+void test_un_acking_after_the_release_claws_nothing_back(void) {
+    with_gated_day();
+    TEST_ASSERT_EQUAL(BTN_B_STARTED, button_b_apply(T0));
+    timer_pause(T0 + 300);
+    (void)button_chore_ack_apply(0, T0 + 400);
+    (void)button_chore_ack_apply(1, T0 + 401);
+    TEST_ASSERT_EQUAL(BTN_ACK_RELEASED, button_chore_ack_apply(2, T0 + 402));
+
+    TEST_ASSERT_EQUAL(BTN_ACK_TOGGLED, button_chore_ack_apply(2, T0 + 500)); /* un-tick it */
+
+    TEST_ASSERT_TRUE_MESSAGE(timer_chore_released(), "an un-ack re-locked a released day");
+    TEST_ASSERT_EQUAL_INT32_MESSAGE(900 + 2400, g_rtc_state.slots[0].remaining_at_pause,
+                                    "an un-ack took the released time back");
+    TEST_ASSERT_EQUAL_INT32(3600, g_rtc_state.slots[0].allocation_sec);
+}
+
+/* And re-ticking it does not pay out a second time: chores_release_due()
+   is false once the flag is latched, so the toggle is an ordinary one. */
+void test_re_acking_after_the_release_does_not_grant_twice(void) {
+    with_gated_day();
+    TEST_ASSERT_EQUAL(BTN_B_STARTED, button_b_apply(T0));
+    timer_pause(T0 + 300);
+    (void)button_chore_ack_apply(0, T0 + 400);
+    (void)button_chore_ack_apply(1, T0 + 401);
+    TEST_ASSERT_EQUAL(BTN_ACK_RELEASED, button_chore_ack_apply(2, T0 + 402));
+    (void)button_chore_ack_apply(2, T0 + 500);
+
+    TEST_ASSERT_EQUAL_MESSAGE(BTN_ACK_TOGGLED, button_chore_ack_apply(2, T0 + 501),
+                              "a re-ack reported a second release");
+    TEST_ASSERT_EQUAL_INT32_MESSAGE(900 + 2400, g_rtc_state.slots[0].remaining_at_pause, "the day paid out twice");
+}
+
+/* The release flag goes to flash with the acks - one record, one write.
+   Without it a reboot mid-day would re-lock a day that had released, and
+   the next full ack would pay out a second allocation. */
+void test_the_release_is_persisted_with_the_acks(void) {
+    with_gated_day();
+    (void)button_chore_ack_apply(0, T0);
+    (void)button_chore_ack_apply(1, T0 + 1);
+    TEST_ASSERT_EQUAL(BTN_ACK_RELEASED, button_chore_ack_apply(2, T0 + 2));
+
+    const chore_ack_t rec = stored_ack(3);
+    TEST_ASSERT_EQUAL_UINT8(0x07, rec.acked);
+    TEST_ASSERT_TRUE_MESSAGE(rec.released, "the release latch never reached flash");
+}
+
+/* The per-day-type off switch (chore_free == allocation): the edge still
+   fires and the day still latches, but there is nothing to grant. This is
+   chores_release_due()'s documented "a true here must not be read as
+   'seconds were granted'". */
+void test_a_day_with_the_gate_off_latches_without_granting(void) {
+    with_chores(3);
+    with_chore_free_min(60); /* == the whole allocation */
+    timer_set_mode(APP_MODE_CHORES);
+    TEST_ASSERT_EQUAL(BTN_B_STARTED, button_b_apply(T0));
+    TEST_ASSERT_EQUAL_INT32(3600, g_rtc_state.slots[0].allocation_sec); /* nothing withheld */
+    timer_pause(T0 + 300);
+
+    (void)button_chore_ack_apply(0, T0 + 400);
+    (void)button_chore_ack_apply(1, T0 + 401);
+    TEST_ASSERT_EQUAL(BTN_ACK_RELEASED, button_chore_ack_apply(2, T0 + 402));
+
+    TEST_ASSERT_TRUE(timer_chore_released());
+    TEST_ASSERT_EQUAL_INT32(3300, g_rtc_state.slots[0].remaining_at_pause);
+    TEST_ASSERT_EQUAL_INT32(3600, g_rtc_state.slots[0].allocation_sec);
+    TEST_ASSERT_EQUAL_INT32(0, timer_slot_adjust_today(0));
+}
+
+/* Row C4: the free tranche ran out before the chores were done. The grant
+   brings the slot back PAUSED holding it, so the kid presses B - it never
+   auto-runs and the expiry alert must not re-fire. */
+void test_the_release_onto_an_expired_screen_comes_back_paused(void) {
+    with_gated_day();
+    TEST_ASSERT_EQUAL(BTN_B_STARTED, button_b_apply(T0));
+    timer_tick(T0 + 1300); /* past the 1200 s free tranche */
+    TEST_ASSERT_EQUAL(TIMER_EXPIRED, timer_get_state());
+
+    (void)button_chore_ack_apply(0, T0 + 1400);
+    (void)button_chore_ack_apply(1, T0 + 1401);
+    TEST_ASSERT_EQUAL(BTN_ACK_RELEASED, button_chore_ack_apply(2, T0 + 1402));
+
+    TEST_ASSERT_EQUAL(TIMER_PAUSED, timer_get_state());
+    TEST_ASSERT_EQUAL_INT32(2400, g_rtc_state.slots[0].remaining_at_pause);
+    TEST_ASSERT_EQUAL_INT32(0, timer_slot_adjust_today(0));
+}
+
+/* The same row C4, but with the chores done DURING an eye-rest break -
+ * and design 2.6 does not merely allow that sequence, it invites it: the
+ * free tranche runs out, Screen EXPIRES, the kid runs an extra timer,
+ * earns a break, and ticks the boxes while it runs.
+ *
+ * The slot is then BREAK, not EXPIRED, so the grant used to take the
+ * PAUSED/BREAK arm of adjust_core and land in remaining_at_pause;
+ * timer_break_tick() put sl->state back to break_prev_state (EXPIRED) and
+ * timer_slot_remaining() reports 0 for EXPIRED. Forty minutes into a
+ * field nobody reads, `released` latched so it can never be offered
+ * again - the day simply ends at zero. Measured before the fix as
+ * "DURING rap=2400 alloc=3600 / AFTER state=EXPIRED remaining=0 rap=2400
+ * released=1". */
+void test_the_release_during_a_break_over_an_expired_screen_survives_the_break(void) {
+    with_gated_day();
+    TEST_ASSERT_EQUAL(BTN_B_STARTED, button_b_apply(T0));
+    timer_tick(T0 + 1300); /* past the 1200 s free tranche */
+    TEST_ASSERT_EQUAL(TIMER_EXPIRED, timer_get_state());
+
+    timer_start_break(T0 + 1400, 300); /* earned by an extra; parks slot 0 */
+    TEST_ASSERT_EQUAL_INT_MESSAGE(TIMER_BREAK, g_rtc_state.slots[0].state, "the fixture is not a break");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(TIMER_EXPIRED, g_rtc_state.break_prev_state,
+                                  "the break was not entered from an expired screen");
+
+    (void)button_chore_ack_apply(0, T0 + 1500);
+    (void)button_chore_ack_apply(1, T0 + 1501);
+    TEST_ASSERT_EQUAL(BTN_ACK_RELEASED, button_chore_ack_apply(2, T0 + 1502));
+
+    /* Rule 7: an ack does not cut the break short. The break runs on, and
+       the grant is already visible as screen time behind it. */
+    TEST_ASSERT_EQUAL_INT_MESSAGE(TIMER_BREAK, g_rtc_state.slots[0].state, "the ack ended the break");
+    TEST_ASSERT_EQUAL_INT32(2400, timer_slot_remaining(0, T0 + 1502, 0));
+
+    timer_break_tick(T0 + 1700); /* the break's own end */
+
+    TEST_ASSERT_EQUAL_INT_MESSAGE(TIMER_PAUSED, g_rtc_state.slots[0].state,
+                                  "the break handed the slot back EXPIRED and the grant was discarded");
+    TEST_ASSERT_EQUAL_INT32_MESSAGE(2400, timer_slot_remaining(0, T0 + 1700, 0),
+                                    "the released seconds did not survive the break");
+    TEST_ASSERT_EQUAL_INT32(2400, g_rtc_state.slots[0].remaining_at_pause);
+    TEST_ASSERT_EQUAL_INT32_MESSAGE(0, timer_slot_adjust_today(0), "the gate wrote into the parent's adjustment");
+    /* And it comes back PAUSED rather than RUNNING, exactly as the
+       no-break case does: the kid presses B, the expiry alert (already
+       heard) does not re-fire. */
+    TEST_ASSERT_EQUAL(BTN_B_RESUMED, button_b_apply(T0 + 1800));
+}
+
+/* Row C5: the day was never started. timer_release_gated() refuses IDLE
+   on purpose - banking the seconds would hand timer_start a second copy
+   of a remainder the live allocation already carries - so nothing is
+   stored on the slot and the next start simply reads the full day. */
+void test_the_release_on_an_idle_screen_banks_nothing(void) {
+    with_gated_day();
+    TEST_ASSERT_EQUAL(TIMER_IDLE, timer_get_state()); /* the premise */
+
+    (void)button_chore_ack_apply(0, T0);
+    (void)button_chore_ack_apply(1, T0 + 1);
+    TEST_ASSERT_EQUAL(BTN_ACK_RELEASED, button_chore_ack_apply(2, T0 + 2));
+
+    TEST_ASSERT_EQUAL_INT32_MESSAGE(0, g_rtc_state.slots[0].bonus_sec,
+                                    "the release banked seconds the live allocation already carries");
+    TEST_ASSERT_EQUAL_INT32_MESSAGE(3600, button_b_start_allocation(T0 + 3),
+                                    "the released day did not start on the whole allocation");
+}
+
+/* ---- the start cap: what makes the withheld seconds actually withheld -- */
+
+/* Design 4.1's worked example is a 60 min day with chore_free 20 and ten
+   minutes used, and the panel it draws reads 00:10:00 - the timer holds
+   the FREE TRANCHE while the gate is shut, not the whole day. Without
+   this the release is not a release at all: the kid already has the whole
+   allocation, and finishing the chores would hand them a second one on
+   top (chores.h: "either way: alloc, once"). */
+void test_a_gated_day_starts_on_the_free_tranche_only(void) {
+    with_gated_day();
+    TEST_ASSERT_EQUAL_INT32(1200, button_b_start_allocation(T0));
+}
+
+/* Once the day has released the cap is gone and the allocation is read
+   live, which is the whole of row C5's "no timer call needed". */
+void test_a_released_day_starts_on_the_whole_allocation(void) {
+    with_gated_day();
+    timer_chore_set_released(true);
+    TEST_ASSERT_EQUAL_INT32(3600, button_b_start_allocation(T0));
+}
+
+/* The shipped fleet: no chore list, so the gate is inert (row C1) and the
+   start allocation is exactly what it was before this feature existed.
+   Paired with test_idle_screen_starts_with_schedule_allocation above,
+   which asserts the same number through the whole B map. */
+void test_a_day_with_no_chores_starts_on_the_whole_allocation(void) {
+    TEST_ASSERT_EQUAL_INT32(3600, button_b_start_allocation(T0));
+    with_chore_free_min(20); /* a stray tranche with no list must not bite */
+    TEST_ASSERT_EQUAL_INT32(3600, button_b_start_allocation(T0));
+}
+
+/* The gate withholds SCREEN time and only that. An extra's duration comes
+   from its def and no chore setting may touch it. */
+void test_the_gate_never_caps_an_extra_timers_duration(void) {
+    with_gated_day();
+    g_rtc_state.active_slot = 1; /* Piano, 900 s */
+    TEST_ASSERT_EQUAL_INT32(900, button_b_start_allocation(T0));
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_idle_screen_starts_with_schedule_allocation);
@@ -420,5 +856,27 @@ int main(void) {
     RUN_TEST(test_a_single_configured_chore_is_enough);
     RUN_TEST(test_an_unreadable_blob_refuses_without_touching_the_stored_mode);
     RUN_TEST(test_the_gate_and_the_map_never_disagree);
+    /* Buttons B/C/D in chore mode — the ack */
+    RUN_TEST(test_an_ack_is_refused_outside_chore_mode);
+    RUN_TEST(test_an_ack_is_refused_with_no_chores_configured);
+    RUN_TEST(test_an_ack_is_refused_for_a_row_that_is_not_configured);
+    RUN_TEST(test_the_ack_gate_and_the_ack_map_never_disagree);
+    RUN_TEST(test_each_ack_button_ticks_its_own_row);
+    RUN_TEST(test_an_ack_reaches_rtc_and_flash);
+    RUN_TEST(test_a_second_press_of_the_same_button_un_acks);
+    RUN_TEST(test_the_last_ack_releases_the_withheld_seconds);
+    RUN_TEST(test_the_release_is_not_recorded_as_an_adjustment);
+    RUN_TEST(test_the_release_reads_the_days_screen_allocation_not_the_active_slots);
+    RUN_TEST(test_un_acking_after_the_release_claws_nothing_back);
+    RUN_TEST(test_re_acking_after_the_release_does_not_grant_twice);
+    RUN_TEST(test_the_release_is_persisted_with_the_acks);
+    RUN_TEST(test_a_day_with_the_gate_off_latches_without_granting);
+    RUN_TEST(test_the_release_onto_an_expired_screen_comes_back_paused);
+    RUN_TEST(test_the_release_during_a_break_over_an_expired_screen_survives_the_break);
+    RUN_TEST(test_the_release_on_an_idle_screen_banks_nothing);
+    RUN_TEST(test_a_gated_day_starts_on_the_free_tranche_only);
+    RUN_TEST(test_a_released_day_starts_on_the_whole_allocation);
+    RUN_TEST(test_a_day_with_no_chores_starts_on_the_whole_allocation);
+    RUN_TEST(test_the_gate_never_caps_an_extra_timers_duration);
     return UNITY_END();
 }

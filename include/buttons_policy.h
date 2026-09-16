@@ -25,6 +25,16 @@ typedef struct {
        button_actions.c so the wake mask and the press itself can never
        disagree about what A would do. */
     bool mode_toggle_allowed;
+    /* button_chore_ack_allowed(BUTTON_CHORE_IDX_C) — C's SECOND reason to
+       wake, ORed with swap_allowed above. Taken raw at sleep entry like
+       the other two, and composite for the same reason: "in chore mode
+       and row 2 is configured" lives in button_actions.c so the wake mask
+       and the press cannot disagree.
+       C ONLY. In chore mode B, C and D are the three ack buttons, and B
+       and D are unconditional wake sources already; C is the one whose
+       gate could leave the middle checkbox dead from sleep while the two
+       either side of it worked. */
+    bool chore_ack_allowed;
 } buttons_policy_in_t;
 
 /* Which buttons may wake the device from the sleep being entered. Bit n =

@@ -344,6 +344,125 @@ bool wake_flow_break_ended_this_wake(void) {
     return s_break_ended;
 }
 
+/* The Timers/Chores toggle landed this wake, so the panel is about to swap
+   one FULL-SCREEN LAYOUT for another (display_screen_for, display.h).
+
+   Why this exists at all: the arm below returns true with
+   *selection_changed false, and a toggle moves no timer, so `before` and
+   `after` are the same state with no break end — and wake_policy_render's
+   button leg then answers PARTIAL. That was harmless while both modes
+   painted the same screen. Since M2-T4 it is precisely the hazard that
+   function's own break-chip comment names: a partial diff across a
+   whole-screen layout change ghosts the panel.
+
+   It is NOT threaded through wake_policy_render as a fifth argument,
+   deliberately. The policy's inputs are timer states, and the boundary
+   this crosses is a MODE boundary that no timer state can express; the
+   force_full channel beside it already exists for exactly this — "a real
+   full refresh regardless of the render policy" — and is what Button D
+   uses. Adding the parameter would also touch some fifty call sites whose
+   answers do not change.
+
+   Set only where the toggle actually APPLIED, never on a refusal: a
+   refused press leaves the panel showing the screen it already showed, and
+   the tail still paints it (test_c3_a_refused_button_a_wake_repaints_the_
+   current_screen), so forcing a full refresh there would spend two seconds
+   of panel time on a frame nobody changed.
+
+   Wake-sticky for the same reason s_break_ended is, and by the same means:
+   a plain static, because the next wake is a fresh boot. This is NOT
+   M2-T9, which is about which ghost-CLEANING pass a chore-screen partial
+   gets; this is about the partial existing at all.
+
+   Static, unlike its break-end neighbour: nothing outside this file needs
+   the answer, because the only thing it feeds is the force_full channel in
+   the two render tails below. */
+static bool s_mode_toggled;
+
+static bool wake_flow_mode_toggled_this_wake(void) {
+    return s_mode_toggled;
+}
+
+/* A chore ack landed this wake, and design 2.5 makes an ack a PARTIAL:
+   "an ack is a state change, so under today's policy each one is a full
+   refresh — ~3 s, and ~9 s to tick three boxes", which is precisely what
+   that section rejects. The panel is not the feedback channel for an ack;
+   the NeoPixels are (M2-T7/T8).
+
+   Left to itself the policy already answers PARTIAL for an ack — nothing
+   an ack touches is an input to wake_policy_render — so this flag exists
+   for exactly ONE button. Button D rides the force_full channel because
+   it is the user-facing "refresh everything" button, and in chore mode D
+   is ✓3; without this, the one ack button that is also the refresh button
+   would spend a full refresh the other two do not.
+
+   It is a SUPPRESSION and not a promotion, which is the opposite of its
+   neighbour above, and the pair must not be folded together: a mode
+   toggle swaps one whole-screen layout for another and needs the full
+   refresh, while an ack redraws a tick mark inside the layout already on
+   the glass.
+
+   Wake-sticky by the same means as both of its neighbours — a plain
+   static, because the next wake is a fresh boot. Not M2-T9 either: that
+   one is about which ghost-CLEANING pass a chore-screen partial gets,
+   this is about the refresh staying partial at all. */
+static bool s_chore_acked;
+
+static bool wake_flow_chore_acked_this_wake(void) {
+    return s_chore_acked;
+}
+
+/* B, C or D ticking a checkbox instead of doing its timer job (design
+   2.4). Returns whether the press APPLIED — false is a refusal (the row
+   is not configured, or the mode moved under the press), and a refusal
+   owes the caller nothing but the repaint every refused press already
+   gets.
+
+   THE THREE LINES AFTER THE REFUSAL ARE M2-T3's ARM, inherited whole, and
+   for the identical reason: render_action_result() drains a pending break
+   end before it paints and that drain stores APP_MODE_TIMERS
+   unconditionally (wake_flow_break_end says why it is right to). An ack
+   that left the drain to the tail would tick the box and then paint the
+   TIMER screen — the press silently undone, which in the field is
+   indistinguishable from a dead checkbox. Draining first only rotates the
+   problem; apply, drain, then RE-ASSERT is what has neither failure, and
+   the drain's other effects (the chime, the snap back, the wake-sticky
+   full refresh) all stand.
+
+   Re-asserting CHORES rather than reading the mode back, unlike the A
+   arm: A's press CHOOSES a mode and has to report which one it chose,
+   whereas an ack can only have been made in chore mode — the routing
+   above and button_chore_ack_apply()'s own gate both say so.
+
+   Overruling the break-end revert is not a quarrel with C16: design 4.2
+   justifies it with "the kid did not press anything", and here the kid
+   just did. Every other path into that revert is untouched.
+
+   THE RESIDUAL is A's residual, unchanged and not worth new machinery: a
+   caller that has ALREADY drained the break end before entering the
+   dispatch (wake_flow_handle_button_wake and the tick-wake latch drain,
+   both pinned) has already had the mode reverted to Timers under it, so
+   the routing above sends the press to its TIMER action instead. The kid
+   who meant ✓1 gets a start. It costs one press, in a wake where the
+   break ended at the same moment as the press, and wake_flow_poll_break_
+   buttons — the one caller with no prologue, and the one design 2.6 cares
+   about — is fully protected. */
+static bool wake_flow_apply_chore_ack(uint8_t idx, time_t now) {
+    if (button_chore_ack_apply(idx, now) == BTN_ACK_NONE) {
+        /* Before the drain, so a refused ack leaves the break-end edge
+           exactly where a refused A leaves it — latched, for a later
+           consumer or the sleep safety net. A refusal must not consume an
+           edge it then cannot get painted. */
+        ESP_LOGI(TAG, "chore ack %u refused", (unsigned)idx);
+        return false;
+    }
+    s_chore_acked = true;
+    (void)wake_flow_break_end();
+    timer_set_mode(APP_MODE_CHORES);
+    ESP_LOGI(TAG, "chore ack %u applied", (unsigned)idx);
+    return true;
+}
+
 bool wake_flow_break_end(void) {
     time_t now = hal_time_now();
     timer_break_tick(now);
@@ -559,11 +678,36 @@ bool wake_flow_dispatch_button_action(button_id_t btn, time_t *now, timer_state_
             const app_mode_t chosen = timer_mode(); /* read back, so the mapping has one home */
             (void)wake_flow_break_end();
             timer_set_mode(chosen);
+            /* Past the refusal, so only an APPLIED toggle promotes the
+               paint — see s_mode_toggled for why the promotion is needed
+               and why it does not go through wake_policy_render. */
+            s_mode_toggled = true;
             ESP_LOGI(TAG, "button A: %s",
                      (act == BTN_A_CHORES) ? "painting the chore checklist" : "back to the timer screen");
             return true;
         }
         case BTN_B:
+            /* CHORE MODE REBINDS B TO ✓1 (design 2.4), and the branch sits
+               ABOVE the break guard on purpose: 2.6 wants the checklist
+               usable throughout a screen break, and that guard refuses a
+               START, which is right for a start and wrong for a tick.
+
+               `return` and not a fall-through, in BOTH directions. In
+               chore mode B is the first ack button and nothing else, so a
+               row that does not exist (a one-chore list has no ✓2, a
+               two-chore list no ✓3) is a REFUSAL — not a quiet demotion
+               to the timer action. A press that started the screen timer
+               because a row happened to be missing is the ambiguity the
+               three fixed rows exist to remove, arriving by a side door.
+
+               Routed on the MODE ALONE here, while the apply re-checks the
+               whole gate: the mode is one RTC byte and the row count is an
+               NVS read, so the cheap half decides which action the press
+               IS and the expensive half decides whether that action can
+               run. */
+            if (timer_mode() == APP_MODE_CHORES) {
+                return wake_flow_apply_chore_ack(BUTTON_CHORE_IDX_B, *now);
+            }
             /* THE break guard — a short circuit and a diagnostic, NOT a
                behavioural difference from the break gate inside
                button_b_apply(). Do not talk yourself into believing the
@@ -664,6 +808,17 @@ bool wake_flow_dispatch_button_action(button_id_t btn, time_t *now, timer_state_
                     return false;
             }
         case BTN_C:
+            /* CHORE MODE REBINDS C TO ✓2 — the middle checkbox, and the
+               one whose wake source had to be widened for it
+               (buttons_policy.c). Same shape and same reasoning as B's
+               branch above, with one thing extra riding on the `return`:
+               a swap happening invisibly behind the checklist would move
+               the selected timer with nothing on the panel to say so, and
+               `selection_changed` is already false here, so the render
+               would not even be promoted to a full refresh. */
+            if (timer_mode() == APP_MODE_CHORES) {
+                return wake_flow_apply_chore_ack(BUTTON_CHORE_IDX_C, *now);
+            }
             /* Swap timer type; refused only while RUNNING (pause first).
                A Screen Break deliberately does NOT refuse — going and
                running Piano is what the break time is for.
@@ -720,6 +875,19 @@ bool wake_flow_poll_pause_button(void) {
 }
 
 bool wake_flow_poll_button_b_action(void) {
+    /* AHEAD OF THE TAKE, so the press is left in the latch rather than
+       eaten. In chore mode B is ✓1 and not a start, and this poll cannot
+       paint one — it runs inside the MQTT join, after the render — so
+       acking here would tick a box nobody sees. Leaving the edge latched
+       is the honest answer: a later consumer in the same wake can act on
+       it, and if none does it evaporates at sleep exactly as every other
+       press the join swallows does.
+       What this must NOT do is apply B's TIMER action: that would start
+       the screen timer from the chore screen, which is the one outcome
+       design 4.2 rules out by only letting the device into chore mode
+       when nothing is running. */
+    if (timer_mode() == APP_MODE_CHORES)
+        return false;
     if (buttons_take_pressed_mask(1u << BTN_B) == 0)
         return false;
     timer_state_t st = timer_get_state();
@@ -814,6 +982,35 @@ bool wake_flow_maybe_start_break(time_t now) {
     (void)accum;
     ESP_LOGI(TAG, "Screen break due (accum %ld s)", (long)accum);
     timer_start_break(now, (int32_t)duration_min * 60);
+    /* C16's revert, break-START half, and it is the same argument
+       wake_flow_break_end() makes a few hundred lines up, applied to the
+       other edge of the same event: the kid did not press anything, the
+       repaint that follows is a full refresh with an alarm behind it, and
+       the whole point of that repaint is to show the new situation.
+
+       WITHOUT IT THE BREAK NEVER ANNOUNCES ITSELF. display_screen_for()
+       puts CHORES above BREAK unconditionally, and paint_break_started()
+       renders through that same choice — so a break that starts while the
+       stored mode is CHORES paints the checklist: no SCREEN BREAK title,
+       no countdown, no bar. The alarm sounds and the panel never says
+       why. Widened by M2-T4a, because the ack arm re-asserts
+       APP_MODE_CHORES after the break-end drain, so the checklist now
+       survives a break end as well as a mode toggle — this site is after
+       every one of those re-asserts, because the dispatch that performs
+       them has returned by the time finish_or_break() gets here.
+
+       Fixing it HERE and not by reordering display_screen_for(): design
+       4.2 wants chore mode reachable throughout a break ("BREAK is not
+       RUNNING ... exactly where 2.6 wants it"), and a BREAK that outranked
+       CHORES would make Button A do nothing visible for the whole break.
+       Nothing is lost by reverting — 2.6's break screen carries its own
+       "A → Chores" prompt and the outstanding count, so the way back in
+       is one press and is the press 2.6 asks for.
+
+       Unconditional, on wake_flow_break_end()'s reasoning verbatim: this
+       is a site a break start gates, so the write cannot reach a paint
+       path the whole fleet runs. */
+    timer_set_mode(APP_MODE_TIMERS);
     timer_persist_save();
     paint_break_started(now); /* blue LED through the inverted SCREEN BREAK refresh */
     alert_run(ALERT_BREAK);   /* pulse end darkens the pixels */
@@ -1083,15 +1280,55 @@ static void render_action_result(button_id_t btn, timer_state_t before, time_t n
     display_state_t st = make_display_state(remaining, now);
 
     /* Button D is the user-facing "refresh everything" button — it always
-       gets a real full refresh regardless of the render policy. */
-    bool force_full = (btn == BTN_D);
-    /* One read feeds both the policy call and the log below. It has to
-       leave the log argument list anyway (HAZ-1); sharing it with the
-       policy call is the version that also guarantees the line reports the
-       state the policy actually saw. Safe because wake_policy_render() and
-       wake_flow_break_ended_this_wake() are both pure reads, so nothing
-       between the two former call sites could have moved the state. */
+       gets a real full refresh regardless of the render policy. A mode
+       toggle rides the same channel: it swaps one full-screen layout for
+       another while every input wake_policy_render can see stays put, so
+       the policy would answer PARTIAL and the panel would ghost
+       (s_mode_toggled says the rest).
+
+       An ack SUPPRESSES D's half of that, and only D's: in chore mode D
+       is ✓3, and design 2.5 makes an ack a partial — three of them at ~3 s
+       each is the ~9 s that section rejects. The mode toggle's half is
+       not suppressed, and cannot collide with it anyway: one press per
+       dispatch, and a press is either the toggle or an ack. */
+    /* One read feeds the policy call, the screen-kind test and the log
+       below. It has to leave the log argument list anyway (HAZ-1);
+       sharing it with the policy call is the version that also guarantees
+       the line reports the state the policy actually saw. Safe because
+       wake_policy_render() and wake_flow_break_ended_this_wake() are both
+       pure reads, so nothing between the two former call sites could have
+       moved the state. */
     const timer_state_t after = timer_get_state();
+    /* A CHANGE OF SCREEN KIND IS A FULL REFRESH, always. Swapping one
+       full-screen layout for another leaves almost nothing of the old
+       image in place, and e-ink partials do not erase what they do not
+       redraw — so a partial across that boundary ghosts the whole panel.
+       Design 2.5 states it for the direction that matters most ("the
+       transition OUT of chore mode stays a full refresh"), so this is
+       design-mandated rather than defensive.
+
+       It GENERALISES the rule wake_policy_render already encodes for the
+       break boundary alone, which is the same rule applied to one
+       particular pair of screens. Written as a test on
+       display_screen_for() rather than as a list of the transitions that
+       can reach it, because that list is an emergent property of the
+       button bindings: today B's start is rebound in chore mode, C no
+       longer swaps, the join poll is guarded and HA cannot start a timer,
+       so no press reaches a chore-mode RUNNING — and every one of those is
+       a fact about a different file that nothing stops a later task
+       changing. The screen the painter would choose is the thing this
+       actually depends on, so that is what it asks.
+
+       Both calls take st.app_mode and st.chore_count, the CURRENT ones,
+       so the term varies only in the timer state: the mode's own
+       transitions are already carried by wake_flow_mode_toggled_this_wake()
+       above and by make_display_state()'s emptied-list revert, and
+       re-reading the chore count here would cost a second flash read on
+       every button wake for an answer st already holds. */
+    const bool screen_kind_changed = display_screen_for(before, st.app_mode, st.chore_count) !=
+                                     display_screen_for(after, st.app_mode, st.chore_count);
+    bool force_full = ((btn == BTN_D) && !wake_flow_chore_acked_this_wake()) || wake_flow_mode_toggled_this_wake() ||
+                      screen_kind_changed;
     wake_render_t bwr = wake_policy_render(before, after, true, wake_flow_break_ended_this_wake(), selection_changed);
     if (bwr == WAKE_RENDER_EXPIRY_ALERT) {
         wake_flow_fire_expiry_alert(); /* alert owns the NeoPixels (red pulse) */
@@ -1114,7 +1351,19 @@ static void render_action_result(button_id_t btn, timer_state_t before, time_t n
    window, and re-render when the join changed what the panel shows. */
 static void finish_action_and_render(button_id_t btn, timer_state_t before, time_t now, bool selection_changed) {
     render_action_result(btn, before, now, selection_changed);
-    bool force_full = (btn == BTN_D);
+    /* The toggle latch carries into the RE-render too, and not merely for
+       symmetry: the join can empty the chore list, and make_display_state's
+       emptied-list guard then reverts the mode and paints the OTHER layout
+       — a second screen-kind change in the same wake, which a partial would
+       ghost exactly as the first one would
+       (test_c3_a_config_edit_that_empties_the_list_after_the_press_still_wins
+       is that path).
+
+       And so does the ack's suppression of D, for the symmetric reason:
+       the re-render is the same paint of the same layout, so promoting
+       THAT one to a full refresh would spend the seconds design 2.5 is
+       trying not to spend, just a few lines later. */
+    bool force_full = ((btn == BTN_D) && !wake_flow_chore_acked_this_wake()) || wake_flow_mode_toggled_this_wake();
 
     /* Paint done: release the MQTT phase (display refresh current and
        radio TX bursts must never coincide — brownout), then join, apply
@@ -1486,6 +1735,27 @@ void wake_flow_handle_button_wake(void) {
             wake_flow_dispatch_button_action(btn, &now, before, true, &swapped);
             break;
         case BTN_D:
+            /* CHORE MODE REBINDS D TO ✓3 (design 2.4). An update check and
+               a network window are not what that row promises, so the
+               sync leg below is skipped entirely — including on a refusal
+               (a two-chore list has no ✓3), for the same reason B and C
+               refuse rather than fall through.
+
+               HERE AND NOT IN THE SHARED DISPATCH, deliberately. D is
+               excluded from both latch pick masks — it stays
+               wake-press-only, because a D that merely rode in on another
+               wake would open a second window for nothing — and both of
+               those exclusions are documented as safe *because the
+               dispatch has no BTN_D arm*
+               (test_button_d_and_button_none_are_inert_in_the_dispatch,
+               and the two mask cases that cite it). Putting the binding in
+               the EXT1 decode keeps that true: D acquires an action
+               without either mask becoming load bearing, and a latched D
+               press goes on doing nothing at all. */
+            if (timer_mode() == APP_MODE_CHORES) {
+                (void)wake_flow_apply_chore_ack(BUTTON_CHORE_IDX_D, now);
+                break;
+            }
             /* The second checking trigger, and the only one a person can
                reach on purpose — which is what makes it the one you use
                while testing an update. Whether it ACTUALLY checks is

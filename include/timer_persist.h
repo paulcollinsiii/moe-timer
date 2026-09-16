@@ -55,10 +55,24 @@ void timer_persist_save(void);
    clock survives, and again after the rollover's NTP sync, which covers
    a power-on where the clock is invalid until corrected.
 
-   Reads flash at most once and never writes it: this runs on the boot
-   path ahead of the display, so a write here would add flash latency to
-   every cold boot and would make the boot path capable of destroying the
-   very blob it is reading. timer_defs_install() must have run first —
+   ALSO RESTORES TODAY'S CHORE ACKS, on the success path and only there.
+   Succeeding is by definition "RTC memory was lost and the day came back
+   from flash", which is the one arrangement where coming back with the
+   gate re-armed does damage: the restored allocation already carries
+   whatever the release granted, so a second release grants the withheld
+   remainder twice. The failure path deliberately does not restore —
+   there the caller resets the day to a fresh full allocation and the
+   gate is SUPPOSED to be armed, and one release then hands back exactly
+   what was withheld. See timer_persist_restore_chore_acks() below for
+   the record's own rules; the list hash it needs is read here.
+
+   Never writes flash, and reads it at most three times: the snapshot,
+   and then on the success path the chore names and the ack record. This
+   runs on the boot path ahead of the display, so a write here would add
+   flash latency to every cold boot and would make the boot path capable
+   of destroying the very blobs it is reading. Two of the three reads are
+   skipped on every ordinary deep-sleep wake, because this returns at its
+   first guard. timer_defs_install() must have run first —
    the restore ends in timer_ensure_active_slot_enabled(), which reads the
    defs table to decide whether the restored selection still exists, and
    with no table every extra slot reads as disabled and the selection is
@@ -114,22 +128,28 @@ bool timer_persist_try_restore(time_t now);
    acks exist in exactly one place — flash — and this is what fetches
    them.
 
-   WHERE M2 MUST CALL IT. Two requirements, and with the date derived from
-   `now` they are the only two:
-
-       timer_rtc_state_guard();                  // zeroes a foreign image
-       timer_defs_install();
-       timer_persist_try_restore(now);           // restores the timer day
-       timer_persist_restore_chore_acks(now, hash);
+   WHERE IT IS CALLED, and it is NOT a boot block in main.c. Its home is
+   the tail of timer_persist_try_restore(), above — which already IS the
+   "RTC was lost, rebuild the day from flash" path, already derives and
+   refuses a stale date, and is already reached on both of the wakes that
+   need this (app_main's boot restore, and the rollover's second attempt
+   once NTP has corrected the clock). Wiring it there costs main.c
+   nothing, keeps §5.1's one authority, and makes the two requirements
+   below hold by construction rather than by a comment:
 
    (1) AFTER timer_rtc_state_guard(). The guard memsets the whole of
    g_rtc_state when it rejects an image, so acks restored ahead of it are
-   thrown away. (2) BEFORE anything that paints the checklist or gates on
-   an ack, which is what it is for. It does NOT have to follow
-   try_restore: try_restore writes only the snapshot's own fields (it does
-   not memset g_rtc_state) and reads only last_date, which this function
-   neither reads nor writes. The block above is main.c's boot sequence as
-   it stands with the one line added, and that is the natural place.
+   thrown away. try_restore is only reached past its own last_date guard,
+   and on the esp_restart path it is the rtc_state_guard two calls
+   earlier in app_main that emptied last_date. (2) BEFORE anything that
+   paints the checklist or gates on an ack, which is what it is for; the
+   boot restore precedes the first paint.
+
+   It remains public, and is called directly by the suite, because it is
+   where every rule below lives and because nothing in it depends on
+   try_restore having run: try_restore writes only the snapshot's own
+   fields (it does not memset g_rtc_state) and reads only last_date,
+   which this function neither reads nor writes.
 
    THE ONE ASYMMETRY, stated rather than buried. Flash is the AUTHORITY,
    so wherever the record and the live RTC copy disagree the record wins —

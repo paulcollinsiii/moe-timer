@@ -53,6 +53,42 @@ bool timer_persist_try_restore(time_t now) {
     const timer_state_t st = timer_get_state();
     (void)st;
     ESP_LOGW(TAG, "Timer state restored from NVS snapshot, state=%d", (int)st);
+
+    /* C14, and it belongs HERE rather than in a boot block of its own:
+       this branch IS "RTC memory was lost and the day came back from
+       flash", which is the one arrangement where a re-armed gate does
+       damage. The day's allocation has just been restored already
+       carrying whatever the release granted, so leaving chore_released
+       false lets the same withheld remainder be granted a SECOND time —
+       measured at 100 minutes on a 60-minute day, repeatable per reset,
+       with adjust_today_sec still 0 (the state timer.h calls impossible).
+
+       Deliberately NOT on the failure path above. There the caller resets
+       the day to a fresh full allocation and the gate is SUPPOSED to be
+       armed: the withheld part is withheld again and one release hands it
+       back, so the day still totals one allocation and nothing is farmed.
+
+       Ordering against timer_rtc_state_guard() — the one hard requirement
+       in timer_persist.h, because the guard memsets g_rtc_state when it
+       rejects an image — is satisfied by construction: this function is
+       only reached with last_date empty, and on the esp_restart path that
+       is the guard's own doing, two calls earlier in app_main.
+
+       The return is discarded because there is nothing to do with it. A
+       false means "no usable record" and leaves g_rtc_state untouched,
+       which is the right answer for a device that has never had a chore
+       configured; it must NOT be turned into a restore failure, because
+       the timer day genuinely did come back. */
+    char names[CHORE_MAX][CHORE_NAME_BUF];
+    uint8_t n = 0;
+    /* Return discarded on the same terms button_actions.c discards it:
+       every failure path in chore_store_load_names() sets n = 0 first, so
+       an unreadable names blob hashes as the empty list. That mismatches
+       the stored hash and takes chores_reconcile()'s C10 arm, which
+       clears the acks but PRESERVES `released` — so the one thing a
+       transient NVS fault on this key cannot do is re-arm the gate. */
+    (void)chore_store_load_names(names, &n);
+    (void)timer_persist_restore_chore_acks(now, chores_list_hash(names, n));
     return true;
 }
 
