@@ -12,7 +12,17 @@
    it is what makes "no chores configured" here mean the same thing it
    means on device, including the case that matters most: every failure
    mode of chore_store_load_names() reports n = 0, so a blob this firmware
-   cannot read is indistinguishable from an empty list. */
+   cannot read is indistinguishable from an empty list.
+
+   display_layout.c is here for ONE function, display_screen_for(), and
+   for one test: THE CORRESPONDENCE at the bottom of this file. The chore
+   screen draws its "Timers" label unconditionally because the painter's
+   gate implies Button A's, and until that test existed nothing anywhere
+   checked the two against each other — they live in different modules and
+   in different single-TU suites, and each is separately correct. It costs
+   nothing to pull in: the file is pure layout math with no LVGL and no
+   ESP dependencies, which is what makes it host-testable in the first
+   place. */
 // clang-format off
 #include "mock_hal_time.c"
 #include "mock_hal_nvs.c"
@@ -21,6 +31,7 @@
 #include "../../main/chores.c"
 #include "../../main/chore_store.c"
 #include "../../main/button_actions.c"
+#include "../../main/display_layout.c"
 // clang-format on
 
 /* 2026-01-05 00:00:00 UTC (Monday) */
@@ -828,6 +839,79 @@ void test_the_gate_never_caps_an_extra_timers_duration(void) {
     TEST_ASSERT_EQUAL_INT32(900, button_b_start_allocation(T0));
 }
 
+/* ---- THE CORRESPONDENCE: the painter's gate implies Button A's --------
+
+   display_screens.c draws the chore screen's "Timers" label
+   UNCONDITIONALLY, on the stated ground that display_screen_for() has
+   already established everything button_a_toggle_allowed() would check
+   (display.h). If that ever stops being true the device paints a
+   checklist with a dead button on it: the label offers a way out, the
+   press is refused, and the kid is stuck on the screen with no feedback
+   at all. It is the exact failure button_actions.h forbids a restatement
+   for — and display_screen_for() IS a restatement, struck deliberately,
+   because the painter is handed a display_state_t snapshot and must not
+   reach live state or NVS from the render path.
+
+   Nothing enforced it before this case. The two functions live in
+   different modules and, until display_layout.c was pulled into this TU,
+   in suites that could not see each other; each is separately correct and
+   separately tested, and the IMPLICATION between them was documentation.
+
+   Swept over the whole product space rather than sampled, because the
+   divergence this guards against is a term ADDED to one side. M2-T10 adds
+   a third device lock; if it gives button_a_toggle_allowed() a new
+   refusal reason and display_screen_for() does not learn it, every state
+   in which that reason fires lands here. A sampled case would have to
+   have guessed the new term in advance. */
+void test_the_chore_screen_is_never_painted_where_button_a_would_be_refused(void) {
+    const timer_state_t states[] = {TIMER_IDLE, TIMER_RUNNING, TIMER_PAUSED, TIMER_EXPIRED, TIMER_BREAK};
+    /* NON-VACUITY, and it is not ceremony here: the assertion lives under
+       a `continue`, so a fixture that never reaches the chore screen — a
+       seeding helper that stops working, a mode byte that stops sticking
+       — would leave this case green with nothing asserted at all. That
+       exact shape has shipped on this plan before. The expected figure is
+       the product space minus the rows display_screen_for() sends
+       elsewhere: 4 non-RUNNING states x 3 non-empty counts = 12. */
+    int painted = 0;
+    for (size_t i = 0; i < sizeof states / sizeof states[0]; i++) {
+        for (uint8_t n = 0; n <= CHORE_MAX; n++) {
+            timer_reset();
+            mock_nvs_reset();
+            hal_nvs_write_u16("weekday_min", 60);
+            if (n > 0)
+                with_chores(n);
+            timer_set_mode(APP_MODE_CHORES);
+            g_rtc_state.slots[0].state = (uint8_t)states[i];
+
+            /* The painter is given the SNAPSHOT — the same two values
+               app_state.c puts in display_state_t — while the gate reads
+               live state and NVS. Feeding both from one fixture is what
+               makes the comparison meaningful. */
+            if (display_screen_for(timer_get_state(), APP_MODE_CHORES, n) != DISPLAY_SCREEN_CHORES)
+                continue;
+            painted++;
+            TEST_ASSERT_TRUE_MESSAGE(button_a_toggle_allowed(),
+                                     "the painter chose the chore screen in a state where Button A is refused - "
+                                     "the checklist's Timers label is dead");
+        }
+    }
+    TEST_ASSERT_EQUAL_INT_MESSAGE(12, painted, "the sweep never reached the chore screen - the case asserted nothing");
+}
+
+/* The converse is NOT asserted, and its absence is deliberate rather than
+   an oversight: A being allowed while the timer screen is painted is the
+   ordinary Timers-mode case, and it is what lets A be armed to ENTER
+   chore mode at all. Only one direction can be true, and it is the one
+   the label depends on. */
+void test_button_a_is_deliberately_allowed_where_no_checklist_is_painted(void) {
+    with_chores(3);
+    timer_set_mode(APP_MODE_TIMERS);
+
+    TEST_ASSERT_EQUAL_MESSAGE(DISPLAY_SCREEN_MAIN, display_screen_for(timer_get_state(), APP_MODE_TIMERS, 3),
+                              "the fixture is not on the timer screen");
+    TEST_ASSERT_TRUE_MESSAGE(button_a_toggle_allowed(), "A cannot be armed to enter chore mode");
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_idle_screen_starts_with_schedule_allocation);
@@ -878,5 +962,7 @@ int main(void) {
     RUN_TEST(test_a_released_day_starts_on_the_whole_allocation);
     RUN_TEST(test_a_day_with_no_chores_starts_on_the_whole_allocation);
     RUN_TEST(test_the_gate_never_caps_an_extra_timers_duration);
+    RUN_TEST(test_the_chore_screen_is_never_painted_where_button_a_would_be_refused);
+    RUN_TEST(test_button_a_is_deliberately_allowed_where_no_checklist_is_painted);
     return UNITY_END();
 }

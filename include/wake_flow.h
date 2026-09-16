@@ -97,20 +97,53 @@ bool wake_flow_break_ended_this_wake(void);
 
 /* ---- the button guard matrix ------------------------------------------- */
 
-/* Apply one button action (A = Timers/Chores mode toggle, B =
-   Start/Pause/Resume/Reload, C = Next timer; D is wake-only). Shared by
-   the EXT1 wake handler, the tick-wake latch drain and the break tail, so
-   all three honour the same state guards.
+/* Apply one button action. The map is MODE-DEPENDENT and this summary
+   went stale twice by pretending otherwise, so it is written as the two
+   columns it is:
+
+                       TIMERS mode                 CHORES mode
+     A    Timers/Chores mode toggle    (the same toggle, back to Timers)
+     B    Start/Pause/Resume/Reload    ✓1
+     C    Next timer                   ✓2
+     D    no arm here (see below)      no arm here (see below)
+
+   D HAS NO ARM IN THIS FUNCTION and that is not the same as "D is
+   wake-only", which is what stood here. D is the force-sync button in
+   Timers mode and ✓3 in Chores mode; both bindings live OUTSIDE this
+   function — the sync leg in the EXT1 decode, and ✓3 in the EXT1 decode
+   and in wake_flow_dispatch_latched_press(). Reaching this function, D
+   falls to the default arm and returns false (pinned by
+   test_button_d_and_button_none_are_inert_in_the_dispatch).
+
+   THREE CALLERS, and only one of them still calls this DIRECTLY: the
+   EXT1 wake handler. The tick-wake latch drain and the break tail go
+   through wake_flow_dispatch_latched_press(), which routes a picked D to
+   ✓3 and hands everything else here — so "all three honour the same state
+   guards" is true of A, B and C and false of D, which is exactly the
+   distinction M2-T4b exists to make.
 
    The signature is the contract, and every part of it encodes a shipped
    defect — do not "clean it up":
 
    `before` is by VALUE because it is the state that was PAINTED, not the
-   state that is live. wake_policy_render()'s break-screen boundary check
-   is the only thing standing between a swap during a break and a ghosted
-   panel, and it can only see that boundary if `before` still names the
-   layout on the glass. The guards below therefore key on this parameter,
-   never on timer_get_state().
+   state that is live. It is the render policy's only input describing
+   where the panel STARTED, and two separate promotions read it that way:
+   wake_policy_render()'s break-screen boundary check, and the screen-kind
+   comparison in render_action_result() that M2-T4 added over it. Either
+   one seeing a rewritten `before` is a partial diff across a full-screen
+   layout change, which ghosts the panel. The guards below therefore key
+   on this parameter, never on timer_get_state().
+
+   It is NOT "the record of which layout was painted", which is what this
+   used to say and what the paragraph on selection_changed below still
+   leaned on. `before` is a TIMER STATE, and the layout is a function of
+   three things — display_screen_for(timer_state, mode, chore_count). The
+   mode moved out from under it when Button A gained a binding, which is
+   why s_mode_toggled exists as a separate wake-sticky record, and the
+   chore count can move during the same wake (make_display_state's
+   emptied-list revert). So `before` is one of the layout's three terms —
+   the only one this function is given — and the promotions above are what
+   turn it into a statement about the glass.
 
    `now` is by POINTER because a start/resume can span a network window
    (seconds) and the caller must render against the clock the action
@@ -120,10 +153,10 @@ bool wake_flow_break_ended_this_wake(void);
    `selection_changed` is an OUT-PARAM rather than a rewrite of `before`
    because both facts have to survive: landing on an already-EXPIRED slot
    must not re-fire its alert (which is what this reports), while `before`
-   remains the only record of which layout was painted. Overwriting
-   `before` to signal the swap made those renders partial, which ghosted
-   the panel. Always written — false on every arm, including refusals and
-   the buttons this function ignores.
+   remains the caller's only account of the state the panel was painted
+   from. Overwriting `before` to signal the swap made those renders
+   partial, which ghosted the panel. Always written — false on every arm,
+   including refusals and the buttons this function ignores.
 
    allow_net_window gates the NTP window on a start/resume: a wake that
    already ran a window skips the redundant second one (clock corrected,

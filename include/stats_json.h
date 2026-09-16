@@ -59,8 +59,10 @@ typedef struct {
    net_window_task has already copied it off the queue before it calls
    ota_flow_check(). An OTA field carried in the snapshot is therefore
    frozen BEFORE this wake's check runs, and could only ever publish the
-   PREVIOUS wake's result — the ordering at net_window.c:103-105 buys
-   nothing for it. Keeping these four out of the snapshot makes that
+   PREVIOUS wake's result — net_window_task's ordering, ota_flow_check()
+   and then mqtt_ha_window() two statements later, buys nothing for it.
+   (The ":103-105" that stood here points at that file's own comment
+   block, not at the ordering.) Keeping these four out of the snapshot makes that
    mistake unrepresentable rather than merely discouraged. They are read
    from NVS at publish time by ota_flow_stat(); see docs/planning/
    ota.plan.md task 12, "A correction to this entry's own third bullet".

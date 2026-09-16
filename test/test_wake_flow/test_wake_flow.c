@@ -1137,9 +1137,12 @@ display_state_t app_state_display(const app_state_in_t *in, int32_t remaining, t
     st.break_banner = flow_made_break_banner;
     st.break_remaining_sec = flow_made_break_remaining;
     /* The two chore fields the emptied-list guard reads, assembled the way
-       main/app_state.c:212 and :180 assemble them: the mode comes from the
-       LIVE accessor rather than from a fixture variable of its own, and the
-       count from the store. Taking the mode live is what makes the guard's
+       main/app_state.c's make_display_state() assembles them — its
+       `st.app_mode = timer_mode()` and its chore_store_load_names() call,
+       named rather than numbered because that file moves: the mode comes
+       from the LIVE accessor rather than from a fixture variable of its
+       own, and the count from the store. Taking the mode live is what
+       makes the guard's
        coupling real here — a guard that reverted the stored byte but handed
        the painter a stale one, or vice versa, shows up as a disagreement
        between flow_mode and flow_painted_mode instead of passing twice. */
@@ -2731,9 +2734,11 @@ void test_a_break_press_on_slot_zero_is_still_refused_before_the_map(void) {
    break press on every leg too).
 
    Pinned anyway, because the parameter is load bearing for the RENDER
-   policy — it is the only record of which layout is on the glass across
-   a swap during a break, which
-   test_row4_a_swap_during_a_break_renders_full_end_to_end proves — and a
+   policy — it is its only account of the timer state the glass was
+   painted from, which is what carries a swap across a break, as
+   test_row4_a_swap_during_a_break_renders_full_end_to_end proves (the
+   layout's other two terms, the mode and the chore count, have records of
+   their own — see wake_flow.h) — and a
    "cleanup" that re-read the live state inside the guard would compile,
    pass every other case, and quietly delete that contract. */
 void test_row18_the_refusal_reads_the_before_parameter_not_timer_get_state(void) {
@@ -3273,11 +3278,17 @@ void test_the_break_tail_poll_is_inert_when_nothing_is_latched(void) {
    between this poll and the row-5 pair, and copying their masked take
    here would strand a B or C press for a drain that never comes.
 
-   A and D are out of the PICK but still inside the TAKE, which is the
-   distinction this case exists to hold: both bits are cleared here rather
-   than left pending for a consumer that never runs. */
+   THE TAKE IS WIDER THAN THE PICK, which is the distinction this case
+   exists to hold: every bit is cleared here rather than left pending for
+   a consumer that never runs, whatever the pick then chose to act on.
+   The earlier wording — "A and D are out of the PICK" — was stale twice
+   over: M2-T3 put A into the allowed mask (it loses the pick to B here,
+   which is a different fact), and M2-T4b puts D in whenever the mode says
+   CHORES. Neither changes what this case asserts, because the take never
+   consulted the mask in the first place. */
 void test_the_break_tail_poll_drains_the_whole_latch_including_a_and_d(void) {
-    flow_state = TIMER_BREAK; /* B is refused here, so the poll reports false */
+    flow_state = TIMER_BREAK;    /* B is refused here, so the poll reports false */
+    flow_mode = APP_MODE_TIMERS; /* so the pick is the T4a set; the take is not */
     flow_press(BTN_A);
     flow_press(BTN_B);
     flow_press(BTN_C);
@@ -3289,17 +3300,23 @@ void test_the_break_tail_poll_drains_the_whole_latch_including_a_and_d(void) {
     TEST_ASSERT_EQUAL_HEX8(0, flow_latch_residue());
 }
 
-/* D's ABSENCE from the allowed mask is the one membership fact in this
-   poll that cannot be pinned, and deliberately so: adding (1u << BTN_D)
-   back changes nothing observable. D only ever wins the pick when it is
-   latched alone, and it then reaches the dispatch's outer default arm and
-   is refused there instead — same false return, same empty effect log,
-   same drained latch. The assertions below hold either way. What makes
-   that safe is the dispatch having no BTN_D arm, which IS pinned
-   (test_button_d_and_button_none_are_inert_in_the_dispatch); if D ever
-   gains one, this mask becomes load bearing and needs a case of its own. */
+/* D's ABSENCE from the allowed mask, IN TIMERS MODE — which is the whole
+   of what this case now says, and it used to say more. The comment that
+   stood here claimed adding (1u << BTN_D) back changed nothing observable,
+   because a lone D then reached the dispatch's outer default arm and was
+   refused there. M2-T4b made that false in one direction: the candidates
+   are mode-gated now (wake_flow_pick_latched_press), and in CHORE mode a
+   lone D is ✓3 and really does act
+   (test_c4b_a_latched_d_press_in_the_break_tail_acks_row_3).
+
+   In Timers mode nothing moved, and this case is what pins that half: D
+   is not a candidate, so the poll reports false and the press is taken and
+   dropped, which is what keeps a rode-in D from buying a network window.
+   The mode is setUp's default and is left implicit nowhere else in this
+   case — it is set explicitly below for that reason. */
 void test_a_lone_d_press_in_the_break_tail_is_consumed_and_ignored(void) {
     flow_state = TIMER_BREAK;
+    flow_mode = APP_MODE_TIMERS; /* load bearing as of T4b: in chores D acts */
     flow_press(BTN_D);
     mock_time_set(flow_at(16, 0));
 
@@ -5774,26 +5791,35 @@ void test_a_latched_a_press_alone_reaches_its_own_arm_and_no_slot(void) {
     TEST_ASSERT_EQUAL_HEX8(0, flow_latch_residue()); /* taken, then dropped */
 }
 
-/* D is excluded from the drain's pick mask. It is latched and thrown away
-   rather than dispatched — D stays wake-press-only, because a D that rode
-   in on a tick wake would open a second window for nothing.
+/* D's TIMER action — the update check and the network window — is
+   unreachable from the tick drain. A D that rode in on a tick wake must
+   not buy a second window, so it is taken and thrown away.
 
-   MEMBERSHIP IS NOT PINNED HERE, and cannot be: adding (1u << BTN_D) back
-   to the mask changes nothing observable. D only wins the pick when it is
-   latched alone, and it then reaches the dispatch's outer default arm,
-   which writes selection_changed = false and returns false — so the `if`
-   body is skipped either way and the only difference on device is one
-   extra pure timer_get_state() read. Verified by mutation: the mask
-   mutant is the single survivor of this cycle's battery.
+   IN TIMERS MODE, and the qualifier is M2-T4b's. This comment used to
+   read "D is excluded from the drain's pick mask ... MEMBERSHIP IS NOT
+   PINNED HERE, and cannot be: adding (1u << BTN_D) back to the mask
+   changes nothing observable ... the mask mutant is the single survivor
+   of this cycle's battery." Every sentence of that is now wrong.
+   wake_flow_pick_latched_press() admits D while the mode byte says
+   CHORES, membership is pinned in BOTH directions — W18 (D admitted
+   unconditionally) dies on
+   test_c4b_a_latched_d_press_outside_chore_mode_is_still_dropped and W21
+   (the drain keeps the old A|B|C pick) dies on
+   test_c4b_a_latched_d_press_in_chore_mode_acks_row_3 — and that battery
+   has no survivors at all.
 
-   This is BUG-3 (docs/planning/refactor.bugdiscoveries.md), which the
-   register records against the BREAK-TAIL pick mask. The tick drain has
-   the SAME exclusion and the same conditional hazard, so BUG-3 covers two
-   call sites and not one. What makes both safe today is the dispatch
-   having no BTN_D arm, which IS pinned, by
-   test_button_d_and_button_none_are_inert_in_the_dispatch. The moment D
-   gains an arm, both masks become load bearing and each needs a case. */
-void test_a_latched_d_press_is_never_dispatched_by_the_tick_drain(void) {
+   This was BUG-3 (docs/planning/refactor.bugdiscoveries.md), recorded
+   against the BREAK-TAIL mask with the tick drain folded in as the second
+   call site. Its condition — "the moment BTN_D gains a dispatch arm" —
+   fired in M2-T4a/T4b, the decision it asked for was made deliberately
+   (admit D, and only in chore mode), and both call sites got the case it
+   asked for. The register entry is closed there rather than here.
+
+   What this case still pins, and the reason it did not become a
+   duplicate of the c4b pair: it is the TIMER leg, asserted as
+   EV_NET_OPEN == 0. The c4b negative control proves no ack happens; this
+   one proves no WINDOW opens. */
+void test_a_latched_d_press_in_timers_mode_is_never_dispatched_by_the_tick_drain(void) {
     flow_tick_clock(flow_at(15, 0));
     flow_state = TIMER_IDLE;
     flow_press(BTN_D);
@@ -8175,14 +8201,53 @@ void test_c4a_d_outside_chore_mode_still_checks_for_an_update(void) {
     TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_OTA_ARM));
 }
 
-/* D STAYS WAKE-PRESS-ONLY. It is excluded from both latch pick masks, so
-   a D press that merely rode in on another wake is taken and thrown away
-   — before this binding and after it. Pinned because D now HAS an action
-   for the first time, which is the condition both mask comments name as
-   the moment they would become load bearing. They are not: the binding
-   lives in the EXT1 decode, not in the dispatch, so the dispatch still
-   has no BTN_D arm and both masks stay documentation. */
-void test_c4a_a_latched_d_press_in_chore_mode_still_never_acks(void) {
+/* ---- M2-T4b: ✓3 survives the latch drains too ---------------------------
+
+   A DELIBERATE FLIP of what T4a shipped. The case that stood here,
+   test_c4a_a_latched_d_press_in_chore_mode_still_never_acks, asserted
+   that a latched D was taken and dropped in chore mode as well as out of
+   it, and it was an accurate reading of T4a's code. It was also the
+   defect: ✓1 and ✓2 ARE honoured from both latch drains, so the checklist
+   lost its third row in exactly the window design §2.6 cares about most —
+   wake_flow_watch_break_end's ~250 ms tail poll, which is the break, and
+   the tick-wake drain, which is any press that lands while the wake is
+   already awake.
+
+   WHAT DID NOT CHANGE, and is pinned below: the dispatch still has no
+   BTN_D arm (test_button_d_and_button_none_are_inert_in_the_dispatch),
+   so D's TIMER action — the update check and the network window — is
+   still reachable only from the EXT1 decode. D joins the pick only while
+   the mode byte says CHORES, where it is ✓3 and has no network leg at
+   all, which is the entire reason it was kept out. Neither pick mask
+   became load bearing on the way: a D that leaked into the candidates in
+   Timers mode routes to button_chore_ack_apply(), whose own first line
+   refuses on the mode (button_actions.c) — inert, exactly as the
+   dispatch's default arm was. */
+
+/* ✓3 from the break tail: the window §2.6 names, and the one caller with
+   no break-end drain in its prologue. */
+void test_c4b_a_latched_d_press_in_the_break_tail_acks_row_3(void) {
+    flow_mode = APP_MODE_CHORES;
+    flow_chore_count = 3;
+    flow_ack_result = BTN_ACK_TOGGLED;
+    flow_state = TIMER_BREAK;
+    mock_time_set(flow_at(16, 0));
+    flow_press(BTN_D);
+
+    /* ASCII in the assertion MESSAGES, unlike the comments around them:
+       Unity prints them byte-escaped, so a "check 3" that reads as
+       \xE2\x9C\x933 tells the next reader nothing. */
+    TEST_ASSERT_TRUE_MESSAGE(wake_flow_poll_break_buttons(), "the break tail dropped a check-3 press");
+
+    TEST_ASSERT_EQUAL_INT_MESSAGE(1, flow_log_count(EV_CHORE_ACK),
+                                  "check 3 is discarded where checks 1 and 2 are honoured");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(2, flow_ack_idx, "the break tail ticked the wrong row");
+    TEST_ASSERT_EQUAL_HEX8(0, flow_latch_residue());
+}
+
+/* ✓3 from the tick-wake drain: a press that landed during a sync, a grid
+   wait or an e-ink flush. Same binding, the other drain. */
+void test_c4b_a_latched_d_press_in_chore_mode_acks_row_3(void) {
     flow_tick_clock(flow_at(15, 0));
     flow_mode = APP_MODE_CHORES;
     flow_chore_count = 3;
@@ -8192,8 +8257,53 @@ void test_c4a_a_latched_d_press_in_chore_mode_still_never_acks(void) {
 
     TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_tick());
 
-    TEST_ASSERT_EQUAL_INT_MESSAGE(0, flow_log_count(EV_CHORE_ACK), "a latched D press acked");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(1, flow_log_count(EV_CHORE_ACK), "the tick-wake drain dropped a check-3 press");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(2, flow_ack_idx, "the tick drain ticked the wrong row");
+    TEST_ASSERT_EQUAL_HEX8(0, flow_latch_residue());
+}
+
+/* THE NEGATIVE CONTROL, and the reason the widening is mode-gated rather
+   than unconditional: outside chore mode a latched D is still taken and
+   thrown away. D's timer action opens a network window, and a D that
+   merely rode in on somebody else's wake must not buy one — that is why
+   it was kept out of both masks in the first place, and that reason is
+   untouched here. An implementation that added (1u << BTN_D)
+   unconditionally would pass both cases above and fail this one. */
+void test_c4b_a_latched_d_press_outside_chore_mode_is_still_dropped(void) {
+    flow_tick_clock(flow_at(15, 0));
+    flow_mode = APP_MODE_TIMERS;
+    flow_ack_result = BTN_ACK_TOGGLED; /* armed, so a wrong route would be loud */
+    flow_state = TIMER_IDLE;
+    flow_press(BTN_D);
+
+    TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_tick());
+
+    TEST_ASSERT_EQUAL_INT_MESSAGE(0, flow_log_count(EV_CHORE_ACK), "a timer-mode latched D reached the ack");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(0, flow_log_count(EV_OTA_ARM), "a latched D bought an update check");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(0, flow_log_count(EV_NET_OPEN), "a latched D bought a network window");
     TEST_ASSERT_EQUAL_HEX8(0, flow_latch_residue()); /* taken, then dropped */
+}
+
+/* PRIORITY IS UNCHANGED, which is what keeps this one action per drain.
+   button_latch_pick runs B > C > D > A, so D joining the candidates can
+   only ever displace A — never a press that moves a timer, and never a
+   second ack in the same drain. Asserted on the ROW, because an
+   implementation that acked D alongside the B it lost to would still log
+   an ack and still return true. */
+void test_c4b_a_latched_b_press_outranks_a_latched_d_in_the_break_tail(void) {
+    flow_mode = APP_MODE_CHORES;
+    flow_chore_count = 3;
+    flow_ack_result = BTN_ACK_TOGGLED;
+    flow_state = TIMER_BREAK;
+    mock_time_set(flow_at(16, 0));
+    flow_press(BTN_B);
+    flow_press(BTN_D);
+
+    TEST_ASSERT_TRUE(wake_flow_poll_break_buttons());
+
+    TEST_ASSERT_EQUAL_INT_MESSAGE(1, flow_log_count(EV_CHORE_ACK), "one drain ticked two boxes");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(0, flow_ack_idx, "check 3 outranked check 1 - the pick's priority was bypassed");
+    TEST_ASSERT_EQUAL_HEX8(0, flow_latch_residue());
 }
 
 /* Design 2.5: "an ack is a partial refresh", and the transition OUT of
@@ -8554,7 +8664,7 @@ int main(void) {
     RUN_TEST(test_a_press_latched_during_the_wake_is_dispatched_before_sleep);
     RUN_TEST(test_a_latched_a_press_never_swallows_the_b_press_beside_it);
     RUN_TEST(test_a_latched_a_press_alone_reaches_its_own_arm_and_no_slot);
-    RUN_TEST(test_a_latched_d_press_is_never_dispatched_by_the_tick_drain);
+    RUN_TEST(test_a_latched_d_press_in_timers_mode_is_never_dispatched_by_the_tick_drain);
     RUN_TEST(test_a_synced_wake_denies_the_latched_press_a_second_window);
     RUN_TEST(test_an_unsynced_wake_lets_the_latched_press_open_its_own_window);
     RUN_TEST(test_the_latch_drain_runs_before_the_event_watch);
@@ -8674,7 +8784,10 @@ int main(void) {
     RUN_TEST(test_c4a_a_refused_ack_leaves_the_break_end_latched);
     RUN_TEST(test_c4a_d_in_chore_mode_acks_row_3_instead_of_checking_for_an_update);
     RUN_TEST(test_c4a_d_outside_chore_mode_still_checks_for_an_update);
-    RUN_TEST(test_c4a_a_latched_d_press_in_chore_mode_still_never_acks);
+    RUN_TEST(test_c4b_a_latched_d_press_in_the_break_tail_acks_row_3);
+    RUN_TEST(test_c4b_a_latched_d_press_in_chore_mode_acks_row_3);
+    RUN_TEST(test_c4b_a_latched_d_press_outside_chore_mode_is_still_dropped);
+    RUN_TEST(test_c4b_a_latched_b_press_outranks_a_latched_d_in_the_break_tail);
     RUN_TEST(test_c4a_an_ack_renders_a_partial_not_a_full);
     RUN_TEST(test_c4a_d_outside_chore_mode_still_forces_a_full_refresh);
     RUN_TEST(test_c4a_the_ack_suppression_survives_into_the_post_join_repaint);

@@ -648,10 +648,15 @@ bool wake_flow_dispatch_button_action(button_id_t btn, time_t *now, timer_state_
                    test_c3_an_ext1_wake_that_also_drains_a_break_end_toggles_from_timers.
                  - wake_flow_handle_timer_tick's latch drain, which is
                    reached only AFTER two unconditional wake_flow_break_end()
-                   calls (:1289 and :1343). An earlier revision of the
-                   comment at the EXT1 call site asserted this path had no
-                   such prologue; it has one, and the residual is therefore
-                   identical here. Pinned by
+                   calls: the one just below its rollover + bedtime
+                   prologue, and the one just below the render grid wait.
+                   (Named by their neighbours rather than by line number:
+                   this file moves, and the numbers that stood here —
+                   ":1289 and :1343" — pointed into unrelated comment
+                   blocks by the time anyone checked.) An earlier revision
+                   of the comment at the EXT1 call site asserted this path
+                   had no such prologue; it has one, and the residual is
+                   therefore identical here. Pinned by
                    test_c3_a_tick_latch_drain_after_a_break_end_toggles_from_timers.
 
                wake_flow_poll_break_buttons is the only caller with no
@@ -725,10 +730,12 @@ bool wake_flow_dispatch_button_action(button_id_t btn, time_t *now, timer_state_
                the map for a press that has nothing to do.
 
                `before` being by VALUE is load bearing all the same, just
-               not here: it is the RENDER policy's only record of which
-               layout is on the glass across a C swap during a break (see
-               wake_flow.h, and
+               not here: it is the render policy's only account of the
+               timer state the glass was painted from, which is what
+               carries a C swap across a break (see wake_flow.h, and
                test_row4_a_swap_during_a_break_renders_full_end_to_end).
+               Not the whole layout — that is display_screen_for()'s three
+               terms, and the other two have their own records now.
                So the parameter stays, and so does keying this guard on it
                rather than on a second timer_get_state() call.
 
@@ -825,10 +832,11 @@ bool wake_flow_dispatch_button_action(button_id_t btn, time_t *now, timer_state_
 
                Report the swap instead of rewriting `before`: landing on
                an already-EXPIRED timer must not re-fire its alert, but
-               `before` is also the only record of WHICH LAYOUT was
-               painted, and both directions of a swap during a break cross
-               the full-screen inversion. Overwriting it made those
-               renders partial, which ghosts the panel. */
+               `before` is also the render policy's only account of the
+               timer state the glass was painted from, and both directions
+               of a swap during a break cross the full-screen inversion.
+               Overwriting it made those renders partial, which ghosts the
+               panel. */
             if (timer_select_next()) {
                 const int selected = timer_active_slot(); /* after the swap */
                 (void)selected;
@@ -905,27 +913,88 @@ bool wake_flow_poll_button_b_action(void) {
     return true;
 }
 
-bool wake_flow_poll_break_buttons(void) {
-    /* Unmasked take, unlike the two polls above: this is the last
-       consumer before sleep, so anything left latched is discarded
-       anyway. D alone is excluded from the PICK rather than from the
-       take; it reaches the dispatch's outer default arm and is refused
-       there in any case, so the exclusion is documentation more than
-       behaviour (see the test that says so).
+/* ---- the latch drains' shared pick + routing ----------------------------
 
-       A IS IN THE MASK, and this poll is where that matters most: 2.6
-       wants the chore checklist reachable throughout a screen break, and
-       a press made during one has no other consumer. Admitting A cannot
-       swallow a real press — button_latch_pick runs B > C > D > A, so a B
-       or C press latched alongside it still wins. That priority table is
-       what made this safe; the old exclusion here predates it. */
-    int pick = button_latch_pick(buttons_take_pressed(), (1u << BTN_A) | (1u << BTN_B) | (1u << BTN_C));
+   TWO CALLERS, and they were copies of each other until D acquired a
+   chore binding: wake_flow_poll_break_buttons (the break tail) and
+   wake_flow_handle_timer_tick's drain. Both take the WHOLE latch — they
+   are the last consumers before sleep on their paths, so anything left
+   behind is discarded anyway — and both then ask button_latch_pick for
+   the one press to act on.
+
+   A IS IN THE CANDIDATES, and the break tail is where that matters most:
+   2.6 wants the chore checklist reachable throughout a screen break, and
+   a press made during one has no other consumer. Admitting A cannot
+   swallow a real press — button_latch_pick runs B > C > D > A, so a B or
+   C press latched alongside it still wins. That priority table is what
+   made admitting A safe.
+
+   D IS IN THE CANDIDATES ONLY IN CHORE MODE, which is M2-T4b and the
+   thing this pair of helpers exists for. T4a bound D to ✓3 in the EXT1
+   decode alone, so ✓1 and ✓2 were honoured from both drains and ✓3 was
+   silently dropped — including through the ~250 ms break-tail poll, which
+   is precisely the window §2.6 wants the checklist live in. The kid ticks
+   two boxes during the break and the third does nothing.
+
+   The mode test is what keeps D's EXCLUSION honest rather than deleting
+   it. The stated reason D was kept out is that its timer action opens a
+   network window, and a D that merely rode in on somebody else's wake
+   must not buy one; in chore mode D is ✓3 and has no network leg at all,
+   so that reason simply does not apply there. Outside chore mode D is
+   still taken and thrown away, exactly as before
+   (test_c4b_a_latched_d_press_outside_chore_mode_is_still_dropped).
+
+   NEITHER MASK BECAME LOAD BEARING. The two facts the old mask comments
+   rested on are both still true: the dispatch has no BTN_D arm (pinned by
+   test_button_d_and_button_none_are_inert_in_the_dispatch), and a D that
+   reached these helpers with the mode byte NOT saying CHORES would route
+   to button_chore_ack_apply(), whose own first line refuses on that same
+   mode byte (button_actions.c). Inert, and it costs what the arm it
+   replaces costs: the dispatch's default arm for D is a bare `return
+   false`, and the refusal above it returns on one RTC byte, ahead of the
+   names-blob read. Neither reaches flash. What the mask now decides is
+   whether ✓3 works, not whether something unsafe happens.
+
+   One RTC byte, read once per drain. Deliberately NOT button_chore_ack_-
+   allowed(), which would add a names-blob read to every latch drain on
+   every wake to answer a question the apply re-asks anyway. */
+static int wake_flow_pick_latched_press(void) {
+    uint8_t allowed = (uint8_t)((1u << BTN_A) | (1u << BTN_B) | (1u << BTN_C));
+    if (timer_mode() == APP_MODE_CHORES) {
+        allowed |= (uint8_t)(1u << BTN_D);
+    }
+    return button_latch_pick(buttons_take_pressed(), allowed);
+}
+
+/* The dispatch for a LATCHED press: wake_flow_dispatch_button_action for
+   every button that has an arm there, and ✓3 for the one that does not.
+
+   Routing D HERE rather than adding an arm to the shared dispatch is the
+   whole point — the dispatch is also the EXT1 decode's path, where D is
+   still the sync button, so an arm there would have to re-derive which
+   caller it was serving. The EXT1 decode keeps its own ✓3 binding for the
+   same reason it always had one.
+
+   `selection_changed` is cleared on the D leg for the same reason every
+   other arm clears it: the caller reads it unconditionally, and an ack
+   moves no selection. */
+static bool wake_flow_dispatch_latched_press(button_id_t btn, time_t *now, timer_state_t before, bool allow_net_window,
+                                             bool *selection_changed) {
+    if (btn == BTN_D) {
+        *selection_changed = false;
+        return wake_flow_apply_chore_ack(BUTTON_CHORE_IDX_D, *now);
+    }
+    return wake_flow_dispatch_button_action(btn, now, before, allow_net_window, selection_changed);
+}
+
+bool wake_flow_poll_break_buttons(void) {
+    int pick = wake_flow_pick_latched_press();
     if (pick < 0)
         return false;
     time_t now = hal_time_now();
     timer_state_t before = timer_get_state();
     bool swapped = false;
-    if (!wake_flow_dispatch_button_action((button_id_t)pick, &now, before, false, &swapped))
+    if (!wake_flow_dispatch_latched_press((button_id_t)pick, &now, before, false, &swapped))
         return false;
     status_led_show_timer_state();
     render_action_result((button_id_t)pick, before, now, swapped);
@@ -1658,17 +1727,18 @@ void wake_flow_handle_timer_tick(void) {
     /* A press that landed while this wake was awake (sync, grid wait,
        e-ink flush) is in the latch — act on it now or it evaporates at
        deep sleep (losing the start/pause race against the minute render).
-       Same guards as a wake press via the shared dispatch; D stays
-       wake-press-only, and A is in the candidate set for the same reason
-       as in the break tail — it has a binding now, and the pick's
-       B > C > D > A priority keeps it from swallowing the press next to
-       it. Must run BEFORE maybe_wait_for_event: the final-minute watch
-       discards pre-watch latched presses at entry. */
-    int pick = button_latch_pick(buttons_take_pressed(), (1u << BTN_A) | (1u << BTN_B) | (1u << BTN_C));
+       Same guards as a wake press, via the shared latch pick and routing
+       the break tail uses (see wake_flow_pick_latched_press): A is in the
+       candidate set because it has a binding and the pick's B > C > D > A
+       priority keeps it from swallowing the press next to it, and D joins
+       it only while the mode says CHORES, where it is ✓3 rather than the
+       sync button. Must run BEFORE maybe_wait_for_event: the final-minute
+       watch discards pre-watch latched presses at entry. */
+    int pick = wake_flow_pick_latched_press();
     if (pick >= 0) {
         timer_state_t painted = timer_get_state();
         bool swapped = false;
-        if (wake_flow_dispatch_button_action((button_id_t)pick, &now, painted, !synced_this_wake, &swapped)) {
+        if (wake_flow_dispatch_latched_press((button_id_t)pick, &now, painted, !synced_this_wake, &swapped)) {
             status_led_show_timer_state();
             finish_or_break((button_id_t)pick, painted, now, swapped);
         }
@@ -1725,10 +1795,15 @@ void wake_flow_handle_button_wake(void) {
            wake_flow_poll_break_buttons (the break tail), which is the
            ONLY caller with no such prologue — do not write "the two
            latch-drain callers" here, which an earlier revision did and
-           which is false: wake_flow_handle_timer_tick drains at :1289 and
-           again at :1343, both unconditional and both above its own latch
-           drain, so the tick path has the same prologue this one does and
-           carries the same residual (see the A arm). */
+           which is false: wake_flow_handle_timer_tick calls
+           wake_flow_break_end() twice unconditionally, once below its
+           rollover + bedtime prologue and once below the render grid
+           wait, and both are above its own latch drain — so the tick path
+           has the same prologue this one does and carries the same
+           residual (see the A arm). Stated by position rather than by
+           line number on purpose: the numbers this sentence used to carry
+           had drifted several hundred lines, which turns the one piece of
+           evidence correcting an earlier mistake into a dead pointer. */
         case BTN_A:
         case BTN_B:
         case BTN_C:
@@ -1741,17 +1816,29 @@ void wake_flow_handle_button_wake(void) {
                (a two-chore list has no ✓3), for the same reason B and C
                refuse rather than fall through.
 
-               HERE AND NOT IN THE SHARED DISPATCH, deliberately. D is
-               excluded from both latch pick masks — it stays
-               wake-press-only, because a D that merely rode in on another
-               wake would open a second window for nothing — and both of
-               those exclusions are documented as safe *because the
-               dispatch has no BTN_D arm*
-               (test_button_d_and_button_none_are_inert_in_the_dispatch,
-               and the two mask cases that cite it). Putting the binding in
-               the EXT1 decode keeps that true: D acquires an action
-               without either mask becoming load bearing, and a latched D
-               press goes on doing nothing at all. */
+               HERE AND NOT IN THE SHARED DISPATCH, deliberately, and the
+               reason is the SYNC leg rather than the ack. The dispatch is
+               also the two latch drains' path; an arm here would have to
+               re-derive which caller it was serving before deciding
+               whether D meant sync or ✓3. Keeping the binding at the EXT1
+               decode means the sync leg is reachable from a real wake
+               press and from nowhere else, which is what the latch masks
+               used to say and now do not have to.
+
+               WHAT THIS PARAGRAPH USED TO SAY, and it is worth recording
+               because it was true for one task and then silently was not:
+               "D is excluded from both latch pick masks — it stays
+               wake-press-only ... and a latched D press goes on doing
+               nothing at all." M2-T4b deleted that. wake_flow_pick_-
+               latched_press() admits D to the pick while the mode byte
+               says CHORES, precisely so ✓3 works in the break tail and
+               the tick drain where ✓1 and ✓2 already did; a latched D in
+               chore mode now acks. What survived unchanged is the fact
+               those exclusions rested on — the shared dispatch still has
+               no BTN_D arm
+               (test_button_d_and_button_none_are_inert_in_the_dispatch) —
+               so neither mask became load bearing even so. See the pick
+               helper's own comment for the whole of it. */
             if (timer_mode() == APP_MODE_CHORES) {
                 (void)wake_flow_apply_chore_ack(BUTTON_CHORE_IDX_D, now);
                 break;

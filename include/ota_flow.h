@@ -28,8 +28,10 @@
    Between them the panel is painted, and that gap is the entire reason
    for the split. display_ota() carries no net_window_active() guard and
    its flush blocks for a full refresh; painting inside an open window
-   walks into the brownout this project already paid for once
-   (net_window.c:65-79). So: window 1 closes -> paint -> window 2 opens.
+   walks into the brownout this project already paid for once (the
+   snapshot rendezvous in net_window_task says so in as many words; the
+   ":65-79" that stood here has drifted into the NTP block above it).
+   So: window 1 closes -> paint -> window 2 opens.
    ota_flow_apply enforces that ordering rather than leaving it to the
    call site, and test_ota_flow asserts it.
 

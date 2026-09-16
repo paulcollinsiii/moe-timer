@@ -298,6 +298,17 @@ typedef enum {
    button that would not act — a device stuck on the chore screen for as
    long as the timer runs. Agreeing is what lets the screen builder draw
    that label unconditionally instead of re-deriving the gate a third time.
+
+   THIS FUNCTION IS THE RESTATEMENT button_actions.h forbids, struck
+   knowingly: the painter is handed a display_state_t snapshot and cannot
+   reach live state or NVS, which is what calling the predicate would mean.
+   The deal is one-directional — CHORES here implies A is allowed, never
+   the converse — and it is enforced, not merely documented, by
+   test_the_chore_screen_is_never_painted_where_button_a_would_be_refused
+   in test_button_actions (which compiles display_layout.c for it). A
+   REFUSAL REASON ADDED TO A AND NOT TO THIS FUNCTION FAILS THAT CASE;
+   M2-T10's device lock is the next one due, so decide there whether the
+   painter inherits it rather than leaving the two to drift.
    The stored mode is deliberately NOT reverted here: this is a paint
    decision, and the day's mode byte is the wake flow's (C16, C17).
 
@@ -310,9 +321,25 @@ display_screen_t display_screen_for(timer_state_t timer_state, app_mode_t mode, 
 
 /* Whether row idx draws a tick. chores_is_acked()'s rule, restated here
    ONLY because chores.c is not linked into either display test binary
-   (both are single-TU builds over display_layout.c) — the masking itself
-   must not be dropped: bits at or above the configured count are stored
-   RAW, so testing one directly renders a stale tick from a longer list. */
+   (both are single-TU builds over display_layout.c).
+
+   THE RE-MASK IS REDUNDANT IN PRODUCTION AND MUST STAY ANYWAY, and the
+   reason is not the one that stood here. "Bits at or above the configured
+   count are stored RAW" is true of timer_chore_acked(), the RTC byte —
+   but this function is never handed that byte. Its argument is
+   display_state_t.chore_acked, which app_state.c has already masked
+   through chores_is_acked() at the assembly seam (see the field's own
+   comment above), so on device a stale bit cannot arrive here in the
+   first place.
+
+   What can is a TEST setting the field directly: test_display_render's
+   render cases build a display_state_t by hand and bypass that seam
+   entirely, and one of them (`st.chore_acked = 0x05` against a two-row
+   list) exists precisely to hold this line — it is the stale third tick
+   from a longer list, and without the mask it paints. So the masking is
+   load bearing for the goldens and belt-and-braces for the field, which
+   is the opposite of how it read. Dropping it would leave every
+   production path green. */
 bool display_chore_row_ticked(uint8_t acked, uint8_t count, uint8_t idx);
 
 /* The header's right-hand count, "n of 3". n is derived from the SAME mask

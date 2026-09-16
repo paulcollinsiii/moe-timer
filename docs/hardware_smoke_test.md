@@ -41,25 +41,44 @@ credentials.**
        "nothing happened" is indistinguishable from a dead switch or an
        unpopulated pad.
        With a chore list configured and no timer running, a press from
-       sleep **wakes the device and repaints the timer screen**, and the
-       log names the mode it just selected: `button A: painting the chore
-       checklist`, then `button A: back to the timer screen` on the next
-       press. That log pair alternating is the pass condition for this
-       build. **The panel must NOT be expected to change** — no painter
-       branches on the mode yet (the chore screen is M2-T4/T5), so the
-       toggle is stored and logged but nothing on the glass differs. A
-       tester who marks this FAILED for "the screen did not change" is
-       reading the wrong build; update this case when the chore screen
-       lands. While a timer is RUNNING, A is dropped from the wake mask
-       entirely — pause with B first.
+       sleep **wakes the device and repaints the panel as the chore
+       checklist** (M2-T4 landed the painter): header `CHORES` top left,
+       `n of N` top right, one row per configured chore, and a bottom
+       button row reading `Timers` under A and `OK 1` / `OK 2` / `OK 3`
+       under B/C/D for as many rows as are configured. A second press
+       goes back to the timer screen. Both transitions are **full**
+       refreshes, so expect the ~3 s flash, not a partial. The log names
+       the mode it selected each time: `button A: painting the chore
+       checklist`, then `button A: back to the timer screen`.
+       Check the glass AND the log — they are independent failures. A log
+       pair that alternates with an unchanged panel is a painter or
+       refresh-policy bug; a panel that changes with no log line means the
+       press took some other path.
+       While a timer is RUNNING, A is dropped from the wake mask entirely
+       — pause with B first. A checklist is never painted over a RUNNING
+       timer even if the stored mode says chores; the timer screen wins
+       (`display_screen_for`), and the stored mode is deliberately not
+       reverted to match.
        One thing that is **not** a failure: A silences a sounding alarm,
        because dismissal deliberately takes any button (cases 11, 15, 24),
        so never test A against TIME'S UP or a break alarm.
-9. [ ] **Button D (force sync)**: WiFi cycle + full refresh; sync time updates.
-10. [ ] **Button C**: with no extra timers configured (the default), does
-        nothing at all — not a wake source (kept out of the EXT1 mask so
-        mashing it cannot burn battery or refreshes). With an extra timer
+9. [ ] **Button D (force sync)**: WiFi cycle + full refresh; sync time
+       updates. **Timer mode only.** On the chore checklist D is the third
+       checkbox and does no syncing at all — see case 25a — so run this
+       one from the timer screen, which on a device with no chore list is
+       every state there is.
+10. [ ] **Button C**: with no extra timers configured (the default) and
+        **outside chore mode**, does nothing at all — not a wake source
+        (kept out of the EXT1 mask so mashing it cannot burn battery or
+        refreshes). With an extra timer
         configured (`MAGTAG_TIMER1_NAME` etc.), swaps the selected timer.
+        C IS a wake source on the chore checklist even with no extras
+        configured, and that is not a regression of the rule above: in
+        chore mode C is the middle checkbox, and the EXT1 mask ORs the
+        two reasons (`swap_allowed || chore_ack_allowed`) precisely so a
+        device with no extra timers gets a working `OK 2` instead of a
+        dead one. It needs at least **two** configured chores — with one,
+        row 2 does not exist, C is refused, and it is not armed either.
         While a timer is RUNNING, C is dropped from the wake mask entirely
         — pressing it does nothing (no wake, no refresh) until the timer is
         paused. A Screen Break does **not** refuse: `timer_swap_allowed()`
@@ -76,10 +95,15 @@ credentials.**
         snapshot exists (`python -m esptool --chip esp32s2 erase-region
         0x9000 0x6000`) or wait past midnight: wake re-syncs and resets to
         IDLE with the new day's allocation.
-13. [ ] **Wake buttons**: B and D always wake the device. C wakes only when
-        its press would succeed (the EXT1 mask is rebuilt at every sleep
-        entry): it needs extra timers configured and no RUNNING (case 10) —
-        a break does not refuse it. **A wakes only when its toggle would be
+13. [ ] **Wake buttons**: B and D always wake the device. C wakes when
+        **either** of its two reasons holds (the EXT1 mask is rebuilt at
+        every sleep entry, and the two are ORed): a swap would succeed —
+        extra timers configured and no RUNNING, a break does not refuse it
+        (case 10) — **or** it would tick a chore, which means the stored
+        mode is CHORES and at least two chores are configured. Neither
+        implies the other, so test both legs: C on a no-extras device from
+        the checklist (wakes), and C on the timer screen of that same
+        device (does not). **A wakes only when its toggle would be
         honoured** — no RUNNING timer AND a configured chore list (case 8);
         on a device with no chore list it never wakes at all. Check A with
         every other gate open (IDLE, chores configured) so a pass cannot be
@@ -155,15 +179,36 @@ credentials.**
         also unlabelled on the panel for that reason. A resumes nothing
         either — it only chooses which screen is painted — but a BREAK is
         not RUNNING, so with a chore list configured A stays live right
-        through the break, which is the point of having it. What to check
-        is the log, not the glass: `button A: painting the chore
-        checklist` on the press and `button A: back to the timer screen`
-        on the next one. As in case 8, no painter branches on the mode in
-        this build, so the break screen itself does not change — that is
-        expected, not a failure. With no chore list A is refused and
-        produces no wake. D still syncs. (If
+        through the break, which is the point of having it. **The panel
+        really does swap**: the press replaces the inverted SCREEN BREAK
+        screen with the `CHORES` checklist (a full refresh — the screen
+        kind changed), and the next press puts the break screen back. The
+        log reads `button A: painting the chore checklist` then `button A:
+        back to the timer screen`. Check both the glass and the log.
+        With no chore list A is refused and produces no wake.
+        **D does NOT sync here if the mode says chores** — see case 25a.
+        In timer mode during a break, D syncs as usual. (If
         the break alarm is still sounding, any button silences it, A
         included — let it finish first.)
+25a. [ ] **The checklist works during a break (design §2.6)**: this is the
+        window the feature exists for, so test it here and not only from
+        IDLE. With 3 chores configured, press A during a break to reach the
+        checklist, then press B, C and D in turn. Each logs `chore ack N
+        applied` (N = 0, 1, 2) and ticks its row — `OK` appears beside the
+        name and the header count advances `0 of 3` → `3 of 3`. Each ack is
+        a **partial** refresh (~1 s), including D: D is checkbox 3 here and
+        must NOT cycle WiFi, must NOT log an OTA check, and must NOT spend
+        a full refresh. A D that flashes the whole panel and syncs is the
+        binding not being applied. The last ack adds `Screen time
+        unlocked`.
+        Press each button **twice** to confirm acks toggle back off, and
+        try a row that is not configured — with only 2 chores, D logs
+        `chore ack 2 refused`, ticks nothing, and still does not sync.
+        Repeat one ack **while the device is already awake** (press during
+        the ~3 s panel flush of the previous one): a press caught by the
+        latch is honoured at the end of the wake, and that includes D.
+        Before M2-T4b, checkboxes 1 and 2 worked from the latch and 3 was
+        silently dropped, so D is the one to press here.
 26. [ ] **Break end**: at the end of the break (within ~1 s), double-beep
         chime, display returns to the normal layout showing PAUSED with the
         frozen remaining time; Button B resumes and accrual starts fresh

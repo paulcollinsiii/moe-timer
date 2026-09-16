@@ -205,15 +205,17 @@ constraint remains; everything else is independent and can be reordered freely.
 | 0 | **S1 + S2 smoke tests** | The only item that needs the device. Two merged fixes stay unconfirmed until it happens, and everything below is engineering time that can proceed in parallel | a USB flash, then an OTA |
 | 0.5 | **BUG-10** — recurring PANIC resets on an idle device | A device that reboots itself several times a day is the most serious thing on this page, and the cause is unknown. Diagnostics first: inference from an HA activity stream has already produced one retracted answer, so the device needs to report what it was doing when it died | — |
 | 1 | **BUG-7** — a RUNNING slot outliving its own definition | State-machine change to an uncovered path; independent | — |
-| 2 | **BUG-2**, then **BUG-3** | Same latch/mask surface — fix together so each is checked against the other. Both need a re-baselined sweep to show the fix changed *only* the intended cases. | — |
+| 2 | **BUG-2** | **BUG-3 is RESOLVED** (2026-09-16, M2-T4a/T4b) and is no longer part of this item — its condition fired when Button D gained a chore-ack arm, and the decision it was waiting for was made there with cases at both call sites. BUG-2 stands alone now, and still needs a re-baselined sweep to show the fix changed *only* the intended cases. | — |
 | 3 | **BUG-5** — the v1→v2 migration | Only bites on a version bump, and **R4** means it has to be written *before* one rather than after. Nothing in flight bumps the version, which is why it sits last. | — |
 | 4 | **BUG-11** — bed time is evaluated against an unvalidated clock | **No longer blocked, and no longer 0.6.** Both were derived from a mechanism review refuted on 2026-08-21: a panic does *not* clear the wall clock, so this is not downstream of BUG-10. The real trigger is a power-on reset alone, which is rare, and the fix needs a design decision rather than a patch. Settle the OPEN QUESTION in the entry before touching the code — it lives on the same path | — |
 | 5 | **BUG-12** — a network window that ends before MQTT leaves the net phase slot stale | Found reviewing the BOOT subdivision. Cheap, but it sequences the window the panic measurement is being read from, so it wants its own pass rather than a ride-along | — |
 | — | **BUG-1** | **Parked 2026-08-07.** Settling its fork needs an instrumented build run on hardware, which is reporter time rather than engineering time. Revisit after item 2: BUG-2's fix touches the same latch surface and may move the ground under it. | — |
 
-**Constraint — BUG-2 and BUG-3 together.** They share a root shape and both
-touch button-latch masks; a fix for either must be checked against the other
-rather than applied in isolation.
+*The constraint "BUG-2 and BUG-3 together" was discharged on 2026-09-16. BUG-3
+was resolved on its own, by M2-T4b, and the check it asked for was made in the
+direction that mattered: the latch pick is now a single shared helper
+(`wake_flow_pick_latched_press`), so a later BUG-2 fix cannot move one mask
+without moving the other. BUG-2 remains open and no longer waits on anything.*
 
 *The earlier constraint "BUG-4 before BUG-2/BUG-3" was discharged on 2026-08-10
 and is gone. The sweeps now derive the repository from their own location and
@@ -376,7 +378,9 @@ other rather than applied in isolation.
 
 ## BUG-3 — Break-tail pick mask excludes BTN_D without a test
 
-**Status:** CONDITIONAL · **Severity:** none today
+**Status:** RESOLVED 2026-09-16 (M2-T4a/T4b) · **Severity:** none today, and the
+condition below fired exactly as written — see the closing note at the end of
+this entry before reading the rest of it as current.
 
 The break-tail button pick uses an explicit mask:
 
@@ -401,6 +405,35 @@ arm, which writes `selection_changed = false` and returns false; the only
 residual difference on device is one extra side-effect-free `timer_get_state()`
 read. Both call sites need a deliberate decision and a test when D gains an arm.
 Recorded on `test_a_latched_d_press_is_never_dispatched_by_the_tick_drain`.
+
+**Closed (2026-09-16, M2-T4a/T4b).** The condition fired: M2-T4a bound BTN_D to
+checkbox 3 of the chore checklist. The decision this entry asked for was made
+deliberately and is **admit D to both picks, and only while the mode byte says
+`APP_MODE_CHORES`** — `wake_flow_pick_latched_press()` is the single place both
+call sites now get their mask from, so the two can no longer drift apart. The
+shipped defect in between is the one this entry predicted: for the length of
+M2-T4a, ✓1 and ✓2 were honoured from both drains and ✓3 was silently dropped,
+including through `wake_flow_watch_break_end`'s ~250 ms tail poll — the break,
+which is the window design §2.6 most wants the checklist live in.
+
+One prediction did **not** hold, and it is worth recording because it was the
+whole reason the entry stayed open: *"both masks become load-bearing"*. They did
+not. D's TIMER action still lives only in the EXT1 decode and the shared
+dispatch still has no `BTN_D` arm, so a D that leaks into the candidates in
+Timers mode routes to `button_chore_ack_apply()`, whose first line refuses on
+the same mode byte — inert, exactly as the dispatch's default arm was. What the
+masks now decide is whether ✓3 *works*, not whether anything unsafe happens.
+
+Cases, both call sites, per the entry's "a test either way":
+`test_c4b_a_latched_d_press_in_the_break_tail_acks_row_3`,
+`test_c4b_a_latched_d_press_in_chore_mode_acks_row_3`,
+`test_c4b_a_latched_d_press_outside_chore_mode_is_still_dropped`,
+`test_c4b_a_latched_b_press_outranks_a_latched_d_in_the_break_tail`, and the
+renamed timer-leg case
+`test_a_latched_d_press_in_timers_mode_is_never_dispatched_by_the_tick_drain`
+(the old name asserted more than it tested once D gained an arm). Mutants
+W17–W22 cover the mask, the mode gate, the routing, the row mapping and the
+priority; all six are killed by the case named above as their killer.
 
 ---
 

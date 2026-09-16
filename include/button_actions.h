@@ -59,11 +59,36 @@ typedef enum {
    answer is also what arms A as an EXT1 wake source. buttons.c reads it
    at sleep entry and hands it to buttons_policy_wake_mask() in
    buttons_policy_in_t.mode_toggle_allowed, so a press that could only be
-   refused does not burn a wake and a panel refresh. Whatever else reads
-   it — the chore screen's Button-A label, when M2-T4/T5 add one — must
-   read THIS, not a restatement of it: two copies of the rule drift, and
-   both drift directions are bad (a button armed at sleep and refused on
-   arrival, or a label offering something the map then refuses).
+   refused does not burn a wake and a panel refresh. Reading THIS rather
+   than a restatement is the rule: two copies of it drift, and both drift
+   directions are bad (a button armed at sleep and refused on arrival, or
+   a label offering something the map then refuses).
+
+   ONE RESTATEMENT WAS STRUCK ANYWAY, and pretending otherwise is worse
+   than naming it. display_screen_for() (display.h) re-derives two of this
+   function's terms — not RUNNING, and a non-empty list — from a
+   display_state_t snapshot, and the chore screen then draws its "Timers"
+   label unconditionally on the strength of that. It is not read from here
+   because it cannot be: the painter runs on a snapshot assembled at the
+   app_state.c seam and must not reach live state or NVS from the render
+   path, and display_layout.c is deliberately free of both.
+
+   WHAT WAS TRADED FOR is the IMPLICATION, not equality, and only in one
+   direction: wherever the painter chooses the checklist, this predicate
+   must say yes. The converse is false on purpose — this says yes in
+   TIMERS mode too, which is what arms A to ENTER chore mode.
+
+   WHAT CATCHES A DIVERGENCE is
+   test_the_chore_screen_is_never_painted_where_button_a_would_be_refused
+   in test_button_actions, which is why that suite compiles
+   display_layout.c beside this file. It sweeps every timer state against
+   every list length and asserts the implication on all 12 rows that paint
+   a checklist. A TERM ADDED TO THIS FUNCTION AND NOT TO THE PAINTER IS
+   WHAT IT IS FOR: M2-T10's third device lock is the next candidate, and
+   without that case the failure reaches the glass as a checklist whose
+   "Timers" label does nothing — a kid stuck on a screen with no way off
+   and no feedback. Add the reason here, then decide in display.h whether
+   the painter inherits it; do not add one and stop.
 
    Two refusal reasons, and they are ORs of each other:
 

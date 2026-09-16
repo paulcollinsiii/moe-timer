@@ -28,7 +28,19 @@ uint8_t button_latch_take(void);
    presses a later checkpoint (e.g. the tick-wake drain) will act on. */
 uint8_t button_latch_take_masked(uint8_t mask);
 /* Pick the single button to act on from a taken mask, restricted to
-   allowed_mask; priority A > C > B > D. Returns -1 when none allowed. */
+   allowed_mask; priority B > C > D > A. Returns -1 when none allowed.
+
+   The order is "the time-sensitive action wins", not "the lowest index
+   wins", and A being LAST is the load-bearing part — button_latch.c says
+   why, and both of wake_flow.c's latch drains admit A to their allowed
+   masks only because of it. This line said "A > C > B > D" until
+   2026-09-16, which was ACCURATE when it was written — the table was
+   {0, 2, 1, 3} back when A was start/pause — and went stale at 04b4752
+   (M0-T4), which rewrote the table to {1, 2, 3, 0} without it. Nothing
+   caught that for six days because the two latch drains in wake_flow.c
+   carry their own copy of the order and both state it correctly, so the
+   only reader who could have been misled is a future one. Callers reason
+   about this order — do not change it without reading both of them. */
 int button_latch_pick(uint8_t mask, uint8_t allowed_mask);
 
 #ifdef __cplusplus

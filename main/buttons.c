@@ -122,9 +122,42 @@ void buttons_configure_wakeup_if(bool enable) {
     /* THE NVS READS ON THIS PATH, and they are worth naming because of
        where they land. Two gates below reach the names blob and BOTH
        short-circuit before they do — button_a_toggle_allowed() on the
-       timer state, button_chore_ack_allowed() on the RTC mode byte — so
-       an ordinary sleep off the chore screen reaches flash at most once
-       and a sleep while a timer runs not at all.
+       timer state, button_chore_ack_allowed() on the RTC mode byte. The
+       cost per sleep, stated as the three cases rather than as a bound,
+       because the worst of them is not the one a reader guesses:
+
+         Timers mode, no timer running   ONE read. A's gate goes to flash;
+                                         C's short-circuits on the mode.
+         Timers mode, a timer running    NONE. A's gate short-circuits on
+                                         TIMER_RUNNING first.
+         CHORE mode                      TWO FULL READS, every sleep. Both
+                                         gates pass their cheap half, and
+                                         each loads the whole names blob
+                                         into its own 64-byte stack buffer
+                                         (button_actions.c) to ask a
+                                         different question of it.
+
+       Two is the real chore-screen cost and there is no caching layer
+       under it; it is accepted rather than unnoticed. The chore screen is
+       also the state a device sits in for seconds at a time, not hours,
+       so the reads are bounded by presses and not by the clock.
+
+       "A sleep while a timer runs reaches flash not at all" is the ONE
+       claim here that is not local to this function. It needs BOTH gates
+       to stay away from flash, and only A's is gated on the timer state:
+       C's is gated on the mode alone, so a RUNNING timer with the mode
+       byte saying CHORES would read the blob. That combination cannot
+       occur, and the reason is emergent rather than enforced —
+       button_a_apply() is the only writer of APP_MODE_CHORES and it
+       refuses while RUNNING, timer_start() has exactly one caller
+       (button_b_apply, button_actions.c) and B is rebound to an ack in
+       chore mode, the awake join poll refuses to start from the chore
+       screen (wake_flow.c), and no MQTT command starts a timer. CHORES
+       therefore implies not RUNNING. Nothing asserts it; if a later task
+       gives anything else a way to start a timer, this claim is the first
+       thing it breaks and the breakage is silent — a second flash read
+       per sleep, on the path that runs on every sleep.
+
        button_a_toggle_allowed() asks the chore names blob
        whether a list is configured — the count exists nowhere else, the
        RTC block holding only the acks, the release and the mode (timer.h)
@@ -151,11 +184,23 @@ void buttons_configure_wakeup_if(bool enable) {
         .swap_allowed = timer_swap_allowed(),
         .mode_toggle_allowed = button_a_toggle_allowed(),
         /* C's chore binding (design 2.4): the middle checkbox. A SECOND
-           reader of the names blob on this path, and it is bounded — it
-           short-circuits on the RTC mode byte, so it reaches flash only
-           while the device is actually on the chore screen, which is also
-           the only time the gate above can have said yes. Off the
-           checklist it costs one comparison. */
+           reader of the names blob on this path. It short-circuits on the
+           RTC mode byte, so off the checklist it costs one comparison and
+           on it costs a full blob read — the second of the two the header
+           above tabulates.
+
+           NOT "the only time the gate above can have said yes", which is
+           what stood here and is false in the direction that matters. The
+           implication runs one way only. C's gate passing DOES imply A's
+           passed: it needs a second configured row, so n >= 2 > 0, and it
+           needs the mode byte to say CHORES, which by the invariant in
+           the header means not RUNNING — both of A's conditions. The
+           converse is what is false: A's gate says yes in TIMERS mode
+           too, and it must, or A could never be armed to ENTER chore
+           mode, which is the whole of M2-T3. So the two reads are not
+           alternatives. In chore mode they both happen, and that is what
+           bounds this path — the tabulated pair above, not an
+           exclusion. */
         .chore_ack_allowed = button_chore_ack_allowed(BUTTON_CHORE_IDX_C),
     };
     uint8_t wake = buttons_policy_wake_mask(&pol);
