@@ -259,6 +259,35 @@ void display_format_chore_count(char *buf, size_t len, uint8_t acked, uint8_t co
     snprintf(buf, len, "%u of %u", (unsigned)chore_acked_count(acked, count), cfg);
 }
 
+/* The break screen's prompt (§2.6). Three wordings and not one format
+   string, and each of the two special cases is a sentence the generic
+   form gets WRONG rather than merely gets clumsy:
+
+   "1 chores left" is the one a child reads as a broken device, and one
+   outstanding chore is the commonest state a three-row list is ever in.
+
+   "0 chores left" is arithmetic. The screen is a prompt, so at zero the
+   thing worth saying is that the list is finished — the line stays on the
+   screen rather than going quiet, because a break with the chores already
+   done should say so. Note this is the OUTSTANDING count and not
+   display_chore_unlocked(): the two disagree after C8's toggle-back-off,
+   where the day stays released and a row is outstanding again, and this
+   line is about the list rather than about the gate.
+
+   Clamped to CHORE_MAX for the same reason the checklist header is:
+   button A sends the reader to a screen with CHORE_MAX rows on it, and a
+   larger figure here could not be reconciled with what they find there.
+   chore_outstanding is already 0..chore_count at the assembly seam, so a
+   larger value is a bug somewhere upstream either way. */
+void display_format_chore_prompt(char *buf, size_t len, uint8_t outstanding) {
+    unsigned n = (outstanding > CHORE_MAX) ? CHORE_MAX : outstanding;
+    if (n == 0) {
+        snprintf(buf, len, "All chores done");
+    } else {
+        snprintf(buf, len, "%u chore%s left", n, (n == 1) ? "" : "s");
+    }
+}
+
 /* The label the Screen bar's locked block holds (§4.1). Same acked/count
    pair as the checklist header and the same masking, but "0/3" rather
    than "0 of 3": this one shares a 24 px bar with a figure in minutes and

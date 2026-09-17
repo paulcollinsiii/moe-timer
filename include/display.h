@@ -68,11 +68,17 @@ typedef struct {
        normally sits. False when the break screen itself will be drawn. */
     bool break_banner;
     /* Break screen only: the timer Button C would select, for the swap
-       hint. NULL = the break has nothing to offer — no extra timers at
+       hint. NULL = the break has no TIMER to offer — no extra timers at
        all, or none that are break_eligible, since the hint must promise a
-       timer a press would actually start. The break screen then falls
-       back to its centred "Timer paused" footer, i.e. it behaves like the
-       pre-non-blocking locking break, which is correct. */
+       timer a press would actually start.
+
+       NULL suppresses cell C and nothing else (§2.6). It used to suppress
+       the whole button row, and did so correctly while C was the only
+       cell with anything in it; now cell A carries the Chores label
+       whenever chore_count > 0, so the row survives a NULL here. Only
+       with NO chores configured as well does the screen fall back to its
+       centred "Timer paused" footer — i.e. behave like the
+       pre-non-blocking locking break, which is correct there. */
     const char *swap_next_name;
     /* Extra timers (v1.3): NULL/"" name = Screen (day-type mode line) */
     const char *timer_name;
@@ -240,8 +246,21 @@ typedef struct {
 display_bar_split_t display_bar_split(int32_t remaining_sec, uint32_t allocation_sec, uint32_t withheld_sec);
 void display_format_remaining(char *buf, size_t len, int32_t remaining_sec);
 /* Coarse duration, "1:30" (h:mm, truncated). Used for the frozen screen
-   time on the break screen, where the value cannot change for the whole
-   break and the row has three 16 pt items to fit. Clamps at zero. */
+   time on the break screen, and the reason it is coarse is TRUTH, not
+   width: the Screen timer is paused for the whole break, so the value
+   cannot change while this screen is up, and seconds ticking on a figure
+   that is not moving would be a lie the panel cannot take back until the
+   next refresh.
+
+   Width bites in one band only, and the claim is worth scoping because
+   the other band looks like it should bite and does not. With no chore
+   list the figure sits in cell A of the button row: "Screen 12:30:00" is
+   a 125 px box from a left margin at x=4, so it runs to x=129 and over
+   the swap hint, whose box starts at x=114 — it genuinely does not fit.
+   With a list the figure moves to the line above (§2.6), where the
+   widest prompt is right-aligned at x=168 and the same 125 px box clears
+   it by 39 px. There IS room for the seconds there; they are still not
+   drawn, for the reason above. Clamps at zero. */
 void display_format_hm(char *buf, size_t len, int32_t sec);
 /* Header chip while a break runs behind another timer: "BREAK 12:34".
    Always M:SS, never H:MM:SS — break durations are bounded (minutes) and
@@ -373,6 +392,22 @@ bool display_chore_row_ticked(uint8_t acked, uint8_t count, uint8_t idx);
    header can never disagree with the rows underneath it. count is the
    configured list length, so a two-chore list reads "1 of 2". */
 void display_format_chore_count(char *buf, size_t len, uint8_t acked, uint8_t count);
+
+/* The break screen's chore prompt (§2.6), "2 chores left". A break is the
+   natural moment to do chores, so the device says how many are left — a
+   PROMPT and never the gate (§3), which is why it states a figure and
+   offers nothing.
+
+   Takes chore_outstanding rather than the acked/count pair the two
+   formatters above take. Those two draw the checklist, where the count
+   has to agree row-for-row with the ticks beside it; this one draws a
+   sentence on a different screen, and the field already carries exactly
+   the number that sentence needs.
+
+   The longest output is "All chores done" at 15 characters, so 16 bytes
+   hold any of them. A shorter buffer truncates the way snprintf does; a
+   zero length writes nothing at all. */
+void display_format_chore_prompt(char *buf, size_t len, uint8_t outstanding);
 
 /* How much of the locked block's label there is room to say. The block is
    `withheld / allocation` of a 280 px bar, so its width is a config

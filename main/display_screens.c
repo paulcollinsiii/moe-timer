@@ -404,13 +404,22 @@ static void build_main_status(lv_obj_t *scr, const display_state_t *st) {
 }
 
 /* Button-label row along the bottom edge (geometry: see BTN_X0/BTN_PITCH).
-   Cell 0 (A) is blank. A is the Timers/Chores mode toggle and has been
-   bound since M2-T3, so "unbound" is no longer the reason; what it has
-   not got yet is a LABEL. When one is added it must be gated on
-   button_a_toggle_allowed() (button_actions.h) — the same predicate that
-   arms A as a wake source — so the label never offers a press the map
-   would refuse. B shows the action a press will take; C only when its
-   press would work; D = sync, always.
+   THE MAIN SCREEN'S row — the break screen builds its own, at 16 pt and
+   with different cells.
+
+   Cell 0 (A) is blank here. A is the Timers/Chores mode toggle and has
+   been bound since M2-T3, so "unbound" is no longer the reason; what it
+   has not got on THIS screen is a LABEL. The break screen's row does
+   label it (§2.6), and when this one follows it must be gated the same
+   way: on button_a_toggle_allowed() (button_actions.h) — the same
+   predicate that arms A as a wake source — so the label never offers a
+   press the map would refuse. Note the break screen can spell that gate
+   as `chore_count > 0` only because TIMER_BREAK rules out the predicate's
+   other refusal; the main screen is drawn in every state, RUNNING
+   included, so it has no such shortcut.
+
+   B shows the action a press will take; C only when its press would work;
+   D = sync, always.
 
    Every decision about B lives in display_button_b_label() — this is a
    plain switch over its answer, so no gate is re-tested here. */
@@ -450,61 +459,165 @@ void display_screens_build_main(const display_state_t *st) {
     build_button_row(scr, st);
 }
 
-/* Screen Break layout (inverted): title, draining break bar, break
-   countdown, and the frozen screen-time remaining as a footer. */
+/* ---- Screen Break layout (inverted), design §2.6 -----------------------
+
+   Two vertical stacks, chosen by whether a chore list is configured. The
+   figures below are MEASURED ink rows (inclusive) on the 128 px panel —
+   first/last row actually painted, not LVGL box extents, which for a
+   48 pt label overstate the glyphs by 9 rows at each end:
+
+     element              no list        list configured
+     "SCREEN BREAK" 28pt    9..28          9..28      (y=4, the same)
+     break bar             40..55         34..49
+     countdown 48pt        71..104        55..88
+     chore line 16pt          —           93..104
+     bottom row 16pt      109..124       109..124     (BOTTOM -2, the same)
+
+   The lift is not cosmetic. With the countdown where it stands there are
+   FOUR blank rows between it and the button row, and a 16 pt line needs
+   twelve: a chore line simply does not fit under it, so a configured list
+   raises the bar and the countdown to open one band. The gutters that
+   leaves are 5/5/4/4 rows, and 4 is what the unchanged screen already
+   runs at between its countdown and its row — this is as tight as the
+   layout has ever been, not tighter.
+   test_the_break_chore_line_clears_the_countdown_and_the_row measures the
+   bands off the framebuffer and fails if any two touch, because on e-ink
+   overlapping white-on-black text is unreadable and a regenerated golden
+   would record the overlap as the new correct answer.
+
+   With no list every band is byte-for-byte where it was, which is what
+   keeps the two no-chores cells of §2.6's matrix unchanged.
+
+   12 pt renders illegibly white-on-black on e-ink (thin strokes eaten by
+   the inversion), so EVERY string on this screen is 16 pt — which is also
+   why the swap hint's name is truncated to a fixed budget, and why the
+   chore line had to be paid for in geometry rather than in font size. */
+#define BREAK_BAR_Y 40
+#define BREAK_BAR_Y_CHORES 34
+#define BREAK_COUNTDOWN_Y 62
+#define BREAK_COUNTDOWN_Y_CHORES 46
+#define BREAK_CHORE_LINE_Y 90
+
 void display_screens_build_break(const display_state_t *st) {
     lv_obj_t *scr = fresh_screen(true);
     char buf[64];
+    char rem_buf[16];
+
+    /* §2.6's matrix as two independent questions. The old rule tested
+       `swap_next_name == NULL` and used the answer for BOTH "is there a
+       swap hint" and "is there a button row"; those stopped being the
+       same question when cell A gained a label of its own, so the row's
+       existence is now the OR of its cells and each cell asks only about
+       itself.
+
+       has_chores is the display-side spelling of button_a_toggle_allowed()
+       (button_actions.h): that predicate refuses on no-chores-configured
+       or an active slot that is RUNNING, and the second can never hold
+       here — display_screen_for() only routes to this screen on
+       TIMER_BREAK, and only the active slot is ever RUNNING. So on this
+       screen the two conditions collapse to one, and the label can never
+       offer a press the map would refuse.
+
+       THE SECOND display-side spelling of that predicate (display.h
+       describes the chore screen's), and a refusal reason added to A and
+       not to this line makes "Chores" below a button that does nothing —
+       silent, where the chore screen's version is at least loud.
+
+       WHAT HOLDS IT, precisely, because the two halves are not in one
+       suite. The boundary of this literal is swept by
+       test_the_break_screen_offers_chores_exactly_when_the_list_is_non_empty
+       (test_display_render), which renders both sides of it and kills
+       `> 1` and `>= 0` alike. The CROSS-CHECK against
+       button_a_toggle_allowed() is held by nothing: test_button_actions
+       has the predicate but not this file (no LVGL), and the render suite
+       has this file but not the predicate. So if M2-T10's device lock
+       adds a refusal reason, the chore screen's spelling is covered by
+       that suite's sweep and THIS line is not — teaching it the lock is a
+       manual obligation of that task, not something a test will catch. */
+    const bool has_chores = st->chore_count > 0;
+    const bool has_swap = st->swap_next_name != NULL;
 
     make_label(scr, "SCREEN BREAK", &lv_font_montserrat_28, LV_ALIGN_TOP_MID, 0, 4);
 
     /* Break-progress bar: white indicator draining on the black screen */
     lv_obj_t *bar = lv_bar_create(scr);
     lv_obj_set_size(bar, 284, 16);
-    lv_obj_align(bar, LV_ALIGN_TOP_MID, 0, 40);
+    lv_obj_align(bar, LV_ALIGN_TOP_MID, 0, has_chores ? BREAK_BAR_Y_CHORES : BREAK_BAR_Y);
     lv_bar_set_range(bar, 0, 280);
     lv_bar_set_value(bar, display_bar_fill_px(st->break_remaining_sec, st->break_duration_sec), LV_ANIM_OFF);
     style_bar(bar, true);
 
     display_format_remaining(buf, sizeof(buf), st->break_remaining_sec);
-    make_label(scr, buf, &lv_font_montserrat_48, LV_ALIGN_TOP_MID, 0, 62);
+    make_label(scr, buf, &lv_font_montserrat_48, LV_ALIGN_TOP_MID, 0,
+               has_chores ? BREAK_COUNTDOWN_Y_CHORES : BREAK_COUNTDOWN_Y);
 
-    char rem_buf[16];
+    if (has_chores) {
+        /* The chore line, left and right on one band: the frozen screen
+           time, then the prompt. The frozen time is here rather than in
+           the row below because it cannot BE in that row any more —
+           "Screen 1:30" is 90 px and centred over button B it spans
+           x 46..136, which runs into "Chores" at one end and the swap
+           hint at the other. The design's mock draws it over B; the
+           measurement says only three items fit that row, so the fourth
+           moved up.
 
-    /* 12 pt renders illegibly white-on-black on e-ink (thin strokes eaten
-       by the inversion), so the whole bottom row is 16 pt — which is also
-       why the swap hint's name is truncated to a fixed budget. */
-    if (st->swap_next_name == NULL) {
-        /* No extra timers configured: nothing to swap to, so keep the
-           original centred footer and no button row. */
+           Widest case measured (ink, as above): "Screen 12:30" paints out
+           to x=100 and "All chores done" starts at x=169, so the two are
+           68 px from meeting even at their worst —
+           test_the_break_chore_line_items_never_meet holds that. */
+        display_format_hm(rem_buf, sizeof(rem_buf), st->remaining_sec);
+        snprintf(buf, sizeof(buf), "Screen %s", rem_buf);
+        make_label(scr, buf, &lv_font_montserrat_16, LV_ALIGN_TOP_LEFT, 4, BREAK_CHORE_LINE_Y);
+
+        display_format_chore_prompt(buf, sizeof(buf), st->chore_outstanding);
+        make_label(scr, buf, &lv_font_montserrat_16, LV_ALIGN_TOP_RIGHT, -4, BREAK_CHORE_LINE_Y);
+    }
+
+    if (!has_chores && !has_swap) {
+        /* Matrix row 4: no list to offer and nothing to swap to, so no
+           cell has anything in it and there is no row. The original
+           centred footer is the whole bottom, exactly as before — this is
+           the ONE cell that keeps it, and it is the only place the full
+           h:mm:ss remaining is spelled out. */
         display_format_remaining(rem_buf, sizeof(rem_buf), st->remaining_sec);
         snprintf(buf, sizeof(buf), "Timer paused - %s left", rem_buf);
         make_label(scr, buf, &lv_font_montserrat_16, LV_ALIGN_BOTTOM_MID, 0, -4);
         return;
     }
 
-    /* Left: the frozen screen time (h:mm — it cannot change during the
-       break, and the row has three items to fit). At 16 pt this spans
-       x 5..91: all of cell A (x<54) AND most of cell B (54..128), ending
-       on B's button centre. Anything added to cell A of this row has to
-       account for that — the width is NOT one cell's worth. */
-    display_format_hm(rem_buf, sizeof(rem_buf), st->remaining_sec);
-    snprintf(buf, sizeof(buf), "Screen %s", rem_buf);
-    make_label(scr, buf, &lv_font_montserrat_16, LV_ALIGN_BOTTOM_LEFT, 4, -2);
+    /* Cell A. With a list, the mode toggle finally gets its label; without
+       one, the cell carries the frozen screen time as it always has.
+       Either way this is NOT one cell's worth of width, and the two
+       overrun differently:
+         "Chores"      renders x 5..59  — 5 px past the A/B midline (54)
+         "Screen 1:30" renders x 5..91  — all of A and most of B, ending
+                                          on B's button centre
+       Both are safe for the same single reason: cell B carries no label on
+       this screen, because the break is still enforced for the Screen
+       timer and display_button_b_label() yields nothing for TIMER_BREAK.
+       Anything that ever puts a label over B has to move this one first.
+       test_the_break_chore_row_fits_its_cells measures it. */
+    if (has_chores) {
+        make_label(scr, "Chores", &lv_font_montserrat_16, LV_ALIGN_BOTTOM_LEFT, 4, -2);
+    } else {
+        display_format_hm(rem_buf, sizeof(rem_buf), st->remaining_sec);
+        snprintf(buf, sizeof(buf), "Screen %s", rem_buf);
+        make_label(scr, buf, &lv_font_montserrat_16, LV_ALIGN_BOTTOM_LEFT, 4, -2);
+    }
 
-    /* Over button C: the swap affordance. This row is built here rather
-       than by build_button_row (16 pt, and the frozen screen time runs
-       across cells A and B in place of their labels), but it already
-       agrees with the new layout: A carries no label yet (see
-       build_button_row), and B is blank because the break is still
-       enforced for the Screen timer — TIMER_BREAK yields no label from
-       display_button_b_label() either. */
-    char hint[DISPLAY_SWAP_HINT_MAX + 1];
-    display_format_swap_hint(hint, sizeof(hint), st->swap_next_name);
-    snprintf(buf, sizeof(buf), "%s %s", LV_SYMBOL_RIGHT, hint);
-    make_label(scr, buf, &lv_font_montserrat_16, LV_ALIGN_BOTTOM_MID, BTN_MID_OFS(2), -2);
+    /* Cell C: the swap affordance, only when there is somewhere to swap
+       to. This row is built here rather than by build_button_row because
+       it is 16 pt and cell A is not the main screen's cell A. */
+    if (has_swap) {
+        char hint[DISPLAY_SWAP_HINT_MAX + 1];
+        display_format_swap_hint(hint, sizeof(hint), st->swap_next_name);
+        snprintf(buf, sizeof(buf), "%s %s", LV_SYMBOL_RIGHT, hint);
+        make_label(scr, buf, &lv_font_montserrat_16, LV_ALIGN_BOTTOM_MID, BTN_MID_OFS(2), -2);
+    }
 
-    /* Over button D: the same refresh symbol as the main layout. */
+    /* Cell D: sync, the same refresh symbol as the main layout. Present
+       whenever the row is, which is what "D = sync, always" means on a
+       screen that can have no row at all. */
     make_label(scr, LV_SYMBOL_REFRESH, &lv_font_montserrat_16, LV_ALIGN_BOTTOM_MID, BTN_MID_OFS(3), -2);
 }
 

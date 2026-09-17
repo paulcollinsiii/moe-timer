@@ -612,6 +612,66 @@ void test_chore_count_with_a_zero_length_buffer_touches_nothing(void) {
     TEST_ASSERT_EQUAL_HEX8((char)0xAA, buf[0]);
 }
 
+/* ---- display_format_chore_prompt: the break screen's line (§2.6) ---- */
+
+void test_chore_prompt_says_how_many_are_left(void) {
+    char buf[16];
+    display_format_chore_prompt(buf, sizeof(buf), 3);
+    TEST_ASSERT_EQUAL_STRING("3 chores left", buf);
+    /* §2.6's own sketch */
+    display_format_chore_prompt(buf, sizeof(buf), 2);
+    TEST_ASSERT_EQUAL_STRING("2 chores left", buf);
+}
+
+/* "1 chores left" is the kind of sentence that makes a device look broken
+   to the child reading it, and one outstanding chore is the commonest
+   state there is on a three-row list. */
+void test_chore_prompt_is_singular_at_one(void) {
+    char buf[16];
+    display_format_chore_prompt(buf, sizeof(buf), 1);
+    TEST_ASSERT_EQUAL_STRING("1 chore left", buf);
+}
+
+/* Zero outstanding is not the count to shorten: "0 chores left" is
+   arithmetic, and the only thing worth saying at that point is that the
+   list is finished. The screen still carries the line — a break with the
+   chores done should say so rather than go quiet. */
+void test_chore_prompt_at_zero_says_the_list_is_finished(void) {
+    char buf[16];
+    display_format_chore_prompt(buf, sizeof(buf), 0);
+    TEST_ASSERT_EQUAL_STRING("All chores done", buf);
+}
+
+/* chore_outstanding is 0..chore_count by the time it reaches the display
+   state, so a larger figure is already a bug elsewhere; clamping it to
+   CHORE_MAX keeps the prompt reconcilable with the checklist A sends the
+   reader to, which has only CHORE_MAX rows on it. */
+void test_chore_prompt_clamps_a_count_the_checklist_could_not_show(void) {
+    char buf[16];
+    display_format_chore_prompt(buf, sizeof(buf), CHORE_MAX + 1);
+    TEST_ASSERT_EQUAL_STRING("3 chores left", buf);
+    display_format_chore_prompt(buf, sizeof(buf), 0xFF);
+    TEST_ASSERT_EQUAL_STRING("3 chores left", buf);
+}
+
+/* The longest output is "All chores done" at 15 characters: a 16-byte
+   buffer holds it whole, and that is the size the screen builder must
+   give it. */
+void test_chore_prompt_longest_output_fits_sixteen_bytes(void) {
+    char buf[16];
+    memset(buf, (char)0xAA, sizeof(buf));
+    display_format_chore_prompt(buf, sizeof(buf), 0);
+    TEST_ASSERT_EQUAL_size_t(15, strlen(buf));
+    TEST_ASSERT_EQUAL_HEX8('\0', buf[15]);
+}
+
+void test_chore_prompt_with_a_zero_length_buffer_touches_nothing(void) {
+    char buf[4];
+    memset(buf, (char)0xAA, sizeof(buf));
+    display_format_chore_prompt(buf, 0, 2);
+    TEST_ASSERT_EQUAL_HEX8((char)0xAA, buf[0]);
+}
+
 /* ---- display_chore_unlocked ---- */
 
 void test_unlocked_on_the_last_ack_before_the_latch_is_written(void) {
@@ -956,6 +1016,12 @@ int main(void) {
     RUN_TEST(test_chore_count_reads_n_of_the_configured_length);
     RUN_TEST(test_chore_count_follows_a_shorter_list);
     RUN_TEST(test_chore_count_with_a_zero_length_buffer_touches_nothing);
+    RUN_TEST(test_chore_prompt_says_how_many_are_left);
+    RUN_TEST(test_chore_prompt_is_singular_at_one);
+    RUN_TEST(test_chore_prompt_at_zero_says_the_list_is_finished);
+    RUN_TEST(test_chore_prompt_clamps_a_count_the_checklist_could_not_show);
+    RUN_TEST(test_chore_prompt_longest_output_fits_sixteen_bytes);
+    RUN_TEST(test_chore_prompt_with_a_zero_length_buffer_touches_nothing);
     RUN_TEST(test_unlocked_on_the_last_ack_before_the_latch_is_written);
     RUN_TEST(test_unlocked_stays_true_after_an_ack_is_toggled_back_off);
     RUN_TEST(test_no_chores_is_never_unlocked);

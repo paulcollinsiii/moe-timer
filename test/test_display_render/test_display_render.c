@@ -252,7 +252,18 @@ void test_break_screen_no_eligible(void) {
     /* Extras exist but none is break-eligible, so the break has nothing
        to offer: app_state suppresses the hint (swap_next_name NULL) and
        the screen falls back to the centred footer — the pre-non-blocking
-       locking break, which is the right behaviour here. */
+       locking break, which is the right behaviour here.
+
+       TWO conditions reach that footer now, not one. Since M2-T6 this is
+       cell 4 of §2.6's matrix — no swap hint AND no chore list — and the
+       second half rides silently on base_state() leaving chore_count at
+       0. Giving base_state() a non-zero .chore_count would move this
+       screen to cell 2, which has a button row, and take
+       break_screen_no_extras (cell 4 likewise) and break_screen (cell 3
+       to cell 1) with it: all three legacy break goldens broken by a
+       fixture edit that looks unrelated to any of them. If chore counts
+       are ever wanted by default, set them on the fixtures that need
+       them — break_chore_state() is where they belong. */
     display_state_t st = base_state();
     st.timer_state = TIMER_BREAK;
     st.remaining_sec = 5400;
@@ -260,6 +271,399 @@ void test_break_screen_no_eligible(void) {
     st.swap_next_name = NULL;
     display_screens_build_break(&st);
     assert_matches_golden("break_screen_no_eligible");
+}
+
+/* ---- the break screen's chore cells (design §2.6) --------------------
+
+   The matrix has four cells and the two with no list configured are the
+   two goldens above, unchanged. These are the other two: a configured
+   list puts a label over button A and a prompt line under the countdown,
+   and the old `swap_next_name == NULL` suppression — which used to mean
+   "no button row at all" — now only means "no cell C".
+
+   The break screen reads two fields out of the chore block and no more:
+   chore_count decides whether there is a list, chore_outstanding is what
+   the prompt says. The names belong to the checklist, so this fixture
+   does not fill them in. */
+static display_state_t break_chore_state(uint8_t count, uint8_t outstanding) {
+    display_state_t st = base_state();
+    st.timer_state = TIMER_BREAK;
+    st.remaining_sec = 5400; /* 1:30:00 of screen time frozen */
+    st.break_remaining_sec = 700;
+    st.chore_count = count;
+    st.chore_outstanding = outstanding;
+    return st;
+}
+
+/* Cell 1: a list AND somewhere to swap to — the full row. */
+void test_break_screen_with_chores(void) {
+    display_state_t st = break_chore_state(3, 2);
+    st.swap_next_name = "Piano";
+    display_screens_build_break(&st);
+    assert_matches_golden("break_screen_chores");
+}
+
+/* Cell 2: a list, but nothing break-eligible. A still offers Chores, so
+   there IS a row — which is precisely what the generalised rule buys and
+   what no arrangement of the old one could have produced. */
+void test_break_screen_with_chores_no_eligible(void) {
+    display_state_t st = break_chore_state(3, 2);
+    st.swap_next_name = NULL;
+    display_screens_build_break(&st);
+    assert_matches_golden("break_screen_chores_no_eligible");
+}
+
+/* Cell 1 again, at its widest in every band at once: "All chores done" is
+   the longest prompt this formatter can produce (124 px), a 12-hour
+   allocation the longest frozen screen time, and an over-long name the
+   longest swap hint the 8-character budget allows. A pixel golden is what
+   catches the packing of five bands against each other; the width
+   assertions below only ever compare two at a time. */
+void test_break_screen_with_every_chore_done(void) {
+    display_state_t st = break_chore_state(3, 0);
+    st.remaining_sec = 45000; /* "Screen 12:30" */
+    st.swap_next_name = "Woodwind lesson";
+    display_screens_build_break(&st);
+    assert_matches_golden("break_screen_chores_all_done");
+}
+
+/* Painted rows on the INVERTED break screen. LVGL I1 has 1 = white, so
+   here ink is the set bits — the mirror image of assert_rows_blank above,
+   which reads the upright layouts. */
+static bool break_row_has_ink(int y) {
+    for (int b = 0; b < HOR / 8; b++) {
+        if (s_captured[y * (HOR / 8) + b] != 0x00)
+            return true;
+    }
+    return false;
+}
+
+/* Runs of consecutive painted rows, top to bottom; returns how many. */
+static int break_ink_bands(int *tops, int *bots, int max) {
+    int n = 0;
+    bool in = false;
+    for (int y = 0; y < VER; y++) {
+        bool ink = break_row_has_ink(y);
+        if (ink && !in) {
+            TEST_ASSERT_TRUE_MESSAGE(n < max, "more ink bands than the break screen can hold");
+            tops[n] = y;
+            in = true;
+        } else if (!ink && in) {
+            bots[n++] = y - 1;
+            in = false;
+        }
+    }
+    if (in)
+        bots[n++] = VER - 1;
+    return n;
+}
+
+/* THE trap this layout had to clear. On the unchanged break screen the
+   48 pt countdown ends at row 104 and the button row starts at row 109:
+   four blank rows, where a 16 pt line needs twelve. So there is no band
+   free for a chore line where the countdown stands, and a list lifts the
+   bar and the countdown to open one.
+
+   Measured on the glass rather than in the arithmetic, because the
+   failure mode is silent: overlapping white-on-black text is unreadable
+   on e-ink, and MAGTAG_WRITE_GOLDEN would happily record the overlap as
+   the new correct answer. Five bands with a gutter each is the property;
+   the goldens pin which pixels are in them. */
+void test_the_break_chore_line_clears_the_countdown_and_the_row(void) {
+    display_state_t st = break_chore_state(3, 2);
+    st.swap_next_name = "Piano";
+    display_screens_build_break(&st);
+    lv_refr_now(s_disp);
+
+    int tops[8], bots[8];
+    int n = break_ink_bands(tops, bots, 8);
+    for (int i = 0; i < n; i++)
+        printf("break band %d: rows %d..%d\n", i, tops[i], bots[i]);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(5, n, "the break screen is not title / bar / countdown / chore line / button row");
+
+    /* 4 is not a target plucked out of the air: it is the gutter the
+       unchanged screen already runs at between its countdown and its
+       row, so it is the floor a new band has to clear as well. */
+    for (int i = 1; i < n; i++) {
+        char msg[112];
+        snprintf(msg, sizeof(msg), "band %d ends at row %d and band %d starts at row %d - %d blank rows between", i - 1,
+                 bots[i - 1], i, tops[i], (int)(tops[i] - bots[i - 1] - 1));
+        TEST_ASSERT_TRUE_MESSAGE(tops[i] - bots[i - 1] - 1 >= 4, msg);
+    }
+}
+
+/* Collects the bottom row's label boxes, left to right as they were
+   built. `found` is the cell count, which is the matrix cell's signature:
+   three with a swap hint, two without. */
+static int break_bottom_row(int32_t *left, int32_t *right, const char **text, int max) {
+    lv_obj_t *scr = lv_screen_active();
+    lv_obj_update_layout(scr);
+    int found = 0;
+    uint32_t kids = lv_obj_get_child_count(scr);
+    for (uint32_t i = 0; i < kids; i++) {
+        lv_obj_t *o = lv_obj_get_child(scr, i);
+        if (!lv_obj_check_type(o, &lv_label_class))
+            continue;
+        if (lv_obj_get_y(o) < VER - 20) /* the bottom row only */
+            continue;
+        TEST_ASSERT_TRUE_MESSAGE(found < max, "more bottom-row labels than the row can hold");
+        text[found] = lv_label_get_text(o);
+        int32_t x = lv_obj_get_x(o), w = lv_obj_get_width(o);
+        printf("break button cell '%s' x=%d..%d (%d px)\n", lv_label_get_text(o), (int)x, (int)(x + w), (int)w);
+        char msg[112];
+        snprintf(msg, sizeof(msg), "'%s' spans x=%d..%d, off a %d px panel", lv_label_get_text(o), (int)x, (int)(x + w),
+                 HOR);
+        TEST_ASSERT_TRUE_MESSAGE(x >= 0, msg);
+        TEST_ASSERT_TRUE_MESSAGE(x + w <= HOR, msg);
+        left[found] = x;
+        right[found] = x + w;
+        found++;
+    }
+    for (int i = 1; i < found; i++) {
+        char msg[112];
+        snprintf(msg, sizeof(msg), "cell %d ends at x=%d and cell %d starts at x=%d", i - 1, (int)right[i - 1], i,
+                 (int)left[i]);
+        TEST_ASSERT_TRUE_MESSAGE(right[i - 1] < left[i], msg);
+    }
+    return found;
+}
+
+/* The row is NOT four equal cells and never was: "Chores" is 57 px from a
+   left margin at x=4, so it ends at x=61 and overruns the A/B midline at
+   x=54. That is safe for exactly one reason — cell B carries no label on
+   this screen, because the break is still enforced for the Screen timer
+   and display_button_b_label() yields nothing for TIMER_BREAK — and this
+   test is what holds it: three cells and none of them reaching the next.
+
+   WHICH ASSERTION HOLDS WHAT, because it is not the obvious split. The
+   real guard against cell A running into the swap hint is the adjacency
+   loop inside break_bottom_row() — right[i-1] < left[i] — and yes, that
+   compares a MEASURED neighbour. It has to: the hint is centred on C, so
+   where its left edge falls is a function of the string's width and no
+   constant can name it. The loop is not thereby vacuous, because the two
+   edges come from independent build paths: cell A is left-anchored at a
+   margin, the hint is centre-anchored on a button, and nothing derives
+   either from the other. The midline bound below is the coarse structural
+   check that survives a change of strings, and it is strictly weaker than
+   it looks — see there.
+
+   It is also why the frozen screen time is NOT in this row in the chore
+   cells. "Screen 1:30" is 90 px; put it over button B and it spans
+   x=46..136, which collides with "Chores" at one end and the swap hint at
+   the other. It moved to the line above instead. */
+void test_the_break_chore_row_fits_its_cells(void) {
+    display_state_t st = break_chore_state(3, 2);
+    st.swap_next_name = "Woodwind lesson"; /* the widest hint the budget allows */
+    display_screens_build_break(&st);
+
+    int32_t left[8], right[8];
+    const char *text[8];
+    int found = break_bottom_row(left, right, text, 8);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(3, found, "cell 1 of the matrix is Chores, the swap hint and sync");
+    TEST_ASSERT_EQUAL_STRING_MESSAGE("Chores", text[0], "cell A does not offer the checklist");
+    /* A COARSE UPPER BOUND, deliberately, and not the thing that keeps
+       the two apart. BTN_X0 + 3*BTN_PITCH/2 is the B/C midline at x=128;
+       the widest hint the budget allows already starts at x=114, 14 px
+       LEFT of it, so a 120 px cell-A label would satisfy this and still
+       paint over the hint. Non-overlap is the adjacency loop's job (see
+       the header comment). What this adds that the loop cannot is a bound
+       expressed in the row's own geometry rather than in today's strings:
+       it fails if cell A grows past the structural half-way mark even on
+       a future screen where the hint happens to be short enough for the
+       loop to shrug. Keep both; neither implies the other. */
+    TEST_ASSERT_TRUE_MESSAGE(right[0] < BTN_X0 + 3 * BTN_PITCH / 2,
+                             "the Chores label reaches past cell B and over the B/C midline");
+}
+
+/* Cell 2: no break-eligible timer, so no C — but A still has a label, so
+   the row survives where the old rule would have dropped it and fallen
+   back to the centred footer. */
+void test_the_break_row_without_a_swap_keeps_its_chore_cell(void) {
+    display_state_t st = break_chore_state(3, 2);
+    st.swap_next_name = NULL;
+    display_screens_build_break(&st);
+
+    int32_t left[8], right[8];
+    const char *text[8];
+    int found = break_bottom_row(left, right, text, 8);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(2, found, "cell 2 of the matrix is Chores and sync, with C empty");
+    TEST_ASSERT_EQUAL_STRING_MESSAGE("Chores", text[0], "cell A does not offer the checklist");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(4, left[0], "the Chores label is not at the row's left margin");
+}
+
+/* Collects the chore line's label boxes and text, left to right as they
+   were built: the frozen screen time, then the prompt. The text pointers
+   belong to the labels, and fresh_screen() deletes those on the next
+   build — copy anything that has to outlive one render. */
+static int break_chore_line(int32_t *left, int32_t *right, const char **text, int max) {
+    lv_obj_t *scr = lv_screen_active();
+    lv_obj_update_layout(scr);
+    int found = 0;
+    uint32_t kids = lv_obj_get_child_count(scr);
+    for (uint32_t i = 0; i < kids; i++) {
+        lv_obj_t *o = lv_obj_get_child(scr, i);
+        if (!lv_obj_check_type(o, &lv_label_class) || lv_obj_get_y(o) != BREAK_CHORE_LINE_Y)
+            continue;
+        TEST_ASSERT_TRUE_MESSAGE(found < max, "more items on the chore line than it holds");
+        printf("break chore line '%s' x=%d..%d\n", lv_label_get_text(o), (int)lv_obj_get_x(o),
+               (int)(lv_obj_get_x(o) + lv_obj_get_width(o)));
+        text[found] = lv_label_get_text(o);
+        left[found] = lv_obj_get_x(o);
+        right[found] = lv_obj_get_x(o) + lv_obj_get_width(o);
+        found++;
+    }
+    return found;
+}
+
+/* The line above the row carries two items, and they are the two widest
+   strings each side can produce: "Screen 12:30" against "All chores
+   done". Nothing truncates either of them, so the only thing keeping them
+   apart is the panel being wide enough — measured, not assumed. */
+void test_the_break_chore_line_items_never_meet(void) {
+    display_state_t st = break_chore_state(3, 0);
+    st.remaining_sec = 45000; /* "Screen 12:30" */
+    st.swap_next_name = "Piano";
+    display_screens_build_break(&st);
+
+    int32_t left[4], right[4];
+    const char *text[4];
+    int found = break_chore_line(left, right, text, 4);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(2, found, "the chore line is the frozen screen time and the prompt");
+    /* THE MARGINS ARE PINNED, not bounded, and the difference is the
+       whole point. "inside the panel" (left >= 0, right <= HOR) is
+       satisfied BETTER by deleting the padding — zeroing either margin
+       moves the glyphs AWAY from the edge the bound watches, so the
+       mutant reads as an improvement and only the golden notices. That
+       exact shape shipped one band down in M2-T5 and the button row's
+       equivalent is pinned for the same reason (see the Chores cell
+       above). Equalities, so the padding cannot quietly go missing. */
+    TEST_ASSERT_EQUAL_INT_MESSAGE(4, left[0], "the frozen screen time is not at the line's left margin");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(HOR - 4, right[1], "the chore prompt is not at the line's right margin");
+    TEST_ASSERT_TRUE_MESSAGE(right[0] < left[1], "the frozen screen time and the chore prompt touch");
+}
+
+/* WHICH FIELD the prompt is fed. chore_count and chore_outstanding are
+   adjacent bytes of the same block and every golden fixture here happens
+   to be rendered at a count of 3, so handing the formatter the count
+   instead of the outstanding figure produces a screen that is wrong on
+   every day but a fresh one — and a mutant that does exactly that is
+   caught only by a pixel compare. This pins the choice as a property:
+   two states differing in NOTHING but chore_outstanding must say
+   different things. Under the count-for-outstanding swap both renders
+   read "3 chores left" and this fails. */
+void test_the_break_chore_prompt_follows_the_outstanding_count(void) {
+    char first[32];
+    int32_t left[4], right[4];
+    const char *text[4];
+
+    display_state_t st = break_chore_state(3, 2);
+    st.swap_next_name = "Piano";
+    display_screens_build_break(&st);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(2, break_chore_line(left, right, text, 4), "the chore line is not drawn");
+    /* Copied because the next build deletes the label that owns it. */
+    snprintf(first, sizeof(first), "%s", text[1]);
+
+    st.chore_outstanding = 3;
+    display_screens_build_break(&st);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(2, break_chore_line(left, right, text, 4), "the chore line is not drawn");
+    TEST_ASSERT_TRUE_MESSAGE(strcmp(first, text[1]) != 0,
+                             "the chore prompt says the same thing at 2 outstanding as at 3 - it is reading the "
+                             "list's size, not what is left to do");
+}
+
+/* A LIST OF ONE, which is the boundary the display-side gate is written
+   on and the one no other case here visits: every fixture above renders
+   at a count of 3. That left `chore_count > 0` free to be mutated to
+   `> 1` with all 146 cases green, goldens included — and a family that
+   configures a single chore (config_apply.c's apply_chores() accepts
+   n = 1) would have got the legacy no-chore break screen: no Chores over
+   A, no prompt line, the frozen screen time back down in the row. The
+   three bands are asserted rather than a fourth golden because what is in
+   question is the GATE, not the pixels, and the pixels at count 1 differ
+   from count 3 only in the prompt's wording.
+
+   It is also the only place the singular prompt is rendered end to end
+   rather than unit-tested on the formatter. */
+void test_a_single_chore_still_earns_the_break_screen_layout(void) {
+    display_state_t st = break_chore_state(1, 1);
+    st.swap_next_name = "Piano";
+    display_screens_build_break(&st);
+    lv_refr_now(s_disp);
+
+    int tops[8], bots[8];
+    TEST_ASSERT_EQUAL_INT_MESSAGE(5, break_ink_bands(tops, bots, 8),
+                                  "one chore does not lift the bar and open a band for the chore line");
+
+    int32_t left[4], right[4];
+    const char *text[4];
+    TEST_ASSERT_EQUAL_INT_MESSAGE(2, break_chore_line(left, right, text, 4), "one chore draws no chore line");
+    TEST_ASSERT_EQUAL_STRING_MESSAGE("1 chore left", text[1], "the singular prompt never reaches the glass");
+
+    int32_t row_left[8], row_right[8];
+    const char *row_text[8];
+    TEST_ASSERT_EQUAL_INT_MESSAGE(3, break_bottom_row(row_left, row_right, row_text, 8),
+                                  "the row is Chores, the swap hint and sync");
+    TEST_ASSERT_EQUAL_STRING_MESSAGE("Chores", row_text[0], "one chore does not put Chores over button A");
+}
+
+/* THE GATE ITSELF, and the only case that sweeps its whole boundary
+   rather than pinning one point of it. `st->chore_count > 0` in
+   display_screens.c is a SECOND display-side spelling of
+   button_a_toggle_allowed() — the break screen's, beside the chore
+   screen's in display_screen_for() — and the obvious home for a
+   cross-check, test_button_actions, cannot host one: that suite is a
+   single TU that does not compile display_screens.c (the break painter
+   needs LVGL, which it does not link), so an arm there could only test a
+   copy of this literal retyped into the test. The comment in
+   test_the_chore_screen_is_never_painted_where_button_a_would_be_refused
+   records what is therefore still unheld.
+
+   Both directions, because each fails differently and the two are caught
+   by different things without this case. `> 1` would give a family with a
+   single chore configured (config_apply.c's apply_chores() accepts n = 1)
+   the legacy no-chore break screen; nothing caught it at all until
+   test_a_single_chore_still_earns_the_break_screen_layout, which pins
+   that one count and is the case to keep in step with this one. `>= 0`
+   would put a dead "Chores" over button A on every device with no list —
+   the dead affordance the gate exists to prevent — and was caught only by
+   a pixel compare on three goldens. Asserting the painted label and the
+   chore line rather than pixels keeps the case about the GATE; the
+   goldens cover what the two layouts look like. */
+void test_the_break_screen_offers_chores_exactly_when_the_list_is_non_empty(void) {
+    int offered = 0;
+    int withheld = 0;
+    for (uint8_t n = 0; n <= CHORE_MAX; n++) {
+        display_state_t st = break_chore_state(n, n);
+        /* A swap is available throughout, so the bottom row exists in
+           both layouts and the only thing moving is the chore cell. */
+        st.swap_next_name = "Piano";
+        display_screens_build_break(&st);
+
+        int32_t row_left[8], row_right[8];
+        const char *row_text[8];
+        int cells = break_bottom_row(row_left, row_right, row_text, 8);
+        const bool offers_chores = cells > 0 && strcmp(row_text[0], "Chores") == 0;
+
+        int32_t left[4], right[4];
+        const char *text[4];
+        const bool has_line = break_chore_line(left, right, text, 4) > 0;
+
+        if (n > 0) {
+            offered++;
+            TEST_ASSERT_TRUE_MESSAGE(offers_chores, "a configured list does not put Chores over button A");
+            TEST_ASSERT_TRUE_MESSAGE(has_line, "a configured list draws no chore line");
+        } else {
+            withheld++;
+            TEST_ASSERT_FALSE_MESSAGE(offers_chores,
+                                      "an empty list still offers Chores over button A - the press is refused, so "
+                                      "the label is a dead affordance");
+            TEST_ASSERT_FALSE_MESSAGE(has_line, "an empty list still draws the chore line");
+        }
+    }
+    /* NON-VACUITY: both arms live under a condition, so each counts its
+       own firings. CHORE_MAX + 1 counts in total, split 3 / 1. */
+    TEST_ASSERT_EQUAL_INT_MESSAGE(CHORE_MAX, offered, "the sweep never rendered a configured list");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(1, withheld, "the sweep never rendered an empty list");
 }
 
 /* Isolates the flag itself: one state rendered twice, differing only in
@@ -1420,6 +1824,16 @@ int main(void) {
     RUN_TEST(test_start_available_only_changes_button_b);
     RUN_TEST(test_reload_label_fits_its_cell);
     RUN_TEST(test_break_screen_no_eligible);
+    RUN_TEST(test_break_screen_with_chores);
+    RUN_TEST(test_break_screen_with_chores_no_eligible);
+    RUN_TEST(test_break_screen_with_every_chore_done);
+    RUN_TEST(test_the_break_chore_line_clears_the_countdown_and_the_row);
+    RUN_TEST(test_the_break_chore_row_fits_its_cells);
+    RUN_TEST(test_the_break_row_without_a_swap_keeps_its_chore_cell);
+    RUN_TEST(test_the_break_chore_line_items_never_meet);
+    RUN_TEST(test_the_break_chore_prompt_follows_the_outstanding_count);
+    RUN_TEST(test_a_single_chore_still_earns_the_break_screen_layout);
+    RUN_TEST(test_the_break_screen_offers_chores_exactly_when_the_list_is_non_empty);
     RUN_TEST(test_main_low_battery_warn_badge);
     RUN_TEST(test_main_idle_weekday_adjusted);
     RUN_TEST(test_mode_row_fits_beside_the_state_word);

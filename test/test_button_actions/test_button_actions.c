@@ -862,7 +862,34 @@ void test_the_gate_never_caps_an_extra_timers_duration(void) {
    a third device lock; if it gives button_a_toggle_allowed() a new
    refusal reason and display_screen_for() does not learn it, every state
    in which that reason fires lands here. A sampled case would have to
-   have guessed the new term in advance. */
+   have guessed the new term in advance.
+
+   ONE ARM ONLY, and the second claimant is deliberately NOT swept here.
+   M2-T6 gave the implication a second display-side spelling: the break
+   screen labels button A "Chores" off `st->chore_count > 0`
+   (display_screens.c), with the same failure mode and less noise — the
+   chore screen at least strands the kid on a screen that says "Timers",
+   whereas a dead "Chores" on the break screen just does nothing when
+   pressed. It cannot be swept from this case, because this suite is a
+   single TU and display_screens.c is not in it (see the includes: the
+   break painter needs LVGL, which this suite does not link). Any arm
+   added here could only compare button_a_toggle_allowed() against a
+   COPY of that literal retyped into the test, which constrains the
+   source not at all — a `> 0` -> `> 1` mutation in display_screens.c
+   does not even relink this binary. Such an arm was written and removed;
+   its rows ({TIMER_BREAK} x {1,2,3}) are in any case a strict subset of
+   the rows the sweep below already asserts the same predicate on.
+
+   Where the break screen's gate IS held: test_display_render, which does
+   compile display_screens.c —
+   test_the_break_screen_offers_chores_exactly_when_the_list_is_non_empty
+   pins the painted label across the whole count boundary. What NOTHING
+   holds, in either suite, is the cross-check between that gate and
+   button_a_toggle_allowed(): the predicate is unavailable in the render
+   suite and the painter is unavailable here. So M2-T10's device lock,
+   if it adds a refusal reason, will be caught on the chore screen by the
+   sweep below and NOT on the break screen by anything. Teaching the
+   break screen that lock is a manual obligation of that task. */
 void test_the_chore_screen_is_never_painted_where_button_a_would_be_refused(void) {
     const timer_state_t states[] = {TIMER_IDLE, TIMER_RUNNING, TIMER_PAUSED, TIMER_EXPIRED, TIMER_BREAK};
     /* NON-VACUITY, and it is not ceremony here: the assertion lives under
