@@ -15,7 +15,7 @@ static const char *TAG = "neopixel";
 
 #define NEOPIXEL_DATA_GPIO GPIO_NUM_1
 #define NEOPIXEL_POWER_GPIO GPIO_NUM_21
-#define NEOPIXEL_COUNT 4
+/* NEOPIXEL_COUNT lives in neopixel.h: it bounds the public API's idx. */
 #define RMT_RESOLUTION_HZ 10000000
 
 /* ---------- Embedded WS2812B RMT encoder ---------- */

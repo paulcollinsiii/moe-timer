@@ -7,6 +7,12 @@
 extern "C" {
 #endif
 
+/* Status pixels on the board. Public because it is the bound on every
+   `idx` below (out-of-range indices are dropped, silently) and because
+   callers that paint the WHOLE strip rather than one pixel — the chore
+   checklist, status_led.h — have to size themselves by it. */
+#define NEOPIXEL_COUNT 4
+
 /* Must be called on every boot/wake before any other peripheral code.
    Ensures GPIO 21 (power gate) is HIGH (off), then starts the LED task:
    the single owner of the RMT channel AND the power gate. Every call

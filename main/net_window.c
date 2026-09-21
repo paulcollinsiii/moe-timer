@@ -23,7 +23,18 @@
 
 static const char *TAG = "net_window";
 
-/* WiFi status pixel — pixel 0 (timer state) is owned by main.c. */
+/* WiFi status pixel. Pixel 0 (timer state) belongs to status_led.c, which
+   wake_flow.c drives — the two sit at opposite ends of the strip so both
+   can be read at once. That holds in every mode BUT the chore checklist,
+   which claims all four pixels and makes this one a chore row
+   (status_led.h). A network window opened on a button wake can therefore
+   repaint a chore row. The dark write in net_window_join() below reads on
+   that screen as "not a configured chore"; worse, the NTP-success triple
+   below is (0,20,0), byte-identical to the checklist's "done" green, so a
+   successful sync paints a convincing FALSE ACK. M2-T8 owns the fix, and
+   the direction is settled — chore mode owns the whole strip, so these
+   writes get suppressed or relocated for chore-mode wakes, not the other
+   way round. See the caller contract on chores_led_show(). */
 #define NP_WIFI_PIXEL 3
 
 static SemaphoreHandle_t s_ntp_settled; /* (a) sync resolved — paint may go, MQTT still ahead */
