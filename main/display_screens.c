@@ -552,24 +552,47 @@ void display_screens_build_break(const display_state_t *st) {
                has_chores ? BREAK_COUNTDOWN_Y_CHORES : BREAK_COUNTDOWN_Y);
 
     if (has_chores) {
-        /* The chore line, left and right on one band: the frozen screen
-           time, then the prompt. The frozen time is here rather than in
-           the row below because it cannot BE in that row any more —
-           "Screen 1:30" is 90 px and centred over button B it spans
-           x 46..136, which runs into "Chores" at one end and the swap
-           hint at the other. The design's mock draws it over B; the
-           measurement says only three items fit that row, so the fourth
-           moved up.
+        /* The chore line, left and right on one band: the prompt at the
+           left margin, then the frozen screen time at the right. The
+           frozen time is on this line rather than in the row below
+           because it cannot BE in that row any more — "Screen 1:30" is
+           90 px and centred over button B it spans x 46..136, which runs
+           into "Chores" at one end and the swap hint at the other. The
+           design's mock draws it over B; the measurement says only three
+           items fit that row, so the fourth moved up.
 
-           Widest case measured (ink, as above): "Screen 12:30" paints out
-           to x=100 and "All chores done" starts at x=169, so the two are
-           68 px from meeting even at their worst —
-           test_the_break_chore_line_items_never_meet holds that. */
-        display_format_hm(rem_buf, sizeof(rem_buf), st->remaining_sec);
-        snprintf(buf, sizeof(buf), "Screen %s", rem_buf);
+           THE PROMPT IS ON THE LEFT so that "Chores" holds one x for the
+           life of the screen: it is the item whose text changes, and a
+           right-anchored label of changing width walks its own left edge
+           across the panel every time an ack lands. The same reasoning
+           puts the tick after the word rather than before it.
+
+           WIDTH, measured on the built objects (LVGL box extents, which
+           is what the render test reads) over EVERY string either side
+           can produce, because the digits of this font do not share one
+           advance — '0' is 3 px wider than '1' — so neither side's worst
+           case can be reasoned about from the character count:
+             prompt, widest   "Chores 0 of 2"  x   4..109
+             prompt, finished "Chores <tick>"  x   4.. 81
+             frozen time, widest "Screen 20:00" x 186..292  (h 0..23 swept)
+           77 px apart at the worst pairing.
+           test_the_break_chore_line_items_never_meet holds it.
+
+           HEIGHT is the tighter of the two and the reason the prompt
+           reads "2 of 3" rather than "(2/3)". This band is 12 ink rows:
+           the countdown ends at row 88 and the button row starts at 109,
+           and 4 blank rows each side is the gutter the screen already
+           runs at. Letters and digits paint rows 93..104 — exactly 12.
+           Any of '(' ')' '/' '[' ']' paints 91..107, which is 17, and no
+           y fixes that: the panel has 80 rows between the title and the
+           button row, the three bands need 67 of them, and four 4-row
+           gutters need 16 more. 83 does not fit in 80, so a bracketed
+           fraction would have had to be paid for by moving the title. */
+        display_format_chore_prompt(buf, sizeof(buf), st->chore_acked, st->chore_count);
         make_label(scr, buf, &lv_font_montserrat_16, LV_ALIGN_TOP_LEFT, 4, BREAK_CHORE_LINE_Y);
 
-        display_format_chore_prompt(buf, sizeof(buf), st->chore_outstanding);
+        display_format_hm(rem_buf, sizeof(rem_buf), st->remaining_sec);
+        snprintf(buf, sizeof(buf), "Screen %s", rem_buf);
         make_label(scr, buf, &lv_font_montserrat_16, LV_ALIGN_TOP_RIGHT, -4, BREAK_CHORE_LINE_Y);
     }
 

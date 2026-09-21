@@ -614,61 +614,111 @@ void test_chore_count_with_a_zero_length_buffer_touches_nothing(void) {
 
 /* ---- display_format_chore_prompt: the break screen's line (§2.6) ---- */
 
-void test_chore_prompt_says_how_many_are_left(void) {
+/* THE DIRECTION OF THE FRACTION, which is the whole reason this formatter
+   takes acked/count rather than chore_outstanding. Button A sends the
+   reader from this line to a checklist headed "n of 3" counting what is
+   DONE, so a prompt counting what is LEFT would put the same-looking
+   fraction on two screens meaning opposite things — and every figure it
+   produced would still be in range, so nothing but an exact string pins
+   it. 0x03 of 3 is the case that separates the two: two bits set, one
+   chore outstanding, so done and outstanding differ. */
+void test_chore_prompt_counts_what_is_done_not_what_is_left(void) {
     char buf[16];
-    display_format_chore_prompt(buf, sizeof(buf), 3);
-    TEST_ASSERT_EQUAL_STRING("3 chores left", buf);
-    /* §2.6's own sketch */
-    display_format_chore_prompt(buf, sizeof(buf), 2);
-    TEST_ASSERT_EQUAL_STRING("2 chores left", buf);
+    display_format_chore_prompt(buf, sizeof(buf), 0x00, 3);
+    TEST_ASSERT_EQUAL_STRING("Chores 0 of 3", buf);
+    display_format_chore_prompt(buf, sizeof(buf), 0x01, 3);
+    TEST_ASSERT_EQUAL_STRING("Chores 1 of 3", buf);
+    /* §2.6's own sketch, and the asymmetric one: 2 done, 1 left. */
+    display_format_chore_prompt(buf, sizeof(buf), 0x03, 3);
+    TEST_ASSERT_EQUAL_STRING("Chores 2 of 3", buf);
 }
 
-/* "1 chores left" is the kind of sentence that makes a device look broken
-   to the child reading it, and one outstanding chore is the commonest
-   state there is on a three-row list. */
-void test_chore_prompt_is_singular_at_one(void) {
+/* The tick, and where it goes. It is LAST because a leading one would
+   shift "Chores" rightwards the moment the list was finished, and a word
+   that moves on e-ink reads as churn; the exact string is what holds the
+   placement, since a leading tick is the same three glyphs in the wrong
+   order and no length or content check would notice. DISPLAY_CHORE_TICK
+   is checked against LV_SYMBOL_OK itself in test_display_render, which is
+   the suite that links LVGL. */
+void test_chore_prompt_ticks_after_the_word_when_the_list_is_finished(void) {
     char buf[16];
-    display_format_chore_prompt(buf, sizeof(buf), 1);
-    TEST_ASSERT_EQUAL_STRING("1 chore left", buf);
+    display_format_chore_prompt(buf, sizeof(buf), 0x07, 3);
+    TEST_ASSERT_EQUAL_STRING("Chores " DISPLAY_CHORE_TICK, buf);
+    /* A shorter list finishes on its own length, not on CHORE_MAX. */
+    display_format_chore_prompt(buf, sizeof(buf), 0x03, 2);
+    TEST_ASSERT_EQUAL_STRING("Chores " DISPLAY_CHORE_TICK, buf);
 }
 
-/* Zero outstanding is not the count to shorten: "0 chores left" is
-   arithmetic, and the only thing worth saying at that point is that the
-   list is finished. The screen still carries the line — a break with the
-   chores done should say so rather than go quiet. */
-void test_chore_prompt_at_zero_says_the_list_is_finished(void) {
+/* A shorter list counts against its own length. A two-chore family sees
+   "1 of 2", never "1 of 3" — the denominator is the configured count,
+   the same one the checklist's own header uses. */
+void test_chore_prompt_follows_a_shorter_list(void) {
     char buf[16];
-    display_format_chore_prompt(buf, sizeof(buf), 0);
-    TEST_ASSERT_EQUAL_STRING("All chores done", buf);
+    display_format_chore_prompt(buf, sizeof(buf), 0x01, 2);
+    TEST_ASSERT_EQUAL_STRING("Chores 1 of 2", buf);
+    /* A single chore, the boundary the display-side gate is written on. */
+    display_format_chore_prompt(buf, sizeof(buf), 0x00, 1);
+    TEST_ASSERT_EQUAL_STRING("Chores 0 of 1", buf);
+    display_format_chore_prompt(buf, sizeof(buf), 0x01, 1);
+    TEST_ASSERT_EQUAL_STRING("Chores " DISPLAY_CHORE_TICK, buf);
+    /* A stale bit from a longer list is masked off, exactly as the ticks
+       beside it are, so the fraction can never exceed its denominator. */
+    display_format_chore_prompt(buf, sizeof(buf), 0x05, 2);
+    TEST_ASSERT_EQUAL_STRING("Chores 1 of 2", buf);
 }
 
-/* chore_outstanding is 0..chore_count by the time it reaches the display
-   state, so a larger figure is already a bug elsewhere; clamping it to
-   CHORE_MAX keeps the prompt reconcilable with the checklist A sends the
-   reader to, which has only CHORE_MAX rows on it. */
-void test_chore_prompt_clamps_a_count_the_checklist_could_not_show(void) {
+/* AN EMPTY LIST IS NOT A FINISHED ONE. "done == configured" is true at
+   0 == 0, so the tick branch needs the count > 0 guard or a device with
+   no chores configured would claim a finished list. The break screen
+   never calls it this way — the line is drawn only when chore_count > 0 —
+   so nothing downstream would catch it; this is the formatter refusing to
+   invent the state on its own. "0 of 0" is also what
+   display_format_chore_count says at the same input. */
+void test_chore_prompt_never_ticks_an_empty_list(void) {
     char buf[16];
-    display_format_chore_prompt(buf, sizeof(buf), CHORE_MAX + 1);
-    TEST_ASSERT_EQUAL_STRING("3 chores left", buf);
-    display_format_chore_prompt(buf, sizeof(buf), 0xFF);
-    TEST_ASSERT_EQUAL_STRING("3 chores left", buf);
+    display_format_chore_prompt(buf, sizeof(buf), 0x00, 0);
+    TEST_ASSERT_EQUAL_STRING("Chores 0 of 0", buf);
+    display_format_chore_prompt(buf, sizeof(buf), 0x07, 0);
+    TEST_ASSERT_EQUAL_STRING("Chores 0 of 0", buf);
 }
 
-/* The longest output is "All chores done" at 15 characters: a 16-byte
-   buffer holds it whole, and that is the size the screen builder must
-   give it. */
+/* chore_count is clamped by its store, so a larger figure is already a
+   bug elsewhere; clamping here keeps the prompt reconcilable with the
+   checklist A sends the reader to, which has only CHORE_MAX rows on it.
+   Both halves of the fraction clamp, and the tick still lands when every
+   row the checklist can show is ticked. */
+void test_chore_prompt_clamps_a_list_the_checklist_could_not_show(void) {
+    char buf[16];
+    display_format_chore_prompt(buf, sizeof(buf), 0x01, CHORE_MAX + 1);
+    TEST_ASSERT_EQUAL_STRING("Chores 1 of 3", buf);
+    display_format_chore_prompt(buf, sizeof(buf), 0x00, 0xFF);
+    TEST_ASSERT_EQUAL_STRING("Chores 0 of 3", buf);
+    display_format_chore_prompt(buf, sizeof(buf), 0xFF, 0xFF);
+    TEST_ASSERT_EQUAL_STRING("Chores " DISPLAY_CHORE_TICK, buf);
+}
+
+/* The longest output is "Chores 0 of 3" at 13 characters; the tick form
+   is 10 bytes, its tick being 3 bytes of UTF-8 rather than 1. A 16-byte
+   buffer holds either whole, and that is the size the screen builder must
+   give it. Measured here rather than asserted as a comment, because the
+   wording is what changes and the budget is what breaks. */
 void test_chore_prompt_longest_output_fits_sixteen_bytes(void) {
     char buf[16];
     memset(buf, (char)0xAA, sizeof(buf));
-    display_format_chore_prompt(buf, sizeof(buf), 0);
-    TEST_ASSERT_EQUAL_size_t(15, strlen(buf));
-    TEST_ASSERT_EQUAL_HEX8('\0', buf[15]);
+    display_format_chore_prompt(buf, sizeof(buf), 0x00, 3);
+    TEST_ASSERT_EQUAL_size_t(13, strlen(buf));
+    TEST_ASSERT_EQUAL_HEX8('\0', buf[13]);
+
+    memset(buf, (char)0xAA, sizeof(buf));
+    display_format_chore_prompt(buf, sizeof(buf), 0x07, 3);
+    TEST_ASSERT_EQUAL_size_t(10, strlen(buf));
+    TEST_ASSERT_EQUAL_HEX8('\0', buf[10]);
 }
 
 void test_chore_prompt_with_a_zero_length_buffer_touches_nothing(void) {
     char buf[4];
     memset(buf, (char)0xAA, sizeof(buf));
-    display_format_chore_prompt(buf, 0, 2);
+    display_format_chore_prompt(buf, 0, 0x01, 3);
     TEST_ASSERT_EQUAL_HEX8((char)0xAA, buf[0]);
 }
 
@@ -1016,10 +1066,11 @@ int main(void) {
     RUN_TEST(test_chore_count_reads_n_of_the_configured_length);
     RUN_TEST(test_chore_count_follows_a_shorter_list);
     RUN_TEST(test_chore_count_with_a_zero_length_buffer_touches_nothing);
-    RUN_TEST(test_chore_prompt_says_how_many_are_left);
-    RUN_TEST(test_chore_prompt_is_singular_at_one);
-    RUN_TEST(test_chore_prompt_at_zero_says_the_list_is_finished);
-    RUN_TEST(test_chore_prompt_clamps_a_count_the_checklist_could_not_show);
+    RUN_TEST(test_chore_prompt_counts_what_is_done_not_what_is_left);
+    RUN_TEST(test_chore_prompt_ticks_after_the_word_when_the_list_is_finished);
+    RUN_TEST(test_chore_prompt_follows_a_shorter_list);
+    RUN_TEST(test_chore_prompt_never_ticks_an_empty_list);
+    RUN_TEST(test_chore_prompt_clamps_a_list_the_checklist_could_not_show);
     RUN_TEST(test_chore_prompt_longest_output_fits_sixteen_bytes);
     RUN_TEST(test_chore_prompt_with_a_zero_length_buffer_touches_nothing);
     RUN_TEST(test_unlocked_on_the_last_ack_before_the_latch_is_written);

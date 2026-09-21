@@ -151,7 +151,15 @@ typedef struct {
     /* Configured chores still un-acked, 0..chore_count. NOT a synonym for
        "the gate is shut": with chore_count == 0 this is also 0 and nothing
        was ever done. The "n of 3" header is (chore_count -
-       chore_outstanding) and means nothing until chore_count > 0. */
+       chore_outstanding) and means nothing until chore_count > 0.
+
+       NO PAINTER READS THIS FIELD any more. Both screens that state a
+       figure derive it from chore_acked instead, so that each agrees
+       row-for-row with the ticks beside it — the checklist header always
+       did, and the break screen's prompt joined it in M2-T6a when the
+       figure was turned round to count what is done. app_state.c still
+       fills it in, and a reader that wants "how many are left" should
+       take it rather than recompute, but nothing currently does. */
     uint8_t chore_outstanding;
     /* Seconds of today's SCREEN allocation held back until every chore is
        acked — chores_withheld_sec() over the day's allocation and its
@@ -393,21 +401,53 @@ bool display_chore_row_ticked(uint8_t acked, uint8_t count, uint8_t idx);
    configured list length, so a two-chore list reads "1 of 2". */
 void display_format_chore_count(char *buf, size_t len, uint8_t acked, uint8_t count);
 
-/* The break screen's chore prompt (§2.6), "2 chores left". A break is the
-   natural moment to do chores, so the device says how many are left — a
-   PROMPT and never the gate (§3), which is why it states a figure and
-   offers nothing.
+/* The tick the chore prompt ends with when the list is finished. Spelled
+   as its UTF-8 bytes rather than as LV_SYMBOL_OK because display_layout.c
+   is a pure formatter that does not include LVGL, and test_display links
+   no LVGL at all. The duplication is held by an assertion and not by this
+   comment: test_the_break_chore_tick_matches_the_checklist_glyph
+   (test_display_render, which does link LVGL) compares this against
+   LV_SYMBOL_OK, so a font upgrade that moves the codepoint fails there
+   rather than painting a wrong glyph. */
+#define DISPLAY_CHORE_TICK "\xEF\x80\x8C" /* LV_SYMBOL_OK, U+F00C */
 
-   Takes chore_outstanding rather than the acked/count pair the two
-   formatters above take. Those two draw the checklist, where the count
-   has to agree row-for-row with the ticks beside it; this one draws a
-   sentence on a different screen, and the field already carries exactly
-   the number that sentence needs.
+/* The break screen's chore prompt (§2.6), "Chores 2 of 3" or, with every
+   row done, "Chores " and a tick. A break is the natural moment to do
+   chores, so the device says where the list stands — a PROMPT and never
+   the gate (§3), which is why it states a figure and offers nothing.
 
-   The longest output is "All chores done" at 15 characters, so 16 bytes
-   hold any of them. A shorter buffer truncates the way snprintf does; a
-   zero length writes nothing at all. */
-void display_format_chore_prompt(char *buf, size_t len, uint8_t outstanding);
+   THE NUMERATOR IS WHAT IS DONE, not what is left, and it takes the same
+   acked/count pair as display_format_chore_count above for exactly that
+   reason: button A sends the reader from this line to a checklist headed
+   "2 of 3", and two screens must not show the same-looking fraction with
+   opposite meanings. Feeding this chore_outstanding would produce a
+   fraction that reads correctly and means the reverse.
+
+   IT IS SPELLED THE SAME WAY AS THAT HEADER, "2 of 3" and not "(2/3)",
+   because of what the glyphs measure rather than because the two ought
+   to rhyme: '(' ')' and '/' rise above this font's cap height and fall
+   below its baseline, which paints 17 ink rows where letters and digits
+   paint 12, and the band the break screen opens for this line is 12 —
+   display_screens.c carries that arithmetic.
+
+   THE TICK GOES LAST. A leading tick would shift "Chores" rightwards the
+   instant the list was finished, and on e-ink a word that moves reads as
+   churn; trailing keeps it anchored at the line's left margin in both
+   states. There is no box glyph for the un-done case because the symbol
+   font has none — the device's existing vocabulary is already "tick =
+   done, nothing = not done", which is what the checklist rows draw.
+
+   count == 0 yields "Chores 0 of 0" rather than a tick: an empty list has
+   nothing done, and this matches display_format_chore_count at the same
+   input. The break screen never calls it that way (the line is drawn only
+   when chore_count > 0), so this is the formatter refusing to invent a
+   finished list rather than a case the screen relies on.
+
+   The longest output is "Chores 0 of 3" at 13 characters; the tick form
+   is 10 bytes (7 characters, the tick being 3 bytes of UTF-8). 16 bytes
+   hold either. A shorter buffer truncates the way snprintf does; a zero
+   length writes nothing at all. */
+void display_format_chore_prompt(char *buf, size_t len, uint8_t acked, uint8_t count);
 
 /* How much of the locked block's label there is room to say. The block is
    `withheld / allocation` of a 280 px bar, so its width is a config

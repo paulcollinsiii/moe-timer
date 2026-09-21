@@ -259,32 +259,54 @@ void display_format_chore_count(char *buf, size_t len, uint8_t acked, uint8_t co
     snprintf(buf, len, "%u of %u", (unsigned)chore_acked_count(acked, count), cfg);
 }
 
-/* The break screen's prompt (§2.6). Three wordings and not one format
-   string, and each of the two special cases is a sentence the generic
-   form gets WRONG rather than merely gets clumsy:
+/* The break screen's prompt (§2.6). "Chores 2 of 3" while there is
+   anything to do, "Chores" and a tick once there is not.
 
-   "1 chores left" is the one a child reads as a broken device, and one
-   outstanding chore is the commonest state a three-row list is ever in.
+   THE SAME acked/count PAIR AS THE HEADER ABOVE, and the same derived
+   numerator, because button A sends the reader from this line to that
+   header: two screens carrying a fraction that looks alike must not mean
+   opposite things. So this counts what is DONE. chore_outstanding would
+   have been the shorter route to a figure and it is the wrong figure —
+   every value it produced would still be in range, which is why the
+   choice is pinned by exact strings in both display suites rather than
+   left to a pixel compare.
 
-   "0 chores left" is arithmetic. The screen is a prompt, so at zero the
-   thing worth saying is that the list is finished — the line stays on the
-   screen rather than going quiet, because a break with the chores already
-   done should say so. Note this is the OUTSTANDING count and not
-   display_chore_unlocked(): the two disagree after C8's toggle-back-off,
-   where the day stays released and a row is outstanding again, and this
-   line is about the list rather than about the gate.
+   "n of m" RATHER THAN "(n/m)", and that is a measurement and not a
+   preference. '(' ')' and '/' all ascend two rows above this font's cap
+   height and descend two or three below its baseline: "Chores (2/3)"
+   paints 17 ink rows where "Chores 2 of 3" paints 12, and the band the
+   break screen opens for this line is 12 (see display_screens.c, which
+   has the arithmetic). Letters and digits alone stay inside it. The
+   wording it lands on is also the checklist header's own, which is what
+   the two screens had to agree on in the first place.
 
-   Clamped to CHORE_MAX for the same reason the checklist header is:
-   button A sends the reader to a screen with CHORE_MAX rows on it, and a
-   larger figure here could not be reconciled with what they find there.
-   chore_outstanding is already 0..chore_count at the assembly seam, so a
-   larger value is a bug somewhere upstream either way. */
-void display_format_chore_prompt(char *buf, size_t len, uint8_t outstanding) {
-    unsigned n = (outstanding > CHORE_MAX) ? CHORE_MAX : outstanding;
-    if (n == 0) {
-        snprintf(buf, len, "All chores done");
+   THE TICK IS LAST. Leading, it would shove "Chores" rightwards the
+   moment the list was finished, and a word that moves on e-ink reads as
+   churn; trailing, the word stays on the left margin in both states.
+   There is no bracket-and-cross pair for the two states because the
+   symbol font has no box glyph, and the device's vocabulary is already
+   the checklist's: a tick means done and nothing means not done.
+
+   THE TICK IS THE LIST'S STATE AND NOT THE GATE'S. display_chore_unlocked()
+   disagrees with "every row ticked" after C8's toggle-back-off, where the
+   day stays released and a row is outstanding again; this line is about
+   the list, so it follows the rows. The count > 0 guard is what stops
+   0 == 0 ticking an empty list — a state this screen never renders, the
+   line being drawn only when chore_count > 0, so nothing downstream would
+   catch it.
+
+   Both halves clamp to CHORE_MAX for the same reason the checklist header
+   does: that screen has CHORE_MAX rows on it and a larger figure here
+   could not be reconciled with what the reader finds there. The numerator
+   is already bounded by display_chore_row_ticked's own cap, so the clamp
+   below is the denominator's. */
+void display_format_chore_prompt(char *buf, size_t len, uint8_t acked, uint8_t count) {
+    unsigned cfg = (count > CHORE_MAX) ? CHORE_MAX : count;
+    unsigned done = chore_acked_count(acked, count);
+    if (count > 0 && done == cfg) {
+        snprintf(buf, len, "Chores " DISPLAY_CHORE_TICK);
     } else {
-        snprintf(buf, len, "%u chore%s left", n, (n == 1) ? "" : "s");
+        snprintf(buf, len, "Chores %u of %u", done, cfg);
     }
 }
 

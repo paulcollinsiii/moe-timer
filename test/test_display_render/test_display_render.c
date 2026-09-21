@@ -282,9 +282,18 @@ void test_break_screen_no_eligible(void) {
    "no button row at all" — now only means "no cell C".
 
    The break screen reads two fields out of the chore block and no more:
-   chore_count decides whether there is a list, chore_outstanding is what
-   the prompt says. The names belong to the checklist, so this fixture
-   does not fill them in. */
+   chore_count decides whether there is a list, and chore_acked is what
+   the prompt counts — chore_outstanding was the prompt's input until
+   M2-T6a turned the figure round, and nothing on this screen reads it
+   now. The names belong to the checklist, so this fixture does not fill
+   them in. */
+/* `outstanding` stays the argument because that is what every case here
+   reads naturally ("three chores, two still to do"), but chore_acked is
+   filled in to match: the two are not independent fields on the device —
+   app_state.c derives chore_outstanding FROM the ack bits at the assembly
+   seam — and the break screen's prompt is drawn from the bits. A fixture
+   that set only one of them would render a screen no device can be in,
+   and would let a painter reading the wrong field look correct. */
 static display_state_t break_chore_state(uint8_t count, uint8_t outstanding) {
     display_state_t st = base_state();
     st.timer_state = TIMER_BREAK;
@@ -292,6 +301,10 @@ static display_state_t break_chore_state(uint8_t count, uint8_t outstanding) {
     st.break_remaining_sec = 700;
     st.chore_count = count;
     st.chore_outstanding = outstanding;
+    /* The low `count - outstanding` bits: which rows are ticked does not
+       matter to any case here, only how many. */
+    for (uint8_t i = 0; i < count - outstanding; i++)
+        st.chore_acked |= (uint8_t)(1u << i);
     return st;
 }
 
@@ -313,12 +326,14 @@ void test_break_screen_with_chores_no_eligible(void) {
     assert_matches_golden("break_screen_chores_no_eligible");
 }
 
-/* Cell 1 again, at its widest in every band at once: "All chores done" is
-   the longest prompt this formatter can produce (124 px), a 12-hour
-   allocation the longest frozen screen time, and an over-long name the
-   longest swap hint the 8-character budget allows. A pixel golden is what
-   catches the packing of five bands against each other; the width
-   assertions below only ever compare two at a time. */
+/* Cell 1 again, with the finished-list prompt and the widest everything
+   else: a 12-hour allocation is the longest frozen screen time and an
+   over-long name the longest swap hint the 8-character budget allows.
+   This is NOT the chore line's widest case — the tick form is the SHORTER
+   of the prompt's two, and test_the_break_chore_line_items_never_meet
+   measures both against the frozen time. A pixel golden is what catches
+   the packing of five bands against each other; the width assertions
+   below only ever compare two at a time. */
 void test_break_screen_with_every_chore_done(void) {
     display_state_t st = break_chore_state(3, 0);
     st.remaining_sec = 45000; /* "Screen 12:30" */
@@ -492,9 +507,9 @@ void test_the_break_row_without_a_swap_keeps_its_chore_cell(void) {
 }
 
 /* Collects the chore line's label boxes and text, left to right as they
-   were built: the frozen screen time, then the prompt. The text pointers
-   belong to the labels, and fresh_screen() deletes those on the next
-   build — copy anything that has to outlive one render. */
+   were built: the chore prompt, then the frozen screen time. The text
+   pointers belong to the labels, and fresh_screen() deletes those on the
+   next build — copy anything that has to outlive one render. */
 static int break_chore_line(int32_t *left, int32_t *right, const char **text, int max) {
     lv_obj_t *scr = lv_screen_active();
     lv_obj_update_layout(scr);
@@ -515,60 +530,138 @@ static int break_chore_line(int32_t *left, int32_t *right, const char **text, in
     return found;
 }
 
-/* The line above the row carries two items, and they are the two widest
-   strings each side can produce: "Screen 12:30" against "All chores
-   done". Nothing truncates either of them, so the only thing keeping them
-   apart is the panel being wide enough — measured, not assumed. */
-void test_the_break_chore_line_items_never_meet(void) {
-    display_state_t st = break_chore_state(3, 0);
-    st.remaining_sec = 45000; /* "Screen 12:30" */
-    st.swap_next_name = "Piano";
-    display_screens_build_break(&st);
+/* The line above the row carries two items — the chore prompt at the left
+   margin, the frozen screen time at the right — and nothing truncates
+   either, so the only thing keeping them apart is the panel being wide
+   enough. MEASURED, not assumed: M2-T5 shipped a label clipped mid-number
+   one band below this one because a width was arrived at by counting
+   characters.
 
-    int32_t left[4], right[4];
-    const char *text[4];
-    int found = break_chore_line(left, right, text, 4);
-    TEST_ASSERT_EQUAL_INT_MESSAGE(2, found, "the chore line is the frozen screen time and the prompt");
-    /* THE MARGINS ARE PINNED, not bounded, and the difference is the
-       whole point. "inside the panel" (left >= 0, right <= HOR) is
-       satisfied BETTER by deleting the padding — zeroing either margin
-       moves the glyphs AWAY from the edge the bound watches, so the
-       mutant reads as an improvement and only the golden notices. That
-       exact shape shipped one band down in M2-T5 and the button row's
-       equivalent is pinned for the same reason (see the Chores cell
-       above). Equalities, so the padding cannot quietly go missing. */
-    TEST_ASSERT_EQUAL_INT_MESSAGE(4, left[0], "the frozen screen time is not at the line's left margin");
-    TEST_ASSERT_EQUAL_INT_MESSAGE(HOR - 4, right[1], "the chore prompt is not at the line's right margin");
-    TEST_ASSERT_TRUE_MESSAGE(right[0] < left[1], "the frozen screen time and the chore prompt touch");
+   NEITHER SIDE'S WORST CASE IS THE OBVIOUS ONE, and both were found by
+   sweeping rather than by reading the strings. The digits of this font do
+   not share an advance — '0' is 3 px wider than '1' — so "Screen 12:30"
+   is NOT the widest frozen time ("Screen 20:00" is, by 7 px) and the
+   widest prompt is the one with the most zeros in it. Both prompt forms
+   are rendered too, because the tick form is the shorter and it is the
+   count form that decides the worst case. */
+void test_the_break_chore_line_items_never_meet(void) {
+    /* outstanding = 3 -> nothing done -> "Chores 0 of 3", the widest the
+       prompt gets at this count; outstanding = 0 -> the tick form. */
+    const uint8_t outstanding[2] = {3, 0};
+    for (int pass = 0; pass < 2; pass++) {
+        display_state_t st = break_chore_state(3, outstanding[pass]);
+        st.remaining_sec = 20 * 3600; /* "Screen 20:00", the widest */
+        st.swap_next_name = "Piano";
+        display_screens_build_break(&st);
+
+        int32_t left[4], right[4];
+        const char *text[4];
+        int found = break_chore_line(left, right, text, 4);
+        TEST_ASSERT_EQUAL_INT_MESSAGE(2, found, "the chore line is the chore prompt and the frozen screen time");
+        /* THE MARGINS ARE PINNED, not bounded, and the difference is the
+           whole point. "inside the panel" (left >= 0, right <= HOR) is
+           satisfied BETTER by deleting the padding — zeroing either
+           margin moves the glyphs AWAY from the edge the bound watches,
+           so the mutant reads as an improvement and only the golden
+           notices. That exact shape shipped one band down in M2-T5 and
+           the button row's equivalent is pinned for the same reason (see
+           the Chores cell above). Equalities, so the padding cannot
+           quietly go missing.
+
+           WHICH ITEM each anchor pins is asserted and not assumed. The
+           two swapped sides in M2-T6a, and an index-only anchor survives
+           that swap intact: left[0] == 4 was true of the old layout as
+           well, because the old left-hand item was the frozen time. So
+           the identity of each item is checked first, and only then its
+           margin. */
+        TEST_ASSERT_EQUAL_INT_MESSAGE(0, strncmp(text[0], "Chores", 6), "the line's left-hand item is not the prompt");
+        TEST_ASSERT_EQUAL_INT_MESSAGE(0, strncmp(text[1], "Screen ", 7),
+                                      "the line's right-hand item is not the frozen screen time");
+        TEST_ASSERT_EQUAL_INT_MESSAGE(4, left[0], "the chore prompt is not at the line's left margin");
+        TEST_ASSERT_EQUAL_INT_MESSAGE(HOR - 4, right[1], "the frozen screen time is not at the line's right margin");
+        char msg[128];
+        snprintf(msg, sizeof(msg), "'%s' ends at x=%d and '%s' starts at x=%d - they touch", text[0], (int)right[0],
+                 text[1], (int)left[1]);
+        TEST_ASSERT_TRUE_MESSAGE(right[0] < left[1], msg);
+    }
 }
 
-/* WHICH FIELD the prompt is fed. chore_count and chore_outstanding are
-   adjacent bytes of the same block and every golden fixture here happens
-   to be rendered at a count of 3, so handing the formatter the count
-   instead of the outstanding figure produces a screen that is wrong on
-   every day but a fresh one — and a mutant that does exactly that is
-   caught only by a pixel compare. This pins the choice as a property:
-   two states differing in NOTHING but chore_outstanding must say
-   different things. Under the count-for-outstanding swap both renders
-   read "3 chores left" and this fails. */
-void test_the_break_chore_prompt_follows_the_outstanding_count(void) {
+/* WHICH FIELD the prompt is fed, and WHICH WAY the fraction runs. Both
+   mutants produce a figure that is in range and a screen that looks
+   entirely plausible, so only an exact string catches either.
+
+   chore_acked and chore_outstanding are neighbouring bytes of the same
+   block, and at a count of 3 the obvious fixtures hide the difference:
+   acked 0x01 has one bit set and an outstanding of 2 also has one bit
+   set, so a painter reading the wrong field renders the same "1" and
+   nothing fails. 0x03 against an outstanding of 1 is the case that
+   separates them — two bits against one — which is why this pins that
+   state and not a tidier-looking one.
+
+   The direction is pinned by the pair: a formatter counting what is LEFT
+   rather than what is DONE swaps these two strings over, so each render
+   kills the reversal the other would accept. */
+void test_the_break_chore_prompt_counts_what_is_done(void) {
     char first[32];
     int32_t left[4], right[4];
     const char *text[4];
 
-    display_state_t st = break_chore_state(3, 2);
+    /* 3 configured, 1 outstanding -> acked 0x03, two rows done. */
+    display_state_t st = break_chore_state(3, 1);
     st.swap_next_name = "Piano";
     display_screens_build_break(&st);
     TEST_ASSERT_EQUAL_INT_MESSAGE(2, break_chore_line(left, right, text, 4), "the chore line is not drawn");
+    TEST_ASSERT_EQUAL_STRING_MESSAGE("Chores 2 of 3", text[0],
+                                     "the prompt at 2 done of 3 is wrong - it is reading the outstanding count, or "
+                                     "counting what is left rather than what is done");
     /* Copied because the next build deletes the label that owns it. */
-    snprintf(first, sizeof(first), "%s", text[1]);
+    snprintf(first, sizeof(first), "%s", text[0]);
 
-    st.chore_outstanding = 3;
+    /* The same list one ack earlier. Only the ack bits move. */
+    st = break_chore_state(3, 2);
+    st.swap_next_name = "Piano";
     display_screens_build_break(&st);
     TEST_ASSERT_EQUAL_INT_MESSAGE(2, break_chore_line(left, right, text, 4), "the chore line is not drawn");
-    TEST_ASSERT_TRUE_MESSAGE(strcmp(first, text[1]) != 0,
-                             "the chore prompt says the same thing at 2 outstanding as at 3 - it is reading the "
-                             "list's size, not what is left to do");
+    TEST_ASSERT_EQUAL_STRING_MESSAGE("Chores 1 of 3", text[0], "the prompt at 1 done of 3 is wrong");
+    TEST_ASSERT_TRUE_MESSAGE(strcmp(first, text[0]) != 0,
+                             "the chore prompt says the same thing at 1 done as at 2 - it is reading the list's "
+                             "size, not how much of it is finished");
+}
+
+/* THE TICK IS THE CHECKLIST'S OWN GLYPH, held by an assertion rather than
+   by the comment on DISPLAY_CHORE_TICK. That macro spells U+F00C as raw
+   UTF-8 because display_layout.c is a pure formatter with no LVGL and
+   test_display links none either — so this suite, which links both, is
+   the only place the two spellings can be compared. Without this a font
+   or symbol-table upgrade that moved the codepoint would paint a box on
+   the glass with every other test still green.
+
+   It also pins the tick's PLACEMENT end to end, and the reason it goes
+   last: the word "Chores" must not move when the list is finished,
+   because a word that shifts on e-ink reads as churn. The two renders
+   differ in nothing but the ack bits, so the left edge holding still is
+   the property itself and not a restatement of the margin anchor. */
+void test_the_break_chore_tick_matches_the_checklist_glyph(void) {
+    TEST_ASSERT_EQUAL_STRING_MESSAGE(LV_SYMBOL_OK, DISPLAY_CHORE_TICK,
+                                     "DISPLAY_CHORE_TICK is no longer the glyph the checklist rows draw");
+
+    int32_t left[4], right[4];
+    const char *text[4];
+
+    display_state_t st = break_chore_state(3, 1);
+    st.swap_next_name = "Piano";
+    display_screens_build_break(&st);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(2, break_chore_line(left, right, text, 4), "the chore line is not drawn");
+    const int32_t unfinished_left = left[0];
+
+    st = break_chore_state(3, 0);
+    st.swap_next_name = "Piano";
+    display_screens_build_break(&st);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(2, break_chore_line(left, right, text, 4), "the chore line is not drawn");
+    TEST_ASSERT_EQUAL_STRING_MESSAGE("Chores " LV_SYMBOL_OK, text[0],
+                                     "the finished prompt is not the word then the tick - a leading tick is the same "
+                                     "glyphs in the order that moves the word");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(unfinished_left, left[0], "'Chores' moves sideways when the list is finished");
 }
 
 /* A LIST OF ONE, which is the boundary the display-side gate is written
@@ -582,8 +675,11 @@ void test_the_break_chore_prompt_follows_the_outstanding_count(void) {
    question is the GATE, not the pixels, and the pixels at count 1 differ
    from count 3 only in the prompt's wording.
 
-   It is also the only place the singular prompt is rendered end to end
-   rather than unit-tested on the formatter. */
+   It is also the only place a denominator other than 3 is rendered end
+   to end rather than unit-tested on the formatter: "Chores 0 of 1" is
+   the whole of what a one-chore family sees, and a prompt that hard-coded
+   CHORE_MAX as its denominator would read "0 of 3" beside a checklist
+   with one row on it. */
 void test_a_single_chore_still_earns_the_break_screen_layout(void) {
     display_state_t st = break_chore_state(1, 1);
     st.swap_next_name = "Piano";
@@ -597,7 +693,8 @@ void test_a_single_chore_still_earns_the_break_screen_layout(void) {
     int32_t left[4], right[4];
     const char *text[4];
     TEST_ASSERT_EQUAL_INT_MESSAGE(2, break_chore_line(left, right, text, 4), "one chore draws no chore line");
-    TEST_ASSERT_EQUAL_STRING_MESSAGE("1 chore left", text[1], "the singular prompt never reaches the glass");
+    TEST_ASSERT_EQUAL_STRING_MESSAGE("Chores 0 of 1", text[0],
+                                     "a one-chore list is not counted against its own length");
 
     int32_t row_left[8], row_right[8];
     const char *row_text[8];
@@ -1831,7 +1928,8 @@ int main(void) {
     RUN_TEST(test_the_break_chore_row_fits_its_cells);
     RUN_TEST(test_the_break_row_without_a_swap_keeps_its_chore_cell);
     RUN_TEST(test_the_break_chore_line_items_never_meet);
-    RUN_TEST(test_the_break_chore_prompt_follows_the_outstanding_count);
+    RUN_TEST(test_the_break_chore_prompt_counts_what_is_done);
+    RUN_TEST(test_the_break_chore_tick_matches_the_checklist_glyph);
     RUN_TEST(test_a_single_chore_still_earns_the_break_screen_layout);
     RUN_TEST(test_the_break_screen_offers_chores_exactly_when_the_list_is_non_empty);
     RUN_TEST(test_main_low_battery_warn_badge);
