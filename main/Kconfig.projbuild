@@ -249,6 +249,34 @@ menu "MagTag Timer"
             feedback, final-countdown binary display). Alert pulses (expiry
             red, break cyan) are NOT scaled — they accompany alarms.
 
+    config MAGTAG_STATUS_LED_ACK_HOLD_MS
+        int "NeoPixel ack hold / chore-ack coalescing window (ms)"
+        default 250
+        range 0 3000
+        help
+            ONE figure with two jobs, and it is here because both want
+            sweeping on a board rather than guessing in prose.
+
+            First, the PRE-PRESS HOLD: how long the old colour stays up
+            before the pixel that acknowledges a press changes. The
+            acknowledgement is the transition, so there has to be a frame
+            of the old state for the new one to be a change from. Shared
+            by Button B's start/resume and the chore ack, which are the
+            same gesture read by the same person.
+
+            Second, the CHORE-ACK COALESCING WINDOW: how long the panel
+            refresh is held open after a chore ack, polling for the next
+            one, so two or three boxes ticked in one go land in a single
+            ~1.9 s refresh with every flip immediate. Raise this if a
+            child cannot get the second press in before the screen starts
+            redrawing; that is the figure this knob exists for.
+
+            The two pull in opposite directions — a longer window gives
+            more clicking time, a longer hold puts more dead time in front
+            of the first ack — so if a board says they want different
+            values, status_led.h's STATUS_LED_ACK_HOLD_MS is the one line
+            to split into two.
+
     config MAGTAG_QUIET_START_HHMM
         int "NeoPixel quiet hours start (HHMM, 24h)"
         default 2230

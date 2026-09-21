@@ -36,7 +36,7 @@ void neopixel_stop_sync(uint32_t timeout_ms);
 /* Library configuration, injected from main so the module stays clock- and
    Kconfig-agnostic. */
 void neopixel_set_quiet_cb(bool (*is_quiet)(void));
-void neopixel_set_status_brightness(uint8_t pct); /* 0-100 scale, status class only */
+void neopixel_set_status_brightness(uint8_t pct); /* 0-100 scale; every non-pulse paint */
 
 /* STATUS class — silently no-ops while the quiet callback returns true;
    colours are scaled by the status brightness. */
@@ -44,7 +44,11 @@ void neopixel_status_pixel(int idx, uint8_t r, uint8_t g, uint8_t b);
 /* 4-bit binary display: pixel 0 (over button A) = bit3 ... pixel 3 = bit0. */
 void neopixel_status_binary4(uint8_t value, uint8_t r, uint8_t g, uint8_t b);
 
-/* HIGHPRI class — ignores quiet hours (accompanies audible alarms). */
+/* HIGHPRI class — ignores quiet hours, and ONLY quiet hours: the status
+   brightness still applies, because that is the user's dimmer rather than a
+   schedule. For a paint whose absence would leave a deliberate press with no
+   feedback at all (the chore checklist's strip, design §2.5) or which
+   accompanies an audible alarm. */
 void neopixel_highpri_pixel(int idx, uint8_t r, uint8_t g, uint8_t b);
 /* Slow pulse on all pixels, run inside the LED task. begin/end are posts:
    end clears every pixel and drops the gate (callers re-light what they

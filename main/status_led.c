@@ -92,11 +92,38 @@ void chores_led_show(uint8_t mask, uint8_t n, bool released) {
        four other claimants (NP_STATE_PIXEL above, net_window.c's pixel 3,
        and the two strip-wide ones listed in status_led.h — the countdown's
        binary4 and the alert pulse), any of which may have left colours
-       standing, so a skipped pixel is a stale one. See the caller contract
-       in status_led.h — especially the network window and the expiry
-       alarm, either of which can still repaint over this after it
-       returns. */
+       standing, so a skipped pixel is a stale one.
+       Of those four, three can no longer repaint over this AFTER it
+       returns — the timer pixel and the sync pixel are both stood down for
+       the wake (status_led.h's caller contract, items 2 and 3), and the
+       countdown cannot paint a screen the checklist is on because
+       display_screen_for() answers MAIN for a RUNNING timer, whatever the
+       mode byte says (display_layout.c: `timer_state != TIMER_RUNNING`).
+       THAT ONE LINE IS THE WHOLE GUARANTEE, and it is stated that way
+       because the version of this comment that said "the countdown needs a
+       RUNNING timer chore mode does not reach" was FALSE: chore mode
+       reaches RUNNING freely — the mode byte and the timer state are
+       independent, and button_actions.c gates an ack without consulting
+       the state at all. What chore mode cannot do is be the SCREEN while a
+       timer runs, which is a different claim, in one file, checkable.
+       The alert pulse still can repaint over this, which is why item 4
+       makes repainting after an alarm the caller's job rather than
+       something this function could defend against.
+
+       HIGHPRI CLASS, AND IT IS THE ONLY HIGHPRI PAINT IN THE TREE. Design
+       §2.5 deliberately stopped making the panel the ack channel, so these
+       four pixels are the ONLY feedback a press gets for the ~1.9 s the
+       partial takes. Status class drops every post while the quiet-hours
+       callback is true, which made a night-time ack produce nothing at
+       all: no pixel, no panel, no sound. Quiet hours exist for a sleeping
+       house; a checklist ack is a deliberate press by somebody awake and
+       standing at the device, which is not what the mute was written for.
+       Nothing else moves class — status_led_show_timer_state() above and
+       net_window.c's sync pixel are both still STATUS, because both of
+       those really are ambient and really should go dark at night.
+       NP_MSG_PIXEL_HI still applies the brightness scale (neopixel.c), so
+       this bypasses the MUTE and not the user's dimmer. */
     for (int p = 0; p < NEOPIXEL_COUNT; p++) {
-        neopixel_status_pixel(p, t.px[p].r, t.px[p].g, t.px[p].b);
+        neopixel_highpri_pixel(p, t.px[p].r, t.px[p].g, t.px[p].b);
     }
 }

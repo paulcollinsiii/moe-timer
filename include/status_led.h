@@ -32,8 +32,15 @@ extern "C" {
                    display DISPLACES both single-pixel owners above for
                    as long as the checklist is the screen. That
                    displacement is intended — on the checklist the pixels
-                   are the ack feedback — but its WiFi half still needs a
-                   mechanism; see the caller contract on chores_led_show().
+                   are the ack feedback. Both halves have a mechanism now
+                   (M2-T8): the timer pixel via wake_flow.c's single
+                   status-paint wrapper, the WiFi pixel via
+                   net_window_claim_leds(). Items 2 and 3 of the caller
+                   contract on chores_led_show() carry both.
+                   ONLY ON A BUTTON WAKE, though: row C17 keeps the strip
+                   dark on an unattended wake that happens to paint the
+                   chore screen, and there both single-pixel owners keep
+                   their pixels exactly as they do in any other mode.
 
    STRIP-WIDE, and NOT mode-scoped — either can overwrite a chore row or
    the timer pixel without going through either owner above:
@@ -50,12 +57,90 @@ extern "C" {
                                 whatever was painted before an alarm is
                                 gone after it.
 
-   The alarm one is a live collision for the chore screen, not a
-   theoretical one: an expiry alarm firing while the checklist is up
-   wipes the strip, and nothing repaints it. It belongs to T8/M2-HW2 the
-   same way the net_window collision does — recorded here so it is not
-   missed merely because the contract below spells out only net_window. */
+   The alarm one was a live collision for the chore screen, not a
+   theoretical one, and M2-T8 closed it: an expiry alarm firing while the
+   checklist is up still wipes the strip, and wake_flow_fire_expiry_alert()
+   now repaints it afterwards. See item 4 of the caller contract below for
+   how it is reached and why the BREAK alarm deliberately gets no such
+   repair.
+
+   The binary4 countdown has NO such repair and is the one strip-wide
+   claimant M2-T8 left alone. It is entered only from wake_flow's
+   final-minute watch, which runs only while timer_get_state() ==
+   TIMER_RUNNING — and a RUNNING timer is never the checklist's screen,
+   because display_screen_for() answers MAIN for one whatever the mode byte
+   says (display_layout.c: `timer_state != TIMER_RUNNING`).
+
+   THAT ONE LINE, IN THAT ONE FILE, IS THE WHOLE GUARANTEE. An earlier
+   version of this note argued it from four facts instead — "no press
+   reaches a chore-mode RUNNING today: B's start is rebound, C no longer
+   swaps, the join poll is guarded, and HA cannot start a timer" — and that
+   argument was FALSE as well as fragile. All four are about how a timer
+   STARTS; none of them covers a timer that was ALREADY RUNNING when chore
+   mode was entered, which needs no press at all. Chore mode reaches
+   RUNNING freely: the mode byte and the timer state are independent, and
+   button_actions.c gates an ack with no timer-state term. What it cannot
+   do is be the SCREEN while a timer runs. Prefer the single-line
+   guarantee; a reachability argument dressed up as one is worse than
+   either, because it reads as settled.
+
+   If that line moves, the countdown will paint over the checklist and
+   nothing here will notice — it does not go through wake_flow's
+   status-paint wrapper, because it is not a status paint. */
 #define NP_STATE_PIXEL 0
+
+/* How long a PRE-PRESS colour is held before the pixel that acknowledges
+   the press changes. The acknowledgement is the TRANSITION, not the
+   destination colour, so there has to be a frame of the old state for the
+   new one to be a change from — repaint with no hold and a user sees one
+   colour appear, which is indistinguishable from a device that was
+   already showing it.
+
+   ONE constant for two call sites, which is the whole reason it is here
+   rather than a literal at either: Button B's start/resume (wake_flow.c)
+   and the chore ack (design §2.5) are the same gesture — hold the old
+   colour, then change it — read by the same person on the same device.
+   Two figures for that would be an inconsistency nobody could interpret,
+   and nothing but a shared constant and a test across both paths stops
+   them drifting.
+
+   250 AND NOT DESIGN §2.5's "~400 ms", deliberately. Three reasons, in
+   the order they weighed:
+     - 250 is the figure that has actually been watched on a board. It has
+       been in the tree since Button B's start path was written and is the
+       only one of the two anybody has seen work. ~400 is an estimate in
+       prose that no measurement stands behind.
+     - §2.5's own thesis is that the pixels are the FAST channel, there to
+       cover the panel's ~1.9 s partial. 150 ms more of deliberate nothing
+       in front of the ack spends the latency the section exists to
+       remove, and spends it on the one press a child is waiting on.
+     - 250 ms is already this device's poll quantum (the break tail and
+       the final-minute countdown both spin at it), so the hold costs at
+       most one extra pass of a loop that was going to run anyway.
+   If a board says 250 reads as instant rather than as a change, this is
+   the one line to move and both paths move with it.
+
+   SO IT IS A MENUCONFIG KNOB, because that is the only way a board can
+   say so: CONFIG_MAGTAG_STATUS_LED_ACK_HOLD_MS, default 250, so the
+   shipped figure is unchanged and a sweep is a rebuild rather than a
+   patch. The host build has no sdkconfig.h, so it takes the literal — the
+   same #ifdef shape nvs_defaults.h uses for every other Kconfig-backed
+   constant, and for the same reason: the tests must not need a generated
+   header to compile.
+
+   THE HOLD IS ALSO THE COALESCING WINDOW (wake_flow.c's ack drain): after
+   an ack the panel work is held open for this long, polling for the next
+   press, so two or three boxes ticked in one go land in ONE refresh with
+   every flip immediate. That is deliberately one figure and not two, but
+   the two halves pull in OPPOSITE directions — a longer window buys
+   clicking time, a longer hold spends the latency §2.5 exists to remove —
+   so a board that wants them apart splits this line, and the Kconfig help
+   says so. */
+#ifdef CONFIG_MAGTAG_STATUS_LED_ACK_HOLD_MS
+#define STATUS_LED_ACK_HOLD_MS CONFIG_MAGTAG_STATUS_LED_ACK_HOLD_MS
+#else
+#define STATUS_LED_ACK_HOLD_MS 250
+#endif
 
 typedef struct {
     uint8_t r;
@@ -110,9 +195,9 @@ typedef struct {
    that does not exist. With n == 0 the whole strip is dark, the gate
    included — nothing is withheld, so neither colour would be true (C1).
 
-   Pure: no clock, no NVS, no globals, no GPIO. T8 needs that, because the
-   first frame it paints is the PRE-press state, which by then disagrees
-   with the live one.
+   Pure: no clock, no NVS, no globals, no GPIO. The ack sequencing needs
+   that, because the first frame painted on a button wake is the PRE-press
+   state, which by then disagrees with the live one.
 
    SIGNATURE DRIFT: design §2.5 still writes this as chores_led_for(mask,
    n), two arguments. The DOC is stale, not the code — `released` is a
@@ -124,68 +209,126 @@ chores_led_t chores_led_for(uint8_t mask, uint8_t n, bool released);
 /* Paint chores_led_for()'s four pixels over neopixel.c. Status class, so
    quiet hours and brightness are handled inside that module.
 
-   CALLER CONTRACT — three things this function cannot enforce:
+   CALLER CONTRACT — three things this function cannot enforce. The sole
+   caller today is wake_flow.c, which honours all three; each entry names
+   where, so a second caller knows what it is taking on:
 
    1. BUTTON WAKES ONLY (design §2.5, "Power discipline"). An unattended
       tick or NTP wake that happens to paint the chore screen must leave
       the pixels dark, or chore mode lights four LEDs every 55 s for
       nobody. This function paints whenever it is called; the wake cause
       is the caller's to check.
+      HONOURED BY wake_flow.c's s_chore_strip_lit, which is set in exactly
+      one place — the EXT1 button-wake decode — and never on a tick wake,
+      including one that drains a latched ack out of a previous wake's
+      tail (test_t8_a_latched_ack_on_a_tick_wake_leaves_the_strip_dark).
 
    2. NOT ALONGSIDE status_led_show_timer_state(). Both write pixel 0.
       The chore strip's gate lands there, so a timer paint in the same
       wake turns the gate into a timer colour, or vice versa.
+      HONOURED BY wake_flow_show_status_leds(), which is the ONLY caller
+      of status_led_show_timer_state() in that file — an invariant a reader
+      can check by grep, and which scripts/check-status-led-wrapper.py
+      checks by grep on every commit, because "a reader can check it" is
+      not the same as anything checking it: ten of the twelve call sites
+      that wrapper replaced turned out to be unpinned by any test — and
+      which repaints the checklist instead on any wake that claimed the
+      strip
+      (test_t8_a_chore_mode_wake_never_paints_a_timer_colour_over_the_gate).
 
-   3. A NETWORK WINDOW WILL CORRUPT THIS — M2-T8 OWNS THE FIX.
-      With CONFIG_MAGTAG_SYNC_LED_FEEDBACK=y (the default, and the current
-      sdkconfig) net_window.c writes pixel 3 from its own task at window
-      open, at the NTP result, and again at net_window_join(), where it
-      sets that pixel to 0,0,0. Pixel 3 is a chore row under the mapping
-      in status_led.c, and the corrupted colours are not merely wrong,
-      they are CONVINCING: net_window.c's NTP-success triple is (0,20,0),
-      the same three bytes as this module's CHORES_LED_DONE. A sync that
-      lands while the checklist is up therefore paints a chore row a
-      PERFECT green — a silent false ack, a row reading as done that
+   3. A NETWORK WINDOW WILL CORRUPT THIS unless the caller stands the
+      sync pixel down first. With CONFIG_MAGTAG_SYNC_LED_FEEDBACK=y (the
+      default, and the current sdkconfig) net_window.c writes pixel 3 at
+      window open, at the NTP result, and again at net_window_join(),
+      where it sets that pixel to 0,0,0. Pixel 3 is a chore row under the
+      mapping in status_led.c, and the corrupted colours are not merely
+      wrong, they are CONVINCING: net_window.c's NTP-success triple is
+      (0,20,0), the same three bytes as this module's CHORES_LED_DONE. A
+      sync landing while the checklist is up therefore paints a chore row
+      a PERFECT green — a silent false ack, a row reading as done that
       nobody did, with nothing on the screen to contradict it. That is
-      the worst of the three and the one to size the risk by. The
-      failure triple (30,0,0) is likewise a near-match for the (25,0,0)
-      red. The window-open blue (0,0,20) and the join's dark are the mild
-      cases: dark reads as "not a configured chore", which is wrong but
-      at least reads as anomalous.
+      the worst of the four and the one to size the risk by. The failure
+      triple (30,0,0) is likewise a near-match for the (25,0,0) red. The
+      window-open blue (0,0,20) and the join's dark are the mild cases:
+      dark reads as "not a configured chore", which is wrong but at least
+      reads as anomalous.
+      HONOURED BY net_window_claim_leds(), which suppresses all four
+      writes at the source for the rest of the wake. M2-T8 chose
+      suppression over a repaint after the join because the false green
+      is written by net_window_wait_ntp() and the caller then spends the
+      whole ~1.9 s panel partial before it could repaint — exactly the
+      stretch the user is looking at the pixels. The reachable route is
+      the DAY ROLLOVER, which opens a window from inside the button
+      handler's own prologue, so the claim is made above it
+      (test_t8_the_checklist_claims_the_sync_pixel_before_the_rollover_opens_a_window).
+      Timer modes keep their sync pixel: there it is how the user knows
+      the device is awake and working, and nothing else claims the strip.
 
-      The DIRECTION is settled and is not T8's to re-litigate: in chore
-      mode the chore display owns the whole strip, so T8 must SUPPRESS OR
-      RELOCATE net_window's pixel feedback for chore-mode wakes, rather
-      than weaken the chore paint around it. Timer modes keep their sync
-      pixel — there it is how the user knows the device is awake and
-      working; on the checklist that is obvious without it.
+   AND ONE THE CALLER MUST REPAIR RATHER THAN PREVENT:
 
-      The MECHANISM is T8's to pick, because T8 owns the call site that
-      can test the choice. Candidates, none of them decided here: gate
-      net_window.c's writes on a chore-mode flag; repaint the strip after
-      net_window_join() returns; hold the window until the checklist is
-      torn down; or move the sync feedback to a pixel the checklist does
-      not own — noting that in chore mode there is no such pixel, all
-      four are claimed, so that option means giving up a chore row.
+   4. AN ALARM WIPES THIS AND DOES NOT PUT IT BACK.
+      neopixel_alert_pulse_*() owns every pixel while it runs and its
+      _end() clears all four and drops the power gate (neopixel.h), so
+      whatever was painted before an alarm is gone after it. It is
+      reachable on a chore-mode wake: a config edit arriving in the
+      window can move the active slot to EXPIRED under the press, and
+      wake_policy_render answers EXPIRY_ALERT for any transition INTO
+      expired, not only from RUNNING. The expiry alert then RETURNS and
+      the wake carries on, so the checklist would sit on the glass with a
+      dead strip under it until sleep.
+      REPAIRED BY wake_flow_fire_expiry_alert(), which repaints the strip
+      after the alarm when the strip is its to repaint
+      (test_t8_an_expiry_alarm_repaints_the_strip_it_wiped). The BREAK
+      alarm deliberately does not: that path goes straight to sleep, and
+      relighting the strip for the length of an MQTT join would be a
+      battery cost with nobody left to read it.
 
-   NOTED HAZARDS — carried, deliberately not solved here. Both are policy
-   or sizing questions for T8/design, and T7 takes no position on either:
+   NOTED HAZARDS. The first was a policy question and now has an answer;
+   the second is carried, and is sized here so the next person does not
+   have to re-derive it:
 
-   * QUIET HOURS REMOVE THE ONLY ACK FEEDBACK. Status class means
-     neopixel.c drops every post while the quiet callback returns true
-     (status_muted()), so all four posts below become no-ops. Design §2.5
+   * QUIET HOURS USED TO REMOVE THE ONLY ACK FEEDBACK — SETTLED, and the
+     answer is HIGHPRI. Status class means neopixel.c drops every post
+     while the quiet callback returns true (status_muted()). Design §2.5
      made these pixels the ONLY ack feedback — it deliberately stopped
      making the panel the feedback channel — so during quiet hours an ack
-     produces NO feedback at all until the ~1.9 s panel partial catches
-     up. Whether that is acceptable, or whether a chore ack should be
-     HIGHPRI class like the alarm is, has not been decided.
+     produced no feedback at ALL: no pixel, no panel for ~1.9 s, no sound.
+     The user chose to let acks through the mute, so this function posts
+     HIGHPRI class (status_led.c says it at the loop). Quiet hours are for
+     a sleeping house; a checklist ack is a deliberate press by somebody
+     awake and standing at the device, which is not what the mute was
+     written for. It bypasses the MUTE and not the DIMMER — HIGHPRI still
+     takes the status brightness percent (neopixel.c) — and nothing else
+     moved class: the timer state pixel and net_window's sync pixel are
+     genuinely ambient and still go dark at night.
 
    * THE LED QUEUE CAN SWALLOW A PIXEL. The queue is 8 deep and this
      function bursts four posts with a zero timeout; a queue already
      carrying other traffic drops the overflow with only an ESP_LOGW.
-     That leaves exactly the half-painted strip the write-every-pixel
-     rule below exists to prevent. Not observed — but the depth was
-     sized for one alert sequence, not for a four-post burst behind it. */
+
+     BURSTS PAST THE DEPTH ARE REACHABLE TODAY, which is the correction an
+     earlier version of this note needed: it credited
+     STATUS_LED_ACK_HOLD_MS with separating the frames and concluded that
+     only "a FUTURE caller that paints twice with nothing in between" could
+     reach eight. A SECOND ack pays no hold at all (§2.5 clause 4), so that
+     caller already existed on the break tail — the dispatch's flip and the
+     poll's own status paint are adjacent — and wake_flow.c's coalescing
+     drain can now apply two or three latched acks in one pass, which is 8
+     or 12 posts with nothing between them. The LED task's priority (5,
+     above the main task) does not save it either: the task preempts on the
+     first post, but flush_pixels() then blocks in
+     rmt_tx_wait_all_done(portMAX_DELAY), and the main task can issue the
+     rest of the burst inside one ~200 us flush.
+
+     WHAT ACTUALLY KEEPS THE OUTCOME CORRECT is the write-every-pixel rule
+     below, plus one ordering fact: every frame carries ALL FOUR pixels
+     computed from the LIVE state, so a dropped post is never a MISSING
+     update — only a stale one — and the next frame of the wake repairs it
+     wholesale. Every ack burst in wake_flow.c is followed, within
+     milliseconds and before any panel work, by that file's own status
+     paint (an ADC read and two NVS reads later), which repaints the whole
+     strip from the state the acks left. THAT is the property to preserve:
+     an ack burst must never be the LAST strip paint of a wake. */
 void chores_led_show(uint8_t mask, uint8_t n, bool released);
 
 #ifdef __cplusplus

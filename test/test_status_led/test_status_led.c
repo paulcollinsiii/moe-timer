@@ -29,7 +29,18 @@ static uint8_t stub_pixel_r, stub_pixel_g, stub_pixel_b;
 static int stub_seen_idx[MAX_RECORDED];
 static uint8_t stub_seen_r[MAX_RECORDED], stub_seen_g[MAX_RECORDED], stub_seen_b[MAX_RECORDED];
 
-void neopixel_status_pixel(int idx, uint8_t r, uint8_t g, uint8_t b) {
+/* The CLASS each write went out as, counted separately. Both classes record
+   into the arrays above, so every colour and mapping assertion in this file
+   is class-agnostic and keeps meaning what it meant; these two are what let
+   a case ask the one question the colours cannot answer — whether quiet
+   hours can silence the write. STATUS is dropped while the quiet callback
+   is true and HIGHPRI is not (neopixel.h), and for the chore strip that is
+   the difference between a night-time ack showing something and showing
+   nothing at all. */
+static int stub_status_calls;
+static int stub_hi_calls;
+
+static void stub_record(int idx, uint8_t r, uint8_t g, uint8_t b) {
     if (stub_pixel_calls < MAX_RECORDED) {
         stub_seen_idx[stub_pixel_calls] = idx;
         stub_seen_r[stub_pixel_calls] = r;
@@ -43,6 +54,16 @@ void neopixel_status_pixel(int idx, uint8_t r, uint8_t g, uint8_t b) {
     stub_pixel_b = b;
 }
 
+void neopixel_status_pixel(int idx, uint8_t r, uint8_t g, uint8_t b) {
+    stub_status_calls++;
+    stub_record(idx, r, g, b);
+}
+
+void neopixel_highpri_pixel(int idx, uint8_t r, uint8_t g, uint8_t b) {
+    stub_hi_calls++;
+    stub_record(idx, r, g, b);
+}
+
 static timer_state_t stub_state;
 static int stub_state_reads;
 
@@ -53,6 +74,8 @@ timer_state_t timer_get_state(void) {
 
 void setUp(void) {
     stub_pixel_calls = 0;
+    stub_status_calls = 0;
+    stub_hi_calls = 0;
     stub_pixel_idx = -1;
     stub_pixel_r = stub_pixel_g = stub_pixel_b = 0xFF;
     stub_state = TIMER_IDLE;
@@ -421,6 +444,30 @@ void test_the_painter_reads_no_timer_state(void) {
     TEST_ASSERT_EQUAL_INT(0, stub_state_reads);
 }
 
+/* Quiet hours would otherwise remove the ONLY acknowledgement a press gets.
+   Design §2.5 stopped making the panel the ack channel on purpose, so
+   during the mute a status-class strip means a child presses a button and
+   nothing happens anywhere for ~1.9 s. The user's decision was to let acks
+   through the mute, and HIGHPRI is how neopixel.c spells that — so the
+   class is the behaviour and belongs in a test, not in a comment. */
+void test_the_chore_strip_is_highpri_so_quiet_hours_cannot_silence_an_ack(void) {
+    chores_led_show(0x01, 3, false);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(NEOPIXEL_COUNT, stub_hi_calls,
+                                  "the chore strip is status class: quiet hours silence every ack");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(0, stub_status_calls, "part of the chore strip is still status class");
+}
+
+/* And nothing else came with it. The promotion is the CHECKLIST's, not the
+   strip's: the timer state pixel is ambient — it says "the device is awake
+   and counting" — and is exactly what quiet hours are for. net_window.c's
+   sync pixel is the same kind of thing and is left alone in that file. */
+void test_the_timer_state_pixel_stays_status_class(void) {
+    stub_state = TIMER_RUNNING;
+    status_led_show_timer_state();
+    TEST_ASSERT_EQUAL_INT_MESSAGE(1, stub_status_calls, "the timer state pixel is no longer status class");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(0, stub_hi_calls, "the timer state pixel was promoted past quiet hours");
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_running_is_green);
@@ -455,5 +502,7 @@ int main(void) {
     RUN_TEST(test_the_painter_paints_what_the_table_says);
     RUN_TEST(test_the_painter_writes_a_spare_row_dark_rather_than_skipping_it);
     RUN_TEST(test_the_painter_reads_no_timer_state);
+    RUN_TEST(test_the_chore_strip_is_highpri_so_quiet_hours_cannot_silence_an_ack);
+    RUN_TEST(test_the_timer_state_pixel_stays_status_class);
     return UNITY_END();
 }

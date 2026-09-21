@@ -28,14 +28,44 @@ static const char *TAG = "net_window";
    can be read at once. That holds in every mode BUT the chore checklist,
    which claims all four pixels and makes this one a chore row
    (status_led.h). A network window opened on a button wake can therefore
-   repaint a chore row. The dark write in net_window_join() below reads on
-   that screen as "not a configured chore"; worse, the NTP-success triple
-   below is (0,20,0), byte-identical to the checklist's "done" green, so a
-   successful sync paints a convincing FALSE ACK. M2-T8 owns the fix, and
-   the direction is settled — chore mode owns the whole strip, so these
-   writes get suppressed or relocated for chore-mode wakes, not the other
-   way round. See the caller contract on chores_led_show(). */
+   repaint a chore row, and the NTP-success triple below is (0,20,0),
+   byte-identical to the checklist's "done" green — a convincing FALSE
+   ACK. net_window_claim_leds() is the fix and its header carries the
+   whole of the argument; every write below goes through wifi_pixel(). */
 #define NP_WIFI_PIXEL 3
+
+/* Set once by net_window_claim_leds(), never cleared: see the header for
+   why there is no release. Plain bool with no barrier because both the
+   write and every read below are on the MAIN task — the four call sites
+   are net_window_spawn(), net_window_wait_ntp() and net_window_join(),
+   none of which is net_window_task(). The window task does not touch the
+   pixels at all (net_window.h's "the task owns the radio and NOTHING
+   else"), which is what makes that true and is the reason to keep it
+   true. */
+static bool s_leds_claimed;
+
+/* THE ONLY writer of NP_WIFI_PIXEL in this module. Four call sites
+   collapsed into one so the claim cannot be honoured at three of them and
+   missed at the fourth — which is the shape this bug would come back in.
+   The CONFIG_MAGTAG_SYNC_LED_FEEDBACK fence moved in here with them, so
+   adding a fifth write is adding a call to this and nothing else.
+   Status class: quiet hours and brightness are handled inside
+   neopixel.c. */
+static void wifi_pixel(uint8_t r, uint8_t g, uint8_t b) {
+#if CONFIG_MAGTAG_SYNC_LED_FEEDBACK
+    if (s_leds_claimed)
+        return;
+    neopixel_status_pixel(NP_WIFI_PIXEL, r, g, b);
+#else
+    (void)r;
+    (void)g;
+    (void)b;
+#endif
+}
+
+void net_window_claim_leds(void) {
+    s_leds_claimed = true;
+}
 
 static SemaphoreHandle_t s_ntp_settled; /* (a) sync resolved — paint may go, MQTT still ahead */
 static SemaphoreHandle_t s_window_done; /* (b) radio down, results buffered */
@@ -192,15 +222,10 @@ bool net_window_spawn(void) {
     s_ntp_result = ESP_FAIL;
     s_clock_step = 0;
 
-#if CONFIG_MAGTAG_SYNC_LED_FEEDBACK
-    /* status class: quiet hours + brightness handled inside the module */
-    neopixel_status_pixel(NP_WIFI_PIXEL, 0, 0, 20); /* blue: window open */
-#endif
+    wifi_pixel(0, 0, 20); /* blue: window open */
     if (xTaskCreate(net_window_task, "net_win", 10240, NULL, 3, NULL) != pdPASS) {
         ESP_LOGE(TAG, "network task create failed - skipping window");
-#if CONFIG_MAGTAG_SYNC_LED_FEEDBACK
-        neopixel_status_pixel(NP_WIFI_PIXEL, 0, 0, 0);
-#endif
+        wifi_pixel(0, 0, 0);
         return false;
     }
     s_active = true;
@@ -220,9 +245,7 @@ bool net_window_wait_ntp(void) {
     } else {
         ESP_LOGW(TAG, "NTP sync failed: %s", esp_err_to_name(s_ntp_result));
     }
-#if CONFIG_MAGTAG_SYNC_LED_FEEDBACK
-    neopixel_status_pixel(NP_WIFI_PIXEL, ok ? 0 : 30, ok ? 20 : 0, 0);
-#endif
+    wifi_pixel(ok ? 0 : 30, ok ? 20 : 0, 0);
     return ok;
 }
 
@@ -247,9 +270,7 @@ bool net_window_join(int timeout_ms, void (*poll_cb)(void)) {
         }
     }
     s_active = false;
-#if CONFIG_MAGTAG_SYNC_LED_FEEDBACK
-    neopixel_status_pixel(NP_WIFI_PIXEL, 0, 0, 0);
-#endif
+    wifi_pixel(0, 0, 0);
     /* Sync landed after the paint's bounded wait gave up? Still record it. */
     if (xSemaphoreTake(s_ntp_settled, 0) == pdTRUE && s_ntp_result == ESP_OK) {
         timer_record_ntp_sync(time(NULL));

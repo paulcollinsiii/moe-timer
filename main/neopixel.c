@@ -274,9 +274,20 @@ static void led_task_apply(const np_msg_t *m, pulse_state_t *pulse) {
             s_pixels[m->idx * 3 + 2] = scale_status(m->b);
             break;
         case NP_MSG_PIXEL_HI:
-            s_pixels[m->idx * 3 + 0] = m->g; /* GRB byte order */
-            s_pixels[m->idx * 3 + 1] = m->r;
-            s_pixels[m->idx * 3 + 2] = m->b;
+            /* No status_muted() test — that is the whole difference between
+               this class and the one above.
+               STILL SCALED, THOUGH, and that is not an oversight either way
+               round: HIGHPRI means "quiet hours do not apply", which is what
+               neopixel.h promises and all it promises. The brightness
+               percent is the user's dimmer and applies to every non-pulse
+               paint; the Kconfig help exempts alert PULSES, which are
+               NP_MSG_PULSE and scale themselves. Live as of M2-T8's fix
+               pass, when chores_led_show() became the first caller of this
+               class: without the scale a device dimmed to 20 % would blaze
+               its chore strip at full while everything else stayed dim. */
+            s_pixels[m->idx * 3 + 0] = scale_status(m->g); /* GRB byte order */
+            s_pixels[m->idx * 3 + 1] = scale_status(m->r);
+            s_pixels[m->idx * 3 + 2] = scale_status(m->b);
             break;
         case NP_MSG_BINARY4:
             if (status_muted())

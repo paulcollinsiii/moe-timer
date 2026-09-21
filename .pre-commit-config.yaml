@@ -61,6 +61,22 @@ repos:
         files: \.(c|h)$
         exclude: ^(build/|\.pio/)
 
+  # ── The chore gate / timer pixel collision ────────────────────────────────────
+  # status_led_show_timer_state() writes NP_STATE_PIXEL, which is also the chore
+  # checklist's gate pixel, so the two painters collide. wake_flow.c funnels all
+  # twelve of its status paints through one wrapper and keeps exactly one raw
+  # call (inside that wrapper). Review reverted each site in turn and TEN of the
+  # twelve survived the whole host suite, two of them the last LED paint before
+  # sleep on a chore-reachable path. The scanner carries the reasoning.
+  - repo: local
+    hooks:
+      - id: status-led-wrapper
+        name: one status_led_show_timer_state() call in wake_flow.c
+        language: script
+        entry: scripts/check-status-led-wrapper.py
+        files: ^main/wake_flow\.c$
+        pass_filenames: false
+
   # ── Commit message format ─────────────────────────────────────────────────────
   - repo: local
     hooks:

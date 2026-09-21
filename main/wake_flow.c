@@ -11,6 +11,7 @@
 #include "button_actions.h"
 #include "button_latch.h"
 #include "buttons.h"
+#include "chore_store.h" /* chore_store_load_names(): the strip's row count */
 #include "config_cache.h"
 #include "display.h"
 #include "hal_time.h"
@@ -412,6 +413,133 @@ static bool wake_flow_chore_acked_this_wake(void) {
     return s_chore_acked;
 }
 
+/* ---- the checklist's four pixels (design §2.5) --------------------------
+
+   THE CHECKLIST HAS CLAIMED THE STRIP FOR THIS WAKE. Wake-sticky by the
+   same means as its three neighbours above — a plain static, because the
+   next wake is a fresh boot — and set in exactly ONE place: the EXT1
+   button-wake entry, while the stored mode says CHORES.
+
+   ONE PLACE IS THE WHOLE OF ROW C17. §2.5's power discipline paragraph
+   says the pixels light on a BUTTON wake and on no other, because chore
+   mode otherwise lights four LEDs every 55 seconds for nobody, on
+   battery — and that failure is invisible: the screen looks identical
+   either way and only a current meter or a flat cell ever says so. Keyed
+   on the wake CAUSE and not on the mode, so a tick wake that paints the
+   chore screen, or one that drains a latched ack out of a previous
+   wake's tail, leaves the strip dark.
+
+   NEVER CLEARED within a wake, and deliberately not when the mode moves
+   off CHORES under it (a break end reverts the byte). The flag is not
+   "the mode is chores", it is "these four pixels are showing chore
+   colours right now" — which stays true until enter_deep_sleep()'s
+   neopixel_stop_sync() darkens them, whatever the mode byte does in the
+   meantime. Clearing it early would hand pixel 0 back to the timer
+   painter with the other three still red and green. */
+static bool s_chore_strip_lit;
+
+/* Paint the strip from the LIVE chore state. Three reads, all of them
+   deliberately re-taken rather than cached across the wake: two RTC
+   bytes, and one NVS read for the row count.
+
+   NOT CACHED because the count can move under this wake — a config
+   payload arriving on the network task can empty the list mid-wake, and
+   make_display_state()'s emptied-list guard is the panel's answer to
+   that. A cached count would leave the pixels naming rows the panel had
+   just stopped drawing. The traffic argument that pays for caching
+   elsewhere in this file does not reach here: this runs on chore-mode
+   BUTTON wakes only, a handful of times on a day somebody uses the
+   feature, never on the tick wakes the whole fleet runs all day.
+
+   `names` is read and discarded — the strip is a function of the COUNT
+   and the mask, not of the text. chore_store_load_names() is the only
+   accessor for the count, and it fills the rows on the way; 63 bytes of
+   stack is cheaper than a second NVS accessor that could disagree with
+   the one the painter uses. */
+/* Is the CHECKLIST the screen right now — the painter's own answer, not a
+   restatement of its three terms.
+
+   THE ONE PLACE THAT QUESTION IS ANSWERED IN THIS FILE, and it is asked
+   rather than re-derived because the mode byte alone is not the answer and
+   reading it as though it were is what made two separate defects: the mode
+   and the timer state are INDEPENDENT (button_actions.c gates an ack on the
+   mode and the row count with no timer-state term, so acks apply while a
+   timer runs), and display_screen_for() answers MAIN for a RUNNING timer
+   whatever the mode says. Any local copy of those terms is a thing that can
+   drift out of step with the painter; this cannot.
+
+   THE MODE SHORT-CIRCUIT IS NOT A FOURTH TERM. `mode == APP_MODE_CHORES` is
+   a NECESSARY condition of display_screen_for()'s CHORES answer, so
+   answering false without asking is not a second opinion — it is the same
+   opinion, reached without the flash read. It is here because this runs on
+   every status paint on every wake, and today's whole fleet has no chore
+   list: one RTC byte instead of an NVS read, up to three times per tick
+   wake, all day, on every device. */
+static bool wake_flow_chore_screen_now(void) {
+    if (timer_mode() != APP_MODE_CHORES) {
+        return false;
+    }
+    char names[CHORE_MAX][CHORE_NAME_BUF];
+    uint8_t n = 0;
+    (void)chore_store_load_names(names, &n); /* n stays 0 on any failure: the inert default */
+    return display_screen_for(timer_get_state(), timer_mode(), n) == DISPLAY_SCREEN_CHORES;
+}
+
+static void wake_flow_paint_chore_strip(void) {
+    char names[CHORE_MAX][CHORE_NAME_BUF];
+    uint8_t n = 0;
+    (void)chore_store_load_names(names, &n); /* n stays 0 on any failure: the inert default */
+    chores_led_show(timer_chore_acked(), n, timer_chore_released());
+}
+
+/* THE ONLY CALLER of status_led_show_timer_state() in this file, and that
+   is the invariant rather than an accident of how it reads — it is
+   checkable by grep, which a list of "these sites are unreachable in
+   chore mode" arguments is not, and those arguments rot. The grep is a
+   pre-commit hook (scripts/check-status-led-wrapper.py), so the claim in
+   the sentence above is enforced rather than merely made: reverting any
+   one of the twelve call sites to a raw call fails the commit. Before that
+   hook existed ten of the twelve were unpinned — the wrapper was correct
+   and nothing would have noticed it becoming incorrect.
+
+   It exists because THE TWO PAINTERS COLLIDE ON PIXEL 0. status_led.c
+   maps the chore GATE to pixel 0, which is NP_STATE_PIXEL — the pixel
+   the timer state is painted on. status_led.h states "not alongside
+   status_led_show_timer_state()" as a contract chores_led_show() cannot
+   enforce; this is where it is enforced. On a wake the checklist has
+   claimed, every status paint repaints the checklist instead, so the
+   gate can never be overwritten with an amber or a white that means
+   nothing on that screen.
+
+   A no-op change on every wake that never claimed, which is every wake
+   on every device with no chore list — so the eleven call sites this
+   replaced behave exactly as they did.
+
+   CARRIED HAZARD, MEASURED AND NOT FIXED: on a chore screen the wake did
+   NOT claim, this still paints a timer colour into the GATE's slot. It is
+   reachable without anybody pressing anything at the time — the tick
+   handler's latched-ack drain repaints the panel and then calls this with
+   s_chore_strip_lit false, because the wake was the RTC alarm and row C17
+   forbids claiming there. status_led_for_state()'s IDLE is {10,10,10}, so
+   a white pixel sits under a checklist meaning nothing; BREAK's cyan and
+   EXPIRED's red are worse, because they mean something false.
+   THE RIGHT ANSWER IS DARK — cheaper than a paint, and C17 already wants
+   the pixels dark on a wake nobody is watching, so it trades nothing. It
+   is not done here because an early `return` when
+   wake_flow_chore_screen_now() is true removes the EV_LED that
+   test_wake_flow's flow_repaint_body_at() uses as its ONLY discriminator
+   between paint_current_state_full() (tick, assemble, flush, nothing
+   between) and render_action_result() (which puts the LED there) — 80
+   assertions read that helper, and reworking it is a task, not a line.
+   Whoever takes it should budget the harness change first. */
+static void wake_flow_show_status_leds(void) {
+    if (s_chore_strip_lit) {
+        wake_flow_paint_chore_strip();
+        return;
+    }
+    status_led_show_timer_state();
+}
+
 /* B, C or D ticking a checkbox instead of doing its timer job (design
    2.4). Returns whether the press APPLIED — false is a refusal (the row
    is not configured, or the mode moved under the press), and a refusal
@@ -456,11 +584,193 @@ static bool wake_flow_apply_chore_ack(uint8_t idx, time_t now) {
         ESP_LOGI(TAG, "chore ack %u refused", (unsigned)idx);
         return false;
     }
+    /* Read BEFORE the flag is set, because it is the flag: "an ack has
+       already landed this wake" is exactly "the pre-press state has
+       already been seen". Reusing s_chore_acked rather than adding a
+       second flag is deliberate — two records of the same fact can
+       disagree, and this one is already wake-sticky and already set here. */
+    const bool first_ack_this_wake = !s_chore_acked;
     s_chore_acked = true;
     (void)wake_flow_break_end();
     timer_set_mode(APP_MODE_CHORES);
     ESP_LOGI(TAG, "chore ack %u applied", (unsigned)idx);
+
+    /* THE ACKNOWLEDGEMENT (design §2.5), and it is the TRANSITION and not
+       the colour: the strip has been showing the pre-press state since
+       the wake, and this is the frame where the pressed row goes red ->
+       green. The panel's partial runs behind it — ~1.9 s once display.c's
+       ghost-clean pass and the driver's 1 s floor are counted — which is
+       the latency the pixels are here to cover, so this must stay AHEAD
+       of the caller's render tail and not be folded into it.
+
+       Below the log line on purpose: the hold is real time, and the
+       serial record of the press should not wait for it.
+
+       THE HOLD IS PAID ONCE PER WAKE. §2.5: "subsequent presses in the
+       same awake window flip instantly — no pre-state pause. You already
+       saw the starting state." Two chores ticked in one go ("no homework
+       today, and I just did the dishes") is the case it names, and a
+       second pause there is dead time in front of an ack nobody is
+       waiting to interpret.
+
+       AND ONLY WHEN THE STRIP IS OURS. Row C17: a latched ack drained on
+       an RTC-alarm wake applies, repaints the panel, and lights nothing —
+       the wake was not a press, there is nobody in the room, and the
+       hold would be a quarter-second of dead wake spent for them. Both
+       halves matter: without the guard this would also pay the delay. */
+    if (s_chore_strip_lit) {
+        if (first_ack_this_wake) {
+            hal_delay_ms(STATUS_LED_ACK_HOLD_MS);
+        }
+        wake_flow_paint_chore_strip();
+    }
     return true;
+}
+
+/* ---- coalescing a burst of acks into one refresh (design §2.5) -----------
+
+   THE DEFECT THIS EXISTS FOR, because the shape of it is not obvious from
+   any one line: a SECOND chore ack in the same button wake used to be
+   DISCARDED, not merely delayed. The EXT1 handler's tail took the latch
+   with a bare `buttons_take_pressed();` whose return value went nowhere,
+   and after that nothing on the path consumes an ack —
+   wake_flow_wait_for_render_grid() polls the PAUSE button,
+   wake_flow_watch_break_end() returns at its own `!timer_break_active()`
+   guard, and button_latch's mask is plain BSS that deep sleep discards. So
+   a press during the pre-press hold was eaten by that bare take, and a
+   press during the ~1.9 s panel refresh sat in the latch until sleep threw
+   it away. Either way the box was never ticked and the child saw nothing:
+   released before sleep there is no EXT1 level left to re-trigger on, and
+   still held is swallowed by the still-held guard at the top of the
+   handler. §2.5 clause 4 — "subsequent presses in the same awake window
+   flip instantly" — was therefore true only on the break screen, where the
+   break tail happens to poll, and even there the flip landed AFTER the
+   panel refresh rather than ahead of it.
+
+   §2.5 blesses the case explicitly: "Two chores can legitimately be ticked
+   in one go — no homework today, and I just did the dishes." So the answer
+   is to hold the panel work OPEN for the next press rather than to race it.
+
+   THE WINDOW IS STATUS_LED_ACK_HOLD_MS, which is the menuconfig knob
+   (status_led.h), because how long a child needs to get the next press in
+   is a question only a board can answer. It is one take per window rather
+   than a finer poll on purpose: the flip then lands at most one window
+   after the press, which is the same interval the FIRST ack deliberately
+   holds for, so both acks read as the same gesture. A finer quantum would
+   be a second figure nobody had measured.
+
+   BOUNDED AT CHORE_MAX WINDOWS, and the bound is the number of rows there
+   are to tick: a child ticking every box on a full list gets a window
+   each, and anything past that is either a mis-press being corrected —
+   which is welcome to its own refresh — or a flaky pad, which must not be
+   able to hold the device awake by generating edges. */
+#define CHORE_ACK_COALESCE_MAX CHORE_MAX
+
+/* The three ack buttons and the rows they tick, as a table rather than as
+   `btn - BTN_B`: the arithmetic happens to work today only because the
+   enum and BUTTON_CHORE_IDX_* run in step, which is a coincidence of two
+   headers and not a fact either of them states. */
+static const struct {
+    button_id_t btn;
+    uint8_t idx;
+} k_chore_ack_buttons[] = {
+    {BTN_B, BUTTON_CHORE_IDX_B},
+    {BTN_C, BUTTON_CHORE_IDX_C},
+    {BTN_D, BUTTON_CHORE_IDX_D},
+};
+
+/* Is a latched B/C/D THIS wake's to treat as an ack?
+
+   All three terms are load bearing. s_chore_strip_lit is row C17 — only a
+   wake a press caused claims the strip, so only such a wake spends real
+   time waiting for another press. s_chore_acked narrows that to a wake in
+   which an ack has ALREADY landed: that is what makes a window a
+   continuation of a gesture rather than a quarter-second of dead wake in
+   front of a press nobody is making. And timer_mode() is read LIVE because
+   the mode can move under the wake (make_display_state()'s emptied-list
+   guard reverts it when a config edit empties the list mid-wake), and a
+   press consumed here that button_chore_ack_apply() would then refuse is a
+   press destroyed — it mirrors that function's own gate rather than
+   trusting the flag. In chore mode B, C and D are ALL acks (B's start is
+   rebound, C no longer swaps, D is not the sync button), so consuming them
+   cannot take a timer action away from anybody.
+
+   WHICH OF THE THREE A CASE CAN ACTUALLY FAIL ON, measured rather than
+   assumed, because "all three are load bearing" is the sort of claim this
+   milestone keeps finding to be false. s_chore_acked and the mode read each
+   die to one (a wake that acked nothing must spend no window; a mode
+   reverted mid-wake must stop routing presses to acks). Deleting
+   s_chore_strip_lit survives every case in the suite, and that is honest
+   rather than a gap: both callers are inside the button handler, so row C17
+   is enforced by WHERE this is called from, and the term is defence in depth
+   against a future caller on a tick path. Keep it, and do not add a case for
+   it — a case that cannot fail is worse than no case. */
+static bool wake_flow_chore_acks_are_ours(void) {
+    return s_chore_strip_lit && s_chore_acked && timer_mode() == APP_MODE_CHORES;
+}
+
+/* Apply EVERY ack sitting in the latch, and that is the point of taking a
+   mask rather than asking button_latch_pick(): pick answers with ONE
+   button, so the existing latch drains lose a simultaneous second press
+   outright. Two boxes ticked within a poll of each other is precisely the
+   case §2.5 names, so here each bit gets its own apply and therefore its
+   own flip.
+
+   MASKED, so A is left exactly where it was: the mode toggle is not an ack
+   and the tail's own bare take still owns it. Returns whether anything
+   applied — a refusal (a two-chore list and ✓3) consumes the press and
+   reports nothing, which is what every other refusal on the ack paths
+   already does. */
+static bool wake_flow_take_chore_acks(time_t *now) {
+    if (!wake_flow_chore_acks_are_ours()) {
+        return false;
+    }
+    uint8_t mask = 0;
+    for (size_t i = 0; i < sizeof k_chore_ack_buttons / sizeof k_chore_ack_buttons[0]; i++) {
+        mask |= (uint8_t)(1u << (int)k_chore_ack_buttons[i].btn);
+    }
+    const uint8_t latched = buttons_take_pressed_mask(mask);
+    if (latched == 0) {
+        return false;
+    }
+    bool applied = false;
+    for (size_t i = 0; i < sizeof k_chore_ack_buttons / sizeof k_chore_ack_buttons[0]; i++) {
+        if ((latched & (uint8_t)(1u << (int)k_chore_ack_buttons[i].btn)) == 0) {
+            continue;
+        }
+        *now = hal_time_now();
+        if (wake_flow_apply_chore_ack(k_chore_ack_buttons[i].idx, *now)) {
+            applied = true;
+        }
+    }
+    return applied;
+}
+
+/* Take what is latched now, then hold the panel open for one window per
+   press that keeps landing. Returns whether any ack applied, which is the
+   caller's cue that the panel owes a repaint.
+
+   THE FIRST TAKE PAYS NO WAIT, deliberately: before the render it collects
+   the press made during the pre-press hold, and after the render the one
+   made during the refresh, and in both cases the press already happened —
+   waiting first would only delay its flip.
+
+   C17 IS PRESERVED THROUGH ALL OF THIS. Nothing here paints: every flip
+   goes through wake_flow_apply_chore_ack(), whose paint is guarded on
+   s_chore_strip_lit, and that flag is still written in exactly one place. */
+static bool wake_flow_coalesce_chore_acks(time_t *now) {
+    bool applied = wake_flow_take_chore_acks(now);
+    if (!wake_flow_chore_acks_are_ours()) {
+        return applied; /* not our strip, not our wake: no window to grant */
+    }
+    for (int granted = 0; granted < CHORE_ACK_COALESCE_MAX; granted++) {
+        hal_delay_ms(STATUS_LED_ACK_HOLD_MS);
+        if (!wake_flow_take_chore_acks(now)) {
+            break; /* the window closed empty: the gesture is over */
+        }
+        applied = true;
+    }
+    return applied;
 }
 
 bool wake_flow_break_end(void) {
@@ -759,9 +1069,16 @@ bool wake_flow_dispatch_button_action(button_id_t btn, time_t *now, timer_state_
                 case BTN_B_STARTED:
                 case BTN_B_RESUMED:
                     /* Hold the pre-press colour briefly so the WHITE/AMBER ->
-                       GREEN transition is visible as an acknowledgement */
-                    hal_delay_ms(250);
-                    status_led_show_timer_state();
+                       GREEN transition is visible as an acknowledgement.
+                       THE SAME CONSTANT the chore ack holds for, and the
+                       same gesture: hold the old colour, then change it.
+                       Two figures for that on one device would be an
+                       inconsistency nobody could interpret — status_led.h
+                       carries the argument and
+                       test_t8_the_ack_hold_is_one_figure_shared_with_button_bs_start
+                       measures both paths rather than either literal. */
+                    hal_delay_ms(STATUS_LED_ACK_HOLD_MS);
+                    wake_flow_show_status_leds();
 
                     /* NTP-gated paint: wait only for the sync (seconds) so the
                        panel renders once, with the corrected clock and shifted
@@ -909,7 +1226,7 @@ bool wake_flow_poll_button_b_action(void) {
     const timer_state_t after = timer_get_state(); /* post-apply half of the pair */
     (void)after;
     ESP_LOGI(TAG, "button B during join: state %d -> %d", (int)st, (int)after);
-    status_led_show_timer_state();
+    wake_flow_show_status_leds();
     return true;
 }
 
@@ -996,7 +1313,7 @@ bool wake_flow_poll_break_buttons(void) {
     bool swapped = false;
     if (!wake_flow_dispatch_latched_press((button_id_t)pick, &now, before, false, &swapped))
         return false;
-    status_led_show_timer_state();
+    wake_flow_show_status_leds();
     render_action_result((button_id_t)pick, before, now, swapped);
     return true;
 }
@@ -1022,8 +1339,8 @@ bool wake_flow_poll_break_buttons(void) {
    they mean, and two of them are ~15 s stale by the time they ask. */
 static void paint_break_started(time_t now) {
     display_state_t st = make_display_state(timer_tick(now), now);
-    status_led_show_timer_state(); /* blue during the refresh */
-    display_full_refresh(&st);     /* inverted SCREEN BREAK layout */
+    wake_flow_show_status_leds(); /* blue during the refresh */
+    display_full_refresh(&st);    /* inverted SCREEN BREAK layout */
 }
 
 /* Returns true when a break was started (caller should go straight to
@@ -1095,6 +1412,26 @@ void wake_flow_fire_expiry_alert(void) {
     timer_persist_save();
     display_timesup();
     alert_run(ALERT_EXPIRY);
+    /* THE ALARM OWNED EVERY PIXEL AND CLEARED ALL FOUR ON ITS WAY OUT
+       (neopixel.h: the pulse end darkens the strip and drops the power
+       gate), so whatever the checklist had painted is gone — and unlike
+       the break alarm, this one RETURNS and the wake carries on. Left
+       alone, the checklist would sit on the glass with a dead strip under
+       it until sleep.
+
+       Reachable in chore mode by the post-join re-render: a config edit
+       arriving in the window can move the active slot to EXPIRED under
+       the press, and wake_policy_render answers EXPIRY_ALERT for any
+       transition INTO expired, not only from RUNNING.
+
+       Deliberately not wake_flow_show_status_leds(): that would add a
+       timer-pixel paint after every expiry alert in every other mode,
+       which is a behaviour change to a path this task has no business
+       touching. Guarded, so it is a no-op on every wake that never
+       claimed the strip. */
+    if (s_chore_strip_lit) {
+        wake_flow_paint_chore_strip();
+    }
     /* Back to the main layout. The tail is character for character the
        break-end repaint's paint half — re-read the clock, tick, full
        refresh — so it reaches the panel through that same seam instead of
@@ -1203,7 +1540,7 @@ void wake_flow_watch_break_end(void) {
         return; /* not our tail; the planner will wake us closer */
     if (brem > 0) {
         ESP_LOGI(TAG, "Break ends in %ld s: staying awake", (long)brem);
-        status_led_show_timer_state();
+        wake_flow_show_status_leds();
         while (timer_break_remaining(hal_time_now()) > 0) {
             if (wake_flow_poll_break_buttons())
                 return; /* repainted; the planner owns the end from here */
@@ -1235,7 +1572,7 @@ void wake_flow_watch_final_minute(void) {
             return;
         }
     }
-    status_led_show_timer_state();
+    wake_flow_show_status_leds();
 
     /* Break config read once — the loop below spins at 250 ms. Short
        allocations can put break-due INSIDE this watch (e.g. 3 min screen
@@ -1260,7 +1597,7 @@ void wake_flow_watch_final_minute(void) {
             neopixel_stop(); /* clear the binary-countdown pixels */
             time_t pnow = hal_time_now();
             display_state_t st = make_display_state(timer_tick(pnow), pnow);
-            status_led_show_timer_state(); /* amber through the refresh until sleep */
+            wake_flow_show_status_leds(); /* amber through the refresh until sleep */
             display_full_refresh(&st);
             return;
         }
@@ -1380,13 +1717,15 @@ static void render_action_result(button_id_t btn, timer_state_t before, time_t n
        break boundary alone, which is the same rule applied to one
        particular pair of screens. Written as a test on
        display_screen_for() rather than as a list of the transitions that
-       can reach it, because that list is an emergent property of the
-       button bindings: today B's start is rebound in chore mode, C no
-       longer swaps, the join poll is guarded and HA cannot start a timer,
-       so no press reaches a chore-mode RUNNING — and every one of those is
-       a fact about a different file that nothing stops a later task
-       changing. The screen the painter would choose is the thing this
-       actually depends on, so that is what it asks.
+       can reach it, because such a list is an emergent property of the
+       button bindings and of the timer state together, and gets it wrong:
+       an earlier version of this comment argued from four of them (B's
+       start rebound, C no longer swapping, the join poll guarded, HA
+       unable to start a timer) that "no press reaches a chore-mode
+       RUNNING", and that conclusion is FALSE — all four are about how a
+       timer STARTS, and a timer already running when chore mode is entered
+       needs no press at all. The screen the painter would choose is the
+       thing this actually depends on, so that is what it asks.
 
        Both calls take st.app_mode and st.chore_count, the CURRENT ones,
        so the term varies only in the timer state: the mode's own
@@ -1406,7 +1745,7 @@ static void render_action_result(button_id_t btn, timer_state_t before, time_t n
            layout (empty bar, TIME'S UP state). */
         ESP_LOGI(TAG, "button %d: state %d -> %d, %s refresh", (int)btn, (int)before, (int)after,
                  (force_full || bwr == WAKE_RENDER_FULL) ? "full" : "partial");
-        status_led_show_timer_state(); /* resulting state, lit until sleep */
+        wake_flow_show_status_leds(); /* resulting state, lit until sleep */
         if (force_full || bwr == WAKE_RENDER_FULL) {
             display_full_refresh(&st);
         } else {
@@ -1460,7 +1799,7 @@ static void finish_action_and_render(button_id_t btn, timer_state_t before, time
             wake_flow_fire_expiry_alert();
         } else {
             display_state_t rst = make_display_state(rrem, rnow);
-            status_led_show_timer_state();
+            wake_flow_show_status_leds();
             if (force_full || rwr == WAKE_RENDER_FULL) {
                 display_full_refresh(&rst);
             } else {
@@ -1637,7 +1976,7 @@ void wake_flow_handle_timer_tick(void) {
        report). Deep-sleep tick wakes stay dark: a dim blink every minute,
        all day, isn't worth the battery. */
     if (esp_reset_reason() != ESP_RST_DEEPSLEEP) {
-        status_led_show_timer_state();
+        wake_flow_show_status_leds();
     }
 
     /* Fast path: a break already due on arrival, before the grid wait and
@@ -1739,7 +2078,7 @@ void wake_flow_handle_timer_tick(void) {
         timer_state_t painted = timer_get_state();
         bool swapped = false;
         if (wake_flow_dispatch_latched_press((button_id_t)pick, &now, painted, !synced_this_wake, &swapped)) {
-            status_led_show_timer_state();
+            wake_flow_show_status_leds();
             finish_or_break((button_id_t)pick, painted, now, swapped);
         }
     }
@@ -1761,9 +2100,61 @@ void wake_flow_handle_button_wake(void) {
         enter_deep_sleep(lock_gate_sleep_mode()); /* does not return */
     }
 
+    /* THE ONLY PLACE THE CHECKLIST CLAIMS THE STRIP (row C17, design
+       §2.5's power discipline). A press caused this wake, so somebody is
+       holding the device and looking at it; no other entry point can say
+       that, which is why the claim is made from the EXT1 decode and
+       nowhere else.
+
+       ABOVE THE ROLLOVER ON THE NEXT LINE, and that ordering is the
+       whole of the net_window fix rather than a tidy-up: the rollover
+       opens a network window from inside this handler's own prologue
+       (net_apply_try_window, via wake_flow_handle_day_rollover), and
+       net_window.c's sync pixel is index 3 — a chore ROW — painted
+       (0,20,0) on success, which is byte for byte the checklist's "done"
+       green. Claimed after the window opened, the first press of the day
+       after midnight would show a row ticked that nobody ticked.
+       net_window_claim_leds() carries the rest of the argument.
+
+       KEYED ON THE SCREEN THE PAINTER WOULD CHOOSE, not on the mode byte,
+       and that is a correctness fix rather than a nicety. The mode byte and
+       the timer state are INDEPENDENT: button_actions.c gates an ack on the
+       mode and the row count with no timer-state term, so a press applies
+       while a timer runs, while display_screen_for() answers MAIN for a
+       RUNNING timer however the mode reads. Keyed on the mode alone, a
+       press made during a running timer looked like nothing had happened —
+       and then the NEXT button wake claimed the strip, painted four chore
+       colours over a TIMER screen, and replaced the RUNNING green on pixel
+       0 with the gate's colour for the whole wake. That destroys the one
+       piece of feedback that says the device is alive and counting.
+       The count term comes along with it and is worth having on its own: in
+       chore mode with an emptied list the old test claimed the strip,
+       stood the sync pixel down, and painted four dark pixels for nothing.
+
+       Asking display_screen_for() rather than restating its three terms is
+       the whole point — the two cannot disagree, today or after a later
+       edit, because there is only one answer and this reads it. It costs
+       one flash read on a chore-mode button wake, which is the read
+       wake_flow_paint_chore_strip() makes on the very next line anyway and
+       which its comment already pays for: a handful of times on a day
+       somebody uses the feature, never on the tick wakes the fleet runs.
+
+       In every other mode the sync pixel is how the user knows the radio
+       is up, and nothing is claiming the strip. */
+    if (wake_flow_chore_screen_now()) {
+        s_chore_strip_lit = true;
+        net_window_claim_leds();
+    }
+
     /* Immediate "button heard" ack — current state colour, updated to the
-       resulting state below once the action has run. */
-    status_led_show_timer_state();
+       resulting state below once the action has run.
+
+       In chore mode this is §2.5's PRE-PRESS FRAME instead: the strip as
+       it stood before the press, so the flip STATUS_LED_ACK_HOLD_MS later
+       is a change you can see rather than a colour that simply appears.
+       Which of the two it paints is the claim above, so the ordering is
+       claim, then paint, and they cannot be swapped. */
+    wake_flow_show_status_leds();
 
     time_t now = hal_time_now();
     wake_flow_handle_day_rollover(&now);
@@ -1866,6 +2257,15 @@ void wake_flow_handle_button_wake(void) {
             break;
     }
 
+    /* §2.5 CLAUSE 4, AND IT IS AHEAD OF THE DRAIN BELOW FOR THAT REASON:
+       a second box ticked in the same wake is a case the design blesses,
+       and the bare take on the next line used to destroy it. Holding the
+       panel work open here is what puts every flip AHEAD of the one
+       refresh they all share, instead of racing a ~1.9 s partial that
+       cannot be interrupted. A no-op on every wake that is not a chore ack
+       (the helper's three-term guard). */
+    (void)wake_flow_coalesce_chore_acks(&now);
+
     /* Drain latch: the wake press itself was handled via the EXT1 decode
        above; its release bounce (or a second tap during the action) must
        not replay through the awake-press consumers below — e.g. a resume
@@ -1874,6 +2274,20 @@ void wake_flow_handle_button_wake(void) {
     buttons_take_pressed();
 
     finish_or_break(btn, before, now, swapped); /* e.g. resume with accrual already past the interval */
+
+    /* THE PRESS MADE DURING THE PANEL WORK, which is the other half of the
+       same defect: the refresh above holds the CPU for ~1.9 s with nothing
+       polling, so a press there is latched and — before this line — thrown
+       away at sleep. It is already in the latch by the time the render
+       returns, so this take grants no window and costs nothing on the wakes
+       where nobody pressed anything; it is only the coalescing window that
+       spends time, and only when an ack has already landed.
+       The repaint is render_action_result and NOT finish_action_and_render:
+       the MQTT phase was released and joined by the tail above, and doing
+       that twice would post the stat snapshot twice. */
+    if (wake_flow_take_chore_acks(&now)) {
+        render_action_result(BTN_NONE, timer_get_state(), now, false);
+    }
     maybe_wait_for_event();
     maybe_apply_update(); /* second window; does not return when it commits */
     enter_deep_sleep(lock_gate_sleep_mode());

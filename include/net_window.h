@@ -27,6 +27,40 @@ extern "C" {
    paint with the uncorrected clock, exactly like a WiFi failure). */
 bool net_window_spawn(void);
 
+/* Stand the WiFi status pixel down for the rest of this wake: something
+   else has claimed the whole strip and this module's four writes to it
+   would corrupt what that owner painted.
+
+   THE CLAIMANT TODAY IS THE CHORE CHECKLIST (design §2.5), and the
+   corruption is not cosmetic. This module's pixel is index 3, which is a
+   chore ROW under status_led.c's mapping, and the triple it writes on a
+   successful sync is (0, 20, 0) — byte for byte the checklist's "done"
+   green. A sync landing while the checklist is up therefore paints a row
+   a perfectly convincing green: a chore reading as ticked that nobody
+   did, with nothing on the screen to contradict it. The failure triple
+   (30, 0, 0) is a near-match for the checklist's red, and the dark write
+   in net_window_join() reads on that screen as "not a configured chore".
+
+   SUPPRESSED AT THE SOURCE rather than repainted afterwards, because the
+   false green is written by net_window_wait_ntp() and the caller then
+   spends ~1.9 s on the panel partial before it could repaint anything —
+   which is exactly the stretch the user is looking at the pixels.
+
+   ONE-WAY and wake-scoped: there is no release. The claim lasts until the
+   next boot, because the strip the claimant painted stays lit until
+   enter_deep_sleep()'s neopixel_stop_sync(), and a mid-wake release would
+   hand the pixel back while the claimant's colours were still standing.
+   Idempotent, so a caller need not track whether it has already asked.
+
+   Timer modes DO NOT call this: there the sync pixel is how the user
+   knows the device is awake and working, and nothing else claims the
+   strip. Nor does an unattended wake in chore mode — row C17 keeps the
+   chore pixels dark there, so this module's pixel is the only feedback
+   there is and it keeps it. The key is "the strip is lit by someone
+   else", not "the device is in chore mode"; only the caller knows that,
+   which is why this is a call and not a mode test in here. */
+void net_window_claim_leds(void);
+
 /* Wait (bounded) for NTP-settled; on success the sync is recorded via
    timer_record_ntp_sync. true = sync succeeded (clock_step valid). */
 bool net_window_wait_ntp(void);

@@ -64,7 +64,18 @@ add_host_test(test_lock_gate)
 add_host_test(test_buttons_policy)
 add_host_test(test_button_latch)
 add_host_test(test_wake_policy)
-add_host_test(test_wake_flow)
+# Deliberately NOT 250, which is both the Kconfig default and status_led.h's
+# host fallback. The ack hold and the chore-ack coalescing window are the same
+# menuconfig figure (CONFIG_MAGTAG_STATUS_LED_ACK_HOLD_MS) precisely so a board
+# can sweep it, and every case that measures either one is written against
+# STATUS_LED_ACK_HOLD_MS rather than a number. Building the suite at a value
+# that is not the default is what makes that real: a literal 250 left at either
+# call site -- Button B's start or the coalescing window -- compiles fine and
+# passes every relative assertion while the two figures have silently diverged.
+# With this, it fails. The value itself means nothing beyond "not 250, and
+# crosses no second boundary in the mock clock's sub-second carry".
+add_host_test(test_wake_flow
+    EXTRA_DEFS CONFIG_MAGTAG_STATUS_LED_ACK_HOLD_MS=170)
 add_host_test(test_status_led)
 # alerts.c reads two alarm-length Kconfig ints straight out of sdkconfig.h,
 # which the host build has no equivalent of. Supplied here rather than as
@@ -168,3 +179,16 @@ add_test(NAME test_check_slot_size
 add_test(NAME test_check_log_args
          COMMAND ${Python3_EXECUTABLE}
                  ${CMAKE_CURRENT_SOURCE_DIR}/test_check_log_args/test_check_log_args.py)
+
+# scripts/check-status-led-wrapper.py is the chore-gate gate: exactly one raw
+# status_led_show_timer_state() call in wake_flow.c, because that function
+# writes the pixel the chore checklist puts its gate on and the file funnels
+# all twelve of its status paints through one wrapper to keep them apart.
+# Python and registered here for the same two reasons as the two above. It
+# exists because review reverted each of those twelve sites in turn and TEN
+# survived the entire host suite -- so the thing this file is really testing
+# is a gate that was added after a near miss, which is exactly the kind that
+# needs its own tests.
+add_test(NAME test_check_status_led_wrapper
+         COMMAND ${Python3_EXECUTABLE}
+                 ${CMAKE_CURRENT_SOURCE_DIR}/test_check_status_led_wrapper/test_check_status_led_wrapper.py)
