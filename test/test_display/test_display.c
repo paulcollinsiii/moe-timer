@@ -997,6 +997,197 @@ void test_the_locked_label_respects_a_small_buffer(void) {
 #undef DAY
 #undef WITHHELD
 
+/* ---- display_refresh_plan: cadence and the chore ghost-clean exemption ---
+
+   Every case below drives the counter the way display.c does — one shared
+   uint8_t carried across calls — because the cadence only means anything
+   across a sequence of paints. Nothing here asserts whether a paint is
+   partial or full at the CALLER's request; display_full_refresh() does not
+   come through this function at all.
+
+   The exemption is a TRANSITION test, so every call names the previous
+   painted screen as well as the current one. display.c keeps that in
+   s_prev_screen / s_prev_screen_valid; the third argument being false
+   means "nothing known is on the glass" — after a takeover screen, or on
+   the first paint of a power cycle. */
+
+/* The exemption itself (§2.5): an ack repaint of a checklist that is
+   already up skips the double pass. A mutation that inverts the test —
+   cleaning on the chore screen — fails here. */
+void test_a_chore_screen_partial_skips_the_ghost_clean_pass(void) {
+    uint8_t count = 0;
+    display_refresh_plan_t plan = display_refresh_plan(DISPLAY_SCREEN_CHORES, DISPLAY_SCREEN_CHORES, true, &count);
+    TEST_ASSERT_FALSE_MESSAGE(plan.full, "a first paint is a partial");
+    TEST_ASSERT_FALSE_MESSAGE(plan.ghost_clean, "an ack repaint must skip the ghost-clean double pass");
+}
+
+/* The other half of the same mutation, and the guard against the exemption
+   being WIDENED: the two screens it must not cover still clean. */
+void test_the_timer_and_break_screens_still_get_the_ghost_clean_pass(void) {
+    uint8_t count = 0;
+    TEST_ASSERT_TRUE_MESSAGE(display_refresh_plan(DISPLAY_SCREEN_MAIN, DISPLAY_SCREEN_MAIN, true, &count).ghost_clean,
+                             "the timer screen must still clean");
+    count = 0;
+    TEST_ASSERT_TRUE_MESSAGE(display_refresh_plan(DISPLAY_SCREEN_BREAK, DISPLAY_SCREEN_BREAK, true, &count).ghost_clean,
+                             "the break screen must still clean");
+}
+
+/* THE EXEMPTION IS ABOUT AN ACK, NOT ABOUT A SCREEN. Its whole
+   justification is that an ack changes ~1108 px of a checklist that is
+   already up; a partial that changes the screen INTO the checklist is a
+   10829 px whole-screen change and must keep the double pass. Not
+   hypothetical: wake_flow's post-join re-render drops the screen-kind term
+   from its force_full, so a config edit arriving on the network window and
+   cancelling a running timer paints main, then re-renders the checklist as
+   a partial. A mutation that ignores the previous screen fails here. */
+void test_a_partial_that_changes_screen_into_the_checklist_still_cleans(void) {
+    uint8_t count = 0;
+    TEST_ASSERT_TRUE_MESSAGE(display_refresh_plan(DISPLAY_SCREEN_CHORES, DISPLAY_SCREEN_MAIN, true, &count).ghost_clean,
+                             "main -> checklist is a whole-screen change and must clean");
+    count = 0;
+    TEST_ASSERT_TRUE_MESSAGE(
+        display_refresh_plan(DISPLAY_SCREEN_CHORES, DISPLAY_SCREEN_BREAK, true, &count).ghost_clean,
+        "break -> checklist is a whole-screen change and must clean");
+}
+
+/* The way back out. The mode toggle rides force_full and never reaches
+   this function, but nothing here may DEPEND on that — a partial leaving
+   the checklist cleans on the same rule as one entering it. */
+void test_a_partial_that_leaves_the_checklist_still_cleans(void) {
+    uint8_t count = 0;
+    TEST_ASSERT_TRUE_MESSAGE(display_refresh_plan(DISPLAY_SCREEN_MAIN, DISPLAY_SCREEN_CHORES, true, &count).ghost_clean,
+                             "checklist -> main must clean");
+    count = 0;
+    TEST_ASSERT_TRUE_MESSAGE(
+        display_refresh_plan(DISPLAY_SCREEN_BREAK, DISPLAY_SCREEN_CHORES, true, &count).ghost_clean,
+        "checklist -> break must clean");
+}
+
+/* AN UNKNOWN PREVIOUS SCREEN CLEANS — the fail-safe direction. display.c
+   invalidates the record after every takeover screen (TIME'S UP, Charge
+   Me, sync failed, bedtime, the OTA banner), and RTC memory comes back
+   invalid after esp_restart. The stale byte underneath can say anything,
+   CHORES included, so the flag and not the value has to decide: this case
+   passes DISPLAY_SCREEN_CHORES as the previous screen precisely so a
+   mutation that drops the validity term cannot survive on it. */
+void test_an_unknown_previous_screen_cleans(void) {
+    uint8_t count = 0;
+    TEST_ASSERT_TRUE_MESSAGE(
+        display_refresh_plan(DISPLAY_SCREEN_CHORES, DISPLAY_SCREEN_CHORES, false, &count).ghost_clean,
+        "an invalid previous screen must clean whatever byte it left behind");
+    count = 0;
+    TEST_ASSERT_TRUE_MESSAGE(
+        display_refresh_plan(DISPLAY_SCREEN_CHORES, DISPLAY_SCREEN_MAIN, false, &count).ghost_clean,
+        "and the same when the stale byte names another screen");
+    count = 0;
+    TEST_ASSERT_TRUE_MESSAGE(display_refresh_plan(DISPLAY_SCREEN_MAIN, DISPLAY_SCREEN_MAIN, false, &count).ghost_clean,
+                             "the timer screen was never exempt either way");
+}
+
+/* THE CADENCE COUNTER STILL ADVANCES ON THE NEWLY-CLEANING PAINT. The
+   increment sits above the screen test, so narrowing the exemption must
+   not have made a cleaning chore paint a paint that does not count —
+   moving the increment below an early return for the cleaning case would
+   postpone every full refresh. N-1 screen-changing chore partials, each
+   cleaning, then the Nth is full. */
+void test_a_newly_cleaning_chore_partial_still_advances_the_cadence(void) {
+    uint8_t count = 0;
+    for (int i = 1; i < DISPLAY_FULL_REFRESH_EVERY_N; i++) {
+        display_refresh_plan_t plan = display_refresh_plan(DISPLAY_SCREEN_CHORES, DISPLAY_SCREEN_MAIN, true, &count);
+        TEST_ASSERT_FALSE_MESSAGE(plan.full, "only the Nth paint is full");
+        TEST_ASSERT_TRUE_MESSAGE(plan.ghost_clean, "a screen change into the checklist cleans");
+        TEST_ASSERT_EQUAL_UINT8_MESSAGE(i, count, "and a cleaning chore paint must still count");
+    }
+    TEST_ASSERT_TRUE_MESSAGE(display_refresh_plan(DISPLAY_SCREEN_CHORES, DISPLAY_SCREEN_MAIN, true, &count).full,
+                             "the Nth is still the anti-ghosting full refresh");
+    TEST_ASSERT_EQUAL_UINT8(0, count);
+}
+
+/* THE TRAP THIS EXEMPTION SETS. The double pass and the every-Nth full
+   refresh are the only two things holding ghosting back. A chore partial
+   gives up the first, so it must keep counting toward the second — a
+   skipped-clean paint that also stopped counting would leave a chore
+   session accumulating ghosting with NEITHER mechanism ever firing.
+   N consecutive chore paints must still produce a full refresh. */
+void test_a_skipped_clean_chore_partial_still_advances_the_full_refresh_cadence(void) {
+    uint8_t count = 0;
+    for (int i = 1; i < DISPLAY_FULL_REFRESH_EVERY_N; i++) {
+        display_refresh_plan_t plan = display_refresh_plan(DISPLAY_SCREEN_CHORES, DISPLAY_SCREEN_CHORES, true, &count);
+        TEST_ASSERT_FALSE_MESSAGE(plan.full, "only the Nth chore paint is full");
+        TEST_ASSERT_FALSE_MESSAGE(plan.ghost_clean, "and none of them clean");
+        TEST_ASSERT_EQUAL_UINT8_MESSAGE(i, count, "a skipped-clean chore paint must still count");
+    }
+    display_refresh_plan_t nth = display_refresh_plan(DISPLAY_SCREEN_CHORES, DISPLAY_SCREEN_CHORES, true, &count);
+    TEST_ASSERT_TRUE_MESSAGE(nth.full, "the Nth chore paint is the anti-ghosting full refresh");
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(0, count, "and it rearms the cadence");
+}
+
+/* The cadence is one counter over all screens, not one per screen: a wake
+   that paints the checklist and a wake that paints the timer screen both
+   move the device toward the same full refresh. Interleaving must not
+   postpone it. */
+void test_chore_and_timer_paints_share_one_cadence_counter(void) {
+    uint8_t count = 0;
+    display_screen_t order[] = {DISPLAY_SCREEN_CHORES, DISPLAY_SCREEN_MAIN, DISPLAY_SCREEN_CHORES,
+                                DISPLAY_SCREEN_BREAK};
+    display_screen_t prev = DISPLAY_SCREEN_MAIN;
+    for (int i = 0; i < DISPLAY_FULL_REFRESH_EVERY_N - 1; i++) {
+        TEST_ASSERT_FALSE_MESSAGE(display_refresh_plan(order[i % 4], prev, true, &count).full,
+                                  "the cadence must not restart when the screen changes");
+        prev = order[i % 4];
+    }
+    TEST_ASSERT_TRUE_MESSAGE(display_refresh_plan(DISPLAY_SCREEN_CHORES, prev, true, &count).full,
+                             "the Nth paint overall is full whatever the screens before it were");
+}
+
+/* A full refresh drives every pixel both ways by itself, so it never also
+   asks for the double pass — on any screen. */
+void test_the_cadence_full_refresh_never_also_asks_to_ghost_clean(void) {
+    const display_screen_t SCREENS[] = {DISPLAY_SCREEN_MAIN, DISPLAY_SCREEN_BREAK, DISPLAY_SCREEN_CHORES};
+    for (unsigned s = 0; s < sizeof(SCREENS) / sizeof(SCREENS[0]); s++) {
+        uint8_t count = (uint8_t)(DISPLAY_FULL_REFRESH_EVERY_N - 1);
+        display_refresh_plan_t plan = display_refresh_plan(SCREENS[s], SCREENS[s], true, &count);
+        TEST_ASSERT_TRUE_MESSAGE(plan.full, "this paint completes the cadence");
+        TEST_ASSERT_FALSE_MESSAGE(plan.ghost_clean, "a full refresh needs no double pass");
+    }
+}
+
+/* The exemption must leave the screen it does not cover exactly as it was:
+   N-1 cleaning partials, then a full refresh, then the counter rearmed. */
+void test_the_timer_screen_cadence_is_unchanged_by_the_exemption(void) {
+    uint8_t count = 0;
+    for (int i = 1; i < DISPLAY_FULL_REFRESH_EVERY_N; i++) {
+        display_refresh_plan_t plan = display_refresh_plan(DISPLAY_SCREEN_MAIN, DISPLAY_SCREEN_MAIN, true, &count);
+        TEST_ASSERT_FALSE(plan.full);
+        TEST_ASSERT_TRUE(plan.ghost_clean);
+        TEST_ASSERT_EQUAL_UINT8(i, count);
+    }
+    TEST_ASSERT_TRUE(display_refresh_plan(DISPLAY_SCREEN_MAIN, DISPLAY_SCREEN_MAIN, true, &count).full);
+    TEST_ASSERT_EQUAL_UINT8(0, count);
+}
+
+/* display.c's counter is RTC-persistent and comes back from deep sleep
+   part-way through a cadence, so the function must be entered at an
+   arbitrary count and not only at zero. */
+void test_the_plan_resumes_a_cadence_already_part_way_through(void) {
+    uint8_t count = (uint8_t)(DISPLAY_FULL_REFRESH_EVERY_N - 2);
+    TEST_ASSERT_FALSE_MESSAGE(display_refresh_plan(DISPLAY_SCREEN_CHORES, DISPLAY_SCREEN_CHORES, true, &count).full,
+                              "one paint short of the Nth");
+    TEST_ASSERT_TRUE_MESSAGE(display_refresh_plan(DISPLAY_SCREEN_CHORES, DISPLAY_SCREEN_CHORES, true, &count).full,
+                             "and this is the Nth");
+    TEST_ASSERT_EQUAL_UINT8(0, count);
+}
+
+/* A counter that came back from RTC memory above the threshold — a
+   shortened cadence, or a stale byte — must still land on a full refresh
+   and rearm rather than wrapping past it. */
+void test_a_counter_already_past_the_threshold_refreshes_and_rearms(void) {
+    uint8_t count = 200;
+    display_refresh_plan_t plan = display_refresh_plan(DISPLAY_SCREEN_CHORES, DISPLAY_SCREEN_CHORES, true, &count);
+    TEST_ASSERT_TRUE_MESSAGE(plan.full, "an over-threshold counter must refresh, not wrap");
+    TEST_ASSERT_EQUAL_UINT8(0, count);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_break_chip_is_minutes_and_seconds);
@@ -1095,5 +1286,17 @@ int main(void) {
     RUN_TEST(test_a_fully_gated_day_says_what_the_chores_unlock);
     RUN_TEST(test_the_locked_label_counts_only_configured_acks);
     RUN_TEST(test_the_locked_label_respects_a_small_buffer);
+    RUN_TEST(test_a_chore_screen_partial_skips_the_ghost_clean_pass);
+    RUN_TEST(test_the_timer_and_break_screens_still_get_the_ghost_clean_pass);
+    RUN_TEST(test_a_partial_that_changes_screen_into_the_checklist_still_cleans);
+    RUN_TEST(test_a_partial_that_leaves_the_checklist_still_cleans);
+    RUN_TEST(test_an_unknown_previous_screen_cleans);
+    RUN_TEST(test_a_newly_cleaning_chore_partial_still_advances_the_cadence);
+    RUN_TEST(test_a_skipped_clean_chore_partial_still_advances_the_full_refresh_cadence);
+    RUN_TEST(test_chore_and_timer_paints_share_one_cadence_counter);
+    RUN_TEST(test_the_cadence_full_refresh_never_also_asks_to_ghost_clean);
+    RUN_TEST(test_the_timer_screen_cadence_is_unchanged_by_the_exemption);
+    RUN_TEST(test_the_plan_resumes_a_cadence_already_part_way_through);
+    RUN_TEST(test_a_counter_already_past_the_threshold_refreshes_and_rearms);
     return UNITY_END();
 }

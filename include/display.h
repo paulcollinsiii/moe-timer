@@ -509,6 +509,85 @@ void display_fb_invert_byte_cols(uint8_t *fb, int rows, int row_bytes, int b0, i
    the cleaning flash to the characters that changed. Returns dirty rows. */
 int display_fb_invert_dirty_rows(uint8_t *fb, const uint8_t *prev, int rows, int row_bytes, int b0, int b1);
 
+/* ---- the refresh plan: cadence and cleaning (design §2.5) ---------------
+
+   Anti-ghosting cadence: one paint in every N is promoted to a full
+   refresh. Named here rather than left a literal in display.c so a test
+   can assert the cadence without restating the number — a suite written
+   against a hard-coded 5 keeps passing after the figure moves. */
+#define DISPLAY_FULL_REFRESH_EVERY_N 5
+
+/* display_update()'s refresh policy, lifted out of display.c so it can be
+   tested at all: display.c is not compiled by any host suite (it pulls in
+   LVGL, FreeRTOS and the panel driver), so a policy left inline there is a
+   policy nothing can check. display.c reads this the same way
+   build_for_state() reads display_screen_for(), and decides nothing of its
+   own.
+
+   TWO ANSWERS FROM ONE FUNCTION, deliberately. `full` is the every-Nth
+   promotion; `ghost_clean` is whether a partial gets the inverse/true
+   double pass. They are coupled, and that is the reason they share a
+   function: those two passes are the only things holding ghosting back on
+   this panel, so a frame that gives one up MUST keep the other. Split into
+   two predicates, a later change could exempt a screen from both and leave
+   nothing — which is precisely the failure the chore exemption below is
+   one step away from.
+
+   WHAT THIS DOES NOT DECIDE: whether the caller wanted a partial at all.
+   A paint that must be full whatever the cadence says goes through
+   display_full_refresh() and never reaches here. Refresh CADENCE is
+   display.c policy; the panel's minimum-interval guard is the ssd1680
+   driver's, a different layer, and merging the two is the thing the
+   project invariant names.
+
+   WHAT IS GUARANTEED, AND WHAT IS ONLY ARGUED — the distinction matters
+   because this function is one screen test away from getting it wrong,
+   and an earlier version of this comment did. GUARANTEED: the chore-mode
+   TOGGLE arrives as a full refresh. wake_flow's force_full channel is
+   wake-sticky on wake_flow_mode_toggled_this_wake(), so both directions
+   of the toggle bypass this function entirely.
+
+   NOT GUARANTEED: that a change of screen always arrives as a full
+   refresh. That is an argument about wake_flow, and it is false.
+   render_action_result() forces full on
+   display_screen_for(before) != display_screen_for(after), but
+   finish_action_and_render()'s post-join RE-RENDER builds its force_full
+   WITHOUT that term, and wake_policy_render() promotes a button wake only
+   across the TIMER_BREAK boundary. So a network-join config edit that
+   cancels a running timer (NET_FINISH_CHANGED, RUNNING -> IDLE) paints
+   the main screen, then re-renders the checklist — display_screen_for()
+   suppresses CHORES while RUNNING, so the screen genuinely changes — as a
+   PARTIAL. Measured main -> checklist diff: 10829 px, 28.58% of the
+   panel, an order of magnitude past anything the exemption was sized for.
+
+   Which is why the exemption below is stated over the PREVIOUS painted
+   screen as well as the current one, rather than over the current one
+   plus a reachability argument. It exempts CHORES -> CHORES and nothing
+   else; every screen CHANGE cleans, whether or not any caller would have
+   forced it full anyway. */
+typedef struct {
+    bool full;        /* paint a full refresh rather than a partial */
+    bool ghost_clean; /* a partial frame gets the ghost-cleaning double pass */
+} display_refresh_plan_t;
+
+/* `screen` is the screen this paint drew; `prev_screen` is the one the
+   frame currently on the glass drew, and `prev_valid` says whether that
+   is known at all — false after a takeover screen (TIME'S UP, Charge Me,
+   sync failed, bedtime, the OTA banner), which is none of these three
+   kinds, and false on the first paint of a power cycle. An unknown
+   previous screen resolves to ghost_clean = true, which is the fail-safe
+   direction: cleaning when you needn't costs ~1.5 s of latency, skipping
+   when you should leaves the old frame ghosted on the glass. Expressed as
+   a separate flag rather than a fourth display_screen_t enumerator so the
+   -Wswitch exhaustiveness that several painters rely on keeps its meaning.
+
+   `partial_count` is display.c's RTC-persistent cadence counter and is
+   advanced IN PLACE — every paint that reaches here counts toward the next
+   full refresh, whichever screen it drew. See the chore exemption in
+   display_layout.c for why that is load-bearing rather than incidental. */
+display_refresh_plan_t display_refresh_plan(display_screen_t screen, display_screen_t prev_screen, bool prev_valid,
+                                            uint8_t *partial_count);
+
 #ifdef __cplusplus
 }
 #endif

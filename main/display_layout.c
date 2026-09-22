@@ -419,3 +419,101 @@ void display_format_remaining(char *buf, size_t len, int32_t remaining_sec) {
     snprintf(buf, len, "%02ld:%02ld:%02ld", (long)(remaining_sec / 3600), (long)((remaining_sec / 60) % 60),
              (long)(remaining_sec % 60));
 }
+
+/* ---- refresh cadence and ghost cleaning (design §2.5) ------------------- */
+
+display_refresh_plan_t display_refresh_plan(display_screen_t screen, display_screen_t prev_screen, bool prev_valid,
+                                            uint8_t *partial_count) {
+    display_refresh_plan_t plan = {.full = false, .ghost_clean = false};
+
+    /* THE COUNTER ADVANCES FIRST AND UNCONDITIONALLY, ahead of the screen
+       test below, and that order is the whole safety argument for the
+       exemption rather than an accident of writing. See it under the
+       exemption. `>=` and not `==` so a counter that came back from RTC
+       memory above the threshold still lands here instead of wrapping. */
+    (*partial_count)++;
+    if (*partial_count >= DISPLAY_FULL_REFRESH_EVERY_N) {
+        *partial_count = 0;
+        plan.full = true;
+        return plan; /* a full refresh drives every pixel; no double pass */
+    }
+
+    /* THE CHORE-ACK EXEMPTION (design §2.5) — an ack REPAINT of a
+       checklist that is already up, not the chore screen as such; see
+       SCOPE below for why the difference is the whole of it. The double
+       pass costs ~1.5 s of the ~1.9 s a partial takes, which is most of
+       the latency between pressing an ack button and the tick appearing;
+       §2.5 spends that budget on the NeoPixels instead and lets the panel
+       catch up behind them.
+
+       WHY IT IS SAFE HERE AND NOT GENERALLY, measured rather than
+       asserted. §2.5 argues "a tick mark is a tiny diff"; the diff is
+       small but it is NOT only the tick column. The largest ack-only
+       change among the render goldens, chores_one_acked ->
+       chores_all_acked (two new ticks, the header going "1 of 3" ->
+       "3 of 3", and the "Screen time unlocked" line appearing), changes
+       1108 px inside a bounding box of x=6..261, y=8..104 — most of the
+       screen's width, not a column. Decomposed: 927 px is the unlocked
+       line, 74 px each tick, 33 px the header digit.
+
+       That is the largest GOLDEN, not the true worst case, and the
+       difference is worth stating because M2-T8 coalesces acks: entering
+       chore mode is a full refresh, so the glass starts at zero acks, and
+       a child pressing all three OK buttons paints 0x00 -> 0x07 in one
+       frame — three new ticks rather than two. At the 74 px a tick costs
+       above that is ~1182 px, ~3.12% of the panel. No golden pins it;
+       the figure is derived from the decomposition, and the argument
+       below is written to survive it being a little wrong.
+
+       What makes it safe is the comparison, not the region: a main-screen
+       partial changes several times as much and is never exempted. The
+       goldens' main_idle_weekday -> main_idle_weekday_adjusted is 3779 px
+       (progress bar 2800, remaining time 549, mode row 430) — that pair
+       shares a timestamp, its header band y=3..17 does not change at all,
+       so it is an ADJUSTMENT event rather than the frame a quiet wake
+       paints, and a quiet wake's own repaint moves the clock on top of
+       whatever else changed. Either way the exempted frames are around a
+       third of the diff of frames that clean today. They are also
+       short-lived — the checklist is left within seconds — so what they
+       do retain has little time to set.
+
+       AND THE COUNTER IS WHY IT STAYS BOUNDED. The double pass and the
+       every-Nth full refresh are the only two mechanisms holding ghosting
+       back on this panel. This gives up the first, so it must keep the
+       second: the increment above runs before this test, so a chore paint
+       counts toward the next full refresh exactly like any other, and a
+       long chore session is still flushed every Nth paint. An exemption
+       that also skipped the counter would leave a chore screen ghosting
+       with NEITHER mechanism running, which is unbounded — that is the
+       change not to make here, and
+       test_a_skipped_clean_chore_partial_still_advances_the_full_refresh_-
+       cadence fails if anyone makes it.
+
+       SCOPE, AND WHY IT IS A TRANSITION TEST AND NOT A SCREEN TEST. Only
+       the CLEANING pass, only on this screen, and only when the frame
+       already on the glass was this screen too. The justification above
+       is entirely about an ack-sized diff on a checklist that is already
+       up; a paint that CHANGES the screen into the checklist is a
+       whole-screen change — main -> checklist measures 10829 px, 28.58%
+       of the panel, ten times the frames this exempts — and gets the
+       double pass like any other whole-screen partial.
+
+       Leaving the previous screen out and arguing that no partial can
+       change screen anyway is the version that was wrong: the mode toggle
+       is forced full, but wake_flow's post-join re-render drops the
+       screen-kind term from its force_full and can partial-paint
+       main -> checklist after a config edit cancels a running timer. The
+       header carries that path in full. The rule here does not depend on
+       it, which is the point.
+
+       An UNKNOWN previous screen cleans. !prev_valid means a takeover
+       screen is on the glass, or this is the first paint of a power
+       cycle; either way the exemption's premise cannot be checked, and
+       cleaning needlessly costs latency while skipping wrongly costs a
+       ghost that the next full refresh is the only thing to remove.
+
+       The panel's own 1 s minimum-interval guard is the ssd1680 driver's
+       and is untouched: an exempted paint still waits for it. */
+    plan.ghost_clean = !(screen == DISPLAY_SCREEN_CHORES && prev_valid && prev_screen == DISPLAY_SCREEN_CHORES);
+    return plan;
+}

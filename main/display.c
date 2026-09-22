@@ -16,8 +16,6 @@
 
 static const char *TAG = "display";
 
-#define FULL_REFRESH_EVERY_N 5
-
 /* MagTag EPD pinout (Adafruit schematic) */
 static const ssd1680_pins_t PINS = {
     .pin_sclk = 36, .pin_mosi = 35, .pin_cs = 8, .pin_dc = 7, .pin_rst = 6, .pin_busy = 5};
@@ -35,17 +33,46 @@ static lv_display_t *s_disp;
 static bool s_initialized;
 static bool s_panel_slept; /* panel in deep sleep — must re-init before next flush */
 static ssd1680_refresh_mode_t s_pending_mode = SSD1680_REFRESH_FULL;
+/* Whether the pending partial gets the ghost-cleaning double pass.
+   display_refresh_plan() answers it; render() is the only writer, so no
+   paint path can leave a stale value behind for the next one. */
+static bool s_pending_clean;
 /* Partial/full cadence counter (policy, distinct from the driver's
    protection guard). Display-owned RTC state — the cadence survives deep
-   sleep without living in the timer module's rtc_state_t. */
+   sleep without living in the timer module's rtc_state_t. The arithmetic
+   over it is display_refresh_plan()'s, in display_layout.c, because this
+   file is not compiled by any host suite. */
 static RTC_DATA_ATTR uint8_t s_partial_count;
+
+/* Which of the three display_screen_t kinds the frame now on the glass
+   drew, and whether that is known at all — the input display_refresh_plan()
+   needs to tell an ack-sized chore partial from a whole-screen change INTO
+   the checklist. Only the first is exempt from the ghost-cleaning pass.
+
+   SAME RTC SEMANTICS AS s_prev_fb_valid ALONGSIDE, and for the same
+   reason: it describes what is physically on the panel, so it must
+   survive deep sleep and must NOT survive esp_restart(). It does both.
+   The bootloader reloads .rtc.data on every reset except a deep-sleep
+   wake (see s_takeover_on_panel's declaration for the citation), so after
+   a reboot the valid flag comes back false and the next partial cleans —
+   which is correct, because ssd1680.c's own previous-frame flag was wiped
+   by the same reboot and the driver is promoting that paint to a full
+   refresh anyway.
+
+   A SEPARATE FLAG RATHER THAN A FOURTH ENUMERATOR. "No known previous
+   screen" is not a screen, and adding DISPLAY_SCREEN_NONE would silently
+   weaken every -Wswitch-exhaustive switch over this type (build_for_state()
+   below is one) into one that compiles with a case nobody thought about.
+   The flag costs a byte of RTC memory and costs the switches nothing. */
+static RTC_DATA_ATTR display_screen_t s_prev_screen;
+static RTC_DATA_ATTR bool s_prev_screen_valid;
 
 /* "The panel is showing a full-screen takeover." Set by display_ota(),
    consumed by the next display_update().
 
    Zeroing s_partial_count is NOT enough on its own: the next
-   display_update() increments it to 1, and 1 < FULL_REFRESH_EVERY_N, so
-   the paint that lands on top of a 28 pt full-panel headline is a
+   display_update() increments it to 1, and 1 < DISPLAY_FULL_REFRESH_EVERY_N,
+   so the paint that lands on top of a 28 pt full-panel headline is a
    PARTIAL — the worst case for ghosting. lock_gate_promote_render()
    solves exactly this for the lock screens, one layer up; this is the
    same idea expressed where the takeover is painted, so no caller has to
@@ -106,7 +133,18 @@ static uint32_t tick_ms(void) {
    (keep them from sharing a byte with each other), which is why adding a
    fifth band or moving a row boundary is the change that needs care. A
    screen that only ever full-refreshes needs no entry either, for the
-   different reason that this table is read only on the partial path. */
+   different reason that this table is read only on the partial path.
+
+   AND THE CHORE SCREEN NEEDS NO ENTRY FOR THE FIRST REASON, not for a
+   special one. §2.5's exemption (display_refresh_plan()) keeps most chore
+   partials away from this table, but NOT all of them: it covers only
+   CHORES -> CHORES, so the partial that changes the screen INTO the
+   checklist cleans and does read these bands. That is fine, and by the
+   joint-coverage property above rather than by luck — the four bands are
+   every byte of every row, so the checklist's rows land inside them just
+   as the break screen's do, and display_fb_invert_dirty_rows() limits the
+   flash to bytes that actually changed. The extents are the MAIN screen's
+   widget geometry and always were; no screen needs its own table. */
 static const struct {
     int y0, y1; /* inclusive landscape rows */
 } CLEAN_BANDS[] = {
@@ -183,10 +221,19 @@ static void flush_cb(lv_display_t *disp, const lv_area_t *area, uint8_t *px_map)
        inside the text bands, pass 2 restores the true frame, so those
        pixels are driven both ways. Skipped when nothing in the bands
        changed or when previous-frame state is invalid (driver would
-       promote to full anyway). The intermediate pass doesn't re-arm the
-       refresh-rate guard (both passes are one render), so pass 2 starts
-       the moment BUSY releases — no fixed inter-pass delay. */
-    if (s_pending_mode == SSD1680_REFRESH_PARTIAL && ssd1680_partial_diff_ready() && s_prev_fb_valid) {
+       promote to full anyway), and skipped by policy on a chore partial
+       that follows another chore paint (s_pending_clean — see
+       display_refresh_plan(), which exempts CHORES -> CHORES and nothing
+       else, so a partial that changes screen still cleans). The intermediate
+       pass doesn't re-arm the refresh-rate guard (both passes are one
+       render), so pass 2 starts the moment BUSY releases — no fixed
+       inter-pass delay.
+
+       The driver's minimum-interval guard is NOT part of this decision and
+       is absorbed above unconditionally: a paint that skips the double
+       pass still waits out the 1 s floor like any other. */
+    if (s_pending_clean && s_pending_mode == SSD1680_REFRESH_PARTIAL && ssd1680_partial_diff_ready() &&
+        s_prev_fb_valid) {
         memcpy(s_panel_clean, s_panel_fb, sizeof(s_panel_clean));
         if (invert_clean_bands(s_panel_clean) > 0 && ssd1680_write_framebuffer(s_panel_clean) == ESP_OK) {
             ssd1680_refresh_intermediate(SSD1680_REFRESH_PARTIAL);
@@ -218,7 +265,7 @@ void display_init(void) {
 }
 
 /* The single choke point every paint in this file goes through, which is
-   why the RENDER breadcrumb is here rather than at nine call sites.
+   why the RENDER breadcrumb is here rather than at eight call sites.
    Covers the LVGL render pass AND the synchronous flush underneath it
    (the SPI writes and the panel's BUSY wait), which between them are the
    longest uninterruptible stretch of a quiet wake.
@@ -234,10 +281,20 @@ void display_init(void) {
    written by two tasks — never concurrently, because ota_task_run_apply
    blocks the main task on a semaphore for the whole attempt. That
    produces the honest reading "RENDER+OTA_DL" while the download paints
-   its progress screen. panic_diag.h carries the argument in full. */
-static void render(ssd1680_refresh_mode_t mode) {
+   its progress screen. panic_diag.h carries the argument in full.
+
+   `ghost_clean` is a parameter rather than a static every caller has to
+   remember to set: flush_cb reads it from inside the lv_refr_now() below,
+   so a paint path that forgot to write it would silently inherit the
+   PREVIOUS paint's answer — and on this panel that is a wrong refresh
+   nobody can see from here. As a parameter the compiler asks instead.
+   Only a PARTIAL can act on it, so the full-refresh entry points below
+   pass false; that is not a new restriction on them, it is what flush_cb's
+   own mode test already gave them. */
+static void render(ssd1680_refresh_mode_t mode, bool ghost_clean) {
     const panic_phase_t prev = panic_diag_enter(PANIC_PHASE_RENDER);
     s_pending_mode = mode;
+    s_pending_clean = ghost_clean;
     lv_refr_now(s_disp); /* renders + calls flush_cb synchronously */
     panic_diag_exit(PANIC_PHASE_RENDER, prev);
 }
@@ -248,9 +305,50 @@ static void render(ssd1680_refresh_mode_t mode) {
    somewhere — lives in that pure function, where test_display can reach
    it. Every enumerator listed and no default, so -Wswitch (an error under
    IDF's -Wall -Werror) catches a fourth screen kind that nobody wired up
-   here rather than letting it paint the timer screen. */
-static void build_for_state(const display_state_t *st) {
-    switch (display_screen_for(st->timer_state, st->app_mode, st->chore_count)) {
+   here rather than letting it paint the timer screen.
+
+   Returns the screen it built so display_update() can hand it to
+   display_refresh_plan() without asking display_screen_for() a second
+   time — two calls could not disagree today, but the screen that was
+   PAINTED is the one the refresh policy is about, and taking it from here
+   is what keeps that true.
+
+   It also RECORDS that screen, for the next paint to compare against.
+   Here rather than at the two call sites because this is the one place a
+   display_screen_t is turned into a frame: both callers (display_update
+   and display_full_refresh) go on to render unconditionally, including
+   display_update's takeover early-return below — that path has already
+   built this screen and paints it full, so the record is right for it
+   too. A future caller that built a screen and then did NOT paint it
+   would break that, and there is no such caller; the alternative, a
+   record updated at each render() site, is the one that has been got
+   wrong before.
+
+   `prev_out` HANDS BACK WHAT THE RECORD SAID ON ENTRY, and exists so that
+   a caller needing the previous screen cannot read it too late. The
+   overwrite happens here, so a caller that read the statics itself would
+   have to do so on the line BEFORE this call — an ordering requirement
+   that holds today and that nothing would enforce tomorrow. Returning the
+   old value from inside the swap makes it unorderable instead. NULL for
+   callers that do not need it. Pass it to display_refresh_plan() and
+   nowhere else: it describes the glass, not the state.
+
+   CALLERS THAT PAINT SOMETHING ELSE must call forget_painted_screen()
+   instead — see it. */
+typedef struct {
+    display_screen_t screen;
+    bool valid;
+} painted_screen_t;
+
+static display_screen_t build_for_state(const display_state_t *st, painted_screen_t *prev_out) {
+    const display_screen_t screen = display_screen_for(st->timer_state, st->app_mode, st->chore_count);
+    if (prev_out != NULL) {
+        prev_out->screen = s_prev_screen;
+        prev_out->valid = s_prev_screen_valid;
+    }
+    s_prev_screen = screen;
+    s_prev_screen_valid = true;
+    switch (screen) {
         case DISPLAY_SCREEN_CHORES:
             display_screens_build_chores(st);
             break;
@@ -261,73 +359,103 @@ static void build_for_state(const display_state_t *st) {
             display_screens_build_main(st);
             break;
     }
+    return screen;
+}
+
+/* The takeover painters below (TIME'S UP, Charge Me, sync failed,
+   bedtime, the OTA banner) do not go through build_for_state(): what they
+   put on the glass is none of the three display_screen_t kinds, so the
+   record cannot name it and must say so.
+
+   NOT MERELY TIDINESS. Only display_ota() also sets s_takeover_on_panel;
+   the other four do not, so the paint after one of them takes the ordinary
+   cadence path. Leave the record alone and a checklist painted after a
+   TIME'S UP screen would read back the CHORES it left there before the
+   alert, match, and skip the cleaning pass over a 28 pt full-panel
+   headline — the worst frame on this device to skip it on. */
+static void forget_painted_screen(void) {
+    s_prev_screen_valid = false;
 }
 
 void display_update(const display_state_t *st) {
     if (!s_initialized)
         display_init();
-    build_for_state(st);
+    /* `prev` is what the record said before this build overwrote it —
+       the screen on the glass right now. The plan below is a question
+       about that frame, not about this one. */
+    painted_screen_t prev;
+    const display_screen_t screen = build_for_state(st, &prev);
     /* A takeover screen is still on the glass — from earlier in this
        wake, or from before a deep sleep. NOT from before a reboot: the
        flag does not survive esp_restart (see its declaration), and the
        driver's own previous-frame guard is what covers that case. Promote
-       this paint to a full refresh and clear the flag. */
+       this paint to a full refresh and clear the flag. It returns before
+       display_refresh_plan() is reached, so the chore exemption cannot
+       reach a repaint over a takeover even when the checklist is what
+       paints next — a full refresh over a 28 pt headline is not something
+       the cadence gets a say in.
+
+       That covers display_ota() only, because it is the only painter that
+       sets the flag. The other four takeovers (TIME'S UP, Charge Me, sync
+       failed, bedtime) fall through to the cadence below, and what keeps
+       the exemption off THOSE is forget_painted_screen() — see it. */
     if (s_takeover_on_panel) {
         s_takeover_on_panel = false;
         s_partial_count = 0;
-        render(SSD1680_REFRESH_FULL);
+        render(SSD1680_REFRESH_FULL, false);
         return;
     }
-    /* Policy: full refresh every Nth partial (anti-ghosting). The counter
-       lives in RTC memory so the cadence survives deep sleep. */
-    s_partial_count++;
-    if (s_partial_count >= FULL_REFRESH_EVERY_N) {
-        s_partial_count = 0;
-        render(SSD1680_REFRESH_FULL);
-    } else {
-        render(SSD1680_REFRESH_PARTIAL);
-    }
+    /* Policy: full refresh every Nth partial (anti-ghosting), and which
+       partials get the ghost-cleaning double pass. Both answers come from
+       display_layout.c so they can be host-tested; the counter lives in
+       RTC memory so the cadence survives deep sleep. */
+    const display_refresh_plan_t plan = display_refresh_plan(screen, prev.screen, prev.valid, &s_partial_count);
+    render(plan.full ? SSD1680_REFRESH_FULL : SSD1680_REFRESH_PARTIAL, plan.ghost_clean);
 }
 
 void display_full_refresh(const display_state_t *st) {
     if (!s_initialized)
         display_init();
-    build_for_state(st);
+    build_for_state(st, NULL);   /* a full refresh asks the plan nothing */
     s_takeover_on_panel = false; /* this paint is already the full one */
     s_partial_count = 0;
-    render(SSD1680_REFRESH_FULL);
+    render(SSD1680_REFRESH_FULL, false);
 }
 
 void display_timesup(void) {
     if (!s_initialized)
         display_init();
     display_screens_build_timesup();
+    forget_painted_screen();
     s_partial_count = 0;
-    render(SSD1680_REFRESH_FULL);
+    render(SSD1680_REFRESH_FULL, false);
 }
 
 void display_charge_me(void) {
     if (!s_initialized)
         display_init();
     display_screens_build_charge_me();
+    forget_painted_screen();
     s_partial_count = 0;
-    render(SSD1680_REFRESH_FULL);
+    render(SSD1680_REFRESH_FULL, false);
 }
 
 void display_sync_failed(void) {
     if (!s_initialized)
         display_init();
     display_screens_build_sync_failed();
+    forget_painted_screen();
     s_partial_count = 0;
-    render(SSD1680_REFRESH_FULL);
+    render(SSD1680_REFRESH_FULL, false);
 }
 
 void display_bedtime(void) {
     if (!s_initialized)
         display_init();
     display_screens_build_bedtime();
+    forget_painted_screen();
     s_partial_count = 0;
-    render(SSD1680_REFRESH_FULL);
+    render(SSD1680_REFRESH_FULL, false);
 }
 
 /* Painted between the OTA check window and the download window, with the
@@ -342,6 +470,7 @@ void display_ota(const char *from_version, const char *to_version) {
        of the new firmware after the reboot — must be full, not a partial
        over a full-panel 28 pt headline. See s_takeover_on_panel. */
     s_takeover_on_panel = true;
+    forget_painted_screen(); /* belt and braces: the flag above already forces full */
     s_partial_count = 0;
-    render(SSD1680_REFRESH_FULL);
+    render(SSD1680_REFRESH_FULL, false);
 }
