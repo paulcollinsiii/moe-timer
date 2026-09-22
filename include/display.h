@@ -206,6 +206,11 @@ void display_timesup(void);                              /* TIME'S UP layout, fu
 void display_sync_failed(void);                          /* "No sync - check WiFi" layout */
 void display_charge_me(void);                            /* battery lock layout, full refresh */
 void display_bedtime(void);                              /* bed-time lock layout, full refresh */
+/* Config-error lock layout, full refresh (design 5.3). Names the day type
+   whose `chore_free_*` exceeds its paired allocation and both figures, in
+   MINUTES as stored — the point of the screen is that the fix needs no
+   laptop. */
+void display_config_error(day_type_t day_type, uint16_t chore_free_min, uint16_t alloc_min);
 /* Firmware update in progress, full refresh. Version strings are bare
    ("1.5.0"); the screen adds the "v". */
 void display_ota(const char *from_version, const char *to_version);
@@ -359,9 +364,17 @@ typedef enum {
    the converse — and it is enforced, not merely documented, by
    test_the_chore_screen_is_never_painted_where_button_a_would_be_refused
    in test_button_actions (which compiles display_layout.c for it). A
-   REFUSAL REASON ADDED TO A AND NOT TO THIS FUNCTION FAILS THAT CASE;
-   M2-T10's device lock is the next one due, so decide there whether the
-   painter inherits it rather than leaving the two to drift.
+   REFUSAL REASON ADDED TO A AND NOT TO THIS FUNCTION FAILS THAT CASE, so
+   decide here whether the painter inherits one rather than leaving the
+   two to drift.
+   M2-T10's config-error lock was the candidate this named, and it added
+   NO refusal reason: it narrows the EXT1 wake mask (buttons_policy.c) and
+   leaves the predicate alone, precisely so this pure layout function does
+   not grow a device-state dependency. So that case neither caught nor
+   could catch anything about that lock — it does not set the flag and
+   does not link lock_gate.c — and nothing here changed. The next task
+   that adds a REASON, rather than a mask, is the one this paragraph is
+   waiting for.
    The stored mode is deliberately NOT reverted here: this is a paint
    decision, and the day's mode byte is the wake flow's (C16, C17).
 

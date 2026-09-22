@@ -1120,6 +1120,79 @@ void test_main_idle_weekday_adjusted(void) {
     assert_matches_golden("main_idle_weekday_adjusted");
 }
 
+/* ---- the config-error lock screen (design 5.3, row C11) -----------------
+
+   The one screen on this panel whose job is to be read by an adult and
+   acted on, so it carries three things no other lock screen does: which
+   day type is broken, both numbers, and what to press. */
+void test_config_error_screen(void) {
+    display_screens_build_config_error(DAY_WEEKDAY, 120, 60);
+    assert_matches_golden("config_error");
+}
+
+/* Leftmost and rightmost ink column anywhere on the panel. A label wider
+   than 296 px does not wrap or error — LVGL clips it — so a too-long line
+   shows up as ink pressed against both edges, and a golden regenerated
+   over it would record the clipping as correct. */
+static void ink_columns(int *left, int *right) {
+    *left = HOR;
+    *right = -1;
+    for (int y = 0; y < VER; y++) {
+        for (int x = 0; x < HOR; x++) {
+            if (((s_captured[y * (HOR / 8) + x / 8] >> (7 - (x & 7))) & 1) != 0)
+                continue; /* LVGL I1: 1 = white */
+            if (x < *left)
+                *left = x;
+            if (x > *right)
+                *right = x;
+        }
+    }
+}
+
+/* The numbers are read from NVS, not from the validated config document,
+   so the screen has to survive values no setter would ever have accepted:
+   an older firmware or an NVS oddity is the whole reason layer 3 exists.
+   uint16_t's ceiling is therefore the width case, not CFG_BOUND_*'s 1440. */
+void test_the_config_error_screen_fits_the_panel_at_its_widest(void) {
+    const day_type_t days[] = {DAY_WEEKDAY, DAY_WEEKEND, DAY_HOLIDAY, DAY_SUMMER};
+    int checked = 0;
+    for (size_t i = 0; i < sizeof days / sizeof days[0]; i++) {
+        display_screens_build_config_error(days[i], 65535, 65534);
+        lv_refr_now(s_disp);
+        int left, right;
+        ink_columns(&left, &right);
+        char msg[128];
+        snprintf(msg, sizeof(msg), "day type %d: ink spans x=%d..%d on a %d px panel", (int)days[i], left, right, HOR);
+        TEST_ASSERT_TRUE_MESSAGE(left >= 2, msg);
+        TEST_ASSERT_TRUE_MESSAGE(right <= HOR - 3, msg);
+        checked++;
+    }
+    TEST_ASSERT_EQUAL_INT_MESSAGE(4, checked, "the sweep rendered nothing");
+}
+
+/* Naming the pair is the entire reason this is a screen rather than
+   another config_ack nobody reads, and a golden alone would not notice a
+   builder that ignored its arguments and drew the same four lines every
+   time. Two different pairs must not render identically. */
+void test_the_config_error_screen_renders_the_pair_it_is_given(void) {
+    static uint8_t first[FB_BYTES];
+    display_screens_build_config_error(DAY_WEEKDAY, 120, 60);
+    lv_refr_now(s_disp);
+    memcpy(first, s_captured, FB_BYTES);
+
+    display_screens_build_config_error(DAY_WEEKDAY, 121, 60);
+    lv_refr_now(s_disp);
+    TEST_ASSERT_TRUE_MESSAGE(memcmp(first, s_captured, FB_BYTES) != 0, "the free slice does not reach the panel");
+
+    display_screens_build_config_error(DAY_WEEKDAY, 120, 61);
+    lv_refr_now(s_disp);
+    TEST_ASSERT_TRUE_MESSAGE(memcmp(first, s_captured, FB_BYTES) != 0, "the allocation does not reach the panel");
+
+    display_screens_build_config_error(DAY_SUMMER, 120, 60);
+    lv_refr_now(s_disp);
+    TEST_ASSERT_TRUE_MESSAGE(memcmp(first, s_captured, FB_BYTES) != 0, "the day type does not reach the panel");
+}
+
 void test_ota_screen(void) {
     /* Firmware update, full refresh: both versions, direction-neutral verb
        (the policy deliberately supports downgrades). */
@@ -1939,6 +2012,9 @@ int main(void) {
     RUN_TEST(test_version_fits_the_battery_row);
     RUN_TEST(test_version_cap_clips_the_drawing_not_just_the_object);
     RUN_TEST(test_no_version_renders_the_row_unchanged);
+    RUN_TEST(test_config_error_screen);
+    RUN_TEST(test_the_config_error_screen_fits_the_panel_at_its_widest);
+    RUN_TEST(test_the_config_error_screen_renders_the_pair_it_is_given);
     RUN_TEST(test_ota_screen);
     RUN_TEST(test_ota_screen_lines_fit_the_panel);
     RUN_TEST(test_charge_me_screen);

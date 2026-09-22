@@ -92,11 +92,13 @@ sleep_plan_in_t sleep_plan_from_timer(const sleep_plan_timer_in_t *in) {
     return out;
 }
 
-wake_sleep_mode_t wake_sleep_mode_select(bool charge_locked, bool bedtime_locked) {
+wake_sleep_mode_t wake_sleep_mode_select(bool charge_locked, bool bedtime_locked, bool config_locked) {
     if (charge_locked)
         return WAKE_SLEEP_CHARGE_LOCK;
     if (bedtime_locked)
         return WAKE_SLEEP_BEDTIME;
+    if (config_locked)
+        return WAKE_SLEEP_CONFIG_ERR;
     return WAKE_SLEEP_NORMAL;
 }
 
@@ -116,6 +118,15 @@ sleep_outcome_t sleep_plan_outcome(wake_sleep_mode_t mode, const sleep_plan_in_t
                 .seconds = CHARGE_LOCK_SLEEP_SEC, .enable_buttons = false, .reason = "charge lock, "};
         case WAKE_SLEEP_BEDTIME:
             return (sleep_outcome_t){.seconds = BEDTIME_SLEEP_SEC, .enable_buttons = false, .reason = "bed time, "};
+        case WAKE_SLEEP_CONFIG_ERR:
+            /* THE ONE LOCK THAT ARMS ANYTHING, and `true` here is the
+               whole of it: buttons_policy.c narrows the mask to D alone
+               off lock_gate_config_locked(), but it never gets asked
+               unless this flag says the driver may arm at all. Flipping
+               this to false to "match the other two" leaves a device that
+               can only be recovered with a serial cable. */
+            return (sleep_outcome_t){
+                .seconds = CONFIG_ERR_SLEEP_SEC, .enable_buttons = true, .reason = "config error, "};
     }
     /* Unreachable while wake_sleep_mode_select() is the only producer, but
        a cast value would land here. Fail CLOSED: this whole mechanism

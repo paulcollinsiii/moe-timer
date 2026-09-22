@@ -5,11 +5,12 @@
 #include "sleep_plan.h"  /* wake_sleep_mode_t */
 #include "wake_policy.h" /* wake_render_t */
 
-/* The two screen locks — battery charge and bed time — and the sleep mode
-   they imply. Both are gates: they run early in a wake and either return
-   (the wake carries on) or paint a lock screen once and end the wake
-   there. Both keep their "am I locked" bit in RTC memory, because the
-   whole point is to survive the long sleeps they schedule.
+/* The three screen locks — battery charge, bed time and config error —
+   and the sleep mode they imply. All three are gates: they run early in a
+   wake and either return (the wake carries on) or paint a lock screen
+   once and end the wake there. All three keep their "am I locked" bit in
+   RTC memory, because the whole point is to survive the long sleeps they
+   schedule.
 
    Everything here is an edge, which is why it earns a module of its own:
    engaging must stop the timer before the panel changes, engaging must
@@ -52,9 +53,17 @@ wake_sleep_mode_t lock_gate_sleep_mode(void);
    anyone asks of it. */
 bool lock_gate_charge_locked(void);
 
-/* A release leaves the panel showing Charge Me! or Bed Time, which a
-   partial refresh cannot clear, so the wake that observes the release
-   owes the panel a full one. Only PARTIAL is promoted: FULL is already
+/* For the WAKE MASK, and for nothing else so far. buttons.c narrows the
+   EXT1 mask to Button D alone while this is true (buttons_policy.h), and
+   short-circuits the three gates it would otherwise ask — two of which go
+   to flash — off the same answer. Not published to HA: a device that is
+   config-locked has just told the parent so on the panel, which is a
+   louder channel than a stat nobody has a card for. */
+bool lock_gate_config_locked(void);
+
+/* A release leaves the panel showing Charge Me!, Bed Time or Config
+   Error, which a partial refresh cannot clear, so the wake that observes
+   the release owes the panel a full one. Only PARTIAL is promoted: FULL is already
    what we want, and an expiry alert owns the display for itself. Levels
    are wrong here and edges are right — the flags are set by the release
    and live only for that wake, so a device that merely happens to be
@@ -78,7 +87,35 @@ void lock_gate_bedtime_engage(time_t now, bool alert);
 
 /* Bed-time gate, modeled on the battery one: called from both wake
    handlers right after day rollover (rollover-first ordering is what
-   clears the lock on the new day). May not return. */
+   clears the lock on the new day). May not return.
+
+   AND THE CONFIG-ERROR GATE, WHICH RUNS HERE TOO (design 5.3). The name
+   is now narrower than the function, which is a cost paid deliberately
+   and is worth reading before "tidying" it into two entry points:
+
+     - This is the only place in the firmware where a gate can ask what
+       TODAY's day type is. The config-error lock engages for today's pair
+       and stays dormant over the other three (rows C11/C12), and today is
+       only settled once wake_flow_handle_day_rollover() has run. Both
+       wake handlers call this immediately after it, with `now` in hand.
+       The battery gate — the other existing entry point — runs in
+       app_main before any of that and takes no instant at all.
+     - main.c takes ZERO additions on this plan, and the file list this
+       task owns does not include wake_flow.c either, so a second call
+       site was never available. Folding it in here is not a shortcut
+       around that constraint; it is the position the ordering already
+       required.
+     - The shapes are the same to the line: paint once, then sleep in long
+       intervals that still run a network window, because for both locks
+       an edit arriving in that window is the only remote fix path and it
+       must not wait another interval.
+
+   ORDER IS BED TIME, THEN CONFIG ERROR, and it is not interchangeable.
+   Bed time's engage does not return, so a broken pair found at 21:00 gets
+   no screen that night — correctly, since nobody is editing config then
+   and the panel is already saying "not in service". The morning the
+   bed-time lock lets go, the config gate picks the panel back up in the
+   same wake. */
 void lock_gate_check_bedtime(time_t now);
 
 #ifdef __cplusplus

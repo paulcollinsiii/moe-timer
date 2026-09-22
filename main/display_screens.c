@@ -75,6 +75,11 @@ static lv_obj_t *make_label(lv_obj_t *parent, const char *text, const lv_font_t 
    renders with. */
 #define BATT_ROW_MAX_W 168
 #define OTA_LINE_MAX_W 280
+/* The config-error screen's pair line, centred on a 296 px panel like the
+   OTA version lines and for the same 8 px-a-side margin. A geometric
+   backstop, not a width the worst line fits inside: the numbers are read
+   raw out of NVS, so no character budget bounds them. */
+#define CONFIG_ERR_LINE_MAX_W 280
 /* The status row's left half, against the state word right-aligned at
    x=292. "TIME'S UP" is the widest state word at 62 px, so it starts at
    x=230; allowing 6 px of gap leaves x=224, and from the left margin at
@@ -530,10 +535,49 @@ void display_screens_build_break(const display_state_t *st) {
        `> 1` and `>= 0` alike. The CROSS-CHECK against
        button_a_toggle_allowed() is held by nothing: test_button_actions
        has the predicate but not this file (no LVGL), and the render suite
-       has this file but not the predicate. So if M2-T10's device lock
-       adds a refusal reason, the chore screen's spelling is covered by
-       that suite's sweep and THIS line is not — teaching it the lock is a
-       manual obligation of that task, not something a test will catch. */
+       has this file but not the predicate. So if a device lock adds a
+       refusal reason, the chore screen's spelling is covered by that
+       suite's sweep and THIS line is not — teaching it the lock would be
+       a manual obligation of that task, not something a test will catch.
+
+       M2-T10 CAME AND WENT AND THIS LINE IS UNCHANGED, which is a
+       finding and not an omission, so it is recorded here rather than
+       left for the next reader to re-derive. The config-error lock adds
+       NO refusal reason to button_a_toggle_allowed(), so the predicate
+       and this literal still agree and this label still cannot offer a
+       press the map would refuse. WHAT THE LOCK NARROWS IS THE WAKE MASK
+       (buttons_policy.c), not the set of screens that can reach the
+       panel, and the difference is the whole of what follows.
+
+       NO GUARANTEE IS CLAIMED HERE ABOUT WHAT IS ON THE GLASS. An
+       earlier draft of this comment said the config-error screen was the
+       only screen that could reach the panel while the lock held. That
+       was false in two directions at once, and both are worth naming
+       because the argument is the tempting one. It is false ACROSS
+       LOCKS: the other two gates paint as they engage and can go up over
+       a held config lock, which lock_gate.c's own config gate is written
+       to correct. And it was false WITHIN the locked path: the network
+       window every locked wake runs can repaint through
+       on_active_expired_alert(), which is how the chore checklist could
+       end up on the panel above a D-only wake mask — M2-T10's
+       HIGH-severity finding. The reachable-screens claim was an
+       enumeration of the painters its author could see, stated as a
+       property of the system.
+
+       WHAT IS TRUE NOW, by mechanism rather than by enumeration: every
+       locked path in lock_gate.c repaints its own screen immediately
+       before enter_deep_sleep(), unconditionally, so whatever painted
+       during the wake, the lock's screen is what the panel is left
+       holding. That is a statement about the sleep, not about the wake:
+       DURING a locked wake other screens do reach the panel, and this
+       label can be among them.
+
+       WHICH MEANS THE UNDERLYING HAZARD IS NOT RETIRED, only this
+       task's version of it. A future gate that adds a REFUSAL REASON to
+       button_a_toggle_allowed() without adding one here still makes
+       "Chores" a dead label, and nothing tests the cross-check (see the
+       paragraph above). A blocking lock does not put that obligation
+       back; a refusing one always does. */
     const bool has_chores = st->chore_count > 0;
     const bool has_swap = st->swap_next_name != NULL;
 
@@ -762,6 +806,53 @@ void display_screens_build_bedtime(void) {
        and 20 pt overruns the 296 px panel. */
     make_label(scr, "Brush teeth | Get water bottles", &lv_font_montserrat_18, LV_ALIGN_CENTER, 0, 4);
     make_label(scr, "Goodnight!", &lv_font_montserrat_28, LV_ALIGN_BOTTOM_MID, 0, -2);
+}
+
+/* Config-error lock (design 5.3, row C11): today's `chore_free_*` is
+   larger than the allocation it is paired with, which cannot mean
+   anything, so the device stops and says so.
+
+   NOT INVERTED, unlike the bed-time lock it is otherwise shaped on, and
+   the reason is the small type rather than the mood: this is the only
+   lock screen carrying a 12 pt line, and 12 pt white-on-black renders
+   illegibly on this panel — the inversion eats the thin strokes (the
+   break screen's own comment records the same measurement). A screen
+   nobody can read is a screen that cannot route the fault to the person
+   who can clear it, which is the entire point of layer 3.
+
+   THE NUMBERS COME FROM NVS, NOT FROM A VALIDATED DOCUMENT. The pairs
+   this screen is asked to render are precisely the ones no setter would
+   have accepted — an older firmware's value, an NVS oddity, a bug in a
+   setter — so the width case is uint16_t's ceiling and not
+   CFG_BOUND_CHORE_FREE_HI's 1440. Hence the cap on the pair line, and
+   test_the_config_error_screen_fits_the_panel_at_its_widest, which
+   renders 65535/65534 on every day type and fails if ink reaches either
+   edge. LVGL clips rather than wraps, so an overrun would otherwise be
+   frozen into a regenerated golden as the new correct answer.
+
+   No CLEAN_BANDS entry is needed, for the same reason charge_me and
+   bedtime need none: this screen only ever arrives through a full
+   refresh. */
+void display_screens_build_config_error(day_type_t day_type, uint16_t chore_free_min, uint16_t alloc_min) {
+    lv_obj_t *scr = fresh_screen(false);
+    char buf[64];
+
+    make_label(scr, "Config Error", &lv_font_montserrat_28, LV_ALIGN_TOP_MID, 0, 2);
+
+    /* NAMES THE PAIR, which is what makes the fix possible without a
+       laptop and is the one thing distinguishing this from the
+       config_ack entry nobody reads. Day type first because it is what
+       tells a parent which of the four settings to open. */
+    snprintf(buf, sizeof(buf), "%s: free %u > %u min", day_type_str(day_type), (unsigned)chore_free_min,
+             (unsigned)alloc_min);
+    cap_width(make_label(scr, buf, &lv_font_montserrat_16, LV_ALIGN_TOP_MID, 0, 44), CONFIG_ERR_LINE_MAX_W);
+
+    /* The rule, in the words of the setting rather than the code: a
+       parent who has never read design 3.3 still needs to know which way
+       to move which number. */
+    make_label(scr, "chore_free exceeds the allocation", &lv_font_montserrat_12, LV_ALIGN_TOP_MID, 0, 70);
+
+    make_label(scr, "Fix in Home Assistant, press D", &lv_font_montserrat_16, LV_ALIGN_BOTTOM_MID, 0, -4);
 }
 
 /* Firmware update, full refresh only (display_ota): static, no progress

@@ -27,7 +27,13 @@
      The two reasons are an OR and neither implies the other: outside
      chore mode only the swap arms C, and on the chore screen only the ack
      does.
-   - B and D are unconditional.
+   - B and D are unconditional, with ONE exception above all of them: the
+     config-error lock (design 5.3) narrows the mask to D alone. That is
+     the same UX rule pointed at the device rather than at a press — every
+     button's action would be refused, because the wake it bought ends in
+     the gate — with D exempted because it is the exit: it forces the
+     network window that carries the corrected config. buttons_policy.h
+     says why the narrowing cannot be expressed as a fourth gate.
 
    A and C are gated SEPARATELY even though both refuse while RUNNING.
    Folding them is the obvious saving and it is wrong: swap_allowed also
@@ -80,6 +86,12 @@
 #include "buttons_policy.h"
 
 static bool wake_source(button_id_t btn, const buttons_policy_in_t *in) {
+    /* The config-error lock, before the per-button rules and not folded
+       into them: it is a statement about the DEVICE, not about what any
+       one press would do, and B has no gate of its own to carry it (see
+       buttons_policy.h). D is the exit and everything else is dark. */
+    if (in->config_locked)
+        return btn == BTN_D;
     switch (btn) {
         case BTN_A:
             return in->mode_toggle_allowed;

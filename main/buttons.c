@@ -10,6 +10,7 @@
 #include "esp_sleep.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
+#include "lock_gate.h"
 #include "sdkconfig.h"
 #include "timer.h"
 
@@ -179,8 +180,39 @@ void buttons_configure_wakeup_if(bool enable) {
        (CONFIG_ESP_TIMER_TASK_STACK_SIZE=3584). The gate's names buffer
        adds ~64 B there (button_actions.c). Running NVS from esp_timer on
        this path is pre-existing, not something this gate introduced. */
+    /* THE LOCK IS REPORTED HERE AND APPLIED IN EXACTLY ONE PLACE, which
+       is buttons_policy.c's early return. Each of the three gates below
+       used to be written `!config_locked && ...` as well, on the grounds
+       that a config-locked sleep arms D alone (buttons_policy.h) so their
+       answers cannot change the mask, and two of them go to flash to
+       produce one.
+
+       THAT SPELT THE NARROWING TWICE, and the second copy was the one
+       nothing could see: this file is in no host suite, and a mutant
+       severing its half of the rule produced a test binary bit-identical
+       to pristine — it never compiled. The two copies also fail
+       differently, which is what settles it. Delete the policy's early
+       return with these short-circuits present and A and C go dark with
+       no rule anywhere saying they should be: the "primary control dead
+       to the press" failure this module's policy exists to avoid, arrived
+       at by accident and with no test to notice. Delete it with the
+       narrowing spelt once and the mask merely widens back to what it was
+       before the lock existed — a stray press and a wasted refresh.
+
+       WHAT THAT GIVES UP, measured rather than asserted: the two flash
+       reads the header above tabulates, a few ms of NVS, on a wake that
+       has already spent up to NET_JOIN_TIMEOUT_MS (90 s) of radio — the
+       config gate runs a window on EVERY wake where this flag is true,
+       engage and locked re-wake alike (lock_gate.c). Three to five orders
+       of magnitude apart on any plausible figure for a blob read. And the
+       saving was never consistent in the first place: the same reads
+       already happen unconditionally on the charge- and bed-time-locked
+       sleeps, where `enable` is false and the entire mask is discarded a
+       line later. */
+    const bool config_locked = lock_gate_config_locked();
     buttons_policy_in_t pol = {
         .enable = enable,
+        .config_locked = config_locked,
         .swap_allowed = timer_swap_allowed(),
         .mode_toggle_allowed = button_a_toggle_allowed(),
         /* C's chore binding (design 2.4): the middle checkbox. A SECOND
@@ -296,6 +328,11 @@ button_id_t buttons_get_wakeup_button(void) {
            construction — the next gate to arrive may be the one that
            does. */
         .chore_ack_allowed = true,
+        /* config_locked is left out, and FALSE is the maximal value for
+           it — it is the one field that NARROWS. Setting it true here
+           would cut the fallback level scan down to button D and lose
+           every other press this path exists to recover. The literal is
+           maximal by VALUE, not by mentioning every field. */
     };
     const uint8_t armable = buttons_policy_wake_mask(&maximal);
     esp_rom_delay_us(DEBOUNCE_US);

@@ -17,14 +17,25 @@ void tearDown(void) {}
    gate would narrow the fallback level scan below the set of pads the
    policy can arm. Both are designated initializers over the same struct;
    this one is caught by a failing sweep, that one by nothing. */
-static uint8_t mask4(bool enable, bool swap_allowed, bool mode_toggle_allowed, bool chore_ack_allowed) {
+static uint8_t mask5(bool enable, bool swap_allowed, bool mode_toggle_allowed, bool chore_ack_allowed,
+                     bool config_locked) {
     buttons_policy_in_t in = {
         .enable = enable,
         .swap_allowed = swap_allowed,
         .mode_toggle_allowed = mode_toggle_allowed,
         .chore_ack_allowed = chore_ack_allowed,
+        .config_locked = config_locked,
     };
     return buttons_policy_wake_mask(&in);
+}
+
+/* The four-gate form the cases below were written against. config_locked
+   is FALSE here for the same reason chore_ack_allowed is false in
+   wake_mask_for() below: it is the state every device that is not broken
+   is in, and it narrows the mask to one pad, so leaving it out of the
+   baseline keeps those expectations about the gate each case drives. */
+static uint8_t mask4(bool enable, bool swap_allowed, bool mode_toggle_allowed, bool chore_ack_allowed) {
+    return mask5(enable, swap_allowed, mode_toggle_allowed, chore_ack_allowed, false);
 }
 
 /* The three-gate form the cases below this line were written against.
@@ -59,10 +70,50 @@ void test_enabled_is_never_an_empty_mask(void) {
     for (int swap = 0; swap <= 1; swap++) {
         for (int mode = 0; mode <= 1; mode++) {
             for (int ack = 0; ack <= 1; ack++) {
-                TEST_ASSERT_NOT_EQUAL_UINT8(0, mask4(true, swap, mode, ack));
+                for (int cfg = 0; cfg <= 1; cfg++) {
+                    /* The config-error lock narrows to D and D ALONE, so
+                       it is swept here rather than excused: the guarantee
+                       is "not empty", and a narrowing that reached zero
+                       would make the driver's early return start meaning
+                       something it does not mean. */
+                    TEST_ASSERT_NOT_EQUAL_UINT8(0, mask5(true, swap, mode, ack, cfg));
+                }
             }
         }
     }
+}
+
+/* ---- the config-error lock's mask -------------------------------------
+
+   Design 5.3: this lock sleeps charge-lock style but keeps Button D alive
+   so a parent can force the corrected config in immediately instead of
+   waiting out an interval. D and NOTHING else — B is unconditional
+   everywhere above this line and has to be dropped here explicitly, which
+   is why the narrowing lives in the policy rather than in the three gates.
+
+   THE SWEEP IS THE POINT, not ceremony: the driver hands all three gates
+   their honest answers now (it used to short-circuit A and C to false as
+   well, spelling the rule a second time where no suite could reach it),
+   so these eight combinations are the whole of what the policy has to
+   drop, and this case is the only thing holding it. */
+void test_a_config_locked_sleep_arms_button_d_alone(void) {
+    for (int swap = 0; swap <= 1; swap++) {
+        for (int mode = 0; mode <= 1; mode++) {
+            for (int ack = 0; ack <= 1; ack++) {
+                TEST_ASSERT_EQUAL_UINT8_MESSAGE(M(BTN_D), mask5(true, swap, mode, ack, true),
+                                                "a config-locked sleep armed something other than D alone");
+            }
+        }
+    }
+}
+
+/* The narrowing must not outrank the arm decision: the charge and
+   bed-time locks arm nothing at all, and a device that is BOTH config-
+   locked and charge-locked takes the charge lock's answer (sleep_plan.c
+   settles which mode wins; this says the mask agrees). */
+void test_a_config_locked_sleep_still_arms_nothing_when_disabled(void) {
+    TEST_ASSERT_EQUAL_UINT8(0, mask5(false, true, true, true, true));
+    TEST_ASSERT_EQUAL_UINT8(0, mask5(false, false, false, false, true));
 }
 
 /* ---- which buttons qualify -------------------------------------------- */
@@ -193,6 +244,8 @@ int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_disabled_arms_nothing);
     RUN_TEST(test_enabled_is_never_an_empty_mask);
+    RUN_TEST(test_a_config_locked_sleep_arms_button_d_alone);
+    RUN_TEST(test_a_config_locked_sleep_still_arms_nothing_when_disabled);
     RUN_TEST(test_a_follows_mode_toggle_allowed);
     RUN_TEST(test_a_does_not_follow_the_swap_gate);
     RUN_TEST(test_a_still_does_not_wake_on_a_locked_sleep);

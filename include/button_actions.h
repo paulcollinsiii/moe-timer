@@ -84,11 +84,20 @@ typedef enum {
    display_layout.c beside this file. It sweeps every timer state against
    every list length and asserts the implication on all 12 rows that paint
    a checklist. A TERM ADDED TO THIS FUNCTION AND NOT TO THE PAINTER IS
-   WHAT IT IS FOR: M2-T10's third device lock is the next candidate, and
-   without that case the failure reaches the glass as a checklist whose
-   "Timers" label does nothing — a kid stuck on a screen with no way off
-   and no feedback. Add the reason here, then decide in display.h whether
-   the painter inherits it; do not add one and stop.
+   WHAT IT IS FOR: without that case the failure reaches the glass as a
+   checklist whose "Timers" label does nothing — a kid stuck on a screen
+   with no way off and no feedback. Add the reason here, then decide in
+   display.h whether the painter inherits it; do not add one and stop.
+
+   M2-T10's config-error lock was named here as the next candidate and is
+   NOT one, which is recorded so the next reader does not go looking for
+   the term it was supposed to add. That lock narrows the EXT1 wake mask
+   (buttons_policy.c) instead of refusing a press, so this predicate is
+   unchanged and the case above is silent about it in both directions —
+   it neither sets the flag nor links lock_gate.c, and would read the same
+   if the lock were deleted. What holds that lock is test_lock_gate and
+   test_sleep_plan. The paragraph above is still waiting for a task that
+   adds a REASON rather than a mask.
 
    Two refusal reasons, and they are ORs of each other:
 

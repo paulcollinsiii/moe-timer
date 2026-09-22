@@ -171,6 +171,21 @@ static uint16_t read_cached_min(const char *key, uint16_t def, bool *loaded, uin
     return *slot;
 }
 
+/* The stored pair, raw. Shares s_day_rows with the two accessors below so
+   the day_type -> key mapping has exactly one home; the whole reason that
+   table exists with designated initializers is that a second mapping
+   drifts out of step with the first, and a gate that judged the weekday
+   free slice against the summer allocation would lock devices at random.
+   See the header for why the clamp is absent here and why the unit is
+   minutes. */
+void schedule_get_chore_free_pair_min(day_type_t day_type, uint16_t *free_min, uint16_t *alloc_min) {
+    unsigned idx = day_type_index(day_type);
+    *free_min = read_cached_min(s_day_rows[idx].free_key, s_day_rows[idx].free_default_min, &s_cache.free_loaded[idx],
+                                &s_cache.free_min[idx]);
+    *alloc_min = read_cached_min(s_day_rows[idx].alloc_key, s_day_rows[idx].alloc_default_min,
+                                 &s_cache.alloc_loaded[idx], &s_cache.alloc_min[idx]);
+}
+
 uint32_t schedule_get_allocation_sec(day_type_t day_type) {
     unsigned idx = day_type_index(day_type);
     uint16_t minutes = read_cached_min(s_day_rows[idx].alloc_key, s_day_rows[idx].alloc_default_min,

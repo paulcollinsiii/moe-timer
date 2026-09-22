@@ -886,10 +886,31 @@ void test_the_gate_never_caps_an_extra_timers_duration(void) {
    pins the painted label across the whole count boundary. What NOTHING
    holds, in either suite, is the cross-check between that gate and
    button_a_toggle_allowed(): the predicate is unavailable in the render
-   suite and the painter is unavailable here. So M2-T10's device lock,
-   if it adds a refusal reason, will be caught on the chore screen by the
-   sweep below and NOT on the break screen by anything. Teaching the
-   break screen that lock is a manual obligation of that task. */
+   suite and the painter is unavailable here. So a device lock that adds
+   a refusal reason will be caught on the chore screen by the sweep below
+   and NOT on the break screen by anything, and teaching the break screen
+   such a lock is a manual obligation of whichever task adds it.
+
+   M2-T10 SHIPPED ITS DEVICE LOCK AND DID NOT TRIGGER THAT OBLIGATION,
+   which is why the sentence above is written for a future task and not
+   for that one. The config-error lock (design 5.3) adds no refusal
+   reason to button_a_toggle_allowed(): it narrows the EXT1 WAKE MASK
+   (buttons_policy.c) and leaves the predicate alone, deliberately, so
+   that display_screen_for() — a pure layout function — does not grow a
+   device-state dependency. Predicate and both display-side spellings
+   still agree, so the original framing of the obligation is retired.
+   display_screens.c's break-screen comment says the same thing; the two
+   are a pair and were out of step for one review cycle.
+
+   AND THIS CASE CANNOT SEE THAT LOCK AT ALL, which is worth stating
+   where someone might reach for it as evidence. The sweep below compares
+   display_screen_for() against button_a_toggle_allowed(); M2-T10 changed
+   neither, this suite never sets the lock flag, and lock_gate.c is not
+   linked into this binary. It is green here for reasons that have
+   nothing to do with the lock, and it would stay green if the lock were
+   deleted. What holds the lock is test_lock_gate (the gate's own
+   behaviour, including what is left on the panel before each locked
+   sleep) and test_sleep_plan (the mask narrowing). */
 void test_the_chore_screen_is_never_painted_where_button_a_would_be_refused(void) {
     const timer_state_t states[] = {TIMER_IDLE, TIMER_RUNNING, TIMER_PAUSED, TIMER_EXPIRED, TIMER_BREAK};
     /* NON-VACUITY, and it is not ceremony here: the assertion lives under

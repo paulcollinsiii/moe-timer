@@ -403,6 +403,92 @@ void test_chore_free_reads_key_once_per_wake(void) {
     TEST_ASSERT_EQUAL_INT(1, mock_nvs_read_count("chore_free_wd"));
 }
 
+/* ---- the raw pair, for the config-error gate (design 5.3) --------------
+
+   The seconds accessor above CLAMPS, which is exactly right for every
+   consumer that does arithmetic with it and exactly wrong for the one
+   caller whose whole job is to notice the fault. A gate built on
+   schedule_get_chore_free_sec() would find every pair valid, for ever,
+   and the blocking screen would never paint — so this accessor exists to
+   hand back what is STORED, in the unit config is stored in. */
+void test_the_raw_pair_is_minutes_and_is_not_clamped(void) {
+    hal_nvs_write_u16("weekday_min", 60);
+    hal_nvs_write_u16("chore_free_wd", 90);
+
+    uint16_t free_min = 0;
+    uint16_t alloc_min = 0;
+    schedule_get_chore_free_pair_min(DAY_WEEKDAY, &free_min, &alloc_min);
+
+    /* MINUTES, not seconds: 90 and 60, never 5400 and 3600. The predicate
+       that judges these (config_is_valid_chore_free_min) takes uint16_t,
+       so a seconds value would truncate silently and invert the answer —
+       config_validate.h works the arithmetic. */
+    TEST_ASSERT_EQUAL_UINT16(90, free_min);
+    TEST_ASSERT_EQUAL_UINT16(60, alloc_min);
+    /* And the clamped view of the same pair, side by side, so the two
+       cannot quietly become the same function. */
+    TEST_ASSERT_EQUAL_UINT32(60u * 60u, schedule_get_chore_free_sec(DAY_WEEKDAY));
+}
+
+void test_the_raw_pair_uses_each_day_types_own_keys(void) {
+    hal_nvs_write_u16("weekday_min", 11);
+    hal_nvs_write_u16("weekend_min", 22);
+    hal_nvs_write_u16("holiday_min", 33);
+    hal_nvs_write_u16("summer_min", 44);
+    hal_nvs_write_u16("chore_free_wd", 1);
+    hal_nvs_write_u16("chore_free_we", 2);
+    hal_nvs_write_u16("chore_free_hol", 3);
+    hal_nvs_write_u16("chore_free_sum", 4);
+
+    const day_type_t days[] = {DAY_WEEKDAY, DAY_WEEKEND, DAY_HOLIDAY, DAY_SUMMER};
+    const uint16_t want_free[] = {1, 2, 3, 4};
+    const uint16_t want_alloc[] = {11, 22, 33, 44};
+    for (size_t i = 0; i < sizeof days / sizeof days[0]; i++) {
+        uint16_t free_min = 0;
+        uint16_t alloc_min = 0;
+        schedule_get_chore_free_pair_min(days[i], &free_min, &alloc_min);
+        TEST_ASSERT_EQUAL_UINT16(want_free[i], free_min);
+        TEST_ASSERT_EQUAL_UINT16(want_alloc[i], alloc_min);
+    }
+}
+
+/* Absent is the NORMAL state for the chore_free_* keys — they are
+   deliberately outside the seeded-defaults registry — so the gate must
+   see the compile-time default rather than garbage, and 0 against any
+   allocation is valid. A gate that read uninitialised stack here would
+   lock devices at random. */
+void test_the_raw_pair_falls_back_to_the_same_defaults(void) {
+    uint16_t free_min = 0xAAAA;
+    uint16_t alloc_min = 0xAAAA;
+    schedule_get_chore_free_pair_min(DAY_WEEKDAY, &free_min, &alloc_min);
+    TEST_ASSERT_EQUAL_UINT16(NVS_DEFAULT_CHORE_FREE_WD, free_min);
+    TEST_ASSERT_EQUAL_UINT16(NVS_DEFAULT_WEEKDAY_MIN, alloc_min);
+}
+
+/* One cache, so the fix an HA edit lands mid-wake is visible to the gate
+   the moment the orchestrator invalidates — and so the gate costs no
+   extra flash reads on the wakes where nothing is wrong. */
+void test_the_raw_pair_shares_the_wake_cache_with_the_seconds_accessors(void) {
+    seed_roomy_allocations();
+    hal_nvs_write_u16("chore_free_wd", 10);
+
+    uint16_t free_min = 0;
+    uint16_t alloc_min = 0;
+    for (int i = 0; i < 5; i++) {
+        schedule_get_chore_free_pair_min(DAY_WEEKDAY, &free_min, &alloc_min);
+    }
+    TEST_ASSERT_EQUAL_UINT16(10, free_min);
+    TEST_ASSERT_EQUAL_INT(1, mock_nvs_read_count("chore_free_wd"));
+
+    hal_nvs_write_u16("chore_free_wd", 20);
+    schedule_get_chore_free_pair_min(DAY_WEEKDAY, &free_min, &alloc_min);
+    TEST_ASSERT_EQUAL_UINT16_MESSAGE(10, free_min, "an NVS edit alone moved a wake-scoped read");
+
+    schedule_cache_invalidate();
+    schedule_get_chore_free_pair_min(DAY_WEEKDAY, &free_min, &alloc_min);
+    TEST_ASSERT_EQUAL_UINT16_MESSAGE(20, free_min, "the gate cannot see a fix that landed in the network window");
+}
+
 void test_chore_free_invalidate_forces_reread(void) {
     seed_roomy_allocations();
     hal_nvs_write_u16("chore_free_wd", 10);
@@ -470,5 +556,9 @@ int main(void) {
     RUN_TEST(test_chore_free_range_bottom_is_zero);
     RUN_TEST(test_chore_free_reads_key_once_per_wake);
     RUN_TEST(test_chore_free_invalidate_forces_reread);
+    RUN_TEST(test_the_raw_pair_is_minutes_and_is_not_clamped);
+    RUN_TEST(test_the_raw_pair_uses_each_day_types_own_keys);
+    RUN_TEST(test_the_raw_pair_falls_back_to_the_same_defaults);
+    RUN_TEST(test_the_raw_pair_shares_the_wake_cache_with_the_seconds_accessors);
     return UNITY_END();
 }

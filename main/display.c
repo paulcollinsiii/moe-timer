@@ -458,6 +458,15 @@ void display_bedtime(void) {
     render(SSD1680_REFRESH_FULL, false);
 }
 
+void display_config_error(day_type_t day_type, uint16_t chore_free_min, uint16_t alloc_min) {
+    if (!s_initialized)
+        display_init();
+    display_screens_build_config_error(day_type, chore_free_min, alloc_min);
+    forget_painted_screen();
+    s_partial_count = 0;
+    render(SSD1680_REFRESH_FULL, false);
+}
+
 /* Painted between the OTA check window and the download window, with the
    radio down: net_window.c documents that a panel refresh coinciding with
    a WiFi TX burst browns out the rail. Full refresh only, so it needs no
