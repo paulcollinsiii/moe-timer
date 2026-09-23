@@ -104,29 +104,72 @@ extern "C" {
    and nothing but a shared constant and a test across both paths stops
    them drifting.
 
-   250 AND NOT DESIGN §2.5's "~400 ms", deliberately. Three reasons, in
-   the order they weighed:
-     - 250 is the figure that has actually been watched on a board. It has
-       been in the tree since Button B's start path was written and is the
-       only one of the two anybody has seen work. ~400 is an estimate in
-       prose that no measurement stands behind.
-     - §2.5's own thesis is that the pixels are the FAST channel, there to
-       cover the panel's ~1.9 s partial. 150 ms more of deliberate nothing
-       in front of the ack spends the latency the section exists to
-       remove, and spends it on the one press a child is waiting on.
-     - 250 ms is already this device's poll quantum (the break tail and
-       the final-minute countdown both spin at it), so the hold costs at
-       most one extra pass of a loop that was going to run anyway.
-   If a board says 250 reads as instant rather than as a change, this is
-   the one line to move and both paths move with it.
+   400 IS DESIGN §2.5's PROSE ESTIMATE, ADOPTED BECAUSE A BOARD RULED 250
+   OUT — WHICH IS NOT THE SAME AS A BOARD CHOOSING 400, and that gap is
+   the first thing to know about this number. The 2026-09-22 session
+   produced one fact and it is a LOWER BOUND: 250 is too short. Nothing
+   has been measured above it. 400 is unvalidated UPWARD — 300 may do,
+   600 may be better — and the only reason it rather than some other
+   figure above 250 is that §2.5 had already guessed ~400 before any of
+   this. Design §8 Q-C records it as a first correction wanting another
+   pass. Treat it as provisional; do not cite it as swept.
 
-   SO IT IS A MENUCONFIG KNOB, because that is the only way a board can
-   say so: CONFIG_MAGTAG_STATUS_LED_ACK_HOLD_MS, default 250, so the
-   shipped figure is unchanged and a sweep is a rebuild rather than a
-   patch. The host build has no sdkconfig.h, so it takes the literal — the
-   same #ifdef shape nvs_defaults.h uses for every other Kconfig-backed
-   constant, and for the same reason: the tests must not need a generated
-   header to compile.
+   This line carried 250 first, on an argument worth keeping because the
+   measurement is exactly what overturned it. That argument ran: 250 was
+   the only figure anybody had watched work (it had been in the tree since
+   Button B's start path was written) while ~400 was an estimate in prose;
+   §2.5's own thesis is that the pixels are the FAST channel covering the
+   panel's ~1.9 s partial, so 150 ms more of deliberate nothing in front
+   of the ack spends the very latency the section exists to remove; and
+   250 ms is already this device's poll quantum, so the hold costs at most
+   one extra pass of a loop that was going to run anyway.
+
+   Every clause of that is still true, and it still loses, because it
+   weighed the wrong half. 250 had been watched on a board as a HOLD, in
+   front of one press; nobody had watched it as the COALESCING WINDOW,
+   which is the other job this same figure does and the one a child is
+   inside when they reach for the second chore. On the glass, 2026-09-22,
+   the window was the binding half: 250 ms was not long enough to get the
+   next chore pressed before the refresh began, so a child ticking two
+   boxes got two ~1.9 s redraws instead of one. 150 ms of extra latency in
+   front of the first ack buys that back, and a redraw is an order of
+   magnitude more of the same latency.
+
+   Which is the lesson the two-jobs-one-figure shape was always carrying:
+   the number is only "measured" for whichever job the measurement was
+   watching. If a board ever wants them apart, this is the line to split.
+
+   IT IS A MENUCONFIG KNOB, because that is how a board says so:
+   CONFIG_MAGTAG_STATUS_LED_ACK_HOLD_MS, so a sweep is a rebuild rather
+   than a patch. The host build has no sdkconfig.h, so it takes the
+   literal below — the same #ifdef shape nvs_defaults.h uses for every
+   other Kconfig-backed constant, and for the same reason: the tests must
+   not need a generated header to compile.
+
+   THE FALLBACK AND THE KCONFIG DEFAULT MUST AGREE, and what holds that is
+   scripts/check-ack-hold-default.py, a pre-commit gate that reads the
+   `default` out of the Kconfig block and the literal out of the #else
+   below and fails when they differ. It is named here rather than left as
+   an exhortation because an earlier version of this comment asserted the
+   MUST as though a mechanism carried it, and review found the assertion
+   was doing all the work AND that its stated consequence was unreachable:
+   the ONLY host suite that expands STATUS_LED_ACK_HOLD_MS is
+   test_wake_flow, which is built with CONFIG_MAGTAG_STATUS_LED_ACK_HOLD_MS
+   defined (=170) and so takes the #ifdef arm. Every other suite compiles
+   the #else and never mentions the macro. Mutating the literal below to
+   250 or to 0 therefore changed no host binary and failed no test.
+
+   So the reason to keep the two in step is NOT "the host suites would
+   time a different device" — today none of them would notice. It is that
+   the next suite to measure this figure without an EXTRA_DEFS override
+   would silently be timing the fallback while the firmware timed the
+   Kconfig default, and it would pass. The gate makes the divergence
+   impossible to commit instead of waiting for that suite to exist.
+
+   test_wake_flow is deliberately built at NEITHER value
+   (test/CMakeLists.txt overrides it to 170) so that no case there can
+   quietly encode today's figure as a literal; the gate does not look at
+   that override and must not, since disagreeing with both is its point.
 
    THE HOLD IS ALSO THE COALESCING WINDOW (wake_flow.c's ack drain): after
    an ack the panel work is held open for this long, polling for the next
@@ -139,7 +182,7 @@ extern "C" {
 #ifdef CONFIG_MAGTAG_STATUS_LED_ACK_HOLD_MS
 #define STATUS_LED_ACK_HOLD_MS CONFIG_MAGTAG_STATUS_LED_ACK_HOLD_MS
 #else
-#define STATUS_LED_ACK_HOLD_MS 250
+#define STATUS_LED_ACK_HOLD_MS 400
 #endif
 
 typedef struct {
@@ -156,7 +199,9 @@ status_led_rgb_t status_led_for_state(timer_state_t state);
 
 /* Drives NP_STATE_PIXEL from the live timer state. Status class — quiet
    hours are handled inside neopixel.c. Must not be called while the chore
-   strip is up: it would repaint the gate's pixel with a timer colour. */
+   strip is up: NP_STATE_PIXEL is pixel 0, which is chore slot 2's row
+   (button D's) under status_led.c's mapping, so it would repaint a chore
+   row with a timer colour. */
 void status_led_show_timer_state(void);
 
 /* ---- the chore checklist's strip (design §2.5) --------------------------
@@ -224,8 +269,12 @@ chores_led_t chores_led_for(uint8_t mask, uint8_t n, bool released);
       tail (test_t8_a_latched_ack_on_a_tick_wake_leaves_the_strip_dark).
 
    2. NOT ALONGSIDE status_led_show_timer_state(). Both write pixel 0.
-      The chore strip's gate lands there, so a timer paint in the same
-      wake turns the gate into a timer colour, or vice versa.
+      CHORE SLOT 2 — button D's row — lands there, so a timer paint in
+      the same wake turns that row into a timer colour, or vice versa.
+      (Pixel 0 held the GATE until M2-HW2 inverted the strip on
+      2026-09-22. The collision is unchanged by that: the mapping is a
+      permutation of the whole strip, so pixel 0 always belongs to some
+      slot. Only which slot it is moved.)
       HONOURED BY wake_flow_show_status_leds(), which is the ONLY caller
       of status_led_show_timer_state() in that file — an invariant a reader
       can check by grep, and which scripts/check-status-led-wrapper.py
@@ -234,24 +283,32 @@ chores_led_t chores_led_for(uint8_t mask, uint8_t n, bool released);
       that wrapper replaced turned out to be unpinned by any test — and
       which repaints the checklist instead on any wake that claimed the
       strip
-      (test_t8_a_chore_mode_wake_never_paints_a_timer_colour_over_the_gate).
+      (test_t8_a_chore_mode_wake_never_paints_a_timer_colour_over_a_chore_row).
 
    3. A NETWORK WINDOW WILL CORRUPT THIS unless the caller stands the
       sync pixel down first. With CONFIG_MAGTAG_SYNC_LED_FEEDBACK=y (the
       default, and the current sdkconfig) net_window.c writes pixel 3 at
       window open, at the NTP result, and again at net_window_join(),
-      where it sets that pixel to 0,0,0. Pixel 3 is a chore row under the
-      mapping in status_led.c, and the corrupted colours are not merely
-      wrong, they are CONVINCING: net_window.c's NTP-success triple is
-      (0,20,0), the same three bytes as this module's CHORES_LED_DONE. A
-      sync landing while the checklist is up therefore paints a chore row
-      a PERFECT green — a silent false ack, a row reading as done that
-      nobody did, with nothing on the screen to contradict it. That is
-      the worst of the four and the one to size the risk by. The failure
-      triple (30,0,0) is likewise a near-match for the (25,0,0) red. The
-      window-open blue (0,0,20) and the join's dark are the mild cases:
-      dark reads as "not a configured chore", which is wrong but at least
-      reads as anomalous.
+      where it sets that pixel to 0,0,0. Pixel 3 is THE GATE under the
+      mapping in status_led.c — it was chore slot 2's row until M2-HW2
+      inverted the strip on 2026-09-22, and the inversion moved the gate
+      onto the sync pixel rather than off it, so this item got worse and
+      not better. The corrupted colours are not merely wrong, they are
+      CONVINCING: net_window.c's NTP-success triple is (0,20,0), the same
+      three bytes as this module's CHORES_LED_DONE, and on the GATE that
+      green does not mean "one row is done", it means THE DAY IS RELEASED
+      — the withheld time is granted. A sync landing while the checklist
+      is up therefore paints a PERFECT green release that nobody earned,
+      with nothing on the screen to contradict it. That is the worst of
+      the four and the one to size the risk by, and it is a strictly
+      bigger lie than the single false row this said before the strip was
+      inverted. The failure triple (30,0,0) is likewise a near-match for
+      the (25,0,0) red, which on the gate reads as "still locked" — false
+      whenever the day HAS been released, though at least the cautious
+      direction. The window-open blue (0,0,20) and the join's dark are
+      the mild cases: blue is not in this module's vocabulary at all, and
+      a dark gate reads as "nothing is withheld" (C1's n == 0 strip),
+      which is wrong but at least reads as anomalous.
       HONOURED BY net_window_claim_leds(), which suppresses all four
       writes at the source for the rest of the wake. M2-T8 chose
       suppression over a repaint after the join because the false green

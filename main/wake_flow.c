@@ -503,12 +503,18 @@ static void wake_flow_paint_chore_strip(void) {
    and nothing would have noticed it becoming incorrect.
 
    It exists because THE TWO PAINTERS COLLIDE ON PIXEL 0. status_led.c
-   maps the chore GATE to pixel 0, which is NP_STATE_PIXEL — the pixel
-   the timer state is painted on. status_led.h states "not alongside
+   maps CHORE SLOT 2 — button D's row — to pixel 0, which is
+   NP_STATE_PIXEL, the pixel the timer state is painted on. The GATE is
+   pixel 3, not pixel 0: M2-HW2 inverted the strip on 2026-09-22 and the
+   gate moved with the table. The collision is untouched by that, and for
+   a reason worth stating rather than rediscovering — k_chore_pixel is a
+   permutation of the WHOLE strip, so pixel 0 always belongs to some
+   slot, and which slot it is never changes whether the two painters
+   overlap. status_led.h states "not alongside
    status_led_show_timer_state()" as a contract chores_led_show() cannot
    enforce; this is where it is enforced. On a wake the checklist has
-   claimed, every status paint repaints the checklist instead, so the
-   gate can never be overwritten with an amber or a white that means
+   claimed, every status paint repaints the checklist instead, so that
+   row can never be overwritten with an amber or a white that means
    nothing on that screen.
 
    A no-op change on every wake that never claimed, which is every wake
@@ -516,7 +522,8 @@ static void wake_flow_paint_chore_strip(void) {
    replaced behave exactly as they did.
 
    CARRIED HAZARD, MEASURED AND NOT FIXED: on a chore screen the wake did
-   NOT claim, this still paints a timer colour into the GATE's slot. It is
+   NOT claim, this still paints a timer colour into CHORE SLOT 2's pixel
+   — button D's row, which is where pixel 0 lands under the mapping. It is
    reachable without anybody pressing anything at the time — the tick
    handler's latched-ack drain repaints the panel and then calls this with
    s_chore_strip_lit false, because the wake was the RTC alarm and row C17
@@ -616,8 +623,11 @@ static bool wake_flow_apply_chore_ack(uint8_t idx, time_t now) {
        AND ONLY WHEN THE STRIP IS OURS. Row C17: a latched ack drained on
        an RTC-alarm wake applies, repaints the panel, and lights nothing —
        the wake was not a press, there is nobody in the room, and the
-       hold would be a quarter-second of dead wake spent for them. Both
-       halves matter: without the guard this would also pay the delay. */
+       hold would be STATUS_LED_ACK_HOLD_MS of dead wake spent for them.
+       Named rather than spelled as a duration on purpose: this read "a
+       quarter-second" while the knob said 250, and stayed saying it after
+       a board raised the knob to 400. Both halves matter: without the
+       guard this would also pay the delay. */
     if (s_chore_strip_lit) {
         if (first_ack_this_wake) {
             hal_delay_ms(STATUS_LED_ACK_HOLD_MS);
@@ -685,8 +695,10 @@ static const struct {
    wake a press caused claims the strip, so only such a wake spends real
    time waiting for another press. s_chore_acked narrows that to a wake in
    which an ack has ALREADY landed: that is what makes a window a
-   continuation of a gesture rather than a quarter-second of dead wake in
-   front of a press nobody is making. And timer_mode() is read LIVE because
+   continuation of a gesture rather than one STATUS_LED_ACK_HOLD_MS window
+   of dead wake in front of a press nobody is making (the second site that
+   called this "a quarter-second" and went stale when the knob moved off
+   250). And timer_mode() is read LIVE because
    the mode can move under the wake (make_display_state()'s emptied-list
    guard reverts it when a config edit empties the list mid-wake), and a
    press consumed here that button_chore_ack_apply() would then refuse is a
@@ -2110,10 +2122,12 @@ void wake_flow_handle_button_wake(void) {
        whole of the net_window fix rather than a tidy-up: the rollover
        opens a network window from inside this handler's own prologue
        (net_apply_try_window, via wake_flow_handle_day_rollover), and
-       net_window.c's sync pixel is index 3 — a chore ROW — painted
-       (0,20,0) on success, which is byte for byte the checklist's "done"
-       green. Claimed after the window opened, the first press of the day
-       after midnight would show a row ticked that nobody ticked.
+       net_window.c's sync pixel is index 3 — THE GATE, since M2-HW2
+       inverted the strip — painted (0,20,0) on success, which is byte for
+       byte the checklist's "done" green, and on the gate that green means
+       the withheld time is GRANTED. Claimed after the window opened, the
+       first press of the day after midnight would show the day released
+       when nothing had been acked.
        net_window_claim_leds() carries the rest of the argument.
 
        KEYED ON THE SCREEN THE PAINTER WOULD CHOOSE, not on the mode byte,

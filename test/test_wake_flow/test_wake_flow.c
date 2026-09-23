@@ -82,10 +82,12 @@ typedef enum {
     EV_PAUSE,
     EV_LED,
     /* The checklist's four pixels (M2-T8). A SEPARATE code from EV_LED
-       and not a flavour of it: the two painters collide on pixel 0 — the
-       chore gate's pixel IS NP_STATE_PIXEL (status_led.c's mapping) — so
-       "which of the two ran" is the whole question on a chore-mode wake
-       and one shared code could not ask it. */
+       and not a flavour of it: the two painters collide on pixel 0 —
+       NP_STATE_PIXEL is chore slot 2's pixel, button D's row, under
+       status_led.c's mapping (it was the GATE's until M2-HW2 inverted the
+       strip; the mapping is a permutation, so pixel 0 belongs to some
+       slot either way) — so "which of the two ran" is the whole question
+       on a chore-mode wake and one shared code could not ask it. */
     EV_CHORE_LEDS,
     EV_LED_CLAIM, /* net_window_claim_leds(): the sync pixel stands down */
     EV_NET_OPEN,
@@ -7546,20 +7548,25 @@ void test_t8_a_latched_ack_on_a_tick_wake_leaves_the_strip_dark(void) {
     TEST_ASSERT_EQUAL_UINT32_MESSAGE(0, mock_delay_total_ms(), "a tick wake paid the pre-press hold for nobody");
 }
 
-/* The gate's pixel IS NP_STATE_PIXEL — status_led.c maps the gate to
-   pixel 0, which is the one status_led_show_timer_state() writes — so the
-   two painters cannot both run on a wake. status_led.h states it as a
-   caller contract it cannot enforce; this is the enforcement. Every
-   status paint in wake_flow.c goes through one wrapper, and on a wake
-   the checklist has claimed, that wrapper repaints the checklist. */
-void test_t8_a_chore_mode_wake_never_paints_a_timer_colour_over_the_gate(void) {
+/* CHORE SLOT 2's pixel IS NP_STATE_PIXEL — status_led.c maps slot 2,
+   button D's row, to pixel 0, which is the one status_led_show_timer_state()
+   writes — so the two painters cannot both run on a wake. Pixel 0 held the
+   GATE until M2-HW2 inverted the strip on 2026-09-22; the gate is pixel 3
+   now, and this test's subject moved with it, because k_chore_pixel is a
+   permutation and pixel 0 simply belongs to a different slot. What is
+   guarded is unchanged: no timer colour on a claimed wake.
+   status_led.h states it as a caller contract it cannot enforce; this is
+   the enforcement. Every status paint in wake_flow.c goes through one
+   wrapper, and on a wake the checklist has claimed, that wrapper repaints
+   the checklist. */
+void test_t8_a_chore_mode_wake_never_paints_a_timer_colour_over_a_chore_row(void) {
     flow_tick_clock(flow_at(15, 0));
     flow_arm_chore_wake(BTN_B);
 
     TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_button());
 
     TEST_ASSERT_EQUAL_INT_MESSAGE(0, flow_log_count(EV_LED),
-                                  "a chore-mode wake painted a timer colour over the chore gate's pixel");
+                                  "a chore-mode wake painted a timer colour over a chore row's pixel");
     TEST_ASSERT_GREATER_THAN_INT_MESSAGE(0, flow_log_count(EV_CHORE_LEDS),
                                          "a chore-mode wake painted nothing on the strip at all");
 }
@@ -7579,12 +7586,14 @@ void test_t8_a_timer_mode_button_wake_lights_the_timer_pixel_and_no_strip(void) 
     TEST_ASSERT_EQUAL_INT_MESSAGE(0, flow_led_claims, "a timer-mode wake took the sync pixel away from net_window");
 }
 
-/* THE FALSE ACK. net_window.c writes pixel 3 from its own task, and pixel
-   3 is a chore ROW under status_led.c's mapping. Its NTP-success triple
-   is (0,20,0) — byte for byte the checklist's "done" green — so a sync
-   landing while the checklist is up paints a row a perfectly convincing
-   green: a chore reading as ticked that nobody did, with nothing on the
-   screen to contradict it.
+/* THE FALSE RELEASE. net_window.c writes pixel 3 from its own task, and
+   pixel 3 is THE GATE under status_led.c's mapping — it was chore slot 2's
+   row until M2-HW2 inverted the strip on 2026-09-22, which moved the gate
+   ONTO the sync pixel. Its NTP-success triple is (0,20,0) — byte for byte
+   the checklist's "done" green — and on the gate that green means the day
+   is RELEASED, the withheld time granted. So a sync landing while the
+   checklist is up paints a perfectly convincing release that nobody
+   earned, with nothing on the screen to contradict it.
    It is reachable on a BUTTON wake, which is the only kind that lights
    these pixels: the day rollover opens a window from inside the button
    handler's own prologue. So the claim has to be made BEFORE the
@@ -7866,7 +7875,7 @@ void test_t8_a_wake_with_no_ack_spends_no_coalescing_window(void) {
    answers MAIN for a RUNNING timer whatever the mode says. So a press made
    during a running timer looked like nothing on the panel, and the NEXT
    button wake painted four chore colours over a TIMER screen with the
-   RUNNING green on pixel 0 replaced by the gate's. */
+   RUNNING green on pixel 0 replaced by chore slot 2's. */
 void test_t8_a_running_timer_keeps_its_pixel_even_in_chore_mode(void) {
     flow_tick_clock(flow_at(15, 0));
     flow_arm_chore_wake(BTN_B);
@@ -9471,7 +9480,7 @@ int main(void) {
     RUN_TEST(test_t8_a_second_ack_in_the_same_wake_flips_with_no_hold);
     RUN_TEST(test_t8_the_flip_reaches_the_pixels_before_the_panel_refresh);
     RUN_TEST(test_t8_a_latched_ack_on_a_tick_wake_leaves_the_strip_dark);
-    RUN_TEST(test_t8_a_chore_mode_wake_never_paints_a_timer_colour_over_the_gate);
+    RUN_TEST(test_t8_a_chore_mode_wake_never_paints_a_timer_colour_over_a_chore_row);
     RUN_TEST(test_t8_a_timer_mode_button_wake_lights_the_timer_pixel_and_no_strip);
     RUN_TEST(test_t8_the_checklist_claims_the_sync_pixel_before_the_rollover_opens_a_window);
     RUN_TEST(test_t8_an_expiry_alarm_repaints_the_strip_it_wiped);

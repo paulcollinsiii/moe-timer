@@ -64,16 +64,27 @@ add_host_test(test_lock_gate)
 add_host_test(test_buttons_policy)
 add_host_test(test_button_latch)
 add_host_test(test_wake_policy)
-# Deliberately NOT 250, which is both the Kconfig default and status_led.h's
-# host fallback. The ack hold and the chore-ack coalescing window are the same
-# menuconfig figure (CONFIG_MAGTAG_STATUS_LED_ACK_HOLD_MS) precisely so a board
-# can sweep it, and every case that measures either one is written against
+# Deliberately NOT THE SHIPPING FIGURE, which is 400 as of M2-HW-FIX and is
+# both the Kconfig default and status_led.h's host fallback. Written that way
+# round on purpose: this comment said "NOT 250" at three points and the raise
+# to 400 left all three behind, which is the same one-obligation-many-sites
+# drift the override itself exists to catch. The 170 below is the only figure
+# here that means anything, and it means "neither of the other two".
+#
+# The ack hold and the chore-ack coalescing window are the same menuconfig
+# figure (CONFIG_MAGTAG_STATUS_LED_ACK_HOLD_MS) precisely so a board can sweep
+# it, and every case that measures either one is written against
 # STATUS_LED_ACK_HOLD_MS rather than a number. Building the suite at a value
-# that is not the default is what makes that real: a literal 250 left at either
+# that is not the default is what makes that real: a literal left at either
 # call site -- Button B's start or the coalescing window -- compiles fine and
 # passes every relative assertion while the two figures have silently diverged.
-# With this, it fails. The value itself means nothing beyond "not 250, and
-# crosses no second boundary in the mock clock's sub-second carry".
+# With this, it fails. The value itself means nothing beyond "not the default,
+# and crosses no second boundary in the mock clock's sub-second carry".
+#
+# NOTE this override is also why status_led.h's #else fallback reaches no host
+# binary: defining the CONFIG symbol here takes the #ifdef arm. That is what
+# made the header's old "MUST AGREE" claim vacuous, and why the agreement is
+# now held by scripts/check-ack-hold-default.py instead of by a sentence.
 add_host_test(test_wake_flow
     EXTRA_DEFS CONFIG_MAGTAG_STATUS_LED_ACK_HOLD_MS=170)
 add_host_test(test_status_led)
@@ -192,3 +203,17 @@ add_test(NAME test_check_log_args
 add_test(NAME test_check_status_led_wrapper
          COMMAND ${Python3_EXECUTABLE}
                  ${CMAKE_CURRENT_SOURCE_DIR}/test_check_status_led_wrapper/test_check_status_led_wrapper.py)
+
+# scripts/check-ack-hold-default.py holds STATUS_LED_ACK_HOLD_MS's Kconfig
+# default equal to the host fallback in status_led.h's #else arm. Python and
+# registered here for the same two reasons as the three above. It exists
+# because status_led.h asserted that agreement as a MUST while nothing held
+# it -- and review showed the assertion was worse than unenforced: the only
+# host suite that expands the macro is test_wake_flow, built with the CONFIG
+# symbol defined (see the =170 override above), so the #else literal reaches
+# NO host binary and mutating it to 250 or 0 failed nothing. The two gates
+# before this one each shipped with a hole review had to find, so this one's
+# suite spends most of its cases on the ways it could pass while blind.
+add_test(NAME test_check_ack_hold_default
+         COMMAND ${Python3_EXECUTABLE}
+                 ${CMAKE_CURRENT_SOURCE_DIR}/test_check_ack_hold_default/test_check_ack_hold_default.py)

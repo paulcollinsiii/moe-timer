@@ -32,14 +32,19 @@ bool net_window_spawn(void);
    would corrupt what that owner painted.
 
    THE CLAIMANT TODAY IS THE CHORE CHECKLIST (design §2.5), and the
-   corruption is not cosmetic. This module's pixel is index 3, which is a
-   chore ROW under status_led.c's mapping, and the triple it writes on a
+   corruption is not cosmetic. This module's pixel is index 3, which is
+   the checklist's GATE under status_led.c's mapping — it was chore slot
+   2's row until M2-HW2 inverted the strip on 2026-09-22, and the
+   inversion moved the gate ONTO this pixel. The triple written on a
    successful sync is (0, 20, 0) — byte for byte the checklist's "done"
-   green. A sync landing while the checklist is up therefore paints a row
-   a perfectly convincing green: a chore reading as ticked that nobody
-   did, with nothing on the screen to contradict it. The failure triple
-   (30, 0, 0) is a near-match for the checklist's red, and the dark write
-   in net_window_join() reads on that screen as "not a configured chore".
+   green — and on the gate that green means the day is RELEASED and the
+   withheld time granted, not merely that one row is ticked. A sync
+   landing while the checklist is up therefore paints a perfectly
+   convincing release that nobody earned, with nothing on the screen to
+   contradict it. The failure triple (30, 0, 0) is a near-match for the
+   checklist's red, which on the gate reads as "still locked" — wrong
+   whenever the day has in fact been released. The dark write in
+   net_window_join() reads on that screen as "nothing is withheld".
 
    SUPPRESSED AT THE SOURCE rather than repainted afterwards, because the
    false green is written by net_window_wait_ntp() and the caller then

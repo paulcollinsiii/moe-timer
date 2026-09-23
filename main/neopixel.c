@@ -293,7 +293,11 @@ static void led_task_apply(const np_msg_t *m, pulse_state_t *pulse) {
             if (status_muted())
                 return;
             for (int i = 0; i < NEOPIXEL_COUNT; i++) {
-                /* pixel 0 (over button A) = bit3 ... pixel 3 = bit0 */
+                /* pixel 0 = bit3 (MSB) ... pixel 3 = bit0. Pixel 0 is over
+                   button D, the RIGHTMOST button, so the MSB shows on the
+                   right and the countdown reads right-to-left on the glass.
+                   That is CORRECT — confirmed on hardware 2026-09-22; see
+                   neopixel.h's note before changing the shift. */
                 bool lit = (m->idx >> (3 - i)) & 1;
                 s_pixels[i * 3 + 0] = lit ? scale_status(m->g) : 0;
                 s_pixels[i * 3 + 1] = lit ? scale_status(m->r) : 0;

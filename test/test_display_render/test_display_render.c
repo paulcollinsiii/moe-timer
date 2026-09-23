@@ -838,6 +838,230 @@ void test_reload_label_fits_its_cell(void) {
     TEST_ASSERT_TRUE_MESSAGE(w <= BTN_PITCH, "Reload label is wider than its button cell");
 }
 
+/* ---- the main screen's cell A (M2-HW-FIX, design §2.6) ----------------
+
+   Collects the MAIN screen's bottom row, left to right as it was built,
+   the way break_bottom_row() does for the break screen's. Separate rather
+   than shared: the two rows have different fonts, different cell counts
+   and different anchors, and a helper general enough for both would be
+   parameterised by exactly the things these cases are about.
+
+   The filter is the label's BOTTOM EDGE rather than its top, because the
+   two rows this screen has are only 16 px apart at the anchor and a 12 pt
+   line box is nearly that tall: the mode row (BOTTOM_LEFT, -18) ends at
+   y=110 and the button row (-2) at y=126, so a bottom edge within 6 px of
+   the panel is unambiguous where a top-edge threshold is a near miss. */
+static int main_bottom_row(int32_t *left, int32_t *right, const char **text, int max) {
+    lv_obj_t *scr = lv_screen_active();
+    lv_obj_update_layout(scr);
+    int found = 0;
+    uint32_t kids = lv_obj_get_child_count(scr);
+    for (uint32_t i = 0; i < kids; i++) {
+        lv_obj_t *o = lv_obj_get_child(scr, i);
+        if (!lv_obj_check_type(o, &lv_label_class))
+            continue;
+        if (lv_obj_get_y(o) + lv_obj_get_height(o) < VER - 6)
+            continue; /* the bottom row only */
+        TEST_ASSERT_TRUE_MESSAGE(found < max, "more bottom-row labels than the row can hold");
+        text[found] = lv_label_get_text(o);
+        int32_t x = lv_obj_get_x(o), w = lv_obj_get_width(o);
+        printf("main button cell '%s' x=%d..%d (%d px)\n", lv_label_get_text(o), (int)x, (int)(x + w), (int)w);
+        char msg[112];
+        snprintf(msg, sizeof(msg), "'%s' spans x=%d..%d, off a %d px panel", lv_label_get_text(o), (int)x, (int)(x + w),
+                 HOR);
+        TEST_ASSERT_TRUE_MESSAGE(x >= 0, msg);
+        TEST_ASSERT_TRUE_MESSAGE(x + w <= HOR, msg);
+        left[found] = x;
+        right[found] = x + w;
+        found++;
+    }
+    for (int i = 1; i < found; i++) {
+        char msg[112];
+        snprintf(msg, sizeof(msg), "cell %d ends at x=%d and cell %d starts at x=%d", i - 1, (int)right[i - 1], i,
+                 (int)left[i]);
+        TEST_ASSERT_TRUE_MESSAGE(right[i - 1] < left[i], msg);
+    }
+    return found;
+}
+
+/* THE GATE, swept over its whole boundary in BOTH of its dimensions —
+   the main screen's counterpart to
+   test_the_break_screen_offers_chores_exactly_when_the_list_is_non_empty,
+   and written to the same shape on purpose.
+
+   `st->timer_state != TIMER_RUNNING && st->chore_count > 0` in
+   display_screens.c is the THIRD display-side spelling of
+   button_a_toggle_allowed() (the break screen's is the second,
+   display_screen_for()'s the first), and the obvious home for a
+   cross-check, test_button_actions, still cannot host one: that suite is
+   a single TU that does not compile display_screens.c, so an arm there
+   could only test a copy of this predicate retyped into the test. The
+   comment on build_button_row() records what is therefore still unheld.
+   What this case DOES hold is that the copy in the painter has the shape
+   the predicate has.
+
+   TWO DIMENSIONS, because this spelling has two terms where the break
+   screen's has one, and each fails differently:
+     - the COUNT boundary kills the same pair its sibling does. `> 1`
+       gives a one-chore family no hint that A does anything on the screen
+       their device actually sits on — the M2-HW-FIX bug, one config
+       narrower. `>= 0` puts a dead "Chores" over button A on every device
+       with no list, which is the affordance the gate exists to refuse.
+     - the STATE term is this screen's alone, since the break screen is
+       only ever drawn at TIMER_BREAK. Dropping it entirely, or writing
+       `== TIMER_RUNNING`, offers the toggle while a timer runs, and
+       button_a_toggle_allowed() refuses exactly there.
+   TIMER_BREAK IS IN THE STATE LIST AND IS UNREACHABLE HERE — deliberate,
+   and recorded because the next person to notice will think it a mistake.
+   display_screen_for() (display_layout.c) routes every TIMER_BREAK to the
+   break screen or the checklist, so the app never calls this painter in
+   that state. It is swept anyway because display_screens_build_main() is
+   a pure function of the snapshot it is handed, and what this case pins
+   is the PREDICATE COPY inside it over that function's whole input
+   domain. Dropping the row would quietly convert the case into a claim
+   about today's routing: re-point one branch of display_screen_for() and
+   a painter that had never been exercised at TIMER_BREAK would start
+   being, with nothing having failed in between.
+
+   The price, stated so it is not mistaken for a bug later: adding
+   `&& st->timer_state != TIMER_BREAK` to build_button_row()'s gate is a
+   no-op on any real device and FAILS THIS CASE. That failure is not the
+   test catching a defect — it is the painter's domain being narrowed,
+   which is a decision to take on purpose (and to make here too) rather
+   than one to discover from a red suite and paper over.
+
+   Asserting the painted label rather than pixels keeps the case about the
+   GATE; the goldens cover what the two layouts look like. */
+void test_the_main_screen_offers_chores_exactly_when_button_a_would_act(void) {
+    static const timer_state_t STATES[] = {TIMER_IDLE, TIMER_RUNNING, TIMER_PAUSED, TIMER_EXPIRED, TIMER_BREAK};
+    int offered = 0;
+    int withheld = 0;
+    for (unsigned s = 0; s < sizeof(STATES) / sizeof(STATES[0]); s++) {
+        for (uint8_t n = 0; n <= CHORE_MAX; n++) {
+            display_state_t st = base_state();
+            st.timer_state = STATES[s];
+            st.chore_count = n;
+            /* A swap is available throughout, so cells C and D exist in
+               both layouts and the only thing moving is cell A. */
+            st.swap_available = true;
+            display_screens_build_main(&st);
+
+            int32_t left[8], right[8];
+            const char *text[8];
+            int cells = main_bottom_row(left, right, text, 8);
+            const bool offers_chores = cells > 0 && strcmp(text[0], "Chores") == 0;
+
+            char msg[128];
+            snprintf(msg, sizeof(msg), "timer_state %d with %u chores", (int)STATES[s], (unsigned)n);
+            if (STATES[s] != TIMER_RUNNING && n > 0) {
+                offered++;
+                TEST_ASSERT_TRUE_MESSAGE(offers_chores, msg);
+                TEST_ASSERT_EQUAL_INT_MESSAGE(4, left[0], "the Chores label is not at the row's left margin");
+            } else {
+                withheld++;
+                TEST_ASSERT_FALSE_MESSAGE(offers_chores, msg);
+            }
+        }
+    }
+    /* NON-VACUITY: both arms live under a condition, so each counts its
+       own firings. 5 states x (CHORE_MAX + 1) counts = 20 renders, split
+       into the 4 non-RUNNING states x CHORE_MAX counts that offer, and
+       the rest that do not. */
+    TEST_ASSERT_EQUAL_INT_MESSAGE(4 * CHORE_MAX, offered, "the sweep never rendered an actionable list");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(20 - 4 * CHORE_MAX, withheld, "the sweep never rendered a refused toggle");
+}
+
+/* Ink bands in a byte-column window of an UPRIGHT screen: LVGL I1 has
+   1 = white, so ink here is any byte that is not 0xFF — the mirror of
+   break_ink_bands(), which reads the inverted break screen. */
+static int main_ink_bands(int b0, int b1, int *tops, int *bots, int max) {
+    int n = 0;
+    bool in = false;
+    for (int y = 0; y < VER; y++) {
+        bool ink = false;
+        for (int b = b0; b <= b1 && !ink; b++)
+            ink = (s_captured[y * (HOR / 8) + b] != 0xFF);
+        if (ink && !in) {
+            TEST_ASSERT_TRUE_MESSAGE(n < max, "more ink bands than this window can hold");
+            tops[n] = y;
+            in = true;
+        } else if (!ink && in) {
+            bots[n++] = y - 1;
+            in = false;
+        }
+    }
+    if (in)
+        bots[n++] = VER - 1;
+    return n;
+}
+
+/* THE COLLISION CHECK, and the reason it is measured rather than argued.
+   build_main_status() carries the comment "moved up to make room for
+   button labels", so the room is already spent: the mode row sits at
+   BOTTOM_LEFT -18 and this new label at BOTTOM_LEFT -2, 16 px apart at
+   the anchor, with a 12 pt line box nearly that tall. And to its right,
+   cell B is centred on x=91 and can carry the word "Reload".
+   Overlapping text on e-ink is unreadable, and MAGTAG_WRITE_GOLDEN would
+   record the overlap as the new correct answer, so neither edge may be
+   taken on trust.
+
+   BOTH NEIGHBOURS, because they fail independently. The horizontal edge
+   is the adjacency loop inside main_bottom_row() — right[0] < left[1] —
+   plus the structural bound below, which is the same pair the break
+   screen's row uses and for the same reason: the neighbour is
+   centre-anchored on its button, so where its left edge falls is a
+   function of the string and no constant can name it, while the midline
+   bound survives a change of strings. The vertical edge is a band count
+   in cell A's own byte window, taken off the glass.
+
+   RELOAD IS THE WIDEST CELL B, which is why this renders an EXPIRED
+   reloadable slot rather than the IDLE screen the goldens use: a glyph
+   cell leaves far more air, and the case that matters is the text one. */
+void test_the_main_chore_label_clears_the_status_row_and_button_b(void) {
+    display_state_t st = base_state();
+    st.timer_state = TIMER_EXPIRED;
+    st.timer_name = "Piano";
+    st.reloadable = true;
+    st.reload_available = true;
+    st.remaining_sec = 0;
+    st.chore_count = 3;
+    display_screens_build_main(&st);
+    lv_refr_now(s_disp);
+
+    int32_t left[8], right[8];
+    const char *text[8];
+    int cells = main_bottom_row(left, right, text, 8);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(4, cells, "the main button row is not Chores, Reload, swap and sync");
+    TEST_ASSERT_EQUAL_STRING_MESSAGE("Chores", text[0], "cell A does not offer the checklist");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(4, left[0], "the Chores label is not at the row's left margin");
+    /* The structural bound, in the row's own geometry rather than in
+       today's strings: BTN_X0 + BTN_PITCH/2 is the A/B midline at x=54.
+       Weaker than it looks on its own — Reload starts well right of it —
+       but it fails if cell A ever grows past its half of the row even on
+       a screen where the neighbour happens to be short. Keep both. */
+    TEST_ASSERT_TRUE_MESSAGE(right[0] < BTN_X0 + BTN_PITCH / 2,
+                             "the Chores label reaches past the A/B midline and into cell B");
+
+    /* Bytes 0..5 is x=0..47, cell A's own window: wide enough to hold the
+       whole label and narrow enough that cell B's ink never enters it. */
+    int tops[12], bots[12];
+    int n = main_ink_bands(0, 5, tops, bots, 12);
+    for (int i = 0; i < n; i++)
+        printf("main cell-A window band %d: rows %d..%d\n", i, tops[i], bots[i]);
+    TEST_ASSERT_TRUE_MESSAGE(n >= 2, "cell A's window has no row above the button row to clear");
+    /* The bottom-most band is the new label and the one above it is the
+       status row. A gutter of 4 blank rows is not plucked out of the air:
+       it is what the break screen's bands are held to, and what this
+       screen already ran between its countdown and its button row before
+       cell A was filled. */
+    const int gutter = tops[n - 1] - bots[n - 2] - 1;
+    char msg[128];
+    snprintf(msg, sizeof(msg), "the status row ends at row %d and the Chores label starts at row %d - %d blank rows",
+             bots[n - 2], tops[n - 1], gutter);
+    TEST_ASSERT_TRUE_MESSAGE(gutter >= 4, msg);
+    TEST_ASSERT_TRUE_MESSAGE(bots[n - 1] <= VER - 1, "the Chores label runs off the bottom of the panel");
+}
+
 void test_main_low_battery_warn_badge(void) {
     /* <= 15%: the progress bar carries the Charge Me!!! badge */
     display_state_t st = base_state();
@@ -1616,9 +1840,46 @@ void test_the_free_tranche_drains_at_the_same_rate_as_an_ungated_bar(void) {
     TEST_ASSERT_TRUE_MESSAGE(gated_lo > plain_lo, "no locked block was drawn; the rate test proves nothing");
 }
 
+/* Differing bytes between two captures over a row range. The range is
+   what M2-HW-FIX forced this file to start naming: cell A's "Chores"
+   label makes the BUTTON ROW a second place two chore states can differ,
+   and a whole-frame compare can no longer tell that difference from a
+   difference in the bar. */
+static int frame_diff_rows(const uint8_t *a, const uint8_t *b, int r0, int r1) {
+    int n = 0;
+    for (int r = r0; r <= r1; r++) {
+        for (int col = 0; col < HOR / 8; col++) {
+            if (a[r * (HOR / 8) + col] != b[r * (HOR / 8) + col])
+                n++;
+        }
+    }
+    return n;
+}
+
+/* Everything above the bottom button row. The row's labels are anchored
+   at y=-2 and measure rows 113..122 (printed by
+   test_the_main_chore_label_clears_the_status_row_and_button_b); 110 is
+   the anchor's own box top and so is the conservative boundary — a
+   literal, not an expression over the source constants, so a mistake in
+   those constants cannot move the boundary in lockstep with a bug. */
+#define BUTTON_ROW_TOP 110
+
 /* §4.1: "on release the block simply vanishes and the bar goes full width
    with the ordinary remaining/allocation fill". Byte-identical to a day
-   that never had chores, which is the strongest form of "vanishes". */
+   that never had chores ABOVE THE BUTTON ROW, which is the strongest form
+   of "vanishes" that is still true.
+
+   WHY THE ROW IS SPLIT OFF RATHER THAN IGNORED. §4.1's claim is about the
+   BAR: release zeroes chores_withheld_sec(), so no block is drawn. It was
+   never a claim about the LIST, which release does not delete —
+   button_a_toggle_allowed() still says yes on a released day (no refusal
+   reason applies), the checklist is still reachable and still worth
+   reaching, so cell A still reads "Chores". Until M2-HW-FIX the main
+   screen had no cell A and the two claims could share one memcmp; now a
+   whole-frame compare fails for the second reason while the first is
+   perfectly satisfied. So both are asserted, separately, and each can
+   fail on its own: the bar is identical, and the ONLY thing the released
+   day adds is the label, in cell A's own window. */
 void test_the_locked_block_vanishes_when_the_day_releases(void) {
     static uint8_t ungated[FB_BYTES];
     /* Both ends of the bar, because they hide different mistakes. A full
@@ -1654,17 +1915,53 @@ void test_the_locked_block_vanishes_when_the_day_releases(void) {
         shut.remaining_sec = REMAINING[i];
         display_screens_build_main(&shut);
         lv_refr_now(s_disp);
-        TEST_ASSERT_TRUE_MESSAGE(memcmp(ungated, s_captured, FB_BYTES) != 0,
-                                 "the gate changed no pixel - the block never painted");
+        /* ABOVE THE ROW, because below it the "Chores" label alone would
+           satisfy a whole-frame inequality and this assertion would pass
+           on a painter that never drew a block at all. */
+        TEST_ASSERT_TRUE_MESSAGE(frame_diff_rows(ungated, s_captured, 0, BUTTON_ROW_TOP - 1) > 0,
+                                 "the gate changed no pixel above the button row - the block never painted");
 
         display_state_t open = gated_state(3, 0x07, 0); /* released: nothing withheld */
         open.remaining_sec = REMAINING[i];
         open.chore_released = true;
         display_screens_build_main(&open);
         lv_refr_now(s_disp);
-        char msg[80];
+        char msg[96];
         snprintf(msg, sizeof(msg), "a released day with %ld s left still carries the locked block", (long)REMAINING[i]);
-        TEST_ASSERT_EQUAL_MEMORY_MESSAGE(ungated, s_captured, FB_BYTES, msg);
+        TEST_ASSERT_EQUAL_INT_MESSAGE(0, frame_diff_rows(ungated, s_captured, 0, BUTTON_ROW_TOP - 1), msg);
+
+        /* And the row below: a released day still has a list, so cell A
+           still offers it — and nothing ELSE in the row may move. Bytes
+           0..5 are x=0..47, which contains the 43 px "Chores" label at
+           x=4 (ending at x=47) with cell B's ink well clear of it.
+
+           The clearance argued from the geometry rather than from one
+           label's measured x, because cell B's width is NOT fixed — it is
+           a PLAY glyph, a PAUSE glyph or the word "Reload" depending on
+           display_button_b_label(), and a figure read off whichever one a
+           given case renders is not a fact about the boundary. What is
+           fixed: every cell-B label is CENTRED on button B, at
+           BTN_MID_OFS(1) = BTN_X0 + BTN_PITCH = x 91. Ink symmetric about
+           91 can only reach x=47 once the label is 88 px wide, and the
+           widest of the three ("Reload" at 12 pt, ~42 px) is less than
+           half that. So the split at byte 5 is safe for every B label,
+           present and added later, rather than for the one on screen. */
+        int outside = 0, inside = 0;
+        for (int r = BUTTON_ROW_TOP; r < VER; r++) {
+            for (int col = 0; col < HOR / 8; col++) {
+                int idx = r * (HOR / 8) + col;
+                if (ungated[idx] == s_captured[idx])
+                    continue;
+                if (col <= 5)
+                    inside++;
+                else
+                    outside++;
+            }
+        }
+        snprintf(msg, sizeof(msg), "a released day with %ld s left moved the button row outside cell A",
+                 (long)REMAINING[i]);
+        TEST_ASSERT_EQUAL_INT_MESSAGE(0, outside, msg);
+        TEST_ASSERT_TRUE_MESSAGE(inside > 0, "a released day with a list drew no Chores label over button A");
     }
 }
 
@@ -1993,6 +2290,8 @@ int main(void) {
     RUN_TEST(test_main_break_chip_no_start);
     RUN_TEST(test_start_available_only_changes_button_b);
     RUN_TEST(test_reload_label_fits_its_cell);
+    RUN_TEST(test_the_main_screen_offers_chores_exactly_when_button_a_would_act);
+    RUN_TEST(test_the_main_chore_label_clears_the_status_row_and_button_b);
     RUN_TEST(test_break_screen_no_eligible);
     RUN_TEST(test_break_screen_with_chores);
     RUN_TEST(test_break_screen_with_chores_no_eligible);

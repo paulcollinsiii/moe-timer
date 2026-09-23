@@ -255,8 +255,15 @@ static void build_main_header(lv_obj_t *scr, const display_state_t *st) {
 
    Unfilled, and black-on-white: a label over a filled bar would be
    half-inverted (§4.1), and white-on-black at 12 pt is what the break
-   chip already had to abandon on this panel. 12 pt is PROVISIONAL —
-   M2-HW1 is a look at the real glass.
+   chip already had to abandon on this panel. 12 pt BLACK-ON-WHITE HAS NOW
+   BEEN READ ON THE REAL GLASS (M2-HW1, 2026-09-22) and is legible, so the
+   size is settled and the block the four goldens carry —
+   main_chore_gated, main_chore_gated_running, main_chore_fully_gated and
+   main_chore_gated_narrow — is final rather than provisional: a future
+   diff inside it is a regression to explain, not a placeholder still
+   waiting on a panel. Note what that measurement does NOT cover: it says nothing
+   about 12 pt INVERTED, which the break chip's own finding still rules
+   out and which is why the config-error screen below stays non-inverted.
 
    THE LABEL MUST NOT BE CLIPPED. The block's width is a config decision
    (withheld / allocation of 280 px), not a layout one, and §4.1's
@@ -412,16 +419,64 @@ static void build_main_status(lv_obj_t *scr, const display_state_t *st) {
    THE MAIN SCREEN'S row — the break screen builds its own, at 16 pt and
    with different cells.
 
-   Cell 0 (A) is blank here. A is the Timers/Chores mode toggle and has
-   been bound since M2-T3, so "unbound" is no longer the reason; what it
-   has not got on THIS screen is a LABEL. The break screen's row does
-   label it (§2.6), and when this one follows it must be gated the same
-   way: on button_a_toggle_allowed() (button_actions.h) — the same
-   predicate that arms A as a wake source — so the label never offers a
-   press the map would refuse. Note the break screen can spell that gate
-   as `chore_count > 0` only because TIMER_BREAK rules out the predicate's
-   other refusal; the main screen is drawn in every state, RUNNING
-   included, so it has no such shortcut.
+   Cell 0 (A) NOW CARRIES "Chores", and until M2-HW-FIX it carried
+   nothing — which is the bug a board found. A is the Timers/Chores mode
+   toggle and has been bound since M2-T3, the break screen labels it
+   (§2.6) and the chore screen labels its way back ("Timers"), but the
+   main screen — the one a Timer-mode device is actually sitting on —
+   offered no hint at all. So a configured list was reachable only if you
+   already knew A did something, or had read the cell on a break screen
+   and remembered it: discoverable during a break, invisible the rest of
+   the day, which is most of it. Three spellings of one affordance and the
+   third was simply missed.
+
+   THE GATE IS button_a_toggle_allowed()'s RULE (button_actions.h) — the
+   predicate the BUTTON MAP consults, so the label never offers a press
+   the map would refuse. Not, note, the same thing as "what arms A as a
+   wake source": buttons_policy.c's wake_source() short-circuits on
+   config_locked and returns D-only however this predicate answers, so
+   under the config-error lock A is unarmed while this rule may still say
+   yes. That is the break painter's distinction 130 lines below, and it
+   applies here identically; the lock's own screen is not this one, which
+   is why the difference costs nothing rather than being a second gate.
+
+   Spelled here as the two conditions the painter can see: not RUNNING,
+   and a non-empty list. The break screen gets to write only
+   `chore_count > 0` because TIMER_BREAK rules out the predicate's other
+   refusal. This painter has no such shortcut, and the reason is NOT that
+   it runs in every state — it does not. display_screen_for()
+   (display_layout.c) sends every TIMER_BREAK to the break screen or the
+   checklist, so TIMER_BREAK never reaches this function in the app at
+   all. What it does reach is RUNNING, which the break screen cannot, and
+   that alone is why both conditions must be tested here. The sweep that
+   holds this line nevertheless drives TIMER_BREAK through it — see the
+   note in that test for why an unreachable row is deliberate there.
+
+   SO THIS IS THE THIRD DISPLAY-SIDE SPELLING of that predicate, and the
+   cross-check is STILL held by nothing — the same hazard the break
+   painter's own note names, now one copy worse. test_button_actions has
+   the predicate but cannot compile this file (no LVGL); test_display_render
+   compiles this file but cannot reach the predicate (no NVS, no timer).
+   What holds this copy is a render-suite sweep of the boundary in both
+   directions (test_the_main_screen_offers_chores_exactly_when_button_a_would_act),
+   which is the same shape the break screen's sweep has and catches the
+   same two mutants, `> 1` and `>= 0`, plus the RUNNING arm this screen
+   adds. A future refusal reason added to button_a_toggle_allowed() and
+   not to this line makes "Chores" a dead label here as it would there —
+   but NOT to the same degree, and the asymmetry runs the wrong way for
+   this copy. The break screen is transient: it is painted for the length
+   of a break and the next state change repaints over it, so a stale label
+   there is wrong for minutes. This screen is the RESIDENT one — an e-ink
+   panel holds it through every deep sleep until something else needs
+   drawing — so a stale label here is what the device is showing, all day,
+   to someone pressing a button that does nothing. Of the three spellings
+   this is the one whose drift costs most.
+
+   LEFT-ANCHORED, NOT CENTRED ON BTN_MID_OFS(0), for the reason the chore
+   screen's "Timers" records at its own call: button A's centre is only
+   17 px in (BTN_X0), so a ~41 px label centred on it starts at x=-4 and
+   loses its first glyph off the panel. Measured there, not guessed; this
+   is the same geometry and takes the same answer.
 
    B shows the action a press will take; C only when its press would work;
    D = sync, always.
@@ -429,6 +484,12 @@ static void build_main_status(lv_obj_t *scr, const display_state_t *st) {
    Every decision about B lives in display_button_b_label() — this is a
    plain switch over its answer, so no gate is re-tested here. */
 static void build_button_row(lv_obj_t *scr, const display_state_t *st) {
+    /* Built first so the row's children are left to right in build order,
+       which is what the render suite's adjacency sweeps read. */
+    if (st->timer_state != TIMER_RUNNING && st->chore_count > 0) {
+        make_label(scr, "Chores", &lv_font_montserrat_12, LV_ALIGN_BOTTOM_LEFT, 4, -2);
+    }
+
     const char *b_text = NULL;
     switch (display_button_b_label(st->timer_state, st->start_available, st->reload_available)) {
         case DISPLAY_BTN_LABEL_PLAY:
@@ -523,8 +584,9 @@ void display_screens_build_break(const display_state_t *st) {
        screen the two conditions collapse to one, and the label can never
        offer a press the map would refuse.
 
-       THE SECOND display-side spelling of that predicate (display.h
-       describes the chore screen's), and a refusal reason added to A and
+       ONE OF THREE display-side spellings of that predicate — display.h
+       describes the chore screen's, and M2-HW-FIX added the main screen's
+       in build_button_row() above — and a refusal reason added to A and
        not to this line makes "Chores" below a button that does nothing —
        silent, where the chore screen's version is at least loud.
 
@@ -532,13 +594,15 @@ void display_screens_build_break(const display_state_t *st) {
        suite. The boundary of this literal is swept by
        test_the_break_screen_offers_chores_exactly_when_the_list_is_non_empty
        (test_display_render), which renders both sides of it and kills
-       `> 1` and `>= 0` alike. The CROSS-CHECK against
+       `> 1` and `>= 0` alike; the main screen's spelling has a sweep of
+       the same shape beside it. The CROSS-CHECK against
        button_a_toggle_allowed() is held by nothing: test_button_actions
        has the predicate but not this file (no LVGL), and the render suite
        has this file but not the predicate. So if a device lock adds a
        refusal reason, the chore screen's spelling is covered by that
-       suite's sweep and THIS line is not — teaching it the lock would be
-       a manual obligation of that task, not something a test will catch.
+       suite's sweep and NEITHER PAINTER'S IS — teaching them the lock
+       would be a manual obligation of that task, not something a test
+       will catch, and there are now two lines to teach.
 
        M2-T10 CAME AND WENT AND THIS LINE IS UNCHANGED, which is a
        finding and not an omission, so it is recorded here rather than

@@ -26,11 +26,13 @@ static const char *TAG = "net_window";
 /* WiFi status pixel. Pixel 0 (timer state) belongs to status_led.c, which
    wake_flow.c drives — the two sit at opposite ends of the strip so both
    can be read at once. That holds in every mode BUT the chore checklist,
-   which claims all four pixels and makes this one a chore row
-   (status_led.h). A network window opened on a button wake can therefore
-   repaint a chore row, and the NTP-success triple below is (0,20,0),
-   byte-identical to the checklist's "done" green — a convincing FALSE
-   ACK. net_window_claim_leds() is the fix and its header carries the
+   which claims all four pixels and makes this one the GATE — M2-HW2's
+   strip inversion (2026-09-22) moved the gate onto this very pixel; it
+   was a chore row before (status_led.h). A network window opened on a
+   button wake can therefore repaint the gate, and the NTP-success triple
+   below is (0,20,0), byte-identical to the checklist's "done" green,
+   which on the gate reads as THE DAY RELEASED — a convincing FALSE
+   RELEASE. net_window_claim_leds() is the fix and its header carries the
    whole of the argument; every write below goes through wifi_pixel(). */
 #define NP_WIFI_PIXEL 3
 

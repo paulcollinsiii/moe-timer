@@ -251,11 +251,23 @@ menu "MagTag Timer"
 
     config MAGTAG_STATUS_LED_ACK_HOLD_MS
         int "NeoPixel ack hold / chore-ack coalescing window (ms)"
-        default 250
+        default 400
         range 0 3000
         help
             ONE figure with two jobs, and it is here because both want
             sweeping on a board rather than guessing in prose.
+
+            400 IS NOT A SWEPT VALUE — NOBODY HAS SWEPT THIS YET, and the
+            distinction is the whole reason this paragraph exists. What a
+            board established on 2026-09-22 is a LOWER BOUND and nothing
+            more: at the 250 this shipped with, a person could not get the
+            second chore pressed before the refresh began. 400 was then
+            adopted because design §2.5 had already estimated ~400 in
+            prose — so it is a first correction picked off an estimate,
+            not a figure anybody has watched work. It is unvalidated
+            UPWARD: 300 might do, 600 might be better, and this knob
+            exists so finding out is a rebuild rather than a patch. See
+            design §8 Q-C, which records it as wanting another pass.
 
             First, the PRE-PRESS HOLD: how long the old colour stays up
             before the pixel that acknowledges a press changes. The
@@ -269,7 +281,8 @@ menu "MagTag Timer"
             one, so two or three boxes ticked in one go land in a single
             ~1.9 s refresh with every flip immediate. Raise this if a
             child cannot get the second press in before the screen starts
-            redrawing; that is the figure this knob exists for.
+            redrawing; that is the figure this knob exists for, and it is
+            the half that moved the default to 400.
 
             The two pull in opposite directions — a longer window gives
             more clicking time, a longer hold puts more dead time in front

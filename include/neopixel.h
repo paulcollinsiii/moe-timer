@@ -41,7 +41,24 @@ void neopixel_set_status_brightness(uint8_t pct); /* 0-100 scale; every non-puls
 /* STATUS class — silently no-ops while the quiet callback returns true;
    colours are scaled by the status brightness. */
 void neopixel_status_pixel(int idx, uint8_t r, uint8_t g, uint8_t b);
-/* 4-bit binary display: pixel 0 (over button A) = bit3 ... pixel 3 = bit0. */
+/* 4-bit binary display: pixel 0 = bit3 (the MSB) ... pixel 3 = bit0.
+
+   WHICH PUTS THE MSB ON THE RIGHT OF THE PANEL, AND THAT IS CORRECT —
+   CONFIRMED ON HARDWARE 2026-09-22 BY THE PERSON WHO READS IT. Do not
+   "fix" it. The strip runs OPPOSITE the buttons: pixel 0 sits over button
+   D, which is the RIGHTMOST button (BTN_X0 17, BTN_PITCH 74 put A at the
+   left edge and D at the right), and pixel 3 sits over button A on the
+   left. So bit3 lands on the right-hand pixel and the countdown reads
+   right-to-left across the glass — which looks backwards if you assume
+   pixel 0 is leftmost, and is what the owner looked at and called right.
+
+   This line used to say "pixel 0 (over button A)". It named the wrong
+   button while describing behaviour that was correct, and it was the only
+   support anywhere in the tree for the guess that pixel i sits over button
+   i — a guess that did put the CHORE strip's rows on the wrong buttons
+   (see main/status_led.c's k_chore_pixel, corrected the same day). The
+   button is now right, and the presentation is recorded as verified
+   rather than left to look like a defect somebody should tidy up. */
 void neopixel_status_binary4(uint8_t value, uint8_t r, uint8_t g, uint8_t b);
 
 /* HIGHPRI class — ignores quiet hours, and ONLY quiet hours: the status

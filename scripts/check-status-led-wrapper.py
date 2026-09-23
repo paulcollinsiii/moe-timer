@@ -3,9 +3,13 @@
 
 WHY THIS EXISTS
 ---------------
-status_led.c maps the chore checklist's GATE to pixel 0, which is
-NP_STATE_PIXEL -- the pixel `status_led_show_timer_state()` writes.  The two
-painters therefore collide, and `status_led.h` states "not alongside
+status_led.c maps CHORE SLOT 2 -- button D's row -- to pixel 0, which is
+NP_STATE_PIXEL, the pixel `status_led_show_timer_state()` writes.  The two
+painters therefore collide.  (Pixel 0 held the checklist's GATE until M2-HW2
+inverted the strip on 2026-09-22; the gate is pixel 3 now.  That changed
+nothing here: `k_chore_pixel` is a permutation of the whole strip, so pixel 0
+always belongs to SOME slot and the two painters overlap either way.)
+`status_led.h` states "not alongside
 status_led_show_timer_state()" as a caller contract that `chores_led_show()`
 cannot enforce for itself.
 
@@ -129,10 +133,11 @@ def check(path):
         print(f"  {path}:{ln}")
     if len(lines) > EXPECTED:
         print(
-            f"\n{FUNC}() writes NP_STATE_PIXEL, which is the chore checklist's\n"
-            f"gate pixel. Call {WRAPPER}() instead: on a wake the checklist has\n"
-            f"claimed it repaints the strip, so the gate cannot be overwritten\n"
-            f"with a timer colour that means nothing on that screen.\n"
+            f"\n{FUNC}() writes NP_STATE_PIXEL -- pixel 0, which is chore slot 2's\n"
+            f"row (button D's) on the checklist. Call {WRAPPER}() instead: on a\n"
+            f"wake the checklist has claimed it repaints the strip, so that row\n"
+            f"cannot be overwritten with a timer colour that means nothing on\n"
+            f"that screen.\n"
             f"The one permitted call is the one inside {WRAPPER}() itself."
         )
     else:

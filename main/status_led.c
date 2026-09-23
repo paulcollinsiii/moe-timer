@@ -36,21 +36,41 @@ _Static_assert(CHORE_MAX + 1 == NEOPIXEL_COUNT, "chore mode needs one pixel per 
    gate's. Everything else works in slots and reads this table, so
    inverting the strip is this one initialiser.
 
-   M2-HW2 (design §8, Q-B) OWNS THIS LINE. The values below encode an
-   assumption nobody has checked on a board: that pixel i sits over button
-   i. Under it the ack buttons B/C/D — BUTTON_CHORE_IDX_B/C/D are chores
-   0/1/2 — take pixels 1/2/3, and the gate takes pixel 0, over button A,
-   the button that switches into chore mode in the first place.
+   M2-HW2 (design §8, Q-B) SETTLED THIS LINE ON A BOARD, 2026-09-22, and
+   the answer was the one the strip-is-reversed branch predicted: THE
+   PIXELS RUN OPPOSITE THE BUTTONS. Pixel 3 sits over button A and pixel 0
+   over button D, so the old {1, 2, 3, 0} — written from the guess that
+   pixel i sits over button i — lit the wrong row for every chore.
 
-   The only support for that reading anywhere in the tree is a comment on
-   neopixel_status_binary4() ("pixel 0 (over button A) = bit3"), and its
-   sole caller — the last-15-seconds countdown — would look merely
-   mirrored if it were wrong, so nothing has ever held it true. If the
-   strip runs opposite the buttons, this becomes {2, 1, 0, 3}; change
-   test_the_mapping_is_button_order_until_hardware_says_otherwise with it
-   and every other test in that suite keeps passing unchanged. */
+   What the table says now, and it is one rule and not four exceptions:
+   the pixel over button b is 3 - b. The ack buttons B/C/D are chores
+   0/1/2 (BUTTON_CHORE_IDX_B/C/D), so they are buttons 1/2/3 and take
+   pixels 2/1/0; the gate slot is button A, button 0, and takes pixel 3.
+   Hence {2, 1, 0, 3} — still a permutation of the strip, which
+   test_the_mapping_covers_every_pixel_exactly_once holds, and still the
+   only mapping in the tree: everything else works in slots and reads this
+   table, so a future strip is again this one initialiser.
+
+   Why nothing caught it before a board did: the only support for the old
+   reading anywhere in the tree was a comment on neopixel_status_binary4()
+   (neopixel.h: "pixel 0 (over button A) = bit3"), and its sole caller —
+   the last-15-seconds countdown — would look merely mirrored if it were
+   wrong, so nothing ever held it true. That parenthetical named the wrong
+   button and has been corrected.
+
+   THE COUNTDOWN ITSELF WAS NEVER WRONG, and this is worth stating plainly
+   because the two defects look identical from the source. Both run off
+   the same reversed strip, but only one of them was a bug: a checklist
+   lighting the row above the wrong BUTTON is wrong by construction,
+   whereas a binary number is only ever a convention about which end the
+   MSB goes. Pixel 0 being over button D puts the MSB on the RIGHT, the
+   owner read it on the board on 2026-09-22 and called it correct, and
+   neopixel.h now records that as verified. So there is nothing deferred
+   here and nothing for a later reader to tidy: correcting the comment
+   above WAS the whole of that fix. Flipping the countdown to match this
+   table would break working behaviour. */
 #define CHORES_LED_GATE_SLOT CHORE_MAX
-static const uint8_t k_chore_pixel[CHORE_MAX + 1] = {1, 2, 3, 0};
+static const uint8_t k_chore_pixel[CHORE_MAX + 1] = {2, 1, 0, 3};
 
 /* The timer table's own green and red, reused rather than re-picked: the
    same person reads both on the same device, and a second almost-green

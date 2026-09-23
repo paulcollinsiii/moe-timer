@@ -355,7 +355,13 @@ typedef enum {
    is refused, the panel would show a screen with a "Timers" label on a
    button that would not act — a device stuck on the chore screen for as
    long as the timer runs. Agreeing is what lets the screen builder draw
-   that label unconditionally instead of re-deriving the gate a third time.
+   the chore screen's "Timers" label unconditionally instead of re-deriving
+   the gate for itself. (This read "a third time" until M2-HW-FIX, which
+   made the phrase unreadable: there are now exactly three display-side
+   spellings of the gate — this function's, the break painter's and the
+   main painter's — so "a third" names one of them rather than the
+   one-more-than-those it meant. They are enumerated at build_button_row()
+   in display_screens.c.)
 
    THIS FUNCTION IS THE RESTATEMENT button_actions.h forbids, struck
    knowingly: the painter is handed a display_state_t snapshot and cannot

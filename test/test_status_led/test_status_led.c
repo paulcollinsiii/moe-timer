@@ -184,14 +184,16 @@ void test_wrapper_writes_pixel_zero(void) {
 /* ---- the chore strip: the mapping --------------------------------------- */
 
 /* Read a chore's / the gate's pixel THROUGH the mapping table, so every
-   semantic test below stays true if M2-HW2 inverts the strip. Exactly two
-   tests pin the mapping itself, and they are the ones HW2 edits. */
+   semantic test below is about WHICH ROW lit rather than which pixel did.
+   That is what let M2-HW2's inversion land as a two-line change: exactly
+   two tests name pixel numbers (the permutation check and the mapping
+   case), and every other one here passed unchanged across it. */
 #define CHORE_PX(tbl, i) ((tbl).px[k_chore_pixel[(i)]])
 #define GATE_PX(tbl) ((tbl).px[k_chore_pixel[CHORES_LED_GATE_SLOT]])
 
 void test_the_mapping_covers_every_pixel_exactly_once(void) {
     /* Three chores plus the gate is the whole strip, so the four slots
-       must be a permutation of 0..NEOPIXEL_COUNT-1. An HW2 edit that
+       must be a permutation of 0..NEOPIXEL_COUNT-1. A re-mapping that
        duplicated one index would silently leave another pixel holding
        whatever the previous paint put there — the timer state, or a
        network window's blue. */
@@ -206,22 +208,31 @@ void test_the_mapping_covers_every_pixel_exactly_once(void) {
     }
 }
 
-void test_the_mapping_is_button_order_until_hardware_says_otherwise(void) {
-    /* THE unverified assumption, pinned so that changing it is deliberate.
-       It reads "pixel i sits over button i": button A (the mode toggle) is
-       pixel 0, so the gate lands there, and the ack buttons B/C/D —
-       BUTTON_CHORE_IDX_B/C/D = chores 0/1/2 — are pixels 1/2/3.
+void test_the_mapping_is_the_reversed_strip_hardware_showed(void) {
+    /* WHAT A BOARD SAID, 2026-09-22 (M2-HW2), pinned so that changing it
+       back is deliberate. The strip runs opposite the buttons: the pixel
+       over button b is 3 - b. Button A (the mode toggle) is therefore
+       pixel 3, so the gate lands there, and the ack buttons B/C/D —
+       BUTTON_CHORE_IDX_B/C/D = chores 0/1/2, i.e. buttons 1/2/3 — are
+       pixels 2/1/0.
 
-       The only support for that reading anywhere in the tree is a comment
-       (neopixel.h, on the 4-bit binary display), and nothing depends on
-       that comment's "over button A" clause, so nothing has ever tested
-       it. M2-HW2 looks at a board; if the strip runs the other way it
-       edits k_chore_pixel to {2, 1, 0, 3} and this test to match, and
-       every other test in this file keeps passing unchanged. */
-    TEST_ASSERT_EQUAL_UINT8(1, k_chore_pixel[0]);
-    TEST_ASSERT_EQUAL_UINT8(2, k_chore_pixel[1]);
-    TEST_ASSERT_EQUAL_UINT8(3, k_chore_pixel[2]);
-    TEST_ASSERT_EQUAL_UINT8(0, k_chore_pixel[CHORES_LED_GATE_SLOT]);
+       It replaces an assumption ("pixel i sits over button i") whose only
+       support in the tree was a comment in neopixel.h on the 4-bit binary
+       display, which nothing depended on and nothing had tested. This
+       case is now the tree's record of the measurement, which is why it
+       spells all four slots out as literals: derived from a 3 - b
+       expression it would agree with any table that happened to be
+       generated the same way, including one regenerated from the wrong
+       end of the strip.
+
+       Every other test in this file reads through CHORE_PX/GATE_PX and so
+       kept passing unchanged across the inversion — which is the point of
+       those macros, and the reason exactly two cases here name pixel
+       numbers at all (this one and the permutation check). */
+    TEST_ASSERT_EQUAL_UINT8(2, k_chore_pixel[0]);
+    TEST_ASSERT_EQUAL_UINT8(1, k_chore_pixel[1]);
+    TEST_ASSERT_EQUAL_UINT8(0, k_chore_pixel[2]);
+    TEST_ASSERT_EQUAL_UINT8(3, k_chore_pixel[CHORES_LED_GATE_SLOT]);
 }
 
 /* ---- the chore strip: the colours --------------------------------------- */
@@ -481,7 +492,7 @@ int main(void) {
     RUN_TEST(test_wrapper_reads_the_timer_exactly_once);
     RUN_TEST(test_wrapper_writes_pixel_zero);
     RUN_TEST(test_the_mapping_covers_every_pixel_exactly_once);
-    RUN_TEST(test_the_mapping_is_button_order_until_hardware_says_otherwise);
+    RUN_TEST(test_the_mapping_is_the_reversed_strip_hardware_showed);
     RUN_TEST(test_an_outstanding_chore_is_red);
     RUN_TEST(test_an_acked_chore_is_green);
     RUN_TEST(test_each_chore_lands_on_its_own_pixel);
