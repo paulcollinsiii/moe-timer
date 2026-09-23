@@ -2,6 +2,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "chores.h" /* CHORE_MAX / CHORE_NAME_BUF: the discovery fingerprint's chore rows */
 #include "esp_compat.h"
 
 /* Editable Home Assistant config entities. A single field registry drives
@@ -131,20 +132,79 @@ const char *ha_config_json_escape(char *dst, size_t dstlen, const char *src);
    NULL-safe (a NULL argument folds as an empty string). */
 uint16_t ha_config_device_hash(const char *dev_name, const char *fw);
 
+/* The chore list as ONE discovery window sees it: the rows and the count
+   travel together, so the fingerprint and the discovery pass cannot be
+   handed different counts. `n` is stats_json_chore_discovery()'s
+   convention exactly — the configured count, 0 for none (a rejected blob
+   included: the device runs on 0), or -1 when the read FAILED and the
+   list is unknown. `names` always holds CHORE_MAX NUL-terminated rows;
+   only the first min(n, CHORE_MAX) mean anything. */
+typedef struct {
+    char names[CHORE_MAX][CHORE_NAME_BUF];
+    int n;
+} ha_disc_chores_t;
+
 /* The full discovery fingerprint mqtt_ha stores: the dev block (above)
    PLUS every extra-timer slot name, because those drive the published
-   names of the per-timer stat entities and which of them exist. Reads the
-   timer-defs blob, so it is host-tested over the mock NVS rather than
-   pure. This is the value to compare and to store — ha_config_device_hash
-   alone would leave a rename invisible until the next schema bump. */
-uint16_t ha_config_discovery_hash(const char *dev_name, const char *fw);
+   names of the per-timer stat entities and which of them exist, PLUS the
+   chore list, because it drives the names of the chore_1..CHORE_MAX
+   binary sensors and which of them exist. Reads the timer-defs blob, so
+   it is host-tested over the mock NVS rather than pure. This is the value
+   to compare and to store — ha_config_device_hash alone would leave a
+   rename invisible until the next schema bump.
 
-/* The discovery-freshness gate itself, lifted out of mqtt_ha.c so it can
-   be tested: discovery is republished when the stored schema version or
-   the stored fingerprint disagrees with the current pair. Kept as a
-   predicate because the wiring around it (compare, publish, then stamp
-   only after a successful drain) is what actually went wrong before. */
+   The chore list is an ARGUMENT, not read here, and that asymmetry with
+   the timer slots is deliberate: discovery must fingerprint the list it
+   actually publishes, and the only way to guarantee that is one read per
+   window handed to both — ha_config_discovery_gate() below does exactly
+   that. NULL means "no chores" (n = 0). An unknown list (n < 0) folds a
+   marker no readable list can produce at that position, so it cannot
+   match a real list's fingerprint there; the final 16-bit value can
+   still collide with a stored one by chance, and what is relied on to
+   keep a failed read from being certified is the withheld stamp
+   (ha_config_discovery_gate()'s `stamp`), not the marker. */
+uint16_t ha_config_discovery_hash(const char *dev_name, const char *fw, const ha_disc_chores_t *chores);
+
+/* The one read of the chore list that a discovery window makes: fills
+   `out` (every row always written — all-empty on any failure) with the
+   list and its `n`: the configured count when chore_store_load_names()
+   answered authoritatively — the list, "never configured" (0) or a
+   rejected blob (0, because the whole device runs on 0) — and -1 when the
+   read itself failed and the list is unknown. Does not log: the loader
+   already reports the failed read, and the gate reports what it costs. */
+void ha_config_discovery_chores(ha_disc_chores_t *out);
+
+/* The discovery-freshness predicate: discovery is republished when the
+   stored schema version or the stored fingerprint disagrees with the
+   current pair. Kept as a predicate because the wiring around it
+   (compare, publish, then stamp only after a successful drain) is what
+   actually went wrong before; ha_config_discovery_gate() is that wiring. */
 bool ha_config_discovery_stale(uint16_t stored_ver, uint16_t stored_hash, uint16_t schema_ver, uint16_t dev_hash);
+
+/* One window's discovery decision, everything mqtt_ha.c acts on. */
+typedef struct {
+    uint16_t hash; /* the fingerprint of what this window publishes: the value to stamp */
+    bool stale;    /* run the discovery passes this window */
+    bool stamp;    /* after a successful drain, write the schema version and `hash` */
+} ha_disc_verdict_t;
+
+/* The discovery gate, lifted out of mqtt_ha.c so every decision the
+   stamp's safety rests on is host-tested: reads the chore list ONCE into
+   `chores_out` (ha_config_discovery_chores()), fingerprints exactly that
+   (ha_config_discovery_hash()), and judges it against the stored pair
+   (ha_config_discovery_stale()). mqtt_ha.c hands `chores_out` to the
+   discovery pass unchanged, so the pass publishes the list the hash
+   certifies.
+
+   `stamp` is `stale` AND the chore list known. On a failed read the pass
+   skips every chore row (n = -1: leaves the owner's entities as they
+   are), so a stamp would certify rows that were never published; it is
+   withheld instead, the stored pair stays stale, and the next window
+   runs the whole pass again. The stored pair is the caller's to read and
+   write (NVS_KEY_DISC_VER / NVS_KEY_DISC_NAME), beside the drain the
+   write waits on. */
+ha_disc_verdict_t ha_config_discovery_gate(const char *dev_name, const char *fw, uint16_t stored_ver,
+                                           uint16_t stored_hash, uint16_t schema_ver, ha_disc_chores_t *chores_out);
 
 #ifdef __cplusplus
 }

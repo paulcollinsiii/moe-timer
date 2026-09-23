@@ -34,7 +34,13 @@
 #include "../../main/tones.c"
 #include "../../main/ha_config.c"
 #include "../../main/timer_defs.c"
+#include "../../main/chores.c"
+#include "../../main/chore_store.c"
 // clang-format on
+/* chores.c + chore_store.c: ha_config_discovery_chores() reads the chore
+   list through the real loader over the mock flash, so the mapping the
+   discovery stamp's safety rests on (failed read = -1, rejected blob = 0)
+   is the firmware's and not a restatement of it. */
 /* Header only: the set/<key> transport slot the registry's advertised
    maximums have to fit through. */
 #include "mqtt_rx.h"
@@ -834,20 +840,20 @@ void test_discovery_stale_on_fingerprint_change_alone(void) {
 void test_discovery_hash_changes_when_a_slot_is_renamed(void) {
     char ack[128];
     ha_config_set("timer1_name", "Piano", ack, sizeof(ack));
-    uint16_t before = ha_config_discovery_hash("Kitchen", "1.5.0");
+    uint16_t before = ha_config_discovery_hash("Kitchen", "1.5.0", NULL);
     ha_config_set("timer1_name", "Violin", ack, sizeof(ack));
-    TEST_ASSERT_NOT_EQUAL(before, ha_config_discovery_hash("Kitchen", "1.5.0"));
+    TEST_ASSERT_NOT_EQUAL(before, ha_config_discovery_hash("Kitchen", "1.5.0", NULL));
 }
 
 void test_discovery_hash_changes_when_a_slot_is_enabled_or_cleared(void) {
     char ack[128];
-    uint16_t empty = ha_config_discovery_hash("Kitchen", "1.5.0");
+    uint16_t empty = ha_config_discovery_hash("Kitchen", "1.5.0", NULL);
     ha_config_set("timer2_name", "Reading", ack, sizeof(ack));
-    uint16_t enabled = ha_config_discovery_hash("Kitchen", "1.5.0");
+    uint16_t enabled = ha_config_discovery_hash("Kitchen", "1.5.0", NULL);
     TEST_ASSERT_NOT_EQUAL(empty, enabled);
     /* Clearing the name retires those entities — also a discovery change. */
     ha_config_set("timer2_name", "", ack, sizeof(ack));
-    TEST_ASSERT_NOT_EQUAL(enabled, ha_config_discovery_hash("Kitchen", "1.5.0"));
+    TEST_ASSERT_NOT_EQUAL(enabled, ha_config_discovery_hash("Kitchen", "1.5.0", NULL));
 }
 
 /* Slot names are folded with the same separator discipline as the dev
@@ -856,16 +862,504 @@ void test_discovery_hash_does_not_confuse_slot_boundaries(void) {
     char ack[128];
     ha_config_set("timer1_name", "ab", ack, sizeof(ack));
     ha_config_set("timer2_name", "", ack, sizeof(ack));
-    uint16_t a = ha_config_discovery_hash("Kitchen", "1.5.0");
+    uint16_t a = ha_config_discovery_hash("Kitchen", "1.5.0", NULL);
     ha_config_set("timer1_name", "a", ack, sizeof(ack));
     ha_config_set("timer2_name", "b", ack, sizeof(ack));
-    TEST_ASSERT_NOT_EQUAL(a, ha_config_discovery_hash("Kitchen", "1.5.0"));
+    TEST_ASSERT_NOT_EQUAL(a, ha_config_discovery_hash("Kitchen", "1.5.0", NULL));
 }
 
 void test_discovery_hash_still_tracks_the_device_block(void) {
     /* The dev-block legs must survive being folded together with slots. */
-    TEST_ASSERT_NOT_EQUAL(ha_config_discovery_hash("Kitchen", "1.5.0"), ha_config_discovery_hash("Kitchen", "1.6.0"));
-    TEST_ASSERT_NOT_EQUAL(ha_config_discovery_hash("Kitchen", "1.5.0"), ha_config_discovery_hash("Playroom", "1.5.0"));
+    TEST_ASSERT_NOT_EQUAL(ha_config_discovery_hash("Kitchen", "1.5.0", NULL),
+                          ha_config_discovery_hash("Kitchen", "1.6.0", NULL));
+    TEST_ASSERT_NOT_EQUAL(ha_config_discovery_hash("Kitchen", "1.5.0", NULL),
+                          ha_config_discovery_hash("Playroom", "1.5.0", NULL));
+}
+
+/* ---- the chore list in the discovery fingerprint (M3-T2) ----
+   mqtt_ha publishes binary_sensor chore_1..CHORE_MAX named "<chore> done"
+   and retires every row at or past the configured count
+   (stats_json_chore_discovery). None of that is in DISC_SCHEMA_VER, so the
+   list has to be in the fingerprint or a rename leaves the old entity name
+   standing, and a shrink leaves the dropped rows live, forever.
+
+   Every case compares hashes over the SAME timer table and dev block, so
+   only the chore leg can move them. `n` is the convention
+   stats_json_chore_discovery() takes: -1 = the read failed. */
+
+/* A fixed-shape list: CHORE_MAX rows, unused ones empty, as the loader
+   hands them back. The count is supplied per hash (chore_hash) so one set
+   of rows can be fingerprinted at every n. */
+typedef struct {
+    char rows[CHORE_MAX][CHORE_NAME_BUF];
+} chore_list_t;
+
+static chore_list_t chores3(const char *a, const char *b, const char *c) {
+    chore_list_t l;
+    memset(&l, 0, sizeof(l));
+    snprintf(l.rows[0], CHORE_NAME_BUF, "%s", a);
+    snprintf(l.rows[1], CHORE_NAME_BUF, "%s", b);
+    snprintf(l.rows[2], CHORE_NAME_BUF, "%s", c);
+    return l;
+}
+
+static ha_disc_chores_t as_disc(const chore_list_t *l, int n) {
+    ha_disc_chores_t c;
+    memcpy(c.names, l->rows, sizeof(c.names));
+    c.n = n;
+    return c;
+}
+
+static uint16_t chore_hash_as(const char *dev, const chore_list_t *l, int n) {
+    const ha_disc_chores_t c = as_disc(l, n);
+    return ha_config_discovery_hash(dev, "1.5.0", &c);
+}
+
+static uint16_t chore_hash(const chore_list_t *l, int n) {
+    return chore_hash_as("Kitchen", l, n);
+}
+
+void test_discovery_hash_is_stable_for_an_identical_chore_list(void) {
+    chore_list_t a = chores3("Bed", "Teeth", "Dishes");
+    chore_list_t b = chores3("Bed", "Teeth", "Dishes");
+    TEST_ASSERT_EQUAL_UINT16(chore_hash(&a, 3), chore_hash(&b, 3));
+    TEST_ASSERT_EQUAL_UINT16(chore_hash(&a, 3), chore_hash(&a, 3));
+}
+
+/* THE regression: a rename in the config document left "<old> done" in HA. */
+void test_discovery_hash_changes_when_a_chore_is_renamed(void) {
+    chore_list_t before = chores3("Bed", "Teeth", "Dishes");
+    chore_list_t after = chores3("Bed", "Teeth", "Laundry");
+    TEST_ASSERT_NOT_EQUAL(chore_hash(&before, 3), chore_hash(&after, 3));
+    /* ...in every row, not just the first: a fold that stopped at row 0
+       would pass the case above only by luck of which row was edited. */
+    for (int row = 0; row < CHORE_MAX; row++) {
+        chore_list_t edited = before;
+        edited.rows[row][0] = 'Z';
+        TEST_ASSERT_NOT_EQUAL_MESSAGE(chore_hash(&before, 3), chore_hash(&edited, 3), "row not folded");
+    }
+}
+
+/* The rest of the defect: a device that gets its first list after the
+   v22 republish had no chore entities, and shrinking 3 -> 1 left chore_2/3
+   live under their old names. */
+void test_discovery_hash_changes_when_a_chore_is_added_or_removed(void) {
+    chore_list_t l = chores3("Bed", "Teeth", "Dishes");
+    TEST_ASSERT_NOT_EQUAL(chore_hash(&l, 0), chore_hash(&l, 1));
+    TEST_ASSERT_NOT_EQUAL(chore_hash(&l, 1), chore_hash(&l, 2));
+    TEST_ASSERT_NOT_EQUAL(chore_hash(&l, 2), chore_hash(&l, 3));
+    TEST_ASSERT_NOT_EQUAL(chore_hash(&l, 3), chore_hash(&l, 1));
+}
+
+/* The count is folded on its own, not inferred from the names: an
+   EMPTY-named row below the count is still published (under its default
+   name), so ["A"] and ["A", ""] are different discovery and must hash
+   differently even though they hold the same bytes. */
+void test_discovery_hash_counts_an_empty_named_chore(void) {
+    chore_list_t l = chores3("Bed", "", "");
+    TEST_ASSERT_NOT_EQUAL(chore_hash(&l, 1), chore_hash(&l, 2));
+    TEST_ASSERT_NOT_EQUAL(chore_hash(&l, 2), chore_hash(&l, 3));
+}
+
+/* WHY THE COUNT IS FOLDED when each row's terminator already implies it.
+   Terminators alone make ONE empty-named chore fold as a bare h * 33, and
+   h * 33 == h (mod 2^16) whenever h is a multiple of 2048 — so on such a
+   device (the dev block and timer table decide h) going from no chores to
+   a single EMPTY-named one would not move the fingerprint and chore_1
+   would never appear. config_apply() refuses an empty chore name, so only
+   a hand-built or corrupt blob can hold that list; the count closes the
+   case anyway. With the count folded first the step is (h * 33 + 1) * 33,
+   and 1088 * h == -33 (mod 2^16) has no solution (even vs odd): no device
+   can collide there. Searched, not assumed: find a dev name that puts h on
+   such a multiple, then check. */
+void test_discovery_hash_never_confuses_no_chores_with_one_unnamed_chore(void) {
+    char dev[16] = "";
+    bool found = false;
+    for (int i = 0; i < 200000 && !found; i++) {
+        snprintf(dev, sizeof(dev), "dev%d", i);
+        found = (ha_config_discovery_hash(dev, "1.5.0", NULL) & 0x7FFu) == 0;
+    }
+    TEST_ASSERT_TRUE_MESSAGE(found, "no dev name hit a multiple of 2048; widen the search");
+    chore_list_t unnamed = chores3("", "", "");
+    TEST_ASSERT_NOT_EQUAL(ha_config_discovery_hash(dev, "1.5.0", NULL), chore_hash_as(dev, &unnamed, 1));
+}
+
+void test_discovery_hash_changes_when_chores_are_reordered(void) {
+    chore_list_t a = chores3("Bed", "Teeth", "Dishes");
+    chore_list_t b = chores3("Teeth", "Bed", "Dishes");
+    TEST_ASSERT_NOT_EQUAL(chore_hash(&a, 3), chore_hash(&b, 3));
+    chore_list_t c = chores3("Dishes", "Teeth", "Bed");
+    TEST_ASSERT_NOT_EQUAL(chore_hash(&a, 3), chore_hash(&c, 3));
+}
+
+/* Rows are delimited, so moving bytes across a row boundary cannot cancel
+   out — the chore counterpart of test_discovery_hash_does_not_confuse_slot_boundaries. */
+void test_discovery_hash_does_not_confuse_chore_boundaries(void) {
+    chore_list_t ab = chores3("AB", "", "");
+    chore_list_t a_b = chores3("A", "B", "");
+    TEST_ASSERT_NOT_EQUAL(chore_hash(&ab, 2), chore_hash(&a_b, 2));
+    chore_list_t x = chores3("AB", "C", "");
+    chore_list_t y = chores3("A", "BC", "");
+    TEST_ASSERT_NOT_EQUAL(chore_hash(&x, 2), chore_hash(&y, 2));
+    chore_list_t p = chores3("A", "", "B");
+    chore_list_t q = chores3("", "A", "B");
+    TEST_ASSERT_NOT_EQUAL(chore_hash(&p, 3), chore_hash(&q, 3));
+}
+
+/* Discovery ignores the rows at and past the count (it retires those
+   entities without reading a name), and the loader leaves them empty
+   anyway — but the fingerprint must not depend on them either, or a
+   hand-built buffer and a loaded one fingerprint the same list apart. */
+void test_discovery_hash_ignores_rows_past_the_count(void) {
+    chore_list_t a = chores3("Bed", "", "");
+    chore_list_t b = chores3("Bed", "Teeth", "Dishes");
+    TEST_ASSERT_EQUAL_UINT16(chore_hash(&a, 1), chore_hash(&b, 1));
+    TEST_ASSERT_EQUAL_UINT16(chore_hash(&a, 0), chore_hash(&b, 0));
+}
+
+/* 0 chores, never configured and a REJECTED blob are all n = 0 to the
+   discovery pass (every chore row retires), so they fingerprint the same —
+   and the same as a device from before the chore list existed: n = 0
+   folds nothing, so a device with no list keeps its stored stamp and
+   pays no republish on upgrade. NULL is legal at n = 0. */
+void test_discovery_hash_with_no_chores_is_the_pre_chore_fingerprint(void) {
+    chore_list_t empty = chores3("", "", "");
+    chore_list_t stale_rows = chores3("Bed", "Teeth", "");
+    TEST_ASSERT_EQUAL_UINT16(ha_config_discovery_hash("Kitchen", "1.5.0", NULL), chore_hash(&empty, 0));
+    TEST_ASSERT_EQUAL_UINT16(chore_hash(&empty, 0), chore_hash(&stale_rows, 0));
+    /* "Pre-chore" pinned structurally: the dev block plus the timer slots
+       of setUp()'s empty table, folded as the slot loop folds them. */
+    uint16_t h = ha_config_device_hash("Kitchen", "1.5.0");
+    for (int i = 0; i < TIMER_EXTRA_SLOTS; i++)
+        h = (uint16_t)(h * 33u * 33u * 33u); /* empty name, sep, enabled=0, sep */
+    TEST_ASSERT_EQUAL_UINT16(h, ha_config_discovery_hash("Kitchen", "1.5.0", NULL));
+}
+
+/* An UNKNOWN list (the read failed) folds a marker no readable list can
+   put at that position — above all not the "no chores" stream, which is
+   what the loader's zeroed outputs would say if the count were taken raw.
+   The 16-bit value can still collide with SOME list by chance, which is
+   why the gate withholds the stamp rather than relying on this (see the
+   gate tests below); this pins the fold for the lists at hand. The rows
+   are ignored at n = -1. */
+void test_discovery_hash_separates_an_unknown_chore_list(void) {
+    chore_list_t l = chores3("Bed", "Teeth", "Dishes");
+    chore_list_t empty = chores3("", "", "");
+    const uint16_t unknown = chore_hash(&empty, -1);
+    TEST_ASSERT_EQUAL_UINT16(unknown, chore_hash(&l, -1));
+    for (int n = 0; n <= CHORE_MAX; n++)
+        TEST_ASSERT_NOT_EQUAL_MESSAGE(unknown, chore_hash(&l, n), "unknown list fingerprints as a known one");
+}
+
+/* stats_json_chore_discovery() publishes every row below n and there are
+   only CHORE_MAX rows, so an out-of-range count publishes exactly what
+   CHORE_MAX does. The fingerprint clamps the same way (the loader never
+   returns such a count; this pins that the two agree if one ever does). */
+void test_discovery_hash_clamps_the_chore_count_as_discovery_does(void) {
+    chore_list_t l = chores3("Bed", "Teeth", "Dishes");
+    TEST_ASSERT_EQUAL_UINT16(chore_hash(&l, CHORE_MAX), chore_hash(&l, CHORE_MAX + 1));
+    TEST_ASSERT_EQUAL_UINT16(chore_hash(&l, CHORE_MAX), chore_hash(&l, 255));
+}
+
+/* The published entity name is "%.*s done" with CHORE_NAME_MAX as the
+   bound, so a row that fills all 21 bytes without a NUL publishes its
+   first 20 — and must fingerprint as that 20-byte name, not read on. */
+void test_discovery_hash_bounds_a_chore_name_as_discovery_does(void) {
+    chore_list_t full;
+    memset(&full, 0, sizeof(full));
+    memset(full.rows[0], 'x', CHORE_NAME_BUF); /* no NUL in the row */
+    chore_list_t twenty;
+    memset(&twenty, 0, sizeof(twenty));
+    memset(twenty.rows[0], 'x', CHORE_NAME_MAX);
+    TEST_ASSERT_EQUAL_UINT16(chore_hash(&twenty, 1), chore_hash(&full, 1));
+}
+
+/* The chore leg is appended, not substituted: the dev block and the timer
+   slots must still move a fingerprint that carries a chore list. */
+void test_discovery_hash_keeps_its_other_legs_with_chores(void) {
+    chore_list_t l = chores3("Bed", "Teeth", "Dishes");
+    const ha_disc_chores_t c = as_disc(&l, 3);
+    uint16_t base = ha_config_discovery_hash("Kitchen", "1.5.0", &c);
+    TEST_ASSERT_NOT_EQUAL(base, ha_config_discovery_hash("Kitchen", "1.6.0", &c));
+    TEST_ASSERT_NOT_EQUAL(base, ha_config_discovery_hash("Playroom", "1.5.0", &c));
+    char ack[128];
+    ha_config_set("timer1_name", "Piano", ack, sizeof(ack));
+    TEST_ASSERT_NOT_EQUAL(base, ha_config_discovery_hash("Kitchen", "1.5.0", &c));
+}
+
+/* ---- ha_config_discovery_chores(): the window's one read ----
+   Its `n` is what the fingerprint AND the discovery pass both act on, so
+   it has to say exactly what stats_json_chore_discovery() means by n: the
+   count, 0 for anything authoritative that is not a list, -1 only for a
+   read that failed. */
+
+static ha_disc_chores_t clobbered(void) {
+    ha_disc_chores_t c;
+    memset(&c, '#', sizeof(c)); /* so "fully written" is observable */
+    return c;
+}
+
+static uint16_t disc_hash(const ha_disc_chores_t *c) {
+    return ha_config_discovery_hash("Kitchen", "1.5.0", c);
+}
+
+void test_discovery_chores_returns_the_stored_list(void) {
+    const char src[CHORE_MAX][CHORE_NAME_BUF] = {"Bed", "Teeth", ""};
+    TEST_ASSERT_EQUAL(ESP_OK, chore_store_save_names(src, 2));
+    ha_disc_chores_t got = clobbered();
+    ha_config_discovery_chores(&got);
+    TEST_ASSERT_EQUAL_INT(2, got.n);
+    TEST_ASSERT_EQUAL_STRING("Bed", got.names[0]);
+    TEST_ASSERT_EQUAL_STRING("Teeth", got.names[1]);
+    TEST_ASSERT_EQUAL_STRING("", got.names[2]);
+}
+
+/* Never configured and REJECTED both answer 0 — discovery retires every
+   chore row for both — and so fingerprint exactly as an empty list does,
+   which is also the pre-chore fingerprint. */
+void test_discovery_chores_reads_absent_and_rejected_as_no_chores(void) {
+    ha_disc_chores_t got = clobbered();
+    ha_config_discovery_chores(&got); /* never written */
+    TEST_ASSERT_EQUAL_INT(0, got.n);
+    const uint16_t absent = disc_hash(&got);
+    TEST_ASSERT_EQUAL_STRING("", got.names[0]);
+
+    nvs_chore_names_blob_t b;
+    memset(&b, 0, sizeof(b));
+    b.version = CHORE_NAMES_BLOB_VERSION + 1; /* another firmware's layout */
+    b.n = 2;
+    snprintf(b.names[0], CHORE_NAME_BUF, "Bed");
+    snprintf(b.names[1], CHORE_NAME_BUF, "Teeth");
+    TEST_ASSERT_EQUAL(ESP_OK, hal_nvs_write_blob(NVS_KEY_CHORES, &b, sizeof(b)));
+    got = clobbered();
+    ha_config_discovery_chores(&got);
+    TEST_ASSERT_EQUAL_INT(0, got.n);
+    TEST_ASSERT_EQUAL_STRING("", got.names[0]); /* the rejected names do not leak through */
+    TEST_ASSERT_EQUAL_UINT16(absent, disc_hash(&got));
+
+    const char none[CHORE_MAX][CHORE_NAME_BUF] = {"", "", ""};
+    TEST_ASSERT_EQUAL(ESP_OK, chore_store_save_names(none, 0)); /* configured: zero chores */
+    got = clobbered();
+    ha_config_discovery_chores(&got);
+    TEST_ASSERT_EQUAL_INT(0, got.n);
+    TEST_ASSERT_EQUAL_UINT16(absent, disc_hash(&got));
+    TEST_ASSERT_EQUAL_UINT16(ha_config_discovery_hash("Kitchen", "1.5.0", NULL), absent);
+}
+
+/* THE safety case. A good list is in flash the whole time; only the read
+   fails. The loader's outputs then say "0 chores", and taking that count
+   raw would (a) retire the owner's chore entities and (b) fingerprint as
+   the no-chore device. -1 is what prevents (a) and the common case of
+   (b); the gate's withheld stamp (below) is what makes (b) safe outright. */
+void test_discovery_chores_reports_a_failed_read_as_unknown(void) {
+    const char src[CHORE_MAX][CHORE_NAME_BUF] = {"Bed", "Teeth", "Dishes"};
+    TEST_ASSERT_EQUAL(ESP_OK, chore_store_save_names(src, 3));
+    ha_disc_chores_t good = clobbered();
+    ha_config_discovery_chores(&good);
+    TEST_ASSERT_EQUAL_INT(3, good.n);
+    const uint16_t current = disc_hash(&good);
+
+    mock_nvs_fail_reads(1);
+    ha_disc_chores_t got = clobbered();
+    ha_config_discovery_chores(&got);
+    TEST_ASSERT_EQUAL_INT(-1, got.n);
+    TEST_ASSERT_EQUAL_STRING("", got.names[0]); /* still fully written */
+    const uint16_t unknown = disc_hash(&got);
+    TEST_ASSERT_NOT_EQUAL(current, unknown);
+    TEST_ASSERT_NOT_EQUAL(ha_config_discovery_hash("Kitchen", "1.5.0", NULL), unknown);
+
+    /* ...and the flash recovering is the list again, same fingerprint. */
+    got = clobbered();
+    ha_config_discovery_chores(&got);
+    TEST_ASSERT_EQUAL_INT(3, got.n);
+    TEST_ASSERT_EQUAL_UINT16(current, disc_hash(&got));
+}
+
+/* End to end over the real store: a rename written the way config_apply
+   writes it moves the fingerprint the next window computes. */
+void test_discovery_chores_a_stored_rename_moves_the_fingerprint(void) {
+    const char before[CHORE_MAX][CHORE_NAME_BUF] = {"Bed", "Teeth", ""};
+    const char after[CHORE_MAX][CHORE_NAME_BUF] = {"Bed", "Floss", ""};
+    TEST_ASSERT_EQUAL(ESP_OK, chore_store_save_names(before, 2));
+    ha_disc_chores_t got = clobbered();
+    ha_config_discovery_chores(&got);
+    const uint16_t h1 = disc_hash(&got);
+    TEST_ASSERT_EQUAL(ESP_OK, chore_store_save_names(after, 2));
+    got = clobbered();
+    ha_config_discovery_chores(&got);
+    TEST_ASSERT_NOT_EQUAL(h1, disc_hash(&got));
+    /* and the same list read twice is the same fingerprint: no republish */
+    ha_disc_chores_t again = clobbered();
+    ha_config_discovery_chores(&again);
+    TEST_ASSERT_EQUAL_UINT16(disc_hash(&got), disc_hash(&again));
+}
+
+/* ---- ha_config_discovery_gate(): the whole per-window decision ----
+   mqtt_ha.c forwards this verdict and nothing else: it runs the passes on
+   `stale`, hands `chores` to the discovery pass, and writes the stamp
+   (schema version + `hash`) after the drain iff `stamp`. So every
+   property the stamp's safety rests on is asserted here. GATE_SCHEMA is
+   any schema version: the gate takes it as an argument. */
+
+#define GATE_SCHEMA 22u
+
+typedef struct {
+    uint16_t ver, hash; /* the stored pair, as NVS_KEY_DISC_VER / NVS_KEY_DISC_NAME hold it */
+} disc_stamp_t;
+
+/* One window over `stored`: run the gate and, if it says so, write the
+   stamp the way mqtt_ha_window() does after a successful drain. */
+static ha_disc_verdict_t gate_window(disc_stamp_t *stored, ha_disc_chores_t *chores) {
+    const ha_disc_verdict_t v =
+        ha_config_discovery_gate("Kitchen", "1.5.0", stored->ver, stored->hash, GATE_SCHEMA, chores);
+    if (v.stamp) {
+        stored->ver = GATE_SCHEMA;
+        stored->hash = v.hash;
+    }
+    return v;
+}
+
+static void save_three(void) {
+    const char src[CHORE_MAX][CHORE_NAME_BUF] = {"Bed", "Teeth", "Dishes"};
+    TEST_ASSERT_EQUAL(ESP_OK, chore_store_save_names(src, 3));
+}
+
+/* The verdict's hash IS the fingerprint of the list it hands back — never
+   of a different n or a different read. mqtt_ha.c stamps v.hash after
+   publishing v's chores, so any drift here certifies an unpublished list. */
+void test_discovery_gate_hashes_the_list_it_returns(void) {
+    disc_stamp_t stored = {0, 0};
+    ha_disc_chores_t chores = clobbered();
+    ha_disc_verdict_t v = gate_window(&stored, &chores); /* never configured */
+    TEST_ASSERT_EQUAL_INT(0, chores.n);
+    TEST_ASSERT_EQUAL_UINT16(disc_hash(&chores), v.hash);
+
+    save_three();
+    chores = clobbered();
+    v = gate_window(&stored, &chores);
+    TEST_ASSERT_EQUAL_INT(3, chores.n);
+    TEST_ASSERT_EQUAL_STRING("Dishes", chores.names[2]);
+    TEST_ASSERT_EQUAL_UINT16(disc_hash(&chores), v.hash);
+
+    mock_nvs_fail_reads(1);
+    chores = clobbered();
+    v = gate_window(&stored, &chores);
+    TEST_ASSERT_EQUAL_INT(-1, chores.n); /* the pass will skip every chore row */
+    TEST_ASSERT_EQUAL_UINT16(disc_hash(&chores), v.hash);
+    ha_disc_chores_t as_none = chores;
+    as_none.n = 0;
+    TEST_ASSERT_NOT_EQUAL(disc_hash(&as_none), v.hash); /* not hashed as "no chores" */
+}
+
+/* A known list: first window stale and stampable; once stamped, the same
+   list is current; a rename is stale and stampable again. */
+void test_discovery_gate_known_list_stamps_then_is_current(void) {
+    save_three();
+    disc_stamp_t stored = {0, 0};
+    ha_disc_chores_t chores;
+    ha_disc_verdict_t v = gate_window(&stored, &chores);
+    TEST_ASSERT_TRUE(v.stale);
+    TEST_ASSERT_TRUE(v.stamp);
+
+    v = gate_window(&stored, &chores);
+    TEST_ASSERT_FALSE(v.stale);
+    TEST_ASSERT_FALSE(v.stamp); /* nothing ran, nothing to certify */
+
+    const char renamed[CHORE_MAX][CHORE_NAME_BUF] = {"Bed", "Floss", "Dishes"};
+    TEST_ASSERT_EQUAL(ESP_OK, chore_store_save_names(renamed, 3));
+    const uint16_t before = stored.hash;
+    v = gate_window(&stored, &chores);
+    TEST_ASSERT_TRUE(v.stale);
+    TEST_ASSERT_TRUE(v.stamp);
+    TEST_ASSERT_NOT_EQUAL(before, stored.hash);
+    TEST_ASSERT_FALSE(gate_window(&stored, &chores).stale);
+}
+
+/* The stored HASH is consulted, not just the schema version: a matching
+   version with a different fingerprint is stale. */
+void test_discovery_gate_reads_the_stored_hash(void) {
+    save_three();
+    ha_disc_chores_t chores;
+    disc_stamp_t stored = {0, 0};
+    const ha_disc_verdict_t first = gate_window(&stored, &chores);
+    disc_stamp_t other = {GATE_SCHEMA, (uint16_t)(first.hash ^ 0x5A5Au)};
+    const ha_disc_verdict_t v = gate_window(&other, &chores);
+    TEST_ASSERT_TRUE(v.stale);
+    TEST_ASSERT_TRUE(v.stamp);
+    TEST_ASSERT_EQUAL_UINT16(first.hash, other.hash);
+}
+
+/* A schema bump alone is stale, over an otherwise current stamp. */
+void test_discovery_gate_stale_on_schema_mismatch(void) {
+    save_three();
+    ha_disc_chores_t chores;
+    disc_stamp_t stored = {0, 0};
+    (void)gate_window(&stored, &chores);
+    stored.ver = GATE_SCHEMA - 1;
+    const ha_disc_verdict_t v = gate_window(&stored, &chores);
+    TEST_ASSERT_TRUE(v.stale);
+    TEST_ASSERT_TRUE(v.stamp);
+    TEST_ASSERT_EQUAL_UINT16(GATE_SCHEMA, stored.ver);
+}
+
+/* THE safety case, end to end. The stamp is withheld on a failed read
+   WHATEVER `stale` says — on a fresh device, a schema bump, or a stored
+   stamp for the good list — so a window whose pass skipped the chore rows
+   never records itself as done. Recovery then sees the pre-failure
+   fingerprint and, the stamp having been kept, is current again. */
+void test_discovery_gate_never_stamps_an_unknown_list(void) {
+    save_three();
+    ha_disc_chores_t chores;
+
+    /* fresh device, and a schema bump: stale either way, never stampable */
+    disc_stamp_t fresh = {0, 0};
+    mock_nvs_fail_reads(1);
+    ha_disc_verdict_t v = gate_window(&fresh, &chores);
+    TEST_ASSERT_EQUAL_INT(-1, chores.n);
+    TEST_ASSERT_TRUE(v.stale);
+    TEST_ASSERT_FALSE(v.stamp);
+    TEST_ASSERT_EQUAL_UINT16(0, fresh.ver); /* nothing written */
+
+    /* the good list, stamped */
+    disc_stamp_t stored = {0, 0};
+    v = gate_window(&stored, &chores);
+    TEST_ASSERT_TRUE(v.stamp);
+    const disc_stamp_t good = stored;
+
+    /* a stored stamp that happens to equal the unknown fingerprint (the
+       ~1-in-65536 case the marker cannot rule out): not stale, and still
+       never stampable */
+    mock_nvs_fail_reads(1);
+    disc_stamp_t colliding = {GATE_SCHEMA, 0};
+    colliding.hash = ha_config_discovery_gate("Kitchen", "1.5.0", 0, 0, GATE_SCHEMA, &chores).hash;
+    mock_nvs_fail_reads(1);
+    v = gate_window(&colliding, &chores);
+    TEST_ASSERT_EQUAL_INT(-1, chores.n);
+    TEST_ASSERT_FALSE(v.stale);
+    TEST_ASSERT_FALSE(v.stamp);
+
+    /* the failed read over the good stamp: stale (the pass reruns), not
+       stampable, and the stored pair is left exactly as it was */
+    mock_nvs_fail_reads(1);
+    v = gate_window(&stored, &chores);
+    TEST_ASSERT_TRUE(v.stale);
+    TEST_ASSERT_FALSE(v.stamp);
+    TEST_ASSERT_NOT_EQUAL(good.hash, v.hash);
+    TEST_ASSERT_EQUAL_UINT16(good.ver, stored.ver);
+    TEST_ASSERT_EQUAL_UINT16(good.hash, stored.hash);
+
+    /* a schema bump during the failure: still withheld */
+    disc_stamp_t bumped = {GATE_SCHEMA - 1, good.hash};
+    mock_nvs_fail_reads(1);
+    v = gate_window(&bumped, &chores);
+    TEST_ASSERT_TRUE(v.stale);
+    TEST_ASSERT_FALSE(v.stamp);
+
+    /* recovery: the pre-failure fingerprint, and the kept stamp is current */
+    v = gate_window(&stored, &chores);
+    TEST_ASSERT_EQUAL_INT(3, chores.n);
+    TEST_ASSERT_EQUAL_UINT16(good.hash, v.hash);
+    TEST_ASSERT_FALSE(v.stale);
 }
 
 /* ---- transport ----
@@ -903,11 +1397,11 @@ void test_discovery_hash_changes_when_only_the_duration_enables_a_slot(void) {
     char ack[128];
     /* Window 1: name set, min still 0 -> slot is NOT yet enabled. */
     ha_config_set("timer4_name", "Yoga", ack, sizeof(ack));
-    uint16_t named_but_disabled = ha_config_discovery_hash("Kitchen", "1.5.0");
+    uint16_t named_but_disabled = ha_config_discovery_hash("Kitchen", "1.5.0", NULL);
     /* Window 2: min set -> slot flips to enabled and its three per-slot
        entities should now appear. The name did not change. */
     ha_config_set("timer4_min", "20", ack, sizeof(ack));
-    TEST_ASSERT_NOT_EQUAL(named_but_disabled, ha_config_discovery_hash("Kitchen", "1.5.0"));
+    TEST_ASSERT_NOT_EQUAL(named_but_disabled, ha_config_discovery_hash("Kitchen", "1.5.0", NULL));
 }
 
 /* The reviewer's measured collision: these two hashed identically. */
@@ -919,10 +1413,10 @@ void test_discovery_hash_separates_zero_and_nonzero_duration(void) {
     snprintf(b.defs[0].name, sizeof(b.defs[0].name), "Piano");
     b.defs[0].min = 20;
     nvs_config_set_timer_defs(&b);
-    uint16_t with_duration = ha_config_discovery_hash("Kitchen", "1.5.0");
+    uint16_t with_duration = ha_config_discovery_hash("Kitchen", "1.5.0", NULL);
     b.defs[0].min = 0;
     nvs_config_set_timer_defs(&b);
-    TEST_ASSERT_NOT_EQUAL(with_duration, ha_config_discovery_hash("Kitchen", "1.5.0"));
+    TEST_ASSERT_NOT_EQUAL(with_duration, ha_config_discovery_hash("Kitchen", "1.5.0", NULL));
     (void)ack;
 }
 
@@ -936,10 +1430,10 @@ void test_discovery_hash_ignores_a_duration_change_that_keeps_it_enabled(void) {
     snprintf(b.defs[0].name, sizeof(b.defs[0].name), "Piano");
     b.defs[0].min = 20;
     nvs_config_set_timer_defs(&b);
-    uint16_t at20 = ha_config_discovery_hash("Kitchen", "1.5.0");
+    uint16_t at20 = ha_config_discovery_hash("Kitchen", "1.5.0", NULL);
     b.defs[0].min = 30;
     nvs_config_set_timer_defs(&b);
-    TEST_ASSERT_EQUAL_UINT16(at20, ha_config_discovery_hash("Kitchen", "1.5.0"));
+    TEST_ASSERT_EQUAL_UINT16(at20, ha_config_discovery_hash("Kitchen", "1.5.0", NULL));
 }
 
 /* An unterminated name in the blob must not read into the next slot. */
@@ -950,7 +1444,7 @@ void test_discovery_hash_tolerates_an_unterminated_slot_name(void) {
     memset(b.defs[0].name, 'x', sizeof(b.defs[0].name)); /* no NUL */
     b.defs[0].min = 20;
     nvs_config_set_timer_defs(&b);
-    ha_config_discovery_hash("Kitchen", "1.5.0"); /* ASan catches an overrun */
+    ha_config_discovery_hash("Kitchen", "1.5.0", NULL); /* ASan catches an overrun */
     char buf[HA_CONFIG_STATE_MAX];
     ha_config_state_json(buf, sizeof(buf)); /* same field, via jesc */
 }
@@ -1155,7 +1649,7 @@ void test_state_json_falls_back_to_the_installed_table(void) {
 void test_discovery_hash_falls_back_to_the_installed_table(void) {
     timer_set_defs(INSTALLED, TIMER_SLOT_COUNT);
     store_unreadable_blob();
-    uint16_t from_installed = ha_config_discovery_hash("Kitchen", "1.5.0");
+    uint16_t from_installed = ha_config_discovery_hash("Kitchen", "1.5.0", NULL);
 
     /* The same two slots, but stored: the fallback must reach the same
        fingerprint, or the first window after an erase burns a discovery
@@ -1169,12 +1663,12 @@ void test_discovery_hash_falls_back_to_the_installed_table(void) {
     snprintf(b.defs[1].name, sizeof(b.defs[1].name), "Meditation");
     b.defs[1].min = 10;
     nvs_config_set_timer_defs(&b);
-    TEST_ASSERT_EQUAL_UINT16(ha_config_discovery_hash("Kitchen", "1.5.0"), from_installed);
+    TEST_ASSERT_EQUAL_UINT16(ha_config_discovery_hash("Kitchen", "1.5.0", NULL), from_installed);
 
     /* And it is not the all-empty hash the zeroed fallback produced. */
     mock_nvs_reset();
     timer_set_defs(NULL, 0);
-    TEST_ASSERT_NOT_EQUAL(from_installed, ha_config_discovery_hash("Kitchen", "1.5.0"));
+    TEST_ASSERT_NOT_EQUAL(from_installed, ha_config_discovery_hash("Kitchen", "1.5.0", NULL));
 }
 
 /* A slot that is NAMED but has no minutes yet is the middle of the two-edit
@@ -1199,7 +1693,7 @@ void test_state_json_shows_a_name_only_slot(void) {
 void test_discovery_hash_is_stable_for_a_name_only_slot(void) {
     timer_set_defs(INSTALLED_NAME_ONLY, TIMER_SLOT_COUNT);
     store_unreadable_blob();
-    uint16_t from_installed = ha_config_discovery_hash("Kitchen", "1.5.0");
+    uint16_t from_installed = ha_config_discovery_hash("Kitchen", "1.5.0", NULL);
 
     mock_nvs_reset();
     nvs_timer_defs_blob_t b;
@@ -1211,7 +1705,7 @@ void test_discovery_hash_is_stable_for_a_name_only_slot(void) {
     b.defs[1].min = 10;
     snprintf(b.defs[2].name, sizeof(b.defs[2].name), "Reading"); /* min still 0 */
     nvs_config_set_timer_defs(&b);
-    TEST_ASSERT_EQUAL_UINT16(ha_config_discovery_hash("Kitchen", "1.5.0"), from_installed);
+    TEST_ASSERT_EQUAL_UINT16(ha_config_discovery_hash("Kitchen", "1.5.0", NULL), from_installed);
 }
 
 /* Same rule as the entity table in stats_json.c: every discovery payload
@@ -1781,6 +2275,28 @@ int main(void) {
     RUN_TEST(test_discovery_hash_changes_when_a_slot_is_enabled_or_cleared);
     RUN_TEST(test_discovery_hash_does_not_confuse_slot_boundaries);
     RUN_TEST(test_discovery_hash_still_tracks_the_device_block);
+    RUN_TEST(test_discovery_hash_is_stable_for_an_identical_chore_list);
+    RUN_TEST(test_discovery_hash_changes_when_a_chore_is_renamed);
+    RUN_TEST(test_discovery_hash_changes_when_a_chore_is_added_or_removed);
+    RUN_TEST(test_discovery_hash_counts_an_empty_named_chore);
+    RUN_TEST(test_discovery_hash_never_confuses_no_chores_with_one_unnamed_chore);
+    RUN_TEST(test_discovery_hash_changes_when_chores_are_reordered);
+    RUN_TEST(test_discovery_hash_does_not_confuse_chore_boundaries);
+    RUN_TEST(test_discovery_hash_ignores_rows_past_the_count);
+    RUN_TEST(test_discovery_hash_with_no_chores_is_the_pre_chore_fingerprint);
+    RUN_TEST(test_discovery_hash_separates_an_unknown_chore_list);
+    RUN_TEST(test_discovery_hash_clamps_the_chore_count_as_discovery_does);
+    RUN_TEST(test_discovery_hash_bounds_a_chore_name_as_discovery_does);
+    RUN_TEST(test_discovery_hash_keeps_its_other_legs_with_chores);
+    RUN_TEST(test_discovery_chores_returns_the_stored_list);
+    RUN_TEST(test_discovery_chores_reads_absent_and_rejected_as_no_chores);
+    RUN_TEST(test_discovery_chores_reports_a_failed_read_as_unknown);
+    RUN_TEST(test_discovery_chores_a_stored_rename_moves_the_fingerprint);
+    RUN_TEST(test_discovery_gate_hashes_the_list_it_returns);
+    RUN_TEST(test_discovery_gate_known_list_stamps_then_is_current);
+    RUN_TEST(test_discovery_gate_reads_the_stored_hash);
+    RUN_TEST(test_discovery_gate_stale_on_schema_mismatch);
+    RUN_TEST(test_discovery_gate_never_stamps_an_unknown_list);
     RUN_TEST(test_every_string_field_fits_the_set_transport);
     RUN_TEST(test_every_field_key_fits_the_set_transport);
     RUN_TEST(test_discovery_hash_changes_when_only_the_duration_enables_a_slot);

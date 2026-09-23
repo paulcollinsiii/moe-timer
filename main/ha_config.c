@@ -11,6 +11,7 @@
 #include <string.h>
 
 #include "bedtime.h"
+#include "chore_store.h" /* ha_config_discovery_gate: the window's one read of the list */
 #include "config_validate.h"
 #include "nvs_config.h"
 #include "quiet_hours.h"
@@ -507,9 +508,10 @@ static void mark_defined(nvs_timer_defs_blob_t *b, int slot) {
     b->defs[slot - 1].defined = 1;
 }
 
-uint16_t ha_config_discovery_hash(const char *dev_name, const char *fw) {
-    /* Start from the dev block, then fold every extra-timer slot name.
-       Those names are the second mutable input to discovery: mqtt_ha's
+uint16_t ha_config_discovery_hash(const char *dev_name, const char *fw, const ha_disc_chores_t *chores) {
+    /* Start from the dev block, then fold every extra-timer slot name,
+       then the chore list (after the loop, where it says why). The slot
+       names are the second mutable input to discovery: mqtt_ha's
        per-timer stat entities (`<Name> remaining` / `<Name> limit` /
        `<Name> runs`) take their published names from timerN_name, and
        which of them exist at all depends on whether the slot is enabled.
@@ -546,11 +548,91 @@ uint16_t ha_config_discovery_hash(const char *dev_name, const char *fw) {
         h = (uint16_t)(h * 33u + ((n > 0 && defs.defs[i].min > 0) ? 1u : 0u));
         h = (uint16_t)(h * 33u); /* slot separator, as in device_hash */
     }
+    /* Then the chore list, the third mutable input: the chore_N binary
+       sensors are named "<chore> done" and rows at or past the count are
+       retired, so a rename, an added or a removed chore all change what
+       discovery publishes — and none of them moves DISC_SCHEMA_VER.
+
+       What is folded is exactly what stats_json_chore_discovery() acts
+       on, row for row, so the fingerprint cannot drift from the pass:
+         - the COUNT, clamped to CHORE_MAX as that function effectively
+           clamps it (it publishes every row below n, and there are only
+           CHORE_MAX rows). The row terminators below already imply it,
+           but not robustly: one EMPTY-named chore (published under its
+           default name, not retired) would fold as a bare h * 33, and
+           h * 33 == h (mod 2^16) for every h that is a multiple of 2048,
+           so on such a device "no chores" -> "one empty-named chore"
+           would not move the fingerprint and chore_1 would never appear.
+           That list cannot come from the config document —
+           config_apply() refuses an empty chore name — so it takes a
+           hand-built or corrupt blob that still passes the loader; the
+           count is folded anyway because it is one step and closes the
+           case outright: "no chores" vs "one unnamed chore" cannot
+           collide for any h (1088 * h == -33 mod 2^16 has no solution);
+           test_discovery_hash_never_confuses_no_chores_with_one_unnamed_chore
+           searches out such an h and checks;
+         - each row's name up to CHORE_NAME_MAX bytes — the same bound as
+           the "%.*s" that names the entity — then a 0 separator. Names
+           cannot contain NUL, so the separator makes the byte stream
+           prefix-free and ["AB", ""] cannot read as ["A", "B"] — the
+           same device as the slot loop's separators above.
+       Nothing at all for 0 chores, deliberately: the stream is then the
+       one every device hashed before the chore list existed, so a device
+       with no list keeps its stored stamp and pays no republish for a
+       feature it does not use. A rejected blob and a never-written one
+       are both 0 here because discovery treats them both as 0.
+
+       UNKNOWN (n < 0, the read failed) folds a marker no readable list
+       can produce at that position — a count is 1..CHORE_MAX — so the
+       byte streams differ there. The 16-bit result can still equal a
+       stored stamp by chance (about 1 in 65536), so the marker is not
+       what keeps a failed read from being certified: the withheld stamp
+       is (ha_config_discovery_gate()). The marker's job is the common
+       case — the gate then reports "stale" and the next window retries
+       the pass rather than trusting a list nobody read. */
+    const int chore_n = chores != NULL ? chores->n : 0;
+    if (chore_n < 0) {
+        h = (uint16_t)(h * 33u + 0xFFu);
+    } else if (chore_n > 0) {
+        const int rows = chore_n < CHORE_MAX ? chore_n : CHORE_MAX;
+        h = (uint16_t)(h * 33u + (unsigned)rows);
+        for (int i = 0; i < rows; i++) {
+            size_t n = strnlen(chores->names[i], CHORE_NAME_MAX);
+            for (size_t j = 0; j < n; j++)
+                h = (uint16_t)(h * 33u + (unsigned char)chores->names[i][j]);
+            h = (uint16_t)(h * 33u); /* row separator */
+        }
+    }
     return h;
+}
+
+void ha_config_discovery_chores(ha_disc_chores_t *out) {
+    /* No log here: chore_store_load_names() already warns on a failed
+       read (with the error), and its other callers rely on that because
+       they log nothing themselves; the consequence for discovery is
+       reported by the gate, which is where it is decided. */
+    uint8_t n = 0;
+    const esp_err_t ret = chore_store_load_names(out->names, &n);
+    out->n = chore_store_names_known(ret) ? (int)n : -1;
 }
 
 bool ha_config_discovery_stale(uint16_t stored_ver, uint16_t stored_hash, uint16_t schema_ver, uint16_t dev_hash) {
     return (stored_ver != schema_ver) || (stored_hash != dev_hash);
+}
+
+ha_disc_verdict_t ha_config_discovery_gate(const char *dev_name, const char *fw, uint16_t stored_ver,
+                                           uint16_t stored_hash, uint16_t schema_ver, ha_disc_chores_t *chores_out) {
+    ha_disc_verdict_t v;
+    ha_config_discovery_chores(chores_out);
+    v.hash = ha_config_discovery_hash(dev_name, fw, chores_out);
+    v.stale = ha_config_discovery_stale(stored_ver, stored_hash, schema_ver, v.hash);
+    /* A pass run on an unknown list skips every chore row, so stamping it
+       would certify rows it never published. Withholding the stamp leaves
+       the stored pair stale, and the next window runs the pass again. */
+    v.stamp = v.stale && chores_out->n >= 0;
+    if (v.stale && !v.stamp) /* the loader warned, with the error; this is only what it costs */
+        ESP_LOGW(TAG_HA_CONFIG, "chore list unknown: chore entities left as they are, discovery retried next window");
+    return v;
 }
 
 ha_cfg_result_t ha_config_set(const char *key, const char *value, char *ack, size_t ack_len) {

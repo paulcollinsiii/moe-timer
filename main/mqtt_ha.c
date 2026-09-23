@@ -4,7 +4,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-#include "chore_store.h"
 #include "chores.h"
 #include "cmd_apply.h"
 #include "config_apply.h"
@@ -297,30 +296,19 @@ static bool drain_acks(int published, int timeout_ms) {
     return s_pub_acks >= published;
 }
 
-/* *complete is cleared when the pass deliberately left rows untouched and
-   must be retried: the caller then withholds the disc_ver/hash stamp, so
-   the next window runs the whole pass again. Only ever cleared here. */
-static int publish_discovery(esp_mqtt_client_handle_t client, const char *dev_name, const char *fw, bool *complete) {
+/* `chores` is the list ha_config_discovery_gate() read and fingerprinted
+   for this window — not a second read here, so the pass publishes exactly
+   what the stamp will certify. A REJECTED blob is authoritative (n = 0:
+   the device runs on 0 chores, so every chore row retires — the inert C1
+   reading). A FAILED READ is not: n = -1 skips every chore row, leaving
+   the owner's entities as they are, and the gate has already withheld
+   the stamp for it, so the next window runs the whole pass again. */
+static int publish_discovery(esp_mqtt_client_handle_t client, const char *dev_name, const char *fw,
+                             const ha_disc_chores_t *chores) {
     char *topic = s_mem->topic;
     char *payload = s_mem->payload;
     int count = 0, published = 0;
     const ha_entity_t *ents = stats_json_entities(&count);
-    /* The chore list, for the chore_N rows below — read once, here, at
-       publish time, which is when the timer-slot rows read theirs too.
-       A REJECTED blob is authoritative (the device runs on 0 chores, so
-       every chore row retires: the inert C1 reading). A FAILED READ is
-       not: chore_n = -1 skips every chore row, and the pass is reported
-       incomplete so a transient flash error cannot retire the owner's
-       entities and then stamp that as done. */
-    char chore_names[CHORE_MAX][CHORE_NAME_BUF];
-    uint8_t loaded_n = 0;
-    const esp_err_t chore_ret = chore_store_load_names(chore_names, &loaded_n);
-    const int chore_n = chore_store_names_known(chore_ret) ? (int)loaded_n : -1;
-    if (chore_n < 0) {
-        ESP_LOGW(TAG, "chore list unreadable (%d): chore entities left as they are, discovery retried next window",
-                 (int)chore_ret);
-        *complete = false;
-    }
     for (int i = 0; i < count; i++) {
         const char *name_override = NULL;
         char named[48];
@@ -328,7 +316,7 @@ static int publish_discovery(esp_mqtt_client_handle_t client, const char *dev_na
         /* Per-chore binary sensors: stats_json_chore_discovery() decides
            (and the host suite pins) name, retire or skip; this only
            carries it out. */
-        switch (stats_json_chore_discovery(&ents[i], chore_names, chore_n, named, sizeof(named))) {
+        switch (stats_json_chore_discovery(&ents[i], chores->names, chores->n, named, sizeof(named))) {
             case STATS_CHORE_DISC_SKIP:
                 continue;
             case STATS_CHORE_DISC_RETIRE:
@@ -620,28 +608,31 @@ static int publish_states(esp_mqtt_client_handle_t client, const stats_snapshot_
        showing the old version permanently — the sw field would go stale
        and stay stale. The slot-name leg does the same job for the
        per-timer stat entities below, whose published names come from the
-       HA-editable timerN_name. Both the fingerprint and this gate live in
-       ha_config.c, beside the code that writes the block, and are pinned
-       there by host tests. */
+       HA-editable timerN_name, and the chore leg for the chore_N binary
+       sensors, whose names and existence come from the chore list. Both
+       the fingerprint and this gate live in ha_config.c, beside the code
+       that writes the block, and are pinned there by host tests.
+
+       ha_config_discovery_gate() reads the chore list ONCE into `chores`,
+       fingerprints exactly that, and decides both whether to run the
+       passes and whether the result may be stamped (not when the list
+       could not be read). `chores` goes to publish_discovery() unchanged,
+       and *fresh_discovery — all the post-drain stamp write consults — is
+       the gate's `stamp` verbatim. */
+    ha_disc_chores_t chores;
     char dev_name[64];
     device_name(dev_name, sizeof(dev_name));
-    uint16_t dev_hash = ha_config_discovery_hash(dev_name, snap->fw);
     uint16_t disc_ver = 0, disc_dev = 0;
     hal_nvs_read_u16(NVS_KEY_DISC_VER, &disc_ver);
     hal_nvs_read_u16(NVS_KEY_DISC_NAME, &disc_dev);
-    *fresh_discovery = ha_config_discovery_stale(disc_ver, disc_dev, DISC_SCHEMA_VER, dev_hash);
-    *dev_hash_out = dev_hash;
-    if (*fresh_discovery) {
-        bool complete = true;
-        published += publish_discovery(client, dev_name, snap->fw, &complete);
+    const ha_disc_verdict_t disc =
+        ha_config_discovery_gate(dev_name, snap->fw, disc_ver, disc_dev, DISC_SCHEMA_VER, &chores);
+    *fresh_discovery = disc.stamp;
+    *dev_hash_out = disc.hash;
+    if (disc.stale) {
+        published += publish_discovery(client, dev_name, snap->fw, &chores);
         published += publish_config_discovery(client, dev_name, snap->fw);
         published += publish_action_discovery(client, dev_name, snap->fw);
-        /* A pass that skipped rows must not be stamped: *fresh_discovery
-           is all the post-drain stamp write consults, so clearing it here
-           — after the pass has run — withholds the stamp and leaves the
-           stored ver/hash stale, and the next window's gate reruns it. */
-        if (!complete)
-            *fresh_discovery = false;
     }
 
     /* PUBLISH TIME, and it has to be here rather than in the snapshot.

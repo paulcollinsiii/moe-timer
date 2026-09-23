@@ -35,9 +35,11 @@
 #define NVS_KEY_ALERT_VOL "alert_vol"
 #define NVS_KEY_DEFAULTS_VER "defaults_ver"
 #define NVS_KEY_DISC_VER "disc_ver"
-/* Stored ha_config_device_hash(): fingerprints the discovery `dev` block's
-   mutable fields — the device name AND the firmware version. The key name
-   predates the fw leg and is kept as-is deliberately: renaming it would
+/* Stored ha_config_discovery_hash(): fingerprints discovery's mutable
+   inputs — the `dev` block's device name AND firmware version
+   (ha_config_device_hash), the extra-timer slot names and enablement, and
+   the chore list. The key name predates every leg but the name and is
+   kept as-is deliberately: renaming it would
    read as missing on every deployed device and force one pointless
    discovery republish. */
 #define NVS_KEY_DISC_NAME "disc_name"
