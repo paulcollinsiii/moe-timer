@@ -104,40 +104,24 @@ extern "C" {
    and nothing but a shared constant and a test across both paths stops
    them drifting.
 
-   400 IS DESIGN §2.5's PROSE ESTIMATE, ADOPTED BECAUSE A BOARD RULED 250
-   OUT — WHICH IS NOT THE SAME AS A BOARD CHOOSING 400, and that gap is
-   the first thing to know about this number. The 2026-09-22 session
-   produced one fact and it is a LOWER BOUND: 250 is too short. Nothing
-   has been measured above it. 400 is unvalidated UPWARD — 300 may do,
-   600 may be better — and the only reason it rather than some other
-   figure above 250 is that §2.5 had already guessed ~400 before any of
-   this. Design §8 Q-C records it as a first correction wanting another
-   pass. Treat it as provisional; do not cite it as swept.
+   400 IS NOT A SWEPT VALUE, and since M2-T15 nothing measured bears on it
+   at all. The history, because it is the lesson: until M2-T15 this one
+   figure was ALSO the chore-ack coalescing window — how long the panel
+   waits for the next press before it paints. The 2026-09-22 board session
+   found 250 too short, and that was a finding about the WINDOW: a child
+   could not get the second chore pressed before the refresh began. 400
+   (§2.5's prose estimate) was adopted on the strength of it, and the hold
+   moved with it because they were one number.
 
-   This line carried 250 first, on an argument worth keeping because the
-   measurement is exactly what overturned it. That argument ran: 250 was
-   the only figure anybody had watched work (it had been in the tree since
-   Button B's start path was written) while ~400 was an estimate in prose;
-   §2.5's own thesis is that the pixels are the FAST channel covering the
-   panel's ~1.9 s partial, so 150 ms more of deliberate nothing in front
-   of the ack spends the very latency the section exists to remove; and
-   250 ms is already this device's poll quantum, so the hold costs at most
-   one extra pass of a loop that was going to run anyway.
-
-   Every clause of that is still true, and it still loses, because it
-   weighed the wrong half. 250 had been watched on a board as a HOLD, in
-   front of one press; nobody had watched it as the COALESCING WINDOW,
-   which is the other job this same figure does and the one a child is
-   inside when they reach for the second chore. On the glass, 2026-09-22,
-   the window was the binding half: 250 ms was not long enough to get the
-   next chore pressed before the refresh began, so a child ticking two
-   boxes got two ~1.9 s redraws instead of one. 150 ms of extra latency in
-   front of the first ack buys that back, and a redraw is an order of
-   magnitude more of the same latency.
-
-   Which is the lesson the two-jobs-one-figure shape was always carrying:
-   the number is only "measured" for whichever job the measurement was
-   watching. If a board ever wants them apart, this is the line to split.
+   On 2026-09-23 a board showed 400 too short for the window as well — a
+   natural press-pause-press rhythm painted mid-gesture and then again —
+   and the two jobs want opposite things: the hold is dead time in front of
+   the first ack and wants to be SHORT, the window is the panel waiting for
+   the gesture to settle and wants to be LONG. So they were split. The
+   window is CONFIG_MAGTAG_CHORE_PAINT_QUIET_MS (wake_flow.c's
+   CHORE_PAINT_QUIET_MS) and this figure is the hold alone. It stays at 400
+   only because nothing has measured the hold on its own; the lower bound
+   that moved it off 250 was never about the hold.
 
    IT IS A MENUCONFIG KNOB, because that is how a board says so:
    CONFIG_MAGTAG_STATUS_LED_ACK_HOLD_MS, so a sweep is a rebuild rather
@@ -171,14 +155,13 @@ extern "C" {
    quietly encode today's figure as a literal; the gate does not look at
    that override and must not, since disagreeing with both is its point.
 
-   THE HOLD IS ALSO THE COALESCING WINDOW (wake_flow.c's ack drain): after
-   an ack the panel work is held open for this long, polling for the next
-   press, so two or three boxes ticked in one go land in ONE refresh with
-   every flip immediate. That is deliberately one figure and not two, but
-   the two halves pull in OPPOSITE directions — a longer window buys
-   clicking time, a longer hold spends the latency §2.5 exists to remove —
-   so a board that wants them apart splits this line, and the Kconfig help
-   says so. */
+   THE HOLD IS NO LONGER THE COALESCING WINDOW (M2-T15, above). The window
+   has no #else fallback anywhere — wake_flow.c reads its CONFIG symbol
+   directly — so a future edit that writes the window against THIS macro
+   would compile in every suite and quietly restore the one-knob design.
+   test_wake_flow builds the two at different values (170 and 610), and
+   test_t15_a_lone_ack_waits_the_quiet_window_not_the_hold fails if they
+   are collapsed. */
 #ifdef CONFIG_MAGTAG_STATUS_LED_ACK_HOLD_MS
 #define STATUS_LED_ACK_HOLD_MS CONFIG_MAGTAG_STATUS_LED_ACK_HOLD_MS
 #else
@@ -313,7 +296,7 @@ chores_led_t chores_led_for(uint8_t mask, uint8_t n, bool released);
       writes at the source for the rest of the wake. M2-T8 chose
       suppression over a repaint after the join because the false green
       is written by net_window_wait_ntp() and the caller then spends the
-      whole ~1.9 s panel partial before it could repaint — exactly the
+      whole panel partial (~0.8 s, an estimate) before it could repaint — exactly the
       stretch the user is looking at the pixels. The reachable route is
       the DAY ROLLOVER, which opens a window from inside the button
       handler's own prologue, so the claim is made above it
@@ -349,7 +332,9 @@ chores_led_t chores_led_for(uint8_t mask, uint8_t n, bool released);
      while the quiet callback returns true (status_muted()). Design §2.5
      made these pixels the ONLY ack feedback — it deliberately stopped
      making the panel the feedback channel — so during quiet hours an ack
-     produced no feedback at ALL: no pixel, no panel for ~1.9 s, no sound.
+     produced no feedback at ALL: no pixel, no panel until the hold, a
+     quiet window and a partial had passed (~2.4 s from the press at the
+     defaults, plus the boot — the partial's share an estimate), no sound.
      The user chose to let acks through the mute, so this function posts
      HIGHPRI class (status_led.c says it at the loop). Quiet hours are for
      a sleeping house; a checklist ack is a deliberate press by somebody

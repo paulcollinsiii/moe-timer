@@ -71,15 +71,27 @@ add_host_test(test_wake_policy)
 # drift the override itself exists to catch. The 170 below is the only figure
 # here that means anything, and it means "neither of the other two".
 #
-# The ack hold and the chore-ack coalescing window are the same menuconfig
-# figure (CONFIG_MAGTAG_STATUS_LED_ACK_HOLD_MS) precisely so a board can sweep
-# it, and every case that measures either one is written against
+# The ack hold is a menuconfig figure (CONFIG_MAGTAG_STATUS_LED_ACK_HOLD_MS)
+# so a board can sweep it, and every case that measures it is written against
 # STATUS_LED_ACK_HOLD_MS rather than a number. Building the suite at a value
 # that is not the default is what makes that real: a literal left at either
-# call site -- Button B's start or the coalescing window -- compiles fine and
-# passes every relative assertion while the two figures have silently diverged.
-# With this, it fails. The value itself means nothing beyond "not the default,
+# call site -- Button B's start or the chore ack -- compiles fine and passes
+# every relative assertion while the figures have silently diverged. With
+# this, it fails. The value itself means nothing beyond "not the default,
 # and crosses no second boundary in the mock clock's sub-second carry".
+#
+# IT IS NO LONGER THE COALESCING WINDOW. Until M2-T15 the hold and the
+# chore-ack paint window were one figure; they are now two knobs, and
+# CONFIG_MAGTAG_CHORE_PAINT_QUIET_MS below is the window. The two are built
+# at DIFFERENT values here so that collapsing them back into one fails the
+# suite rather than passing every case written against either macro.
+#
+# 610 FOR THE QUIET WINDOW, chosen on the same rules as the others: not the
+# Kconfig default (1200), not the hold, not a multiple of the 50 ms poll (so
+# the idle-window clamp takes a 10 ms last step and is load bearing), and not
+# a divisor of the 1725 budget (1725 = 2 x 610 + 505), so a burst that spends
+# the budget across several windows ends on a clamped partial window rather
+# than on a window boundary where the two bounds would coincide.
 #
 # NOTE this override is also why status_led.h's #else fallback reaches no host
 # binary: defining the CONFIG symbol here takes the #ifdef arm. That is what
@@ -98,11 +110,18 @@ add_host_test(test_wake_policy)
 # -- review deleted it and the entire suite still passed. 1725 makes the last
 # step a 25 ms one, so the clamp is load bearing and its deletion shows up as
 # a 25 ms overshoot in the bound case's delay total. Neither is it a multiple
-# of the 170 above, for the same reason one step up: the idle window's own
-# clamp is pinned by the 170 not dividing by 50.
+# of the 610 above, for the same reason one step up: the idle window's own
+# clamp is pinned by the 610 not dividing by 50.
+#
+# CONFIG_MAGTAG_MAX_AWAKE_SEC is here only because wake_flow.c's worst-case
+# gesture _Static_assert reads it (M2-T15 fix pass), with no #ifndef fallback
+# for the same reason as the burst budget. 180 is the Kconfig default and
+# nothing in the suite measures against it; the assert just has to compile.
 add_host_test(test_wake_flow
     EXTRA_DEFS CONFIG_MAGTAG_STATUS_LED_ACK_HOLD_MS=170
-               CONFIG_MAGTAG_CHORE_ACK_BURST_MS=1725)
+               CONFIG_MAGTAG_CHORE_PAINT_QUIET_MS=610
+               CONFIG_MAGTAG_CHORE_ACK_BURST_MS=1725
+               CONFIG_MAGTAG_MAX_AWAKE_SEC=180)
 add_host_test(test_status_led)
 # alerts.c reads two alarm-length Kconfig ints straight out of sdkconfig.h,
 # which the host build has no equivalent of. Supplied here rather than as

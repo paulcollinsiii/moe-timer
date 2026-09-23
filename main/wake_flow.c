@@ -116,8 +116,14 @@ static const char *TAG = "wake_flow";
    bottom of this file. Declared here because the break tail's press poll
    — which sits with the other guard-matrix entry points above it —
    reaches it after a dispatched press, and the tail in turn calls the
-   expiry alert and the break-end drain that are declared further down. */
-static void render_action_result(button_id_t btn, timer_state_t before, time_t now, bool selection_changed);
+   expiry alert and the break-end drain that are declared further down.
+   Returns the screen kind it built the frame for, which only the post-join
+   re-render reads (finish_action_and_render says why); the _as form is the
+   chore tail's, which alone can know that a break end is already on the
+   glass (wake_flow_repaint_chore_acks_until_quiet says why). */
+static display_screen_t render_action_result(button_id_t btn, timer_state_t before, time_t now, bool selection_changed);
+static display_screen_t render_action_result_as(button_id_t btn, timer_state_t before, time_t now,
+                                                bool selection_changed, bool break_end_on_glass);
 
 /* ---- the two renders this module used to reach through main.c ----------
 
@@ -371,9 +377,10 @@ bool wake_flow_break_ended_this_wake(void) {
    of panel time on a frame nobody changed.
 
    Wake-sticky for the same reason s_break_ended is, and by the same means:
-   a plain static, because the next wake is a fresh boot. This is NOT
-   M2-T9, which is about which ghost-CLEANING pass a chore-screen partial
-   gets; this is about the partial existing at all.
+   a plain static, because the next wake is a fresh boot. This was never
+   M2-T9, which was about which ghost-CLEANING pass a chore-screen partial
+   got (M2-T15 removed that choice: every partial cleans now); this is
+   about the partial existing at all.
 
    Static, unlike its break-end neighbour: nothing outside this file needs
    the answer, because the only thing it feeds is the force_full channel in
@@ -405,8 +412,9 @@ static bool wake_flow_mode_toggled_this_wake(void) {
 
    Wake-sticky by the same means as both of its neighbours — a plain
    static, because the next wake is a fresh boot. Not M2-T9 either: that
-   one is about which ghost-CLEANING pass a chore-screen partial gets,
-   this is about the refresh staying partial at all. */
+   one was about which ghost-CLEANING pass a chore-screen partial got, and
+   M2-T15 retired it (every partial cleans); this is about the refresh
+   staying partial at all. */
 static bool s_chore_acked;
 
 static bool wake_flow_chore_acked_this_wake(void) {
@@ -605,9 +613,9 @@ static bool wake_flow_apply_chore_ack(uint8_t idx, time_t now) {
     /* THE ACKNOWLEDGEMENT (design §2.5), and it is the TRANSITION and not
        the colour: the strip has been showing the pre-press state since
        the wake, and this is the frame where the pressed row goes red ->
-       green. The panel's partial runs behind it — ~1.9 s once display.c's
-       ghost-clean pass and the driver's 1 s floor are counted — which is
-       the latency the pixels are here to cover, so this must stay AHEAD
+       green. The panel's partial runs behind it — a whole quiet window
+       later (CHORE_PAINT_QUIET_MS), then ~0.8 s (estimated) of ghost-cleaned partial —
+       which is the latency the pixels are here to cover, so this must stay AHEAD
        of the caller's render tail and not be folded into it.
 
        Below the log line on purpose: the hold is real time, and the
@@ -648,7 +656,7 @@ static bool wake_flow_apply_chore_ack(uint8_t idx, time_t now) {
    wake_flow_watch_break_end() returns at its own `!timer_break_active()`
    guard, and button_latch's mask is plain BSS that deep sleep discards. So
    a press during the pre-press hold was eaten by that bare take, and a
-   press during the ~1.9 s panel refresh sat in the latch until sleep threw
+   press during the panel refresh sat in the latch until sleep threw
    it away. Either way the box was never ticked and the child saw nothing:
    released before sleep there is no EXT1 level left to re-trigger on, and
    still held is swallowed by the still-held guard at the top of the
@@ -661,18 +669,32 @@ static bool wake_flow_apply_chore_ack(uint8_t idx, time_t now) {
    in one go — no homework today, and I just did the dishes." So the answer
    is to hold the panel work OPEN for the next press rather than to race it.
 
-   THE WINDOW IS STATUS_LED_ACK_HOLD_MS, which is the menuconfig knob
-   (status_led.h), because how long a child needs to get the next press in
-   is a question only a board can answer. It is an IDLE window: it measures
-   the quiet since the last press that landed, so every press grants another
-   full one and the gesture ends when the pressing does.
+   THE WINDOW IS CHORE_PAINT_QUIET_MS, its own menuconfig knob
+   (CONFIG_MAGTAG_CHORE_PAINT_QUIET_MS), because how long a child needs to
+   get the next press in is a question only a board can answer. It is an
+   IDLE window: it measures the quiet since the last ack that applied, so
+   every press grants another full one and the gesture ends when the
+   pressing does.
+
+   IT USED TO BE STATUS_LED_ACK_HOLD_MS, and M2-T15 split them because one
+   number was doing two jobs that pull in opposite directions. The hold is
+   dead time in front of the first pixel flip and wants to be short; this
+   window is how long the panel waits for the gesture to settle and wants
+   to be long. At the shared 400 ms, a natural press-pause-press rhythm
+   outlasted the window, so the panel began painting mid-gesture and the
+   next press landed during that paint and cost a second refresh (board,
+   2026-09-23). THE NEOPIXELS ARE THE FAST CHANNEL AND THE PANEL IS THE
+   SLOW ONE: every press already gets its flip within a poll, so the panel
+   can afford to wait — it needs to be settled, not quick. What that costs
+   is stated plainly: a lone press reaches the glass one quiet window after
+   it, rather than one hold after it, and the wake is that much longer.
 
    POLLED AT THE DEBOUNCE WINDOW rather than taken once per idle window, and
    M2-T12 moved it there for two reasons that are not about feel.
    FIRST, THE RELEASE GATE. button_latch.h's gate learns that a button came
    back up from a LEVEL SAMPLE, and buttons.c takes that sample on every
    take — so how often anybody takes IS the gate's resolution, and at one
-   take per 400 ms idle window a person correcting a mis-press had to wait
+   take per (then 400 ms) idle window a person correcting a mis-press had to wait
    most of a second before the pad would even accept the second press.
    SECOND, IT IS WHAT MAKES THE GATE'S COST SMALL, which is not the same
    claim as "it is what keeps the latch a bitmask" — the sentence that stood
@@ -704,17 +726,93 @@ static bool wake_flow_apply_chore_ack(uint8_t idx, time_t now) {
    battery device awake by generating edges. A budget answers that strictly
    better than a count, because it bounds the thing that actually costs
    (awake milliseconds) rather than a proxy for it, and it does not shrink
-   as the list gets longer. CONFIG_MAGTAG_MAX_AWAKE_SEC is 180, so the
-   budget below is nowhere near the wake's own ceiling. */
+   as the list gets longer. Whether the budget stays clear of the wake's own
+   ceiling (CONFIG_MAGTAG_MAX_AWAKE_SEC, the failsafe that forces deep sleep
+   mid-whatever-it-is-doing) depends on the knobs, not on the budget alone —
+   the repaints it allows ride on top of it — so it is not asserted in prose
+   here but by the _Static_assert on CHORE_WORST_GESTURE_MS below.
+
+   WHAT THE BUDGET MEASURES, precisely, because M2-T15 made it span more
+   than one window: the milliseconds the coalescer spends WAITING for a
+   press, summed over every quiet window of the wake — the one before the
+   first paint and each one the tail opens after a press made during a
+   paint. It does NOT count the panel's time. There is no millisecond clock
+   on this path to measure a refresh with (hal_time_now() is seconds), and
+   there does not need to be: the tail repaints only after a quiet window,
+   and a window is spent from this budget, so the number of repaints is
+   bounded by it as well — see wake_flow_repaint_chore_acks_until_quiet().
+   test_t15_the_burst_budget_does_not_count_panel_time pins the definition. */
 #define CHORE_ACK_COALESCE_POLL_MS (BUTTON_LATCH_DEBOUNCE_US / 1000)
 
 /* NO #ifndef FALLBACK, deliberately, and for the reason test/CMakeLists.txt
    gives for alerts.c's two alarm knobs: a renamed or deleted Kconfig symbol
    then breaks the FIRMWARE build loudly instead of silently compiling
-   against a default nobody can see. test_wake_flow supplies it at a value
-   that is not the Kconfig default, so a literal left at the call site fails
-   the suite rather than passing every relative assertion. */
+   against a default nobody can see. test_wake_flow supplies both at values
+   that are not the Kconfig defaults, so a literal left at the call site
+   fails the suite rather than passing every relative assertion.
+
+   THE QUIET WINDOW IS NOT STATUS_LED_ACK_HOLD_MS, and the absence of a
+   fallback is what keeps it that way: status_led.h's hold has one (it must
+   compile in suites with no sdkconfig), so a window written against the
+   hold would build everywhere and silently be the old one-knob design.
+   test_wake_flow builds the two at different values, so collapsing them
+   fails there. */
 #define CHORE_ACK_COALESCE_BUDGET_MS CONFIG_MAGTAG_CHORE_ACK_BURST_MS
+#define CHORE_PAINT_QUIET_MS CONFIG_MAGTAG_CHORE_PAINT_QUIET_MS
+
+/* The tail loop's termination rests on these two: while budget remains,
+   each repaint it makes is preceded by a window that spends at least
+   min(window, what is left of the budget) — never zero — so the budget
+   runs out, and once it has the loop stops.
+   BOTH, not only the window: the window advances in steps of the POLL, and
+   a debounce under one millisecond makes CHORE_ACK_COALESCE_POLL_MS zero —
+   an integer division — so the step is zero, the idle and spent clocks
+   never move, and the window spins forever in no time at all. That spin is
+   not hypothetical: M2-T15's mutation run reached it by another route (the
+   budget term dropped, so the clamp pinned the step at zero) and it hung
+   the suite instead of failing it. Kconfig's range already refuses
+   a zero window and button_latch.h owns the debounce; these hold every
+   build to both. */
+_Static_assert(CHORE_PAINT_QUIET_MS > 0, "a zero quiet window lets the tail repaint without spending the burst budget");
+_Static_assert(CHORE_ACK_COALESCE_POLL_MS > 0,
+               "a sub-millisecond debounce makes the coalescer's poll step zero, and the quiet window never closes");
+
+/* THE WORST CASE THE THREE KNOBS ALLOW, held under the wake's failsafe.
+
+   Kconfig's ranges cannot say this, because the danger is a RATIO: the
+   paint count grows as budget / window, and every range is legal on its own.
+   At the extremes (window 100 ms, budget 30000 ms) a pad that fires once
+   per paint gets ~300 refreshes, each followed by the driver's minimum
+   refresh interval, which is far past CONFIG_MAGTAG_MAX_AWAKE_SEC — the
+   failsafe would then force deep sleep in the middle of a refresh. Tightening
+   the ranges until no combination can do that would forbid sane settings (a
+   short window with a modest budget) to rule out an insane one, so the
+   ranges stay and the build refuses the combination instead.
+
+   CHORE_WORST_PAINTS is the tail's own bound, stated on its comment: max(2,
+   ceil(budget / window)) paints for a pad firing once per paint, plus one
+   for Button A. CHORE_WORST_PAINT_MS charges each one as a FULL refresh
+   (~3 s — an estimate, as every panel figure here is, not a board
+   measurement) plus SSD1680_MIN_REFRESH_INTERVAL_SEC's 1 s, the gap the
+   driver enforces between refreshes; a partial is cheaper, and the
+   every-5th cadence and a break end can each make one full, so full is the
+   figure that cannot be undercut. The hold is paid once, the budget whole.
+
+   HALF THE FAILSAFE, not all of it: the gesture shares its wake with a
+   network window and possibly an expiry alert (~15 s), and a coalescer
+   that could spend the whole ceiling on its own leaves them none. Half is
+   a judgment, not a measurement. At the defaults (400 / 1200 / 8000) the
+   worst case is 400 + 8000 + 8 x 4000 = 40.4 s against 90 s. */
+#define CHORE_WORST_PAINT_MS 4000u /* a full refresh (~3 s, estimate) + the driver's 1 s minimum interval */
+#define CHORE_BUDGET_WINDOWS \
+    (((uint32_t)CHORE_ACK_COALESCE_BUDGET_MS + (uint32_t)CHORE_PAINT_QUIET_MS - 1u) / (uint32_t)CHORE_PAINT_QUIET_MS)
+#define CHORE_WORST_PAINTS ((CHORE_BUDGET_WINDOWS > 2u ? CHORE_BUDGET_WINDOWS : 2u) + 1u)
+#define CHORE_WORST_GESTURE_MS                                                   \
+    ((uint32_t)STATUS_LED_ACK_HOLD_MS + (uint32_t)CHORE_ACK_COALESCE_BUDGET_MS + \
+     CHORE_WORST_PAINTS * CHORE_WORST_PAINT_MS)
+_Static_assert(CHORE_WORST_GESTURE_MS <= (uint32_t)CONFIG_MAGTAG_MAX_AWAKE_SEC * 1000u / 2u,
+               "MAGTAG_CHORE_ACK_BURST_MS / MAGTAG_CHORE_PAINT_QUIET_MS allow a chore gesture whose worst case "
+               "(hold + budget + every repaint it permits, each as a full refresh) exceeds half the awake failsafe");
 
 /* The three ack buttons and the rows they tick, as a table rather than as
    `btn - BTN_B`: the arithmetic happens to work today only because the
@@ -735,10 +833,11 @@ static const struct {
    wake a press caused claims the strip, so only such a wake spends real
    time waiting for another press. s_chore_acked narrows that to a wake in
    which an ack has ALREADY landed: that is what makes a window a
-   continuation of a gesture rather than one STATUS_LED_ACK_HOLD_MS window
+   continuation of a gesture rather than one CHORE_PAINT_QUIET_MS window
    of dead wake in front of a press nobody is making (the second site that
    called this "a quarter-second" and went stale when the knob moved off
-   250). And timer_mode() is read LIVE because
+   250; the window has since left that knob altogether, M2-T15). And
+   timer_mode() is read LIVE because
    the mode can move under the wake (make_display_state()'s emptied-list
    guard reverts it when a config edit empties the list mid-wake), and a
    press consumed here that button_chore_ack_apply() would then refuse is a
@@ -768,11 +867,13 @@ static bool wake_flow_chore_acks_are_ours(void) {
    case §2.5 names, so here each bit gets its own apply and therefore its
    own flip.
 
-   MASKED, so A is left exactly where it was: the mode toggle is not an ack
-   and the tail's own bare take still owns it. Returns whether anything
-   applied — a refusal (a two-chore list and ✓3) consumes the press and
-   reports nothing, which is what every other refusal on the ack paths
-   already does. */
+   MASKED, so A is left exactly where it was: the mode toggle is not an ack,
+   and wake_flow_take_gesture_toggle() below is what takes it. (This said
+   "the tail's own bare take still owns it" until M2-T15's fix pass, and
+   that was the defect rather than a description: the bare take DISCARDS.)
+   Returns whether anything applied — a refusal (a two-chore list and ✓3)
+   consumes the press and reports nothing, which is what every other
+   refusal on the ack paths already does. */
 static bool wake_flow_take_chore_acks(time_t *now) {
     if (!wake_flow_chore_acks_are_ours()) {
         return false;
@@ -798,32 +899,78 @@ static bool wake_flow_take_chore_acks(time_t *now) {
     return applied;
 }
 
-/* Take what is latched now, then hold the panel open while presses keep
-   landing.
+/* BUTTON A DURING A CHORE GESTURE — the press that ENDS it (M2-T15 fix
+   pass). Returns whether the toggle APPLIED.
 
-   VOID, AND IT USED TO RETURN "whether any ack applied, which is the
-   caller's cue that the panel owes a repaint" — a sentence that was false
-   for as long as it stood. The one call site discards the value with a
-   `(void)`, because the render below it is unconditional: every press that
-   reaches this handler owes a repaint whether or not it was an ack. So the
-   flag was tracked, returned, and dropped, and M2-T12 found it by mutating
-   the assignment away and watching the whole suite pass. Keep it void: a
-   value no caller reads is a value no case can pin, and the ONE consumed
-   answer on this path — wake_flow_take_chore_acks()'s, below the render,
-   where a second refresh really does hang on it — is still a bool.
+   THE DEFECT: nothing on the button-wake path took A once an ack had
+   landed. A press made before the first paint was eaten by the handler's
+   bare stale-edge drain, and one made during any later window or paint sat
+   in the latch until deep sleep discarded it. So a child who ticked the last
+   chore, saw the gate go green and pressed A a second later to go back to
+   Timers got nothing at all — no toggle, no pixel, no repaint. M2-T15 made
+   that dead zone a quiet window after every ack plus every paint, up to the
+   whole burst.
 
-   THE FIRST TAKE PAYS NO WAIT, deliberately: it collects the press made
-   during the pre-press hold, which already happened, so waiting first would
-   only delay its flip. The OTHER first take — the one that collects a press
-   made during the panel refresh — is the caller's, below the render, and
-   saying so here rather than "before the render ... and after the render"
-   is M2-T12 correcting this paragraph: it described two call sites for
-   THIS function when there has only ever been one. The behaviour it claimed
-   is real; the site is wake_flow_take_chore_acks()'s second caller.
+   TAKEN HERE, WHERE IT LANDS, and dispatched through the same A arm every
+   other caller uses, so button_a_toggle_allowed()'s refusal is untouched: a
+   refused A is consumed and changes nothing, and the gesture goes on
+   exactly as if it had not been pressed (it grants no window — the same
+   rule as a refused ack).
+
+   AN APPLIED A ENDS THE GESTURE, and it needs no flag of its own to do it:
+   the mode is now TIMERS, so wake_flow_chore_acks_are_ours() answers false
+   from here on, which closes the window, stops the tail after its paint,
+   and stops this helper too — so A can apply at most ONCE per wake by this
+   route. That last property is what keeps the paint bound (the tail's
+   comment counts the one paint an A can add). The paint that follows is a
+   FULL refresh by the ordinary route: the arm sets s_mode_toggled.
+
+   B, C AND D PRESSED AFTER A are timer buttons again — the gesture is over
+   and they no longer mean acks — and this wake treats them the way every
+   Timers-mode button wake treats a press made during its own action: one
+   before the paint is a stale edge the handler's drain drops, and one
+   during or after the paint is not acted on. Acting on them instead would
+   mean starting or swapping a timer from a press made before the Timers
+   screen was even on the glass. That is the Timers-mode residual of M2-T12
+   (a press made during a button wake's refresh), not a discard this code
+   adds, and it is deferred with it.
+
+   AFTER THE ACK TAKE IN EVERY POLL, never before: within one poll the two
+   presses' order is unknowable, and an ack applied first is reversible (the
+   same button again) where an ack routed to a timer action after the toggle
+   is a start nobody asked for. */
+static bool wake_flow_take_gesture_toggle(time_t *now) {
+    if (!wake_flow_chore_acks_are_ours()) {
+        return false;
+    }
+    if (buttons_take_pressed_mask((uint8_t)(1u << BTN_A)) == 0) {
+        return false;
+    }
+    *now = hal_time_now();
+    bool swapped = false; /* the A arm clears it; nothing here reads it */
+    /* allow_net_window false: the A arm never consults it, and nothing on
+       this path may open a window. */
+    return wake_flow_dispatch_button_action(BTN_A, now, timer_get_state(), false, &swapped);
+}
+
+/* Everything a chore gesture can take from the latch in one go: the acks,
+   then A. Returns whether either APPLIED, which is what owes the panel a
+   repaint. Both helpers are always called — `|` and not `||` would read the
+   same, but two statements say it without relying on anyone noticing. */
+static bool wake_flow_take_chore_gesture(time_t *now) {
+    const bool acked = wake_flow_take_chore_acks(now);
+    const bool toggled = wake_flow_take_gesture_toggle(now);
+    return acked || toggled;
+}
+
+/* ONE QUIET WINDOW: poll for acks until CHORE_PAINT_QUIET_MS passes with
+   none applying, or the wake's burst budget is gone, whichever is first.
+   Shared by the window before the first paint and every window the tail
+   opens after one, which is what makes them one budget and one rule.
 
    TWO CLOCKS, and they are different questions. `idle_ms` is how long since
    an ack APPLIED, so it answers "is the person still pressing?" — that is
-   the STATUS_LED_ACK_HOLD_MS window, and it being sliding is why a mis-press
+   the CHORE_PAINT_QUIET_MS window, and it being sliding is why a mis-press
    correction is not a special case.
    APPLIED AND NOT MERELY LANDED, which this said until M2-T12's fix pass and
    which the loop below has never done: a press the ack REFUSES (Button D on
@@ -833,48 +980,157 @@ static bool wake_flow_take_chore_acks(time_t *now) {
    can sit pressing the same dead button. The refusal still costs the poll it
    arrived in, so a person who then presses a live row is inside the window
    that was already running; what it does not do is extend one.
-   `spent_ms` is the whole burst and never resets, so it answers "is this
-   still a person?" — the flaky-pad bound, which is the one thing the old
-   window COUNT was carrying that had to survive.
+   `*spent_ms` is the whole burst and never resets — it is the CALLER's, and
+   carried across every window of the wake — so it answers "is this still a
+   person?" — the flaky-pad bound, which is the one thing the old window
+   COUNT was carrying that had to survive.
 
    THE STEP IS CLAMPED TO WHICHEVER BOUND IS NEARER so the loop cannot
-   overshoot either one, which is what keeps the lone-ack cost
-   min(STATUS_LED_ACK_HOLD_MS, CHORE_ACK_COALESCE_BUDGET_MS) — never more —
-   however the two knobs are set relative to each other: a board can put the
-   poll above the window, or the window above the budget, and neither becomes
-   a silent extra delay.
-   NOT "exactly one idle window whatever the knobs are", which is what stood
-   here while the very next clause offered "a board can put the window above
-   the budget" as a handled case. In that configuration the lone-ack cost IS
-   the budget, the loop leaving on spent_ms rather than on idle_ms, and both
-   Kconfig ranges reach it. The figure
-   test_t8_the_coalescing_window_is_the_ack_hold_figure pins is the idle
-   window because test_wake_flow is built with a budget well above it, which
-   is the ordinary relation and not a guarantee of the clamp.
+   overshoot either one, which is what keeps one window's cost
+   min(CHORE_PAINT_QUIET_MS, what is left of CHORE_ACK_COALESCE_BUDGET_MS)
+   when nothing lands — never more — however the knobs are set relative to
+   each other: a board can put the poll above the window, or the window
+   above the budget, and neither becomes a silent extra delay.
+   NOT "exactly one idle window whatever the knobs are": with the window
+   above the budget the lone-ack cost IS the budget, the loop leaving on
+   spent_ms rather than on idle_ms, and both Kconfig ranges reach it. The
+   figure test_t15_a_lone_ack_waits_the_quiet_window_not_the_hold pins is
+   the idle window because test_wake_flow is built with a budget well above
+   it, which is the ordinary relation and not a guarantee of the clamp.
+
+   A THIRD WAY OUT: Button A. An applied toggle ends the gesture (see
+   wake_flow_take_gesture_toggle), and the first loop term is how — it is
+   also what makes a call after A has already landed return at once, with
+   nothing spent.
 
    C17 IS PRESERVED THROUGH ALL OF THIS. Nothing here paints: every flip
    goes through wake_flow_apply_chore_ack(), whose paint is guarded on
    s_chore_strip_lit, and that flag is still written in exactly one place. */
-static void wake_flow_coalesce_chore_acks(time_t *now) {
-    (void)wake_flow_take_chore_acks(now);
-    if (!wake_flow_chore_acks_are_ours()) {
-        return; /* not our strip, not our wake: no window to grant */
-    }
-    uint32_t idle_ms = 0;  /* since the last ack APPLIED — see the two clocks above */
-    uint32_t spent_ms = 0; /* the whole gesture — the battery bound */
-    while (idle_ms < STATUS_LED_ACK_HOLD_MS && spent_ms < CHORE_ACK_COALESCE_BUDGET_MS) {
+static void wake_flow_wait_for_chore_quiet(time_t *now, uint32_t *spent_ms) {
+    uint32_t idle_ms = 0; /* since the last ack APPLIED — see the two clocks above */
+    while (wake_flow_chore_acks_are_ours() && idle_ms < CHORE_PAINT_QUIET_MS &&
+           *spent_ms < CHORE_ACK_COALESCE_BUDGET_MS) {
         uint32_t step = CHORE_ACK_COALESCE_POLL_MS;
-        if (step > (uint32_t)STATUS_LED_ACK_HOLD_MS - idle_ms) {
-            step = (uint32_t)STATUS_LED_ACK_HOLD_MS - idle_ms;
+        if (step > (uint32_t)CHORE_PAINT_QUIET_MS - idle_ms) {
+            step = (uint32_t)CHORE_PAINT_QUIET_MS - idle_ms;
         }
-        if (step > (uint32_t)CHORE_ACK_COALESCE_BUDGET_MS - spent_ms) {
-            step = (uint32_t)CHORE_ACK_COALESCE_BUDGET_MS - spent_ms;
+        if (step > (uint32_t)CHORE_ACK_COALESCE_BUDGET_MS - *spent_ms) {
+            step = (uint32_t)CHORE_ACK_COALESCE_BUDGET_MS - *spent_ms;
         }
         hal_delay_ms(step);
         idle_ms += step;
-        spent_ms += step;
+        *spent_ms += step;
         if (wake_flow_take_chore_acks(now)) {
             idle_ms = 0; /* another full window: the gesture is still going */
+        }
+        (void)wake_flow_take_gesture_toggle(now); /* applied: the loop's first term ends the window */
+    }
+}
+
+/* Take what is latched now, then hold the panel open while presses keep
+   landing. The window BEFORE the first paint.
+
+   VOID, AND IT USED TO RETURN "whether any ack applied, which is the
+   caller's cue that the panel owes a repaint" — a sentence that was false
+   for as long as it stood. The one call site discards the value with a
+   `(void)`, because the render below it is unconditional: every press that
+   reaches this handler owes a repaint whether or not it was an ack. So the
+   flag was tracked, returned, and dropped, and M2-T12 found it by mutating
+   the assignment away and watching the whole suite pass. Keep it void: a
+   value no caller reads is a value no case can pin, and the ONE consumed
+   answer on this path — wake_flow_take_chore_gesture()'s in the tail loop
+   below the render, where every further refresh hangs on it — is still a
+   bool.
+
+   THE FIRST TAKE PAYS NO WAIT, deliberately: it collects the press made
+   during the pre-press hold, which already happened, so waiting first would
+   only delay its flip. The OTHER first take — the one that collects a press
+   made during the panel refresh — is wake_flow_repaint_chore_acks_until_-
+   quiet()'s, below the render. */
+static void wake_flow_coalesce_chore_acks(time_t *now, uint32_t *spent_ms) {
+    (void)wake_flow_take_chore_gesture(now); /* an A made during the hold ends it here */
+    if (!wake_flow_chore_acks_are_ours()) {
+        return; /* not our strip, not our wake: no window to grant */
+    }
+    wake_flow_wait_for_chore_quiet(now, spent_ms);
+}
+
+/* THE TAIL: a press made during a paint re-opens the quiet window, and the
+   panel paints again only once that window closes (M2-T15).
+
+   The refresh holds the CPU with nothing polling, so a press made during it
+   is latched and found by the take at the top of this loop. Before M2-T15
+   that take was followed by an IMMEDIATE repaint, which is what split a
+   natural press-pause-press gesture into two refreshes on the board: the
+   pause outlasted the window, the panel started, the next press landed
+   inside the paint, and the tail painted again the moment the first one
+   finished. Now the press gets its flip at once (the pixels are the fast
+   channel) and the panel waits for the gesture to settle again, however
+   many presses that takes, before it paints the result once.
+
+   IT ALSO RETIRES AN M2-T12 RESIDUAL: a press made during the SECOND
+   refresh used to be latched and then thrown away at deep sleep, because
+   there was only ever one take below the render. Here every paint is
+   followed by a take while budget remains.
+
+   BOUNDED HARD, because each iteration is an e-ink refresh — power, and
+   panel wear. The budget (`*spent_ms`, shared with the window before the
+   first paint) counts WAITING only; see its macro for why panel time is
+   not counted and does not need to be. Two rules make it a bound on
+   paints as well as on waiting:
+     - while budget remains, every repaint is preceded by a window that
+       spends min(quiet window, what is left) of it — never zero
+       (_Static_assert at the macro) — so the budget runs out;
+     - once it has, the loop paints the press it just took and STOPS. That
+       one paint is owed: the ack already applied and flipped its pixel, and
+       leaving it off the glass would put the panel and the strip in
+       disagreement until the next wake. A press made during THAT paint is
+       left in the latch for deep sleep to discard, which is the bound
+       doing its job, not a regression — it can only happen after a gesture
+       has already spent the whole budget.
+   EXCEPT BUTTON A, which gets one take past the budget and the paint it
+   owes. A is not a flaky pad's to use up: it ends the gesture, so it can
+   apply at most once per wake (wake_flow_take_gesture_toggle), and dropping
+   it after a long gesture would be exactly the dead mode button this fix
+   pass exists to remove. One more paint, once, is what that costs.
+   So a pad that fires once per paint and never otherwise gets
+   max(2, ceil(budget / window)) paints — every window before a paint spends
+   min(window, what is left), and a budget no larger than one window still
+   pays the first paint and the owed one past it — plus at most ONE for A;
+   a pad that fires continuously gets two (the window slides to the budget,
+   then the post-budget repaint), again plus at most one for A. At the
+   defaults that is 7 (8 with A). CHORE_WORST_PAINTS below states the bound
+   and a _Static_assert holds the knobs to it.
+   test_t15_the_burst_budget_does_not_count_panel_time and
+   test_t15_a_continuous_pad_gets_one_paint_past_the_budget pin the two.
+
+   ONLY THE FIRST REPAINT AFTER A BREAK END IS FULL, and that is why this
+   calls render_action_result_as(). s_break_ended is wake-sticky, so through
+   the plain render every repaint of this loop after a break end was a FULL
+   refresh — up to the whole bound of them, ~3 s and a flash each, in one
+   gesture, for a checklist whose layout had not moved since the first. The
+   promotion exists to put the break end ON the glass; once a render has
+   painted it, a later tick of a box is an ordinary partial. A break end
+   drained BEFORE this loop has already been painted by the handler's render
+   (finish_or_break), and one drained inside it — by an ack, which re-asserts
+   chore mode — is painted by the very next render, which is still promoted.
+   Scoped to this loop because it is the only caller that paints the same
+   layout repeatedly in one wake; the other callers keep the wake-sticky
+   rule. test_t15_only_the_first_tail_repaint_after_a_break_end_is_full pins
+   it. */
+static void wake_flow_repaint_chore_acks_until_quiet(time_t *now, uint32_t *spent_ms) {
+    bool break_end_on_glass = wake_flow_break_ended_this_wake(); /* the handler's render painted it */
+    while (wake_flow_take_chore_gesture(now)) {
+        wake_flow_wait_for_chore_quiet(now, spent_ms); /* returns at once when the budget is gone, or after A */
+        render_action_result_as(BTN_NONE, timer_get_state(), *now, false, break_end_on_glass);
+        break_end_on_glass = wake_flow_break_ended_this_wake();
+        if (*spent_ms >= CHORE_ACK_COALESCE_BUDGET_MS) {
+            /* The budget is spent: one paint past it, never more — but an A
+               made during that paint still gets its toggle and its paint. */
+            if (wake_flow_take_gesture_toggle(now)) {
+                render_action_result_as(BTN_NONE, timer_get_state(), *now, false, break_end_on_glass);
+            }
+            break;
         }
     }
 }
@@ -1783,7 +2039,19 @@ void wake_flow_post_stats_snapshot(void) {
    with the break-tail poll above, which runs after the window has already
    been joined and so must not touch the MQTT phase — which is why the
    render is its own half rather than the top of the function below. */
-static void render_action_result(button_id_t btn, timer_state_t before, time_t now, bool selection_changed) {
+static display_screen_t render_action_result(button_id_t btn, timer_state_t before, time_t now,
+                                             bool selection_changed) {
+    return render_action_result_as(btn, before, now, selection_changed, false);
+}
+
+/* `break_end_on_glass`: the wake's break end, if it has one, has ALREADY
+   been painted by an earlier render of this wake, so it no longer promotes
+   this one. Every caller but the chore tail passes false, which is the
+   wake-sticky promotion s_break_ended describes; see
+   wake_flow_repaint_chore_acks_until_quiet() for the one caller that can
+   say otherwise and why it matters there. */
+static display_screen_t render_action_result_as(button_id_t btn, timer_state_t before, time_t now,
+                                                bool selection_changed, bool break_end_on_glass) {
     /* A break can elapse mid-wake (a slow sync, a long press sequence).
        Order-independent now that the edge is latched — this drains early
        so the chime accompanies THIS paint rather than the one after. */
@@ -1843,7 +2111,8 @@ static void render_action_result(button_id_t btn, timer_state_t before, time_t n
                                      display_screen_for(after, st.app_mode, st.chore_count);
     bool force_full = ((btn == BTN_D) && !wake_flow_chore_acked_this_wake()) || wake_flow_mode_toggled_this_wake() ||
                       screen_kind_changed;
-    wake_render_t bwr = wake_policy_render(before, after, true, wake_flow_break_ended_this_wake(), selection_changed);
+    const bool break_end_promotes = wake_flow_break_ended_this_wake() && !break_end_on_glass;
+    wake_render_t bwr = wake_policy_render(before, after, true, break_end_promotes, selection_changed);
     if (bwr == WAKE_RENDER_EXPIRY_ALERT) {
         wake_flow_fire_expiry_alert(); /* alert owns the NeoPixels (red pulse) */
     } else {
@@ -1858,13 +2127,14 @@ static void render_action_result(button_id_t btn, timer_state_t before, time_t n
             display_update(&st); /* partial cadence: every Nth is promoted */
         }
     }
+    return display_screen_for(after, st.app_mode, st.chore_count);
 }
 
 /* Post-action tail shared by both wake handlers and the tick-wake latch
    drain: render the resulting state, release the MQTT phase, join the
    window, and re-render when the join changed what the panel shows. */
 static void finish_action_and_render(button_id_t btn, timer_state_t before, time_t now, bool selection_changed) {
-    render_action_result(btn, before, now, selection_changed);
+    const display_screen_t shown = render_action_result(btn, before, now, selection_changed);
     /* The toggle latch carries into the RE-render too, and not merely for
        symmetry: the join can empty the chore list, and make_display_state's
        emptied-list guard then reverts the mode and paints the OTHER layout
@@ -1876,7 +2146,9 @@ static void finish_action_and_render(button_id_t btn, timer_state_t before, time
        And so does the ack's suppression of D, for the symmetric reason:
        the re-render is the same paint of the same layout, so promoting
        THAT one to a full refresh would spend the seconds design 2.5 is
-       trying not to spend, just a few lines later. */
+       trying not to spend, just a few lines later. When the join DOES move
+       the layout it is not the same paint any more, and the screen-kind
+       term at the re-render below promotes it whatever this says. */
     bool force_full = ((btn == BTN_D) && !wake_flow_chore_acked_this_wake()) || wake_flow_mode_toggled_this_wake();
 
     /* Paint done: release the MQTT phase (display refresh current and
@@ -1905,8 +2177,49 @@ static void finish_action_and_render(button_id_t btn, timer_state_t before, time
             wake_flow_fire_expiry_alert();
         } else {
             display_state_t rst = make_display_state(rrem, rnow);
+            /* THE SCREEN KIND CAN CHANGE ACROSS THE JOIN, and this term is
+               what paints that change as a full refresh — render_action_-
+               result()'s own rule ("a change of screen kind is a full
+               refresh, always"), applied to the one paint of the wake it
+               did not cover. Until M2-T15's fix pass it did not exist here,
+               and the gap was live: a config edit applied during the network
+               window that cancels a timer RUNNING in chore mode moves the
+               screen from MAIN to the checklist with no toggle and no break
+               end (display_screen_for() suppresses CHORES while RUNNING, so
+               the screen genuinely changes), and wake_policy_render calls
+               RUNNING -> IDLE a PARTIAL. The main -> checklist frame diff
+               was measured at 10829 px, 28.58 % of the panel (recorded in
+               include/display.h until M2-T15 deleted the exemption that
+               record belonged to), painted as a partial. The same gap took a config
+               edit that EMPTIES the list with no toggle this wake: the
+               emptied-list revert in make_display_state() above swaps the
+               checklist for the timer screen, and force_full carries only a
+               toggle.
+               THE CLEAN PASS HAD BEEN MITIGATING IT, which is why it was
+               never seen: since M2-T15 every partial is ghost-cleaned, so a
+               layout swap painted as one drives the unchanged pixels of
+               every dirty segment away and back too. That is a mitigation,
+               not a fix — it leaves the panel resting on the one pass
+               M2-T9 once exempted a transition from, and re-introducing any
+               partial exemption, or wanting this transition crisp, would
+               have reopened it.
+               FIXED RATHER THAN RECORDED, because the price is small and
+               falls only where it is owed: a full refresh (~3 s with its
+               flash, against ~0.8 s estimated for the cleaned partial) on a
+               post-join repaint that really swaps the layout — a rare path
+               — and nothing on any repaint that does not.
+               Compared against `shown`, the screen the first render actually
+               built its frame for, not against display_screen_for(painted,
+               ...) with today's mode: the emptied-list case moves the MODE,
+               so asking both sides with the current mode would call it no
+               change. test_m2_a_join_that_moves_the_screen_kind_repaints_full
+               pins the RUNNING case, test_m2_a_join_that_empties_the_list_-
+               repaints_full the emptied list (and dies on that state-only
+               form of the term). */
+            const bool screen_kind_changed =
+                shown != display_screen_for(timer_get_state(), rst.app_mode, rst.chore_count);
             wake_flow_show_status_leds();
-            if (force_full || rwr == WAKE_RENDER_FULL) {
+            if (force_full || screen_kind_changed || rwr == WAKE_RENDER_FULL) {
                 display_full_refresh(&rst);
             } else {
                 display_update(&rst);
@@ -2369,10 +2682,17 @@ void wake_flow_handle_button_wake(void) {
        a second box ticked in the same wake is a case the design blesses,
        and the bare take on the next line used to destroy it. Holding the
        panel work open here is what puts every flip AHEAD of the one
-       refresh they all share, instead of racing a ~1.9 s partial that
-       cannot be interrupted. A no-op on every wake that is not a chore ack
-       (the helper's three-term guard). */
-    wake_flow_coalesce_chore_acks(&now);
+       refresh they all share, instead of racing a partial that cannot be
+       interrupted. A no-op on every wake that is not a chore ack (the
+       helper's three-term guard).
+       BUTTON A IS TAKEN HERE TOO, for the same reason and against the same
+       drain: an A made during the hold or this window would otherwise be
+       eaten by that bare take. An applied A ends the window, and the render
+       below paints the Timers screen full (wake_flow_take_gesture_toggle).
+       `chore_spent_ms` is the wake's ONE burst budget, carried from this
+       window into every window the tail below opens. */
+    uint32_t chore_spent_ms = 0;
+    wake_flow_coalesce_chore_acks(&now, &chore_spent_ms);
 
     /* Drain latch: the wake press itself was handled via the EXT1 decode
        above, and a STALE EDGE on the same button must not replay through
@@ -2388,24 +2708,30 @@ void wake_flow_handle_button_wake(void) {
        during the action, and chatter that arrived after a level sample had
        already observed the pad up. Both are stale for the same reason and
        the drain is unchanged; it is just no longer the only thing standing
-       between a bouncing contact and a re-pause. */
+       between a bouncing contact and a re-pause.
+
+       ON A CHORE GESTURE THIS DRAIN TAKES NOTHING THE GESTURE WANTED: the
+       coalescer above has already taken every ack and any A, so what can be
+       left is a B/C/D made after an A ended the gesture — a timer press
+       made before the Timers screen is even on the glass, which is exactly
+       the stale edge this drain is for. Until M2-T15's fix pass it also
+       took A itself, and that was the dead mode button. */
     buttons_take_pressed();
 
     finish_or_break(btn, before, now, swapped); /* e.g. resume with accrual already past the interval */
 
     /* THE PRESS MADE DURING THE PANEL WORK, which is the other half of the
-       same defect: the refresh above holds the CPU for ~1.9 s with nothing
-       polling, so a press there is latched and — before this line — thrown
-       away at sleep. It is already in the latch by the time the render
-       returns, so this take grants no window and costs nothing on the wakes
-       where nobody pressed anything; it is only the coalescing window that
-       spends time, and only when an ack has already landed.
+       same defect: the refresh above holds the CPU with nothing polling, so
+       a press there is latched and — before M2-T12 — was thrown away at
+       sleep. It is already in the latch by the time the render returns, so
+       the tail's first take grants no window and costs nothing on the wakes
+       where nobody pressed anything; only a take that APPLIES opens a quiet
+       window, and M2-T15 made that window come BEFORE the repaint rather
+       than the repaint following at once — see the helper.
        The repaint is render_action_result and NOT finish_action_and_render:
        the MQTT phase was released and joined by the tail above, and doing
        that twice would post the stat snapshot twice. */
-    if (wake_flow_take_chore_acks(&now)) {
-        render_action_result(BTN_NONE, timer_get_state(), now, false);
-    }
+    wake_flow_repaint_chore_acks_until_quiet(&now, &chore_spent_ms);
     maybe_wait_for_event();
     maybe_apply_update(); /* second window; does not return when it commits */
     enter_deep_sleep(lock_gate_sleep_mode());

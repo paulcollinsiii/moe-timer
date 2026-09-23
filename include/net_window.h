@@ -48,7 +48,7 @@ bool net_window_spawn(void);
 
    SUPPRESSED AT THE SOURCE rather than repainted afterwards, because the
    false green is written by net_window_wait_ntp() and the caller then
-   spends ~1.9 s on the panel partial before it could repaint anything —
+   spends the panel partial (~0.8 s, an estimate) before it could repaint anything —
    which is exactly the stretch the user is looking at the pixels.
 
    ONE-WAY and wake-scoped: there is no release. The claim lasts until the

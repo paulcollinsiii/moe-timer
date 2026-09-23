@@ -54,10 +54,11 @@
    physical fact and should move together — a board that needs one widened
    needs the other.
 
-   AND NOT A KCONFIG KNOB, unlike STATUS_LED_ACK_HOLD_MS, which is the
-   comparison worth drawing because from a distance they look alike. How
-   long a child needs to get the next press in is a question about people
-   and belongs to a board; how long a dome contact rings is a property of
+   AND NOT A KCONFIG KNOB, unlike CONFIG_MAGTAG_CHORE_PAINT_QUIET_MS (the
+   coalescer's idle window, split off STATUS_LED_ACK_HOLD_MS by M2-T15),
+   which is the comparison worth drawing because from a distance they look
+   alike. How long a child needs to get the next press in is a question
+   about people and belongs to a board; how long a dome contact rings is a property of
    the contact. Nor is shorter the safe direction: at zero this re-admits
    the release bounce the gate exists to reject, which is the phantom chore
    toggle of field finding 3. */
@@ -138,9 +139,11 @@ void button_latch_record(int btn, int64_t t_us);
 
    NOT "a caller that samples at least as often as the debounce window can
    never find two waiting", which is what stood here and was a property of
-   exactly one of the four take sites. Measured: 50 ms at the ack coalescer,
-   100 ms at the render-grid wait, 250 ms at both event watches, and ~1.9 s
-   at the take after the panel refresh. On the slow three the bitmask holds
+   exactly one of the four take sites. Read from the source: 50 ms at the
+   ack coalescer, 100 ms at the render-grid wait, 250 ms at both event
+   watches, and a whole panel refresh at the take after it — ESTIMATED at
+   ~0.8 s for a ghost-cleaned partial and ~3 s for a full, not measured on
+   a board. On the slow three the bitmask holds
    one press not because a second could not arrive but because the GATE
    REJECTED it — which is the cost above, not a guarantee, and reading it as
    one is how a counter gets argued away on evidence that does not exist.

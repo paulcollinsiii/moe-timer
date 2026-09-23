@@ -1280,9 +1280,11 @@ display_state_t app_state_display(const app_state_in_t *in, int32_t remaining, t
 
 /* THE PANEL COSTS WALL TIME, and until M2-T8's fix pass these two stubs
    modelled it as free — which made an entire class of defect invisible
-   here. A refresh holds the CPU for seconds with nothing polling: design
-   §2.5 measures a partial at ~1.9 s once display.c's ghost-clean pass and
-   the ssd1680 driver's 1 s floor are counted, and a full refresh at ~3 s.
+   here. A refresh holds the CPU with nothing polling: a partial with
+   display.c's ghost-clean pass is two partial waveforms back to back, ~0.8 s
+   at ProductOverview's ~0.4 s each (an estimate, not a board measurement),
+   and a full refresh is ~3 s. Design §2.5's "~1.9 s" predates c321ffc,
+   which removed a fixed 1.1 s wait between the two passes.
    A press made in that stretch goes into the button latch, and whether
    anything ever takes it out again is a real question about the code under
    test. With the stubs free, the stretch did not exist on the host, the
@@ -1295,7 +1297,7 @@ display_state_t app_state_display(const app_state_in_t *in, int32_t remaining, t
    totals and paint orderings, and a stub that suddenly spent two seconds
    would rewrite all of them at once. A case that cares opts in, the same
    way it opts into its wake cause. Set it to FLOW_PANEL_COST_MS. */
-#define FLOW_PANEL_COST_MS 1900 /* design §2.5's partial: 0.4 + 1.5 ghost-clean */
+#define FLOW_PANEL_COST_MS 800 /* a ghost-cleaned partial: two ~0.4 s passes (estimate) */
 static uint32_t flow_display_ms;
 
 /* Spent AFTER the event is logged, so the log still reads "the panel got
@@ -1305,9 +1307,17 @@ static uint32_t flow_display_ms;
    flush. Guarded on non-zero: hal_delay_ms(0) still runs the delay hook,
    so an unguarded call would re-arm every existing case's deferred press
    at a new point in the wake. */
+/* True only while the stub spends the panel's cost, so a delay hook can
+   tell "a press made DURING a paint" from one made while the code polls
+   (M2-T15's tail-loop cases). The hook runs at the end of hal_delay_ms,
+   inside this bracket. */
+static bool flow_painting;
+
 static void flow_display_cost(void) {
     if (flow_display_ms != 0) {
+        flow_painting = true;
         hal_delay_ms(flow_display_ms);
+        flow_painting = false;
     }
 }
 
@@ -1361,7 +1371,8 @@ static int flow_stats_collects;
 static int flow_stats_posts;
 
 static net_finish_t flow_net_finish;
-static int flow_state_after_finish; /* -1 = the join leaves the state alone */
+static int flow_state_after_finish;  /* -1 = the join leaves the state alone */
+static int flow_chores_after_finish; /* -1 = the join leaves the list alone; else the row count it leaves */
 static time_t flow_last_ntp;
 
 static wake_sleep_mode_t flow_sleep_mode_answer; /* what lock_gate_sleep_mode says */
@@ -1526,6 +1537,9 @@ net_finish_t net_apply_finish(void) {
     }
     if (flow_state_after_finish >= 0) {
         flow_state = (timer_state_t)flow_state_after_finish;
+    }
+    if (flow_chores_after_finish >= 0) {
+        flow_chore_count = (uint8_t)flow_chores_after_finish; /* a config payload applied in the window */
     }
     return flow_net_finish;
 }
@@ -1893,7 +1907,8 @@ void setUp(void) {
     flow_needs_sync = false;
     flow_tick_ret = 0;
     flow_partial_n = 0;
-    flow_display_ms = 0; /* the panel is free unless a case opts into its cost */
+    flow_display_ms = 0;   /* the panel is free unless a case opts into its cost */
+    flow_painting = false; /* a failed assertion inside a hook can leave it set */
     flow_binary_n = 0;
     flow_expiry_wall_reads = 0;
     flow_break_active_reads = 0;
@@ -1937,6 +1952,7 @@ void setUp(void) {
     flow_stats_now = 0;
     flow_net_finish = NET_FINISH_IDLE;
     flow_state_after_finish = -1;
+    flow_chores_after_finish = -1;
     flow_finish_seconds = 0;
     flow_last_ntp = 0;
     flow_sleep_mode_answer = WAKE_SLEEP_NORMAL;
@@ -7419,10 +7435,11 @@ void test_c17_an_unattended_chore_mode_wake_repaints_with_the_pixels_dark(void) 
 /* ---- M2-T8: the NeoPixel ack sequencing (design §2.5) -------------------
 
    §2.5 moves the acknowledgement OFF the panel and onto the pixels,
-   because the panel cannot be the fast path: a partial is ~1.9 s once
-   display.c's ghost-clean pass and the driver's 1 s floor are counted,
-   and three acks is ~6 s of a child pressing a button and watching
-   nothing happen. So the sequence is the feature:
+   because the panel cannot be the fast path: a ghost-cleaned partial is
+   an estimated ~0.8 s of CPU-holding refresh (FLOW_PANEL_COST_MS), a full
+   one ~3 s (also an estimate), and
+   since M2-T15 the panel also waits a whole quiet window for the gesture
+   to settle before it starts. So the sequence is the feature:
 
      a button wake paints the PRE-PRESS strip first, so you see what the
      device thought before you touched it;
@@ -7544,8 +7561,8 @@ void test_t8_the_ack_hold_is_one_figure_shared_with_button_bs_start(void) {
    because the previous version of this comment named the break tail as
    "the one consumer a press made DURING a wake actually reaches", and that
    was true when it was written and is the defect the fix pass removed.
-   Which consumer takes this particular press now depends on the hold, so
-   the case deliberately does not say: at 400 ms it is the coalescing drain
+   Which consumer takes this particular press now depends on the quiet
+   window, so the case deliberately does not say: it is the coalescing drain
    when the window reaches that far and the break tail's poll otherwise,
    and the assertions below hold either way because they are about the
    SECOND ack paying no hold rather than about who took it. The two cases
@@ -7591,8 +7608,8 @@ void test_t8_a_second_ack_in_the_same_wake_flips_with_no_hold(void) {
 /* Clause 3, and the reason the whole feature exists: the pixels have to
    be AHEAD of the panel, not behind it. A flip written after the refresh
    would still show the right colours and would still pass every mask
-   assertion above — it would just arrive ~1.9 s late, which is precisely
-   the latency §2.5 rejects. */
+   assertion above — it would just arrive a quiet window and a refresh
+   late, which is precisely the latency §2.5 rejects. */
 void test_t8_the_flip_reaches_the_pixels_before_the_panel_refresh(void) {
     flow_tick_clock(flow_at(15, 0));
     flow_arm_chore_wake(BTN_B);
@@ -7742,7 +7759,7 @@ void test_t8_a_refused_ack_neither_holds_nor_flips(void) {
    handler's tail took the latch with a bare `buttons_take_pressed();`
    whose return went nowhere, and nothing else on the path consumes an ack
    — so a press during the pre-press hold was eaten there, and a press
-   during the ~1.9 s refresh sat in a BSS latch until deep sleep threw it
+   during the panel refresh sat in a BSS latch until deep sleep threw it
    away. Both are the box never getting ticked, with nothing on screen or
    on the strip to say so.
 
@@ -7758,20 +7775,22 @@ void test_t8_a_refused_ack_neither_holds_nor_flips(void) {
    actually made. */
 
 /* THE BLOCKER, at its plainest: a press made while the panel is busy must
-   still tick its box. Armed past every coalescing window on purpose, so it
+   still tick its box. Armed past the first quiet window on purpose, so it
    lands inside the refresh itself and can only be answered by a take after
-   it — which is the half of the fix a longer window cannot buy. */
+   it — which is the half of the fix a longer window cannot buy.
+
+   RE-ANCHORED BY M2-T15. It used to be armed past the whole burst budget,
+   which put it inside a ~1.9 s refresh; at the ~0.8 s this suite now
+   charges (FLOW_PANEL_COST_MS, an estimate rather than a board figure) the
+   paint is over before then and the press would never be made. Half-way through
+   the first paint is the point this case is about. */
 void test_t8_a_press_made_during_the_panel_refresh_is_not_discarded(void) {
     flow_tick_clock(flow_at(15, 0));
     flow_arm_chore_wake(BTN_B);
     flow_display_ms = FLOW_PANEL_COST_MS; /* the panel costs what it costs */
     flow_deferred_press_btn = BTN_C;      /* ✓2, mid-refresh */
-    /* Past the WHOLE burst budget, not merely past a few windows: no
-       coalescing window can still be open at this point however many
-       presses landed, so the only thing that can answer this press is a
-       take below the render. */
     flow_deferred_press_ms =
-        (int32_t)(STATUS_LED_ACK_HOLD_MS + CHORE_ACK_COALESCE_BUDGET_MS + CHORE_ACK_COALESCE_POLL_MS);
+        (int32_t)(STATUS_LED_ACK_HOLD_MS + CONFIG_MAGTAG_CHORE_PAINT_QUIET_MS + FLOW_PANEL_COST_MS / 2);
 
     TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_button());
 
@@ -7794,8 +7813,8 @@ void test_t8_a_press_made_during_the_panel_refresh_is_not_discarded(void) {
 /* Clause 4 off the break screen, and the COALESCING half: a press that
    arrives while the window is open must tick its box AHEAD of the panel
    and share the one refresh, not trigger a second one. Two chores in one
-   go is the case §2.5 names by example; three acks at ~1.9 s each is the
-   ~6 s it rejects. */
+   go is the case §2.5 names by example; a refresh per ack is what it
+   rejects. */
 void test_t8_a_second_ack_coalesces_into_the_same_refresh_with_no_break(void) {
     flow_tick_clock(flow_at(15, 0));
     flow_arm_chore_wake(BTN_B);
@@ -7840,17 +7859,17 @@ void test_t8_two_acks_latched_in_one_window_both_land(void) {
         flow_strip_mask[flow_strip_n - 1], "the strip does not show all three rows the wake ticked");
 }
 
-/* NO CASE FOR "THE ACK DRAIN LEAVES BUTTON A ALONE", deliberately, and the
-   reason is worth more than the case would have been: a masked take is the
-   PRECISE way to write it, not an observable one. Widening it to a bare
-   buttons_take_pressed() was tried as a mutant and survives, because A's bit
-   is not in the ack table either way and the tail's own bare take discards
-   whatever the drain left a few lines later. So the outcome is identical and
-   a case asserting it could not fail — which on this milestone is worse than
-   no case at all. The mask is in the source with the argument next to it.
+/* "THE ACK DRAIN LEAVES BUTTON A ALONE" USED TO HAVE NO CASE, on the
+   argument that widening the masked take to a bare buttons_take_pressed()
+   survived as a mutant "because the tail's own bare take discards whatever
+   the drain left a few lines later". That sentence was the defect, written
+   down as a reason: the bare take discarding A is a dead mode button. Since
+   M2-T15's fix pass A has its own take (wake_flow_take_gesture_toggle), so
+   the mask IS observable now — a bare take in the ack drain would swallow
+   the A that take exists for — and the test_t15_button_a_* cases below are
+   what fail on it.
 
-   THE LIVE MODE TERM IS DIFFERENT — that one is observable, and the case
-   below is it. */
+   THE LIVE MODE TERM is observable too, and the case below is it. */
 
 /* A config edit that empties the list mid-wake reverts the mode under the
    press (make_display_state's emptied-list guard), and a press arriving
@@ -7887,21 +7906,36 @@ void test_t8_a_mode_reverted_under_the_wake_stops_routing_presses_to_acks(void) 
                                   "a press made after the mode reverted was still routed to a chore ack");
 }
 
-/* The window is the KNOB, which is the whole reason it is a knob: the user
-   asked for a build-time figure to sweep on hardware, and a window keyed
-   to a literal would not move with it. Measured as the wake's whole delay
-   budget — the hold, then exactly one window that closes empty — because
-   that is observable without reaching inside the loop, and it dies both
-   ways: a hard-coded 250 in the coalescer survives a change to the Kconfig
-   value, and a second window granted for nothing shows up as 3x. */
-void test_t8_the_coalescing_window_is_the_ack_hold_figure(void) {
+/* THE WINDOW IS ITS OWN KNOB, and no longer the hold (M2-T15). Until then
+   one figure did both jobs and this case was
+   test_t8_the_coalescing_window_is_the_ack_hold_figure; the board showed
+   the two wanting opposite things — a short hold, a long window — so they
+   were split. Measured as the wake's whole delay total, the hold then
+   exactly one window that closes empty, because that is observable without
+   reaching inside the loop.
+
+   WRITTEN AGAINST THE CONFIG SYMBOL, NOT wake_flow.c's CHORE_PAINT_QUIET_MS,
+   and that choice is the case. The collapse this guards against is a
+   one-line `#define CHORE_PAINT_QUIET_MS STATUS_LED_ACK_HOLD_MS` in
+   wake_flow.c, and a figure written against that macro would move with it
+   and pass. The build gives the two CONFIG symbols different values (170,
+   610), so the collapse fails here. And ONE figure is a bare literal, on
+   the M2-T12 lesson that a suite written only against the macros under
+   test cannot see those macros move: 170 + 610 = 780. */
+void test_t15_a_lone_ack_waits_the_quiet_window_not_the_hold(void) {
     flow_tick_clock(flow_at(15, 0));
     flow_arm_chore_wake(BTN_B);
 
     TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_button());
 
-    TEST_ASSERT_EQUAL_UINT32_MESSAGE(2u * STATUS_LED_ACK_HOLD_MS, mock_delay_total_ms(),
-                                     "a lone ack did not spend exactly the hold plus one coalescing window");
+    TEST_ASSERT_NOT_EQUAL_MESSAGE(STATUS_LED_ACK_HOLD_MS, CONFIG_MAGTAG_CHORE_PAINT_QUIET_MS,
+                                  "the suite builds the hold and the window at one value, so it cannot tell them "
+                                  "apart");
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE((uint32_t)STATUS_LED_ACK_HOLD_MS + CONFIG_MAGTAG_CHORE_PAINT_QUIET_MS,
+                                     mock_delay_total_ms(),
+                                     "a lone ack did not spend exactly the hold plus one quiet window");
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE(780u, mock_delay_total_ms(),
+                                     "170 ms hold + 610 ms quiet window, as test/CMakeLists.txt builds them");
 }
 
 /* The BOUND, and it is a battery guard rather than a feel one: the idle
@@ -7920,9 +7954,19 @@ void test_t8_the_coalescing_window_is_the_ack_hold_figure(void) {
    Driven by its own delay hook rather than the one-shot deferred press,
    which is the only way to model a press arriving in EVERY poll. The hook
    stops itself well above anything the budget can reach, so a coalescer
-   that never terminated fails an assertion instead of hanging the suite. */
+   that never terminated fails an assertion instead of hanging the suite.
+
+   ON ITS OWN COUNTER, and that is a correction: it used to stop on
+   flow_log_count(EV_CHORE_ACK) < 200, and flow_log is 1024 entries that
+   stop recording when full. Every applied ack logs several events, so the
+   log fills before 200 acks are counted, the cap never trips, and a
+   coalescer with its budget removed HUNG the suite — the very outcome
+   this paragraph promised it could not have (M2-T15 mutation run). */
+static int flow_window_presses;
+
 static void flow_press_in_every_window(void) {
-    if (flow_log_count(EV_CHORE_ACK) < 200) {
+    if (flow_window_presses < 200) {
+        flow_window_presses++;
         flow_press(BTN_B);
     }
 }
@@ -7930,6 +7974,7 @@ static void flow_press_in_every_window(void) {
 void test_t8_the_coalescing_window_is_bounded_per_wake(void) {
     flow_tick_clock(flow_at(15, 0));
     flow_arm_chore_wake(BTN_B);
+    flow_window_presses = 0;
     mock_delay_set_hook(flow_press_in_every_window); /* setUp reinstalls the default */
 
     TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_button());
@@ -7950,6 +7995,509 @@ void test_t8_the_coalescing_window_is_bounded_per_wake(void) {
         (int)((CHORE_ACK_COALESCE_BUDGET_MS + CHORE_ACK_COALESCE_POLL_MS - 1) / CHORE_ACK_COALESCE_POLL_MS);
     TEST_ASSERT_EQUAL_INT_MESSAGE(2 + polls, flow_log_count(EV_CHORE_ACK),
                                   "the burst did not land exactly one ack per poll up to the budget");
+}
+
+/* ---- M2-T15: the panel waits for the gesture to settle ------------------
+
+   The board, with every checklist partial cleaning again: press, short
+   pause, press gave TWO partials — one mid-gesture, one catching up. The
+   pause outlasted the 400 ms window (which was the ack hold, one knob doing
+   two jobs), the panel started, the next press landed inside the paint,
+   and the tail repainted the moment the first paint finished. The cases
+   below pin the three halves of the fix: the window slides, a press during
+   a paint re-opens it rather than repainting at once, and the whole thing
+   is bounded by the burst budget. */
+
+/* Two later presses, each a fraction of a window after the one before and
+   together more than a window after the first: gaps of 400 ms and 400 ms
+   against a 610 ms window. */
+#define FLOW_GESTURE_GAP_MS 400u
+static int flow_gesture_presses;
+
+static void flow_press_at_a_natural_pace(void) {
+    static const button_id_t seq[] = {BTN_C, BTN_D};
+    if (flow_gesture_presses >= (int)(sizeof seq / sizeof seq[0])) {
+        return;
+    }
+    const uint32_t due = STATUS_LED_ACK_HOLD_MS + FLOW_GESTURE_GAP_MS * (uint32_t)(flow_gesture_presses + 1);
+    if (mock_delay_total_ms() >= due) {
+        flow_press(seq[flow_gesture_presses++]);
+    }
+}
+
+/* THE WINDOW SLIDES: every ack that applies grants another full one, so a
+   gesture paints once however long it runs, as long as no gap outlasts the
+   window. Dies on a window that stops sliding — it closes 610 ms after the
+   hold, the panel starts, the third press lands inside that paint, and
+   the tail owes a second refresh. */
+void test_t15_presses_less_than_a_window_apart_share_one_paint(void) {
+    flow_tick_clock(flow_at(15, 0));
+    flow_arm_chore_wake(BTN_B);
+    flow_chore_count = CHORE_MAX;
+    flow_display_ms = FLOW_PANEL_COST_MS;
+    flow_gesture_presses = 0;
+    mock_delay_set_hook(flow_press_at_a_natural_pace); /* setUp reinstalls the default */
+
+    TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_button());
+
+    TEST_ASSERT_EQUAL_INT_MESSAGE(2, flow_gesture_presses, "the harness never made both later presses");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(3, flow_log_count(EV_CHORE_ACK), "a press of the gesture never reached the ack");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(1, flow_log_count(EV_PARTIAL) + flow_log_count(EV_FULL_REFRESH),
+                                  "a gesture paced inside the quiet window cost more than one refresh");
+    /* Worth making only if each gap is inside the window and the two
+       together are not — otherwise a window that never slid would pass. */
+    TEST_ASSERT_TRUE(FLOW_GESTURE_GAP_MS < CONFIG_MAGTAG_CHORE_PAINT_QUIET_MS);
+    TEST_ASSERT_TRUE(2u * FLOW_GESTURE_GAP_MS > CONFIG_MAGTAG_CHORE_PAINT_QUIET_MS);
+}
+
+/* A PRESS DURING A PAINT RE-OPENS THE WINDOW, and the repaint waits for it
+   to close. Before M2-T15 the tail repainted the moment it took the press;
+   now the pixel flips at once and the panel waits a quiet window, so a
+   person still pressing is coalesced into that repaint too. Pinned as the
+   delay total, which is where the difference lives: the hold, a window,
+   the paint, a SECOND window, the repaint. Dies on the immediate repaint
+   (one window short). The literal is the M2-T12 lesson again: 170 + 610 +
+   800 + 610 + 800 = 2990, as test/CMakeLists.txt and FLOW_PANEL_COST_MS
+   build it. */
+void test_t15_a_press_during_the_paint_waits_a_quiet_window_before_the_repaint(void) {
+    flow_tick_clock(flow_at(15, 0));
+    flow_arm_chore_wake(BTN_B);
+    flow_display_ms = FLOW_PANEL_COST_MS;
+    flow_deferred_press_btn = BTN_C;
+    flow_deferred_press_ms =
+        (int32_t)(STATUS_LED_ACK_HOLD_MS + CONFIG_MAGTAG_CHORE_PAINT_QUIET_MS + FLOW_PANEL_COST_MS / 2);
+
+    TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_button());
+
+    TEST_ASSERT_EQUAL_INT_MESSAGE(1, flow_deferred_delivered, "the second press was never delivered");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(2, flow_log_count(EV_CHORE_ACK), "the press made during the paint was lost");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(2, flow_log_count(EV_PARTIAL) + flow_log_count(EV_FULL_REFRESH),
+                                  "the press made during the paint was never painted");
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE(
+        (uint32_t)STATUS_LED_ACK_HOLD_MS + 2u * CONFIG_MAGTAG_CHORE_PAINT_QUIET_MS + 2u * FLOW_PANEL_COST_MS,
+        mock_delay_total_ms(), "the repaint did not wait one quiet window after the press made during the paint");
+    TEST_ASSERT_EQUAL_UINT32(2990u, mock_delay_total_ms());
+}
+
+/* A pad that fires once during every paint and never otherwise — the
+   worst case for the tail, because every paint then owes another. Capped
+   well above anything the budget allows, so a tail with no bound fails an
+   assertion instead of hanging the suite. */
+static int flow_paint_presses;
+
+static void flow_press_during_every_paint(void) {
+    if (flow_painting && flow_paint_presses < 50) {
+        flow_paint_presses++;
+        flow_press(BTN_B);
+    }
+}
+
+/* THE M2-T12 RESIDUAL, retired: a press during the SECOND paint used to be
+   latched and thrown away at deep sleep, because the tail took exactly
+   once. Now every paint made while budget remains is followed by a take.
+   Two presses, one in each of the first two paints, both land. */
+static void flow_press_during_the_first_two_paints(void) {
+    if (flow_painting && flow_paint_presses < 2) {
+        flow_paint_presses++;
+        flow_press(flow_paint_presses == 1 ? BTN_C : BTN_D);
+    }
+}
+
+void test_t15_a_press_during_the_second_paint_is_not_discarded(void) {
+    flow_tick_clock(flow_at(15, 0));
+    flow_arm_chore_wake(BTN_B);
+    flow_chore_count = CHORE_MAX;
+    flow_display_ms = FLOW_PANEL_COST_MS;
+    flow_paint_presses = 0;
+    mock_delay_set_hook(flow_press_during_the_first_two_paints); /* setUp reinstalls the default */
+
+    TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_button());
+
+    TEST_ASSERT_EQUAL_INT_MESSAGE(2, flow_paint_presses, "the harness never pressed during two paints");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(3, flow_log_count(EV_CHORE_ACK),
+                                  "a press made during the second paint was thrown away at sleep");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(3, flow_log_count(EV_PARTIAL) + flow_log_count(EV_FULL_REFRESH),
+                                  "each press made during a paint is owed a repaint");
+    TEST_ASSERT_EQUAL_HEX8_MESSAGE(0, flow_latch_residue(), "a press was left for deep sleep to discard");
+}
+
+/* THE BUDGET'S DEFINITION: the coalescer's own WAITING, summed across
+   every quiet window of the wake, with the panel's time NOT counted — the
+   firmware has no millisecond clock on this path to count it with. With a
+   pad firing during every paint, the windows are 610, 610 and the 505
+   left of the 1725 budget, each followed by a paint, and the loop stops
+   after the paint that follows the budget running out: three paints. The
+   press made during that last paint stays in the latch for deep sleep,
+   which is the bound doing its job.
+
+   So the delay total is the hold, the WHOLE budget, and three paints on
+   top: 170 + 1725 + 3 x 800 = 4295. A budget that counted panel time would
+   stop sooner; a tail with no bound would keep painting until the harness
+   cap. Both fail here. */
+void test_t15_the_burst_budget_does_not_count_panel_time(void) {
+    flow_tick_clock(flow_at(15, 0));
+    flow_arm_chore_wake(BTN_B);
+    flow_display_ms = FLOW_PANEL_COST_MS;
+    flow_paint_presses = 0;
+    mock_delay_set_hook(flow_press_during_every_paint); /* setUp reinstalls the default */
+
+    TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_button());
+
+    const int paints = flow_log_count(EV_PARTIAL) + flow_log_count(EV_FULL_REFRESH);
+    const int windows = (int)((CHORE_ACK_COALESCE_BUDGET_MS + CONFIG_MAGTAG_CHORE_PAINT_QUIET_MS - 1) /
+                              CONFIG_MAGTAG_CHORE_PAINT_QUIET_MS);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(windows, paints, "one paint per quiet window, and none past the budget's");
+    TEST_ASSERT_EQUAL_INT(3, paints);
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE(
+        (uint32_t)STATUS_LED_ACK_HOLD_MS + CHORE_ACK_COALESCE_BUDGET_MS + (uint32_t)paints * FLOW_PANEL_COST_MS,
+        mock_delay_total_ms(), "the budget is the waiting alone: hold + budget + the paints on top");
+    TEST_ASSERT_EQUAL_UINT32(4295u, mock_delay_total_ms());
+    /* Every press but the last was taken and applied; the last is the one
+       past the bound. */
+    TEST_ASSERT_EQUAL_INT(paints, flow_paint_presses);
+    TEST_ASSERT_EQUAL_INT(paints, flow_log_count(EV_CHORE_ACK)); /* the wake press + all but the last */
+    TEST_ASSERT_EQUAL_HEX8_MESSAGE((uint8_t)(1u << BTN_B), flow_latch_residue(),
+                                   "the press made during the post-budget paint was not left for sleep");
+}
+
+/* And a pad that fires CONTINUOUSLY — in every poll and every paint — gets
+   exactly one paint past the budget: the window slides all the way to it,
+   the first paint follows, the press made during that paint is owed one
+   repaint with no window in front of it (none is left), and the loop
+   stops.
+
+   CAPPED ON ITS OWN COUNTER, not on flow_log_count(EV_CHORE_ACK) the way
+   flow_press_in_every_window() is: flow_log is 1024 entries and stops
+   recording when full, and with a paint in every iteration it fills long
+   before 200 acks are logged — so a log-based cap never trips and a tail
+   with no bound HANGS the suite instead of failing it (found by the
+   M2-T15 mutation run). */
+static int flow_pad_presses;
+
+static void flow_press_in_every_delay(void) {
+    if (flow_pad_presses < 200) {
+        flow_pad_presses++;
+        flow_press(BTN_B);
+    }
+}
+
+void test_t15_a_continuous_pad_gets_one_paint_past_the_budget(void) {
+    flow_tick_clock(flow_at(15, 0));
+    flow_arm_chore_wake(BTN_B);
+    flow_display_ms = FLOW_PANEL_COST_MS;
+    flow_pad_presses = 0;
+    mock_delay_set_hook(flow_press_in_every_delay); /* setUp reinstalls the default */
+
+    TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_button());
+
+    TEST_ASSERT_EQUAL_INT_MESSAGE(2, flow_log_count(EV_PARTIAL) + flow_log_count(EV_FULL_REFRESH),
+                                  "a continuous pad got more than one paint past the budget");
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)STATUS_LED_ACK_HOLD_MS + CHORE_ACK_COALESCE_BUDGET_MS + 2u * FLOW_PANEL_COST_MS,
+                             mock_delay_total_ms());
+}
+
+/* ---- M2-T15 fix pass: Button A during a chore gesture -------------------
+
+   Review M1. Nothing on the button-wake path took A once an ack had
+   landed: an A made before the first paint was eaten by the handler's bare
+   stale-edge drain, and one made during a later window or paint sat in the
+   latch until deep sleep discarded it. M2-T15's quiet window made that dead
+   zone a second and more after every ack. The owner's scenario is the first
+   case, verbatim: tick the last chore, see the gate go green, press A a
+   moment later to go back to Timers — and nothing happened at all. */
+
+/* THE OWNER'S SCENARIO. The last row is ticked (two already done, B ticks
+   the third) and A is pressed well inside the quiet window — before the
+   panel has painted anything. The mode must be Timers, the panel must paint
+   the Timers screen, and it must be ONE paint, FULL: the toggle swaps the
+   whole layout, and painting the checklist first only to replace it would
+   be a wasted refresh. Dies on the shipped T15 code (A eaten by the bare
+   take: mode still Chores, one partial of the checklist). */
+void test_t15_button_a_after_the_last_tick_goes_back_to_timers(void) {
+    flow_tick_clock(flow_at(15, 0));
+    flow_arm_chore_wake(BTN_B);
+    flow_chore_acked = (uint8_t)((1u << BUTTON_CHORE_IDX_C) | (1u << BUTTON_CHORE_IDX_D)); /* B's is the last */
+    flow_display_ms = FLOW_PANEL_COST_MS;
+    flow_deferred_press_btn = BTN_A;
+    flow_deferred_press_ms = (int32_t)STATUS_LED_ACK_HOLD_MS + 300; /* inside the 610 ms window */
+
+    TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_button());
+
+    TEST_ASSERT_EQUAL_INT_MESSAGE(1, flow_deferred_delivered, "the A press was never delivered");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(1, flow_log_count(EV_CHORE_ACK), "the last tick never landed");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(1, flow_log_count(EV_A_APPLY), "the A press never reached the toggle");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(APP_MODE_TIMERS, (int)flow_mode, "A after the last tick left the device in Chores");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(APP_MODE_TIMERS, (int)flow_painted_mode, "the panel never showed the Timers screen");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(1, flow_log_count(EV_FULL_REFRESH), "the layout swap was not a full refresh");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(0, flow_log_count(EV_PARTIAL), "the checklist was painted only to be replaced");
+    TEST_ASSERT_EQUAL_HEX8_MESSAGE(0, flow_latch_residue(), "a press was left for deep sleep to discard");
+    /* A ENDS THE WINDOW: the paint follows the poll A landed in, not a full
+       window after it. 300 is a whole number of 50 ms polls, so A lands at
+       the end of the sixth and that poll's own take finds it. */
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE((uint32_t)STATUS_LED_ACK_HOLD_MS + 300u + FLOW_PANEL_COST_MS,
+                                     mock_delay_total_ms(), "A did not end the quiet window");
+}
+
+/* The same press made DURING THE FIRST PAINT, which is the tail's half: the
+   checklist is already on its way to the glass, so it is the tail that must
+   take A and repaint — full, Timers. Dies on the shipped T15 tail, whose
+   take was masked to the acks, so A sat in the latch until sleep. */
+void test_t15_button_a_during_the_first_paint_goes_back_to_timers(void) {
+    flow_tick_clock(flow_at(15, 0));
+    flow_arm_chore_wake(BTN_B);
+    flow_display_ms = FLOW_PANEL_COST_MS;
+    flow_deferred_press_btn = BTN_A;
+    flow_deferred_press_ms =
+        (int32_t)(STATUS_LED_ACK_HOLD_MS + CONFIG_MAGTAG_CHORE_PAINT_QUIET_MS + FLOW_PANEL_COST_MS / 2);
+
+    TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_button());
+
+    TEST_ASSERT_EQUAL_INT_MESSAGE(1, flow_deferred_delivered, "the A press was never delivered");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(APP_MODE_TIMERS, (int)flow_mode, "an A made during the paint was discarded");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(1, flow_log_count(EV_PARTIAL), "the checklist's own paint went missing");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(1, flow_log_count(EV_FULL_REFRESH), "A's repaint was not a full refresh");
+    TEST_ASSERT_GREATER_THAN_INT_MESSAGE(flow_log_at(EV_PARTIAL), flow_log_at(EV_FULL_REFRESH),
+                                         "the Timers repaint did not come after the checklist");
+    TEST_ASSERT_EQUAL_INT(APP_MODE_TIMERS, (int)flow_painted_mode);
+    TEST_ASSERT_EQUAL_HEX8_MESSAGE(0, flow_latch_residue(), "a press was left for deep sleep to discard");
+    /* No quiet window in front of A's repaint: A ends the gesture. */
+    TEST_ASSERT_EQUAL_UINT32(
+        (uint32_t)STATUS_LED_ACK_HOLD_MS + CONFIG_MAGTAG_CHORE_PAINT_QUIET_MS + 2u * FLOW_PANEL_COST_MS,
+        mock_delay_total_ms());
+}
+
+/* A REFUSED A IS STILL REFUSED — button_a_toggle_allowed() says no (a RUNNING
+   timer, or no list), so the press is consumed, nothing toggles, nothing is
+   promoted, and the gesture carries on as if A had not been pressed: the
+   window neither closes early nor slides. */
+void test_t15_a_refused_button_a_during_the_gesture_changes_nothing(void) {
+    flow_tick_clock(flow_at(15, 0));
+    flow_arm_chore_wake(BTN_B);
+    flow_a_allowed = false;
+    flow_display_ms = FLOW_PANEL_COST_MS;
+    flow_deferred_press_btn = BTN_A;
+    flow_deferred_press_ms = (int32_t)STATUS_LED_ACK_HOLD_MS + 300;
+
+    TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_button());
+
+    TEST_ASSERT_EQUAL_INT_MESSAGE(1, flow_log_count(EV_A_APPLY), "the refused A never reached its gate");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(APP_MODE_CHORES, (int)flow_mode, "a refused A toggled the mode");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(0, flow_log_count(EV_FULL_REFRESH), "a refused A was promoted to a full refresh");
+    TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_PARTIAL));
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE(
+        (uint32_t)STATUS_LED_ACK_HOLD_MS + CONFIG_MAGTAG_CHORE_PAINT_QUIET_MS + FLOW_PANEL_COST_MS,
+        mock_delay_total_ms(), "a refused A moved the quiet window");
+}
+
+/* AN ACK AND A IN THE SAME POLL: the ack first. Within one 50 ms poll the
+   order of two presses is unknowable, and the two orders are not equally
+   recoverable — an ack applied first is undone by pressing it again, while
+   an ack routed AFTER the toggle is a Timers-mode press the handler's drain
+   then drops (or, anywhere that acted on it, a timer started that nobody
+   asked for). Dies on the order reversed (the ack is lost). */
+static void flow_press_c_and_a_together(void) {
+    if (flow_deferred_press_ms >= 0 && mock_delay_total_ms() >= (uint32_t)flow_deferred_press_ms) {
+        flow_deferred_press_ms = -1;
+        flow_press(BTN_C);
+        flow_press(BTN_A);
+    }
+}
+
+void test_t15_an_ack_and_a_in_one_poll_apply_the_ack_first(void) {
+    flow_tick_clock(flow_at(15, 0));
+    flow_arm_chore_wake(BTN_B);
+    flow_display_ms = FLOW_PANEL_COST_MS;
+    flow_deferred_press_ms = (int32_t)STATUS_LED_ACK_HOLD_MS + 300;
+    mock_delay_set_hook(flow_press_c_and_a_together); /* setUp reinstalls the default */
+
+    TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_button());
+
+    TEST_ASSERT_EQUAL_INT_MESSAGE(-1, flow_deferred_press_ms, "the two presses were never made");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(2, flow_log_count(EV_CHORE_ACK), "the ack made alongside A was lost");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(APP_MODE_TIMERS, (int)flow_mode, "the A made alongside the ack was lost");
+    TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_FULL_REFRESH));
+    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_PARTIAL));
+}
+
+/* The same pair made DURING THE FIRST PAINT, which the tail's take at the
+   top of its loop collects — a different take from the window's, so it
+   gets its own case (the window-only case survives that take's order
+   being reversed). */
+void test_t15_an_ack_and_a_made_during_a_paint_apply_the_ack_first(void) {
+    flow_tick_clock(flow_at(15, 0));
+    flow_arm_chore_wake(BTN_B);
+    flow_display_ms = FLOW_PANEL_COST_MS;
+    flow_deferred_press_ms =
+        (int32_t)(STATUS_LED_ACK_HOLD_MS + CONFIG_MAGTAG_CHORE_PAINT_QUIET_MS + FLOW_PANEL_COST_MS / 2);
+    mock_delay_set_hook(flow_press_c_and_a_together); /* setUp reinstalls the default */
+
+    TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_button());
+
+    TEST_ASSERT_EQUAL_INT_MESSAGE(-1, flow_deferred_press_ms, "the two presses were never made");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(2, flow_log_count(EV_CHORE_ACK), "the ack made alongside A was lost");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(APP_MODE_TIMERS, (int)flow_mode, "the A made alongside the ack was lost");
+    TEST_ASSERT_EQUAL_HEX8_MESSAGE(0, flow_latch_residue(), "a press was left for deep sleep to discard");
+}
+
+/* A OUTLIVES THE BUDGET, and only A. A pad that fires in every poll slides
+   the window to the budget; the paint that follows owes one repaint for the
+   press made during it; and an A made during THAT post-budget paint — the
+   one stretch where every other press is left for sleep — still gets its
+   toggle and its full repaint, because A ends the gesture and can apply
+   once. Dies on a tail with no post-budget A take (A left in the latch,
+   two paints). Own counters, never the log (see flow_press_in_every_delay). */
+static int flow_budget_pad_presses;
+static int flow_budget_paints;
+
+static void flow_pad_then_a_during_the_post_budget_paint(void) {
+    if (flow_painting) {
+        flow_budget_paints++;
+        if (flow_budget_paints <= 2) {
+            flow_press(flow_budget_paints == 1 ? BTN_B : BTN_A); /* A's own paint gets nothing */
+        }
+    } else if (flow_budget_pad_presses < 200) {
+        flow_budget_pad_presses++;
+        flow_press(BTN_B);
+    }
+}
+
+void test_t15_button_a_after_the_budget_still_goes_back_to_timers(void) {
+    flow_tick_clock(flow_at(15, 0));
+    flow_arm_chore_wake(BTN_B);
+    flow_display_ms = FLOW_PANEL_COST_MS;
+    flow_budget_pad_presses = 0;
+    flow_budget_paints = 0;
+    mock_delay_set_hook(flow_pad_then_a_during_the_post_budget_paint); /* setUp reinstalls the default */
+
+    TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_button());
+
+    TEST_ASSERT_GREATER_OR_EQUAL_INT_MESSAGE(2, flow_budget_paints, "the harness never reached the post-budget paint");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(APP_MODE_TIMERS, (int)flow_mode, "an A made after the budget was discarded");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(2, flow_log_count(EV_PARTIAL), "the budget's own two paints changed");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(1, flow_log_count(EV_FULL_REFRESH), "A past the budget was not painted full");
+    TEST_ASSERT_EQUAL_INT(APP_MODE_TIMERS, (int)flow_painted_mode);
+    TEST_ASSERT_EQUAL_HEX8_MESSAGE(0, flow_latch_residue(), "a press was left for deep sleep to discard");
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)STATUS_LED_ACK_HOLD_MS + CHORE_ACK_COALESCE_BUDGET_MS + 3u * FLOW_PANEL_COST_MS,
+                             mock_delay_total_ms());
+}
+
+/* ---- M2-T15 fix pass: only the first tail repaint after a break end is full
+
+   Review L3. s_break_ended is wake-sticky, so through the plain render
+   every repaint of the chore tail after a break end was a full refresh — up
+   to the whole paint bound of them in one gesture. The break ends (latched
+   by timer.c) during the first paint; the ack made in that paint drains it
+   and re-asserts chore mode, so its repaint is promoted — that is the one
+   that shows the break end. The ack made during THAT paint is an ordinary
+   tick of a box on a layout that has not moved, and must be a partial. Dies
+   on the wake-sticky promotion (two fulls). */
+static int flow_break_paints;
+
+static void flow_break_ends_then_two_ticks(void) {
+    if (!flow_painting || flow_break_paints >= 2) {
+        return;
+    }
+    flow_break_paints++;
+    if (flow_break_paints == 1) {
+        flow_latched = true; /* the break's wall end passes during the first paint */
+        flow_latched_wall = hal_time_now();
+        flow_press(BTN_C);
+    } else {
+        flow_press(BTN_D);
+    }
+}
+
+void test_t15_only_the_first_tail_repaint_after_a_break_end_is_full(void) {
+    flow_tick_clock(flow_at(15, 0));
+    flow_arm_chore_wake(BTN_B);
+    flow_display_ms = FLOW_PANEL_COST_MS;
+    flow_break_paints = 0;
+    mock_delay_set_hook(flow_break_ends_then_two_ticks); /* setUp reinstalls the default */
+
+    TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_button());
+
+    TEST_ASSERT_EQUAL_INT_MESSAGE(2, flow_break_paints, "the harness never pressed during two paints");
+    TEST_ASSERT_TRUE_MESSAGE(wake_flow_break_ended_this_wake(), "the break end was never drained");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(3, flow_log_count(EV_CHORE_ACK), "a tick of the gesture was lost");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(1, flow_log_count(EV_FULL_REFRESH),
+                                  "the break end was not promoted on exactly the one repaint that showed it");
+    TEST_ASSERT_EQUAL_INT(2, flow_log_count(EV_PARTIAL));
+    /* And the full one is the repaint right after the drain, not the last. */
+    TEST_ASSERT_LESS_THAN_INT(flow_log_at_nth(EV_PARTIAL, 2), flow_log_at(EV_FULL_REFRESH));
+}
+
+/* ---- M2-T15 fix pass: the post-join re-render across a screen change -----
+
+   Review M2. finish_action_and_render()'s re-render built force_full with
+   no screen-kind term, so a config edit applied during the network window
+   that cancels a timer RUNNING in chore mode (MAIN -> checklist, since
+   display_screen_for() suppresses CHORES while RUNNING) was painted as a
+   PARTIAL — a whole-layout swap as a diff. Negative control inline: the
+   policy still calls the pair partial, so the full refresh can only be the
+   new term. Dies on the term removed. */
+void test_m2_a_join_that_moves_the_screen_kind_repaints_full(void) {
+    flow_mode = APP_MODE_CHORES;
+    flow_chore_count = 3;
+    flow_state = TIMER_RUNNING; /* the timer screen, in chore mode */
+    mock_time_set(flow_at(16, 0));
+    flow_net_finish = NET_FINISH_CHANGED;
+    flow_state_after_finish = TIMER_IDLE; /* the config edit cancelled it */
+
+    TEST_ASSERT_EQUAL_INT_MESSAGE(
+        WAKE_RENDER_PARTIAL, wake_policy_render(TIMER_RUNNING, TIMER_IDLE, true, false, false),
+        "the policy no longer calls this pair partial - this test's negative control has gone vacuous");
+    TEST_ASSERT_NOT_EQUAL(display_screen_for(TIMER_RUNNING, APP_MODE_CHORES, 3),
+                          display_screen_for(TIMER_IDLE, APP_MODE_CHORES, 3));
+
+    finish_action_and_render(BTN_B, TIMER_RUNNING, flow_at(16, 0), false);
+
+    TEST_ASSERT_EQUAL_INT_MESSAGE(1, flow_log_count(EV_PARTIAL), "the first render was not the ordinary partial");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(1, flow_log_count(EV_FULL_REFRESH),
+                                  "the post-join repaint across a screen change went partial");
+    TEST_ASSERT_GREATER_THAN_INT(flow_log_at(EV_PARTIAL), flow_log_at(EV_FULL_REFRESH));
+}
+
+/* The other way the join moves the screen, and the reason the term compares
+   against the screen the first render BUILT rather than asking
+   display_screen_for() about `painted` with today's mode: a config payload
+   that EMPTIES the list, with no toggle this wake, makes the re-render's
+   emptied-list guard revert the mode and paint the timer screen over the
+   checklist. The timer state never moves, so a state-only term asked with
+   the current (reverted) mode sees MAIN on both sides and calls it no
+   change. Dies on that form of the term. */
+void test_m2_a_join_that_empties_the_list_repaints_full(void) {
+    flow_mode = APP_MODE_CHORES;
+    flow_chore_count = 3;
+    flow_state = TIMER_IDLE; /* the checklist */
+    mock_time_set(flow_at(16, 0));
+    flow_net_finish = NET_FINISH_CHANGED;
+    flow_chores_after_finish = 0; /* the config edit emptied the list */
+
+    finish_action_and_render(BTN_B, TIMER_IDLE, flow_at(16, 0), false);
+
+    TEST_ASSERT_EQUAL_INT_MESSAGE(APP_MODE_TIMERS, (int)flow_painted_mode,
+                                  "the emptied list never reverted the screen, so there was nothing to promote");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(1, flow_log_count(EV_PARTIAL), "the first render was not the ordinary partial");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(1, flow_log_count(EV_FULL_REFRESH),
+                                  "the checklist -> timer screen repaint after the join went partial");
+}
+
+/* And the half that keeps the term from being "any join change is full": a
+   join that moves the state but not the screen stays partial. */
+void test_m2_a_join_that_keeps_the_screen_stays_partial(void) {
+    flow_mode = APP_MODE_CHORES;
+    flow_chore_count = 3;
+    flow_state = TIMER_IDLE; /* the checklist */
+    mock_time_set(flow_at(16, 0));
+    flow_net_finish = NET_FINISH_CHANGED;
+    flow_state_after_finish = TIMER_PAUSED; /* still the checklist */
+
+    TEST_ASSERT_EQUAL_INT(WAKE_RENDER_PARTIAL, wake_policy_render(TIMER_IDLE, TIMER_PAUSED, true, false, false));
+
+    finish_action_and_render(BTN_B, TIMER_IDLE, flow_at(16, 0), false);
+
+    TEST_ASSERT_EQUAL_INT_MESSAGE(0, flow_log_count(EV_FULL_REFRESH), "a same-screen post-join repaint went full");
+    TEST_ASSERT_EQUAL_INT(2, flow_log_count(EV_PARTIAL));
 }
 
 /* THE POLL QUANTUM, pinned to BUTTON_LATCH_DEBOUNCE_US and not to the
@@ -7978,7 +8526,8 @@ void test_t12_the_coalescing_loop_polls_at_least_as_often_as_the_debounce(void) 
     TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_button());
 
     const uint32_t debounce_ms = BUTTON_LATCH_DEBOUNCE_US / 1000;
-    const uint32_t floor_takes = ((uint32_t)STATUS_LED_ACK_HOLD_MS + debounce_ms - 1) / debounce_ms;
+    /* The idle window is the QUIET window since M2-T15, not the hold. */
+    const uint32_t floor_takes = ((uint32_t)CONFIG_MAGTAG_CHORE_PAINT_QUIET_MS + debounce_ms - 1) / debounce_ms;
     TEST_ASSERT_GREATER_OR_EQUAL_UINT32_MESSAGE(floor_takes, (uint32_t)flow_mask_takes,
                                                 "the coalescing loop polls further apart than the debounce window, so "
                                                 "two presses of one button can collapse into one latched bit");
@@ -8088,9 +8637,18 @@ void test_t12_a_correction_press_is_accepted_at_a_real_poll_cadence(void) {
 
    Modelled exactly as the hardware produces it: an edge on a button that
    has not been observed released since its last accepted press. The button
-   is held throughout (flow_held_now), so no take can observe a release. */
+   is held throughout (flow_held_now), so no take can observe a release.
+
+   ON ITS OWN COUNTER, like every other self-limiting hook in this file
+   since M2-T15: capping on flow_log_count() is the pattern that hung the
+   suite there, because flow_log holds 1024 entries and silently stops
+   recording. This one could not saturate the log today, but a cap that is
+   only safe because of how few events a passing run logs is not a cap. */
+static int flow_bounce_edges;
+
 static void flow_bounce_the_held_button(void) {
-    if (flow_log_count(EV_CHORE_ACK) < 20) {
+    if (flow_bounce_edges < 20) {
+        flow_bounce_edges++;
         flow_press(BTN_B); /* release-bounce edges, never a new press */
     }
 }
@@ -8099,14 +8657,15 @@ void test_t12_release_bounce_on_a_held_button_is_not_a_second_press(void) {
     flow_tick_clock(flow_at(15, 0));
     flow_arm_chore_wake(BTN_B);
     flow_held_now = 1u << BTN_B; /* still down: nobody can see it come up */
+    flow_bounce_edges = 0;
     mock_delay_set_hook(flow_bounce_the_held_button);
 
     TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_button());
 
     TEST_ASSERT_EQUAL_INT_MESSAGE(1, flow_log_count(EV_CHORE_ACK),
                                   "release bounce on the wake press was applied as a second ack");
-    TEST_ASSERT_EQUAL_UINT32_MESSAGE(2u * STATUS_LED_ACK_HOLD_MS, mock_delay_total_ms(),
-                                     "bounce edges granted the burst more windows");
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE((uint32_t)STATUS_LED_ACK_HOLD_MS + CONFIG_MAGTAG_CHORE_PAINT_QUIET_MS,
+                                     mock_delay_total_ms(), "bounce edges granted the burst more windows");
 }
 
 /* The guard's three terms, from the side that costs battery: a wake that
@@ -9745,8 +10304,23 @@ int main(void) {
     RUN_TEST(test_t8_a_second_ack_coalesces_into_the_same_refresh_with_no_break);
     RUN_TEST(test_t8_two_acks_latched_in_one_window_both_land);
     RUN_TEST(test_t8_a_mode_reverted_under_the_wake_stops_routing_presses_to_acks);
-    RUN_TEST(test_t8_the_coalescing_window_is_the_ack_hold_figure);
+    RUN_TEST(test_t15_a_lone_ack_waits_the_quiet_window_not_the_hold);
     RUN_TEST(test_t8_the_coalescing_window_is_bounded_per_wake);
+    RUN_TEST(test_t15_presses_less_than_a_window_apart_share_one_paint);
+    RUN_TEST(test_t15_a_press_during_the_paint_waits_a_quiet_window_before_the_repaint);
+    RUN_TEST(test_t15_a_press_during_the_second_paint_is_not_discarded);
+    RUN_TEST(test_t15_the_burst_budget_does_not_count_panel_time);
+    RUN_TEST(test_t15_a_continuous_pad_gets_one_paint_past_the_budget);
+    RUN_TEST(test_t15_button_a_after_the_last_tick_goes_back_to_timers);
+    RUN_TEST(test_t15_button_a_during_the_first_paint_goes_back_to_timers);
+    RUN_TEST(test_t15_a_refused_button_a_during_the_gesture_changes_nothing);
+    RUN_TEST(test_t15_an_ack_and_a_in_one_poll_apply_the_ack_first);
+    RUN_TEST(test_t15_an_ack_and_a_made_during_a_paint_apply_the_ack_first);
+    RUN_TEST(test_t15_button_a_after_the_budget_still_goes_back_to_timers);
+    RUN_TEST(test_t15_only_the_first_tail_repaint_after_a_break_end_is_full);
+    RUN_TEST(test_m2_a_join_that_moves_the_screen_kind_repaints_full);
+    RUN_TEST(test_m2_a_join_that_empties_the_list_repaints_full);
+    RUN_TEST(test_m2_a_join_that_keeps_the_screen_stays_partial);
     RUN_TEST(test_t12_the_coalescing_loop_polls_at_least_as_often_as_the_debounce);
     RUN_TEST(test_t12_a_mis_press_on_a_full_list_can_be_corrected_in_the_same_wake);
     RUN_TEST(test_t12_a_correction_press_is_accepted_at_a_real_poll_cadence);

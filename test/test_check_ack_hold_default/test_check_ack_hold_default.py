@@ -47,13 +47,24 @@ menu "MagTag Timer"
             A neighbour with its own default, above the symbol.
 
     config {symbol}
-        int "NeoPixel ack hold / chore-ack coalescing window (ms)"
+        int "NeoPixel ack hold (ms)"
         default {default}
         range 0 3000
 {extra}        help
             The 250 that shipped before was too short; test_wake_flow is
             built at 170, and 400 is design 2.5's prose estimate. None of
             these three numbers is the default and none may be read as it.
+            This used to be the chore-ack paint window as well; that is
+            MAGTAG_CHORE_PAINT_QUIET_MS now, directly below.
+
+    config MAGTAG_CHORE_PAINT_QUIET_MS
+        int "Chore-ack paint quiet window (ms)"
+        default 1200
+        range 100 10000
+        help
+            The knob split off the hold by M2-T15, and the neighbour most
+            likely to be misread as it: it sits immediately below, and its
+            prose talks about the hold at length.
 
     config MAGTAG_QUIET_START_HHMM
         int "NeoPixel quiet hours start (HHMM, 24h)"
@@ -138,6 +149,16 @@ class TestTheAgreeingPair(GateCase):
         # read either, no pairing of 400/400 could be clean.
         out = self.assertFails(kconfig("400"), header("100"), "default 400")
         self.assertIn("100", out)
+
+    def test_the_split_off_quiet_window_is_not_read_as_the_hold(self):
+        # M2-T15 split the hold in two, and the paint window's block now sits
+        # IMMEDIATELY below the hold's with a default of 1200. The gate is
+        # about the hold only: a header that agreed with the window instead
+        # must fail, and a hold block that lost its own default must not
+        # borrow the window's.
+        self.assertFails(kconfig("400"), header("1200"), "default 400")
+        kc = kconfig().replace("        default 400\n", "", 1)
+        self.assertFails(kc, header("1200"), "no unconditional `default`")
 
 
 class TestTheDivergence(GateCase):

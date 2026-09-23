@@ -3,9 +3,13 @@
 
 WHY THIS EXISTS
 ---------------
-`STATUS_LED_ACK_HOLD_MS` (include/status_led.h) is one figure with two jobs --
-the pre-press hold and the chore-ack coalescing window -- and it is a
-menuconfig knob so a board can sweep it.  The firmware takes
+`STATUS_LED_ACK_HOLD_MS` (include/status_led.h) is the NeoPixel pre-press
+hold, and it is a menuconfig knob so a board can sweep it.  (It was also the
+chore-ack coalescing window until M2-T15 split that off as
+CONFIG_MAGTAG_CHORE_PAINT_QUIET_MS.  The window has no host fallback -- the
+host build supplies it through EXTRA_DEFS -- so it has no second home and
+nothing here to check; its Kconfig block sits directly below the hold's and
+is one of the neighbours this gate must not read.)  The firmware takes
 `CONFIG_MAGTAG_STATUS_LED_ACK_HOLD_MS` from sdkconfig.h.  The host build has
 no sdkconfig.h, so it takes a literal written into the `#else` arm.  Two
 places, one number.
@@ -201,12 +205,12 @@ def main(argv):
     print(f"  {KCONFIG}:{kline}: default {default}")
     print(f"  {HEADER}:{hline}: #define {MACRO} {fallback}")
     print(
-        f"\nOne figure with two jobs (the pre-press hold and the chore-ack\n"
-        f"coalescing window), read from sdkconfig.h on the device and from the\n"
+        f"\nOne figure (the NeoPixel pre-press hold), read from sdkconfig.h on\n"
+        f"the device and from the\n"
         f"literal above on the host. A suite that measures it without an\n"
         f"EXTRA_DEFS override times the fallback while the firmware times the\n"
         f"default, and passes green while the two devices differ.\n"
-        f"Raise or lower BOTH, or split the line deliberately."
+        f"Raise or lower BOTH."
     )
     return 1
 
