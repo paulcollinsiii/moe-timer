@@ -30,19 +30,6 @@ static const char *timer_state_str(timer_state_t st) {
     }
 }
 
-static const char *day_type_name(day_type_t dt) {
-    switch (dt) {
-        case DAY_WEEKEND:
-            return "Weekend";
-        case DAY_HOLIDAY:
-            return "Holiday";
-        case DAY_SUMMER:
-            return "Summer";
-        default:
-            return "Weekday";
-    }
-}
-
 /* Today's allocation for an IDLE slot: the scheduled/configured base plus
    whatever adjustment is banked on it, clamped at 0 exactly as
    timer_start does when it folds the bank for real.
@@ -229,7 +216,7 @@ void app_state_stats(const app_state_in_t *in, time_t now, stats_snapshot_t *out
     const timer_def_t *def = timer_active_def();
     out->active_timer = (def != NULL) ? def->name : "Screen";
     day_type_t dt = schedule_get_day_type(now);
-    out->day_type = day_type_name(dt);
+    out->day_type = schedule_day_type_name(dt);
     for (int i = 0; i < TIMER_SLOT_COUNT; i++) {
         const timer_def_t *sd = timer_slot_def(i);
         if (i > 0 && sd == NULL) {
@@ -258,4 +245,33 @@ void app_state_stats(const app_state_in_t *in, time_t now, stats_snapshot_t *out
     out->fw = in->fw_version;
     out->screen_bonus_applied_s = timer_screen_bonus_applied();
     out->reset_reason = in->reset_reason;
+
+    /* ---- the chore checklist, read-only (design 1.4) ------------------
+       The same three reads app_state_display() makes for the panel's chore
+       strip, so HA and the glass cannot disagree about what is done. The
+       ack byte is RAW (timer.h) and is only ever read through chores.c,
+       which ignores bits at or above the configured count — so a stale
+       high bit from a longer list reports neither as a done chore nor as a
+       lit per-chore sensor. No chores configured: all three are 0, the
+       inert C1 reading. */
+    char names[CHORE_MAX][CHORE_NAME_BUF];
+    uint8_t n = 0;
+    chore_store_load_names(names, &n); /* fills n = 0 on any failure; see app_state_display() */
+    const uint8_t acked_raw = timer_chore_acked();
+    for (uint8_t i = 0; i < CHORE_MAX; i++) {
+        if (chores_is_acked(acked_raw, i, n)) {
+            out->chore_acked |= (uint8_t)(1u << i);
+            out->chores_done++;
+        }
+    }
+    out->chores_left = chores_outstanding(acked_raw, n);
+
+    /* M2-D6's config warning. Every day type, not today's: the blocking
+       gate already covers today, and it is the other three that go
+       invisible once the next config document overwrites the ack that
+       named them. The mask is judged on the RAW stored pair — see
+       schedule_chore_free_broken_mask() for why the clamped accessors
+       would report every device healthy. Main task, like every schedule
+       read; stats_json.h says why it can ride the snapshot. */
+    out->chore_free_bad = schedule_chore_free_broken_mask();
 }

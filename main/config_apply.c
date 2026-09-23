@@ -217,16 +217,14 @@ static void apply_holidays(const cJSON *root, err_acc_t *e) {
 
    config_is_clean_str() IS HYGIENE AT THE POINT OF ENTRY, and it is
    explicitly NOT justified by a downstream escaper this function does not
-   control. Two facts, because an earlier version of this comment got both
-   wrong: (1) no chore name reaches a JSON builder today at all —
-   chore_store_load_names() has two callers, this file and chore_store.c,
-   and nothing in stats_json.c, mqtt_ha.c or ha_config.c touches a name;
-   (2) when one does, it will be escaped, not corrupting, because
-   stats_json.c runs every embedded string through jesc() and states the
-   contract in as many words — "NO string reaching it can break the JSON,
-   and a field that is safe only because of what some other module
-   currently does is a field that stops being safe the day that module
-   changes".
+   control. Two facts: (1) since M3-T1 a chore name DOES reach a JSON
+   builder — mqtt_ha.c's publish_discovery() names each chore_N binary
+   sensor "<name> done" through stats_json_discovery_named(); (2) it is
+   escaped there, not corrupting, because that builder runs its name
+   override through jesc() and stats_json.c states the contract in as
+   many words — "NO string reaching it can break the JSON, and a field
+   that is safe only because of what some other module currently does is
+   a field that stops being safe the day that module changes".
 
    What the check buys, beside the 20-BYTE storage cap, is a name that is
    RENDERABLE and a rejection the operator can see: no control byte to
@@ -437,18 +435,18 @@ static bool err_has(const err_acc_t *e, const char *field) {
    gate's rule (M2's config-error screen, which reads today's day type),
    not this ack's. This function has no clock and needs none.
 
-   C12's "NAMED BUT DORMANT" IS NOT DURABLE, and that is a design-level
-   gap for M2/M3 rather than a defect here. The config_ack is published
-   RETAINED (mqtt_ha.c), so the naming does persist in MQTT — but only
-   until the NEXT document overwrites that topic, typically with
-   ok:true. After that a broken NON-TODAY pair is invisible everywhere:
-   this ack is gone, and C11's blocking screen only reads TODAY's day
-   type. So "named in the config_ack; dormant" is satisfied at the moment
-   of the edit, not durably. If a broken summer pair should still be
-   discoverable in December, the place for it is the stat payload (a
-   config-warning field), which is M2/M3's call — deliberately not made
-   here, because inventing a second channel for it would be scope this
-   task does not own.
+   C12's "NAMED BUT DORMANT" IS NOT DURABLE HERE, and the durable report
+   lives elsewhere. The config_ack is published RETAINED (mqtt_ha.c), so
+   the naming does persist in MQTT — but only until the NEXT document
+   overwrites that topic, typically with ok:true, and C11's blocking
+   screen only reads TODAY's day type. So this ack satisfies "named;
+   dormant" at the moment of the edit. What keeps a broken summer pair
+   discoverable in December is the stat payload's config warning
+   (M2-D6, taken into M3-T1): schedule_chore_free_broken_mask() judges
+   every day type's STORED pair with the same predicate this function
+   uses, on every wake that publishes, and HA's config_warning sensor
+   names the day types until the pair is fixed. This function stays a
+   statement about THIS document, for the reason below.
 
    WHAT IT DOES NOT DO: it does not reject the write and it does not clamp.
    The values stay exactly as the document set them and the pair is left

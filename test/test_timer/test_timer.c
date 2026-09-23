@@ -14,6 +14,7 @@
 #include "mock_hal_nvs.c"
 #include "../../main/timer.c"
 #include "../../main/schedule.c"
+#include "../../main/config_validate.c" /* schedule.c judges chore_free pairs with it */
 #include "../../main/chores.c"
 #include "../../main/chore_store.c"
 #include "../../main/button_actions.c"

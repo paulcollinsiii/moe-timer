@@ -3,6 +3,7 @@
 #include <stddef.h>
 #include <stdint.h>
 
+#include "chores.h"          /* CHORE_NAME_MAX / CHORE_NAME_BUF — the chore_N display names */
 #include "config_validate.h" /* CFG_BOUND_OTA_* — the stored OTA widths */
 #include "timer.h"           /* TIMER_EXTRA_SLOTS */
 
@@ -49,6 +50,29 @@ typedef struct {
                                  forensics over MQTT, because the USB
                                  CDC console drops output around
                                  sleep/reset transitions */
+    /* ---- the chore checklist, read-only (design 1.4). The device is the
+       sole authority on acks; HA only displays them. With no chores
+       configured all three are 0 — the feature is inert (row C1). */
+    uint8_t chores_left; /* configured chores not yet acked today */
+    uint8_t chores_done; /* configured chores acked today */
+    uint8_t chore_acked; /* bit i = chore i acked; the builder reports only
+                            bits below chores_left + chores_done */
+    /* M2-D6: bit (1u << d) = day type d's STORED chore_free exceeds its
+       allocation (schedule_chore_free_broken_mask). 0 = every pair valid.
+
+       It rides the snapshot rather than a publish-time argument like
+       ota_stat_t, and the difference is real rather than convenient. Those
+       fields change on the NETWORK task between the snapshot and the
+       publish (the OTA check runs in between). This one changes only when
+       a config document or a set/ lands, and mqtt_ha applies those AFTER
+       this window's stat publish (apply_incoming follows publish_states),
+       so a publish-time read would see exactly what the snapshot saw. It
+       is recomputed from NVS on every wake that publishes — schedule.c's
+       cache is wake-scoped RAM — so a fix that lands in one window clears
+       the warning in the next, and nothing short of a fix clears it. The
+       read has to stay on the main task anyway: the schedule cache it
+       goes through is unsynchronised. */
+    uint8_t chore_free_bad;
 } stats_snapshot_t;
 
 /* The OTA leg of the stat payload, and the reason it is a SEPARATE
@@ -169,6 +193,11 @@ typedef struct {
     int expire_after;         /* seconds; 0 = omit (value persists) */
     bool binary;              /* adds pl_on/pl_off */
     const char *ent_cat;      /* "diagnostic" / NULL = primary (top-level in HA) */
+    /* "measurement" etc. / NULL = omit. HA keeps long-term statistics
+       ONLY for a sensor that declares one — and leaves every such sensor
+       out of the logbook, so a text or event-like sensor whose changes
+       are the point must stay NULL. Added in v22 for the chore counts. */
+    const char *state_class;
 } ha_entity_t;
 
 /* Home Assistant re-reads a discovery config only when something in it
@@ -241,8 +270,18 @@ typedef struct {
         changed. Costs the usual retained-discovery burst; the def_ent_id
         note above still applies, and these four register for the first
         time here so they get their MAC-derived entity_ids straight
-        away. */
-#define STATS_JSON_DISC_SCHEMA_VER 21
+        away.
+
+   v22: + the chore checklist's read-only entities (design 1.4):
+        chores_left, chores_done, and one chore_N binary_sensor per
+        possible chore (CHORE_MAX rows; mqtt_ha.c names each from the list
+        and retires the ones past the configured count, exactly as it does
+        for a disabled timer slot). + config_warning, M2-D6's durable
+        report of a broken chore_free pair on ANY day type. And the
+        table's state_class column (ha_entity_t), set on chores_left and
+        chores_done only, so HA keeps long-term statistics for them. One
+        bump for all of it, as the plan's M3-T1 requires. */
+#define STATS_JSON_DISC_SCHEMA_VER 22
 
 /* Buffer the stat/summary/discovery payloads are built into (mqtt_ha.c).
    Named here because stats_json_stat is what can outgrow it, and a stat
@@ -256,8 +295,18 @@ typedef struct {
    HEAP-allocated at window start and freed at teardown (mqtt_ha.c), so
    the 256 bytes are borrowed for the length of an MQTT window rather
    than parked in .bss — and the struct's own _Static_assert against its
-   12 KB budget is what keeps that growth deliberate. */
-#define STATS_JSON_PAYLOAD_MAX 1024
+   per-window heap budget (beside window_mem_t in mqtt_ha.c, which also
+   carries the arithmetic) is what keeps that growth deliberate.
+
+   1024 -> 1280 with the chore leg (v22): the measured worst case was 938
+   of 1024, 85 bytes usable (the gate is needed < size), and the chore
+   counts, the per-chore ack array and the config warning naming all four
+   day types need about a hundred. Same heap, same lifetime, same assert
+   as the step above; mqtt_ha.c carries the window_mem_t arithmetic.
+   test_stat_payload_worst_case_fits_the_publish_buffer reports the
+   current headroom rather than pinning a number here that would go
+   stale. */
+#define STATS_JSON_PAYLOAD_MAX 1280
 
 const ha_entity_t *stats_json_entities(int *count);
 int stats_json_discovery_topic(char *buf, size_t len, const char *dev_id, const ha_entity_t *ent);
@@ -266,6 +315,42 @@ int stats_json_discovery(char *buf, size_t len, const char *dev_id, const char *
 /* Same, with a runtime display-name override (per-slot completion sensors). */
 int stats_json_discovery_named(char *buf, size_t len, const char *dev_id, const char *dev_name, const char *fw,
                                const ha_entity_t *ent, const char *name_override);
+/* Which chore a per-chore entity reports: 0..CHORE_MAX-1 for the
+   chore_N binary sensors, -1 for every other row. mqtt_ha.c uses it to
+   name the entity from the chore list and to retire the rows past the
+   configured count. An exact match on the whole key, not a prefix test,
+   so chores_left / chores_done can never be mistaken for a chore. */
+int stats_json_chore_index(const ha_entity_t *ent);
+
+/* What mqtt_ha.c's discovery pass does with one ENTITIES row, as far as
+   the chore list is concerned. The decision lives here, pure, so the host
+   suite can pin it; the publishing stays in mqtt_ha.c. */
+typedef enum {
+    STATS_CHORE_DISC_NOT_CHORE = 0, /* not a chore_N row: the caller's usual path */
+    STATS_CHORE_DISC_PUBLISH,       /* configured chore: publish, named name_out */
+    STATS_CHORE_DISC_RETIRE,        /* past the configured count: empty retained config */
+    STATS_CHORE_DISC_SKIP,          /* list UNKNOWN: touch nothing, and do not stamp the pass */
+} stats_chore_disc_t;
+
+/* "<chore name> done". The buffer a chore_N display name needs: the
+   longest name the config path accepts (CHORE_NAME_MAX bytes, enforced in
+   config_apply.c's apply_chores) plus the suffix and its NUL. A caller
+   declares its buffer from this and asserts it at compile time. */
+#define STATS_JSON_CHORE_DONE_SUFFIX " done"
+#define STATS_JSON_CHORE_ENTITY_NAME_BUF (CHORE_NAME_MAX + sizeof(STATS_JSON_CHORE_DONE_SUFFIX))
+
+/* `names`/`n` are chore_store_load_names()'s outputs, with n < 0 meaning
+   the load was not authoritative (chore_store_names_known() false): the
+   list is unknown, so every chore row is SKIPPED — neither renamed nor
+   retired, because retiring on a failed read would delete the owner's
+   entities over a transient error. Otherwise an index at or past n
+   RETIRES, and one below it PUBLISHES named "<name> done" — or under the
+   table's default name when the stored row is empty (the blob can hold
+   "3 chores, the middle one empty"; the config path cannot write it), so
+   an entity is never called just " done". `name_out` is written only for
+   PUBLISH, and must hold STATS_JSON_CHORE_ENTITY_NAME_BUF bytes. */
+stats_chore_disc_t stats_json_chore_discovery(const ha_entity_t *ent, const char names[][CHORE_NAME_BUF], int n,
+                                              char *name_out, size_t name_len);
 
 #ifdef __cplusplus
 }

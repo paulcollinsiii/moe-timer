@@ -5,6 +5,7 @@
 #include <string.h>
 #include <time.h>
 
+#include "config_validate.h"
 #include "date_fmt.h"
 #include "hal_nvs.h"
 #include "nvs_defaults.h"
@@ -15,7 +16,8 @@
    the orchestrator calls schedule_cache_invalidate() after the window so
    later reads see the edit. Sized for the largest consumer (512 B holiday
    blob) — trades a little .bss for one flash read per key per wake. */
-#define SCHED_DAY_TYPES 4
+#define SCHED_DAY_TYPES SCHEDULE_DAY_TYPES
+_Static_assert(DAY_SUMMER + 1 == SCHEDULE_DAY_TYPES, "SCHEDULE_DAY_TYPES must match day_type_t");
 
 static struct {
     bool blob_loaded;
@@ -184,6 +186,24 @@ void schedule_get_chore_free_pair_min(day_type_t day_type, uint16_t *free_min, u
                                 &s_cache.free_min[idx]);
     *alloc_min = read_cached_min(s_day_rows[idx].alloc_key, s_day_rows[idx].alloc_default_min,
                                  &s_cache.alloc_loaded[idx], &s_cache.alloc_min[idx]);
+}
+
+/* Every day type, through the raw reader above and the shared predicate —
+   see the header for why neither may be swapped for anything nearer to
+   hand. The seconds accessors below are the obvious thing to reach for
+   and the wrong one: they clamp, and after the clamp no pair is broken. */
+uint8_t schedule_chore_free_broken_mask(void) {
+    uint8_t mask = 0;
+    for (unsigned d = 0; d < SCHED_DAY_TYPES; d++) {
+        uint16_t free_min = 0;
+        uint16_t alloc_min = 0;
+        schedule_get_chore_free_pair_min((day_type_t)d, &free_min, &alloc_min);
+        /* The free slice is the SUBJECT and goes first — both parameters
+           are uint16_t, so a swap compiles and inverts the answer. */
+        if (!config_is_valid_chore_free_min(free_min, alloc_min))
+            mask |= (uint8_t)(1u << d);
+    }
+    return mask;
 }
 
 uint32_t schedule_get_allocation_sec(day_type_t day_type) {

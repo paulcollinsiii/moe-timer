@@ -625,6 +625,65 @@ static void test_an_erased_name_blob_is_rejected(void) {
     assert_no_chores_configured();
 }
 
+/* A READ that fails is not a record that was rejected. Both hand back the
+   inert n = 0, but only the rejection is the truth about the device (it
+   runs on no chores until a new list lands); after a failed read the list
+   is UNKNOWN, and a caller that publishes the count — HA discovery, which
+   retires entities past it and stamps the pass done — must be able to
+   tell. The good blob is in NVS the whole time, so the failure is the
+   read's alone. */
+static void test_a_failed_read_leaves_the_name_list_unknown_not_rejected(void) {
+    nvs_chore_names_blob_t b = good_names_blob();
+    put_raw(NVS_KEY_CHORES, &b, sizeof(b));
+    mock_nvs_fail_reads(1);
+    clobber_out_params();
+    const esp_err_t ret = chore_store_load_names(g_names, &g_n);
+    TEST_ASSERT_NOT_EQUAL(ESP_OK, ret);
+    TEST_ASSERT_NOT_EQUAL(ESP_ERR_NVS_NOT_FOUND, ret);
+    TEST_ASSERT_NOT_EQUAL(ESP_ERR_INVALID_VERSION, ret);
+    assert_no_chores_configured(); /* still the safe default for every other caller */
+    TEST_ASSERT_FALSE(chore_store_names_known(ret));
+    /* ...and the very next read, the flash recovered, is the list. */
+    clobber_out_params();
+    const esp_err_t again = chore_store_load_names(g_names, &g_n);
+    TEST_ASSERT_EQUAL(ESP_OK, again);
+    TEST_ASSERT_EQUAL_UINT8(3, g_n);
+    TEST_ASSERT_TRUE(chore_store_names_known(again));
+}
+
+/* Every answer that IS authoritative: the list, never configured, and
+   each way a stored blob is rejected — including the oversized one, which
+   nvs_get_blob refuses with ESP_ERR_NVS_INVALID_LENGTH, a verdict on the
+   bytes and not a failed read. */
+static void test_every_rejection_is_an_authoritative_answer(void) {
+    TEST_ASSERT_TRUE(chore_store_names_known(chore_store_load_names(g_names, &g_n))); /* absent */
+
+    nvs_chore_names_blob_t b = good_names_blob();
+    put_raw(NVS_KEY_CHORES, &b, sizeof(b));
+    TEST_ASSERT_TRUE(chore_store_names_known(chore_store_load_names(g_names, &g_n))); /* the list */
+
+    b.version = CHORE_NAMES_BLOB_VERSION + 1;
+    put_raw(NVS_KEY_CHORES, &b, sizeof(b));
+    TEST_ASSERT_TRUE(chore_store_names_known(chore_store_load_names(g_names, &g_n))); /* version */
+
+    b = good_names_blob();
+    b.n = CHORE_MAX + 1;
+    put_raw(NVS_KEY_CHORES, &b, sizeof(b));
+    TEST_ASSERT_TRUE(chore_store_names_known(chore_store_load_names(g_names, &g_n))); /* count */
+
+    b = good_names_blob();
+    put_raw(NVS_KEY_CHORES, &b, sizeof(b) - 1);
+    TEST_ASSERT_TRUE(chore_store_names_known(chore_store_load_names(g_names, &g_n))); /* short */
+
+    uint8_t raw[sizeof(nvs_chore_names_blob_t) + 1];
+    memset(raw, 0, sizeof(raw));
+    memcpy(raw, &b, sizeof(b));
+    put_raw(NVS_KEY_CHORES, raw, sizeof(raw));
+    const esp_err_t over = chore_store_load_names(g_names, &g_n);
+    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_VERSION, over);
+    TEST_ASSERT_TRUE(chore_store_names_known(over)); /* oversized */
+}
+
 /* ---- what the mask does NOT promise ------------------------------------- */
 
 /* The mask comes back EXACTLY as stored, with no masking to the configured
@@ -738,6 +797,8 @@ int main(void) {
     RUN_TEST(test_an_erased_ack_record_is_rejected);
     RUN_TEST(test_an_all_zero_ack_record_is_rejected);
     RUN_TEST(test_an_erased_name_blob_is_rejected);
+    RUN_TEST(test_a_failed_read_leaves_the_name_list_unknown_not_rejected);
+    RUN_TEST(test_every_rejection_is_an_authoritative_answer);
 
     RUN_TEST(test_ack_bits_above_the_configured_count_come_back_unmasked);
     RUN_TEST(test_an_ack_record_outliving_the_name_list_keeps_the_release);

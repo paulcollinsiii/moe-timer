@@ -40,7 +40,7 @@ static stats_snapshot_t base_snapshot(void) {
 /* ---- stat payload ---- */
 
 void test_stat_payload_exact(void) {
-    char buf[512];
+    char buf[STATS_JSON_PAYLOAD_MAX];
     stats_snapshot_t s = base_snapshot();
     int n = stats_json_stat(buf, sizeof(buf), &s, &NO_OTA, &NO_DIAG);
     /* remaining_s/allocation_s are PER-SLOT arrays ([0] = Screen, [N] =
@@ -52,6 +52,7 @@ void test_stat_payload_exact(void) {
         "\"allocation_s\":[3600,900,0,600,900],"
         "\"day_type\":\"Weekday\",\"completions\":[0,2,0,1],\"charge_lock\":false,"
         "\"break_s\":0,\"accum_s\":0,\"fw\":\"v1.4.0-test\",\"reset\":\"DEEPSLEEP\","
+        "\"chores_left\":0,\"chores_done\":0,\"chore_ack\":[0,0,0],\"cfg_warn\":\"OK\","
         "\"ota_result\":\"\",\"ota_target\":\"\",\"ota_fails\":0,\"ota_dl_ms\":0,"
         "\"panics\":0,\"pphase\":\"\",\"pup_s\":0,\"pheap\":0,\"pstk_main\":0,\"pstk_net\":0,"
         "\"heap\":0,\"heap_min\":0,\"stk_main\":0,\"stk_net\":0,\"nvs_free\":0}",
@@ -59,10 +60,118 @@ void test_stat_payload_exact(void) {
     TEST_ASSERT_EQUAL_INT((int)strlen(buf), n);
 }
 
+/* ---- the chore leg (M3-T1, design 1.4) ---- */
+
+void test_stat_payload_carries_the_chore_counts_and_acks(void) {
+    char buf[STATS_JSON_PAYLOAD_MAX];
+    stats_snapshot_t s = base_snapshot();
+    s.chores_left = 1;
+    s.chores_done = 2;
+    s.chore_acked = 0x05; /* chores 1 and 3 */
+    stats_json_stat(buf, sizeof(buf), &s, &NO_OTA, &NO_DIAG);
+    TEST_ASSERT_NOT_NULL(strstr(buf, "\"chores_left\":1,\"chores_done\":2,\"chore_ack\":[1,0,1],"));
+}
+
+/* Each count on its own, so a builder that printed one field under the
+   other's key — or either off by one — cannot pass by symmetry. */
+void test_stat_payload_chore_counts_are_not_interchangeable(void) {
+    char buf[STATS_JSON_PAYLOAD_MAX];
+    stats_snapshot_t s = base_snapshot();
+    s.chores_left = 3;
+    s.chores_done = 0;
+    stats_json_stat(buf, sizeof(buf), &s, &NO_OTA, &NO_DIAG);
+    TEST_ASSERT_NOT_NULL(strstr(buf, "\"chores_left\":3,\"chores_done\":0,\"chore_ack\":[0,0,0]"));
+    s.chores_left = 0;
+    s.chores_done = 3;
+    s.chore_acked = 0x07;
+    stats_json_stat(buf, sizeof(buf), &s, &NO_OTA, &NO_DIAG);
+    TEST_ASSERT_NOT_NULL(strstr(buf, "\"chores_left\":0,\"chores_done\":3,\"chore_ack\":[1,1,1]"));
+}
+
+/* The array is always CHORE_MAX long so every chore_N template has an
+   index to read, and a position past the configured count reads 0 even
+   when the caller left its bit set: a stale bit from a longer list must
+   never light a per-chore sensor. Two chores here, and bit 2 set. */
+void test_stat_payload_chore_ack_ignores_bits_past_the_configured_count(void) {
+    char buf[STATS_JSON_PAYLOAD_MAX];
+    stats_snapshot_t s = base_snapshot();
+    s.chores_left = 1;
+    s.chores_done = 1;
+    s.chore_acked = 0x06; /* chore 2 acked, plus a stale bit 2 */
+    stats_json_stat(buf, sizeof(buf), &s, &NO_OTA, &NO_DIAG);
+    TEST_ASSERT_NOT_NULL(strstr(buf, "\"chore_ack\":[0,1,0]"));
+}
+
+/* No chores configured (row C1): both counts 0 and every position 0. The
+   entities still exist — the chore_N rows are retired at discovery, the
+   two counts are not — so the payload still has to feed them. */
+void test_stat_payload_no_chores_reports_zeroes(void) {
+    char buf[STATS_JSON_PAYLOAD_MAX];
+    stats_snapshot_t s = base_snapshot();
+    s.chore_acked = 0x07; /* stale bits, and no list */
+    stats_json_stat(buf, sizeof(buf), &s, &NO_OTA, &NO_DIAG);
+    TEST_ASSERT_NOT_NULL(strstr(buf, "\"chores_left\":0,\"chores_done\":0,\"chore_ack\":[0,0,0]"));
+}
+
+/* ---- the config warning (M2-D6) ---- */
+
+/* Healthy reads "OK", never "": HA's MQTT sensor ignores an empty state
+   and keeps the old one, so a warning that cleared to "" would never be
+   seen to clear. */
+void test_stat_payload_config_warning_is_ok_when_healthy(void) {
+    char buf[STATS_JSON_PAYLOAD_MAX];
+    stats_snapshot_t s = base_snapshot();
+    s.chore_free_bad = 0;
+    stats_json_stat(buf, sizeof(buf), &s, &NO_OTA, &NO_DIAG);
+    TEST_ASSERT_NOT_NULL(strstr(buf, "\"cfg_warn\":\"OK\""));
+}
+
+/* Each day type on its own names that day type and nothing else. */
+void test_stat_payload_config_warning_names_each_day_type(void) {
+    const char *want[SCHEDULE_DAY_TYPES] = {
+        [DAY_WEEKDAY] = "\"cfg_warn\":\"Weekday\"",
+        [DAY_WEEKEND] = "\"cfg_warn\":\"Weekend\"",
+        [DAY_HOLIDAY] = "\"cfg_warn\":\"Holiday\"",
+        [DAY_SUMMER] = "\"cfg_warn\":\"Summer\"",
+    };
+    for (unsigned d = 0; d < SCHEDULE_DAY_TYPES; d++) {
+        char buf[STATS_JSON_PAYLOAD_MAX];
+        stats_snapshot_t s = base_snapshot();
+        s.chore_free_bad = (uint8_t)(1u << d);
+        stats_json_stat(buf, sizeof(buf), &s, &NO_OTA, &NO_DIAG);
+        TEST_ASSERT_NOT_NULL_MESSAGE(strstr(buf, want[d]), want[d]);
+    }
+}
+
+/* Several at once: all of them, in day_type_t order. */
+void test_stat_payload_config_warning_names_several_day_types(void) {
+    char buf[STATS_JSON_PAYLOAD_MAX];
+    stats_snapshot_t s = base_snapshot();
+    s.chore_free_bad = (1u << DAY_WEEKDAY) | (1u << DAY_SUMMER);
+    stats_json_stat(buf, sizeof(buf), &s, &NO_OTA, &NO_DIAG);
+    TEST_ASSERT_NOT_NULL(strstr(buf, "\"cfg_warn\":\"Weekday, Summer\""));
+    s.chore_free_bad = 0x0F;
+    stats_json_stat(buf, sizeof(buf), &s, &NO_OTA, &NO_DIAG);
+    TEST_ASSERT_NOT_NULL(strstr(buf, "\"cfg_warn\":\"Weekday, Weekend, Holiday, Summer\""));
+}
+
+/* Bits past the last day type name nothing: they are ignored, not
+   rendered as a fifth name or trusted into "broken". */
+void test_stat_payload_config_warning_ignores_bits_past_the_day_types(void) {
+    char buf[STATS_JSON_PAYLOAD_MAX];
+    stats_snapshot_t s = base_snapshot();
+    s.chore_free_bad = 0xF0;
+    stats_json_stat(buf, sizeof(buf), &s, &NO_OTA, &NO_DIAG);
+    TEST_ASSERT_NOT_NULL(strstr(buf, "\"cfg_warn\":\"OK\""));
+    s.chore_free_bad = 0xF4;
+    stats_json_stat(buf, sizeof(buf), &s, &NO_OTA, &NO_DIAG);
+    TEST_ASSERT_NOT_NULL(strstr(buf, "\"cfg_warn\":\"Holiday\""));
+}
+
 void test_stat_payload_reports_a_running_break(void) {
     /* A Screen Break can run behind any selected timer, so HA cannot
        infer it from "state" any more — it needs its own field. */
-    char buf[512];
+    char buf[STATS_JSON_PAYLOAD_MAX];
     stats_snapshot_t s = base_snapshot();
     s.break_remaining_s = 754;
     stats_json_stat(buf, sizeof(buf), &s, &NO_OTA, &NO_DIAG);
@@ -73,7 +182,7 @@ void test_stat_payload_reports_a_running_break(void) {
    did or did not fire — against the known interval it answers the
    question directly. Always >= 0: app_state feeds it the clamped read. */
 void test_stat_payload_reports_the_exposure_balance(void) {
-    char buf[512];
+    char buf[STATS_JSON_PAYLOAD_MAX];
     stats_snapshot_t s = base_snapshot();
     s.accum_s = 1500;
     stats_json_stat(buf, sizeof(buf), &s, &NO_OTA, &NO_DIAG);
@@ -84,7 +193,7 @@ void test_stat_payload_reset_reason_flags_crash_wakes(void) {
     /* Boot forensics over MQTT: the USB CDC console drops output around
        sleep/reset transitions, so the reset reason rides the stat payload
        — a BROWNOUT/PANIC value on a wake means the PREVIOUS wake died. */
-    char buf[512];
+    char buf[STATS_JSON_PAYLOAD_MAX];
     stats_snapshot_t s = base_snapshot();
     s.reset_reason = "BROWNOUT";
     stats_json_stat(buf, sizeof(buf), &s, &NO_OTA, &NO_DIAG);
@@ -92,7 +201,7 @@ void test_stat_payload_reset_reason_flags_crash_wakes(void) {
 }
 
 void test_stat_payload_charge_lock_true(void) {
-    char buf[512];
+    char buf[STATS_JSON_PAYLOAD_MAX];
     stats_snapshot_t s = base_snapshot();
     s.charge_lock = true;
     stats_json_stat(buf, sizeof(buf), &s, &NO_OTA, &NO_DIAG);
@@ -100,7 +209,7 @@ void test_stat_payload_charge_lock_true(void) {
 }
 
 void test_stat_payload_escapes_timer_name(void) {
-    char buf[512];
+    char buf[STATS_JSON_PAYLOAD_MAX];
     stats_snapshot_t s = base_snapshot();
     s.active_timer = "Say \"Om\"\\now"; /* quotes + backslash must escape */
     stats_json_stat(buf, sizeof(buf), &s, &NO_OTA, &NO_DIAG);
@@ -119,7 +228,7 @@ void test_stat_payload_null_string_fields_are_safe(void) {
     /* A NULL state/day_type/fw/active_timer must not crash the builder
        (defensive: main.c always populates them, but the payload builder
        is the pure boundary and should never invoke UB on bad input). */
-    char buf[512];
+    char buf[STATS_JSON_PAYLOAD_MAX];
     stats_snapshot_t s = base_snapshot();
     s.state = NULL;
     s.active_timer = NULL;
@@ -156,9 +265,11 @@ void test_discovery_entity_table_is_populated(void) {
        ota_result, ota_target, ota_fails, ota_dl_ms,
        panic_count, panic_phase, panic_uptime, panic_heap,
        panic_stack_main, panic_stack_net,
-       heap_free, heap_min, stack_main, stack_net, nvs_free
-       + per extra slot: completions, remaining, limit */
-    TEST_ASSERT_EQUAL_INT(28 + 3 * TIMER_EXTRA_SLOTS, count);
+       heap_free, heap_min, stack_main, stack_net, nvs_free,
+       chores_left, chores_done, config_warning
+       + per extra slot: completions, remaining, limit
+       + per possible chore: chore_N */
+    TEST_ASSERT_EQUAL_INT(31 + 3 * TIMER_EXTRA_SLOTS + CHORE_MAX, count);
 }
 
 /* THE BUMP, pinned to the table it describes.
@@ -174,21 +285,22 @@ void test_discovery_entity_table_is_populated(void) {
 void test_discovery_schema_version_moves_with_the_entity_table(void) {
     int count = 0;
     (void)stats_json_entities(&count);
-    TEST_ASSERT_EQUAL_INT(28 + 3 * TIMER_EXTRA_SLOTS, count);
-    /* 21 with the entity count unchanged: v21 added four ha_config
-       REGISTRY rows (the chore_free_* controls), which ride the same
-       republish gate but are not rows in ENTITIES.
+    TEST_ASSERT_EQUAL_INT(31 + 3 * TIMER_EXTRA_SLOTS + CHORE_MAX, count);
+    /* v22: + chores_left, chores_done, config_warning and the CHORE_MAX
+       chore_N rows (M3-T1, one bump covering the chore entities,
+       M2-D6's warning, and the state_class on the two chore counts).
 
-       THIS LINE HAD TO CHANGE, and the reason is the joint assertion
-       above, not a one-directional rule. The pin is exact and the two
-       numbers are asserted together, so it forbids a bump without a count
-       change exactly as much as the reverse: any move in either number
-       lands the author in this test, which is the point of pinning them
-       side by side. A bump whose cause is outside ENTITIES is legitimate
-       and is recorded here as such — that is what an edit to this line
-       means, and it is not evidence the pin is too strict. The config
-       registry has a joint pin of its own in test_ha_config. */
-    TEST_ASSERT_EQUAL_INT(21, STATS_JSON_DISC_SCHEMA_VER);
+       History the line keeps: v21 moved the version with the entity count
+       unchanged — it added four ha_config REGISTRY rows (the chore_free_*
+       controls), which ride the same republish gate but are not rows in
+       ENTITIES. The pin is exact and the two numbers are asserted
+       together, so it forbids a bump without a count change exactly as
+       much as the reverse: any move in either number lands the author in
+       this test, which is the point of pinning them side by side. A bump
+       whose cause is outside ENTITIES is legitimate and is recorded here
+       as such. The config registry has a joint pin of its own in
+       test_ha_config. */
+    TEST_ASSERT_EQUAL_INT(22, STATS_JSON_DISC_SCHEMA_VER);
 }
 
 /* ---- the OTA leg of the stat payload ---- */
@@ -199,7 +311,7 @@ void test_discovery_schema_version_moves_with_the_entity_table(void) {
    no OTA fields at all, so the mistake cannot be made silently; this
    pins the values it CAN carry. */
 void test_stat_payload_carries_the_ota_fields(void) {
-    char buf[512];
+    char buf[STATS_JSON_PAYLOAD_MAX];
     stats_snapshot_t s = base_snapshot();
     ota_stat_t ota = {.fails = 2, .dl_ms = 41250};
     snprintf(ota.result, sizeof(ota.result), "%s", "rolled_back");
@@ -215,7 +327,7 @@ void test_stat_payload_carries_the_ota_fields(void) {
    track the argument and nothing else. A builder that ignored `ota` and
    emitted constants would pass the case above and fail this one. */
 void test_stat_payload_ota_fields_track_the_argument(void) {
-    char a[512], b[512];
+    char a[STATS_JSON_PAYLOAD_MAX], b[STATS_JSON_PAYLOAD_MAX];
     stats_snapshot_t s = base_snapshot();
     ota_stat_t first = {.fails = 1, .dl_ms = 1000};
     ota_stat_t second = {.fails = 3, .dl_ms = 2000};
@@ -232,7 +344,7 @@ void test_stat_payload_ota_fields_track_the_argument(void) {
 /* A duration is a u32 because a u16 saturates at 65.5 s, well under the
    download's own deadline. The payload must carry the full range. */
 void test_stat_payload_ota_duration_survives_a_long_download(void) {
-    char buf[512];
+    char buf[STATS_JSON_PAYLOAD_MAX];
     stats_snapshot_t s = base_snapshot();
     ota_stat_t ota = {.dl_ms = 298000}; /* just inside a 300 s budget */
     stats_json_stat(buf, sizeof(buf), &s, &ota, &NO_DIAG);
@@ -241,7 +353,7 @@ void test_stat_payload_ota_duration_survives_a_long_download(void) {
 
 /* The pure boundary must not fault on a NULL OTA leg either. */
 void test_stat_payload_null_ota_is_safe(void) {
-    char buf[512];
+    char buf[STATS_JSON_PAYLOAD_MAX];
     stats_snapshot_t s = base_snapshot();
     int n = stats_json_stat(buf, sizeof(buf), &s, NULL, NULL);
     TEST_ASSERT_GREATER_THAN_INT(0, n);
@@ -257,7 +369,7 @@ void test_stat_payload_null_ota_is_safe(void) {
    close the JSON string early and hand Home Assistant a payload it drops
    silently. */
 void test_stat_payload_escapes_the_ota_strings(void) {
-    char buf[512];
+    char buf[STATS_JSON_PAYLOAD_MAX];
     stats_snapshot_t s = base_snapshot();
     ota_stat_t ota = {0};
     snprintf(ota.result, sizeof(ota.result), "%s", "a\"b");
@@ -279,7 +391,11 @@ void test_stat_payload_escapes_the_ota_strings(void) {
    evidence would be dropped precisely when it exists. pphase is filled
    with backslashes even though the label builder can only emit letters
    and '+' -- the buffer has to survive the field's declared width, not
-   the current producer's habits. */
+   the current producer's habits.
+
+   The chore leg did it again: 938 of 1024 before it, about a hundred
+   bytes more with it, so STATS_JSON_PAYLOAD_MAX moved to 1280 for the
+   same reason rather than this assertion moving. */
 void test_stat_payload_worst_case_fits_the_publish_buffer(void) {
     char buf[STATS_JSON_PAYLOAD_MAX];
     stats_snapshot_t s = base_snapshot();
@@ -308,6 +424,14 @@ void test_stat_payload_worst_case_fits_the_publish_buffer(void) {
         s.completions[i] = 65535;
     s.break_remaining_s = -2147483647;
     s.accum_s = -2147483647;
+    /* The chore leg at its declared widths, not its reachable ones: the
+       counts are uint8_t and CHORE_MAX caps them at 3 in practice, but the
+       buffer has to survive 255. Every ack set, and every day type broken —
+       the longest config warning there is. */
+    s.chores_left = 255;
+    s.chores_done = 255;
+    s.chore_acked = 0xFF;
+    s.chore_free_bad = 0xFF;
 
     ota_stat_t ota = {.fails = 65535, .dl_ms = 4294967295u};
     memset(ota.result, '\\', sizeof(ota.result) - 1);
@@ -332,6 +456,17 @@ void test_stat_payload_worst_case_fits_the_publish_buffer(void) {
 
     int n = stats_json_stat(buf, sizeof(buf), &s, &ota, &diag);
     TEST_ASSERT_LESS_THAN_INT((int)sizeof(buf), n);
+    /* The chore leg really is in the measured payload — a worst case that
+       silently lost it would pass the assertion above for free. */
+    TEST_ASSERT_NOT_NULL(strstr(buf,
+                                "\"chores_left\":255,\"chores_done\":255,\"chore_ack\":[1,1,1],"
+                                "\"cfg_warn\":\"Weekday, Weekend, Holiday, Summer\""));
+    /* Headroom, reported rather than pinned (the gate is needed < size,
+       so this many more bytes still publish): a loose floor, the same
+       shape as the discovery test's, that fails only when the margin is
+       nearly gone rather than on every added byte. */
+    printf("stat worst case %d of %d B, headroom %d B\n", n, (int)sizeof(buf), (int)sizeof(buf) - 1 - n);
+    TEST_ASSERT_TRUE_MESSAGE(n < (int)sizeof(buf) - 64, "stat payload headroom below 64 B");
 }
 
 void test_discovery_last_reset_diagnostic_sensor(void) {
@@ -660,6 +795,290 @@ void test_break_entities_are_not_mistaken_for_per_slot_sensors(void) {
     TEST_ASSERT_TRUE(strncmp(brk->key, "remaining_", 10) != 0);
 }
 
+/* ---- chore entities (M3-T1, design 1.4) ---- */
+
+/* chores_left is PRIMARY and chores_done DIAGNOSTIC, as the design lists
+   them. Neither carries a unit: HA's logbook skips any entity with one,
+   and these changing is the audit trail. */
+void test_discovery_chore_count_entities(void) {
+    char buf[STATS_JSON_PAYLOAD_MAX];
+    const ha_entity_t *left = find_entity("chores_left");
+    TEST_ASSERT_NOT_NULL(left);
+    TEST_ASSERT_EQUAL_STRING("sensor", left->component);
+    TEST_ASSERT_EQUAL_STRING("Chores left", left->name);
+    TEST_ASSERT_EQUAL_STRING("{{ value_json.chores_left }}", left->tpl);
+    TEST_ASSERT_EQUAL_STRING("stat", left->topic_suffix);
+    TEST_ASSERT_NULL(left->ent_cat);
+    TEST_ASSERT_NULL(left->unit);
+    TEST_ASSERT_EQUAL_INT(STAT_EXPIRE_SEC, left->expire_after);
+    TEST_ASSERT_EQUAL_STRING("measurement", left->state_class);
+    stats_json_discovery(buf, sizeof(buf), "magtag-a1b2c3", "Kitchen", "fw", left);
+    TEST_ASSERT_NOT_NULL(strstr(buf, "\"def_ent_id\":\"sensor.magtag-a1b2c3_chores_left\""));
+    TEST_ASSERT_NULL(strstr(buf, "ent_cat"));
+    TEST_ASSERT_NOT_NULL(strstr(buf, "\"stat_cla\":\"measurement\""));
+
+    const ha_entity_t *done = find_entity("chores_done");
+    TEST_ASSERT_NOT_NULL(done);
+    TEST_ASSERT_EQUAL_STRING("sensor", done->component);
+    TEST_ASSERT_EQUAL_STRING("Chores done", done->name);
+    TEST_ASSERT_EQUAL_STRING("{{ value_json.chores_done }}", done->tpl);
+    TEST_ASSERT_EQUAL_STRING("diagnostic", done->ent_cat);
+    TEST_ASSERT_NULL(done->unit);
+    TEST_ASSERT_EQUAL_INT(STAT_EXPIRE_SEC, done->expire_after);
+    TEST_ASSERT_EQUAL_STRING("measurement", done->state_class);
+    stats_json_discovery(buf, sizeof(buf), "magtag-a1b2c3", "Kitchen", "fw", done);
+    TEST_ASSERT_NOT_NULL(strstr(buf, "\"def_ent_id\":\"sensor.magtag-a1b2c3_chores_done\""));
+    TEST_ASSERT_NOT_NULL(strstr(buf, "\"ent_cat\":\"diagnostic\""));
+    TEST_ASSERT_NOT_NULL(strstr(buf, "\"stat_cla\":\"measurement\""));
+}
+
+/* state_class buys HA's long-term statistics and costs the logbook: HA
+   leaves every sensor that declares one out of it. So it is on exactly
+   the two chore counts (the M4 completion graphs) and nowhere else — the
+   config warning above all, whose logbook line IS the feature. A row
+   gaining one by accident fails here, as does the builder dropping it. */
+void test_only_the_chore_counts_declare_a_state_class(void) {
+    char buf[STATS_JSON_PAYLOAD_MAX];
+    int count = 0, declared = 0;
+    const ha_entity_t *ents = stats_json_entities(&count);
+    for (int i = 0; i < count; i++) {
+        stats_json_discovery(buf, sizeof(buf), "magtag-a1b2c3", "Kitchen", "fw", &ents[i]);
+        if (ents[i].state_class == NULL) {
+            TEST_ASSERT_NULL_MESSAGE(strstr(buf, "stat_cla"), ents[i].key);
+            continue;
+        }
+        declared++;
+        TEST_ASSERT_TRUE_MESSAGE(strcmp(ents[i].key, "chores_left") == 0 || strcmp(ents[i].key, "chores_done") == 0,
+                                 ents[i].key);
+        TEST_ASSERT_NOT_NULL_MESSAGE(strstr(buf, "\"stat_cla\":\"measurement\""), ents[i].key);
+    }
+    TEST_ASSERT_EQUAL_INT(2, declared);
+    TEST_ASSERT_NULL(find_entity("config_warning")->state_class);
+}
+
+/* One binary_sensor per POSSIBLE chore, chore_1..chore_CHORE_MAX, each
+   reading its own position of chore_ack — a row reading its neighbour's
+   index would report the wrong chore's history for ever. */
+void test_discovery_one_binary_sensor_per_chore(void) {
+    char buf[STATS_JSON_PAYLOAD_MAX];
+    for (int i = 0; i < CHORE_MAX; i++) {
+        char key[16], tpl[64], defid[64];
+        snprintf(key, sizeof(key), "chore_%d", i + 1);
+        const ha_entity_t *e = find_entity(key);
+        TEST_ASSERT_NOT_NULL_MESSAGE(e, key);
+        TEST_ASSERT_EQUAL_STRING_MESSAGE("binary_sensor", e->component, key);
+        TEST_ASSERT_TRUE_MESSAGE(e->binary, key);
+        snprintf(tpl, sizeof(tpl), "{{ 'ON' if value_json.chore_ack[%d] else 'OFF' }}", i);
+        TEST_ASSERT_EQUAL_STRING_MESSAGE(tpl, e->tpl, key);
+        TEST_ASSERT_EQUAL_STRING_MESSAGE("stat", e->topic_suffix, key);
+        TEST_ASSERT_NULL_MESSAGE(e->ent_cat, key); /* primary: the per-chore audit trail */
+        TEST_ASSERT_EQUAL_INT_MESSAGE(STAT_EXPIRE_SEC, e->expire_after, key);
+        TEST_ASSERT_EQUAL_INT_MESSAGE(i, stats_json_chore_index(e), key);
+        stats_json_discovery(buf, sizeof(buf), "magtag-a1b2c3", "Kitchen", "fw", e);
+        snprintf(defid, sizeof(defid), "\"def_ent_id\":\"binary_sensor.magtag-a1b2c3_%s\"", key);
+        TEST_ASSERT_NOT_NULL_MESSAGE(strstr(buf, defid), key);
+        TEST_ASSERT_NOT_NULL_MESSAGE(strstr(buf, "\"pl_on\":\"ON\",\"pl_off\":\"OFF\""), key);
+    }
+    /* ...and not one more: a chore_4 row would publish a sensor no ack
+       button can ever drive. */
+    char extra[16];
+    snprintf(extra, sizeof(extra), "chore_%d", CHORE_MAX + 1);
+    TEST_ASSERT_NULL(find_entity(extra));
+}
+
+/* mqtt_ha.c names each chore row from the list, through the runtime
+   override, and the name is escaped on the way: chore names arrive from
+   an MQTT document. */
+void test_discovery_chore_sensor_takes_the_runtime_chore_name(void) {
+    char buf[STATS_JSON_PAYLOAD_MAX];
+    const ha_entity_t *e = find_entity("chore_2");
+    TEST_ASSERT_NOT_NULL(e);
+    stats_json_discovery_named(buf, sizeof(buf), "magtag-a1b2c3", "Kitchen", "fw", e, "Homework done");
+    TEST_ASSERT_NOT_NULL(strstr(buf, "\"name\":\"Homework done\""));
+    TEST_ASSERT_NOT_NULL(strstr(buf, "value_json.chore_ack[1]"));
+    /* The entity id does not follow the name: a rename is a new name on
+       the same entity, not a new entity. */
+    TEST_ASSERT_NOT_NULL(strstr(buf, "\"def_ent_id\":\"binary_sensor.magtag-a1b2c3_chore_2\""));
+    stats_json_discovery_named(buf, sizeof(buf), "magtag-a1b2c3", "Kitchen", "fw", e, "Say \"hi\" done");
+    TEST_ASSERT_NOT_NULL(strstr(buf, "\"name\":\"Say \\\"hi\\\" done\""));
+}
+
+/* The index is an EXACT match on the whole key. chores_left and
+   chores_done share "chore" with the per-chore rows, and a prefix test
+   would have mqtt_ha.c rename or retire them as if they were chores. */
+void test_chore_index_matches_only_the_per_chore_rows(void) {
+    int count = 0;
+    const ha_entity_t *ents = stats_json_entities(&count);
+    int chores = 0;
+    for (int i = 0; i < count; i++) {
+        const int idx = stats_json_chore_index(&ents[i]);
+        if (idx >= 0) {
+            chores++;
+            TEST_ASSERT_EQUAL_STRING_MESSAGE("binary_sensor", ents[i].component, ents[i].key);
+            TEST_ASSERT_TRUE_MESSAGE(idx < CHORE_MAX, ents[i].key);
+        }
+    }
+    TEST_ASSERT_EQUAL_INT(CHORE_MAX, chores);
+    TEST_ASSERT_EQUAL_INT(-1, stats_json_chore_index(find_entity("chores_left")));
+    TEST_ASSERT_EQUAL_INT(-1, stats_json_chore_index(find_entity("chores_done")));
+    TEST_ASSERT_EQUAL_INT(-1, stats_json_chore_index(find_entity("config_warning")));
+    TEST_ASSERT_EQUAL_INT(-1, stats_json_chore_index(find_entity("battery")));
+    /* Keys that only LOOK like a chore row. */
+    const ha_entity_t fake[] = {
+        {.key = "chore_0"}, {.key = "chore_4"}, {.key = "chore_12"}, {.key = "chore_"}, {.key = "chore"},
+    };
+    for (size_t i = 0; i < sizeof(fake) / sizeof(fake[0]); i++)
+        TEST_ASSERT_EQUAL_INT_MESSAGE(-1, stats_json_chore_index(&fake[i]), fake[i].key);
+}
+
+/* None of the new rows may collide with the per-slot prefixes mqtt_ha.c
+   matches to attach a timer name — it would rename or retire them after a
+   timer that has nothing to do with them. */
+void test_chore_entities_are_not_mistaken_for_per_slot_sensors(void) {
+    const char *keys[] = {"chores_left", "chores_done", "config_warning", "chore_1", "chore_2", "chore_3"};
+    for (size_t k = 0; k < sizeof(keys) / sizeof(keys[0]); k++) {
+        const ha_entity_t *e = find_entity(keys[k]);
+        TEST_ASSERT_NOT_NULL_MESSAGE(e, keys[k]);
+        TEST_ASSERT_NOT_EQUAL_MESSAGE(0, strncmp(e->key, "remaining_", 10), keys[k]);
+        TEST_ASSERT_NOT_EQUAL_MESSAGE(0, strncmp(e->key, "limit_", 6), keys[k]);
+        TEST_ASSERT_NOT_EQUAL_MESSAGE(0, strncmp(e->key, "completions_", 12), keys[k]);
+    }
+}
+
+/* M2-D6's warning: one DIAGNOSTIC text sensor, fed by cfg_warn, with no
+   unit (the logbook would skip it, and the activity-log line is the whole
+   point) and no expiry (it reports a stored configuration, which stays
+   broken while the device is silent). */
+void test_discovery_config_warning_entity(void) {
+    char buf[STATS_JSON_PAYLOAD_MAX];
+    const ha_entity_t *w = find_entity("config_warning");
+    TEST_ASSERT_NOT_NULL(w);
+    TEST_ASSERT_EQUAL_STRING("sensor", w->component);
+    TEST_ASSERT_EQUAL_STRING("Config warning", w->name);
+    TEST_ASSERT_EQUAL_STRING("{{ value_json.cfg_warn }}", w->tpl);
+    TEST_ASSERT_EQUAL_STRING("stat", w->topic_suffix);
+    TEST_ASSERT_EQUAL_STRING("diagnostic", w->ent_cat);
+    TEST_ASSERT_NULL(w->unit);
+    TEST_ASSERT_NULL(w->dev_class);
+    TEST_ASSERT_FALSE(w->binary);
+    TEST_ASSERT_EQUAL_INT(0, w->expire_after);
+    TEST_ASSERT_NULL(w->state_class); /* a state_class would drop it from the logbook too */
+    stats_json_discovery(buf, sizeof(buf), "magtag-a1b2c3", "Kitchen", "fw", w);
+    TEST_ASSERT_NOT_NULL(strstr(buf, "\"def_ent_id\":\"sensor.magtag-a1b2c3_config_warning\""));
+    TEST_ASSERT_NOT_NULL(strstr(buf, "\"ent_cat\":\"diagnostic\""));
+    TEST_ASSERT_NULL(strstr(buf, "expire_after"));
+    TEST_ASSERT_NULL(strstr(buf, "stat_cla"));
+}
+
+/* ---- the chore_N discovery decision (stats_json_chore_discovery) --------
+   mqtt_ha.c's discovery pass only carries this out, and no host suite
+   compiles mqtt_ha.c, so this is where name / retire / skip is pinned. */
+
+/* Three DISTINCT names, so a row named from its neighbour's slot reads
+   as the wrong string rather than passing by coincidence. */
+static const char CHORE_NAMES3[CHORE_MAX][CHORE_NAME_BUF] = {"Dishes", "Homework", "Trash"};
+
+static const ha_entity_t *chore_row(int i) {
+    char key[16];
+    snprintf(key, sizeof(key), "chore_%d", i + 1);
+    const ha_entity_t *e = find_entity(key);
+    TEST_ASSERT_NOT_NULL_MESSAGE(e, key);
+    return e;
+}
+
+/* Every configured count, every chore row: below the count PUBLISH under
+   "<that row's name> done", at or past it RETIRE. The n == index cell is
+   the boundary — the first row that must retire. */
+void test_chore_discovery_names_configured_rows_and_retires_the_rest(void) {
+    for (int n = 0; n <= CHORE_MAX; n++) {
+        for (int i = 0; i < CHORE_MAX; i++) {
+            char out[STATS_JSON_CHORE_ENTITY_NAME_BUF] = "untouched";
+            char msg[32], want[STATS_JSON_CHORE_ENTITY_NAME_BUF];
+            snprintf(msg, sizeof(msg), "n=%d chore_%d", n, i + 1);
+            const stats_chore_disc_t got = stats_json_chore_discovery(chore_row(i), CHORE_NAMES3, n, out, sizeof(out));
+            if (i < n) {
+                TEST_ASSERT_EQUAL_INT_MESSAGE(STATS_CHORE_DISC_PUBLISH, got, msg);
+                snprintf(want, sizeof(want), "%s done", CHORE_NAMES3[i]);
+                TEST_ASSERT_EQUAL_STRING_MESSAGE(want, out, msg);
+            } else {
+                TEST_ASSERT_EQUAL_INT_MESSAGE(STATS_CHORE_DISC_RETIRE, got, msg);
+                TEST_ASSERT_EQUAL_STRING_MESSAGE("untouched", out, msg); /* written only for PUBLISH */
+            }
+        }
+    }
+}
+
+/* A failed read (n < 0): every chore row is SKIPPED — not retired, which
+   would delete the owner's entities over a transient flash error, and not
+   published under a default name either, which would rename them. */
+void test_chore_discovery_skips_every_chore_row_when_the_list_is_unknown(void) {
+    for (int i = 0; i < CHORE_MAX; i++) {
+        char out[STATS_JSON_CHORE_ENTITY_NAME_BUF] = "untouched";
+        TEST_ASSERT_EQUAL_INT(STATS_CHORE_DISC_SKIP,
+                              stats_json_chore_discovery(chore_row(i), CHORE_NAMES3, -1, out, sizeof(out)));
+        TEST_ASSERT_EQUAL_STRING("untouched", out);
+    }
+}
+
+/* Every other row is NOT_CHORE whatever the list says, including the
+   list being unknown — a failed chore read must not hold back the
+   battery sensor — and its name buffer is left alone. */
+void test_chore_discovery_leaves_every_other_row_to_the_caller(void) {
+    int count = 0;
+    const ha_entity_t *ents = stats_json_entities(&count);
+    for (int i = 0; i < count; i++) {
+        if (stats_json_chore_index(&ents[i]) >= 0)
+            continue;
+        for (int n = -1; n <= CHORE_MAX; n++) {
+            char out[STATS_JSON_CHORE_ENTITY_NAME_BUF] = "untouched";
+            TEST_ASSERT_EQUAL_INT_MESSAGE(STATS_CHORE_DISC_NOT_CHORE,
+                                          stats_json_chore_discovery(&ents[i], CHORE_NAMES3, n, out, sizeof(out)),
+                                          ents[i].key);
+            TEST_ASSERT_EQUAL_STRING_MESSAGE("untouched", out, ents[i].key);
+        }
+    }
+}
+
+/* The longest name the config path accepts (CHORE_NAME_MAX bytes, the
+   bound apply_chores enforces) fits the declared buffer with its suffix,
+   exactly — and a row that filled all CHORE_NAME_BUF bytes with no NUL
+   (only a hand-built array can) is read to CHORE_NAME_MAX and no further. */
+_Static_assert(STATS_JSON_CHORE_ENTITY_NAME_BUF == CHORE_NAME_MAX + sizeof(" done"),
+               "the chore display-name buffer is sized from the name cap");
+void test_chore_discovery_longest_name_fits_its_buffer(void) {
+    char names[CHORE_MAX][CHORE_NAME_BUF];
+    memset(names, 'W', sizeof(names)); /* every row unterminated */
+    char out[STATS_JSON_CHORE_ENTITY_NAME_BUF];
+    char want[STATS_JSON_CHORE_ENTITY_NAME_BUF];
+    memset(want, 'W', CHORE_NAME_MAX);
+    memcpy(want + CHORE_NAME_MAX, " done", sizeof(" done"));
+    TEST_ASSERT_EQUAL_INT(STATS_CHORE_DISC_PUBLISH,
+                          stats_json_chore_discovery(chore_row(CHORE_MAX - 1), names, CHORE_MAX, out, sizeof(out)));
+    TEST_ASSERT_EQUAL_STRING(want, out);
+    TEST_ASSERT_EQUAL_size_t(sizeof(out) - 1, strlen(out));
+}
+
+/* An empty row inside the count ("3 chores, the middle one empty" — the
+   blob can hold it though the config path refuses it) keeps the table's
+   default name rather than becoming an entity called " done". A zeroed
+   list with n == 0 retires everything. */
+void test_chore_discovery_empty_rows(void) {
+    const char holey[CHORE_MAX][CHORE_NAME_BUF] = {"Dishes", "", "Trash"};
+    char out[STATS_JSON_CHORE_ENTITY_NAME_BUF];
+    TEST_ASSERT_EQUAL_INT(STATS_CHORE_DISC_PUBLISH,
+                          stats_json_chore_discovery(chore_row(1), holey, CHORE_MAX, out, sizeof(out)));
+    TEST_ASSERT_EQUAL_STRING("Chore 2 done", out);
+    TEST_ASSERT_EQUAL_INT(STATS_CHORE_DISC_PUBLISH,
+                          stats_json_chore_discovery(chore_row(2), holey, CHORE_MAX, out, sizeof(out)));
+    TEST_ASSERT_EQUAL_STRING("Trash done", out);
+
+    char zeroed[CHORE_MAX][CHORE_NAME_BUF];
+    memset(zeroed, 0, sizeof(zeroed));
+    for (int i = 0; i < CHORE_MAX; i++)
+        TEST_ASSERT_EQUAL_INT(STATS_CHORE_DISC_RETIRE,
+                              stats_json_chore_discovery(chore_row(i), zeroed, 0, out, sizeof(out)));
+}
+
 void test_discovery_diagnostic_category(void) {
     char buf[600];
     int count = 0;
@@ -892,5 +1311,26 @@ int main(void) {
     RUN_TEST(test_discovery_screen_break_entities);
     RUN_TEST(test_screen_exposure_entity);
     RUN_TEST(test_break_entities_are_not_mistaken_for_per_slot_sensors);
+
+    RUN_TEST(test_stat_payload_carries_the_chore_counts_and_acks);
+    RUN_TEST(test_stat_payload_chore_counts_are_not_interchangeable);
+    RUN_TEST(test_stat_payload_chore_ack_ignores_bits_past_the_configured_count);
+    RUN_TEST(test_stat_payload_no_chores_reports_zeroes);
+    RUN_TEST(test_stat_payload_config_warning_is_ok_when_healthy);
+    RUN_TEST(test_stat_payload_config_warning_names_each_day_type);
+    RUN_TEST(test_stat_payload_config_warning_names_several_day_types);
+    RUN_TEST(test_stat_payload_config_warning_ignores_bits_past_the_day_types);
+    RUN_TEST(test_discovery_chore_count_entities);
+    RUN_TEST(test_discovery_one_binary_sensor_per_chore);
+    RUN_TEST(test_discovery_chore_sensor_takes_the_runtime_chore_name);
+    RUN_TEST(test_chore_index_matches_only_the_per_chore_rows);
+    RUN_TEST(test_chore_entities_are_not_mistaken_for_per_slot_sensors);
+    RUN_TEST(test_discovery_config_warning_entity);
+    RUN_TEST(test_only_the_chore_counts_declare_a_state_class);
+    RUN_TEST(test_chore_discovery_names_configured_rows_and_retires_the_rest);
+    RUN_TEST(test_chore_discovery_skips_every_chore_row_when_the_list_is_unknown);
+    RUN_TEST(test_chore_discovery_leaves_every_other_row_to_the_caller);
+    RUN_TEST(test_chore_discovery_longest_name_fits_its_buffer);
+    RUN_TEST(test_chore_discovery_empty_rows);
     return UNITY_END();
 }

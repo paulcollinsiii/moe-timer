@@ -49,13 +49,22 @@ esp_err_t chore_store_load_names(char names[][CHORE_NAME_BUF], uint8_t *n_out) {
        short blob is never partially consumed. An OVERSIZED stored blob
        does not reach the length test at all — nvs_get_blob refuses to
        write a value that does not fit and returns
-       ESP_ERR_NVS_INVALID_LENGTH — but that lands on the same `ret !=
-       ESP_OK` branch, so both shapes are rejected identically. */
+       ESP_ERR_NVS_INVALID_LENGTH — but that is a verdict on the stored
+       BYTES exactly like a short blob, so it joins the same rejection
+       below and both shapes are rejected identically. */
     uint8_t raw[sizeof(nvs_chore_names_blob_t)];
     size_t len = sizeof(raw);
     esp_err_t ret = hal_nvs_read_blob(NVS_KEY_CHORES, raw, &len);
     if (ret == ESP_ERR_NVS_NOT_FOUND) {
         return ret; /* never configured — not an error, just the default */
+    }
+    /* Any other error is the READ failing, not the record: the list is
+       UNKNOWN, which is a different answer from "rejected" and is passed
+       through unchanged so a caller can tell them apart (see
+       chore_store_names_known() in the header). */
+    if (ret != ESP_OK && ret != ESP_ERR_NVS_INVALID_LENGTH) {
+        ESP_LOGW(TAG, "chores blob unreadable: ret=%d", (int)ret);
+        return ret;
     }
     if (ret != ESP_OK || len != sizeof(nvs_chore_names_blob_t)) {
         ESP_LOGW(TAG, "chores blob rejected: ret=%d len=%u", (int)ret, (unsigned)len);

@@ -1,9 +1,13 @@
 #pragma once
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 
 #include "chores.h"
 #include "esp_compat.h"
+#ifndef NATIVE
+#include "nvs.h" /* ESP_ERR_NVS_NOT_FOUND, for chore_store_names_known() */
+#endif
 
 /* Durable storage for the chore checklist: the configured NAMES and the
    day-stamped ACK RECORD, in two NVS blobs.
@@ -150,15 +154,38 @@ _Static_assert(1 + 11 + 2 + 1 + 1 == sizeof(nvs_chore_ack_blob_t),
    out-of-range count all leave `names` all-empty and *n_out == 0, which is
    the inert "no chores configured" default (design row C1) that every
    device in the field is in today. So a caller that ignores the return
-   code still gets a safe, fully-initialised answer — the return code
-   distinguishes "never configured" (ESP_ERR_NVS_NOT_FOUND) from "rejected"
-   (ESP_ERR_INVALID_VERSION), which only logging cares about.
+   code still gets a safe, fully-initialised answer. The return code
+   says which of three things happened:
+
+     ESP_OK / ESP_ERR_NVS_NOT_FOUND  the list, or "never configured";
+     ESP_ERR_INVALID_VERSION         the stored bytes were REJECTED (wrong
+                                     version, length or count) — as
+                                     permanent as the blob, and the whole
+                                     device runs on n = 0 until a new list
+                                     is written;
+     anything else                   the READ itself failed (the raw
+                                     hal_nvs error): the list is UNKNOWN.
+
+   Most callers want n = 0 in all three failure cases and ignore the code.
+   The one that must not is a caller that PUBLISHES the count somewhere
+   that outlives the wake — mqtt_ha.c's discovery pass retires HA entities
+   past the count and then stamps the pass as done — and it asks
+   chore_store_names_known() below.
 
    Every returned row is NUL-terminated here, at index CHORE_NAME_MAX if
    the stored row filled all 20 bytes without one. The rows come straight
    back from flash and chores_list_hash() tolerates an unterminated row by
    design, but str* in a caller would not. */
 esp_err_t chore_store_load_names(char names[][CHORE_NAME_BUF], uint8_t *n_out);
+
+/* True when chore_store_load_names() returned an AUTHORITATIVE count: the
+   list, "never configured", or a rejected blob (which the rest of the
+   device also reads as no chores, so n = 0 is the truth about this wake).
+   False only when the read failed and the stored list is unknown — act on
+   n = 0 then and a transient flash error becomes a durable fact. */
+static inline bool chore_store_names_known(esp_err_t load_ret) {
+    return load_ret == ESP_OK || load_ret == ESP_ERR_NVS_NOT_FOUND || load_ret == ESP_ERR_INVALID_VERSION;
+}
 
 /* Store the configured chore names. Builds the blob itself — memset
    first, then the fields — so the reserve bytes are 0 by construction and

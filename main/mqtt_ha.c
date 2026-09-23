@@ -4,6 +4,8 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "chore_store.h"
+#include "chores.h"
 #include "cmd_apply.h"
 #include "config_apply.h"
 #include "device_id.h"
@@ -79,7 +81,7 @@ static volatile int s_pub_acks;
 
 /* Window-scoped buffers: allocated at window start, freed at teardown —
    the radio is off (and none of this is needed) for the vast majority of
-   every wake, so these ~12.4 KB (sizeof(window_mem_t), which SET_MAX
+   every wake, so these ~12.7 KB (sizeof(window_mem_t), which SET_MAX
    dominates) no longer sit in .bss permanently. The pointer doubles as
    the "window open" flag for the event handler.
 
@@ -101,7 +103,7 @@ typedef struct {
 
 /* Per-window heap budget. CFG_STR_MAX multiplies through the sets array
    (x SET_MAX), so the ceiling silently controls this figure: at 128 the
-   struct is ~12.4 KB, at 512 it would be ~30 KB with nothing else failing.
+   struct is ~12.7 KB, at 512 it would be ~30 KB with nothing else failing.
    Allocation failure here disables the whole MQTT window, so the growth
    has to be a deliberate edit rather than a side effect.
 
@@ -112,6 +114,11 @@ typedef struct {
    + 1536 + 2048 + 256 + 96 + 96 + 48*152 = 12736 B. 13312 leaves 576 B,
    which is room for a field or two without re-arguing the budget and not
    enough to absorb another kilobyte-scale buffer unnoticed.
+
+   SPENT 256 of that 576 on the chore leg (M3-T1): payload went 1024 ->
+   1280 (STATS_JSON_PAYLOAD_MAX says why), so the sum is now 128 + 1280 +
+   256 + 1536 + 2048 + 256 + 96 + 96 + 48*152 = 12992 B and 320 B are
+   left. The budget itself did not move.
 
    THE ASSERT CANNOT SEE THE WHOLE COST, so the rest is written down here.
    The same change also grows esp-mqtt's own receive buffer: .buffer.size
@@ -290,14 +297,50 @@ static bool drain_acks(int published, int timeout_ms) {
     return s_pub_acks >= published;
 }
 
-static int publish_discovery(esp_mqtt_client_handle_t client, const char *dev_name, const char *fw) {
+/* *complete is cleared when the pass deliberately left rows untouched and
+   must be retried: the caller then withholds the disc_ver/hash stamp, so
+   the next window runs the whole pass again. Only ever cleared here. */
+static int publish_discovery(esp_mqtt_client_handle_t client, const char *dev_name, const char *fw, bool *complete) {
     char *topic = s_mem->topic;
     char *payload = s_mem->payload;
     int count = 0, published = 0;
     const ha_entity_t *ents = stats_json_entities(&count);
+    /* The chore list, for the chore_N rows below — read once, here, at
+       publish time, which is when the timer-slot rows read theirs too.
+       A REJECTED blob is authoritative (the device runs on 0 chores, so
+       every chore row retires: the inert C1 reading). A FAILED READ is
+       not: chore_n = -1 skips every chore row, and the pass is reported
+       incomplete so a transient flash error cannot retire the owner's
+       entities and then stamp that as done. */
+    char chore_names[CHORE_MAX][CHORE_NAME_BUF];
+    uint8_t loaded_n = 0;
+    const esp_err_t chore_ret = chore_store_load_names(chore_names, &loaded_n);
+    const int chore_n = chore_store_names_known(chore_ret) ? (int)loaded_n : -1;
+    if (chore_n < 0) {
+        ESP_LOGW(TAG, "chore list unreadable (%d): chore entities left as they are, discovery retried next window",
+                 (int)chore_ret);
+        *complete = false;
+    }
     for (int i = 0; i < count; i++) {
         const char *name_override = NULL;
         char named[48];
+        _Static_assert(sizeof(named) >= STATS_JSON_CHORE_ENTITY_NAME_BUF, "a chore_N display name would truncate");
+        /* Per-chore binary sensors: stats_json_chore_discovery() decides
+           (and the host suite pins) name, retire or skip; this only
+           carries it out. */
+        switch (stats_json_chore_discovery(&ents[i], chore_names, chore_n, named, sizeof(named))) {
+            case STATS_CHORE_DISC_SKIP:
+                continue;
+            case STATS_CHORE_DISC_RETIRE:
+                stats_json_discovery_topic(topic, sizeof(s_mem->topic), device_id(), &ents[i]);
+                published += publish(client, topic, "", 1);
+                continue;
+            case STATS_CHORE_DISC_PUBLISH:
+                name_override = named;
+                break;
+            case STATS_CHORE_DISC_NOT_CHORE:
+                break;
+        }
         /* Per-slot sensors (completions_N / remaining_N / limit_N) carry
            the configured timer's name; disabled slots get no entity. */
         const char *suffix = NULL;
@@ -589,9 +632,16 @@ static int publish_states(esp_mqtt_client_handle_t client, const stats_snapshot_
     *fresh_discovery = ha_config_discovery_stale(disc_ver, disc_dev, DISC_SCHEMA_VER, dev_hash);
     *dev_hash_out = dev_hash;
     if (*fresh_discovery) {
-        published += publish_discovery(client, dev_name, snap->fw);
+        bool complete = true;
+        published += publish_discovery(client, dev_name, snap->fw, &complete);
         published += publish_config_discovery(client, dev_name, snap->fw);
         published += publish_action_discovery(client, dev_name, snap->fw);
+        /* A pass that skipped rows must not be stamped: *fresh_discovery
+           is all the post-drain stamp write consults, so clearing it here
+           — after the pass has run — withholds the stamp and leaves the
+           stored ver/hash stale, and the next window's gate reruns it. */
+        if (!complete)
+            *fresh_discovery = false;
     }
 
     /* PUBLISH TIME, and it has to be here rather than in the snapshot.
@@ -624,9 +674,10 @@ static int publish_states(esp_mqtt_client_handle_t client, const stats_snapshot_
     if (stat_n < cap) {
         published += publish(client, s_mem->topic, s_mem->payload, 1);
     } else {
-        /* Headroom here is 86 B at the measured worst case, so this is
-           one added field away from firing. Silence would look exactly
-           like a healthy device with nothing to report. */
+        /* test_stat_payload_worst_case_fits_the_publish_buffer holds the
+           worst case under the cap and reports its headroom; this branch
+           is for the day that test is out of date. Silence would look
+           exactly like a healthy device with nothing to report. */
         ESP_LOGW(TAG, "stat payload truncated (%d >= %d), not published", stat_n, cap);
     }
 

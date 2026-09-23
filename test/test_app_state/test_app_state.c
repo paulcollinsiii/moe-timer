@@ -17,6 +17,7 @@
 #include "mock_hal_nvs.c"
 #include "../../main/timer.c"
 #include "../../main/schedule.c"
+#include "../../main/config_validate.c" /* the chore_free predicate schedule.c judges pairs with */
 #include "../../main/nvs_config.c"
 #include "../../main/battery_soc.c"
 #include "../../main/battery_policy.c"
@@ -786,6 +787,114 @@ void test_stats_injected_device_fields_pass_through(void) {
     TEST_ASSERT_EQUAL_INT(0, s.light_mv);
 }
 
+/* ---- the chore leg of the stats snapshot (M3-T1, design 1.4) ------------
+   The same reads the panel's strip makes, so HA and the glass cannot
+   disagree about what is done — and the same RAW-mask rule: the byte from
+   timer_chore_acked() can carry bits past the configured count, and none
+   of them may count as a done chore or light a per-chore sensor. */
+
+void test_stats_no_chores_reports_zero_everywhere(void) {
+    timer_chore_set_acked(0x07); /* stale bits with no list at all */
+    stats_snapshot_t s;
+    app_state_stats(&IN_HEALTHY, T0, &s);
+    TEST_ASSERT_EQUAL_UINT8(0, s.chores_left);
+    TEST_ASSERT_EQUAL_UINT8(0, s.chores_done);
+    TEST_ASSERT_EQUAL_UINT8(0, s.chore_acked);
+}
+
+void test_stats_chore_counts_follow_the_acks(void) {
+    set_chores(CHORE_MAX);
+    stats_snapshot_t s;
+    const uint8_t masks[] = {0x00, 0x01, 0x02, 0x04, 0x05, 0x07};
+    const uint8_t done[] = {0, 1, 1, 1, 2, 3};
+    for (size_t i = 0; i < sizeof(masks); i++) {
+        timer_chore_set_acked(masks[i]);
+        app_state_stats(&IN_HEALTHY, T0, &s);
+        TEST_ASSERT_EQUAL_UINT8_MESSAGE(done[i], s.chores_done, "chores_done");
+        TEST_ASSERT_EQUAL_UINT8_MESSAGE(CHORE_MAX - done[i], s.chores_left, "chores_left");
+        TEST_ASSERT_EQUAL_UINT8_MESSAGE(masks[i], s.chore_acked, "chore_acked");
+    }
+}
+
+void test_stats_chore_acks_ignore_bits_past_the_configured_count(void) {
+    set_chores(2);
+    timer_chore_set_acked(0x05); /* chore 1 acked, plus a stale bit 2 */
+    stats_snapshot_t s;
+    app_state_stats(&IN_HEALTHY, T0, &s);
+    TEST_ASSERT_EQUAL_UINT8(1, s.chores_done);
+    TEST_ASSERT_EQUAL_UINT8(1, s.chores_left);
+    TEST_ASSERT_EQUAL_UINT8(0x01, s.chore_acked);
+    TEST_ASSERT_EQUAL_UINT8(0x05, timer_chore_acked()); /* storage untouched */
+}
+
+/* A SHORT list with chores still to do. chores_left is bounded by the
+   configured count, not CHORE_MAX: every case above has either all
+   CHORE_MAX configured or the stale bit sitting exactly on the row a
+   CHORE_MAX bound would add, so both bounds agreed there. Here they do
+   not — two chores, nothing acked, is 2 left and never 3. */
+void test_stats_chores_left_is_bounded_by_the_configured_count(void) {
+    static const struct {
+        uint8_t n, mask, left, done, acked;
+    } cases[] = {
+        {2, 0x00, 2, 0, 0x00}, /* nothing done yet */
+        {1, 0x06, 1, 0, 0x00}, /* only stale bits past the one chore */
+        {2, 0x04, 2, 0, 0x00}, /* a stale bit on the row a CHORE_MAX bound would add */
+        {1, 0x00, 1, 0, 0x00}, /* one chore, not done */
+        {2, 0x02, 1, 1, 0x02}, /* a short list with one of two done */
+    };
+    stats_snapshot_t s;
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        char msg[40];
+        snprintf(msg, sizeof(msg), "n=%u mask=0x%02X", (unsigned)cases[i].n, (unsigned)cases[i].mask);
+        set_chores(cases[i].n);
+        timer_chore_set_acked(cases[i].mask);
+        app_state_stats(&IN_HEALTHY, T0, &s);
+        TEST_ASSERT_EQUAL_UINT8_MESSAGE(cases[i].left, s.chores_left, msg);
+        TEST_ASSERT_EQUAL_UINT8_MESSAGE(cases[i].done, s.chores_done, msg);
+        TEST_ASSERT_EQUAL_UINT8_MESSAGE(cases[i].acked, s.chore_acked, msg);
+    }
+}
+
+/* M2-D6. Healthy is 0 — and the fixture's own defaults must be healthy,
+   or every device in the field would publish a warning. */
+void test_stats_config_warning_is_clear_when_every_pair_is_valid(void) {
+    stats_snapshot_t s;
+    app_state_stats(&IN_HEALTHY, T0, &s);
+    TEST_ASSERT_EQUAL_UINT8(0, s.chore_free_bad);
+}
+
+/* The day type NAMED is the broken one, not today's: T0 is a Monday and
+   the broken pair is the summer one — exactly the "December" case the
+   blocking gate cannot see. The pair is broken in the way only the RAW
+   read can see: the clamped accessor hands back 30 min, which judges
+   valid. */
+void test_stats_config_warning_names_a_non_today_day_type(void) {
+    hal_nvs_write_u16("summer_min", 30);
+    hal_nvs_write_u16("chore_free_sum", 45);
+    schedule_cache_invalidate();
+    stats_snapshot_t s;
+    app_state_stats(&IN_HEALTHY, T0, &s);
+    TEST_ASSERT_EQUAL_STRING("Weekday", s.day_type); /* today is not the broken day */
+    TEST_ASSERT_EQUAL_UINT8(1u << DAY_SUMMER, s.chore_free_bad);
+    TEST_ASSERT_EQUAL_UINT32(30u * 60u, schedule_get_chore_free_sec(DAY_SUMMER)); /* what a clamp would see */
+}
+
+/* It persists for as long as the pair does, and clears when it is fixed:
+   recomputed on every snapshot, not latched from the edit that broke it. */
+void test_stats_config_warning_persists_until_fixed(void) {
+    hal_nvs_write_u16("chore_free_we", 500); /* weekend_min is 120 */
+    stats_snapshot_t s;
+    for (int wake = 0; wake < 3; wake++) {
+        schedule_cache_invalidate(); /* a new wake: the cache is RAM */
+        app_state_stats(&IN_HEALTHY, T0 + wake * 3600, &s);
+        TEST_ASSERT_EQUAL_UINT8(1u << DAY_WEEKEND, s.chore_free_bad);
+    }
+    hal_nvs_write_u16("chore_free_we", 120); /* == allocation: valid, the off switch */
+    schedule_cache_invalidate();
+    app_state_stats(&IN_HEALTHY, T0, &s);
+    TEST_ASSERT_EQUAL_UINT8(0, s.chore_free_bad);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_display_idle_shows_full_allocation);
@@ -848,5 +957,12 @@ int main(void) {
     RUN_TEST(test_stats_started_slot_allocation_includes_grant);
     RUN_TEST(test_stats_completions_map_extra_slots);
     RUN_TEST(test_stats_injected_device_fields_pass_through);
+    RUN_TEST(test_stats_no_chores_reports_zero_everywhere);
+    RUN_TEST(test_stats_chore_counts_follow_the_acks);
+    RUN_TEST(test_stats_chore_acks_ignore_bits_past_the_configured_count);
+    RUN_TEST(test_stats_chores_left_is_bounded_by_the_configured_count);
+    RUN_TEST(test_stats_config_warning_is_clear_when_every_pair_is_valid);
+    RUN_TEST(test_stats_config_warning_names_a_non_today_day_type);
+    RUN_TEST(test_stats_config_warning_persists_until_fixed);
     return UNITY_END();
 }
