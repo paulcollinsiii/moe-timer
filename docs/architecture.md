@@ -195,8 +195,8 @@ the impure call is one line over it:
 | `main/light.c/h` | ALS-PT19 ambient light on GPIO 3; shares battery.c's ADC1 unit |
 | `main/nvs_config.c/h` | Typed NVS accessors; first-boot defaults |
 | `main/schedule.c/h` | Daily time-block lookup for screen-time allocation |
-| `main/buttons.c/h` | EXT1 deep-sleep wakeup config + wake-button decode; 10 ms software debounce; awake-window GPIO ISR feeding the press latch |
-| `main/button_latch.c` | Pure debounced press latch (host-tested): ISR records edges, awake checkpoints consume — presses during e-ink/NTP blind spots are never lost |
+| `main/buttons.c/h` | EXT1 deep-sleep wakeup config + wake-button decode; 10 ms software debounce; awake-window GPIO ISR feeding the press latch, plus a pad level sample on every take (and one at boot) feeding its release gate |
+| `main/button_latch.c` | Pure debounced press latch (host-tested): ISR records edges, awake checkpoints consume — presses during e-ink/NTP blind spots are never lost. A release gate fed by task-context level samples is what makes an edge a PRESS: without it the falling-edge bounce of a release counts as a second press, which is the M2-T12 phantom chore toggle |
 | `main/audio.c/h` | DAC playback: pumps `dac_continuous` DMA on CH0 (GPIO 17) from the tones renderer or a streamed WAV (stop-flag aware) |
 | `main/tones.c` | Pure alert-tone note tables + streaming envelope/sine renderer, no ESP deps — host-tested |
 | `main/wav_header.c` | Pure RIFF/WAVE header walk for the Custom WAV alert — host-tested |

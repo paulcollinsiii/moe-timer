@@ -290,6 +290,39 @@ menu "MagTag Timer"
             values, status_led.h's STATUS_LED_ACK_HOLD_MS is the one line
             to split into two.
 
+    config MAGTAG_CHORE_ACK_BURST_MS
+        int "Chore-ack burst budget (ms)"
+        default 4000
+        range 0 30000
+        help
+            The HARD BOUND on one gesture, in milliseconds of coalescing
+            after the first chore ack. The window above is sliding — every
+            ack that APPLIES grants another full one (a press the ack
+            refuses, Button D on a two-row list, does not) — so something has to
+            stop a pad that keeps producing edges, or a child leaning on a
+            button, from holding a battery device awake indefinitely.
+
+            IT REPLACED A COUNT OF WINDOWS, which was CHORE_MAX (3). The
+            count looked like generosity — one window per row there is to
+            tick — and was the opposite: a person ticking all three rows
+            had spent the whole budget, so CORRECTING one of those presses
+            was impossible and read in the field as "toggling a checkmark
+            multiple times doesn't work". A budget does not shrink as the
+            list gets longer, and it bounds the thing that actually costs
+            power (awake milliseconds) instead of a proxy for it.
+
+            4000 IS NOT A SWEPT VALUE either, and the same caveat as the
+            window above applies. It is ten windows at the 400 default:
+            room for three ticks and two corrections at a comfortable pace,
+            and 2.2% of CONFIG_MAGTAG_MAX_AWAKE_SEC. Lower it if the power
+            budget says so; a burst only costs anything at all on a wake
+            where somebody is pressing, and it ends one window after they
+            stop.
+
+            0 disables coalescing outright: the first ack still flips and
+            still paints, and every later press in the wake waits for the
+            take below the panel refresh.
+
     config MAGTAG_QUIET_START_HHMM
         int "NeoPixel quiet hours start (HHMM, 24h)"
         default 2230

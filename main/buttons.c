@@ -38,8 +38,36 @@ static void IRAM_ATTR button_isr(void *arg) {
     portEXIT_CRITICAL_ISR(&s_latch_mux);
 }
 
+/* Feed the latch a level sample, which is how the release gate learns a
+   button came back up (button_latch.h). Task context only — the scan reads
+   the GPIO driver, and the whole point of sampling here rather than in the
+   ISR is to keep that call out of an IRAM handler.
+
+   The scan is OUTSIDE the critical section and the note INSIDE it: the
+   sample is a fact about a moment, so holding the lock across the four pad
+   reads would buy nothing and lengthen a section an ISR spins on. */
+static void buttons_note_levels(void) {
+    const uint8_t held = buttons_scan_held();
+    const int64_t t_us = esp_timer_get_time();
+    portENTER_CRITICAL(&s_latch_mux);
+    button_latch_note_levels(held, t_us);
+    portEXIT_CRITICAL(&s_latch_mux);
+}
+
 /* Latch presses while awake. No false latch for the wake button: it is
-   already low at boot, so no falling edge fires. */
+   already low at boot, so no falling edge fires — and the seeding sample
+   below is what stops the falling-edge bounce of its RELEASE from reading as
+   a second press of the button that caused the wake. That sample has to
+   happen before the handlers go on, or an edge could be recorded against an
+   unseeded gate.
+
+   WHICH OF THE TWO WAYS IT DOES THAT DEPENDS ON THE PRESS, and writing only
+   the first was a false unconditional: a wake press long enough to outlast
+   boot reads HELD, which closes the release gate outright, while a quick tap
+   is over before we get here and reads UP — and then it is the settle anchor
+   on that observation (button_latch.h) doing the rejecting. Both are
+   covered; only one of them is the common case, and it is not knowable from
+   here which. */
 static void buttons_watch_begin(void) {
     esp_err_t ret = gpio_install_isr_service(0);
     if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) { /* INVALID_STATE = already installed */
@@ -49,6 +77,7 @@ static void buttons_watch_begin(void) {
     portENTER_CRITICAL(&s_latch_mux);
     button_latch_reset();
     portEXIT_CRITICAL(&s_latch_mux);
+    buttons_note_levels();
     for (int i = 0; i < 4; i++) {
         gpio_set_intr_type(BTN_GPIOS[i], GPIO_INTR_NEGEDGE);
         gpio_isr_handler_add(BTN_GPIOS[i], button_isr, (void *)(intptr_t)i);
@@ -62,7 +91,12 @@ static void buttons_watch_end(void) {
     }
 }
 
+/* EVERY take samples the levels first, so the release gate is fed by the
+   act of consuming presses and no consumer can forget to do it. The gate's
+   resolution is therefore exactly how often somebody takes: the chore-ack
+   coalescer polls at the debounce window for that reason. */
 uint8_t buttons_take_pressed(void) {
+    buttons_note_levels();
     portENTER_CRITICAL(&s_latch_mux);
     uint8_t mask = button_latch_take();
     portEXIT_CRITICAL(&s_latch_mux);
@@ -70,6 +104,7 @@ uint8_t buttons_take_pressed(void) {
 }
 
 uint8_t buttons_take_pressed_mask(uint8_t mask) {
+    buttons_note_levels();
     portENTER_CRITICAL(&s_latch_mux);
     uint8_t taken = button_latch_take_masked(mask);
     portEXIT_CRITICAL(&s_latch_mux);
@@ -114,7 +149,16 @@ void buttons_init(void) {
    pure host-tested calls now (buttons_policy.c, button_latch.c), so what
    rests on review is the wiring, not the decision. Closing the rest needs
    a host suite for this file (stubbed gpio/rtc_io/esp_sleep/FreeRTOS),
-   which is a bigger move than the policy carve. */
+   which is a bigger move than the policy carve.
+
+   A FIFTH SEAM LIVES ABOVE, added by M2-T12 and the same shape: that every
+   take feeds buttons_note_levels() and that the seeding sample in
+   buttons_watch_begin() happens before gpio_isr_handler_add(). The DECISION
+   those two feed — what a level sample means for the release gate — is
+   host-tested in button_latch.c, so again what rests on review is only
+   whether the samples are taken. test_wake_flow's take stubs mirror both
+   calls, which puts the gate itself under the coalescer; what they cannot
+   mirror is this file forgetting one. */
 void buttons_configure_wakeup_if(bool enable) {
     /* A locked sleep arms nothing: leave the RTC domain exactly as the
        last sleep left it, on a battery that cannot spare the work. */

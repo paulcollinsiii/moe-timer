@@ -85,8 +85,24 @@ add_host_test(test_wake_policy)
 # binary: defining the CONFIG symbol here takes the #ifdef arm. That is what
 # made the header's old "MUST AGREE" claim vacuous, and why the agreement is
 # now held by scripts/check-ack-hold-default.py instead of by a sentence.
+#
+# CONFIG_MAGTAG_CHORE_ACK_BURST_MS is here for the same reason and NOT the
+# Kconfig default either: wake_flow.c reads it with no #ifndef fallback (see
+# the alerts.c note below for why that is the safer way round), so this is the
+# only place the host build gets a value.
+#
+# 1725 IS CHOSEN TO BE INDIVISIBLE BY THE 50 ms POLL QUANTUM, and that is the
+# whole of why it is not a round number. The coalescing loop clamps its final
+# step so the burst stops exactly ON the budget rather than one poll past it,
+# and at any budget the poll divides, that clamp is a branch NO case can fail
+# -- review deleted it and the entire suite still passed. 1725 makes the last
+# step a 25 ms one, so the clamp is load bearing and its deletion shows up as
+# a 25 ms overshoot in the bound case's delay total. Neither is it a multiple
+# of the 170 above, for the same reason one step up: the idle window's own
+# clamp is pinned by the 170 not dividing by 50.
 add_host_test(test_wake_flow
-    EXTRA_DEFS CONFIG_MAGTAG_STATUS_LED_ACK_HOLD_MS=170)
+    EXTRA_DEFS CONFIG_MAGTAG_STATUS_LED_ACK_HOLD_MS=170
+               CONFIG_MAGTAG_CHORE_ACK_BURST_MS=1725)
 add_host_test(test_status_led)
 # alerts.c reads two alarm-length Kconfig ints straight out of sdkconfig.h,
 # which the host build has no equivalent of. Supplied here rather than as

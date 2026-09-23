@@ -663,18 +663,58 @@ static bool wake_flow_apply_chore_ack(uint8_t idx, time_t now) {
 
    THE WINDOW IS STATUS_LED_ACK_HOLD_MS, which is the menuconfig knob
    (status_led.h), because how long a child needs to get the next press in
-   is a question only a board can answer. It is one take per window rather
-   than a finer poll on purpose: the flip then lands at most one window
-   after the press, which is the same interval the FIRST ack deliberately
-   holds for, so both acks read as the same gesture. A finer quantum would
-   be a second figure nobody had measured.
+   is a question only a board can answer. It is an IDLE window: it measures
+   the quiet since the last press that landed, so every press grants another
+   full one and the gesture ends when the pressing does.
 
-   BOUNDED AT CHORE_MAX WINDOWS, and the bound is the number of rows there
-   are to tick: a child ticking every box on a full list gets a window
-   each, and anything past that is either a mis-press being corrected —
-   which is welcome to its own refresh — or a flaky pad, which must not be
-   able to hold the device awake by generating edges. */
-#define CHORE_ACK_COALESCE_MAX CHORE_MAX
+   POLLED AT THE DEBOUNCE WINDOW rather than taken once per idle window, and
+   M2-T12 moved it there for two reasons that are not about feel.
+   FIRST, THE RELEASE GATE. button_latch.h's gate learns that a button came
+   back up from a LEVEL SAMPLE, and buttons.c takes that sample on every
+   take — so how often anybody takes IS the gate's resolution, and at one
+   take per 400 ms idle window a person correcting a mis-press had to wait
+   most of a second before the pad would even accept the second press.
+   SECOND, IT IS WHAT MAKES THE GATE'S COST SMALL, which is not the same
+   claim as "it is what keeps the latch a bitmask" — the sentence that stood
+   here — and the difference is worth the words. The bitmask is sound at any
+   cadence: two accepted edges on one button need a release observation
+   between them, observations happen only inside takes, so no take can hold
+   two (button_latch.h). What the cadence buys is that a press the gate
+   REJECTS for want of an observation is a press LOST, and the window in
+   which that can happen is exactly the gap between takes. At one take per
+   400 ms idle window that gap covered most of a second; at the debounce
+   window it is 50 ms. The per-button COUNTER this task was scoped to add
+   would still have been a value no case could drive above one — but for the
+   first reason and not the second.
+   The flip therefore lands within a debounce window of the press instead of
+   within an idle window, which is closer to what §2.5 clause 4 promises
+   ("flip instantly"), and the polls add up to no more delay than the single
+   delay they replaced (see the clamp at the loop).
+
+   BOUNDED BY A TIME BUDGET, not by a count of windows, and that is the
+   M2-T12 fix rather than a tidy-up. The old bound was CHORE_MAX windows
+   because "a child ticking every box on a full list gets a window each" —
+   which silently made CORRECTING one of those presses impossible, since the
+   correction is the fourth press on a three-row list and the budget was
+   already spent. Field report, M2-T12: "if I click a button, then click it
+   again that should work. That'll happen if I misclick and want to put the
+   state back."
+   The original concern the count was carrying is real and is kept whole: a
+   flaky pad, or a child leaning on a button, must not be able to hold a
+   battery device awake by generating edges. A budget answers that strictly
+   better than a count, because it bounds the thing that actually costs
+   (awake milliseconds) rather than a proxy for it, and it does not shrink
+   as the list gets longer. CONFIG_MAGTAG_MAX_AWAKE_SEC is 180, so the
+   budget below is nowhere near the wake's own ceiling. */
+#define CHORE_ACK_COALESCE_POLL_MS (BUTTON_LATCH_DEBOUNCE_US / 1000)
+
+/* NO #ifndef FALLBACK, deliberately, and for the reason test/CMakeLists.txt
+   gives for alerts.c's two alarm knobs: a renamed or deleted Kconfig symbol
+   then breaks the FIRMWARE build loudly instead of silently compiling
+   against a default nobody can see. test_wake_flow supplies it at a value
+   that is not the Kconfig default, so a literal left at the call site fails
+   the suite rather than passing every relative assertion. */
+#define CHORE_ACK_COALESCE_BUDGET_MS CONFIG_MAGTAG_CHORE_ACK_BURST_MS
 
 /* The three ack buttons and the rows they tick, as a table rather than as
    `btn - BTN_B`: the arithmetic happens to work today only because the
@@ -758,31 +798,85 @@ static bool wake_flow_take_chore_acks(time_t *now) {
     return applied;
 }
 
-/* Take what is latched now, then hold the panel open for one window per
-   press that keeps landing. Returns whether any ack applied, which is the
-   caller's cue that the panel owes a repaint.
+/* Take what is latched now, then hold the panel open while presses keep
+   landing.
 
-   THE FIRST TAKE PAYS NO WAIT, deliberately: before the render it collects
-   the press made during the pre-press hold, and after the render the one
-   made during the refresh, and in both cases the press already happened —
-   waiting first would only delay its flip.
+   VOID, AND IT USED TO RETURN "whether any ack applied, which is the
+   caller's cue that the panel owes a repaint" — a sentence that was false
+   for as long as it stood. The one call site discards the value with a
+   `(void)`, because the render below it is unconditional: every press that
+   reaches this handler owes a repaint whether or not it was an ack. So the
+   flag was tracked, returned, and dropped, and M2-T12 found it by mutating
+   the assignment away and watching the whole suite pass. Keep it void: a
+   value no caller reads is a value no case can pin, and the ONE consumed
+   answer on this path — wake_flow_take_chore_acks()'s, below the render,
+   where a second refresh really does hang on it — is still a bool.
+
+   THE FIRST TAKE PAYS NO WAIT, deliberately: it collects the press made
+   during the pre-press hold, which already happened, so waiting first would
+   only delay its flip. The OTHER first take — the one that collects a press
+   made during the panel refresh — is the caller's, below the render, and
+   saying so here rather than "before the render ... and after the render"
+   is M2-T12 correcting this paragraph: it described two call sites for
+   THIS function when there has only ever been one. The behaviour it claimed
+   is real; the site is wake_flow_take_chore_acks()'s second caller.
+
+   TWO CLOCKS, and they are different questions. `idle_ms` is how long since
+   an ack APPLIED, so it answers "is the person still pressing?" — that is
+   the STATUS_LED_ACK_HOLD_MS window, and it being sliding is why a mis-press
+   correction is not a special case.
+   APPLIED AND NOT MERELY LANDED, which this said until M2-T12's fix pass and
+   which the loop below has never done: a press the ack REFUSES (Button D on
+   a two-row list, so there is no ✓3) is consumed and reports nothing, and
+   granting it another full window would buy awake time on a battery for a
+   press that cannot ever change anything — on the one screen where a child
+   can sit pressing the same dead button. The refusal still costs the poll it
+   arrived in, so a person who then presses a live row is inside the window
+   that was already running; what it does not do is extend one.
+   `spent_ms` is the whole burst and never resets, so it answers "is this
+   still a person?" — the flaky-pad bound, which is the one thing the old
+   window COUNT was carrying that had to survive.
+
+   THE STEP IS CLAMPED TO WHICHEVER BOUND IS NEARER so the loop cannot
+   overshoot either one, which is what keeps the lone-ack cost
+   min(STATUS_LED_ACK_HOLD_MS, CHORE_ACK_COALESCE_BUDGET_MS) — never more —
+   however the two knobs are set relative to each other: a board can put the
+   poll above the window, or the window above the budget, and neither becomes
+   a silent extra delay.
+   NOT "exactly one idle window whatever the knobs are", which is what stood
+   here while the very next clause offered "a board can put the window above
+   the budget" as a handled case. In that configuration the lone-ack cost IS
+   the budget, the loop leaving on spent_ms rather than on idle_ms, and both
+   Kconfig ranges reach it. The figure
+   test_t8_the_coalescing_window_is_the_ack_hold_figure pins is the idle
+   window because test_wake_flow is built with a budget well above it, which
+   is the ordinary relation and not a guarantee of the clamp.
 
    C17 IS PRESERVED THROUGH ALL OF THIS. Nothing here paints: every flip
    goes through wake_flow_apply_chore_ack(), whose paint is guarded on
    s_chore_strip_lit, and that flag is still written in exactly one place. */
-static bool wake_flow_coalesce_chore_acks(time_t *now) {
-    bool applied = wake_flow_take_chore_acks(now);
+static void wake_flow_coalesce_chore_acks(time_t *now) {
+    (void)wake_flow_take_chore_acks(now);
     if (!wake_flow_chore_acks_are_ours()) {
-        return applied; /* not our strip, not our wake: no window to grant */
+        return; /* not our strip, not our wake: no window to grant */
     }
-    for (int granted = 0; granted < CHORE_ACK_COALESCE_MAX; granted++) {
-        hal_delay_ms(STATUS_LED_ACK_HOLD_MS);
-        if (!wake_flow_take_chore_acks(now)) {
-            break; /* the window closed empty: the gesture is over */
+    uint32_t idle_ms = 0;  /* since the last ack APPLIED — see the two clocks above */
+    uint32_t spent_ms = 0; /* the whole gesture — the battery bound */
+    while (idle_ms < STATUS_LED_ACK_HOLD_MS && spent_ms < CHORE_ACK_COALESCE_BUDGET_MS) {
+        uint32_t step = CHORE_ACK_COALESCE_POLL_MS;
+        if (step > (uint32_t)STATUS_LED_ACK_HOLD_MS - idle_ms) {
+            step = (uint32_t)STATUS_LED_ACK_HOLD_MS - idle_ms;
         }
-        applied = true;
+        if (step > (uint32_t)CHORE_ACK_COALESCE_BUDGET_MS - spent_ms) {
+            step = (uint32_t)CHORE_ACK_COALESCE_BUDGET_MS - spent_ms;
+        }
+        hal_delay_ms(step);
+        idle_ms += step;
+        spent_ms += step;
+        if (wake_flow_take_chore_acks(now)) {
+            idle_ms = 0; /* another full window: the gesture is still going */
+        }
     }
-    return applied;
 }
 
 bool wake_flow_break_end(void) {
@@ -2278,13 +2372,23 @@ void wake_flow_handle_button_wake(void) {
        refresh they all share, instead of racing a ~1.9 s partial that
        cannot be interrupted. A no-op on every wake that is not a chore ack
        (the helper's three-term guard). */
-    (void)wake_flow_coalesce_chore_acks(&now);
+    wake_flow_coalesce_chore_acks(&now);
 
     /* Drain latch: the wake press itself was handled via the EXT1 decode
-       above; its release bounce (or a second tap during the action) must
-       not replay through the awake-press consumers below — e.g. a resume
-       with <70 s remaining flows straight into the final-minute watch,
-       where a stale B edge would instantly re-pause. */
+       above, and a STALE EDGE on the same button must not replay through
+       the awake-press consumers below — e.g. a resume with <70 s remaining
+       flows straight into the final-minute watch, where a stale B edge
+       would instantly re-pause.
+
+       WHAT COUNTS AS STALE CHANGED WITH M2-T12, and the narrowed claim is
+       worth writing down because this sentence used to name release bounce
+       first. button_latch's release gate now rejects a falling edge on a
+       button nobody has seen come back up, which is the pad-held bounce
+       case — so the edges that can still be sitting here are a SECOND TAP
+       during the action, and chatter that arrived after a level sample had
+       already observed the pad up. Both are stale for the same reason and
+       the drain is unchanged; it is just no longer the only thing standing
+       between a bouncing contact and a re-pause. */
     buttons_take_pressed();
 
     finish_or_break(btn, before, now, swapped); /* e.g. resume with accrual already past the interval */

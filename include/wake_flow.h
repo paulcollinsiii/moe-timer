@@ -320,8 +320,13 @@ void wake_flow_watch_break_end(void);
 
    Three things it does that are each a fixed field report rather than
    housekeeping: presses latched BEFORE the watch are discarded at entry
-   (a resume with <70 s left flows straight in here, and its own release
-   bounce would re-pause instantly); a stale clock is sharpened by a
+   (a resume with <70 s left flows straight in here, and a stale edge left
+   by the very press that resumed would re-pause instantly — "a stale edge"
+   and not "its own release bounce" since M2-T12, whose release gate rejects
+   a falling edge on a pad nobody has seen come back up, so what can still
+   be sitting here is a second tap during the action or chatter that arrived
+   after a level sample had already observed the pad up); a stale clock is
+   sharpened by a
    network window first, but only when the sync would not itself blow past
    the expiry; and the break balance is re-checked on EVERY poll, because
    a short allocation can put break-due inside this watch after the

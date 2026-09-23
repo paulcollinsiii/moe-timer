@@ -669,17 +669,27 @@ static int flow_full_takes; /* the break tail's (and the watch entry's) take */
    is vacuous. This records the content, which is the discriminating fact. */
 static uint8_t flow_last_full_take;
 
-/* buttons.c's take wrappers are pure pass-throughs to the latch compiled
-   in above (it adds only a critical section), so these are the device's
-   behaviour, not a model of it. Row 5 is a property of button_latch's
-   masked take, and this is what puts the real one under the module. */
+/* buttons.c's take wrappers are pass-throughs to the latch compiled in
+   above — a critical section, and a level sample fed to the release gate —
+   so these are the device's behaviour, not a model of it. Row 5 is a
+   property of button_latch's masked take, and this is what puts the real
+   one under the module.
+
+   THE SAMPLE IS THE M2-T12 HALF and it is not decoration: button_latch's
+   release gate refuses a falling edge on a button nobody has seen come back
+   up, so a take stub that skipped the sample would make every second press
+   of one button disappear in here and nowhere on the device. */
+static void flow_note_levels(void); /* defined with the press harness below */
+
 uint8_t buttons_take_pressed(void) {
+    flow_note_levels();
     flow_full_takes++;
     flow_last_full_take = button_latch_take();
     return flow_last_full_take;
 }
 
 uint8_t buttons_take_pressed_mask(uint8_t mask) {
+    flow_note_levels();
     flow_mask_takes++;
     return button_latch_take_masked(mask);
 }
@@ -1593,14 +1603,43 @@ static void flow_arm_break(time_t wall_end, int interrupted_slot, int selected_s
 }
 
 /* Presses go in through the real latch, one simulated edge per call.
-   Edges are spaced well past BUTTON_LATCH_DEBOUNCE_US so a case that
-   presses the same button twice is recording two presses and not
-   measuring the debounce, which is test_button_latch's subject. */
+
+   ONE CLOCK FOR PRESSES AND LEVEL SAMPLES ALIKE, stepped by every touch of
+   either, because the release gate reads both: a sample and a press close
+   enough together have the press rejected as bounce caught by the sample.
+   THAT IS THE DEVICE AND NOT THE HARNESS, which is what this paragraph said
+   until M2-T12's fix pass and is exactly backwards — the gate anchors
+   BUTTON_LATCH_RELEASE_SETTLE_US on the observation, so a real press within
+   that of a real level sample really is rejected on real hardware. Calling
+   it a harness artefact is what let the default step below hide a field
+   defect: while the anchor was a full BUTTON_LATCH_DEBOUNCE_US wide, EVERY
+   press within 50 ms of a poll was lost, and no case here could produce a
+   press that close because every touch of this clock jumps ten windows.
+
+   SO THE STEP IS A VARIABLE. Coarse by default, so a case that presses the
+   same button twice is recording two presses and not measuring the debounce
+   (test_button_latch's subject); a case about the release gate sets it to
+   something inside the gate's own windows and says why. What the ordering of
+   the two calls models faithfully either way — and it is the part the gate is
+   about — is whether a press happened before or after somebody looked at the
+   pads. */
 static int64_t flow_edge_us;
+static int64_t flow_edge_gap_us;
+
+#define FLOW_EDGE_GAP_DEFAULT_US (10 * (int64_t)BUTTON_LATCH_DEBOUNCE_US)
+
+static int64_t flow_edge_step(void) {
+    flow_edge_us += flow_edge_gap_us;
+    return flow_edge_us;
+}
 
 static void flow_press(button_id_t btn) {
-    button_latch_record((int)btn, flow_edge_us);
-    flow_edge_us += 10 * BUTTON_LATCH_DEBOUNCE_US;
+    button_latch_record((int)btn, flow_edge_step());
+}
+
+/* buttons.c's buttons_note_levels(), which every take goes through. */
+static void flow_note_levels(void) {
+    button_latch_note_levels(flow_held_now, flow_edge_step());
 }
 
 /* The mid-wait press. Installed as mock_hal_time's delay hook in setUp(),
@@ -1619,6 +1658,24 @@ static void flow_deferred_press_due(void) {
    what survived can never itself manufacture a deferred press. */
 static uint8_t flow_latch_residue(void) {
     return button_latch_take();
+}
+
+/* THE "it really is latched" IDIOM, which a dozen cases use mid-setup and
+   which has to CONSUME the latch in order to observe it — so whatever it
+   reports gets pressed again on the next line.
+
+   THE LEVEL SAMPLE IS WHY THIS IS A HELPER and not a bare take: on the
+   device every take samples the pads (buttons.c), which is how
+   button_latch's release gate learns a button came back up. Without it the
+   re-press is an edge on a button nobody has seen released since the press
+   this call just took — which is precisely the release BOUNCE the gate
+   exists to reject, so the setup would silently stop putting a press back.
+   flow_latch_residue() above deliberately does NOT sample: it is an
+   end-of-case assertion, and a sample there could arm a gate for nothing. */
+static uint8_t flow_latch_take_and_resample(void) {
+    const uint8_t taken = button_latch_take();
+    flow_note_levels();
+    return taken;
 }
 
 /* Run the break gate under a landing pad for the bed-time engage, which
@@ -1657,6 +1714,13 @@ typedef enum {
 } flow_wake_result_t;
 
 static flow_wake_result_t flow_run_wake(void (*handler)(void)) {
+    /* buttons_init()'s seeding level sample, which runs before either
+       handler on device (main.c calls it at boot) and is what tells the
+       release gate that the WAKE button is still held — so its own release
+       bounce cannot read as a second press. A case that wants that models
+       it by setting flow_held_now before the run, exactly as the pads
+       would. */
+    flow_note_levels();
     if (setjmp(flow_bed_jmp) != 0)
         return FLOW_WAKE_BEDTIME;
     if (setjmp(flow_sleep_jmp) != 0)
@@ -1734,6 +1798,7 @@ void setUp(void) {
 
     button_latch_reset();
     flow_edge_us = 1000000;
+    flow_edge_gap_us = FLOW_EDGE_GAP_DEFAULT_US;
     flow_state = TIMER_IDLE;
     flow_pause_arg = 0;
     /* Default ALLOWED, unlike flow_b_result's inert default: A's refusal
@@ -4746,9 +4811,11 @@ void test_a_countdown_exactly_at_the_watch_window_is_watched(void) {
 }
 
 void test_the_final_minute_watch_discards_presses_made_before_it_started(void) {
-    /* A resume with <70 s left flows straight into this watch; the release
-       bounce of the very press that resumed would otherwise re-pause it
-       instantly. Only presses made DURING the watch may pause. */
+    /* A resume with <70 s left flows straight into this watch; a stale edge
+       left by the very press that resumed would otherwise re-pause it
+       instantly. Only presses made DURING the watch may pause. ("Stale
+       edge" rather than "release bounce" since M2-T12 — see
+       test_the_wake_press_stale_edge_is_drained_before_the_tail.) */
     time_t now = flow_at(14, 0);
     mock_time_set(now);
     flow_state = TIMER_RUNNING;
@@ -5894,7 +5961,7 @@ void test_a_press_latched_during_the_wake_is_dispatched_before_sleep(void) {
     flow_b_result = BTN_B_STARTED;
     flow_press(BTN_B);
     /* the press really is in the latch */
-    TEST_ASSERT_EQUAL_HEX8(1u << BTN_B, button_latch_take());
+    TEST_ASSERT_EQUAL_HEX8(1u << BTN_B, flow_latch_take_and_resample());
     flow_press(BTN_B);
 
     TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_tick());
@@ -5928,7 +5995,7 @@ void test_a_latched_a_press_never_swallows_the_b_press_beside_it(void) {
     flow_press(BTN_A);
     flow_press(BTN_B);
     /* both really are in the latch */
-    TEST_ASSERT_EQUAL_HEX8((1u << BTN_A) | (1u << BTN_B), button_latch_take());
+    TEST_ASSERT_EQUAL_HEX8((1u << BTN_A) | (1u << BTN_B), flow_latch_take_and_resample());
     flow_press(BTN_A);
     flow_press(BTN_B);
 
@@ -5950,7 +6017,7 @@ void test_a_latched_a_press_alone_reaches_its_own_arm_and_no_slot(void) {
     flow_state = TIMER_IDLE;
     flow_b_result = BTN_B_STARTED; /* would fire loudly on a fall-through into B */
     flow_press(BTN_A);
-    TEST_ASSERT_EQUAL_HEX8(1u << BTN_A, button_latch_take());
+    TEST_ASSERT_EQUAL_HEX8(1u << BTN_A, flow_latch_take_and_resample());
     flow_press(BTN_A);
 
     TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_tick());
@@ -5993,7 +6060,7 @@ void test_a_latched_d_press_in_timers_mode_is_never_dispatched_by_the_tick_drain
     flow_tick_clock(flow_at(15, 0));
     flow_state = TIMER_IDLE;
     flow_press(BTN_D);
-    TEST_ASSERT_EQUAL_HEX8(1u << BTN_D, button_latch_take());
+    TEST_ASSERT_EQUAL_HEX8(1u << BTN_D, flow_latch_take_and_resample());
     flow_press(BTN_D);
 
     TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_tick());
@@ -6044,7 +6111,7 @@ void test_the_latch_drain_runs_before_the_event_watch(void) {
     flow_needs_sync = false;
     flow_b_result = BTN_B_PAUSED;
     flow_press(BTN_B);
-    TEST_ASSERT_EQUAL_HEX8(1u << BTN_B, button_latch_take());
+    TEST_ASSERT_EQUAL_HEX8(1u << BTN_B, flow_latch_take_and_resample());
     flow_press(BTN_B);
 
     TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_tick());
@@ -6064,7 +6131,7 @@ void test_a_refused_latched_press_never_reaches_the_tail(void) {
     flow_state = TIMER_EXPIRED;
     flow_b_result = BTN_B_NONE;
     flow_press(BTN_B);
-    TEST_ASSERT_EQUAL_HEX8(1u << BTN_B, button_latch_take());
+    TEST_ASSERT_EQUAL_HEX8(1u << BTN_B, flow_latch_take_and_resample());
     flow_press(BTN_B);
 
     TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_tick());
@@ -6399,17 +6466,25 @@ void test_an_undecoded_button_wake_still_renders_and_sleeps(void) {
     TEST_ASSERT_EQUAL_INT(1, flow_sleeps);
 }
 
-/* The release bounce of the wake press itself (or a second tap during the
-   action) must not replay through the awake-press consumers: a resume
-   with <70 s left flows straight into the final-minute watch, where a
-   stale B edge would instantly re-pause. */
-void test_the_wake_press_release_bounce_is_drained_before_the_tail(void) {
+/* A STALE EDGE on the wake press's own button must not replay through the
+   awake-press consumers: a resume with <70 s left flows straight into the
+   final-minute watch, where a stale B edge would instantly re-pause.
+
+   "A stale edge" and not "release bounce", since M2-T12: button_latch's
+   release gate rejects a falling edge on a pad nobody has seen come back
+   up, so bounce on a still-held button never reaches the latch at all.
+   What this and the two cases below model is therefore the edge that CAN
+   still be latched — a second tap during the action, or chatter after a
+   level sample already observed the pad up — which is exactly what
+   flow_press() records. The drain is unchanged; only the population of
+   edges reaching it is smaller. */
+void test_the_wake_press_stale_edge_is_drained_before_the_tail(void) {
     mock_time_set(flow_at(15, 0));
     flow_wakeup_btn = BTN_C;
     flow_select_ok = false; /* C refused, so nothing else consumes the latch */
     flow_press(BTN_B);
-    /* the bounce really is in the latch */
-    TEST_ASSERT_EQUAL_HEX8(1u << BTN_B, button_latch_take());
+    /* the stale edge really is in the latch */
+    TEST_ASSERT_EQUAL_HEX8(1u << BTN_B, flow_latch_take_and_resample());
     flow_press(BTN_B);
 
     TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_button());
@@ -6421,17 +6496,18 @@ void test_the_wake_press_release_bounce_is_drained_before_the_tail(void) {
 }
 
 /* A resume with under 70 s left lands straight in the final-minute watch.
-   Without the drain above, the release bounce re-pauses it instantly —
-   this is that path end to end, and the assertion is that it does NOT. */
-void test_a_resume_into_the_final_minute_is_not_re_paused_by_its_own_bounce(void) {
+   Without the drain above, the stale edge re-pauses it instantly — this is
+   that path end to end, and the assertion is that it does NOT. See the
+   case above for why "stale edge" and not "release bounce" since M2-T12. */
+void test_a_resume_into_the_final_minute_is_not_re_paused_by_its_own_stale_edge(void) {
     time_t now = flow_at(15, 0);
     mock_time_set(now);
     flow_wakeup_btn = BTN_B;
     flow_b_result = BTN_B_RESUMED;
     flow_expiry_wall = (int64_t)now + 40; /* inside the watch window */
     flow_net_open = false;
-    flow_press(BTN_B); /* the release bounce */
-    TEST_ASSERT_EQUAL_HEX8(1u << BTN_B, button_latch_take());
+    flow_press(BTN_B); /* the stale edge left by the press that resumed */
+    TEST_ASSERT_EQUAL_HEX8(1u << BTN_B, flow_latch_take_and_resample());
     flow_press(BTN_B);
 
     TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_button());
@@ -6670,7 +6746,7 @@ void test_the_latch_drain_runs_before_the_event_watch_can_discard_it(void) {
     flow_expiry_wall = (int64_t)now + 40; /* INSIDE the watch window */
     flow_b_result = BTN_B_PAUSED;
     flow_press(BTN_B);
-    TEST_ASSERT_EQUAL_HEX8(1u << BTN_B, button_latch_take()); /* it is latched */
+    TEST_ASSERT_EQUAL_HEX8(1u << BTN_B, flow_latch_take_and_resample()); /* it is latched */
     flow_press(BTN_B);
 
     TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_tick());
@@ -6694,7 +6770,7 @@ void test_row10_the_post_render_break_takes_the_wake_before_the_latched_press(vo
     flow_state_at_select = TIMER_IDLE;
     flow_break_due_from = base + 40; /* not due on arrival; due after the wait */
     flow_press(BTN_C);
-    TEST_ASSERT_EQUAL_HEX8(1u << BTN_C, button_latch_take());
+    TEST_ASSERT_EQUAL_HEX8(1u << BTN_C, flow_latch_take_and_resample());
     flow_press(BTN_C);
 
     TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_tick());
@@ -6728,16 +6804,18 @@ void test_the_button_wake_captures_the_state_the_break_drain_left_behind(void) {
     TEST_ASSERT_EQUAL_INT(WAKE_RENDER_EXPIRY_ALERT, wake_policy_render(TIMER_IDLE, TIMER_EXPIRED, true, true, false));
 }
 
-/* Kills: the release-bounce drain moved after the tail. The tail can end
-   the wake outright (its break gate does not return), so a drain placed
-   after it never runs at all and the bounce is still latched at sleep. */
-void test_a_break_at_the_tail_still_drains_the_release_bounce_first(void) {
+/* Kills: the stale-edge drain moved after the tail. The tail can end the
+   wake outright (its break gate does not return), so a drain placed after
+   it never runs at all and the edge is still latched at sleep. ("Stale
+   edge" rather than "release bounce" since M2-T12 — see
+   test_the_wake_press_stale_edge_is_drained_before_the_tail.) */
+void test_a_break_at_the_tail_still_drains_the_stale_edge_first(void) {
     mock_time_set(flow_at(15, 0));
     flow_wakeup_btn = BTN_C;
     flow_select_ok = false; /* refused, so nothing else consumes the latch */
     flow_break_due_ret = true;
     flow_press(BTN_B);
-    TEST_ASSERT_EQUAL_HEX8(1u << BTN_B, button_latch_take());
+    TEST_ASSERT_EQUAL_HEX8(1u << BTN_B, flow_latch_take_and_resample());
     flow_press(BTN_B);
 
     TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_button());
@@ -7688,7 +7766,12 @@ void test_t8_a_press_made_during_the_panel_refresh_is_not_discarded(void) {
     flow_arm_chore_wake(BTN_B);
     flow_display_ms = FLOW_PANEL_COST_MS; /* the panel costs what it costs */
     flow_deferred_press_btn = BTN_C;      /* ✓2, mid-refresh */
-    flow_deferred_press_ms = (int32_t)(STATUS_LED_ACK_HOLD_MS * (CHORE_ACK_COALESCE_MAX + 2));
+    /* Past the WHOLE burst budget, not merely past a few windows: no
+       coalescing window can still be open at this point however many
+       presses landed, so the only thing that can answer this press is a
+       take below the render. */
+    flow_deferred_press_ms =
+        (int32_t)(STATUS_LED_ACK_HOLD_MS + CHORE_ACK_COALESCE_BUDGET_MS + CHORE_ACK_COALESCE_POLL_MS);
 
     TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_button());
 
@@ -7821,18 +7904,25 @@ void test_t8_the_coalescing_window_is_the_ack_hold_figure(void) {
                                      "a lone ack did not spend exactly the hold plus one coalescing window");
 }
 
-/* The BOUND, and it is a battery guard rather than a feel one: every
-   landed press grants another window, so without a cap a pad generating
-   edges — or a child leaning on a button — holds the device awake for as
-   long as it keeps producing them. CHORE_MAX windows is one per row there
-   is to tick.
+/* The BOUND, and it is a battery guard rather than a feel one: the idle
+   window slides, so every landed press grants another one and without a
+   hard cap a pad generating edges — or a child leaning on a button — holds
+   the device awake for as long as it keeps producing them.
+
+   M2-T12 MOVED THIS FROM A COUNT TO A TIME, and the case moved with it
+   because the two bounds fail differently. A count of windows ran out on a
+   full list before a mis-press could be corrected, which is the field
+   report this task exists for; a budget of milliseconds bounds the thing
+   that actually costs power and does not shrink as the list grows. So this
+   asserts the wake's DELAY total, which is the bound itself, and the ack
+   count only as corroboration that presses really did keep landing.
 
    Driven by its own delay hook rather than the one-shot deferred press,
-   which is the only way to model a press arriving in EVERY window. The
-   hook stops itself well above the bound so a coalescer that never
-   terminated fails this assertion instead of hanging the suite. */
+   which is the only way to model a press arriving in EVERY poll. The hook
+   stops itself well above anything the budget can reach, so a coalescer
+   that never terminated fails an assertion instead of hanging the suite. */
 static void flow_press_in_every_window(void) {
-    if (flow_log_count(EV_CHORE_ACK) < 20) {
+    if (flow_log_count(EV_CHORE_ACK) < 200) {
         flow_press(BTN_B);
     }
 }
@@ -7844,13 +7934,179 @@ void test_t8_the_coalescing_window_is_bounded_per_wake(void) {
 
     TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_button());
 
-    /* Three separate acks are owed before any window is granted at all —
-       the wake press itself, and the press made during the pre-press hold,
-       which the first take collects for free precisely because it has
-       already happened. Everything past those is one press per window, so
-       the bound reads as the sum rather than as a bare number. */
-    TEST_ASSERT_EQUAL_INT_MESSAGE(2 + CHORE_ACK_COALESCE_MAX, flow_log_count(EV_CHORE_ACK),
-                                  "the coalescing window is not bounded at one per chore row");
+    /* The pre-press hold, then coalescing until the budget is gone — and
+       not one poll more, which is what makes this a bound and not a
+       tendency. A sliding window with no cap never reaches this line. */
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE((uint32_t)STATUS_LED_ACK_HOLD_MS + CHORE_ACK_COALESCE_BUDGET_MS,
+                                     mock_delay_total_ms(),
+                                     "a press in every poll did not stop the burst at the budget");
+    /* Two acks are owed before any poll happens at all — the wake press
+       itself, and the press made during the pre-press hold, which the first
+       take collects for free precisely because it has already happened.
+       Past those it is one press per poll, all the way to the budget —
+       ROUNDED UP, because the budget need not divide by the poll quantum and
+       the short final step the clamp makes is still a poll. */
+    const int polls =
+        (int)((CHORE_ACK_COALESCE_BUDGET_MS + CHORE_ACK_COALESCE_POLL_MS - 1) / CHORE_ACK_COALESCE_POLL_MS);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(2 + polls, flow_log_count(EV_CHORE_ACK),
+                                  "the burst did not land exactly one ack per poll up to the budget");
+}
+
+/* THE POLL QUANTUM, pinned to BUTTON_LATCH_DEBOUNCE_US and not to the
+   coalescer's own macro — which is the difference between a case and a
+   tautology. Every other figure here is written against
+   CHORE_ACK_COALESCE_POLL_MS so it moves with the knob, and review found
+   that a poll quantum mutated up to the whole idle window therefore failed
+   NOTHING: the ack-per-poll arithmetic in the bound case moved with it.
+
+   WHY THE DEBOUNCE IS THE RIGHT BOUND and not a feel figure: the latch is a
+   BITMASK, so two presses of one button waiting in the same take collapse
+   into one toggle. What stops that is not the mask — it is that two accepted
+   edges on one button need a release observation between them
+   (button_latch.h) and a release is only observed when somebody takes. Poll
+   further apart than the debounce window and two presses can accumulate
+   between takes; poll at it or under it and they cannot. So this asserts the
+   floor: the idle window is covered by takes no further apart than that.
+
+   A LOWER BOUND rather than an equality, because the entry take and any
+   other masked take on the path are not this case's business — a coalescer
+   that polled FINER than required is not the defect. */
+void test_t12_the_coalescing_loop_polls_at_least_as_often_as_the_debounce(void) {
+    flow_tick_clock(flow_at(15, 0));
+    flow_arm_chore_wake(BTN_B);
+
+    TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_button());
+
+    const uint32_t debounce_ms = BUTTON_LATCH_DEBOUNCE_US / 1000;
+    const uint32_t floor_takes = ((uint32_t)STATUS_LED_ACK_HOLD_MS + debounce_ms - 1) / debounce_ms;
+    TEST_ASSERT_GREATER_OR_EQUAL_UINT32_MESSAGE(floor_takes, (uint32_t)flow_mask_takes,
+                                                "the coalescing loop polls further apart than the debounce window, so "
+                                                "two presses of one button can collapse into one latched bit");
+}
+
+/* THE FIELD REPORT, and the one case that fails on everything shipped
+   before M2-T12: "if I click a button, then click it again that should
+   work. That'll happen if I misclick and want to put the state back."
+   A toggle is its own inverse, so two presses of one button must leave the
+   row exactly as it was found — and on a FULL list, where the old bound of
+   CHORE_MAX windows was already spent by the three ticks.
+
+   Two separate defects had to be fixed for this to pass and it fails on
+   either alone: the old bound ran out before the fourth press could be
+   granted a window, and one press latched TWICE (its release bounce) so the
+   correction could not be told from the phantom it was competing with.
+
+   WHAT THIS CASE DOES NOT PIN, said here because for a while it was believed
+   to: the release gate's TIMING. Every touch of the latch clock here jumps
+   ten debounce windows (flow_edge_step), so each press sits 500 ms clear of
+   the level sample before it — a gap no polling device produces. A third
+   defect therefore hid underneath a passing case, and
+   test_t12_a_correction_press_is_accepted_at_a_real_poll_cadence below is
+   the case that fails on it. */
+static int flow_correcting_presses;
+
+static void flow_tick_then_correct(void) {
+    /* One press per poll: ✓1, ✓2, ✓3, then ✓3 again to put it back. */
+    static const button_id_t seq[] = {BTN_C, BTN_D, BTN_D};
+    if (flow_correcting_presses < (int)(sizeof seq / sizeof seq[0])) {
+        flow_press(seq[flow_correcting_presses++]);
+    }
+}
+
+void test_t12_a_mis_press_on_a_full_list_can_be_corrected_in_the_same_wake(void) {
+    flow_tick_clock(flow_at(15, 0));
+    flow_arm_chore_wake(BTN_B); /* ✓1 is the wake press */
+    flow_chore_count = CHORE_MAX;
+    flow_correcting_presses = 0;
+    mock_delay_set_hook(flow_tick_then_correct); /* setUp reinstalls the default */
+
+    TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_button());
+
+    TEST_ASSERT_EQUAL_INT_MESSAGE(3, flow_correcting_presses, "the harness never made all three later presses");
+    /* FOUR presses, four applies: the fourth is the correction, and on the
+       old window count there was no window left to collect it in. */
+    TEST_ASSERT_EQUAL_INT_MESSAGE(4, flow_log_count(EV_CHORE_ACK),
+                                  "a repeat press on a full list never reached the ack");
+    /* And they all shared the one refresh, which is what coalescing is for. */
+    TEST_ASSERT_EQUAL_INT_MESSAGE(1, flow_log_count(EV_PARTIAL) + flow_log_count(EV_FULL_REFRESH),
+                                  "correcting a mis-press cost a second panel refresh");
+}
+
+/* THE SAME GESTURE AT THE CADENCE A DEVICE ACTUALLY PRODUCES, and the case
+   that fails on the release anchor M2-T12 shipped first.
+   On hardware the level sample that reopens the gate is taken by the same
+   take that then consumes presses, so a press made while the panel waits
+   lands 0-50 ms after a sample — never the 500 ms the default clock step
+   above manufactures. The anchor on that sample was BUTTON_LATCH_DEBOUNCE_US
+   wide to begin with, so every one of those presses was rejected as bounce
+   and then lost outright at the next poll: the coarse step is the reason no
+   case in this file could see it (see button_latch.h for the arithmetic).
+   The gap below is seven tenths of a chatter window, which is the one place a
+   press can sit and be unambiguous: past the settle anchor so the gate must
+   accept it, inside the chatter window so the first anchor rejected it, and
+   far enough apart that two presses of one button do not collapse into one
+   latched bit on the press-edge window instead. All three are asserted,
+   because a case that silently stops distinguishing them is how this defect
+   got here. */
+#define FLOW_EDGE_GAP_TIGHT_US ((int64_t)30000) /* 30 ms */
+
+void test_t12_a_correction_press_is_accepted_at_a_real_poll_cadence(void) {
+    flow_tick_clock(flow_at(15, 0));
+    flow_arm_chore_wake(BTN_B); /* ✓1 is the wake press */
+    flow_chore_count = CHORE_MAX;
+    flow_correcting_presses = 0;
+    flow_edge_gap_us = FLOW_EDGE_GAP_TIGHT_US;
+    mock_delay_set_hook(flow_tick_then_correct); /* setUp reinstalls the default */
+
+    TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_button());
+
+    TEST_ASSERT_EQUAL_INT_MESSAGE(3, flow_correcting_presses, "the harness never made all three later presses");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(4, flow_log_count(EV_CHORE_ACK),
+                                  "a press made within a debounce window of the level sample that reopened the "
+                                  "gate was rejected as bounce — the lost correction press of M2-T12");
+    /* AFTER the assertion, because these only say whether it was worth
+       making: a probe gap outside the band proves nothing either way. */
+    TEST_ASSERT_TRUE_MESSAGE(FLOW_EDGE_GAP_TIGHT_US > BUTTON_LATCH_RELEASE_SETTLE_US,
+                             "the probe gap no longer clears the settle anchor, so a failure here would be the "
+                             "one rejection the gate is RIGHT to make");
+    TEST_ASSERT_TRUE_MESSAGE(FLOW_EDGE_GAP_TIGHT_US < BUTTON_LATCH_DEBOUNCE_US,
+                             "the probe gap no longer lands inside the chatter window, so this case passes "
+                             "without distinguishing the two anchors");
+    TEST_ASSERT_TRUE_MESSAGE(2 * FLOW_EDGE_GAP_TIGHT_US > BUTTON_LATCH_DEBOUNCE_US,
+                             "two presses of one button are now closer together than the chatter window, so "
+                             "they would collapse in the latch for a reason that is not the gate");
+}
+
+/* THE PHANTOM, on its own, because the case above would also pass if the
+   fourth press were a bounce artefact rather than the press the harness
+   made. One physical press is one falling edge when it goes down and, on a
+   bouncing contact, another when it comes back UP — and that second edge
+   arrives a whole hold duration after the first, so no debounce window
+   measured from the press can reject it. Before M2-T12 the coalescer read
+   it as a second press and toggled the row back, which is field finding 3:
+   "toggling 3 flips 2 back to green and the screen renders as this".
+
+   Modelled exactly as the hardware produces it: an edge on a button that
+   has not been observed released since its last accepted press. The button
+   is held throughout (flow_held_now), so no take can observe a release. */
+static void flow_bounce_the_held_button(void) {
+    if (flow_log_count(EV_CHORE_ACK) < 20) {
+        flow_press(BTN_B); /* release-bounce edges, never a new press */
+    }
+}
+
+void test_t12_release_bounce_on_a_held_button_is_not_a_second_press(void) {
+    flow_tick_clock(flow_at(15, 0));
+    flow_arm_chore_wake(BTN_B);
+    flow_held_now = 1u << BTN_B; /* still down: nobody can see it come up */
+    mock_delay_set_hook(flow_bounce_the_held_button);
+
+    TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_button());
+
+    TEST_ASSERT_EQUAL_INT_MESSAGE(1, flow_log_count(EV_CHORE_ACK),
+                                  "release bounce on the wake press was applied as a second ack");
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE(2u * STATUS_LED_ACK_HOLD_MS, mock_delay_total_ms(),
+                                     "bounce edges granted the burst more windows");
 }
 
 /* The guard's three terms, from the side that costs battery: a wake that
@@ -9427,8 +9683,8 @@ int main(void) {
     RUN_TEST(test_button_d_syncs_before_the_paint_and_re_reads_the_clock);
     RUN_TEST(test_button_d_with_no_window_available_skips_the_ntp_wait);
     RUN_TEST(test_an_undecoded_button_wake_still_renders_and_sleeps);
-    RUN_TEST(test_the_wake_press_release_bounce_is_drained_before_the_tail);
-    RUN_TEST(test_a_resume_into_the_final_minute_is_not_re_paused_by_its_own_bounce);
+    RUN_TEST(test_the_wake_press_stale_edge_is_drained_before_the_tail);
+    RUN_TEST(test_a_resume_into_the_final_minute_is_not_re_paused_by_its_own_stale_edge);
     RUN_TEST(test_a_button_wake_always_ends_in_deep_sleep_under_the_gates_mode);
     RUN_TEST(test_a_button_wake_whose_action_pushed_the_balance_over_breaks);
     RUN_TEST(test_bug1_an_idle_sync_wake_does_drain_the_latch_before_sleep);
@@ -9443,7 +9699,7 @@ int main(void) {
     RUN_TEST(test_the_latch_drain_runs_before_the_event_watch_can_discard_it);
     RUN_TEST(test_row10_the_post_render_break_takes_the_wake_before_the_latched_press);
     RUN_TEST(test_the_button_wake_captures_the_state_the_break_drain_left_behind);
-    RUN_TEST(test_a_break_at_the_tail_still_drains_the_release_bounce_first);
+    RUN_TEST(test_a_break_at_the_tail_still_drains_the_stale_edge_first);
     RUN_TEST(test_the_button_wake_reaches_the_event_watch_before_it_sleeps);
     RUN_TEST(test_row13_an_ext1_wake_goes_to_the_button_handler);
     RUN_TEST(test_row13_a_timer_wake_goes_to_the_tick_handler);
@@ -9491,6 +9747,10 @@ int main(void) {
     RUN_TEST(test_t8_a_mode_reverted_under_the_wake_stops_routing_presses_to_acks);
     RUN_TEST(test_t8_the_coalescing_window_is_the_ack_hold_figure);
     RUN_TEST(test_t8_the_coalescing_window_is_bounded_per_wake);
+    RUN_TEST(test_t12_the_coalescing_loop_polls_at_least_as_often_as_the_debounce);
+    RUN_TEST(test_t12_a_mis_press_on_a_full_list_can_be_corrected_in_the_same_wake);
+    RUN_TEST(test_t12_a_correction_press_is_accepted_at_a_real_poll_cadence);
+    RUN_TEST(test_t12_release_bounce_on_a_held_button_is_not_a_second_press);
     RUN_TEST(test_t8_a_wake_with_no_ack_spends_no_coalescing_window);
     RUN_TEST(test_t8_a_running_timer_keeps_its_pixel_even_in_chore_mode);
     RUN_TEST(test_t8_an_empty_chore_list_claims_nothing);
