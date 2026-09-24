@@ -10,6 +10,8 @@
 
     uv run tools/gen_ha_dashboard.py [--devices tools/ha_devices.yaml]
                                      [--part {setup,automation,dashboard,all}]
+    uv run tools/gen_ha_dashboard.py --mqtt [--sdkconfig sdkconfig] [--wait 10]
+                                     [--devices FILE] [--part ...]
 
 Prints three parts, in order:
 
@@ -21,19 +23,43 @@ Prints three parts, in order:
 
 The generator never talks to Home Assistant: no API, no token. The devices
 come from a small local file (tools/ha_devices.yaml, gitignored; see
-tools/ha_devices.example.yaml).
+tools/ha_devices.example.yaml), or with --mqtt from the MQTT broker.
 
 THE ENTITY SET IS AN INPUT. build_dashboard() takes, per device, the set of
 entities that device has. File mode derives it from the firmware's own
 tables (firmware_entities(): main/stats_json.c ENTITIES, main/ha_config.c
 FIELDS and the two hand-written discovery payloads in main/mqtt_ha.c), so
-every device gets every entity. The --mqtt mode (M4-T3) is meant to supply
-it from the retained discovery documents instead, so a retired timer slot or
-chore gets no card. The layout (LAYOUT below) names keys; a key the device
-does not have is simply skipped. So file mode names every timer slot (1-4)
-and chore row (1-3): a device with a disabled slot or fewer chores shows
-"entity not available" rows for them, and part 1 and the dashboard header
-say so.
+every device gets every entity. The layout (LAYOUT below) names keys; a key
+the device does not have is simply skipped. So file mode names every timer
+slot (1-4) and chore row (1-3): a device with a disabled slot or fewer
+chores shows "entity not available" rows for them, and part 1 and the
+dashboard header say so.
+
+--mqtt reads the broker settings (CONFIG_MAGTAG_MQTT_URI/USER/PASS) from the
+gitignored sdkconfig, collects the retained discovery documents
+(homeassistant/<component>/magtag-<node>_<key>/config) and builds the device
+list and each device's exact entity set from them: an empty (retired)
+payload is skipped, so a disabled slot or an unused chore row gets no card.
+The tab label is the discovery dev.name. A key this generator's layout does
+not know (newer firmware) goes to an "Other" part on the tab, with a warning.
+A device on older firmware than this checkout (it lacks an entity the
+checkout's firmware always publishes, or publishes no state_class where the
+checkout's firmware has one) still gets a tab, built from what it publishes,
+plus a warning to OTA it and re-run. In --mqtt mode a statistics graph keeps
+only the entities whose published state_class suits its stat_types
+(graph_compatible()), and is dropped when none is left. A device whose
+payloads carry no def_ent_id (firmware before discovery schema v20) gets no
+tab: its HA entity ids are name-derived and cannot be known here; part 1
+says to OTA it first.
+
+The password is never printed. It is read into Broker.password (kept out of
+its repr) and handed to paho, nowhere else. Everything --mqtt prints once it
+is read -- errors, warnings and the three parts, stderr and stdout alike --
+leaves through one function, _emit(), which replaces the password with
+"<password>" wherever it occurs: in a library's error text, and in broker
+data too (a device named after the password would show "<password>" on its
+tab). The only messages printed before the password is read (a missing or
+malformed sdkconfig) are built from key names and the path.
 
 The firmware tables are read as plain C rows. A preprocessor conditional
 (#if / #ifdef) inside ENTITIES[] or FIELDS[], or a discovery payload in
@@ -50,10 +76,16 @@ inside it: file mode and its tests run without it.
 from __future__ import annotations
 
 import argparse
+import json
+import math
 import os
 import re
 import sys
-from dataclasses import dataclass
+import textwrap
+import time
+from collections import Counter
+from dataclasses import dataclass, field
+from urllib.parse import urlsplit
 
 import yaml
 
@@ -439,6 +471,26 @@ GRAPHS = [
     ("Chores done per day", dict(keys=["chores_done"], stat_types=["max"], period="day", days=56, chart_type="bar")),
 ]
 
+# The state_classes each statistics-graph stat_type can read (HA
+# statistics): a `change` needs a sum, which only total / total_increasing
+# keep; mean/min/max need a measurement. build_view() keeps a graph entity
+# only if its state_class suits every stat_type of the card: in file mode
+# that is the firmware table's state_class (all suit), in --mqtt mode the
+# stat_cla the device published (older firmware publishes none). The
+# history-graph needs no state_class (recorder history) and is not filtered.
+STAT_TYPE_STATE_CLASSES = {
+    "change": frozenset({"total", "total_increasing"}),
+    "sum": frozenset({"total", "total_increasing"}),
+    "mean": frozenset({"measurement"}),
+    "min": frozenset({"measurement"}),
+    "max": frozenset({"measurement"}),
+}
+
+
+def graph_compatible(state_class: str | None, stat_types) -> bool:
+    return all(state_class in STAT_TYPE_STATE_CLASSES[st] for st in stat_types)
+
+
 DAY_SHIFT_NOTE = (
     "Screen minutes and extra timer runs come from the daily summary, which the device "
     "sends at its first check-in after midnight. HA files each day's figures under the "
@@ -479,6 +531,14 @@ def placed_keys() -> set[str]:
 def coverage_gaps(fw_keys) -> set[str]:
     """Firmware keys neither placed on the tab nor explicitly LEFT_OUT."""
     return set(fw_keys) - placed_keys() - set(LEFT_OUT)
+
+
+# A key the layout does not know -- a device on newer firmware than this
+# generator, seen through --mqtt -- is not dropped: build_view() lists it in
+# an "Other" part above Diagnostics. File mode never has one (the coverage
+# test above fails first).
+OTHER_PART = "Other"
+OTHER_TITLE = "Not in this generator's layout (newer firmware?)"
 
 
 # --------------------------------------------------------------------------
@@ -576,7 +636,9 @@ def build_view(node: str, label: str, entities: dict[str, Entity]) -> dict:
         span=2,
     )
     for title, g in GRAPHS:
-        ents = rows(g["keys"])
+        ents = rows(
+            [k for k in g["keys"] if k in entities and graph_compatible(entities[k].state_class, g["stat_types"])]
+        )
         if not ents:
             continue
         section(
@@ -595,6 +657,9 @@ def build_view(node: str, label: str, entities: dict[str, Entity]) -> dict:
             span=2,
         )
 
+    # ---- Other: entities the layout does not place (see OTHER_PART)
+    section(OTHER_TITLE, [entities_card(sorted(coverage_gaps(entities)))], part=OTHER_PART)
+
     # ---- Diagnostics (bottom)
     for i, (title, keys) in enumerate(DIAGNOSTICS):
         section(title, [entities_card(keys)], part="Diagnostics" if i == 0 else None)
@@ -603,8 +668,15 @@ def build_view(node: str, label: str, entities: dict[str, Entity]) -> dict:
 
 
 def build_dashboard(devices: list[dict], entity_sets: dict[str, dict[str, Entity]]) -> dict:
-    """devices: [{node, label}]; entity_sets: node -> that device's entities."""
-    return {"title": "MagTag", "views": [build_view(d["node"], d["label"], entity_sets[d["node"]]) for d in devices]}
+    """devices: [{node, label}]; entity_sets: node -> that device's entities.
+    A device with no entity set gets no tab: --mqtt leaves out a device
+    whose entity ids it cannot know (see no_tab_devices())."""
+    views = [build_view(d["node"], d["label"], entity_sets[d["node"]]) for d in devices if d["node"] in entity_sets]
+    return {"title": "MagTag", "views": views}
+
+
+def no_tab_devices(devices: list[dict], entity_sets: dict[str, dict[str, Entity]]) -> list[dict]:
+    return [d for d in devices if d["node"] not in entity_sets]
 
 
 # --------------------------------------------------------------------------
@@ -651,6 +723,362 @@ def parse_devices(doc, where: str = "devices file") -> list[dict]:
 
 
 # --------------------------------------------------------------------------
+# --mqtt: devices and entity sets from the retained discovery documents
+# --------------------------------------------------------------------------
+#
+# Split in two so the logic is testable without a broker:
+#   fetch_retained()    the thin paho adapter: connect, subscribe, collect
+#                       {topic: payload} until the broker goes quiet;
+#   collect_discovery() pure: those messages -> devices, entity sets, warnings.
+#
+# THE PASSWORD. It is read from sdkconfig into Broker.password (repr=False)
+# and handed to paho, and goes nowhere else: no message built here names it,
+# and main_mqtt() prints everything -- errors, warnings, the parts -- through
+# _emit(), which scrubs it, in case a library or the broker data ever
+# carries it.
+
+DEFAULT_SDKCONFIG = "sdkconfig"
+SDK_URI, SDK_USER, SDK_PASS = "CONFIG_MAGTAG_MQTT_URI", "CONFIG_MAGTAG_MQTT_USER", "CONFIG_MAGTAG_MQTT_PASS"
+
+# MQTT wildcards match whole levels only, so "magtag-*" cannot be filtered
+# on the broker; collect_discovery() drops every other integration's topic.
+DISCOVERY_FILTER = "homeassistant/+/+/config"
+DISC_TOPIC_RE = re.compile(r"^homeassistant/([a-z_]+)/magtag-([0-9a-f]{6})_([a-z0-9_]+)/config$")
+
+IDLE_S = 2.0  # stop this long after the last message (retained ones arrive in a burst after SUBACK)
+DEFAULT_WAIT_S = 10.0  # hard cap on the whole scan, connect included
+DEFAULT_PORT = {"mqtt": 1883, "mqtts": 8883}
+
+
+class MqttError(Exception):
+    """A --mqtt failure. Its text names the host, never the password."""
+
+
+@dataclass(frozen=True)
+class Broker:
+    host: str
+    port: int
+    tls: bool
+    user: str
+    password: str = field(repr=False)
+
+    def where(self) -> str:
+        return f"{'mqtts' if self.tls else 'mqtt'}://{self.host}:{self.port}"
+
+
+def _scrub(text: str, secret: str | None) -> str:
+    return text.replace(secret, "<password>") if secret else text
+
+
+def _emit(stream, text: str, secret: str | None = None) -> None:
+    """The one exit for everything this tool prints, argparse's usage
+    errors aside (see the module docstring): --mqtt passes the password as
+    `secret` once it has read it."""
+    stream.write(_scrub(text, secret))
+
+
+_SDK_LINE_RE = re.compile(r"^(CONFIG_\w+)=(.*)$")
+_SDK_STRING_RE = re.compile(r'^"((?:[^"\\]|\\.)*)"$')
+
+
+def parse_sdkconfig(text: str, where: str = "sdkconfig") -> dict[str, str]:
+    """The three broker keys from an sdkconfig. Kconfig writes a string as
+    "..." with '\\' and '"' backslash-escaped. Messages name the key, never
+    its value."""
+    out: dict[str, str] = {}
+    for line in text.splitlines():
+        m = _SDK_LINE_RE.match(line.strip())
+        if not m or m.group(1) not in (SDK_URI, SDK_USER, SDK_PASS):
+            continue
+        s = _SDK_STRING_RE.match(m.group(2).strip())
+        if not s:
+            raise UsageError(f"{where}: {m.group(1)} is not a quoted string")
+        out[m.group(1)] = re.sub(r"\\(.)", r"\1", s.group(1))
+    missing = [k for k in (SDK_URI, SDK_USER, SDK_PASS) if k not in out]
+    if missing:
+        raise UsageError(
+            f"{where}: {', '.join(missing)} not found. Is this the firmware's sdkconfig? "
+            f"Run `idf.py reconfigure` once, or pass --sdkconfig PATH."
+        )
+    if not out[SDK_URI].strip():
+        raise UsageError(f"{where}: {SDK_URI} is empty; set the broker URI (idf.py menuconfig) or pass --sdkconfig.")
+    return out
+
+
+def parse_broker_uri(uri: str) -> tuple[bool, str, int]:
+    """mqtt://host[:port] or mqtts://host[:port] -> (tls, host, port).
+    The URI is never echoed: a user:password@ part in it would be a secret."""
+    scheme = uri.split("://", 1)[0].lower() if "://" in uri else ""
+    if scheme not in DEFAULT_PORT:
+        raise UsageError(
+            f"{SDK_URI}: want mqtt://host[:port] or mqtts://host[:port]"
+            + (f", not {scheme}://" if scheme.isalnum() else "")
+        )
+    parts = urlsplit(uri.strip())
+    if "@" in parts.netloc:
+        raise UsageError(f"{SDK_URI}: credentials inside the URI are not supported; use {SDK_USER} / {SDK_PASS}")
+    host = parts.hostname
+    if not host:
+        raise UsageError(f"{SDK_URI}: no host")
+    try:
+        port = parts.port
+    except ValueError:
+        raise UsageError(f"{SDK_URI}: bad port for host {host}") from None
+    return scheme == "mqtts", host, port or DEFAULT_PORT[scheme]
+
+
+def load_broker(path: str) -> Broker:
+    if not os.path.exists(path):
+        raise UsageError(f"sdkconfig not found: {path} (pass --sdkconfig PATH)")
+    with open(path, encoding="utf-8") as fh:
+        cfg = parse_sdkconfig(fh.read(), path)
+    tls, host, port = parse_broker_uri(cfg[SDK_URI])
+    return Broker(host, port, tls, cfg[SDK_USER], cfg[SDK_PASS])
+
+
+def _failed(rc) -> bool:
+    """paho 2's ReasonCode, or a plain int (0 = success)."""
+    is_failure = getattr(rc, "is_failure", None)
+    return bool(is_failure) if is_failure is not None else rc != 0
+
+
+def _paho_client(mqtt=None):
+    """A paho client with an empty client id and a clean session: the broker
+    assigns an id (paho retries with a random one if the broker rejects an
+    empty id), so two runs never share one and kick each other off, and the
+    broker keeps no session behind. mqtt: tests pass a stand-in module."""
+    if mqtt is None:
+        # --mqtt only: file mode must never import paho (its test checks).
+        import paho.mqtt.client as mqtt
+
+    return mqtt.Client(mqtt.CallbackAPIVersion.VERSION2, client_id="", clean_session=True)
+
+
+def fetch_retained(
+    broker: Broker,
+    cap_s: float = DEFAULT_WAIT_S,
+    idle_s: float = IDLE_S,
+    client_factory=None,
+    clock=None,
+    warnings: list[str] | None = None,
+) -> dict[str, bytes]:
+    """Subscribe to DISCOVERY_FILTER and return {topic: payload}, the last
+    payload per topic. Stops idle_s after the last message (or after the
+    SUBACK, if nothing is retained), and at cap_s whatever happens. Stopped
+    by the cap while messages were still arriving, it appends a warning to
+    `warnings`: the set may be incomplete.
+    client_factory / clock: tests pass a stub client and a fake clock."""
+    where = broker.where()
+    clock = clock or time.monotonic
+    client = (client_factory or _paho_client)()
+    st = {"conn": None, "why": "", "sub": None, "last": 0.0}
+    msgs: dict[str, bytes] = {}
+
+    def on_connect(c, userdata, flags, rc, props=None):
+        if _failed(rc):
+            st["conn"], st["why"] = False, str(rc)
+        else:
+            st["conn"] = True
+            c.subscribe(DISCOVERY_FILTER, qos=0)
+
+    def on_subscribe(c, userdata, mid, rcs, props=None):
+        st["sub"] = not any(_failed(r) for r in rcs)
+        st["last"] = clock()
+
+    def on_message(c, userdata, msg):
+        msgs[msg.topic] = bytes(msg.payload)
+        st["last"] = clock()
+
+    client.on_connect, client.on_subscribe, client.on_message = on_connect, on_subscribe, on_message
+    start = clock()
+    try:
+        if broker.user:
+            client.username_pw_set(broker.user, broker.password or None)
+        if broker.tls:
+            client.tls_set()  # the system CA store
+        client.connect(broker.host, broker.port, keepalive=30)
+    except Exception as e:  # DNS, refused, TLS, timeout: the library's words, scrubbed by main()
+        raise MqttError(f"cannot connect to {where}: {type(e).__name__}: {e}") from None
+    try:
+        while True:
+            rc = client.loop(timeout=0.1)
+            if st["conn"] is False:
+                auth = any(s in st["why"].lower() for s in ("author", "password", "user name"))
+                hint = f" (check {SDK_USER} / {SDK_PASS} in sdkconfig)" if auth else ""
+                raise MqttError(f"{where} refused the connection: {st['why']}{hint}")
+            if st["sub"] is False:
+                raise MqttError(f"{where} refused the subscription to {DISCOVERY_FILTER}")
+            if _failed(rc):
+                raise MqttError(f"lost the connection to {where}: {rc}")
+            now = clock()
+            if st["sub"] and now - st["last"] >= idle_s:
+                return msgs
+            if now - start >= cap_s:
+                if not st["conn"]:
+                    raise MqttError(f"no answer from {where} within {cap_s:g} s")
+                if not st["sub"]:
+                    raise MqttError(f"{where} did not confirm the subscription within {cap_s:g} s")
+                # Subscribed and not idle (the idle check above returns
+                # first), so messages were still arriving: keep what came,
+                # but say the set may be short.
+                if warnings is not None:
+                    warnings.append(
+                        f"the scan stopped at the --wait limit ({cap_s:g} s) while {where} was still sending "
+                        f"retained discovery ({len(msgs)} topic(s) so far, the last {now - st['last']:.1f} s ago): "
+                        f"devices or entities may be missing. Re-run with a larger --wait."
+                    )
+                return msgs
+    finally:
+        try:
+            client.disconnect()
+        except Exception:
+            pass
+
+
+@dataclass
+class Scan:
+    devices: list[dict]  # [{node, label}] -- every device seen, tab or not
+    entity_sets: dict[str, dict[str, Entity]]  # node -> entities; devices that get a tab
+    warnings: list[str]
+    topics: int = 0  # discovery topics seen, MagTag or not (for the "nothing found" message)
+
+
+def conditional_keys() -> set[str]:
+    """Keys current firmware publishes only sometimes: the per-slot sensors
+    (retired with a disabled slot) and the chore rows (retired past the
+    chore count). mqtt_ha.c publish_discovery() publishes every other
+    entity on every pass, so a device that lacks one runs older firmware."""
+    return {f"{p}_{n}" for p in PER_SLOT for n in SLOTS} | {f"chore_{n}" for n in CHORES}
+
+
+def collect_discovery(messages, labels: dict[str, str] | None = None, fw: dict[str, Entity] | None = None) -> Scan:
+    """Pure. messages: (topic, payload) pairs, later pairs winning for the
+    same topic. labels: node -> tab label overrides (--devices). fw: this
+    checkout's firmware entities (firmware_entities()), to spot a device on
+    older firmware; None skips that check.
+
+    - A topic outside homeassistant/<component>/magtag-<node>_<key>/config
+      is someone else's and ignored.
+    - An empty payload is a retired entity (disabled slot, chore row past
+      the list, the RETIRED[] keys): skipped.
+    - The component is the topic's; name and stat_cla the payload's.
+    - The label is dev.name, the most frequent if payloads disagree.
+    - No def_ent_id: firmware before schema v20, whose HA ids are
+      name-derived. All of a device's payloads -> no tab; some -> those
+      entities are left off. Either way a warning.
+    - Older firmware (v20 or later, but older than `fw`): it lacks a key
+      `fw` always publishes (anything outside conditional_keys()), or a key
+      `fw` gives a state_class carries no stat_cla. It keeps its tab, built
+      from what it publishes (build_view() drops the statistics graphs its
+      stat_cla cannot feed), and gets a warning to OTA it and re-run."""
+    latest: dict[str, bytes] = {}
+    for topic, payload in messages:
+        latest[topic] = payload
+    labels = labels or {}
+    per: dict[str, dict] = {}
+    warnings: list[str] = []
+    for topic in sorted(latest):
+        m = DISC_TOPIC_RE.match(topic)
+        payload = latest[topic]
+        if not m or not payload:
+            continue
+        comp, node, key = m.groups()
+        d = per.setdefault(
+            node, {"ents": {}, "keys": set(), "names": Counter(), "sw": Counter(), "no_def": [], "odd": []}
+        )
+        d["keys"].add(key)
+        try:
+            doc = json.loads(payload)
+        except (ValueError, UnicodeDecodeError):
+            doc = None
+        if not isinstance(doc, dict):
+            d["odd"].append(f"{key} (payload is not a JSON object; skipped)")
+            continue
+        uid = f"magtag-{node}_{key}"
+        if doc.get("uniq_id") != uid:
+            d["odd"].append(f"{key} (uniq_id {doc.get('uniq_id')!r}, want {uid!r})")
+        dev = doc.get("dev")
+        name = dev.get("name") if isinstance(dev, dict) else None
+        if isinstance(name, str) and name.strip():
+            d["names"][name.strip()] += 1
+        sw = dev.get("sw") if isinstance(dev, dict) else None
+        if isinstance(sw, str) and sw.strip():
+            d["sw"][sw.strip()] += 1
+        de = doc.get("def_ent_id")
+        if de is None:
+            d["no_def"].append(key)
+            continue
+        if de != f"{comp}.{uid}":
+            want = f"{comp}.{uid}"
+            d["odd"].append(f"{key} (def_ent_id {de!r}, want {want!r}; its id on the tab may be wrong)")
+        sc = doc.get("stat_cla")
+        d["ents"][key] = Entity(comp, key, str(doc.get("name") or key), sc if isinstance(sc, str) else None)
+
+    devices, sets = [], {}
+    for node in sorted(per):
+        d = per[node]
+        names = sorted(d["names"].items(), key=lambda kv: (-kv[1], kv[0]))
+        if node in labels:
+            label = labels[node]
+        elif names:
+            label = names[0][0]
+            if len(names) > 1:
+                seen = ", ".join(f"{n!r} x{c}" for n, c in names)
+                warnings.append(f"magtag-{node}: its payloads disagree on the device name ({seen}); using {label!r}.")
+        else:
+            label = f"MagTag {node}"
+            warnings.append(f"magtag-{node}: no device name in its discovery; the tab is labelled {label!r}.")
+        who = f"{label} (magtag-{node})"
+        devices.append({"node": node, "label": label})
+        if d["odd"]:
+            warnings.append(f"{who}: unexpected discovery for {', '.join(d['odd'])}.")
+        if d["no_def"] and not d["ents"]:
+            warnings.append(
+                f"{who} runs firmware older than discovery schema v20: its discovery carries "
+                f"no default entity id, so its Home Assistant entity ids are name-derived and cannot be "
+                f"known here. It gets NO TAB. OTA it to current firmware first (step 1), re-register it if "
+                f"needed (steps 3-4), then re-run this generator."
+            )
+            continue
+        if d["no_def"]:
+            warnings.append(
+                f"{who}: {len(d['no_def'])} retained discovery document(s) carry no default entity id "
+                f"(left over from firmware before schema v20?), so their ids are unknown and they are "
+                f"left off the tab: {', '.join(sorted(d['no_def']))}."
+            )
+        if not d["ents"]:
+            warnings.append(f"{who}: no readable discovery; no tab.")
+            continue
+        other = sorted(coverage_gaps(d["ents"]))
+        if other:
+            warnings.append(
+                f"{who}: {len(other)} entit{'y' if len(other) == 1 else 'ies'} this generator's layout does "
+                f"not know (newer firmware?), put under '{OTHER_PART}' on its tab: {', '.join(other)}. "
+                f"Update tools/gen_ha_dashboard.py's layout to place them."
+            )
+        if fw is not None:
+            missing = sorted(set(fw) - conditional_keys() - d["keys"])
+            no_cla = sorted(k for k, e in d["ents"].items() if k in fw and fw[k].state_class and not e.state_class)
+            if missing or no_cla:
+                sw = d["sw"].most_common(1)
+                why = [f"It reports firmware {sw[0][0]}."] if sw else []
+                if missing:
+                    why.append(f"Missing entities current firmware always publishes: {', '.join(missing)}.")
+                if no_cla:
+                    why.append(
+                        f"No state class on {', '.join(no_cla)}, so the statistics graphs that need one leave "
+                        f"{'it' if len(no_cla) == 1 else 'them'} out."
+                    )
+                warnings.append(
+                    f"{who} runs older firmware: OTA it (step 1), then re-run this tool so its tab includes "
+                    f"the newer entities. " + " ".join(why)
+                )
+        sets[node] = d["ents"]
+    devices.sort(key=lambda x: (x["label"].casefold(), x["node"]))
+    return Scan(devices, sets, warnings, topics=len(latest))
+
+
+# --------------------------------------------------------------------------
 # Output
 # --------------------------------------------------------------------------
 
@@ -665,17 +1093,38 @@ BANNER = {
 FILE_MODE_NOTE = """\
 File mode (this output) puts every timer slot (1-4) and every chore row (1-3)
 on every tab. A device with a disabled slot or fewer than 3 chores shows
-"entity not available" rows for them. --mqtt (coming in M4-T3) builds each
-tab from the device's real entity set instead."""
+"entity not available" rows for them. Run with --mqtt to build each tab from
+the device's real entity set instead."""
 
 
-def render_setup(devices: list[dict]) -> str:
+def mqtt_mode_note(where: str) -> str:
+    return textwrap.fill(
+        f"Built from the retained discovery on {where}: each tab shows exactly the entities "
+        "that device publishes, so a disabled timer slot or an unused chore row gets no row. "
+        "Re-run after enabling a slot or adding a chore, and after an OTA or a re-register: "
+        "newer firmware publishes entities an older one lacks.",
+        width=78,
+    )
+
+
+def _wrap_warning(text: str) -> list[str]:
+    return textwrap.wrap(text, width=78, initial_indent="  - ", subsequent_indent="    ")
+
+
+def render_setup(devices: list[dict], note: str = FILE_MODE_NOTE, warnings=()) -> str:
     lines = [
         "Requirements: Home Assistant 2025.11 or newer. The entity ids need 2025.10",
         "(default_entity_id in MQTT discovery); the dashboard's entity names",
         "(name: {type: entity}) need 2025.11.",
         "",
-        FILE_MODE_NOTE,
+    ]
+    if warnings:
+        lines.append("WARNINGS from the broker scan:")
+        for w in warnings:
+            lines += _wrap_warning(w)
+        lines.append("")
+    lines += [
+        note,
         "",
         "Once, for all devices: install the automation (part 2).",
         "",
@@ -708,9 +1157,13 @@ def render_setup(devices: list[dict]) -> str:
         "   when its discovery changes, and it may not come back on its own. Rename",
         "   one of its chores in its \"MagTag <node> chores\" To-do list -- the chore",
         "   list is part of the firmware's discovery fingerprint. The device",
-        "   publishes at its next network window (Button D on the timer screen",
-        "   forces one) and HA adds it back with the new ids. Once it has",
-        "   re-appeared, rename the chore back.",
+        "   applies the renamed list after that window's discovery pass, so it",
+        "   republishes within two network windows and HA adds it back with the",
+        "   new ids. To force the two windows, press Button D on the timer screen",
+        "   twice, a minute apart. If its chore checklist is showing, D is the",
+        "   chore 3 tick there, not a sync: press Button A first to get back to",
+        "   the timer screen. Once the device has re-appeared, rename the chore",
+        "   back.",
         "",
         "Finally paste the dashboard (part 3): Settings -> Dashboards -> Add dashboard",
         "-> New dashboard from scratch, open it, Edit -> three-dot menu -> Raw",
@@ -727,7 +1180,7 @@ AUTOMATION_NOTES = """\
 #
 # One automation covers every device: it finds every To-do list whose entity
 # id is todo.magtag_<node>_chores and publishes that device's retained config
-# document. A new device needs only its list (setup step 3).
+# document. A new device needs only its list (setup step 2).
 #
 # Calendar: it reads calendar.school_schedule. Events named "No School..."
 # become holidays; "No School: Summer" events give the summer season dates.
@@ -746,28 +1199,41 @@ def render_automation() -> str:
     return AUTOMATION_NOTES + read_automation()
 
 
-DASHBOARD_HEADER = (
-    """\
+def dashboard_header(note: str = FILE_MODE_NOTE, no_tab=()) -> str:
+    head = """\
 # MagTag dashboard: one tab per device. Paste into a new dashboard's
 # Settings -> Dashboards -> (dashboard) -> Edit -> Raw configuration editor.
 # Needs Home Assistant 2025.11 or newer.
 # Generated by tools/gen_ha_dashboard.py; regenerate rather than hand-edit.
 #
-"""
-    + "".join(f"# {ln}\n" for ln in FILE_MODE_NOTE.splitlines())
-)
+""" + "".join(f"# {ln}\n" for ln in note.splitlines())
+    for d in no_tab:
+        head += f"# NO TAB for {d['label']} (magtag-{d['node']}): see the warnings in the setup steps.\n"
+    return head
 
 
-def render_dashboard(devices: list[dict], entity_sets: dict[str, dict[str, Entity]]) -> str:
+DASHBOARD_HEADER = dashboard_header()
+
+
+def render_dashboard(devices: list[dict], entity_sets: dict[str, dict[str, Entity]], note: str = FILE_MODE_NOTE) -> str:
     doc = build_dashboard(devices, entity_sets)
-    return DASHBOARD_HEADER + yaml.safe_dump(doc, sort_keys=False, allow_unicode=True, width=100)
+    head = dashboard_header(note, no_tab_devices(devices, entity_sets))
+    return head + yaml.safe_dump(doc, sort_keys=False, allow_unicode=True, width=100)
 
 
-def render(part: str, devices: list[dict], entity_sets: dict[str, dict[str, Entity]]) -> str:
+def render(
+    part: str,
+    devices: list[dict],
+    entity_sets: dict[str, dict[str, Entity]],
+    note: str = FILE_MODE_NOTE,
+    warnings=(),
+) -> str:
+    """note: FILE_MODE_NOTE, or mqtt_mode_note() in --mqtt mode; warnings go
+    at the top of the setup steps."""
     renderers = {
-        "setup": lambda: render_setup(devices),
+        "setup": lambda: render_setup(devices, note, warnings),
         "automation": render_automation,
-        "dashboard": lambda: render_dashboard(devices, entity_sets),
+        "dashboard": lambda: render_dashboard(devices, entity_sets, note),
     }
     if part != "all":
         return renderers[part]()
@@ -780,23 +1246,93 @@ def render(part: str, devices: list[dict], entity_sets: dict[str, dict[str, Enti
     return "".join(out)
 
 
-def main(argv=None) -> int:
+def _err(msg: str, secret: str | None = None) -> None:
+    _emit(sys.stderr, f"gen_ha_dashboard: {msg}\n", secret)
+
+
+def main_mqtt(args, client_factory=None, clock=None) -> int:
+    """--mqtt. Returns the exit status; 2 = bad input, 1 = broker/scan failure.
+    Every line it prints once the password is read goes through _emit()
+    with the password as the secret."""
+    sdk = args.sdkconfig or os.path.join(REPO, DEFAULT_SDKCONFIG)
+    try:
+        broker = load_broker(sdk)
+    except UsageError as e:
+        _err(str(e))  # the password is not read yet: built from key names and the path only
+        return 2
+    secret = broker.password
+    try:
+        labels = {}
+        if args.devices:
+            labels = {d["node"]: d["label"] for d in load_devices(args.devices)}
+        fetch_warnings: list[str] = []
+        msgs = fetch_retained(broker, args.wait, IDLE_S, client_factory, clock, fetch_warnings)
+        scan = collect_discovery(msgs.items(), labels, firmware_entities())
+        scan.warnings[:0] = fetch_warnings
+        for node in sorted(set(labels) - {d["node"] for d in scan.devices}):
+            scan.warnings.append(f"{args.devices}: magtag-{node} ({labels[node]}) has no discovery on the broker.")
+    except UsageError as e:
+        _err(str(e), secret)
+        return 2
+    except Exception as e:  # MqttError, or anything paho raises: never let a traceback carry the password
+        _err(str(e) if isinstance(e, MqttError) else f"{type(e).__name__}: {e}", secret)
+        return 1
+    for w in scan.warnings:
+        _err(f"warning: {w}", secret)
+    if not scan.devices:
+        _err(
+            f"no MagTag discovery on {broker.where()} ({scan.topics} discovery topic(s) under "
+            f"homeassistant/, none magtag-<node>_<key>). Is this the broker the devices use, and has "
+            f"a device completed a network window?",
+            secret,
+        )
+        return 1
+    if not scan.entity_sets:
+        _err("no device can have a tab (see the warnings above): OTA them to current firmware first.", secret)
+        return 1
+    note = mqtt_mode_note(broker.where())
+    _emit(sys.stdout, render(args.part, scan.devices, scan.entity_sets, note, scan.warnings), secret)
+    return 0
+
+
+def main(argv=None, client_factory=None, clock=None) -> int:
+    """client_factory / clock: tests hand --mqtt a stub instead of a paho
+    client, and a fake clock."""
     ap = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     ap.add_argument(
         "--devices",
-        default=os.path.join(REPO, DEFAULT_DEVICES),  # from any cwd
-        help=f"devices file (default {DEFAULT_DEVICES})",
+        help=f"devices file (default {DEFAULT_DEVICES}); with --mqtt, optional tab-label overrides",
     )
     ap.add_argument("--part", choices=PARTS + ("all",), default="all", help="print one part only (default all)")
+    ap.add_argument(
+        "--mqtt", action="store_true", help="find the devices and their exact entity sets on the MQTT broker"
+    )
+    ap.add_argument(
+        "--sdkconfig", help=f"with --mqtt: where the broker settings are (default {DEFAULT_SDKCONFIG} at the repo root)"
+    )
+    ap.add_argument(
+        "--wait",
+        type=float,
+        default=DEFAULT_WAIT_S,
+        metavar="SECONDS",
+        help=f"with --mqtt: longest the scan may take (default {DEFAULT_WAIT_S:g}; it stops {IDLE_S:g} s "
+        f"after the last retained message)",
+    )
     args = ap.parse_args(argv)
+    if not args.mqtt and (args.sdkconfig or args.wait != DEFAULT_WAIT_S):
+        ap.error("--sdkconfig and --wait need --mqtt")
+    if not math.isfinite(args.wait) or args.wait <= 0:  # nan passes `<= 0` and would disable the cap
+        ap.error("--wait must be a positive number of seconds")
+    if args.mqtt:
+        return main_mqtt(args, client_factory, clock)
     try:
-        devices = load_devices(args.devices)
+        devices = load_devices(args.devices or os.path.join(REPO, DEFAULT_DEVICES))  # from any cwd
     except UsageError as e:
-        print(f"gen_ha_dashboard: {e}", file=sys.stderr)
+        _err(str(e))
         return 2
     fw = firmware_entities()
     entity_sets = {d["node"]: fw for d in devices}
-    sys.stdout.write(render(args.part, devices, entity_sets))
+    _emit(sys.stdout, render(args.part, devices, entity_sets))
     return 0
 
 
