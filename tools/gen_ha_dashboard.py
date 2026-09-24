@@ -808,7 +808,11 @@ def parse_sdkconfig(text: str, where: str = "sdkconfig") -> dict[str, str]:
             f"Run `idf.py reconfigure` once, or pass --sdkconfig PATH."
         )
     if not out[SDK_URI].strip():
-        raise UsageError(f"{where}: {SDK_URI} is empty; set the broker URI (idf.py menuconfig) or pass --sdkconfig.")
+        raise UsageError(
+            f"{where}: {SDK_URI} is empty; set the broker URI (idf.py menuconfig) or pass --sdkconfig. "
+            f"A broker set in include/credentials.local.h is not in sdkconfig: pass --sdkconfig FILE, "
+            f"a file holding the three CONFIG_MAGTAG_MQTT_ lines."
+        )
     return out
 
 
@@ -1155,10 +1159,15 @@ def render_setup(devices: list[dict], note: str = FILE_MODE_NOTE, warnings=()) -
         "3. Only if its entity ids are the old name-derived ones (e.g.",
         "   sensor.testing_timer_...) rather than <component>.magtag_<node>_<key>:",
         "   delete the device in HA (Settings -> Devices & services -> MQTT -> the",
-        "   device -> Delete). This loses its entity history and statistics (they",
-        "   stay behind under the old ids), its area, and any custom names or icons",
-        "   on its entities. A device already on the magtag_<node> ids skips steps",
-        "   3 and 4.",
+        "   device -> Delete). Read from HA's source, NOT yet confirmed on a real",
+        "   install: HA 2025.7+ restores a re-created entity's area, custom names",
+        "   and icons, labels and flags; MQTT then renames it to the new id, and the",
+        "   recorder moves its history and statistics to that id. So it most likely",
+        "   keeps all of those. What breaks is anything naming the old ids --",
+        "   dashboards, automations, scripts: update those by hand. Since 2025.10 HA",
+        '   also has "Recreate entity IDs", which might do this without a delete',
+        "   (untested: check that the ids it gives read magtag_<node>_...). A device",
+        "   already on the magtag_<node> ids skips steps 3 and 4.",
         "",
         "4. After a delete, make the device republish its discovery: it does so only",
         "   when its discovery changes, and it may not come back on its own. Rename",
@@ -1170,7 +1179,9 @@ def render_setup(devices: list[dict], note: str = FILE_MODE_NOTE, warnings=()) -
         "   twice, a minute apart. If its chore checklist is showing, D is the",
         "   chore 3 tick there, not a sync: press Button A first to get back to",
         "   the timer screen. Once the device has re-appeared, rename the chore",
-        "   back.",
+        "   back -- not sooner: renamed back before the device's next window, the",
+        "   list is the one it already has, so the document's ver is unchanged,",
+        "   the device skips it, and nothing republishes.",
         "",
         "Finally paste the dashboard (part 3): Settings -> Dashboards -> Add dashboard",
         "-> New dashboard from scratch, open it, Edit -> three-dot menu -> Raw",
@@ -1184,6 +1195,8 @@ AUTOMATION_NOTES = """\
 # Install: add this to your Home Assistant configuration -- automations.yaml,
 # or wherever your config repo keeps automations (e.g. FluxCD) -- and reload
 # automations. It is NOT part of the dashboard; do not paste it there.
+# A fresh automations.yaml holds only `[]`: REPLACE the [] with this, do not
+# append below it (that is invalid YAML, and HA then loads no automations).
 #
 # One automation covers every device: it finds every To-do list whose entity
 # id is todo.magtag_<node>_chores and publishes that device's retained config

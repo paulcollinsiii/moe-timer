@@ -23,6 +23,10 @@ window. Entities are auto-created via HA's MQTT Discovery.
    Settings → Devices & Services → MQTT as `magtag-xxxxxx` (last 3 bytes of
    its WiFi MAC — stable across reflashes, unique per device on the
    network).
+4. Optional, but the easy way to run it day to day: install the
+   [config-publishing
+   automation](#the-config-publishing-automation-chores-and-school-calendar)
+   and generate the [dashboard](#dashboard).
 
 ## Topics
 
@@ -62,12 +66,15 @@ Everything appears under one device, grouped by HA `entity_category`:
   = limit − remaining (a template sensor if you want it as an entity).
   **Screen time per day**, **Chores done per day** and, per extra timer,
   `<Name> runs per day` are the finished day's figures, read from the
-  daily summary (below). Also
-  **Chores done** and **Config warning** (see
+  daily summary (see [Graphs and statistics](#graphs-and-statistics)).
+  Also **Chores done** and **Config warning** (see
   [Chore checklist](#chore-checklist-read-only-in-ha)).
 
-Recorder history on the read-only sensors IS the usage-stats feature —
-graph battery over weeks, screen minutes per day, practice completions.
+Recorder history and long-term statistics on the read-only sensors ARE the
+usage-stats feature — battery over weeks, screen minutes per day, runs of
+each extra timer, chores done per day. The generated
+[dashboard](#dashboard) graphs all of them; how each figure is recorded is
+under [Graphs and statistics](#graphs-and-statistics).
 
 Notes:
 - Stat-fed sensors carry `expire_after` a bit over 2× the idle sync
@@ -81,52 +88,16 @@ Notes:
   from the **timer screen**. On the chore checklist Button D is the ✓3
   button and opens no window; press A to get back to the timer screen
   first.
-- The daily summary publishes at the first wake after midnight and covers
-  the finished day: `screen_used_s`, completions per extra timer, and
-  `chores_done` of `chores` configured (captured before the rollover
-  clears the ticks). *Screen time per day*, *Chores done per day* and the
-  `<Name> runs per day` sensors read it, so
-  HA files each day's figures under the **next** day (the time they
-  arrived). The shift loses no run: a run finished late in the evening,
-  after the day's last window, is in the summary. What can go missing is
-  a whole day: the device holds the unsent summary in RAM only, so if it
-  goes back to sleep before a window has published it (the first window
-  after midnight fails: no Wi-Fi, no broker), that day's summary is
-  never sent. The per-day graphs then show a gap, which on a bar graph
-  looks like a zero day. (A summary kept across sleep and retried is a
-  planned follow-up, M4-D1.) If the chore list cannot be read at the rollover (a flash error), the
-  summary leaves `chores_done` and `chores` out and *Chores done per
-  day* records that day as *unknown*; a list that is simply empty
-  reports 0 of 0.
-- **Statistics vs the logbook.** Battery %, the summary sensors and the
-  two chore counts declare a `state_class`, so HA keeps long-term
-  statistics for them. The summary sensors are `total` with a
-  `last_reset` taken from the summary's date: each summary is one new
-  day, so a period's statistics *change* is exactly what its summaries
-  reported, and a repeat of the same summary adds nothing. HA keeps no
-  logbook entries for an entity with a `state_class` or a unit, so none
-  of these appear in the activity log. The live `<Name> runs` counts
-  keep no `state_class` and still log each run.
-- **First summary.** HA's statistics take the first value they ever see
-  for a sensor as the starting point, not as a change. After the OTA
-  that adds the summary sensors, that is the summary already retained on
-  the broker, which is therefore recorded once as a state but counted in
-  no graph; the next day's summary is the first to count. On a device
-  that has never published a summary the sensors read *unknown* until
-  one arrives, and that one is the starting point instead. A summary
-  with no `chores_done` (one retained by older firmware, or one sent
-  while the chore list could not be read) sets *Chores done per day* to
-  *unknown*, which the statistics skip. Before the sensor has ever had a
-  value it stays *unknown* until the first summary that carries the
-  field, which is then the starting point. After it has had one (say a
-  rollback to older firmware), that day is *unknown*, not 0 and not the
-  previous day's count again, and the next summary with the field counts
-  as usual. Its template checks for the field first, so HA logs no
-  template warning for such a summary.
+- The daily summary (`magtag/<id>/summary`) publishes at the first wake
+  after midnight and covers the finished day. The per-day sensors that
+  read it, and what that means for graphs — a day's figures land under
+  the next day, and a day whose summary never gets out is missing — are
+  under [Graphs and statistics](#graphs-and-statistics).
 
 ### Entity IDs are stable, and do not follow the device name
 
-**Requires Home Assistant 2025.10 or newer.** Every discovery payload
+**Requires Home Assistant 2025.10 or newer** (the generated
+[dashboard](#dashboard) needs 2025.11). Every discovery payload
 carries `def_ent_id` (`default_entity_id`), added to MQTT discovery in HA
 2025.10, so HA builds entity IDs from the MAC-derived device id rather than
 from the device's friendly name:
@@ -159,36 +130,342 @@ device side as settings reverting by themselves.
 
 **One-time step on a device HA already knows.** `def_ent_id` seeds an entity
 ID only at that entity's *first* registration; HA keys its registry on
-`uniq_id` and will not re-slug an existing entity behind your back. So on
-an already-paired device the IDs stay as they are until you re-register:
+`uniq_id` and will not re-slug an existing entity behind your back. So a
+device paired before discovery schema v20 (`STATS_JSON_DISC_SCHEMA_VER` in
+`include/stats_json.h`) keeps its name-derived IDs — for example
+`sensor.testing_timer_violin_remaining_2` — until it re-registers. A device
+whose IDs already read `<component>.magtag_xxxxxx_<key>` needs none of this.
 
-1. Let the device run one network window on firmware carrying discovery
-   schema v20 or later (`STATS_JSON_DISC_SCHEMA_VER` in
-   `include/stats_json.h`), so the new retained discovery payloads reach
-   the broker.
-2. Settings → Devices & Services → MQTT → the device → **Delete**.
-3. Restart HA (or wait for the next reconnect). It re-reads the retained
-   discovery configs and registers the entities with their new IDs.
+Two facts decide the order. First, HA core's MQTT integration clears a
+deleted device's retained discovery topics on the broker (it publishes an
+empty payload to each; `async_remove_discovery_payload` in
+`homeassistant/components/mqtt/entity.py`), so after a delete nothing on
+the broker brings the device back by itself. Second, the firmware
+republishes its discovery only when its discovery fingerprint or the
+schema version moves (see [When HA sees a list
+change](#when-ha-sees-a-list-change)), not every window. So the old advice
+— let the new firmware publish, delete, restart HA — can leave a device
+that never comes back. Re-register in this order instead:
 
-Do it in that order. Deleting first makes HA re-add from the *old* retained
-payload and slug from the name all over again — deleting the device in HA
-does **not** clear the retained discovery topics on the broker, so whatever
-is retained there is what comes back.
+1. **OTA the device to current firmware first**, and let it run a network
+   window. Firmware older than v20 sends no `def_ent_id`, so a device
+   deleted while still on it would come back under name-derived IDs again.
+2. **Delete it in HA:** Settings → Devices & services → MQTT → the device →
+   **Delete**.
+3. **Make it republish its discovery:** rename one of its chores in its
+   `MagTag <node> chores` To-do list (the chore list is part of the
+   fingerprint; the [config-publishing
+   automation](#the-config-publishing-automation-chores-and-school-calendar)
+   sends the renamed list). Any change to the list does it — on a device
+   with no chores yet, adding the first one to its new list. The device applies the new list after that
+   window's discovery pass, so it republishes in the window after: within
+   **two network windows**. To force them, press **Button D** on the timer
+   screen twice, a minute apart — if the chore checklist is showing, D
+   ticks chore 3 there instead, so press **Button A** first to get back to
+   the timer screen. HA adds the device back with the new IDs. **Once it
+   has re-appeared**, rename the chore back (which republishes once more,
+   under the same IDs). Not sooner: renamed back before the device's next
+   window, the list is the one it already has, so the document and its
+   `ver` are unchanged, the device skips it, and nothing republishes.
 
-**What step 2 actually costs.** It is an entity-registry delete, not a
-cosmetic refresh, and everything HA stores *about* those entities goes with
-them: area assignment, custom entity names, custom icons, labels, and
-hidden/disabled flags. They come back with the firmware's own names, in no
-area, with nothing customised. Anything that names the old IDs —
-dashboards, automations, scripts, template sensors, notification groups —
-has to be updated by hand; HA does not rewrite references. Recorder history
-and long-term statistics are keyed on the entity ID too, so the graphs on
-the read-only sensors restart under the new ID while the old series stays
-behind, orphaned, under the old one.
+Whether a given HA install really clears the retained topics on a delete
+has **not been confirmed** on the owner's hardware. The order above works
+either way: if HA clears them, step 3 brings the device back; if it does
+not, the old retained payloads (already current, thanks to the OTA in step
+1) bring it back the next time HA subscribes to discovery — an HA restart
+or an MQTT reconnect — or step 3's republish does, whichever comes first.
+
+**What step 2 costs: probably less than it looks.** This is read from HA
+core's source and has **not yet been confirmed on the owner's HA**:
+
+- **Customisations come back.** Since HA 2025.7 the entity registry
+  remembers a deleted entity, and when the same integration creates one
+  with the same unique ID again, it restores the old entry: area, custom
+  name and icon, labels, and hidden/disabled flags. MQTT entities stay tied
+  to their config entry, so HA does not purge those remembered entries.
+- **The new ID still wins.** The restored entry comes back under its *old*
+  entity ID. MQTT then sees that it differs from the one `def_ent_id` asks
+  for and renames it (`_init_entity_registry` in
+  `homeassistant/components/mqtt/entity.py`).
+- **History and statistics most likely move with it.** That rename is an
+  ordinary entity ID change, and the recorder moves an entity's history and
+  long-term statistics to its new ID on one. The graphs should carry on
+  under the new IDs.
+
+What does break is **every reference to the old IDs**: dashboards,
+automations, scripts, template sensors, notification groups. HA does not
+rewrite those; update them by hand. (The generated
+[dashboard](#dashboard) already uses the new IDs.) Should the owner's HA
+behave differently, the worst case is entities back in no area with
+nothing customised, and their history left behind under the old IDs.
+
+**A possible alternative without the delete, also unverified.** HA 2025.10
+added a **Recreate entity IDs** action, which re-derives entity IDs in
+place. Whether it follows `def_ent_id` or the device's name has not been
+checked. If you try it, check that the IDs it produces read
+`<component>.magtag_xxxxxx_<key>`; if they do, the delete and republish are
+not needed.
 
 That is the price of the change, and it is paid once. Skipping it is a valid
 choice: an already-paired device keeps working exactly as it does now, it
-just keeps name-derived entity IDs.
+just keeps name-derived entity IDs — but the generated
+[dashboard](#dashboard) names every entity by its
+`<component>.magtag_xxxxxx_<key>` ID, so none of its cards would find that
+device's entities.
+
+## Dashboard
+
+`tools/gen_ha_dashboard.py` generates a Home Assistant dashboard with **one
+tab per device**, and prints everything that goes with it, in three parts:
+
+1. **the setup steps**, with each device's names filled in (below);
+2. **the config-publishing automation**, verbatim from
+   `tools/ha/magtag_publish_config.yaml`, headed by its install and
+   calendar notes (see [the config-publishing
+   automation](#the-config-publishing-automation-chores-and-school-calendar));
+3. **the dashboard YAML**, to paste into HA.
+
+The generator never talks to Home Assistant — no API, no access token. You
+paste what it prints.
+
+### Requirements
+
+- **Home Assistant 2025.11 or newer.** The cards name entities with
+  `name: {type: entity}`, which first appears in the 2025.11 frontend. The
+  entity IDs alone need only 2025.10 (see [Entity
+  IDs](#entity-ids-are-stable-and-do-not-follow-the-device-name)).
+- **Devices on current firmware, with `magtag_<node>` entity IDs.** A
+  device still on name-derived IDs needs the [one-time
+  step](#entity-ids-are-stable-and-do-not-follow-the-device-name) first.
+- **[uv](https://docs.astral.sh/uv/)** on the machine you run it on. The
+  script declares its Python dependencies (PyYAML, and paho-mqtt for
+  `--mqtt`) in its own header (PEP 723 inline metadata), and `uv run`
+  supplies them: there is no virtualenv or `pip install` step. The first
+  run fetches them into uv's cache, so it needs network access once.
+
+### Running it: file mode
+
+File mode takes the device list from a small local file. Copy the example
+and edit it (`tools/ha_devices.yaml` is gitignored):
+
+```sh
+cp tools/ha_devices.example.yaml tools/ha_devices.yaml
+```
+
+```yaml
+devices:
+  - node: "1a0a5c"          # the 6 hex digits after "magtag-"; quote it
+    label: "Testing Timer"  # the tab's title
+```
+
+Then run it from the repository root:
+
+```sh
+uv run tools/gen_ha_dashboard.py                      # all three parts
+uv run tools/gen_ha_dashboard.py --part dashboard     # just one part
+uv run tools/gen_ha_dashboard.py --devices tools/ha_devices.example.yaml --part setup
+```
+
+`--part` takes `setup`, `automation`, `dashboard` or `all` (the default);
+`--devices FILE` reads another devices file.
+
+File mode derives the entities from the firmware tables in the checkout, so
+every tab gets **every** timer slot (1–4) and **every** chore row (1–3). A
+device with a disabled slot, or fewer than three chores, shows "entity not
+available" rows for the ones it does not have. `--mqtt` avoids that.
+
+### Running it: `--mqtt` mode
+
+```sh
+uv run tools/gen_ha_dashboard.py --mqtt
+uv run tools/gen_ha_dashboard.py --mqtt --wait 20 --part dashboard
+```
+
+- **Broker settings** come from `sdkconfig` at the repository root
+  (`CONFIG_MAGTAG_MQTT_URI`, `_USER`, `_PASS`; `--sdkconfig PATH` for
+  another file). `mqtt://` and `mqtts://` both work. The **password is
+  never printed** — not in the output, a warning or an error; errors name
+  the host only.
+- **It reads `sdkconfig` only, never `include/credentials.local.h`.** If
+  you set the broker the preferred way, in `credentials.local.h` (see
+  [Setup](#setup)), that file overrides the Kconfig values in the
+  firmware, and `sdkconfig`'s URI may well be empty; the tool then stops
+  with "`CONFIG_MAGTAG_MQTT_URI` is empty". Put the three settings in a
+  small file of their own, keep it out of git, and pass it with
+  `--sdkconfig FILE`:
+  ```
+  CONFIG_MAGTAG_MQTT_URI="mqtt://homeassistant.local:1883"
+  CONFIG_MAGTAG_MQTT_USER="magtag"
+  CONFIG_MAGTAG_MQTT_PASS="..."
+  ```
+  Or use file mode, which needs no broker at all.
+- It reads the retained discovery documents and builds the device list and
+  **each device's exact entity set** from them. A disabled timer slot or
+  an unused chore row gets no card. Tab labels are the device names from
+  discovery; a `--devices` file, if given, overrides them per node.
+- **A device on older firmware** — one missing entities the checkout's
+  firmware always publishes — still gets a tab, built from what it
+  publishes, plus a warning naming it: OTA it, then re-run. Its graph
+  cards keep only the entities whose published `state_class` suits them,
+  and a card left with none is dropped. A device whose discovery carries
+  no `def_ent_id` (firmware before schema v20) gets no tab, because its
+  entity IDs cannot be known from here. An entity this generator does not
+  know (newer firmware than the checkout) goes into an "Other" part on its
+  tab, with a warning.
+- **`--wait SECONDS`** (default 10) is the longest the scan may take; it
+  stops 2 s after the last retained message arrives. If the time runs out
+  while messages are still arriving it warns: raise `--wait` and re-run.
+
+### Setup, in this order
+
+Once, for all devices: install the [config-publishing
+automation](#the-config-publishing-automation-chores-and-school-calendar).
+Then for each device:
+
+1. **OTA it to current firmware.** This comes first because of step 3:
+   firmware older than discovery schema v20 sends no `def_ent_id`, so a
+   device deleted in HA while still on it comes back under the old
+   name-derived IDs.
+2. **Create its chore list:** Settings → Devices & services → Add
+   integration → Local To-do, named exactly `MagTag <node> chores` (for
+   example `MagTag 1a0a5c chores`, which becomes
+   `todo.magtag_1a0a5c_chores`, the ID the automation looks for). Rename
+   its display name later if you like; the entity ID stays.
+3. **Only if its entity IDs are the old name-derived ones** (for example
+   `sensor.testing_timer_…` rather than `sensor.magtag_1a0a5c_…`): delete
+   the device in HA (Settings → Devices & services → MQTT → the device →
+   **Delete**). From HA's source, not yet confirmed on a real install, it
+   most likely **keeps** its area, custom names and icons, labels, and its
+   history and statistics, which move to the new IDs. What breaks is
+   anything that names the old IDs — dashboards, automations, scripts —
+   which you update by hand. See [what the delete
+   costs](#entity-ids-are-stable-and-do-not-follow-the-device-name), and
+   the unverified no-delete alternative there. A device already on
+   `magtag_<node>` IDs skips steps 3 and 4.
+4. **After a delete, make it republish its discovery**, exactly as in the
+   [one-time step](#entity-ids-are-stable-and-do-not-follow-the-device-name):
+   rename one of its chores in its To-do list. It republishes within two
+   network windows (to force them, press Button D on the timer screen
+   twice, a minute apart, pressing Button A first if the checklist is
+   showing), and HA adds it back with the new IDs. **Once it has
+   re-appeared**, rename the chore back. Renaming it back sooner, before
+   the device's next window, leaves the document and its `ver` as the
+   device already has them, so it skips the document and never
+   republishes.
+
+Finally **paste the dashboard** (part 3): Settings → Dashboards → Add
+dashboard → New dashboard from scratch; open it, then Edit → three-dot menu
+→ **Raw configuration editor**; replace everything in it with the
+generated YAML, and Save. After a firmware update that adds entities, or
+when you add a device, regenerate and paste again rather than editing the
+dashboard by hand.
+
+### What a tab shows
+
+Each device is one tab (a sections view), top to bottom:
+
+- **Settings** — the device's **To-do list card**, where its chores are
+  edited, and a done flag per chore; each day type's **allocation next to
+  its chore-free minutes** in the same row, since the two are a pair (see
+  [Chore-free minutes and their
+  allocation](#editing-config-from-the-ha-card-no-setup)); timers 1–4;
+  breaks; quiet hours and bed time; tones and volume; system and OTA
+  controls.
+- **Activity** — the live state (*Now*: timer state, active timer, Screen
+  time left and limit, break, exposure, charge lock, chores left and done,
+  battery, day type, and each extra timer's remaining, limit and runs) and
+  an **Activity log**: a logbook card over every entity of the device, for
+  the last 48 hours. Some entities never appear in it; see [what the
+  Activity log cannot show](#what-the-activity-log-cannot-show).
+- **Graphs** — remaining time today per timer (a 24-hour history graph),
+  battery over weeks, extra-timer runs per day and per week, Screen minutes
+  per day, and chores done per day (statistics graphs; see below).
+- **Diagnostics** — health (config warning, battery voltage, light, last
+  reset, NVS free), memory, the last panic, OTA updates, and the last
+  daily summary received.
+
+### Graphs and statistics
+
+**The daily summary.** At the first wake after midnight the device
+publishes the finished day on the retained `magtag/<id>/summary` topic:
+`screen_used_s`, the runs of each extra timer, and `chores_done` of
+`chores` configured (counted before the rollover clears the ticks). Three
+kinds of sensor read it:
+
+| Entity | Name in HA | From the summary |
+|--------|-----------|------------------|
+| `sensor.magtag_xxxxxx_screen_used_day` | Screen time per day | `screen_used_s`, in minutes |
+| `sensor.magtag_xxxxxx_day_runs_1` … `_4` | `<Name> runs per day` | that extra timer's runs; retired with a disabled slot |
+| `sensor.magtag_xxxxxx_day_chores` | Chores done per day | `chores_done` |
+
+The dashboard's per-day graphs are HA statistics graphs of these, using
+the statistic *change*. The battery graph is the daily mean of *Battery*,
+which declares `state_class: measurement`.
+
+- **Why the summary, not the live sensors.** The summary sensors carry
+  `state_class: total` with a `last_reset` taken from the summary's date.
+  Each summary starts a new cycle, so a period's *change* is exactly what
+  the summaries in it reported, and a repeat of the same summary (a
+  retained redelivery, an HA restart) adds nothing. The live counters
+  would get it wrong: a run finished after the day's last window is
+  cleared by the rollover before HA sees it, and a daily *max* of *Chores
+  done* includes the count carried over midnight, so a day with nothing
+  ticked could show the day before's full count.
+- **The day shift.** A summary arrives after midnight, so HA files each
+  day's figures under the **following** day — the time they arrived. On
+  the weekly graph a run finished on a Sunday counts in the next week. The
+  shift loses no run: a run finished late in the evening, after the day's
+  last window, is in the summary. The dashboard repeats this note on each
+  of those graphs.
+- **A missed summary is a missing day.** This is a known limitation. The
+  device holds the unsent summary in RAM only, so if it goes back to sleep
+  before a window has published it (the first window after midnight
+  fails: no Wi-Fi, no broker), that day's summary is never sent. The
+  per-day graphs then show nothing for it, which on a bar graph looks like
+  a zero day.
+- **The first summary.** HA's statistics take the first value they ever
+  see for a sensor as the starting point, not as a change. After the OTA
+  that adds the summary sensors, that is the summary already retained on
+  the broker, which is therefore recorded once as a state but counted in
+  no graph; the next day's summary is the first to count. On a device that
+  has never published a summary the sensors read *unknown* until one
+  arrives, and that one is the starting point instead.
+- **Chores done per day can be *unknown*.** A summary with no
+  `chores_done` — one retained by older firmware, or one sent when the
+  chore list could not be read at the rollover (a flash error) — sets it
+  to *unknown*, which the statistics skip: not 0, and not the previous
+  day's count again. Before the sensor has ever had a value it stays
+  *unknown* until the first summary that carries the field, which is then
+  the starting point; after that, the next summary with the field counts
+  as usual. A list that is simply empty reports 0 of 0. Its template checks
+  for the field first, so HA logs no template warning for such a summary.
+
+### What the Activity log cannot show
+
+HA keeps **no logbook entries for a sensor that has a unit or a
+`state_class`** — the price of long-term statistics. So the Activity log
+never shows:
+
+- *Battery*, *Chores left* and *Chores done* (`state_class: measurement`,
+  kept so they have statistics);
+- the three kinds of summary sensor (`state_class: total`);
+- any sensor with a unit: Screen time remaining and limit, Screen break
+  remaining, Screen exposure, each extra timer's remaining and limit
+  (minutes); Battery voltage and Ambient light (mV); Free heap, Free heap
+  low water, Main and Network task stack free (bytes); Update download
+  time (ms); and Panic uptime (s), Panic free heap and the two panic stack
+  figures (bytes).
+
+Their current values are in the *Now* card and the Diagnostics section,
+and their history in the graphs. What the log does show: timer state
+changes, the charge lock and Screen Break, each extra timer's live
+`<Name> runs` count (no `state_class`, so every run is logged), each
+chore's done flag (the day-by-day chore record), Config warning, and the
+other unit-less diagnostics (day type, last reset, the update result,
+target and failures, panic count and phase, NVS free entries). The rule
+covers sensors only: every **control** — number, select, switch, text —
+is logged whatever its unit, so a change to an allocation or a timer's
+settings does show.
 
 ## Example: low-battery notification
 
@@ -442,7 +719,9 @@ an automation has to act on the new limit in the same breath, key it on
 
 For values that aren't a single control — chiefly the **holiday list**
 and the **chore list**, which exist *only* here — publish a **retained**
-JSON document to `magtag/<id>/config`; the device applies it and
+JSON document to `magtag/<id>/config` (for those fields the
+[config-publishing automation](#the-config-publishing-automation-chores-and-school-calendar)
+does it for you; this section is the contract it follows); the device applies it and
 republishes the applied version to `magtag/<id>/config_ack`. Every field
 is optional except `ver`. A rejected field is named in the ack's `errors`
 list but never blocks the others. If more fields fail than the ack can
@@ -462,7 +741,8 @@ so a shortened list never reads as "everything else was fine".
 >    message safe to leave on the topic. Republish edited content under
 >    the same `ver` and it is skipped, and a skipped document publishes no
 >    ack. A timestamp (`"ver": "1758650000"`) or a date-and-counter
->    (`"ver": "20260923-2"`) both work; `ver` may be a JSON string or
+>    (`"ver": "20260923-2"`) both work, and so does a hash of the content,
+>    which is what the config-publishing automation uses; `ver` may be a JSON string or
 >    number, and a string must not contain `"`, `\` or control characters
 >    (`{"ok":false,"err":"ver"}`). A document with no `ver` is refused as
 >    `{"ok":false,"err":"no_ver"}`. Only the first **23 characters** of
@@ -597,8 +877,9 @@ republish with a new `ver`.
   the ack's `errors`, nothing is written, and the list already on the
   device stays exactly as it was — the device never keeps "the entries
   that were fine", because the acks are positional and a half-applied list
-  would have the kid ticking rows nobody asked for. A fourth to-do item is
-  the easy way to hit this.
+  would have the kid ticking rows nobody asked for. A hand-written
+  document with a fourth entry is the easy way to hit this; the
+  config-publishing automation sends only the first three open items.
 
   **Absent and empty mean different things.** Leave `chores` out and the
   stored list is untouched (so a document written before the feature
@@ -703,8 +984,10 @@ So pick **one home per field**. A field you adjust from the Configuration
 controls should be left **out** of any document that gets republished
 (omitted = unchanged); a field you keep in the document should not be
 edited from its control, because the next document puts it back. This
-matters most for a document that is republished often — the To-do bridge
-below publishes on every chore-list change.
+matters most for a document that is republished often — the
+[config-publishing automation](#the-config-publishing-automation-chores-and-school-calendar)
+below republishes on every chore-list edit and every 15 minutes, and so
+carries only the fields that have no control.
 
 **What a reseed resets, and what brings it back.** When a firmware flash
 changes the compiled-in defaults (the menuconfig allocations, or the WiFi /
@@ -727,168 +1010,187 @@ unreadable-timer-table recovery described
 this topic should publish **every field that lives in the document** each
 time, not just the one it is changing — and if two things publish it,
 they must build one document between them, or each publish drops the
-other's fields from the replay copy.
+other's fields from the replay copy. The config-publishing automation below
+is built to be that one publisher: the chores and the calendar fields go
+out together in every document it sends.
 
-### Holidays from a calendar
+### The config-publishing automation (chores and school calendar)
 
-Keep school days-off in an HA **Local Calendar** ("School Days Off") and
-run a nightly automation that reads the next 12 months of all-day events
-and republishes the config with the extracted `holidays` array — so the
-family manages no-school days on a normal calendar UI, and the device
-picks them up automatically. (This is a pattern, not a ready-made
-automation; no YAML for it is given here.) If you also use the To-do
-bridge below, do not give the holidays a publisher of their own: the
-retained document has one slot, so two automations would keep replacing
-each other's fields. Put the calendar lookup into the bridge's
-`doc_fields` instead, so one automation publishes one document.
+The document fields with no HA control — the chore list, the holidays and
+the three season dates — come from one committed Home Assistant
+automation, **`tools/ha/magtag_publish_config.yaml`**. It serves every
+device at once, and it is the **only** publisher of `magtag/<id>/config`.
+Read the file itself for the detail: its header comments are its contract,
+and this section does not repeat its YAML, so there is only one copy to
+keep right. (The dashboard generator prints it too, with these install
+notes: `uv run tools/gen_ha_dashboard.py --part automation`.) The header
+says it was adapted from "the To-do bridge in docs/home_assistant.md": that
+was this section's predecessor, since replaced by it. The device's side of
+the contract is under [Bulk config
+document](#bulk-config-document-holidays-scripted-setup).
 
-### Chores from a To-do list (optional bridge)
+**Installing it.** The file is a YAML list with one entry, `- alias:
+"MagTag — publish config"`. Add it to your Home Assistant configuration and
+reload automations (Developer tools → YAML → Automations), in one of these
+ways:
 
-HA's **To-do list** integration (a Local To-do list is enough) gives the
-chore list a real checklist UI — add, rename, remove and drag to reorder
-from the phone — and one automation turns it into the `chores` field. It is
-a convenience, not the contract: publishing the document by hand or from
-any other script is equally supported.
+- **In `automations.yaml`:** append it after the automations already
+  there. A fresh HA's `automations.yaml` holds only `[]`: **replace** the
+  `[]` with the file's contents rather than appending below it. A list
+  entry after `[]` is invalid YAML, and HA then loads no automations at
+  all.
+- **In a directory of its own:** with `automation manual:
+  !include_dir_merge_list automations/` in `configuration.yaml`, the file
+  goes into that directory as it is.
+- **In a package:** wrap it under an `automation:` key.
+- **Wherever your configuration repository keeps automations** (the
+  owner's is managed by FluxCD), in any of the forms above.
 
-It needs one helper, which remembers the list last published so that the
-automation publishes (and moves `ver`) only when the list actually changed:
-Settings → Devices & Services → Helpers → **Text**, named
-`magtag_chores_published`, maximum length **255**.
+It has no `id:`, so HA treats it as a YAML-managed automation: it runs
+normally, but the automation editor cannot edit it and keeps no traces of
+its runs. Edit the YAML, not the UI. It is **not** part of the dashboard:
+do not paste it into the dashboard's raw configuration editor. It is
+installed once, however many devices you have.
 
-```yaml
-automation:
-  - alias: "MagTag — publish chore list"
-    mode: queued
-    triggers:
-      # Adding, completing or deleting an item changes the open-item count.
-      - trigger: state
-        entity_id: todo.daily_chores
-      # A rename or a reorder does NOT change the count, so a state
-      # trigger alone never sees it. The periodic check catches it.
-      - trigger: time_pattern
-        minutes: "/15"
-      - trigger: homeassistant
-        event: start
-    variables:
-      device: magtag-xxxxxx
-      # ONLY the fields that have no HA control. Anything with a control
-      # (allocations, chore-free minutes, quiet hours, names, ...) stays
-      # OUT: this document is republished on every list change, and a
-      # field in it would overwrite that control's edits each time.
-      doc_fields:
-        holidays: ["2026-10-16", "2026-11-03"]
-        summer_start: "2026-05-29"
-        school_start: "2026-08-20"
-        school_end: "2027-05-28"
-    actions:
-      - action: todo.get_items
-        target:
-          entity_id: todo.daily_chores
-        data:
-          status: needs_action
-        response_variable: items
-      - variables:
-          # Items the device would refuse (over 20 BYTES, empty, or
-          # containing " \ or a control character) are set aside rather
-          # than sent: one of them would get the whole list refused.
-          # Then the first three that are left, in list order.
-          checked: >-
-            {%- set ns = namespace(ok=[], bad=[]) -%}
-            {%- for n in items['todo.daily_chores']['items']
-                         | map(attribute='summary') -%}
-              {%- if n | length > 0
-                     and (n.encode('utf-8') | length) <= 20
-                     and not (n is search('[\\x00-\\x1f"\\\\]')) -%}
-                {%- set ns.ok = ns.ok + [n] -%}
-              {%- else -%}
-                {%- set ns.bad = ns.bad + [n] -%}
-              {%- endif -%}
-            {%- endfor -%}
-            {{ {'chores': ns.ok[:3], 'skipped': ns.bad} }}
-      - condition: template
-        value_template: >-
-          {{ checked.chores | to_json
-             != states('input_text.magtag_chores_published') }}
-      - action: mqtt.publish
-        data:
-          topic: "magtag/{{ device }}/config"
-          retain: true
-          payload: >-
-            {{ dict(doc_fields, ver=(now().timestamp() | int | string),
-                    chores=checked.chores) | to_json }}
-      - action: input_text.set_value
-        target:
-          entity_id: input_text.magtag_chores_published
-        data:
-          value: "{{ checked.chores | to_json }}"
-      - if:
-          - condition: template
-            value_template: "{{ checked.skipped | count > 0 }}"
-        then:
-          - action: persistent_notification.create
-            data:
-              notification_id: magtag_chores_skipped
-              title: "MagTag: chores not sent"
-              message: >-
-                Too long for the device (20 bytes), or containing a
-                quote, backslash or control character:
-                {{ checked.skipped | join(', ') }}
-```
+**What it needs:** the MQTT integration (for `mqtt.publish`), one Local
+To-do list per device, and the calendar `calendar.school_schedule` (both
+below); without the calendar it still publishes the chores but raises a
+standing notification. There are no helpers to create.
 
-What it does and does not do:
+**Which list feeds which device** is read off the entity id. For each
+device, create a **Local To-do** list (Settings → Devices & services → Add
+integration → Local To-do) named exactly **`MagTag <node> chores`**, where
+`<node>` is the six hex digits after `magtag-` in the device id —
+`MagTag 1a0a5c chores` for `magtag-1a0a5c`. HA makes that
+`todo.magtag_1a0a5c_chores`, and the automation publishes every list whose
+id has that shape to its device. Rename the list's display name afterwards
+if you like; the entity id stays, and it is what counts. Adding a device is
+creating its list — nothing in the automation changes. Deleting a list
+stops publishing to that device but leaves its last document retained on
+the broker. The generated dashboard shows each device's list on its tab
+(see [Dashboard](#dashboard)).
 
-- **Retained, and `ver` moves only on a real change.** `ver` is the
-  publish time, so it is new on every publish, and the helper comparison
-  keeps the 15-minute check from publishing an unchanged list — which
-  would otherwise make the device re-apply the whole document every
-  window. An empty list publishes `"chores": []`, which turns the feature
-  off on the device.
+**What each run does.**
+
+- It runs on every To-do edit made through HA's to-do services (add,
+  rename, complete, delete, clear completed), every 15 minutes (which
+  catches a drag-to-reorder, a list created since the last run, and the
+  holiday window rolling forward at midnight), at 09:07 daily, and when HA
+  starts. A burst of edits collapses into one run. "Every To-do edit"
+  means **any** list's, not only the MagTag ones: an edit to the shopping
+  list runs it too (harmless, since an unchanged document changes
+  nothing on the device).
+- **Its notifications** (*MagTag: chores not sent…* and *MagTag: school
+  calendar*, below) are raised only on a run started by an edit, by HA
+  starting or at 09:07 — not by the 15-minute pass, so dismissing one
+  keeps it away until the next of those. Since any To-do edit counts, an
+  unrelated one such as the shopping list brings a dismissed notification
+  straight back if its problem is still there. Each clears itself on the
+  first run that no longer has the problem.
+- For each device it builds one document: the chores, plus the calendar
+  fields below, plus `ver`, and publishes it **retained**.
+- **`ver` is a hash of the document's content**, not a clock. An unchanged
+  document carries an unchanged `ver`, which the device skips without an
+  ack, so publishing every 15 minutes costs nothing on the device, and any
+  real change moves `ver` by itself.
+- **Only fields with no HA control go in** (`chores`, `holidays`,
+  `summer_start`, `school_start`, `school_end`). A controllable field in a
+  document republished this often would overwrite that control's edits
+  every time — see [give each field one
+  home](#the-document-and-the-controls-give-each-field-one-home).
+
+**Chores.**
+
 - **Only open items are sent** (`status: needs_action`). The To-do list is
-  the *authoring* surface, not a place to tick chores: the device is the
-  only thing that records a chore as done. Completing an item in HA
-  removes it from the device's list — and, like any list change, clears
-  the day's ticks on the device.
+  the *authoring* surface — add, rename, remove and reorder from the phone
+  — not a place to tick chores: the device is the only thing that records
+  a chore as done. Completing an item in HA removes it from the device's
+  list and, like any list change, clears the day's ticks on the device.
+  An empty list publishes `"chores": []`, which turns the feature off on
+  the device.
 - **Names the device would refuse are skipped, not sent.** The device
   refuses the **whole** list if any one name is over 20 bytes or contains
-  `"`, `\` or a control character, and keeps the old list. So the template
-  checks each open item first — by **bytes**, not characters, so `Räum
-  dein Zimmer auf` (21 bytes, 20 characters) is caught — sets the bad ones
-  aside, sends the first three of the rest, and raises an HA notification
-  (*MagTag: chores not sent*) naming what it skipped. On the device the
-  skipped item is simply absent, and the item after it moves up. Names are
-  never shortened: a cut-off name on a kid's checklist is worse than a
-  visible "fix this" in HA. Rename the item and it is sent at the next
-  check. `config_ack` stays the place to confirm the device took the list.
-- **The helper can always hold what it is given.** It stores the sent
-  list as JSON, and three names of at most 20 bytes come to well under the
-  helper's 255-character limit. (That is the second reason the check runs
-  *before* the list is stored: a helper value over 255 characters is
-  rejected by HA, the guard never settles, and the automation would
-  publish a new `ver` every 15 minutes.)
-- **`doc_fields` holds only fields with no HA control** — here the
-  holidays and the three season dates. Everything with a control is left
-  out on purpose: this document is republished on every list change, and
-  a field in it would overwrite that control's edits each time (see
-  [give each field one home](#the-document-and-the-controls-give-each-field-one-home)).
-  If you would rather keep some controllable field in the document (for
-  example so it survives a reseed), add it here **and stop editing it
-  from its control**. The same goes for a `timers` array.
-- **Editing `doc_fields` publishes nothing by itself.** The guard compares
-  only the chore list, so a changed holiday list waits for the next chore
-  edit. To push it now, clear the helper — set
-  `input_text.magtag_chores_published` to an empty value (Developer tools
-  → Actions → `input_text.set_value`) — and the next check (at most 15
-  minutes) republishes the whole document with a new `ver`.
-- **This automation owns the retained document.** Do not publish to
-  `magtag/<id>/config` from anywhere else while it runs: the next list
-  change replaces whatever you published with `doc_fields` plus the
-  chores. Put holidays and any other document field here instead.
-- Replace `magtag-xxxxxx` with your device id (Settings → Devices &
-  Services → MQTT shows it) and `todo.daily_chores` with your list.
+  `"`, `\` or a control character, and keeps the old list. So the
+  automation checks each open item first — by **bytes**, not characters,
+  so `Räum dein Zimmer auf` (21 bytes, 20 characters) is caught — sets the
+  bad ones aside, sends the first three of the rest, and raises a
+  persistent notification (*MagTag: chores not sent to magtag-xxxxxx*)
+  naming what it skipped. On the device the skipped item is simply absent,
+  and the item after it moves up. Names are never shortened: a cut-off
+  name on a kid's checklist is worse than a visible "fix this" in HA.
+  Rename the item and it is sent straight away; the notification clears on
+  the next run that finds nothing to skip. A fourth open item is not an
+  error: only the first three are sent.
+- The device takes the list at its next network window, and HA's chore
+  entities follow one window later (see [When HA sees a list
+  change](#when-ha-sees-a-list-change)). `config_ack` stays the place to
+  confirm the device took the document.
+
+**The school calendar.** The automation reads **`calendar.school_schedule`**
+(any HA calendar entity with that id), two years ahead.
+
+- **Creating it.** The simplest is a **Local Calendar** (Settings →
+  Devices & services → Add integration → Local Calendar) named **`School
+  schedule`**, which HA makes `calendar.school_schedule`; add the events
+  by hand. A remote or ICS calendar integration works as well, as long as
+  its entity ID is `calendar.school_schedule` (rename the entity ID in its
+  settings if it came out different).
+- **The events** are **all-day** events, one per break, spanning the days
+  off. The title decides what an event is, and the match is exact: it is
+  case-sensitive and anchored at the start of the title. A title that
+  **starts with `No School: Summer`** is a summer break; any other title
+  that **starts with `No School`** (`No School`, `No School: Winter
+  break`, …) is a holiday. `no school`, `School closed` or `Holiday: No
+  School` are ignored.
+
+What it takes from those events:
+
+- **`holidays`** — every **weekday** of every event whose name starts with
+  `No School` (other than the summer ones), from today for one year, at
+  most **46** (the device's cap; it would drop the rest silently).
+  Weekends are left out because the device checks for a holiday before a
+  weekend, so a Saturday listed as a holiday would get the holiday
+  allocation instead of the weekend one.
+- **`summer_start` / `school_start` / `school_end`** — from events named
+  `No School: Summer`. `summer_start` and `school_start` are the start and
+  end of the next summer break that is not over yet (an all-day event's end
+  is exclusive, so its end is the first day of school); `school_end` is the
+  day before the summer after that. Between them they classify every day
+  until that second summer.
+- **Without the calendar** — the entity missing, or returning no events at
+  all — it still publishes the chores, leaves **every** calendar field out
+  of the document (publishing `"holidays": []` would wipe the device's
+  stored list; left out, the stored list stays), and raises a persistent
+  notification, *MagTag: school calendar*. It raises the same notification,
+  and sends no season dates or no `school_end`, when the calendar has no
+  summer break ahead or only one. That last warning ends "Extend
+  school_calendar.ics.": that file is the owner's own calendar source, and
+  for any calendar the words mean "add the next summer break to wherever
+  your calendar's events come from". With a Local Calendar, add the next
+  `No School: Summer` event.
+  When these are raised and cleared is under *What each run does*, above.
+
+**Keeping a controllable field in the document.** Leaving every field with a
+control out is deliberate. If you would rather keep one in the document
+(for example so it survives a [reseed](#the-document-and-the-controls-give-each-field-one-home)),
+add it to the document in your installed copy **and stop editing it from
+its control**; the same goes for a `timers` array. The committed file stays
+as it is.
+
+**This automation owns the retained document.** Do not publish to
+`magtag/<id>/config` from anywhere else for a device that has its list:
+the automation's next run (within 15 minutes) replaces whatever you
+published, and the device applies the replacement, since its `ver` differs
+from yours. A hand-published document is fine for a device with no list;
+to keep a field in the document permanently, put it in the automation, as
+above.
 
 ## Chore checklist (read-only in HA)
 
-Up to three chores, pushed as the document's `chores` field, gate part of
+Up to three chores, pushed as the document's `chores` field (normally by
+the [config-publishing
+automation](#the-config-publishing-automation-chores-and-school-calendar),
+from the device's own To-do list), gate part of
 each day's Screen time: the first `chore_free_*` minutes are free, the rest
 unlocks when every chore is ticked. The kid ticks them **on the device** —
 Button A switches the panel to the checklist, and B, C and D tick (and
@@ -911,12 +1213,14 @@ section is what Home Assistant sees.
   graph: a daily *max* of *Chores done* includes the count carried over
   midnight, so a day with nothing ticked can show the day before's full
   count. **Chores done per day** reads the daily summary instead
-  (`state_class: total`, like the other summary sensors). The price of a
+  (`state_class: total`, like the other summary sensors; see [Graphs and
+  statistics](#graphs-and-statistics)). The price of a
   state class is the logbook: HA leaves any sensor
   with a state class out of it, so a change in either count does **not**
-  appear in the activity log. The per-chore binary sensors do, which is
-  where the day-by-day record lives. With no list configured both counts
-  read 0.
+  appear in the activity log (see [what the Activity log cannot
+  show](#what-the-activity-log-cannot-show)). The per-chore binary sensors
+  do, which is where the day-by-day record lives. With no list configured
+  both counts read 0.
 - **One binary sensor per configured chore**, named from the list —
   `"Homework"` gives *Homework done*. Rows past the configured count are
   **removed** from HA, not left unavailable: with two chores there is no

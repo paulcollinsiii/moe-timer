@@ -150,12 +150,18 @@ On first flash the NVS is initialised from `nvs_defaults.h` (holiday list, WiFi 
 **Day-type logic** (precedence: holiday > weekend > summer > weekday):
 1. Check if today's date is in the `holidays` blob → holiday allocation.
 2. Else if Saturday or Sunday → weekend allocation.
-3. Else if outside the school year (`NVS_DEFAULT_SUMMER_START`/`SCHOOL_START`/`SCHOOL_END` in `nvs_defaults.h`, from the Dublin City Schools calendar — update yearly) → summer allocation.
+3. Else if outside the school year (`summer_start`/`school_start`/`school_end`; first-boot fallbacks `NVS_DEFAULT_SUMMER_START`/`SCHOOL_START`/`SCHOOL_END` in `nvs_defaults.h`, from the Dublin City Schools calendar) → summer allocation.
 4. Else → weekday allocation.
 
 The holiday list is the Dublin City Schools (Grizzell MS) 2026-27 calendar's
 weekday no-school days, not generic federal holidays — days like Veterans
 Day, when school is in session, are deliberately regular weekdays.
+
+The `nvs_defaults.h` holidays and season dates are only what a device
+starts with on first boot (or after a reseed). With the [config-publishing
+automation](home_assistant.md#the-config-publishing-automation-chores-and-school-calendar)
+installed, Home Assistant keeps all of them current from its school
+calendar, so they need no yearly firmware update.
 
 ### 5 · Timer State Machine
 
@@ -260,6 +266,10 @@ Up to **three** chores ("Dishes away", "Trash out", "Homework") gate part of
 the day's Screen time. The list comes from Home Assistant — it is the
 `chores` field of the bulk config document, and nowhere else
 ([home_assistant.md](home_assistant.md#chore-checklist-read-only-in-ha)).
+In practice a parent edits a per-device HA To-do list, and the committed
+automation `tools/ha/magtag_publish_config.yaml` publishes it; the
+dashboard from `tools/gen_ha_dashboard.py` puts that list on the device's
+tab ([home_assistant.md](home_assistant.md#dashboard)).
 With no list configured the whole feature is inert: no mode, no gate, no
 extra wakes, and Button A does nothing.
 

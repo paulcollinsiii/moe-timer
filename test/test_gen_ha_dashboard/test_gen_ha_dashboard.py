@@ -27,7 +27,9 @@ What is pinned, and why each matters:
     history-graph is exempt: recorder history is enough);
   - the devices file: the example's nodes and labels, and invalid input;
   - the setup text: HA 2025.11+, the re-registration order (OTA, delete,
-    rename a chore to force a republish), and file mode's every-slot note;
+    rename a chore to force a republish, rename it back only after), what
+    the delete costs (from HA source, marked unconfirmed), and file mode's
+    every-slot note;
   - the day-shift note on every per-day and per-week summary graph;
   - file mode does not import paho, checked in the script's own uv
     environment, where paho is installed.
@@ -504,6 +506,9 @@ class TestParts(unittest.TestCase):
         for s in ("automations.yaml", "FluxCD", "todo.magtag_<node>_chores", "calendar.school_schedule",
                   '"No School..."', '"No School: Summer"', "persistent notification", "every device"):
             self.assertIn(s, notes)
+        # A fresh automations.yaml is `[]`; appending a block item after it
+        # is invalid YAML and HA loads no automations at all.
+        self.assertIn("REPLACE the [] with this, do not append below it", " ".join(notes.replace("#", "").split()))
         self.assertTrue(all(ln.startswith("#") for ln in notes.splitlines()))
         self.assertIsInstance(yaml.safe_load(part), list)
         # "needs only its list (setup step N)": N is the step that creates it
@@ -534,10 +539,26 @@ class TestParts(unittest.TestCase):
                                        "-> Delete", "Rename one of its chores", "rename the chore back")]
         self.assertEqual(pos, sorted(pos))
         for s in ("do NOT delete it in HA (step 3) before this OTA", "name-derived", "sensor.testing_timer_",
-                  "loses its entity history", "its area", "custom names or icons", "discovery fingerprint",
+                  "discovery fingerprint",
                   "Button D on the timer screen", '"MagTag <node> chores" To-do list',
                   "after that window's discovery pass", "within two network windows", "twice, a minute apart"):
             self.assertIn(s, flat)
+        # What the delete costs, from HA core source (entity registry restore
+        # since 2025.7, MQTT's rename to default_entity_id, the recorder's
+        # move on an entity_id change): customisations and history most
+        # likely survive; references to the old ids break. Unconfirmed on a
+        # real install, and it says so. It must never again claim a loss.
+        for s in ("NOT yet confirmed on a real install", "HA 2025.7+ restores", "area, custom names and icons",
+                  "recorder moves its history and statistics", "most likely keeps",
+                  "anything naming the old ids -- dashboards, automations, scripts",
+                  '"Recreate entity IDs"', "untested"):
+            self.assertIn(s, flat)
+        for s in ("loses its", "stay behind under the old ids", "orphaned"):
+            self.assertNotIn(s, flat)
+        # Renaming the chore back too early restores the same document and
+        # ver: the device skips it and never republishes.
+        self.assertIn("rename the chore back -- not sooner: renamed back before the device's next window", flat)
+        self.assertIn("the device skips it, and nothing republishes", flat)
         # On the chore checklist D is the chore 3 tick (docs/ProductOverview.md
         # "Buttons -- the mode"): the step says to leave it with A first.
         pos = [flat.index(s) for s in ("If its chore checklist is showing, D is the chore 3 tick there, not a sync",
@@ -1128,6 +1149,18 @@ class TestSdkconfig(unittest.TestCase):
                 self.assertIn(want, str(cm.exception))
                 self.assertIn("/x/sdkconfig", str(cm.exception))
                 self.assertNotIn(SENTINEL, str(cm.exception))
+
+    def test_empty_uri_points_a_credentials_local_h_owner_at_sdkconfig_file(self):
+        # The preferred broker setting (include/credentials.local.h) overrides
+        # Kconfig in the firmware and never reaches sdkconfig, whose URI is
+        # then empty: the error says how to hand the tool the three lines.
+        text = f'CONFIG_MAGTAG_MQTT_URI=""\nCONFIG_MAGTAG_MQTT_USER="u"\nCONFIG_MAGTAG_MQTT_PASS="{SENTINEL}"\n'
+        with self.assertRaises(g.UsageError) as cm:
+            g.parse_sdkconfig(text, "/x/sdkconfig")
+        msg = str(cm.exception)
+        self.assertIn("include/credentials.local.h is not in sdkconfig", msg)
+        self.assertIn("pass --sdkconfig FILE, a file holding the three CONFIG_MAGTAG_MQTT_ lines", msg)
+        self.assertNotIn(SENTINEL, msg)
 
     def test_missing_file(self):
         with self.assertRaises(g.UsageError) as cm:
