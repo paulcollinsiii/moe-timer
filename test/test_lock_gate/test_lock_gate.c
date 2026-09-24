@@ -398,8 +398,14 @@ static void gate_body_check_charge(void) {
     lock_gate_check_charge();
 }
 
+/* What the gate told its caller (M3-T4): true = a lock let go in this
+   call. Poisoned before each run so a gate that never returned cannot
+   read as either answer. */
+static int gate_body_released;
+
 static void gate_body_check_bedtime(void) {
-    lock_gate_check_bedtime(gate_body_now);
+    gate_body_released = -1;
+    gate_body_released = lock_gate_check_bedtime(gate_body_now) ? 1 : 0;
 }
 
 static void gate_body_engage(void) {
@@ -1314,7 +1320,9 @@ void test_the_repaint_names_the_pair_the_post_window_recheck_read(void) {
 /* And the converse, or the repaint could be an unconditional paint that
    happens to run before every sleep: a wake that RELEASES the lock falls
    through and must not paint at all, because the wake it returns into
-   renders (promoted to FULL by lock_gate_promote_render). A repaint here
+   renders in full (lock_gate_promote_render on the tick path; on the
+   button path wake_flow's s_lock_screen_on_glass, set off this gate's
+   true return — M3-T4). A repaint here
    would put Config Error on a healthy device and then paint over it. */
 void test_a_releasing_wake_does_not_repaint_on_its_way_out(void) {
     gate_set_pair(DAY_WEEKDAY, 120, 60);
@@ -1327,6 +1335,95 @@ void test_a_releasing_wake_does_not_repaint_on_its_way_out(void) {
     TEST_ASSERT_FALSE(s_config_locked);
     TEST_ASSERT_EQUAL_INT(0, gate_log_count(EV_CONFIG_ERR_SCREEN));
     TEST_ASSERT_EQUAL_INT(0, gate_sleep_calls);
+}
+
+/* ---- M3-T4: the gate tells its caller that it let go --------------------
+
+   The bool is what makes "fix it in HA, then press D" exactly true: the
+   wake handlers consume the press that woke a locked device, drain the
+   latch and repaint in full on true, and act normally on false. So every
+   RELEASE path has to say true — a path that forgot would hand the D
+   press straight to ✓3 or to a second window — and nothing else may, or
+   an ordinary press would be thrown away. The wake side is pinned in
+   test_wake_flow (test_m3t4_*). */
+
+/* R1, the early path: fixed between wakes, released before any window.
+   The one a "post-window only" implementation would miss. */
+void test_m3t4_an_early_config_release_says_so(void) {
+    gate_set_pair(DAY_WEEKDAY, 30, 60);
+    s_config_locked = true;
+    gate_set_now(gate_at(11, 0));
+
+    TEST_ASSERT_FALSE(gate_run(gate_body_check_bedtime));
+    TEST_ASSERT_EQUAL_INT_MESSAGE(1, gate_body_released, "the pre-window release did not report itself");
+    TEST_ASSERT_EQUAL_INT(0, gate_log_count(EV_NET_WINDOW));
+}
+
+/* R3, the path D exists for: a locked re-wake whose window brings the fix. */
+void test_m3t4_a_config_release_in_the_window_says_so(void) {
+    gate_set_pair(DAY_WEEKDAY, 120, 60);
+    gate_set_pair_after_window(DAY_WEEKDAY, 0, 60);
+    s_config_locked = true;
+    gate_set_now(gate_at(11, 0));
+
+    TEST_ASSERT_FALSE(gate_run(gate_body_check_bedtime));
+    TEST_ASSERT_EQUAL_INT_MESSAGE(1, gate_body_released, "the post-window release did not report itself");
+    TEST_ASSERT_EQUAL_INT(1, gate_log_count(EV_NET_WINDOW));
+}
+
+/* R2: engaged and released inside the same call. Config Error was painted
+   this wake, so the press that started it belongs to the lock too. */
+void test_m3t4_an_engage_and_release_in_one_call_says_so(void) {
+    gate_set_pair(DAY_WEEKDAY, 120, 60);
+    gate_set_pair_after_window(DAY_WEEKDAY, 30, 60);
+    gate_set_now(gate_at(9, 0));
+
+    TEST_ASSERT_FALSE(gate_run(gate_body_check_bedtime));
+    TEST_ASSERT_EQUAL_INT(1, gate_log_count(EV_CONFIG_ERR_SCREEN));
+    TEST_ASSERT_EQUAL_INT(1, gate_body_released);
+}
+
+/* The bed-time lock's two release paths say it as well: its buttons are
+   dark, but its window's latch is not. */
+void test_m3t4_a_morning_bedtime_release_says_so(void) {
+    s_bedtime_locked = true;
+    gate_set_bedtime(GATE_BEDTIME_2000);
+    gate_set_now(gate_at(7, 0));
+
+    TEST_ASSERT_FALSE(gate_run(gate_body_check_bedtime));
+    TEST_ASSERT_EQUAL_INT(1, gate_body_released);
+}
+
+void test_m3t4_a_bedtime_release_in_the_window_says_so(void) {
+    s_bedtime_locked = true;
+    gate_set_bedtime(GATE_BEDTIME_2000);
+    gate_bedtime_min_after_window = -1; /* parent disables bed time from HA */
+    gate_set_now(gate_at(23, 0));
+
+    TEST_ASSERT_FALSE(gate_run(gate_body_check_bedtime));
+    TEST_ASSERT_EQUAL_INT(1, gate_body_released);
+}
+
+/* THE NEGATIVE CONTROLS. An unlocked device — with or without bed time
+   configured, and with a pair that is fine — releases nothing, and must
+   not say otherwise: every ordinary press would be thrown away. */
+void test_m3t4_an_unlocked_wake_reports_no_release(void) {
+    gate_set_pair(DAY_WEEKDAY, 20, 60);
+    gate_set_bedtime(GATE_BEDTIME_2000);
+    gate_set_now(gate_at(9, 0));
+
+    TEST_ASSERT_FALSE(gate_run(gate_body_check_bedtime));
+    TEST_ASSERT_EQUAL_INT_MESSAGE(0, gate_body_released, "an unlocked wake claimed a release");
+}
+
+/* And a lock that holds never returns at all, so it cannot answer. */
+void test_m3t4_a_lock_that_holds_never_answers(void) {
+    gate_set_pair(DAY_WEEKDAY, 120, 60);
+    s_config_locked = true;
+    gate_set_now(gate_at(11, 0));
+
+    TEST_ASSERT_TRUE(gate_run(gate_body_check_bedtime));
+    TEST_ASSERT_EQUAL_INT(-1, gate_body_released);
 }
 
 int main(void) {
@@ -1392,5 +1489,12 @@ int main(void) {
     RUN_TEST(test_a_charge_locked_rewake_still_leaves_the_panel_alone);
     RUN_TEST(test_the_repaint_names_the_pair_the_post_window_recheck_read);
     RUN_TEST(test_a_releasing_wake_does_not_repaint_on_its_way_out);
+    RUN_TEST(test_m3t4_an_early_config_release_says_so);
+    RUN_TEST(test_m3t4_a_config_release_in_the_window_says_so);
+    RUN_TEST(test_m3t4_an_engage_and_release_in_one_call_says_so);
+    RUN_TEST(test_m3t4_a_morning_bedtime_release_says_so);
+    RUN_TEST(test_m3t4_a_bedtime_release_in_the_window_says_so);
+    RUN_TEST(test_m3t4_an_unlocked_wake_reports_no_release);
+    RUN_TEST(test_m3t4_a_lock_that_holds_never_answers);
     return UNITY_END();
 }

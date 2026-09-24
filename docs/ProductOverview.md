@@ -364,7 +364,9 @@ pauses a running timer and locks on a **Config Error** screen naming the
 pair (`Weekday: free 90 > 60 min`) and saying `Fix in Home Assistant, press
 D`. Every button except D is dead. It sleeps 30-minute intervals, each
 running a network window so the fix can arrive, and releases as soon as the
-pair is valid — fix it in HA, then press D. A broken pair for another day
+pair is valid — fix it in HA, then press D. That press only brings the
+check forward: it does not also tick chore 3 or run D's sync, and presses
+made while Config Error was showing are dropped. A broken pair for another day
 type does not lock today; HA's *Config warning* sensor names it. This is
 the device's third lock, beside the charge lock (section 3) and Bed Time,
 and both of those outrank it.
@@ -376,7 +378,7 @@ and both of those outrank it.
 | A | 15 | **Mode toggle**: switches the panel between the timer screen and the chore checklist (5c) — labelled `Chores` on the timer screen and `Timers` on the checklist. Refused — and not a wake source, and no label — while the active slot is RUNNING or when no chore list is configured |
 | B | 14 | Start (IDLE/PAUSED → RUNNING, immediate; NTP sync after) / Pause (RUNNING → PAUSED) / Resume. During a Screen Break, a **start** is refused on any slot that is not break-eligible — including Screen — and the ▶ label is not drawn (see 5a/5b); pausing is never gated. On an **EXPIRED** slot, where B has no start or pause job left that day, B instead **reloads** the timer to full duration when the slot is reloadable; Screen has no def and is never reloadable. **On the checklist:** ticks / unticks chore 1 |
 | C | 12 | Swap timer type (Screen → extra 1 → … → Screen); refused while RUNNING (a Screen Break does **not** refuse — see 5a). **On the checklist:** ticks / unticks chore 2 |
-| D | 11 | Force NTP re-sync + full display refresh. **On the checklist:** ticks / unticks chore 3 instead, with no sync |
+| D | 11 | Force NTP re-sync + full display refresh. **On the checklist:** ticks / unticks chore 3 instead, with no sync. **Under the config-error lock** (5c) the only live button, and it only brings the lock's check forward — neither of the above |
 
 Wake sources: B and D always (outside the locks); A and C only when their press would succeed, since the EXT1 mask is rebuilt at every sleep entry and a press that could only be refused must not burn battery or a panel refresh. C: extra timers configured AND the active timer not RUNNING — a Screen Break leaves C live, so the mask keeps it as a wake source throughout. A: a chore list configured AND the active slot not RUNNING — a Screen Break leaves A live too, which is what makes the checklist reachable during a break. **A's two gates are deliberately not C's**: the mode toggle does not inherit C's "extra timers must exist" condition, so a device with no extra timers still reaches its chore list. On a device that has never had a chore list pushed to it — which is every device until Home Assistant sends one — A never wakes at all. On the checklist C is also a wake source whenever there is a second chore for it to tick. The locks narrow all of this: the charge and Bed Time locks arm no button at all, and the config-error lock (5c) arms D alone. Buttons are debounced in software (10 ms).
 

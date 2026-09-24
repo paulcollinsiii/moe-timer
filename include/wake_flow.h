@@ -196,7 +196,14 @@ bool wake_flow_poll_pause_button(void);
    transmitting (brownout, see the snapshot rendezvous). The clock was
    already synced this wake, so a start here needs no expiry shift. Same
    masked take as the pause poll. Returns true when the state map did
-   something. */
+   something.
+
+   Under ANY lock (lock_gate_sleep_mode() not NORMAL) the press is taken
+   and dropped: every lock runs its window with its flag already set, and
+   a B acted on there would resume the timer the lock just paused, behind
+   the lock screen (M3-T4). The same holds after a release this wake until
+   the repaint replaces the lock screen — the tick handler's regular sync
+   can run in between, with the lock screen still showing. */
 bool wake_flow_poll_button_b_action(void);
 
 /* Button poll for the BREAK tail. The break watch owns the CPU for the

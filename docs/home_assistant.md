@@ -957,9 +957,17 @@ arrive — and then re-checks the pair.
 To clear it, fix the pair from HA — lower that day's chore-free number or
 raise its allocation, or publish a corrected document with a new `ver` —
 then **press D**. That wake's window applies the fix, the re-check passes,
-and the lock lets go and repaints the normal screen. Without the press it
+and the lock lets go and repaints the normal screen. The press does nothing
+else: on the checklist it does not tick chore 3, and on the timer screen it
+does not start a second sync, and any button pressed while Config Error was
+showing — right up to the repaint — is ignored. Without the press it
 clears by itself at the next 30-minute wake, and it also lets go if the day
 type changes to one whose pair is valid.
+
+**Config warning** can trail the panel by one window. That wake's window
+publishes the device's stats *before* it applies the fix, so the sensor
+still names the broken day type after the device has let go; it clears at
+the device's next network window (the press does not open a second one).
 
 The other two locks outrank it. At bed time the Bed Time screen wins, and a
 device that is both config- and charge-locked has no exit — neither a

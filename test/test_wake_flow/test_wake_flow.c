@@ -848,6 +848,12 @@ static time_t flow_record_date_arg;
 static bool flow_reset_called;
 static time_t flow_clock_after_window; /* 0 = the window does not step the clock */
 static int flow_state_after_window;    /* -1 = the window leaves the state alone */
+/* M3-T4 fix pass: a B pressed DURING the window, handed to the real join
+   poll the way net_window_join() would hand it. BTN_NONE (the default)
+   leaves the window exactly as it was; the poll's answer is kept. */
+static button_id_t flow_window_join_press;
+static bool flow_window_join_polled;
+static void flow_press(button_id_t btn);
 
 /* ---- the chore checklist's live state (design rows C16, C17) ------------
 
@@ -992,6 +998,10 @@ esp_err_t net_apply_try_window(void) {
     }
     if (flow_state_after_window >= 0) {
         flow_state = (timer_state_t)flow_state_after_window;
+    }
+    if (flow_window_join_press != BTN_NONE) {
+        flow_press(flow_window_join_press);
+        flow_window_join_polled = wake_flow_poll_button_b_action();
     }
     return ESP_OK;
 }
@@ -1385,6 +1395,13 @@ static bool flow_bedtime_locks;       /* the gate ends the wake */
 static wake_render_t flow_promote_in; /* what lock_gate_promote_render saw */
 static int flow_promote_out;          /* -1 = pass through, as an unlocked wake does */
 
+/* M3-T4. `releases`: the gate returns true, a lock let go this wake.
+   `window_press`: BTN_NONE, or a press made during the lock's window.
+   flow_press is the harness's own, below; the gate stub presses through it. */
+static bool flow_gate_releases;
+static button_id_t flow_gate_window_press;
+static void flow_press(button_id_t btn);
+
 esp_reset_reason_t esp_reset_reason(void) {
     flow_reset_reason_reads++;
     return flow_reset_reason;
@@ -1556,7 +1573,7 @@ wake_sleep_mode_t lock_gate_sleep_mode(void) {
    the wake by painting a lock screen and sleeping. Shares the landing pad
    with the break gate's own engage, because from a handler's point of
    view they are the same outcome — the wake stopped at bed time. */
-void lock_gate_check_bedtime(time_t now) {
+bool lock_gate_check_bedtime(time_t now) {
     flow_log_push(EV_CHECK_BEDTIME);
     flow_bedtime_arg = now;
     if (flow_bedtime_locks) {
@@ -1564,6 +1581,17 @@ void lock_gate_check_bedtime(time_t now) {
         flow_bed_engage_now = now;
         longjmp(flow_bed_jmp, 1);
     }
+    /* A RELEASE, modelled as the real gate leaves it: the lock's own
+       window ran with the flag set (so the join poll saw a locked device
+       and a press made there is latched), then the flag cleared. */
+    if (flow_gate_releases) {
+        if (flow_gate_window_press != BTN_NONE) {
+            flow_press(flow_gate_window_press); /* made while the lock screen was up */
+        }
+        flow_sleep_mode_answer = WAKE_SLEEP_NORMAL;
+        return true;
+    }
+    return false;
 }
 
 /* A lock released THIS wake owes the panel a full refresh, so the gate
@@ -1880,6 +1908,8 @@ void setUp(void) {
     flow_painted_mode = (app_mode_t)-1;
     flow_clock_after_window = 0;
     flow_state_after_window = -1;
+    flow_window_join_press = BTN_NONE;
+    flow_window_join_polled = false;
     flow_completion_asks = 0;
     flow_comps_asked_when_used_read = -1; /* poisoned: never read */
     for (int i = 0; i < TIMER_SLOT_COUNT; i++) {
@@ -1959,6 +1989,9 @@ void setUp(void) {
     flow_sleeps = 0;
     flow_bedtime_locks = false;
     flow_promote_out = -1; /* pass through: no lock was released this wake */
+    flow_gate_releases = false;
+    flow_gate_window_press = BTN_NONE;
+    s_lock_screen_on_glass = false; /* release to repaint on device; one wake is one boot */
     flow_state_after_tick = -1;
     flow_state_at_interrupted = -1;
     /* Wake-sticky on device, like s_break_ended above: one wake is one
@@ -9954,6 +9987,453 @@ void test_c4a_the_join_poll_outside_chore_mode_still_applies_b(void) {
     TEST_ASSERT_EQUAL_INT(TIMER_RUNNING, flow_state);
 }
 
+/* ---- M3-T4: a press made to a locked device belongs to the lock ---------
+
+   The config-error lock arms Button D alone, and the documented exit is
+   "fix it in HA, then press D": D reaches the gate's network window early.
+   When the gate's re-check then finds the pair fixed it lets go and falls
+   through into the normal wake — and until M3-T4 the press fell through
+   with it, into the switch that runs D's own action. In chore mode that
+   ticked ✓3 (and could grant the withheld Screen time); on the timer
+   screen it bought a second window and an update check.
+
+   The gate now SAYS it released (lock_gate_check_bedtime returns true —
+   which paths make it say so is test_lock_gate's subject, including the
+   early release before any window), and these cases pin what the wake
+   does with that: no action, a drained latch, and a full repaint of the
+   normal screen. The stub models the release as the real gate leaves it —
+   its window already run, the lock flag already clear — and can latch a
+   press "made during the window", while Config Error was on the glass. */
+
+/* THE DEFECT, in the mode it did the damage in. The window press is C
+   (✓2), because before the fix the D ack armed the chore gesture window
+   and the coalescer would have ticked C as well. */
+void test_m3t4_a_release_by_d_in_chore_mode_ticks_nothing(void) {
+    flow_tick_clock(flow_at(15, 0));
+    flow_mode = APP_MODE_CHORES;
+    flow_chore_count = 3;
+    flow_chore_outstanding = 3;
+    flow_ack_result = BTN_ACK_TOGGLED; /* armed, so a fall-through would be loud */
+    flow_wakeup_btn = BTN_D;
+    flow_sleep_mode_answer = WAKE_SLEEP_CONFIG_ERR;
+    flow_gate_releases = true;
+    flow_gate_window_press = BTN_C;
+
+    TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_button());
+
+    TEST_ASSERT_EQUAL_INT_MESSAGE(0, flow_log_count(EV_CHORE_ACK), "the D that released the lock also ticked a box");
+    TEST_ASSERT_EQUAL_HEX8_MESSAGE(0, flow_chore_acked, "a checkbox moved on the release wake");
+    TEST_ASSERT_FALSE_MESSAGE(flow_chore_released, "the release wake granted the withheld Screen time");
+    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_OTA_ARM));
+    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_NET_OPEN));
+    TEST_ASSERT_EQUAL_HEX8_MESSAGE(0, flow_latch_residue(), "a press made under Config Error survived the release");
+    /* And the wake still does what the gate's fall-through promised: the
+       normal screen, repainted in full over the lock screen. */
+    TEST_ASSERT_EQUAL_INT_MESSAGE(APP_MODE_CHORES, (int)flow_painted_mode, "the release repainted the wrong screen");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(1, FLOW_RENDER_FLUSHES(), "Config Error was cleared with a partial");
+    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_PARTIAL));
+    TEST_ASSERT_EQUAL_INT(WAKE_SLEEP_NORMAL, flow_slept_mode);
+}
+
+/* The same release on the timer screen: no wrong state before the fix,
+   but a second full network window and an update check the press never
+   asked for — the lock's own window has just run. */
+void test_m3t4_a_release_by_d_on_the_timer_screen_opens_no_second_window(void) {
+    flow_tick_clock(flow_at(15, 0));
+    flow_mode = APP_MODE_TIMERS;
+    flow_state = TIMER_PAUSED; /* where the lock left a timer it found running */
+    flow_wakeup_btn = BTN_D;
+    flow_sleep_mode_answer = WAKE_SLEEP_CONFIG_ERR;
+    flow_gate_releases = true;
+
+    TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_button());
+
+    TEST_ASSERT_EQUAL_INT_MESSAGE(0, flow_log_count(EV_OTA_ARM), "the release wake armed an update check");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(0, flow_log_count(EV_NET_OPEN), "the release wake opened a second window");
+    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_WAIT_NTP));
+    TEST_ASSERT_EQUAL_INT(TIMER_PAUSED, flow_state); /* the release does not resume anything */
+    TEST_ASSERT_EQUAL_INT_MESSAGE(APP_MODE_TIMERS, (int)flow_painted_mode, "the release repainted the wrong screen");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(1, FLOW_RENDER_FLUSHES(), "Config Error was cleared with a partial");
+    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_PARTIAL));
+}
+
+/* THE REPAINT IS OWED BY THE RELEASE, not by the button. A B press on
+   the timer screen normally renders a partial when it moves nothing, so
+   this is the case where only the lock can be what makes it full — D's
+   own force_full is out of the picture. (B cannot wake a config-locked
+   device; the bed-time and charge sleeps arm nothing. The wake handler
+   does not rely on which button it was, and neither does this.) */
+void test_m3t4_the_release_repaint_is_full_whatever_the_button(void) {
+    flow_tick_clock(flow_at(15, 0));
+    flow_mode = APP_MODE_TIMERS;
+    flow_b_result = BTN_B_STARTED; /* armed, so a fall-through would be loud */
+    flow_wakeup_btn = BTN_B;
+    flow_sleep_mode_answer = WAKE_SLEEP_CONFIG_ERR;
+    flow_gate_releases = true;
+
+    TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_button());
+
+    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_B_APPLY));
+    TEST_ASSERT_EQUAL_INT(TIMER_IDLE, flow_state);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(1, FLOW_RENDER_FLUSHES(), "the release render was left to the render policy");
+    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_PARTIAL));
+}
+
+/* The post-join re-render paints over the normal screen the first render
+   left, not over the lock screen, so it goes back to the render policy.
+   That re-render has its own force_full (finish_action_and_render) and
+   never reads s_lock_screen_on_glass, so what this pins is that the tail
+   no longer sees a D: a D left in `btn` would force it full a second
+   time. The one-shot itself is pinned by the case below. */
+void test_m3t4_the_release_promotes_only_the_first_render(void) {
+    flow_tick_clock(flow_at(15, 0));
+    flow_mode = APP_MODE_TIMERS;
+    flow_wakeup_btn = BTN_D;
+    flow_sleep_mode_answer = WAKE_SLEEP_CONFIG_ERR;
+    flow_gate_releases = true;
+    flow_net_finish = NET_FINISH_CHANGED; /* the join changed what the panel shows */
+
+    TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_button());
+
+    TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_FULL_REFRESH));
+    TEST_ASSERT_EQUAL_INT_MESSAGE(1, flow_log_count(EV_PARTIAL), "the release promoted the post-join repaint too");
+}
+
+/* And the same one-shot seen from the other renderer that shares it: a
+   press taken by the break tail's poll after the release paints through
+   render_action_result() too, over the normal screen — so an ack there
+   keeps design 2.5's partial. The post-join re-render above has its own
+   force_full and cannot tell a one-shot from a wake-sticky flag; this can. */
+void test_m3t4_a_later_render_in_the_release_wake_is_not_promoted(void) {
+    flow_tick_clock(flow_at(15, 0));
+    flow_mode = APP_MODE_CHORES;
+    flow_chore_count = 3;
+    flow_ack_result = BTN_ACK_TOGGLED;
+    flow_wakeup_btn = BTN_D;
+    flow_sleep_mode_answer = WAKE_SLEEP_CONFIG_ERR;
+    flow_gate_releases = true;
+    /* A break in its tail, so the watch polls and takes a press after
+       the release's own render. */
+    flow_arm_break(flow_at(15, 0) + 3, FLOW_PIANO, FLOW_SCREEN);
+    flow_deferred_press_btn = BTN_C; /* ✓2, made on the repainted checklist */
+    flow_deferred_press_ms = 400;
+
+    TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_button());
+
+    TEST_ASSERT_EQUAL_INT_MESSAGE(1, flow_log_count(EV_CHORE_ACK), "a press made after the repaint was not honoured");
+    TEST_ASSERT_EQUAL_INT(1, flow_ack_idx);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(1, FLOW_RENDER_FLUSHES(), "the release promoted a later render too");
+    TEST_ASSERT_GREATER_OR_EQUAL_INT(1, flow_log_count(EV_PARTIAL));
+}
+
+/* THE LOCK HOLDS: the gate ends the wake, and the press does nothing but
+   the lock's own path. Existing behaviour, pinned so the consume above can
+   never be mistaken for the only thing standing between D and ✓3. */
+void test_m3t4_a_d_press_that_does_not_release_the_lock_does_nothing_else(void) {
+    flow_tick_clock(flow_at(15, 0));
+    flow_mode = APP_MODE_CHORES;
+    flow_chore_count = 3;
+    flow_ack_result = BTN_ACK_TOGGLED;
+    flow_wakeup_btn = BTN_D;
+    flow_sleep_mode_answer = WAKE_SLEEP_CONFIG_ERR;
+    flow_bedtime_locks = true; /* the gate paints its screen and sleeps */
+
+    TEST_ASSERT_EQUAL_INT(FLOW_WAKE_BEDTIME, flow_run_button());
+
+    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_CHORE_ACK));
+    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_OTA_ARM));
+    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_NET_OPEN));
+    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_FULL_REFRESH));
+    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_PARTIAL));
+}
+
+/* THE NEGATIVE CONTROLS: a gate that released nothing leaves D its action
+   in both modes. A consume written as unconditional would pass every case
+   above and fail these. */
+void test_m3t4_with_no_release_d_still_ticks_row_3_in_chore_mode(void) {
+    flow_tick_clock(flow_at(15, 0));
+    flow_mode = APP_MODE_CHORES;
+    flow_chore_count = 3;
+    flow_ack_result = BTN_ACK_TOGGLED;
+    flow_wakeup_btn = BTN_D;
+
+    TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_button());
+
+    TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_CHORE_ACK));
+    TEST_ASSERT_EQUAL_INT(2, flow_ack_idx);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(0, FLOW_RENDER_FLUSHES(), "an unlocked ack wake was promoted to full");
+}
+
+void test_m3t4_with_no_release_d_still_opens_its_window_on_the_timer_screen(void) {
+    flow_tick_clock(flow_at(15, 0));
+    flow_mode = APP_MODE_TIMERS;
+    flow_wakeup_btn = BTN_D;
+
+    TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_button());
+
+    TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_OTA_ARM));
+    TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_NET_OPEN));
+}
+
+/* THE TICK WAKE: a release there has no wake press to consume, but the
+   latch can hold one made during the lock's window, and the tick drain
+   before sleep would tick ✓3 with it. Drained once the release's repaint
+   has landed (the grid-wait cases below pin why not earlier). */
+void test_m3t4_a_tick_release_drops_a_press_made_under_the_lock(void) {
+    flow_tick_clock(flow_at(15, 0));
+    flow_mode = APP_MODE_CHORES;
+    flow_chore_count = 3;
+    flow_ack_result = BTN_ACK_TOGGLED;
+    flow_state = TIMER_IDLE;
+    flow_sleep_mode_answer = WAKE_SLEEP_CONFIG_ERR;
+    flow_gate_releases = true;
+    flow_gate_window_press = BTN_D;
+
+    TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_tick());
+
+    TEST_ASSERT_EQUAL_INT_MESSAGE(0, flow_log_count(EV_CHORE_ACK), "a press made under Config Error ticked a box");
+    TEST_ASSERT_EQUAL_HEX8(0, flow_latch_residue());
+}
+
+/* And its control: a press latched on a tick wake with no release is a
+   normal press, exactly as test_c4b_a_latched_d_press_in_chore_mode_acks_-
+   row_3 has it — pinned here against a drain written unconditionally. */
+void test_m3t4_a_tick_wake_with_no_release_keeps_its_latched_press(void) {
+    flow_tick_clock(flow_at(15, 0));
+    flow_mode = APP_MODE_CHORES;
+    flow_chore_count = 3;
+    flow_ack_result = BTN_ACK_TOGGLED;
+    flow_state = TIMER_IDLE;
+    flow_press(BTN_D);
+
+    TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_tick());
+
+    TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_CHORE_ACK));
+}
+
+/* THE JOIN POLL UNDER A LOCK. Every lock runs its window with its flag
+   set, and that window's join polls B: acting there would resume the
+   timer the lock just paused, behind the lock screen. Taken and dropped,
+   under each of the three locks. */
+void test_m3t4_the_join_poll_drops_b_under_every_lock(void) {
+    const wake_sleep_mode_t locks[] = {WAKE_SLEEP_CHARGE_LOCK, WAKE_SLEEP_BEDTIME, WAKE_SLEEP_CONFIG_ERR};
+    for (unsigned i = 0; i < sizeof locks / sizeof locks[0]; i++) {
+        setUp();
+        flow_mode = APP_MODE_TIMERS;
+        flow_b_result = BTN_B_RESUMED; /* armed: what B would do to a paused timer */
+        flow_state = TIMER_PAUSED;
+        flow_sleep_mode_answer = locks[i];
+        flow_press(BTN_B);
+        mock_time_set(flow_at(16, 0));
+
+        TEST_ASSERT_FALSE(wake_flow_poll_button_b_action());
+
+        TEST_ASSERT_EQUAL_INT_MESSAGE(0, flow_log_count(EV_B_APPLY), "the join poll acted on B behind a lock screen");
+        TEST_ASSERT_EQUAL_INT(TIMER_PAUSED, flow_state);
+        TEST_ASSERT_EQUAL_HEX8_MESSAGE(0, flow_latch_residue(), "a B press made under a lock was left for later");
+    }
+}
+
+/* Chore mode under a lock takes it too — the lock test runs first, so the
+   chore-mode "leave it latched" refusal never gets to keep it. */
+void test_m3t4_the_join_poll_drops_b_under_a_lock_in_chore_mode_too(void) {
+    flow_mode = APP_MODE_CHORES;
+    flow_ack_result = BTN_ACK_TOGGLED;
+    flow_sleep_mode_answer = WAKE_SLEEP_CONFIG_ERR;
+    flow_press(BTN_B);
+    mock_time_set(flow_at(16, 0));
+
+    TEST_ASSERT_FALSE(wake_flow_poll_button_b_action());
+
+    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_CHORE_ACK));
+    TEST_ASSERT_EQUAL_HEX8(0, flow_latch_residue());
+}
+
+/* ---- M3-T4 fix pass: the lock owns presses until its screen leaves ------
+
+   A tick wake that releases the lock does not repaint at once: the
+   regular sync may run, then the grid wait (up to 25 s), and only then
+   the render. Config Error is on the glass all that time, so a press made
+   there is made to the lock — the person fixed the pair in HA and pressed
+   D, exactly as the screen told them to. Until the fix pass the tick
+   handler drained at the gate and treated everything after as a normal
+   press, so that D reached the latch pick as ✓3. The clock sits ten
+   seconds off the minute, so the grid wait is real and the deferred press
+   lands inside it. */
+void test_m3t4_a_d_pressed_in_the_grid_wait_after_a_tick_release_ticks_nothing(void) {
+    flow_tick_clock(flow_at(15, 0) + 50); /* 10 s to the wall minute */
+    flow_reset_reason = ESP_RST_DEEPSLEEP;
+    flow_mode = APP_MODE_CHORES;
+    flow_chore_count = 3;
+    flow_chore_outstanding = 3;
+    flow_ack_result = BTN_ACK_TOGGLED; /* armed, so an ack would be loud */
+    flow_state = TIMER_PAUSED;         /* where the lock left the timer */
+    flow_sleep_mode_answer = WAKE_SLEEP_CONFIG_ERR;
+    flow_gate_releases = true;
+    flow_promote_out = WAKE_RENDER_FULL; /* the real gate's promotion on a release */
+    flow_deferred_press_btn = BTN_D;
+    flow_deferred_press_ms = 1; /* the first poll of the grid wait */
+
+    TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_tick());
+
+    TEST_ASSERT_EQUAL_INT(1, flow_deferred_delivered); /* a real press, by wall time */
+    TEST_ASSERT_TRUE_MESSAGE(mock_delay_total_ms() >= 1000, "the grid wait did not happen");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(0, flow_log_count(EV_CHORE_ACK), "a D pressed under Config Error ticked ✓3");
+    TEST_ASSERT_EQUAL_HEX8(0, flow_chore_acked);
+    TEST_ASSERT_EQUAL_HEX8(0, flow_latch_residue());
+    TEST_ASSERT_EQUAL_INT_MESSAGE(1, FLOW_RENDER_FLUSHES(), "Config Error was cleared with a partial");
+    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_PARTIAL));
+    TEST_ASSERT_FALSE_MESSAGE(s_lock_screen_on_glass, "the repaint left the lock's claim standing");
+}
+
+/* B in the same wait is dropped too, and the timer the lock paused stays
+   paused. What drops it here is the pause poll's own take — it acts on a
+   RUNNING timer only, and no release leaves one running, since every lock
+   pauses at engage and only B restarts one — and the post-render drain
+   behind it. The flag's part is the join poll, pinned below. */
+void test_m3t4_a_b_pressed_in_the_grid_wait_after_a_tick_release_is_dropped(void) {
+    flow_tick_clock(flow_at(15, 0) + 50);
+    flow_reset_reason = ESP_RST_DEEPSLEEP;
+    flow_mode = APP_MODE_TIMERS;
+    flow_state = TIMER_PAUSED;
+    flow_b_result = BTN_B_RESUMED; /* armed: what B would do to it */
+    flow_sleep_mode_answer = WAKE_SLEEP_CONFIG_ERR;
+    flow_gate_releases = true;
+    flow_promote_out = WAKE_RENDER_FULL;
+    flow_deferred_press_btn = BTN_B;
+    flow_deferred_press_ms = 1;
+
+    TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_tick());
+
+    TEST_ASSERT_EQUAL_INT(1, flow_deferred_delivered);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(0, flow_log_count(EV_B_APPLY), "a B pressed under Config Error resumed the timer");
+    TEST_ASSERT_EQUAL_INT(TIMER_PAUSED, flow_state);
+    TEST_ASSERT_EQUAL_HEX8(0, flow_latch_residue());
+    TEST_ASSERT_EQUAL_INT(1, FLOW_RENDER_FLUSHES());
+}
+
+/* THE REGULAR SYNC AFTER A RELEASE. The gate has let go, so the lock flag
+   is clear and lock_gate_sleep_mode() answers NORMAL — but the sync window
+   runs before the repaint, with Config Error still showing, and its join
+   polls B. s_lock_screen_on_glass is what keeps the poll dropping it. */
+void test_m3t4_the_sync_after_a_tick_release_drops_b_in_its_join(void) {
+    flow_tick_clock(flow_at(15, 0));
+    flow_last_ntp = flow_at(15, 0) - IDLE_SYNC_INTERVAL_SEC; /* the regular sync is due */
+    flow_mode = APP_MODE_TIMERS;
+    flow_state = TIMER_PAUSED;
+    flow_b_result = BTN_B_RESUMED;
+    flow_sleep_mode_answer = WAKE_SLEEP_CONFIG_ERR;
+    flow_gate_releases = true;
+    flow_promote_out = WAKE_RENDER_FULL;
+    flow_window_join_press = BTN_B;
+
+    TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_tick());
+
+    TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_TRY_WINDOW)); /* the sync ran */
+    TEST_ASSERT_FALSE(flow_window_join_polled);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(0, flow_log_count(EV_B_APPLY), "the post-release sync resumed the timer");
+    TEST_ASSERT_EQUAL_INT(TIMER_PAUSED, flow_state);
+    TEST_ASSERT_EQUAL_HEX8(0, flow_latch_residue());
+}
+
+/* Its control: the same sync on a wake that released nothing applies B,
+   so the case above is not passing on a window that never polls. */
+void test_m3t4_the_sync_on_an_unlocked_tick_wake_still_applies_b(void) {
+    flow_tick_clock(flow_at(15, 0));
+    flow_last_ntp = flow_at(15, 0) - IDLE_SYNC_INTERVAL_SEC;
+    flow_mode = APP_MODE_TIMERS;
+    flow_state = TIMER_PAUSED;
+    flow_b_result = BTN_B_RESUMED;
+    flow_window_join_press = BTN_B;
+
+    TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_tick());
+
+    TEST_ASSERT_TRUE(flow_window_join_polled);
+    TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_B_APPLY));
+}
+
+/* THE CLAIM ENDS AT THE REPAINT. A press made after it — here a ✓2 taken
+   by the break tail's poll on the repainted checklist — is a normal
+   press, and its render goes back to the render policy: a flag left
+   standing past the tick render would promote it (the button path's
+   one-shot reader, render_action_result_as, is the break tail's too).
+   The break ends 30 s out: past the grid wait's cap, so the render is not
+   held, and inside the watch, so the tail stays awake and polls. */
+void test_m3t4_a_press_after_the_tick_release_repaint_is_a_normal_press(void) {
+    flow_tick_clock(flow_at(15, 0));
+    flow_reset_reason = ESP_RST_DEEPSLEEP;
+    flow_mode = APP_MODE_CHORES;
+    flow_chore_count = 3;
+    flow_ack_result = BTN_ACK_TOGGLED;
+    flow_sleep_mode_answer = WAKE_SLEEP_CONFIG_ERR;
+    flow_gate_releases = true;
+    flow_promote_out = WAKE_RENDER_FULL;
+    flow_arm_break(flow_at(15, 0) + 30, FLOW_PIANO, FLOW_SCREEN);
+    flow_deferred_press_btn = BTN_C; /* ✓2, made on the repainted checklist */
+    flow_deferred_press_ms = 400;
+
+    TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_tick());
+
+    TEST_ASSERT_EQUAL_INT(1, flow_deferred_delivered);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(1, flow_log_count(EV_CHORE_ACK), "a press made after the repaint was not honoured");
+    TEST_ASSERT_EQUAL_INT(1, flow_ack_idx);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(1, FLOW_RENDER_FLUSHES(), "the release promoted a render after its own");
+    TEST_ASSERT_GREATER_OR_EQUAL_INT(1, flow_log_count(EV_PARTIAL));
+}
+
+/* LOW-4: A LOCKED WAKE DOES NOT CLAIM THE STRIP. A config-locked device in
+   chore mode wakes on D with Config Error on the glass and the gate holds
+   it in its window; claimed, the strip would show the checklist's colours
+   over the lock screen and stand the sync pixel down for all of it. */
+void test_m3t4_a_config_locked_d_wake_in_chore_mode_does_not_claim_the_strip(void) {
+    flow_tick_clock(flow_at(15, 0));
+    flow_mode = APP_MODE_CHORES;
+    flow_chore_count = 3;
+    flow_ack_result = BTN_ACK_TOGGLED;
+    flow_wakeup_btn = BTN_D;
+    flow_sleep_mode_answer = WAKE_SLEEP_CONFIG_ERR;
+    flow_bedtime_locks = true; /* the lock holds: its screen, then sleep */
+
+    TEST_ASSERT_EQUAL_INT(FLOW_WAKE_BEDTIME, flow_run_button());
+
+    TEST_ASSERT_EQUAL_INT_MESSAGE(0, flow_led_claims, "a locked wake took the sync pixel away from its window");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(0, flow_log_count(EV_CHORE_LEDS), "chore colours were painted over Config Error");
+    TEST_ASSERT_FALSE(s_chore_strip_lit);
+}
+
+/* And after a release in that wake the strip stays unclaimed: the
+   repainted checklist gets the status paint a tick wake's checklist gets,
+   because the claim has one write site and it is above the gate. */
+void test_m3t4_a_release_by_d_in_chore_mode_leaves_the_strip_unclaimed(void) {
+    flow_tick_clock(flow_at(15, 0));
+    flow_mode = APP_MODE_CHORES;
+    flow_chore_count = 3;
+    flow_ack_result = BTN_ACK_TOGGLED;
+    flow_wakeup_btn = BTN_D;
+    flow_sleep_mode_answer = WAKE_SLEEP_CONFIG_ERR;
+    flow_gate_releases = true;
+
+    TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_button());
+
+    TEST_ASSERT_EQUAL_INT(0, flow_led_claims);
+    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_CHORE_LEDS));
+    TEST_ASSERT_TRUE_MESSAGE(flow_log_count(EV_LED) >= 1, "the release wake painted no status at all");
+}
+
+/* The control: the same D wake on an unlocked device still claims. */
+void test_m3t4_an_unlocked_d_wake_in_chore_mode_still_claims_the_strip(void) {
+    flow_tick_clock(flow_at(15, 0));
+    flow_mode = APP_MODE_CHORES;
+    flow_chore_count = 3;
+    flow_ack_result = BTN_ACK_TOGGLED;
+    flow_wakeup_btn = BTN_D;
+
+    TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_button());
+
+    TEST_ASSERT_EQUAL_INT(1, flow_led_claims);
+    TEST_ASSERT_TRUE(flow_log_count(EV_CHORE_LEDS) >= 1);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_deepsleep_is_the_healthy_reason);
@@ -10388,5 +10868,25 @@ int main(void) {
     RUN_TEST(test_c4a_the_ack_suppression_survives_into_the_post_join_repaint);
     RUN_TEST(test_c4a_the_join_poll_neither_starts_nor_acks_in_chore_mode);
     RUN_TEST(test_c4a_the_join_poll_outside_chore_mode_still_applies_b);
+    RUN_TEST(test_m3t4_a_release_by_d_in_chore_mode_ticks_nothing);
+    RUN_TEST(test_m3t4_a_release_by_d_on_the_timer_screen_opens_no_second_window);
+    RUN_TEST(test_m3t4_the_release_repaint_is_full_whatever_the_button);
+    RUN_TEST(test_m3t4_the_release_promotes_only_the_first_render);
+    RUN_TEST(test_m3t4_a_later_render_in_the_release_wake_is_not_promoted);
+    RUN_TEST(test_m3t4_a_d_press_that_does_not_release_the_lock_does_nothing_else);
+    RUN_TEST(test_m3t4_with_no_release_d_still_ticks_row_3_in_chore_mode);
+    RUN_TEST(test_m3t4_with_no_release_d_still_opens_its_window_on_the_timer_screen);
+    RUN_TEST(test_m3t4_a_tick_release_drops_a_press_made_under_the_lock);
+    RUN_TEST(test_m3t4_a_tick_wake_with_no_release_keeps_its_latched_press);
+    RUN_TEST(test_m3t4_the_join_poll_drops_b_under_every_lock);
+    RUN_TEST(test_m3t4_the_join_poll_drops_b_under_a_lock_in_chore_mode_too);
+    RUN_TEST(test_m3t4_a_d_pressed_in_the_grid_wait_after_a_tick_release_ticks_nothing);
+    RUN_TEST(test_m3t4_a_b_pressed_in_the_grid_wait_after_a_tick_release_is_dropped);
+    RUN_TEST(test_m3t4_the_sync_after_a_tick_release_drops_b_in_its_join);
+    RUN_TEST(test_m3t4_the_sync_on_an_unlocked_tick_wake_still_applies_b);
+    RUN_TEST(test_m3t4_a_press_after_the_tick_release_repaint_is_a_normal_press);
+    RUN_TEST(test_m3t4_a_config_locked_d_wake_in_chore_mode_does_not_claim_the_strip);
+    RUN_TEST(test_m3t4_a_release_by_d_in_chore_mode_leaves_the_strip_unclaimed);
+    RUN_TEST(test_m3t4_an_unlocked_d_wake_in_chore_mode_still_claims_the_strip);
     return UNITY_END();
 }

@@ -67,7 +67,11 @@ bool lock_gate_config_locked(void);
    what we want, and an expiry alert owns the display for itself. Levels
    are wrong here and edges are right — the flags are set by the release
    and live only for that wake, so a device that merely happens to be
-   unlocked does not repaint on every tick. */
+   unlocked does not repaint on every tick.
+
+   Asked by the TICK handler only. The button handler's render never goes
+   through here; it pays the same debt off lock_gate_check_bedtime()'s
+   true return instead (s_lock_screen_on_glass, wake_flow.c). */
 wake_render_t lock_gate_promote_render(wake_render_t wr);
 
 /* Battery gate. Runs before any wake work — a battery that cannot afford
@@ -115,8 +119,23 @@ void lock_gate_bedtime_engage(time_t now, bool alert);
    no screen that night — correctly, since nobody is editing config then
    and the panel is already saying "not in service". The morning the
    bed-time lock lets go, the config gate picks the panel back up in the
-   same wake. */
-void lock_gate_check_bedtime(time_t now);
+   same wake.
+
+   RETURNS TRUE WHEN THIS CALL RELEASED A LOCK — bed time or config error,
+   on any path: the pre-window check (fixed between wakes, a new day) or
+   the post-window re-check (an edit or a clock step in the window) for
+   either lock, and for the config-error lock alone an engage and a
+   release inside the same call (a bed-time engage never returns). False
+   when there was nothing to release. When it returns at all, both locks
+   are off; what the bool adds is that one of them was ON a moment ago, so
+   the panel is still holding its screen and every press made until that
+   screen is repainted BELONGS TO THE LOCK. The wake handlers act on that
+   (wake_flow.c, s_lock_screen_on_glass): the press that woke the device
+   is consumed rather than also run as ✓3 or a sync, B is dropped by the
+   join poll, the latch is emptied of every press made before the repaint,
+   and the repaint is a full one. "Fix it in HA, then press D" is then
+   exactly true — D reaches the window early and does nothing else. */
+bool lock_gate_check_bedtime(time_t now);
 
 #ifdef __cplusplus
 }

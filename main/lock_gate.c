@@ -207,15 +207,19 @@ void lock_gate_bedtime_engage(time_t now, bool alert) {
    behind a network window that can carry an NTP step, and the caller's
    instant is stale from there on. The config gate that runs next asks
    "what day is it today", so it has to get the moved clock and not the
-   one this wake started with. */
-static void check_bedtime(time_t *now) {
+   one this wake started with.
+
+   Returns true when THIS call released the lock — the answer
+   lock_gate_check_bedtime() hands its caller (see lock_gate.h). */
+static bool check_bedtime(time_t *now) {
     if (!bedtime_active(time_util_minutes_of_day(*now), config_cache_bedtime_minutes())) {
         if (s_bedtime_locked) {
             s_bedtime_locked = false;
             s_bedtime_released = true; /* repaint over the Bed Time screen */
             ESP_LOGW(TAG, "Bed time released");
+            return true;
         }
-        return;
+        return false;
     }
     if (!s_bedtime_locked) {
         lock_gate_bedtime_engage(*now, bedtime_should_alert(timer_get_state(), timer_break_active())); /* no return */
@@ -229,10 +233,13 @@ static void check_bedtime(time_t *now) {
         s_bedtime_locked = false;
         s_bedtime_released = true;
         ESP_LOGW(TAG, "Bed time released (config edit or clock step)");
-        return; /* fall through to the normal wake, which repaints */
+        /* Fall through to the normal wake, which repaints; the true is
+           what tells it the presses made so far were the lock's. */
+        return true;
     }
     display_bedtime(); /* THE LAST WORD ON THE PANEL — see above */
     enter_deep_sleep(lock_gate_sleep_mode());
+    return false; /* unreachable on device: enter_deep_sleep does not return */
 }
 
 /* ---- config error ------------------------------------------------------- */
@@ -257,7 +264,10 @@ static bool config_pair_ok(time_t now, day_type_t *day_type, uint16_t *free_min,
     return config_is_valid_chore_free_min(*free_min, *alloc_min);
 }
 
-static void check_config_error(time_t now) {
+/* Returns true when THIS call released the lock, on either path — see
+   lock_gate_check_bedtime() in lock_gate.h for what the caller does with
+   it. */
+static bool check_config_error(time_t now) {
     day_type_t day_type = DAY_WEEKDAY;
     uint16_t free_min = 0;
     uint16_t alloc_min = 0;
@@ -267,8 +277,9 @@ static void check_config_error(time_t now) {
             s_config_locked = false;
             s_config_released = true; /* repaint over the Config Error screen */
             ESP_LOGW(TAG, "Config error released");
+            return true;
         }
-        return;
+        return false;
     }
 
     if (!s_config_locked) {
@@ -314,22 +325,31 @@ static void check_config_error(time_t now) {
        It is the only remote fix path, and the re-check after it is what
        keeps a corrected config from waiting out a whole interval behind a
        panel that has already been told it is wrong. Button D exists to
-       reach this line early. */
+       reach this line early — and that is ALL a D press on a locked device
+       does: the true returned on a release below is what stops the wake
+       handler also running D's own action (✓3 or the sync) on top. */
     net_apply_try_window(); /* finish drops the schedule cache with the rest */
     if (config_pair_ok(hal_time_now(), &day_type, &free_min, &alloc_min)) {
         s_config_locked = false;
         s_config_released = true;
         ESP_LOGW(TAG, "Config error released (config edit, clock step or day change)");
-        return; /* fall through to the normal wake, which repaints */
+        /* Fall through to the normal wake, which repaints; the true is
+           what tells it the presses made so far were the lock's. */
+        return true;
     }
     /* THE LAST WORD ON THE PANEL — see above. A repaint, NOT a re-engage:
        the timer was paused and persisted when the lock first went up, and
        the pair named is the one the re-check just read. */
     display_config_error(day_type, free_min, alloc_min);
     enter_deep_sleep(lock_gate_sleep_mode());
+    return false; /* unreachable on device: enter_deep_sleep does not return */
 }
 
-void lock_gate_check_bedtime(time_t now) {
-    check_bedtime(&now);     /* may not return; may advance `now` past an NTP step */
-    check_config_error(now); /* may not return */
+bool lock_gate_check_bedtime(time_t now) {
+    /* Each may not return; the first may advance `now` past an NTP step.
+       Both run whatever the first answered: a bed-time release is exactly
+       the morning the config gate picks the panel back up. */
+    const bool bedtime_released = check_bedtime(&now);
+    const bool config_released = check_config_error(now);
+    return bedtime_released || config_released;
 }

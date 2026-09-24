@@ -1530,6 +1530,43 @@ bool wake_flow_dispatch_button_action(button_id_t btn, time_t *now, timer_state_
     }
 }
 
+/* A LOCK SCREEN IS STILL ON THE GLASS: a handler's lock gate let go of a
+   lock this wake (lock_gate_check_bedtime() returned true), and the panel
+   is still holding Config Error or Bed Time until the wake's first paint
+   replaces it. Set by BOTH handlers on a release, and it answers two
+   questions until that paint lands.
+
+   WHO OWNS A PRESS. Every press made while the lock screen is showing
+   belongs to the lock, including the ones made AFTER the release — the
+   gate let go inside its own window, but the person holding the device
+   still sees Config Error. The B poll drops B while this is set
+   (wake_flow_presses_are_the_locks), and the tick handler drains the
+   latch once its render has landed, which is what stops a D pressed
+   during the post-release sync or grid wait from ticking ✓3.
+
+   WHETHER THE PAINT MUST BE FULL: a partial cannot clear a lock screen.
+   The gate's own answer is lock_gate_promote_render(), and the tick
+   handler asks it; the button path's render never did, so
+   render_action_result_as() reads this instead. Before M3-T4 the button
+   path got its full refresh only by coincidence — D forced one — and a D
+   press in chore mode, whose ack suppresses exactly that, painted the
+   checklist over Config Error as a partial.
+
+   CLEARED BY THE PAINT THAT REPLACES THE LOCK SCREEN, and only by it:
+   render_action_result_as() on the button path (read and cleared — a
+   one-shot, so later renders in the wake, which paint over the normal
+   screen, go back to the render policy), and the tick handler right after
+   its render switch. A plain static, because the next wake is a fresh
+   boot. */
+static bool s_lock_screen_on_glass;
+
+/* A press made now belongs to a lock rather than to the timers or the
+   checklist: a lock is up (its own window, with the flag set) or a
+   released lock's screen has not yet left the glass. */
+static bool wake_flow_presses_are_the_locks(void) {
+    return s_lock_screen_on_glass || lock_gate_sleep_mode() != WAKE_SLEEP_NORMAL;
+}
+
 bool wake_flow_poll_pause_button(void) {
     /* Masked take: only the B bit is consumed — a latched C press stays in
        the latch for the tick-wake drain (a poll during the grid wait must
@@ -1562,6 +1599,30 @@ bool wake_flow_poll_pause_button(void) {
 }
 
 bool wake_flow_poll_button_b_action(void) {
+    /* UNDER A LOCK THE PRESS IS THE LOCK'S, and is taken and thrown away.
+       Every lock runs a network window with its flag already set (the
+       charge and bed-time engages, the bed-time and config re-wakes, and
+       the rollover window of a wake that starts locked), and that window's
+       join polls here. Acting on B there would RESUME the timer the lock
+       has just paused, behind a lock screen, and the device would then
+       sleep locked with a timer burning. Taken rather than left, unlike
+       the chore-mode refusal below, and AHEAD of it so the answer is the
+       same in either mode: nothing later in a locked wake may act on it,
+       and a release drains the latch anyway (wake_flow_handle_button_wake,
+       wake_flow_handle_timer_tick).
+       AND AFTER A RELEASE, until the lock screen leaves the glass: the
+       tick handler's regular sync can run between the gate letting go and
+       the repaint, with Config Error or Bed Time still showing, and its
+       join polls here too (s_lock_screen_on_glass). Three RTC reads per
+       poll on an ordinary wake.
+       The grid wait's pause poll needs no such guard: it takes B whatever
+       happens and acts only on a RUNNING timer, and no lock lets go of
+       one — each pauses the timer when it engages (lock_gate.c), and
+       a B press is the only way to run one again. */
+    if (wake_flow_presses_are_the_locks()) {
+        (void)buttons_take_pressed_mask(1u << BTN_B);
+        return false;
+    }
     /* AHEAD OF THE TAKE, so the press is left in the latch rather than
        eaten. In chore mode B is ✓1 and not a start, and this poll cannot
        paint one — it runs inside the MQTT join, after the render — so
@@ -2109,8 +2170,10 @@ static display_screen_t render_action_result_as(button_id_t btn, timer_state_t b
        every button wake for an answer st already holds. */
     const bool screen_kind_changed = display_screen_for(before, st.app_mode, st.chore_count) !=
                                      display_screen_for(after, st.app_mode, st.chore_count);
+    const bool lock_screen_on_glass = s_lock_screen_on_glass;
+    s_lock_screen_on_glass = false; /* one-shot: this is the paint that clears it */
     bool force_full = ((btn == BTN_D) && !wake_flow_chore_acked_this_wake()) || wake_flow_mode_toggled_this_wake() ||
-                      screen_kind_changed;
+                      screen_kind_changed || lock_screen_on_glass;
     const bool break_end_promotes = wake_flow_break_ended_this_wake() && !break_end_on_glass;
     wake_render_t bwr = wake_policy_render(before, after, true, break_end_promotes, selection_changed);
     if (bwr == WAKE_RENDER_EXPIRY_ALERT) {
@@ -2370,10 +2433,21 @@ void wake_flow_note_sleep_entry(void) {
 void wake_flow_handle_timer_tick(void) {
     time_t now = hal_time_now();
     wake_flow_handle_day_rollover(&now);
-    lock_gate_check_bedtime(now); /* may not return; before the sync block so a
-                           locked re-wake runs exactly one net window
-                           (the rare release-by-edit fall-through repaints
-                           and may add this wake's regular sync) */
+    /* May not return; before the sync block so a locked re-wake runs
+       exactly one net window (the rare release-by-edit fall-through
+       repaints — lock_gate_promote_render below — and may add this wake's
+       regular sync). A release leaves the lock screen on the glass until
+       the render below replaces it, and every press made until then is
+       the lock's (lock_gate.h) — the regular sync and the grid wait can
+       hold Config Error up for tens of seconds after the gate let go. So
+       the flag is raised here (the B poll drops B while it stands), and
+       the latch is drained once the render has landed, not here: a D
+       pressed during the grid wait would otherwise reach the latch drain
+       below as ✓3. */
+    const bool lock_released = lock_gate_check_bedtime(now);
+    if (lock_released) {
+        s_lock_screen_on_glass = true;
+    }
     /* After rollover + bedtime (both of which want to see a live break),
        and before `before` is captured below — so a snap back to Screen is
        invisible to the before/after comparison and the wake-sticky
@@ -2461,6 +2535,16 @@ void wake_flow_handle_timer_tick(void) {
         default:
             display_update(&st); /* partial; policy promotes every 5th to full */
             break;
+    }
+    /* THE LOCK SCREEN HAS LEFT THE GLASS, so its claim on the buttons ends
+       here. Everything latched until now was pressed while Config Error or
+       Bed Time was showing — in the lock's own window, the regular sync
+       after it, the grid wait, or the refresh itself — and is thrown away
+       before the drain below can act on it. A press from here on is made
+       on the repainted screen, and is a normal press. */
+    if (lock_released) {
+        s_lock_screen_on_glass = false;
+        (void)buttons_take_pressed();
     }
 
     /* A break earned in the SAME tick that expired a timer. The fast-path
@@ -2561,8 +2645,19 @@ void wake_flow_handle_button_wake(void) {
        somebody uses the feature, never on the tick wakes the fleet runs.
 
        In every other mode the sync pixel is how the user knows the radio
-       is up, and nothing is claiming the strip. */
-    if (wake_flow_chore_screen_now()) {
+       is up, and nothing is claiming the strip.
+
+       NOT ON A LOCKED DEVICE (M3-T4). A config-locked device in chore mode
+       wakes on D with Config Error on the glass, and the gate below holds
+       the wake inside its window for up to a minute and a half; claimed
+       here, the strip would show chore colours — the gate pixel included —
+       over a lock screen for all of it, and stand the sync pixel down in
+       the one window whose outcome the user is waiting on. A release
+       inside the gate leaves the wake unclaimed: the checklist it repaints
+       gets the timer-state paint a tick wake's checklist gets
+       (wake_flow_show_status_leds' carried hazard), because claiming after
+       the gate would be a second write site for s_chore_strip_lit. */
+    if (lock_gate_sleep_mode() == WAKE_SLEEP_NORMAL && wake_flow_chore_screen_now()) {
         s_chore_strip_lit = true;
         net_window_claim_leds();
     }
@@ -2582,7 +2677,42 @@ void wake_flow_handle_button_wake(void) {
     /* IDLE overnight: the threshold crossing may first be observed on a
        button press (idle wakes are up to an hour apart). The press is
        swallowed and the transition is silent per the alert rules. */
-    lock_gate_check_bedtime(now); /* may not return */
+    if (lock_gate_check_bedtime(now)) { /* may not return */
+        /* A LOCK LET GO THIS WAKE, AND THE PRESS WAS THE LOCK'S. On a
+           device that went to sleep locked this is the config-error lock —
+           its sleep arms Button D alone, and the bed-time and charge
+           sleeps arm nothing — so the press is D, and "fix it in HA, then
+           press D" means D reaches the gate's window early and does
+           NOTHING ELSE. Before M3-T4 the wake fell through into the switch
+           below with the press intact: in chore mode D ticked ✓3 (and
+           could release the chore gate); on the timer screen it bought a
+           second window and an update check. The same holds for the early
+           release (the pair already good at wake start). The one release
+           the press can be A, B or C in is an engage-and-release inside
+           the gate on a device that was UNLOCKED when it slept: the pair
+           went bad and was fixed within this one wake. That press is
+           consumed too, and deliberately — Config Error was painted, so
+           the press was answered by the lock screen, not by its action.
+
+           Consumed means three things. The switch sees BTN_NONE, so no
+           action runs. Every press still in the latch was made while the
+           lock screen was up, and none of them survives: the join poll
+           already threw B away (wake_flow_poll_button_b_action), and the
+           rest go to the bare take below the chore coalescer — which is a
+           no-op on this wake, because its guard needs an ack applied THIS
+           wake and nothing here applies one. No drain of its own here for
+           that reason; test_m3t4_a_release_by_d_in_chore_mode_ticks_nothing
+           latches a ✓2 in the lock's window to pin it. Nothing between
+           here and the render polls a press, so nothing can be made on a
+           lock screen and acted on later. And the render below is a FULL
+           refresh, because the panel still holds the lock screen
+           (s_lock_screen_on_glass, which that render clears; until then
+           the B poll drops B). The rest of the tail is an
+           ordinary wake's: the normal screen, checklist or timers as the
+           mode says, then sleep. */
+        btn = BTN_NONE;
+        s_lock_screen_on_glass = true;
+    }
     /* Same ordering as the tick handler: after rollover + bedtime, before
        `before` is captured, so a snap back to Screen rides the
        wake-sticky break-ended promotion rather than confusing the state
