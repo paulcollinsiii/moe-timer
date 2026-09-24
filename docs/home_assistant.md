@@ -73,8 +73,10 @@ Everything appears under one device, grouped by HA `entity_category`:
 Recorder history and long-term statistics on the read-only sensors ARE the
 usage-stats feature — battery over weeks, screen minutes per day, runs of
 each extra timer, chores done per day. The generated
-[dashboard](#dashboard) graphs all of them; how each figure is recorded is
-under [Graphs and statistics](#graphs-and-statistics).
+[dashboard](#dashboard) graphs the battery and the runs; HA records the
+statistics of the other two as well, so a graph of them can be added by
+hand. How each figure is recorded is under [Graphs and
+statistics](#graphs-and-statistics).
 
 Notes:
 - Stat-fed sensors carry `expire_after` a bit over 2× the idle sync
@@ -270,9 +272,11 @@ uv run tools/gen_ha_dashboard.py --devices tools/ha_devices.example.yaml --part 
 `--devices FILE` reads another devices file.
 
 File mode derives the entities from the firmware tables in the checkout, so
-every tab gets **every** timer slot (1–4) and **every** chore row (1–3). A
-device with a disabled slot, or fewer than three chores, shows "entity not
-available" rows for the ones it does not have. `--mqtt` avoids that.
+every tab gets **every** timer slot (1–4), and every tab's Activity Log
+names **every** chore's done flag (1–3). A device with a disabled slot
+shows "entity not available" rows for it, and the Activity Log of a device
+with fewer than three chores names flags it does not have. `--mqtt` avoids
+that.
 
 ### Running it: `--mqtt` mode
 
@@ -301,7 +305,7 @@ uv run tools/gen_ha_dashboard.py --mqtt --wait 20 --part dashboard
   Or use file mode, which needs no broker at all.
 - It reads the retained discovery documents and builds the device list and
   **each device's exact entity set** from them. A disabled timer slot or
-  an unused chore row gets no card. Tab labels are the device names from
+  an unused chore gets no row. Tab labels are the device names from
   discovery; a `--devices` file, if given, overrides them per node.
 - **A device on older firmware** — one missing entities the checkout's
   firmware always publishes — still gets a tab, built from what it
@@ -310,8 +314,8 @@ uv run tools/gen_ha_dashboard.py --mqtt --wait 20 --part dashboard
   and a card left with none is dropped. A device whose discovery carries
   no `def_ent_id` (firmware before schema v20) gets no tab, because its
   entity IDs cannot be known from here. An entity this generator does not
-  know (newer firmware than the checkout) goes into an "Other" part on its
-  tab, with a warning.
+  know (newer firmware than the checkout) goes into an "Other" section on
+  its tab, with a warning.
 - **`--wait SECONDS`** (default 10) is the longest the scan may take; it
   stops 2 s after the last retained message arrives. If the time runs out
   while messages are still arriving it warns: raise `--wait` and re-run.
@@ -362,47 +366,64 @@ dashboard by hand.
 
 ### What a tab shows
 
-Each device is one tab (a sections view), top to bottom. Every section is
-named by its own heading. Status, Graphs and Diagnostics (and "Other",
-when `--mqtt` finds one) each open with a full-width banner holding just
-the part's name; the settings at the top have none.
+Each device is one tab, laid out as the owner arranged it: a sections view
+with dense section placement (HA fills a gap with a later section that
+fits), top to bottom. A heading names each card outside the graphs (a
+graph's title is its own); there are no part banners.
 
-- **Chores Settings** — the device's **To-do list card**, where its
-  chores are edited, and below it, labelled **Chores Status**, a done flag
-  per chore. The other settings follow, each section one card with
-  divider-separated groups:
-  - **Screen Timer Settings** — per day type, the **allocation directly
-    followed by its chore-free minutes**, since the two are a pair (see
-    [Chore-free minutes and their
-    allocation](#editing-config-from-the-ha-card-no-setup)); then Screen
-    adjust (min) today; then the break interval and duration.
-  - **Additional Timers** — timers 1–4: name, minutes, reloadable and
-    break eligible.
-  - **Quiet hours & bed time**, and **Tones & volume**.
-  - **System & OTA** — the device name, time zone, OTA manifest URL, OTA
-    check on sync and Find my timer; then the last update's result,
-    target, failures and download time.
-- **Status** — the live state (*Now*: timer state, active timer, Screen
-  time remaining and limit, Screen break and its time remaining, exposure,
-  charge lock, chores left and done, Battery, day type, and each extra
-  timer's runs today; no graph shows the current day's runs). Battery and
-  Screen time remaining are here as well as in their graphs, since the
-  battery graph is a daily mean and the remaining-time graph shows a value
-  only on hover. There are no per-timer rows beyond the runs: each extra
-  timer's remaining is in the remaining-time graph, and its limit is left
-  off. The limit is the minutes set under Additional Timers, except on a
-  day a [raw-command grant](#raw-command-topic-power-users--per-timer-grants)
-  moved it, or after its minutes were changed while the timer had run out
-  (it keeps the old figure until its next start or the next day).
-- **Graphs** — remaining time today per timer (a 24-hour history graph),
-  battery over weeks, extra-timer runs per day and per week, Screen minutes
-  per day, and chores done per day (statistics graphs; see below).
+- **Screen Timer Settings** — one card of divider-separated groups: per
+  day type, the **allocation directly followed by its chore-free
+  minutes**, since the two are a pair (see [Chore-free minutes and their
+  allocation](#editing-config-from-the-ha-card-no-setup)); then Screen
+  adjust (min) today; then the break interval and duration.
+- **Additional Timers** — timers 1–4, a group each: name, minutes,
+  reloadable and break eligible.
+- **Quiet hours & bed time**, **Tones & volume**, and **Daily Chores**:
+  the device's **To-do list card**, where its chores are edited, in one
+  section. The list shows the chores, not the device's ticks: nothing
+  writes a tick back to it. The per-chore done flags are not on the tab;
+  the Activity Log shows each tick, and Status has the counts.
+- **The graphs** — one section two columns wide, with no heading:
+  - *Timer Burndown (Last 4 days)*: Screen time remaining and each extra
+    timer's remaining, a history graph over 96 hours;
+  - *Additional Timer Runs (last 7 days)*: each extra timer's runs per
+    day, bars of the daily *change* of its `<Name> runs per day` sensor;
+  - *Battery Charge*: the hourly mean of Battery over 7 days, on a 0–100 %
+    axis.
+- **System & OTA** — the device name, time zone, OTA manifest URL, OTA
+  check on sync and Find my timer; then the last update's result, target,
+  failures and download time. Below it, in the same section, **Status**:
+  the live state — timer state, active timer, Screen time limit, Screen
+  break and its time remaining, exposure, charge lock, chores left and
+  done, day type, and each extra timer's runs today (no graph shows the
+  current day). Screen time remaining and Battery are in the graphs
+  instead; on a tab with no Battery Charge graph (older firmware, below),
+  Battery is back on Status, after day type. Each extra timer's limit is
+  left off: it is the minutes set under Additional Timers, except on a day
+  a [raw-command grant](#raw-command-topic-power-users--per-timer-grants)
+  moved it, or
+  after its minutes were changed while the timer had run out (it keeps the
+  old figure until its next start or the next day).
 - **Diagnostics** — health (config warning, battery voltage, light, last
-  reset, NVS free), memory, the last panic, the last daily summary
-  received, and at the bottom the **Activity log**: a logbook card over
-  every entity of the device, for the last 48 hours. Some entities never
-  appear in it; see [what the Activity log cannot
-  show](#what-the-activity-log-cannot-show).
+  reset, NVS free), memory, and the last panic.
+- **Activity Log** — two columns wide: a logbook card over every entity of
+  the device, for the last 48 hours. Some entities never appear in it; see
+  [what the Activity Log cannot show](#what-the-activity-log-cannot-show).
+
+An entity the generator does not know (`--mqtt` meeting newer firmware)
+gets an "Other" section after Status. A card with nothing to show is left
+out with its heading, and a section with no card at all, so a tab built for
+older firmware has no empty cards: with no state class on Battery
+(firmware before schema v23), for example, the Battery Charge graph goes,
+and Battery goes on the Status card instead. Without it there, the tab
+would show Battery nowhere: the Activity Log skips a sensor with a unit.
+
+Off the tab, though the firmware publishes them: the chore done flags and
+each extra timer's limit (above), and *Screen time per day* and *Chores
+done per day*. The owner dropped those two graphs; HA still records their
+statistics, so a graph can be added by hand (see below). The Activity Log
+card names all of them, though HA logs nothing for the two summary sensors
+(see [what it cannot show](#what-the-activity-log-cannot-show)).
 
 ### Graphs and statistics
 
@@ -418,9 +439,13 @@ kinds of sensor read it:
 | `sensor.magtag_xxxxxx_day_runs_1` … `_4` | `<Name> runs per day` | that extra timer's runs; retired with a disabled slot |
 | `sensor.magtag_xxxxxx_day_chores` | Chores done per day | `chores_done` |
 
-The dashboard's per-day graphs are HA statistics graphs of these, using
-the statistic *change*. The battery graph is the daily mean of *Battery*,
-which declares `state_class: measurement`.
+The dashboard graphs the runs: a statistics graph of the `day_runs_N`
+sensors using the statistic *change*, per day. Its battery graph is the
+hourly mean of *Battery*, which declares `state_class: measurement`. It
+has no graph of *Screen time per day* or *Chores done per day*: the owner
+dropped them. The sensors still record their long-term statistics, so a
+graph can be added by hand — a *Statistics graph* card on the sensor,
+statistic *change*, period *day*, chart type bar.
 
 - **Why the summary, not the live sensors.** The summary sensors carry
   `state_class: total` with a `last_reset` taken from the summary's date.
@@ -432,11 +457,12 @@ which declares `state_class: measurement`.
   done* includes the count carried over midnight, so a day with nothing
   ticked could show the day before's full count.
 - **The day shift.** A summary arrives after midnight, so HA files each
-  day's figures under the **following** day — the time they arrived. On
-  the weekly graph a run finished on a Sunday counts in the next week. The
-  shift loses no run: a run finished late in the evening, after the day's
-  last window, is in the summary. The dashboard repeats this note on each
-  of those graphs.
+  day's figures under the **following** day — the time they arrived. A
+  run finished on a Sunday shows on Monday's bar, and on a weekly graph
+  it would count in the next week. The shift loses no run: a run finished
+  late in the evening, after the day's last window, is in the summary. The
+  dashboard does not repeat this on its runs graph, and it holds for any
+  summary graph added by hand.
 - **A missed summary is a missing day.** This is a known limitation. The
   device holds the unsent summary in RAM only, so if it goes back to sleep
   before a window has published it (the first window after midnight
@@ -460,10 +486,10 @@ which declares `state_class: measurement`.
   as usual. A list that is simply empty reports 0 of 0. Its template checks
   for the field first, so HA logs no template warning for such a summary.
 
-### What the Activity log cannot show
+### What the Activity Log cannot show
 
 HA keeps **no logbook entries for a sensor that has a unit or a
-`state_class`** — the price of long-term statistics. So the Activity log
+`state_class`** — the price of long-term statistics. So the Activity Log
 never shows:
 
 - *Battery*, *Chores left* and *Chores done* (`state_class: measurement`,
@@ -476,11 +502,16 @@ never shows:
   time (ms); and Panic uptime (s), Panic free heap and the two panic stack
   figures (bytes).
 
-Their current values are on the *Now* card, in the Diagnostics sections
-and, for Update download time, under System & OTA, except each extra
-timer's remaining, which its graph shows, and its limit, which is the
-minutes set under Additional Timers. The graphs keep the history of the
-ones they plot. What the log
+Their current values are on the Status card, in the Diagnostics section
+and, for Update download time, under System & OTA, except these: Screen
+time remaining and each extra timer's remaining, which the burndown
+history graph shows (hover for the latest value); Battery, whose graph
+plots hourly means, so hovering gives the last completed hour's mean, not
+the current value (on a tab with no Battery Charge graph, Battery is on
+the Status card); each extra timer's limit, which is the minutes set
+under Additional Timers; and *Screen time per day* and *Chores done per
+day*, which are on no card (see [what a tab shows](#what-a-tab-shows)).
+The graphs keep the history of the ones they plot. What the log
 does show: timer state
 changes, the charge lock and Screen Break, each extra timer's live
 `<Name> runs` count (no `state_class`, so every run is logged), each
@@ -1233,8 +1264,8 @@ section is what Home Assistant sees.
 | `sensor.magtag_xxxxxx_config_warning` | Config warning | Diagnostic | `OK`, or the day types whose `chore_free` pair is broken |
 
 - **The two counts** carry `state_class: measurement`, so HA keeps
-  **long-term statistics** for them. They are not the per-day chores
-  graph: a daily *max* of *Chores done* includes the count carried over
+  **long-term statistics** for them. They are not the source for a
+  per-day chores graph: a daily *max* of *Chores done* includes the count carried over
   midnight, so a day with nothing ticked can show the day before's full
   count. **Chores done per day** reads the daily summary instead
   (`state_class: total`, like the other summary sensors; see [Graphs and

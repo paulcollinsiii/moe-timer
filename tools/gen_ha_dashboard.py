@@ -31,17 +31,18 @@ tables (firmware_entities(): main/stats_json.c ENTITIES, main/ha_config.c
 FIELDS and the two hand-written discovery payloads in main/mqtt_ha.c), so
 every device gets every entity. The layout (LAYOUT below) names keys; a key
 the device does not have is simply skipped. So file mode names every timer
-slot (1-4) and chore row (1-3): a device with a disabled slot or fewer
-chores shows "entity not available" rows for them, and part 1 and the
-dashboard header say so.
+slot (1-4) and every chore's done flag (1-3): a device with a disabled slot
+shows "entity not available" rows for it, its Activity Log names the flags
+of chores it does not have, and part 1 and the dashboard header say so.
 
 --mqtt reads the broker settings (CONFIG_MAGTAG_MQTT_URI/USER/PASS) from the
 gitignored sdkconfig, collects the retained discovery documents
 (homeassistant/<component>/magtag-<node>_<key>/config) and builds the device
 list and each device's exact entity set from them: an empty (retired)
-payload is skipped, so a disabled slot or an unused chore row gets no card.
+payload is skipped, so a disabled slot or an unused chore gets no row.
 The tab label is the discovery dev.name. A key this generator's layout does
-not know (newer firmware) goes to an "Other" part on the tab, with a warning.
+not know (newer firmware) goes to an "Other" section on the tab, with a
+warning.
 A device on older firmware than this checkout (it lacks an entity the
 checkout's firmware always publishes, or publishes no state_class where the
 checkout's firmware has one) still gets a tab, built from what it publishes,
@@ -380,13 +381,22 @@ def firmware_entities(repo: str = REPO) -> dict[str, Entity]:
 # Layout
 # --------------------------------------------------------------------------
 #
-# The tab, top to bottom (owner, 2026-09-24, revised after applying it,
-# M4-T6): Chores Settings and the settings sections below it, Status,
-# Graphs, [Other], Diagnostics. Each tuple below is one HA "sections"
-# section, named by its own subtitle heading; Status, Graphs, Other and
-# Diagnostics each open with a full-width banner section (_banner()). Rows
-# name firmware keys; the builder turns them into cards and skips a key the
-# device does not have.
+# The tab is the owner's own (2026-09-24, M4-T7): he edited the generated
+# Testing Timer tab in HA, and build_view() reproduces that edit. Its HA
+# "sections" sections, top to bottom, with no part banners:
+#
+#   1. Screen Timer Settings        4. the graphs (2 columns, no heading)
+#   2. Additional Timers            5. System & OTA, then Status
+#   3. Quiet hours & bed time,         [Other: keys this layout does not know]
+#      Tones & volume, then         6. Diagnostics: Health, Memory, Panic
+#      Daily Chores (the To-do)     7. Activity Log (2 columns)
+#
+# A subtitle heading names each card outside the graphs (a graph's title
+# is its own); Diagnostics and the Activity Log open
+# with a title heading. Rows name firmware keys; the builder turns them into
+# cards and skips a key the device does not have. A card with no rows goes
+# with its heading, and a section with no card goes too, so a tab for older
+# firmware (--mqtt) degrades without empty cards or headings.
 #
 # NAMES. Every row is `name: {type: entity}` (HA 2025.11+): the card shows
 # the entity's own name from discovery, without the device name in front,
@@ -412,7 +422,9 @@ ALLOC_PAIRS = (
 
 # Firmware keys deliberately not on the tab, each with its reason; the
 # coverage test fails on any firmware key that is neither placed nor
-# listed here. (The Activity log still lists them: it covers every entity.)
+# listed here. (The Activity Log still targets them: it covers every
+# entity. HA keeps no logbook entries for a sensor with a state_class or a
+# unit, so screen_used_day and day_chores never show there.)
 #
 # limit_N is the slot's EFFECTIVE limit (app_state.c effective_allocation()
 # over the configured duration), which is timerN_min, shown under
@@ -424,105 +436,127 @@ ALLOC_PAIRS = (
 #   figure until its next start or the day rollover. A RUNNING or PAUSED
 #   slot follows the edit (its allocation is delta-shifted).
 # remaining_N, graphed, shows a grant as a jump.
+#
+# chore_N is the device's done tick for chore N. The owner took the rows
+# off: the Daily Chores To-do card names the chores (it does not show the
+# device's ticks; nothing writes them back to the list), Status has
+# chores_left / chores_done, and the flags keep no state_class or unit, so
+# the Activity Log shows each tick.
+#
+# screen_used_day and day_chores are daily summary sensors whose graphs the
+# owner dropped. HA still records their long-term statistics
+# (state_class total), so a statistics graph can be added back by hand.
 LEFT_OUT: dict[str, str] = {
-    f"limit_{n}": (
-        f"the effective minutes; Additional Timers shows timer{n}_min, which it equals except on a day a "
-        f"raw-command grant moved it (the remaining-time graph shows that as a jump), or after a "
-        f"timer{n}_min edit while the timer is expired (until its next start or the next day)"
-    )
-    for n in SLOTS
+    **{
+        f"limit_{n}": (
+            f"the effective minutes; Additional Timers shows timer{n}_min, which it equals except on a day a "
+            f"raw-command grant moved it (the remaining-time graph shows that as a jump), or after a "
+            f"timer{n}_min edit while the timer is expired (until its next start or the next day)"
+        )
+        for n in SLOTS
+    },
+    **{
+        f"chore_{n}": (
+            f"chore {n}'s done tick on the device; the Daily Chores to-do card names the chores (not the "
+            f"device's ticks), Status shows chores left and done, and the Activity Log shows each tick"
+        )
+        for n in CHORES
+    },
+    "screen_used_day": (
+        "the finished day's screen minutes (daily summary); its graph was dropped, but HA still records "
+        "its statistics, so a statistics graph (change, per day) can be added by hand"
+    ),
+    "day_chores": (
+        "the finished day's chores done (daily summary); its graph was dropped, but HA still records "
+        "its statistics, so a statistics graph (change, per day) can be added by hand"
+    ),
 }
 
 TIMER_FIELDS = ("name", "min", "reload", "break")
 
-# The first section: the To-do card under the "Chores Settings" heading,
-# and the done flags under a "Chores Status" label.
-CHORES_SETTINGS = "Chores Settings"
-CHORES_STATUS = "Chores Status"
-CHORE_FLAGS = [f"chore_{i}" for i in CHORES]
+# The settings: (subtitle, groups). Each is ONE entities card; its groups
+# are separated by dividers, and a group the device has none of is dropped
+# with its divider.
+SCREEN_TIMER = (
+    "Screen Timer Settings",
+    # each allocation directly followed by its chore_free: the two are a
+    # pair (the chore-free minutes must stay within the allocation)
+    [[a, f] for a, f in ALLOC_PAIRS] + [["screen_bonus"], ["break_interval_min", "break_duration_min"]],
+)
+# The firmware names these "Timer N name", "Timer N minutes"... and
+# {type: entity} shows exactly that, so a "Timer N" label above them would
+# say it twice. A divider groups each slot instead.
+ADDITIONAL_TIMERS = ("Additional Timers", [[f"timer{n}_{fld}" for fld in TIMER_FIELDS] for n in SLOTS])
+QUIET = ("Quiet hours & bed time", [["quiet_start", "quiet_end", "bedtime"]])
+TONES = ("Tones & volume", [["tone_expiry", "tone_break", "tone_bed", "alert_volume"]])
+SYSTEM = (
+    "System & OTA",
+    [["name", "tz", "ota_url", "ota_on_sync", "locate"], ["ota_result", "ota_target", "ota_fails", "ota_dl_ms"]],
+)
+SETTINGS = [SCREEN_TIMER, ADDITIONAL_TIMERS, QUIET, TONES, SYSTEM]
 
-# The settings sections below it: (title, groups). Each section is ONE
-# entities card; its groups are separated by dividers, and a group the
-# device has none of is dropped with its divider.
-SETTINGS = [
-    (
-        "Screen Timer Settings",
-        # each allocation directly followed by its chore_free: the two are
-        # a pair (the chore-free minutes must stay within the allocation)
-        [[a, f] for a, f in ALLOC_PAIRS] + [["screen_bonus"], ["break_interval_min", "break_duration_min"]],
-    ),
-    # The firmware names these "Timer N name", "Timer N minutes"... and
-    # {type: entity} shows exactly that, so a "Timer N" label above them
-    # would say it twice. A divider groups each slot instead.
-    ("Additional Timers", [[f"timer{n}_{fld}" for fld in TIMER_FIELDS] for n in SLOTS]),
-    ("Quiet hours & bed time", [["quiet_start", "quiet_end", "bedtime"]]),
-    ("Tones & volume", [["tone_expiry", "tone_break", "tone_bed", "alert_volume"]]),
-    (
-        "System & OTA",
-        [["name", "tz", "ota_url", "ota_on_sync", "locate"], ["ota_result", "ota_target", "ota_fails", "ota_dl_ms"]],
-    ),
-]
+# The To-do card's subtitle, under Tones & volume in the same section.
+DAILY_CHORES = "Daily Chores"
 
-# The Status part's one card: the live state. The former per-slot card is
-# gone: remaining_N is in the history graph, limit_N on LEFT_OUT. battery
-# and screen_remaining stay although a graph shows them too: the battery
-# graph is a daily mean and the remaining-time graph needs a hover, so
-# neither shows the current value. Today's completions_N are here, since no
-# graph shows the current day.
-NOW = [
-    "state",
-    "active_timer",
-    "screen_remaining",
-    "screen_limit",
-    "screen_break",
-    "break_remaining",
-    "screen_exposure",
-    "charge_lock",
-    "chores_left",
-    "chores_done",
-    "battery",
-    "day_type",
-] + [f"completions_{n}" for n in SLOTS]
+# Status, under System & OTA: the live state. screen_remaining, remaining_N
+# and battery are graphed instead; limit_N is on LEFT_OUT. Today's
+# completions_N are here, since no graph shows the current day.
+# STATUS_FALLBACK: when no Battery Charge graph is emitted (older firmware,
+# no state class on battery), battery goes back on Status after day_type;
+# otherwise the tab would show it nowhere (the logbook skips a sensor with
+# a unit).
+STATUS = (
+    "Status",
+    [
+        "state",
+        "active_timer",
+        "screen_limit",
+        "screen_break",
+        "break_remaining",
+        "screen_exposure",
+        "charge_lock",
+        "chores_left",
+        "chores_done",
+        "day_type",
+    ]
+    + [f"completions_{n}" for n in SLOTS],
+)
+STATUS_FALLBACK = ("battery", "day_type")  # (key, the Status row it follows)
 
-# Graphs: (title, card spec). stat_types / period per the owner's list.
+# The graphs: one section, 2 columns, no heading and no notes; every card
+# full width. Each spec is the card as the owner saved it, `keys` standing
+# for its entity rows.
+#
+# The runs graph reads the daily summary (day_runs_N), which the device
+# sends at its first check-in after midnight, so HA files each day's runs
+# under the FOLLOWING day. docs/home_assistant.md explains it; the owner
+# took the on-tab note away. `period: day` + `change`: the owner's file had
+# `week` + `state`, and `state` shows only the last day of each period.
 HISTORY_KEYS = ["screen_remaining"] + [f"remaining_{n}" for n in SLOTS]
+HISTORY_GRAPH = dict(title="Timer Burndown (Last 4 days)", keys=HISTORY_KEYS, hours_to_show=96)
 GRAPHS = [
-    ("Battery", dict(keys=["battery"], stat_types=["mean"], period="day", days=56, chart_type="line")),
-    (
-        "Extra timer runs per day",
-        dict(
-            keys=[f"day_runs_{n}" for n in SLOTS],
-            stat_types=["change"],
-            period="day",
-            days=28,
-            chart_type="bar",
-            note=True,
-        ),
+    dict(
+        title="Additional Timer Runs (last 7 days)",
+        keys=[f"day_runs_{n}" for n in SLOTS],
+        days_to_show=7,
+        period="day",
+        chart_type="bar",
+        stat_types=["change"],
+        expand_legend=False,
     ),
-    (
-        "Extra timer runs per week",
-        dict(
-            keys=[f"day_runs_{n}" for n in SLOTS],
-            stat_types=["change"],
-            period="week",
-            days=84,
-            chart_type="bar",
-            note=True,
-        ),
-    ),
-    (
-        "Screen minutes per day",
-        dict(keys=["screen_used_day"], stat_types=["change"], period="day", days=28, chart_type="bar", note=True),
-    ),
-    # day_chores, not a daily `max` of the live chores_done: the max counts
-    # the value carried across midnight, so a day with nothing done would
-    # show the day before's full count. The summary captures the finished
-    # day exactly (firmware M4-T5).
-    (
-        "Chores done per day",
-        dict(keys=["day_chores"], stat_types=["change"], period="day", days=56, chart_type="bar", note=True),
+    dict(
+        title="Battery Charge",
+        keys=["battery"],
+        days_to_show=7,
+        period="hour",
+        chart_type="line",
+        stat_types=["mean"],
+        expand_legend=False,
+        min_y_axis=0,
+        max_y_axis=100,
     ),
 ]
+FULL_WIDTH = {"columns": "full"}
 
 # The state_classes each statistics-graph stat_type can read (HA
 # statistics): a `change` needs a sum, which only total / total_increasing
@@ -544,33 +578,28 @@ def graph_compatible(state_class: str | None, stat_types) -> bool:
     return all(state_class in STAT_TYPE_STATE_CLASSES[st] for st in stat_types)
 
 
-DAY_SHIFT_NOTE = (
-    "Screen minutes, extra timer runs and chores done come from the daily summary, which the device "
-    "sends at its first check-in after midnight. HA files each day's figures under the "
-    "**following** day, so a run finished on a Sunday counts in the next week."
-)
-
+# One section under a "Diagnostics" title heading, a subtitle per card.
+DIAGNOSTICS_TITLE = "Diagnostics"
 DIAGNOSTICS = [
     ("Health", ["config_warning", "battery_mv", "light", "last_reset", "nvs_free"]),
     ("Memory", ["heap_free", "heap_min", "stack_main", "stack_net"]),
     ("Panic", ["panic_count", "panic_phase", "panic_uptime", "panic_heap", "panic_stack_main", "panic_stack_net"]),
-    ("Daily summary (last received)", ["screen_used_day"] + [f"day_runs_{n}" for n in SLOTS] + ["day_chores"]),
 ]
-# ...followed, still under Diagnostics, by the Activity log: a logbook card
-# over every entity of the device.
-ACTIVITY_LOG = "Activity log"
+# The last section, 2 columns: a title heading over a logbook card of every
+# entity of the device.
+ACTIVITY_LOG = "Activity Log"
+LOG_HOURS = 48
 
 
 def placed_keys() -> set[str]:
     """Every firmware key the layout places (whether or not a device has it).
-    The Activity log is not counted: it lists every entity, placed or not."""
-    keys: set[str] = set(CHORE_FLAGS)
+    The Activity Log is not counted: it lists every entity, placed or not."""
+    keys: set[str] = set(STATUS[1]) | set(HISTORY_GRAPH["keys"])
     for _, groups in SETTINGS:
         for grp in groups:
             keys |= set(grp)
-    keys |= set(NOW) | set(HISTORY_KEYS)
-    for _, g in GRAPHS:
-        keys |= set(g["keys"])
+    for spec in GRAPHS:
+        keys |= set(spec["keys"])
     for _, rows in DIAGNOSTICS:
         keys |= set(rows)
     return keys
@@ -583,15 +612,9 @@ def coverage_gaps(fw_keys) -> set[str]:
 
 # A key the layout does not know -- a device on newer firmware than this
 # generator, seen through --mqtt -- is not dropped: build_view() lists it in
-# an "Other" part above Diagnostics. File mode never has one (the coverage
-# test above fails first).
-OTHER_PART = "Other"
-OTHER_TITLE = "Not in this generator's layout (newer firmware?)"
-
-# The parts that open with a banner, in tab order (OTHER_PART, when there is
-# one, goes between Graphs and Diagnostics). The settings sections at the top
-# have none: the owner renamed the "Settings" heading away.
-STATUS_PART, GRAPHS_PART, DIAGNOSTICS_PART = "Status", "Graphs", "Diagnostics"
+# a section of its own, after System & OTA / Status and above Diagnostics.
+# File mode never has one (the coverage test above fails first).
+OTHER_TITLE = "Other: not in this generator's layout (newer firmware?)"
 
 
 # --------------------------------------------------------------------------
@@ -599,22 +622,12 @@ STATUS_PART, GRAPHS_PART, DIAGNOSTICS_PART = "Status", "Graphs", "Diagnostics"
 # --------------------------------------------------------------------------
 
 ENTITY_NAME = {"type": "entity"}
-MAX_COLUMNS = 4  # the view's max_columns; a part banner spans all of them
+MAX_COLUMNS = 4  # the view's max_columns
+WIDE = 2  # the column_span of the graphs and the Activity Log
 
 
 def _heading(text: str, style: str = "title") -> dict:
     return {"type": "heading", "heading": text, "heading_style": style}
-
-
-def _banner(part: str) -> dict:
-    """A part's banner: a full-width section holding only its title heading.
-    A title heading inside a part's first section reads as that section's
-    name, not as a wrapper. HA's sections view places sections row by row
-    (grid-auto-flow: row, hui-sections-view.ts) and caps column_span at the
-    columns shown, so a section spanning every column always starts a new
-    row. A grid section holding only a heading card is what HA's own "add
-    section" creates (views/default-section.ts)."""
-    return {"type": "grid", "column_span": MAX_COLUMNS, "cards": [_heading(part, "title")]}
 
 
 def _row(eid: str, name=None) -> dict:
@@ -631,24 +644,21 @@ def build_view(node: str, label: str, entities: dict[str, Entity]) -> dict:
     def rows(keys):
         return [_row(eid(k)) for k in keys if k in entities]
 
-    # (part name or None, that part's sections). A part opens with a banner
-    # (see _banner()) only if at least one of its sections is emitted: a
-    # device lacking a whole part (--mqtt) gets no empty banner.
-    parts: list[tuple[str | None, list]] = [(None, [])]  # the settings: no banner
+    sections: list[dict] = []
 
-    def part(name):
-        parts.append((name, []))
-
-    def section(title, cards, span=None):
-        """A content section, named by its own subtitle heading; dropped
-        when the device has none of its cards."""
-        cards = [c for c in cards if c]
+    def section(cards, span=None):
+        """A grid section of `cards`; left out when it has none."""
         if not cards:
             return
-        s = {"type": "grid", "cards": [_heading(title, "subtitle")] + cards}
+        s = {"type": "grid", "cards": cards}
         if span:
             s["column_span"] = span
-        parts[-1][1].append(s)
+        sections.append(s)
+
+    def labelled(title, card, style="subtitle"):
+        """A heading over its card, or nothing when there is no card: a
+        heading never stands over an empty space."""
+        return [_heading(title, style), card] if card else []
 
     def entities_card(keys):
         r = rows(keys)
@@ -665,78 +675,66 @@ def build_view(node: str, label: str, entities: dict[str, Entity]) -> dict:
                 out.extend(r)
         return {"type": "entities", "entities": out} if out else None
 
-    # ---- Chores Settings: the To-do card, then the done flags. The
-    # "Chores Status" label is a subtitle heading card rather than the
-    # entities card's own `title:`: it then reads like every other label on
-    # the tab (a card title is a larger header inside the card), and it
-    # goes with the flags when a device has none (--mqtt, no chores).
-    flags = entities_card(CHORE_FLAGS)
+    def settings(spec):
+        title, groups = spec
+        return labelled(title, grouped_card(groups))
+
+    # ---- 1-2. Screen Timer Settings; Additional Timers
+    section(settings(SCREEN_TIMER))
+    section(settings(ADDITIONAL_TIMERS))
+
+    # ---- 3. Quiet hours & bed time, Tones & volume, then the To-do card
     section(
-        CHORES_SETTINGS,
-        [{"type": "todo-list", "entity": todo_entity_id(node)}]
-        + ([_heading(CHORES_STATUS, "subtitle"), flags] if flags else []),
+        settings(QUIET)
+        + settings(TONES)
+        + labelled(DAILY_CHORES, {"type": "todo-list", "entity": todo_entity_id(node)})
     )
 
-    # ---- The other settings, one entities card each
-    for title, groups in SETTINGS:
-        section(title, [grouped_card(groups)])
+    # ---- 4. The graphs. A statistics graph keeps only the entities whose
+    # state_class suits its stat_types (graph_compatible()); the history
+    # graph needs none (recorder history).
+    graphs = []
+    stat_graphed: set[str] = set()
+    hist = rows(HISTORY_GRAPH["keys"])
+    if hist:
+        spec = {k: v for k, v in HISTORY_GRAPH.items() if k != "keys"}
+        graphs.append({"type": "history-graph", "entities": hist, **spec, "grid_options": dict(FULL_WIDTH)})
+    for g in GRAPHS:
+        keys = [k for k in g["keys"] if k in entities and graph_compatible(entities[k].state_class, g["stat_types"])]
+        if keys:
+            stat_graphed |= set(keys)
+            spec = {k: (list(v) if isinstance(v, list) else v) for k, v in g.items() if k != "keys"}
+            graphs.append(
+                {"type": "statistics-graph", "entities": rows(keys), **spec, "grid_options": dict(FULL_WIDTH)}
+            )
+    section(graphs, span=WIDE)
 
-    # ---- Status
-    part(STATUS_PART)
-    section("Now", [entities_card(NOW)])
+    # ---- 5. System & OTA, then Status (battery on it when no graph has it)
+    status = list(STATUS[1])
+    key, after = STATUS_FALLBACK
+    if key not in stat_graphed:
+        status.insert(status.index(after) + 1, key)
+    section(settings(SYSTEM) + labelled(STATUS[0], entities_card(status)))
 
-    # ---- Graphs
-    part(GRAPHS_PART)
-    hist = rows(HISTORY_KEYS)
-    section(
-        "Remaining time today",
-        [{"type": "history-graph", "hours_to_show": 24, "entities": hist} if hist else None],
-        span=2,
-    )
-    for title, g in GRAPHS:
-        ents = rows(
-            [k for k in g["keys"] if k in entities and graph_compatible(entities[k].state_class, g["stat_types"])]
-        )
-        if not ents:
-            continue
-        section(
-            title,
-            [
-                {"type": "markdown", "content": DAY_SHIFT_NOTE} if g.get("note") else None,
-                {
-                    "type": "statistics-graph",
-                    "entities": ents,
-                    "stat_types": list(g["stat_types"]),
-                    "period": g["period"],
-                    "days_to_show": g["days"],
-                    "chart_type": g["chart_type"],
-                }
-            ],
-            span=2,
-        )
+    # ---- Other: entities the layout does not place (see OTHER_TITLE)
+    section(labelled(OTHER_TITLE, entities_card(sorted(coverage_gaps(entities)))))
 
-    # ---- Other: entities the layout does not place (see OTHER_PART)
-    part(OTHER_PART)
-    section(OTHER_TITLE, [entities_card(sorted(coverage_gaps(entities)))])
+    # ---- 6. Diagnostics: its title heading only over a card it has
+    diag = [c for title, keys in DIAGNOSTICS for c in labelled(title, entities_card(keys))]
+    section([_heading(DIAGNOSTICS_TITLE, "title")] + diag if diag else [])
 
-    # ---- Diagnostics (bottom), ending with the Activity log
-    part(DIAGNOSTICS_PART)
-    for title, keys in DIAGNOSTICS:
-        section(title, [entities_card(keys)])
+    # ---- 7. Activity Log: every entity of the device
     all_ids = sorted(eid(k) for k in entities)
-    section(ACTIVITY_LOG, [{"type": "logbook", "hours_to_show": 48, "target": {"entity_id": all_ids}}], span=2)
+    log = {"type": "logbook", "hours_to_show": LOG_HOURS, "target": {"entity_id": all_ids}} if all_ids else None
+    section(labelled(ACTIVITY_LOG, log, "title"), span=WIDE)
 
-    sections = []
-    for name, secs in parts:
-        if name and secs:
-            sections.append(_banner(name))
-        sections += secs
     return {
         "title": label,
         "path": f"magtag-{node}",
         "type": "sections",
         "max_columns": MAX_COLUMNS,
         "sections": sections,
+        "dense_section_placement": True,
     }
 
 
@@ -1130,7 +1128,7 @@ def collect_discovery(messages, labels: dict[str, str] | None = None, fw: dict[s
         if other:
             warnings.append(
                 f"{who}: {len(other)} entit{'y' if len(other) == 1 else 'ies'} this generator's layout does "
-                f"not know (newer firmware?), put under '{OTHER_PART}' on its tab: {', '.join(other)}. "
+                f"not know (newer firmware?), listed under 'Other' on its tab: {', '.join(other)}. "
                 f"Update tools/gen_ha_dashboard.py's layout to place them."
             )
         if fw is not None:
@@ -1142,10 +1140,13 @@ def collect_discovery(messages, labels: dict[str, str] | None = None, fw: dict[s
                 if missing:
                     why.append(f"Missing entities current firmware always publishes: {', '.join(missing)}.")
                 if no_cla:
+                    it = "it" if len(no_cla) == 1 else "them"
                     why.append(
-                        f"No state class on {', '.join(no_cla)}, so the statistics graphs that need one leave "
-                        f"{'it' if len(no_cla) == 1 else 'them'} out."
+                        f"No state class on {', '.join(no_cla)}, so HA keeps no statistics for {it}, and a "
+                        f"statistics graph that needs {it} leaves {it} out."
                     )
+                    if "battery" in no_cla:
+                        why.append("Its tab has no Battery Charge graph; Battery is on the Status card instead.")
                 warnings.append(
                     f"{who} runs older firmware: OTA it (step 1), then re-run this tool so its tab includes "
                     f"the newer entities. " + " ".join(why)
@@ -1168,16 +1169,17 @@ BANNER = {
 
 
 FILE_MODE_NOTE = """\
-File mode (this output) puts every timer slot (1-4) and every chore row (1-3)
-on every tab. A device with a disabled slot or fewer than 3 chores shows
-"entity not available" rows for them. Run with --mqtt to build each tab from
-the device's real entity set instead."""
+File mode (this output) puts every timer slot (1-4) on every tab and names
+every chore flag (1-3) in every tab's Activity Log. A device with a disabled
+slot shows "entity not available" rows for it, and the Activity Log of a
+device with fewer than 3 chores names flags it does not have. Run with --mqtt
+to build each tab from the device's real entity set instead."""
 
 
 def mqtt_mode_note(where: str) -> str:
     return textwrap.fill(
         f"Built from the retained discovery on {where}: each tab shows exactly the entities "
-        "that device publishes, so a disabled timer slot or an unused chore row gets no row. "
+        "that device publishes, so a disabled timer slot or an unused chore gets no row. "
         "Re-run after enabling a slot or adding a chore, and after an OTA or a re-register: "
         "newer firmware publishes entities an older one lacks.",
         width=78,
@@ -1301,10 +1303,18 @@ def dashboard_header(note: str = FILE_MODE_NOTE, no_tab=()) -> str:
 DASHBOARD_HEADER = dashboard_header()
 
 
+class _NoAliasDumper(yaml.SafeDumper):
+    """The owner pastes and reads this YAML: an object used twice is written
+    out twice, never as an &id/*id alias."""
+
+    def ignore_aliases(self, data):
+        return True
+
+
 def render_dashboard(devices: list[dict], entity_sets: dict[str, dict[str, Entity]], note: str = FILE_MODE_NOTE) -> str:
     doc = build_dashboard(devices, entity_sets)
     head = dashboard_header(note, no_tab_devices(devices, entity_sets))
-    return head + yaml.safe_dump(doc, sort_keys=False, allow_unicode=True, width=100)
+    return head + yaml.dump(doc, Dumper=_NoAliasDumper, sort_keys=False, allow_unicode=True, width=100)
 
 
 def render(

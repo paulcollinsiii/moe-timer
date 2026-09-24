@@ -877,21 +877,23 @@ void test_discovery_chore_count_entities(void) {
 
 /* state_class buys HA's long-term statistics and costs the logbook: HA
    leaves every sensor that declares one out of it. So it is on exactly
-   the rows the M4 dashboard graphs, each with the class its graph needs,
-   and nowhere else — the config warning above all, whose logbook line IS
+   the rows kept for statistics — the ones the M4 dashboard graphs, the
+   two summary rows whose graphs are added by hand since M4-T7, and the
+   two chore counts — each with the class its statistics need, and nowhere
+   else — the config warning above all, whose logbook line IS
    the feature. A row gaining one by accident fails here, as does a graphed
    row losing its class or taking the wrong one, and the builder dropping
    it from the payload. */
 static const struct {
     const char *key, *state_class;
 } GRAPHED[] = {
-    {"battery", "measurement"},     /* battery over weeks */
-    {"screen_used_day", "total"},   /* screen minutes per day: `change` */
-    {"day_runs_1", "total"},        /* runs per day/week per extra timer */
+    {"battery", "measurement"},     /* Battery Charge: hourly `mean` */
+    {"screen_used_day", "total"},   /* screen minutes per day: `change` (by hand) */
+    {"day_runs_1", "total"},        /* runs per day per extra timer: `change` */
     {"day_runs_2", "total"},        /* ... */
     {"day_runs_3", "total"},        /* ... */
     {"day_runs_4", "total"},        /* ... */
-    {"day_chores", "total"},        /* chores done per day: `change` */
+    {"day_chores", "total"},        /* chores done per day: `change` (by hand) */
     {"chores_left", "measurement"}, /* long-term statistics since v22 */
     {"chores_done", "measurement"},
 };
@@ -974,7 +976,7 @@ void test_discovery_completions_keep_no_state_class(void) {
     }
 }
 
-/* The finished day's Screen minutes, the "screen minutes per day" graph.
+/* The finished day's Screen minutes, for a "screen minutes per day" graph.
    The whole payload is pinned: the state topic is the retained SUMMARY
    topic (not stat), the template reads the summary's own field, the unit
    matches the other minute sensors, state_class "total" with a
@@ -1081,7 +1083,7 @@ void test_summary_rows_read_fields_the_summary_writes(void) {
     TEST_ASSERT_EQUAL_STRING("\"chores_done\":", quoted);
 }
 
-/* The finished day's acked chores, the "chores done per day" graph.
+/* The finished day's acked chores, for a "chores done per day" graph.
    Pinned whole: the summary topic, the summary's chores_done (NOT the
    configured count beside it) or the literal 'None' when the summary has
    no such field (HA's MQTT sensor maps a "None" render to unknown; an

@@ -20,18 +20,22 @@ What is pinned, and why each matters:
     suite checks against independent crude row counts -- is on the tab or
     on LEFT_OUT with a reason. A firmware entity added later fails here
     instead of silently missing from the dashboard;
-  - the tab's layout (owner, revised after applying it, M4-T6): the parts
-    and sections in order, Status, Graphs, [Other] and Diagnostics each
-    opening with a full-width, heading-only banner (dropped with its last
-    section), the settings with none, and no title heading anywhere
-    else; one Screen Timer Settings card in which each
-    allocation is directly followed by its chore_free inside one divider
-    group (pairs re-derived from ha_config.c, not from the tool's table),
-    then screen_bonus, then the breaks; the Updates keys under System & OTA
-    and no Updates section; the Activity log at the bottom, under
-    Diagnostics; no per-slot remaining_N / limit_N row on the Now card,
-    which keeps battery and screen_remaining; limit_N on LEFT_OUT; a device's missing keys, dividers and labels dropped, never
-    rendered empty;
+  - THE OWNER'S TAB (M4-T7): built from a recorded discovery of the
+    Testing Timer (the full current-firmware entity set), the tab parses to
+    the same data as the view the owner edited in HA and saved
+    (OWNER_TESTING_TIMER_VIEW below, transcribed from his ha.yaml), except
+    for the differences the plan records, each applied by name in the test;
+  - the layout's parts on their own: the sections in order, no part
+    banners, a title heading only on Diagnostics and the Activity Log; one
+    Screen Timer Settings card in which each allocation is directly
+    followed by its chore_free inside one divider group (pairs re-derived
+    from ha_config.c, not from the tool's table), then screen_bonus, then
+    the breaks; the Updates keys under System & OTA; the To-do card under
+    "Daily Chores"; no graphed key on the Status card; the runs graph's
+    daily `change`; no markdown note; LEFT_OUT (limit_N, chore_N,
+    screen_used_day, day_chores) with reasons whose facts are checked;
+  - older firmware degrades cleanly: a device's missing keys, dividers,
+    headings, cards and sections are dropped, never rendered empty;
   - each statistics-graph entity carries a state_class compatible with the
     card's stat_types, judged by the tool's own rule (graph_compatible();
     history-graph is exempt: recorder history is enough);
@@ -40,7 +44,7 @@ What is pinned, and why each matters:
     rename a chore to force a republish, rename it back only after), what
     the delete costs (from HA source, marked unconfirmed), and file mode's
     every-slot note;
-  - the day-shift note on every per-day and per-week summary graph;
+  - the day-shift explanation, off the tab now, is still in the docs;
   - file mode does not import paho, checked in the script's own uv
     environment, where paho is installed.
 
@@ -57,7 +61,8 @@ fetch_retained() and main()):
     keys, no stat_cla) gets a tab from what it publishes, statistics graphs
     only where its stat_cla allows (an emptied card is dropped), and a
     warning to OTA it and re-run; a current device raises none;
-  - a key the layout does not know lands in an "Other" part, with a warning;
+  - a key the layout does not know lands in an "Other" section, with a
+    warning;
   - a def_ent_id that disagrees with the topic warns;
   - the scan: stops when idle; stopped by --wait mid-stream it warns that
     the set may be incomplete; --wait must be finite and positive; the
@@ -153,30 +158,48 @@ def section_titled(view, title):
     return found[0]
 
 
-def is_banner(section):
-    """A part banner: full width, holding one title heading and nothing else."""
-    cards = section["cards"]
-    return (section.get("column_span") == 4 and len(cards) == 1 and cards[0].get("type") == "heading"
-            and cards[0].get("heading_style") == "title")
+def card_under(view, title):
+    """The card right below the heading `title`."""
+    cards = section_titled(view, title)["cards"]
+    i = next(i for i, c in enumerate(cards) if c.get("type") == "heading" and c["heading"] == title)
+    return cards[i + 1]
+
+
+GRAPHS_SECTION = "<graphs>"  # outline()'s name for the heading-less graphs section
 
 
 def outline(view):
-    """The tab in order: ("banner", part) for a part banner, ("section",
-    label) for a content section, labelled by its first card, which must be
-    a subtitle heading."""
+    """The tab in order: per section, the tuple of its headings, or
+    (GRAPHS_SECTION,) for the graphs section, which has none."""
     out = []
     for s in view["sections"]:
-        if is_banner(s):
-            out.append(("banner", s["cards"][0]["heading"]))
-        else:
-            first = s["cards"][0]
-            assert first.get("type") == "heading" and first.get("heading_style") == "subtitle", first
-            out.append(("section", first["heading"]))
+        h = tuple(headings(s))
+        if not h:
+            assert {c["type"] for c in s["cards"]} <= {"history-graph", "statistics-graph"}, s
+            h = (GRAPHS_SECTION,)
+        out.append(h)
     return out
 
 
-def parts_of(view):
-    return [name for kind, name in outline(view) if kind == "banner"]
+def assert_nothing_empty(test, view):
+    """No empty section, card or divider group, and no heading without a
+    card below it (a title heading may head subtitles)."""
+    for s in view["sections"]:
+        cards = s["cards"]
+        test.assertTrue(cards, s)
+        for i, c in enumerate(cards):
+            if c.get("type") == "heading":
+                test.assertLess(i + 1, len(cards), f"heading {c['heading']!r} ends its section")
+                nxt = cards[i + 1]
+                if c["heading_style"] == "subtitle":
+                    test.assertNotEqual(nxt.get("type"), "heading", f"subtitle {c['heading']!r} heads no card")
+            elif c.get("type") == "entities":
+                ks = keys_of(c)
+                test.assertTrue(ks and ks[0] != "--" and ks[-1] != "--" and "-- --" not in " ".join(ks), ks)
+            elif c.get("type") in ("history-graph", "statistics-graph"):
+                test.assertTrue(c["entities"], c)
+            elif c.get("type") == "logbook":
+                test.assertTrue(c["target"]["entity_id"], c)
 
 
 def keys_of(card):
@@ -191,6 +214,282 @@ def non_log_refs(view):
 
 def find_uv():
     return os.environ.get("UV") or shutil.which("uv") or os.path.expanduser("~/.local/bin/uv")
+
+
+# The Testing Timer tab as the owner edited it in HA and saved it to
+# ha.yaml (2026-09-24; the plan's "The owner's own layout", M4-T7). Copied
+# as saved, untouched: entity rows are written in flow style to keep this
+# short, which parses to the same data. ha.yaml itself is the owner's
+# untracked file, so the test carries this copy. What the generator does
+# differently is applied in TestOwnersTab, one named step per difference.
+OWNER_TESTING_TIMER_VIEW = """
+title: Testing Timer
+path: magtag-1a0a5c
+type: sections
+max_columns: 4
+sections:
+  - type: grid
+    cards:
+      - {type: heading, heading: Screen Timer Settings, heading_style: subtitle}
+      - type: entities
+        entities:
+          - {entity: number.magtag_1a0a5c_weekday_min, name: {type: entity}}
+          - {entity: number.magtag_1a0a5c_chore_free_wd, name: {type: entity}}
+          - type: divider
+          - {entity: number.magtag_1a0a5c_weekend_min, name: {type: entity}}
+          - {entity: number.magtag_1a0a5c_chore_free_we, name: {type: entity}}
+          - type: divider
+          - {entity: number.magtag_1a0a5c_holiday_min, name: {type: entity}}
+          - {entity: number.magtag_1a0a5c_chore_free_hol, name: {type: entity}}
+          - type: divider
+          - {entity: number.magtag_1a0a5c_summer_min, name: {type: entity}}
+          - {entity: number.magtag_1a0a5c_chore_free_sum, name: {type: entity}}
+          - type: divider
+          - {entity: number.magtag_1a0a5c_screen_bonus, name: {type: entity}}
+          - type: divider
+          - {entity: number.magtag_1a0a5c_break_interval_min, name: {type: entity}}
+          - {entity: number.magtag_1a0a5c_break_duration_min, name: {type: entity}}
+  - type: grid
+    cards:
+      - {type: heading, heading: Additional Timers, heading_style: subtitle}
+      - type: entities
+        entities:
+          - {entity: text.magtag_1a0a5c_timer1_name, name: {type: entity}}
+          - {entity: number.magtag_1a0a5c_timer1_min, name: {type: entity}}
+          - {entity: switch.magtag_1a0a5c_timer1_reload, name: {type: entity}}
+          - {entity: switch.magtag_1a0a5c_timer1_break, name: {type: entity}}
+          - type: divider
+          - {entity: text.magtag_1a0a5c_timer2_name, name: {type: entity}}
+          - {entity: number.magtag_1a0a5c_timer2_min, name: {type: entity}}
+          - {entity: switch.magtag_1a0a5c_timer2_reload, name: {type: entity}}
+          - {entity: switch.magtag_1a0a5c_timer2_break, name: {type: entity}}
+          - type: divider
+          - {entity: text.magtag_1a0a5c_timer3_name, name: {type: entity}}
+          - {entity: number.magtag_1a0a5c_timer3_min, name: {type: entity}}
+          - {entity: switch.magtag_1a0a5c_timer3_reload, name: {type: entity}}
+          - {entity: switch.magtag_1a0a5c_timer3_break, name: {type: entity}}
+          - type: divider
+          - {entity: text.magtag_1a0a5c_timer4_name, name: {type: entity}}
+          - {entity: number.magtag_1a0a5c_timer4_min, name: {type: entity}}
+          - {entity: switch.magtag_1a0a5c_timer4_reload, name: {type: entity}}
+          - {entity: switch.magtag_1a0a5c_timer4_break, name: {type: entity}}
+  - type: grid
+    cards:
+      - {type: heading, heading: Quiet hours & bed time, heading_style: subtitle}
+      - type: entities
+        entities:
+          - {entity: number.magtag_1a0a5c_quiet_start, name: {type: entity}}
+          - {entity: number.magtag_1a0a5c_quiet_end, name: {type: entity}}
+          - {entity: number.magtag_1a0a5c_bedtime, name: {type: entity}}
+      - {type: heading, heading: Tones & volume, heading_style: subtitle}
+      - type: entities
+        entities:
+          - {entity: select.magtag_1a0a5c_tone_expiry, name: {type: entity}}
+          - {entity: select.magtag_1a0a5c_tone_break, name: {type: entity}}
+          - {entity: select.magtag_1a0a5c_tone_bed, name: {type: entity}}
+          - {entity: number.magtag_1a0a5c_alert_volume, name: {type: entity}}
+      - {type: heading, heading: Daily Chores, heading_style: subtitle}
+      - {type: todo-list, entity: todo.magtag_1a0a5c_chores}
+  - type: grid
+    cards:
+      - type: history-graph
+        entities:
+          - {entity: sensor.magtag_1a0a5c_screen_remaining, name: {type: entity}}
+          - {entity: sensor.magtag_1a0a5c_remaining_1, name: {type: entity}}
+          - {entity: sensor.magtag_1a0a5c_remaining_2, name: {type: entity}}
+          - {entity: sensor.magtag_1a0a5c_remaining_3, name: {type: entity}}
+          - {entity: sensor.magtag_1a0a5c_remaining_4, name: {type: entity}}
+        title: Timer Burndown (Last 4 days)
+        hours_to_show: 96
+        grid_options: {columns: full}
+      - type: statistics-graph
+        entities:
+          - {entity: sensor.magtag_1a0a5c_day_runs_1, name: {type: entity}}
+          - {entity: sensor.magtag_1a0a5c_day_runs_2, name: {type: entity}}
+          - {entity: sensor.magtag_1a0a5c_day_runs_3, name: {type: entity}}
+          - {entity: sensor.magtag_1a0a5c_day_runs_4, name: {type: entity}}
+        title: Additional Timer Runs (last 7 days)
+        days_to_show: 7
+        period: week
+        chart_type: bar
+        stat_types: [state]
+        expand_legend: false
+        grid_options: {columns: full}
+      - type: statistics-graph
+        grid_options: {columns: full}
+        entities:
+          - {entity: sensor.magtag_1a0a5c_battery, name: {type: entity}}
+        title: Battery Charge
+        days_to_show: 7
+        period: hour
+        chart_type: line
+        stat_types: [mean]
+        expand_legend: false
+        min_y_axis: 0
+        max_y_axis: 100
+    column_span: 2
+  - type: grid
+    cards:
+      - {type: heading, heading: System & OTA, heading_style: subtitle}
+      - type: entities
+        entities:
+          - {entity: text.magtag_1a0a5c_name, name: {type: entity}}
+          - {entity: text.magtag_1a0a5c_tz, name: {type: entity}}
+          - {entity: text.magtag_1a0a5c_ota_url, name: {type: entity}}
+          - {entity: switch.magtag_1a0a5c_ota_on_sync, name: {type: entity}}
+          - {entity: switch.magtag_1a0a5c_locate, name: {type: entity}}
+          - type: divider
+          - {entity: sensor.magtag_1a0a5c_ota_result, name: {type: entity}}
+          - {entity: sensor.magtag_1a0a5c_ota_target, name: {type: entity}}
+          - {entity: sensor.magtag_1a0a5c_ota_fails, name: {type: entity}}
+          - {entity: sensor.magtag_1a0a5c_ota_dl_ms, name: {type: entity}}
+      - {type: heading, heading: Status, heading_style: subtitle}
+      - type: entities
+        entities:
+          - {entity: sensor.magtag_1a0a5c_state, name: {type: entity}}
+          - {entity: sensor.magtag_1a0a5c_active_timer, name: {type: entity}}
+          - {entity: sensor.magtag_1a0a5c_screen_limit, name: {type: entity}}
+          - {entity: binary_sensor.magtag_1a0a5c_screen_break, name: {type: entity}}
+          - {entity: sensor.magtag_1a0a5c_break_remaining, name: {type: entity}}
+          - {entity: sensor.magtag_1a0a5c_screen_exposure, name: {type: entity}}
+          - {entity: binary_sensor.magtag_1a0a5c_charge_lock, name: {type: entity}}
+          - {entity: sensor.magtag_1a0a5c_chores_left, name: {type: entity}}
+          - {entity: sensor.magtag_1a0a5c_chores_done, name: {type: entity}}
+          - {entity: sensor.magtag_1a0a5c_day_type, name: {type: entity}}
+          - {entity: sensor.magtag_1a0a5c_completions_1, name: {type: entity}}
+          - {entity: sensor.magtag_1a0a5c_completions_2, name: {type: entity}}
+          - {entity: sensor.magtag_1a0a5c_completions_3, name: {type: entity}}
+          - {entity: sensor.magtag_1a0a5c_completions_4, name: {type: entity}}
+  - type: grid
+    cards:
+      - {type: heading, heading: Diagnostics, heading_style: title}
+      - {type: heading, heading: Health, heading_style: subtitle}
+      - type: entities
+        entities:
+          - {entity: sensor.magtag_1a0a5c_config_warning, name: {type: entity}}
+          - {entity: sensor.magtag_1a0a5c_battery_mv, name: {type: entity}}
+          - {entity: sensor.magtag_1a0a5c_light, name: {type: entity}}
+          - {entity: sensor.magtag_1a0a5c_last_reset, name: {type: entity}}
+          - {entity: sensor.magtag_1a0a5c_nvs_free, name: {type: entity}}
+      - {type: heading, heading: Memory, heading_style: subtitle}
+      - type: entities
+        entities:
+          - {entity: sensor.magtag_1a0a5c_heap_free, name: {type: entity}}
+          - {entity: sensor.magtag_1a0a5c_heap_min, name: {type: entity}}
+          - {entity: sensor.magtag_1a0a5c_stack_main, name: {type: entity}}
+          - {entity: sensor.magtag_1a0a5c_stack_net, name: {type: entity}}
+      - {type: heading, heading: Panic, heading_style: subtitle}
+      - type: entities
+        entities:
+          - {entity: sensor.magtag_1a0a5c_panic_count, name: {type: entity}}
+          - {entity: sensor.magtag_1a0a5c_panic_phase, name: {type: entity}}
+          - {entity: sensor.magtag_1a0a5c_panic_uptime, name: {type: entity}}
+          - {entity: sensor.magtag_1a0a5c_panic_heap, name: {type: entity}}
+          - {entity: sensor.magtag_1a0a5c_panic_stack_main, name: {type: entity}}
+          - {entity: sensor.magtag_1a0a5c_panic_stack_net, name: {type: entity}}
+      - {type: heading, heading: Activity log, heading_style: subtitle}
+  - type: grid
+    cards:
+      - {type: heading, heading: Activity Log, heading_style: title}
+      - type: logbook
+        hours_to_show: 48
+        target:
+          entity_id:
+            - binary_sensor.magtag_1a0a5c_charge_lock
+            - binary_sensor.magtag_1a0a5c_chore_1
+            - binary_sensor.magtag_1a0a5c_chore_2
+            - binary_sensor.magtag_1a0a5c_chore_3
+            - binary_sensor.magtag_1a0a5c_screen_break
+            - number.magtag_1a0a5c_alert_volume
+            - number.magtag_1a0a5c_bedtime
+            - number.magtag_1a0a5c_break_duration_min
+            - number.magtag_1a0a5c_break_interval_min
+            - number.magtag_1a0a5c_chore_free_hol
+            - number.magtag_1a0a5c_chore_free_sum
+            - number.magtag_1a0a5c_chore_free_wd
+            - number.magtag_1a0a5c_chore_free_we
+            - number.magtag_1a0a5c_holiday_min
+            - number.magtag_1a0a5c_quiet_end
+            - number.magtag_1a0a5c_quiet_start
+            - number.magtag_1a0a5c_screen_bonus
+            - number.magtag_1a0a5c_summer_min
+            - number.magtag_1a0a5c_timer1_min
+            - number.magtag_1a0a5c_timer2_min
+            - number.magtag_1a0a5c_timer3_min
+            - number.magtag_1a0a5c_timer4_min
+            - number.magtag_1a0a5c_weekday_min
+            - number.magtag_1a0a5c_weekend_min
+            - select.magtag_1a0a5c_tone_bed
+            - select.magtag_1a0a5c_tone_break
+            - select.magtag_1a0a5c_tone_expiry
+            - sensor.magtag_1a0a5c_active_timer
+            - sensor.magtag_1a0a5c_battery
+            - sensor.magtag_1a0a5c_battery_mv
+            - sensor.magtag_1a0a5c_break_remaining
+            - sensor.magtag_1a0a5c_chores_done
+            - sensor.magtag_1a0a5c_chores_left
+            - sensor.magtag_1a0a5c_completions_1
+            - sensor.magtag_1a0a5c_completions_2
+            - sensor.magtag_1a0a5c_completions_3
+            - sensor.magtag_1a0a5c_completions_4
+            - sensor.magtag_1a0a5c_config_warning
+            - sensor.magtag_1a0a5c_day_chores
+            - sensor.magtag_1a0a5c_day_runs_1
+            - sensor.magtag_1a0a5c_day_runs_2
+            - sensor.magtag_1a0a5c_day_runs_3
+            - sensor.magtag_1a0a5c_day_runs_4
+            - sensor.magtag_1a0a5c_day_type
+            - sensor.magtag_1a0a5c_heap_free
+            - sensor.magtag_1a0a5c_heap_min
+            - sensor.magtag_1a0a5c_last_reset
+            - sensor.magtag_1a0a5c_light
+            - sensor.magtag_1a0a5c_limit_1
+            - sensor.magtag_1a0a5c_limit_2
+            - sensor.magtag_1a0a5c_limit_3
+            - sensor.magtag_1a0a5c_limit_4
+            - sensor.magtag_1a0a5c_nvs_free
+            - sensor.magtag_1a0a5c_ota_dl_ms
+            - sensor.magtag_1a0a5c_ota_fails
+            - sensor.magtag_1a0a5c_ota_result
+            - sensor.magtag_1a0a5c_ota_target
+            - sensor.magtag_1a0a5c_panic_count
+            - sensor.magtag_1a0a5c_panic_heap
+            - sensor.magtag_1a0a5c_panic_phase
+            - sensor.magtag_1a0a5c_panic_stack_main
+            - sensor.magtag_1a0a5c_panic_stack_net
+            - sensor.magtag_1a0a5c_panic_uptime
+            - sensor.magtag_1a0a5c_remaining_1
+            - sensor.magtag_1a0a5c_remaining_2
+            - sensor.magtag_1a0a5c_remaining_3
+            - sensor.magtag_1a0a5c_remaining_4
+            - sensor.magtag_1a0a5c_screen_exposure
+            - sensor.magtag_1a0a5c_screen_limit
+            - sensor.magtag_1a0a5c_screen_remaining
+            - sensor.magtag_1a0a5c_screen_used_day
+            - sensor.magtag_1a0a5c_stack_main
+            - sensor.magtag_1a0a5c_stack_net
+            - sensor.magtag_1a0a5c_state
+            - switch.magtag_1a0a5c_locate
+            - switch.magtag_1a0a5c_ota_on_sync
+            - switch.magtag_1a0a5c_timer1_break
+            - switch.magtag_1a0a5c_timer1_reload
+            - switch.magtag_1a0a5c_timer2_break
+            - switch.magtag_1a0a5c_timer2_reload
+            - switch.magtag_1a0a5c_timer3_break
+            - switch.magtag_1a0a5c_timer3_reload
+            - switch.magtag_1a0a5c_timer4_break
+            - switch.magtag_1a0a5c_timer4_reload
+            - text.magtag_1a0a5c_name
+            - text.magtag_1a0a5c_ota_url
+            - text.magtag_1a0a5c_timer1_name
+            - text.magtag_1a0a5c_timer2_name
+            - text.magtag_1a0a5c_timer3_name
+            - text.magtag_1a0a5c_timer4_name
+            - text.magtag_1a0a5c_tz
+        column_span: 2
+dense_section_placement: true
+cards: []
+"""
 
 
 class TestParsers(unittest.TestCase):
@@ -368,7 +667,6 @@ class TestCoverage(unittest.TestCase):
         # timer_reconcile_def() leaves IDLE/EXPIRED alone; RUNNING/PAUSED
         # follow the edit). app_state_stats() must still derive it from the
         # configured duration, or the reason below is false.
-        self.assertEqual(set(g.LEFT_OUT), {f"limit_{n}" for n in g.SLOTS})
         for n in g.SLOTS:
             why = g.LEFT_OUT[f"limit_{n}"]
             self.assertIn("the effective minutes; Additional Timers shows", why)
@@ -383,12 +681,95 @@ class TestCoverage(unittest.TestCase):
         self.assertIn("effective_allocation((i == 0) ? schedule_get_allocation_sec(dt) : (uint32_t)sd->duration_sec,",
                       read("main/app_state.c"))
 
+    def test_left_out_is_exactly_the_owners_list(self):
+        self.assertEqual(set(g.LEFT_OUT), {f"limit_{n}" for n in g.SLOTS} | {f"chore_{n}" for n in g.CHORES}
+                         | {"screen_used_day", "day_chores"})
+
+    def test_chore_flags_are_left_out_with_a_true_reason(self):
+        # "the to-do card names the chores (not the device's ticks)": the
+        # automation reads the list's open items and never writes a tick
+        # back. "the Activity Log shows each tick": a flag keeps no
+        # state_class or unit (HA's logbook skips a sensor with either).
+        auto = read("tools/ha/magtag_publish_config.yaml")
+        self.assertIn("status: needs_action", auto)
+        self.assertNotIn("action: todo.update_item", auto)
+        for n in g.CHORES:
+            why = g.LEFT_OUT[f"chore_{n}"]
+            self.assertIn(f"chore {n}'s done tick", why)
+            self.assertIn("to-do card names the chores (not the device's ticks)", why)
+            self.assertIn("Activity Log shows each tick", why)
+            self.assertIsNone(FW[f"chore_{n}"].state_class)
+        stats = read("main/stats_json.c")
+        row = stats[stats.index('{"binary_sensor", "chore_1"'):]
+        self.assertTrue(row.startswith('{"binary_sensor", "chore_1", "Chore 1 done", NULL,'), row[:60])  # no unit
+
+    def test_dropped_summary_graphs_are_left_out_with_a_true_reason(self):
+        for k, what in (("screen_used_day", "screen minutes"), ("day_chores", "chores done")):
+            why = g.LEFT_OUT[k]
+            self.assertIn(f"the finished day's {what} (daily summary)", why)
+            self.assertIn("HA still records its statistics", why)
+            self.assertIn("can be added by hand", why)
+            # the advice is the statistic that works: a daily change, not a max
+            self.assertIn("a statistics graph (change, per day)", why)
+            self.assertNotIn("max", why)
+            self.assertTrue(g.graph_compatible(FW[k].state_class, ["change"]))
+            self.assertFalse(g.graph_compatible(FW[k].state_class, ["max"]))
+
     def test_missing_entities_are_skipped_not_rendered(self):
         # The entity set is an input (M4-T3 supplies it from discovery).
         sub = {k: v for k, v in FW.items() if not k.endswith("_3") and k != "chore_free_hol"}
         view = g.build_view("abcdef", "Sub", sub)
         keys = {ID_RE.match(r).group(3) for r in entity_refs(view) if not r.startswith("todo.")}
         self.assertEqual(keys, set(sub))
+
+
+class TestOwnersTab(unittest.TestCase):
+    """The owner edited the generated Testing Timer tab in HA; the generator
+    now emits his edit. The differences below are the plan's list ("The
+    owner's own layout", M4-T7), plus one the plan states without calling
+    it a difference; nothing else may differ."""
+
+    def expected(self):
+        view = yaml.safe_load(OWNER_TESTING_TIMER_VIEW)
+        graphs = view["sections"][3]["cards"]
+        diag = view["sections"][5]["cards"]
+        log = view["sections"][6]
+        # 1. The runs graph: daily `change` bars, not `week` + `state` (the
+        #    owner's choice: `state` shows only each period's last day).
+        runs = graphs[1]
+        self.assertEqual(runs["title"], "Additional Timer Runs (last 7 days)")
+        self.assertEqual((runs["period"], runs["stat_types"]), ("week", ["state"]))
+        runs["period"], runs["stat_types"] = "day", ["change"]
+        # 2. No empty "Activity log" subtitle closing Diagnostics (a leftover).
+        self.assertEqual(diag.pop(), {"type": "heading", "heading": "Activity log", "heading_style": "subtitle"})
+        # 3. The Activity Log's `column_span: 2` goes on its section, as the
+        #    plan has it: in ha.yaml it sits on the logbook card, where HA
+        #    reads no column_span (a card is sized by grid_options).
+        self.assertEqual(log["cards"][1].pop("column_span"), 2)
+        self.assertNotIn("column_span", log)
+        log["column_span"] = 2
+        # 4. `cards: []` (HA adds it on save) is allowed either way.
+        self.assertEqual(view.pop("cards"), [])
+        return view
+
+    def test_the_testing_timer_tab_is_the_owners(self):
+        # From a recorded discovery of the whole current-firmware entity set
+        # (every slot enabled, 3 chores), as --mqtt builds it...
+        scan = g.collect_discovery(device_msgs("1a0a5c", "Testing Timer"), fw=FW)
+        self.assertEqual(scan.warnings, [])
+        ents = scan.entity_sets["1a0a5c"]
+        self.assertEqual(set(ents), set(FW))
+        want = self.expected()
+        # ...which is the owner's device: his Activity Log lists exactly it
+        self.assertEqual(want["sections"][6]["cards"][1]["target"]["entity_id"],
+                         sorted(g.entity_id(e.component, "1a0a5c", k) for k, e in FW.items()))
+        got = g.build_view("1a0a5c", "Testing Timer", ents)
+        got.pop("cards", None)
+        self.assertEqual(got, want)
+        # ...and file mode's tab for the same device, through the YAML printed
+        got = next(v for v in dashboard()["views"] if v["path"] == "magtag-1a0a5c")
+        got.pop("cards", None)
+        self.assertEqual(got, want)
 
 
 class TestDashboard(unittest.TestCase):
@@ -400,7 +781,7 @@ class TestDashboard(unittest.TestCase):
         self.assertEqual([v["title"] for v in views], ["Testing Timer", "Julia's Timer"])
         self.assertEqual([v["path"] for v in views], ["magtag-1a0a5c", "magtag-1aaa76"])
         for v in views:
-            self.assertEqual(v["type"], "sections")
+            self.assertEqual((v["type"], v["max_columns"], v["dense_section_placement"]), ("sections", 4, True))
             self.assertTrue(all(s["type"] == "grid" for s in v["sections"]))
 
     def test_every_entity_id_is_a_real_firmware_entity_of_that_device(self):
@@ -425,57 +806,45 @@ class TestDashboard(unittest.TestCase):
         self.assertEqual(g.todo_entity_id("1a0a5c"), "todo.magtag_1a0a5c_chores")
         self.assertEqual(g.todo_list_name("1a0a5c"), "MagTag 1a0a5c chores")
 
-    def test_chores_settings_holds_the_todo_card_then_the_chores_status_flags(self):
+    def test_the_todo_card_is_under_daily_chores_after_quiet_hours_and_tones(self):
+        # The chore done-flag rows and the "Chores Settings" / "Chores
+        # Status" headings are gone: the flags are on LEFT_OUT.
         for view, dev in zip(self.doc["views"], DEVICES):
-            n = dev["node"]
-            first = view["sections"][0]["cards"]
-            self.assertEqual([c["type"] for c in first], ["heading", "todo-list", "heading", "entities"])
-            self.assertEqual(first[0], {"type": "heading", "heading": "Chores Settings", "heading_style": "subtitle"})
-            self.assertEqual(first[1], {"type": "todo-list", "entity": g.todo_entity_id(n)})
-            self.assertEqual(first[2], {"type": "heading", "heading": "Chores Status", "heading_style": "subtitle"})
-            self.assertEqual(entity_refs(first[3]), [f"binary_sensor.magtag_{n}_chore_{i}" for i in (1, 2, 3)])
-            # no "Settings" part heading any more, anywhere
-            self.assertNotIn("Settings", [h for s in view["sections"] for h in headings(s)])
+            sec = section_titled(view, "Daily Chores")
+            self.assertEqual([c["type"] for c in sec["cards"]],
+                             ["heading", "entities", "heading", "entities", "heading", "todo-list"])
+            self.assertEqual(headings(sec), ["Quiet hours & bed time", "Tones & volume", "Daily Chores"])
+            self.assertEqual(sec["cards"][-1], {"type": "todo-list", "entity": g.todo_entity_id(dev["node"])})
+            self.assertEqual([c for c in walk(view) if c.get("type") == "todo-list"], sec["cards"][-1:])
+            all_headings = [h for s in view["sections"] for h in headings(s)]
+            for gone in ("Chores Settings", "Chores Status", "Settings", "Now", "Graphs"):
+                self.assertNotIn(gone, all_headings)
+            self.assertFalse([r for r in non_log_refs(view) if re.search(r"_chore_\d$", r)])
 
     def test_the_tab_runs_in_the_owners_order(self):
-        # Status, Graphs and Diagnostics each open with a banner; the
-        # settings sections at the top have none. Every content section is
-        # named by its own subtitle.
-        S = "section"
-        want = [(S, "Chores Settings"),
-                (S, "Screen Timer Settings"),
-                (S, "Additional Timers"),
-                (S, "Quiet hours & bed time"),
-                (S, "Tones & volume"),
-                (S, "System & OTA"),
-                ("banner", "Status"),
-                (S, "Now"),
-                ("banner", "Graphs"),
-                (S, "Remaining time today")] + [(S, t) for t, _ in g.GRAPHS] + [
-                ("banner", "Diagnostics"),
-                (S, "Health"),
-                (S, "Memory"),
-                (S, "Panic"),
-                (S, "Daily summary (last received)"),
-                (S, "Activity log")]
+        want = [("Screen Timer Settings",),
+                ("Additional Timers",),
+                ("Quiet hours & bed time", "Tones & volume", "Daily Chores"),
+                (GRAPHS_SECTION,),
+                ("System & OTA", "Status"),
+                ("Diagnostics", "Health", "Memory", "Panic"),
+                ("Activity Log",)]
         for view in self.doc["views"]:
             self.assertEqual(outline(view), want)
+            # two columns for the graphs and the log; the rest take HA's default
+            self.assertEqual([s.get("column_span") for s in view["sections"]], [None, None, None, 2, None, None, 2])
 
-    def test_part_banners_are_full_width_title_only_sections(self):
+    def test_no_part_banners_and_title_headings_only_on_diagnostics_and_the_log(self):
         for view in self.doc["views"]:
-            banners = [s for s in view["sections"] if is_banner(s)]
-            self.assertEqual([s["cards"][0]["heading"] for s in banners], ["Status", "Graphs", "Diagnostics"])
-            for s in banners:
-                # full width (the view's max_columns), so it starts a new row
-                self.assertEqual(s, {"type": "grid", "column_span": view["max_columns"],
-                                     "cards": [{"type": "heading", "heading": s["cards"][0]["heading"],
-                                                "heading_style": "title"}]})
-            # no title-style heading anywhere but in a banner
-            titles = [c for s in view["sections"] if not is_banner(s) for c in walk(s)
-                      if c.get("type") == "heading" and c.get("heading_style", "title") == "title"]
-            self.assertEqual(titles, [])
-            # and every heading card states its style (HA's default is title)
+            titles = [(i, j, c["heading"]) for i, s in enumerate(view["sections"]) for j, c in enumerate(s["cards"])
+                      if c.get("type") == "heading" and c["heading_style"] == "title"]
+            n = len(view["sections"])
+            self.assertEqual(titles, [(n - 2, 0, "Diagnostics"), (n - 1, 0, "Activity Log")])
+            # every heading card states its style (HA's default is title)
             self.assertTrue(all("heading_style" in c for c in walk(view) if c.get("type") == "heading"))
+            # no heading-only section anywhere
+            self.assertFalse([s for s in view["sections"] if all(c.get("type") == "heading" for c in s["cards"])])
+            assert_nothing_empty(self, view)
 
     def test_screen_timer_settings_pairs_each_allocation_with_its_chore_free(self):
         # Pairs from the source (NUM_CHORE_FREE's third argument), not the tool.
@@ -505,8 +874,7 @@ class TestDashboard(unittest.TestCase):
     def test_updates_are_under_system_and_ota_after_a_divider(self):
         for view in self.doc["views"]:
             self.assertNotIn("Updates", [h for s in view["sections"] for h in headings(s)])
-            sec = section_titled(view, "System & OTA")
-            (card,) = [c for c in sec["cards"] if c.get("type") == "entities"]
+            card = card_under(view, "System & OTA")
             self.assertEqual(" ".join(keys_of(card)).split(" -- "),
                              ["name tz ota_url ota_on_sync locate", "ota_result ota_target ota_fails ota_dl_ms"])
 
@@ -518,44 +886,35 @@ class TestDashboard(unittest.TestCase):
             want = [" ".join(f"timer{n}_{f}" for f in ("name", "min", "reload", "break")) for n in (1, 2, 3, 4)]
             self.assertEqual(" ".join(keys_of(card)).split(" -- "), want)
 
-    def test_the_now_card_drops_the_per_slot_rows_keeps_battery_and_screen_remaining(self):
-        # The owner's "drop what a graph shows" is the per-slot card:
-        # remaining_N is graphed, limit_N on LEFT_OUT. battery and
-        # screen_remaining stay (plan item 9): the battery graph is a daily
-        # mean and the remaining graph needs a hover, so neither shows the
-        # current value. Today's completions_N stay: no graph shows today.
+    def test_the_status_card_is_the_live_state_and_nothing_graphed(self):
+        # screen_remaining and battery left it: they are graphed. Today's
+        # completions_N stay: no graph shows the current day.
+        want = ["state", "active_timer", "screen_limit", "screen_break", "break_remaining", "screen_exposure",
+                "charge_lock", "chores_left", "chores_done", "day_type",
+                "completions_1", "completions_2", "completions_3", "completions_4"]
         for view in self.doc["views"]:
             graphed = {ID_RE.match(r).group(3) for c in walk(view)
                        if c.get("type") in ("history-graph", "statistics-graph") for r in entity_refs(c)}
             self.assertTrue({"screen_remaining", "battery", "remaining_1", "day_runs_4"} <= graphed)
-            now = section_titled(view, "Now")
-            cards = [c for c in now["cards"] if c.get("type") != "heading"]
-            self.assertEqual([c["type"] for c in cards], ["entities"])  # the per-slot card is gone
-            now_keys = keys_of(cards[0])
-            self.assertEqual(now_keys, g.NOW)
-            self.assertEqual(set(now_keys) & graphed, {"battery", "screen_remaining"})
-            for n in g.SLOTS:
-                self.assertIn(f"completions_{n}", now_keys)  # no graph shows the current day
-                self.assertNotIn(f"remaining_{n}", now_keys)
-                self.assertNotIn(f"limit_{n}", now_keys)
-            self.assertFalse([k for k in now_keys if re.fullmatch(r"(remaining|limit)_\d", k)])
-            for k in ("state", "active_timer", "screen_remaining", "screen_limit", "battery", "chores_left",
-                      "chores_done", "day_type"):
-                self.assertIn(k, now_keys)
+            status = keys_of(card_under(view, "Status"))
+            self.assertEqual(status, want)
+            self.assertFalse(set(status) & graphed)
+            self.assertEqual(headings(section_titled(view, "Status")), ["System & OTA", "Status"])
 
-    def test_the_activity_log_is_the_last_section_under_diagnostics(self):
+    def test_the_activity_log_is_the_last_section(self):
         for view in self.doc["views"]:
             last = view["sections"][-1]
-            self.assertEqual(headings(last), ["Activity log"])
+            self.assertEqual(last["cards"][0], {"type": "heading", "heading": "Activity Log", "heading_style": "title"})
             self.assertEqual([c["type"] for c in last["cards"][1:]], ["logbook"])
+            self.assertEqual(last["cards"][1]["hours_to_show"], 48)
             self.assertEqual(last.get("column_span"), 2)
-            self.assertEqual(parts_of(view)[-1], "Diagnostics")
+            self.assertNotIn("column_span", last["cards"][1])
             self.assertEqual([c for c in walk(view) if c.get("type") == "logbook"], last["cards"][1:])
 
     def test_statistics_graphs_carry_a_compatible_state_class(self):
         for view in self.doc["views"]:
             graphs = [c for c in walk(view) if c.get("type") == "statistics-graph"]
-            self.assertGreaterEqual(len(graphs), 5)
+            self.assertEqual(len(graphs), 2)
             for card in graphs:
                 self.assertTrue(card["stat_types"])
                 for r in entity_refs(card):
@@ -574,64 +933,62 @@ class TestDashboard(unittest.TestCase):
         self.assertFalse(ok("measurement", ["change"]) or ok("total", ["mean"]) or ok(None, ["mean"]))
         self.assertFalse(ok("measurement", ["mean", "change"]))  # every stat_type of the card must suit
         # file mode is unaffected: every graph key has a state_class that suits its card
-        for _, spec in g.GRAPHS:
+        for spec in g.GRAPHS:
             for k in spec["keys"]:
                 self.assertTrue(ok(FW[k].state_class, spec["stat_types"]), k)
 
-    def test_the_owners_graphs_are_there(self):
-        view = self.doc["views"][0]
-        n = DEVICES[0]["node"]
-        hist = [c for c in walk(view) if c.get("type") == "history-graph"]
-        self.assertEqual(len(hist), 1)
-        self.assertEqual(hist[0]["hours_to_show"], 24)
-        for i in (1, 2, 3, 4):
-            self.assertIn(f"sensor.magtag_{n}_remaining_{i}", entity_refs(hist[0]))
-        stats = {(tuple(sorted(entity_refs(c))), tuple(c["stat_types"]), c["period"])
-                 for c in walk(view) if c.get("type") == "statistics-graph"}
-        runs = tuple(sorted(f"sensor.magtag_{n}_day_runs_{i}" for i in (1, 2, 3, 4)))
-        for want in [((f"sensor.magtag_{n}_battery",), ("mean",), "day"),
-                     (runs, ("change",), "day"),
-                     (runs, ("change",), "week"),
-                     ((f"sensor.magtag_{n}_screen_used_day",), ("change",), "day"),
-                     ((f"sensor.magtag_{n}_day_chores",), ("change",), "day")]:
-            self.assertIn(want, stats)
-        self.assertEqual(len(stats), 5)
-        notes = [c["content"] for c in walk(view) if c.get("type") == "markdown"]
-        self.assertTrue(notes and all("following" in t for t in notes))
+    def test_the_graphs_section(self):
+        # One section, two columns, no heading, no markdown note; every card
+        # full width; the runs graph daily `change` bars (the owner's `state`
+        # would show only each period's last day).
+        for view, dev in zip(self.doc["views"], DEVICES):
+            n = dev["node"]
+            (sec,) = [s for s in view["sections"] if outline({"sections": [s]}) == [(GRAPHS_SECTION,)]]
+            self.assertEqual(sec["column_span"], 2)
+            cards = sec["cards"]
+            self.assertEqual([(c["type"], c["title"]) for c in cards],
+                             [("history-graph", "Timer Burndown (Last 4 days)"),
+                              ("statistics-graph", "Additional Timer Runs (last 7 days)"),
+                              ("statistics-graph", "Battery Charge")])
+            for c in cards:
+                self.assertEqual(c["grid_options"], {"columns": "full"})
+                for r in c["entities"]:
+                    self.assertEqual(r["name"], {"type": "entity"})
+            hist, runs, batt = cards
+            self.assertEqual(hist["hours_to_show"], 96)
+            self.assertEqual(entity_refs(hist), [f"sensor.magtag_{n}_screen_remaining"]
+                             + [f"sensor.magtag_{n}_remaining_{i}" for i in (1, 2, 3, 4)])
+            self.assertEqual(entity_refs(runs), [f"sensor.magtag_{n}_day_runs_{i}" for i in (1, 2, 3, 4)])
+            self.assertEqual((runs["period"], runs["stat_types"], runs["days_to_show"], runs["chart_type"]),
+                             ("day", ["change"], 7, "bar"))
+            self.assertIs(runs["expand_legend"], False)
+            self.assertEqual(entity_refs(batt), [f"sensor.magtag_{n}_battery"])
+            self.assertEqual((batt["period"], batt["stat_types"], batt["days_to_show"], batt["chart_type"],
+                              batt["min_y_axis"], batt["max_y_axis"]), ("hour", ["mean"], 7, "line", 0, 100))
+            self.assertFalse([c for c in walk(view) if c.get("type") == "markdown"])
 
-    def test_chores_per_day_reads_the_summary_not_the_live_count(self):
-        # A daily `max` of the live chores_done counts the value carried
-        # across midnight, so a day with nothing done could show the day
-        # before's full count. The graph reads day_chores with `change`;
-        # chores_done stays on the tab as the live value, in no graph.
-        view = self.doc["views"][0]
-        n = DEVICES[0]["node"]
-        graphs = [c for c in walk(view) if c.get("type") == "statistics-graph"]
-        chores = [c for c in graphs if f"sensor.magtag_{n}_day_chores" in entity_refs(c)]
-        self.assertEqual(len(chores), 1)
-        self.assertEqual(entity_refs(chores[0]), [f"sensor.magtag_{n}_day_chores"])
-        self.assertEqual((chores[0]["stat_types"], chores[0]["period"]), (["change"], "day"))
-        live = f"sensor.magtag_{n}_chores_done"
-        self.assertFalse([c for c in graphs if live in entity_refs(c)])
-        now = next(s for s in view["sections"] if any(c.get("heading") == "Now" for c in s["cards"]))
-        self.assertIn(live, [r for c in now["cards"] for r in entity_refs(c)])
+    def test_the_dropped_graphs_keys_are_left_out_and_still_recorded(self):
+        # The owner dropped the runs-per-week, screen-minutes-per-day and
+        # chores-per-day graphs. Their summary sensors keep a state_class
+        # (HA records their statistics: a graph can be added by hand), and
+        # appear on no card but the Activity Log. chores_done stays on
+        # Status as the live value.
+        for k in ("screen_used_day", "day_chores"):
+            self.assertEqual(FW[k].state_class, "total")
+            self.assertIn(k, g.LEFT_OUT)
+        for view, dev in zip(self.doc["views"], DEVICES):
+            n = dev["node"]
+            shown = non_log_refs(view)
+            for k in ("screen_used_day", "day_chores"):
+                self.assertNotIn(f"sensor.magtag_{n}_{k}", shown)
+            self.assertEqual([c["period"] for c in walk(view) if c.get("type") == "statistics-graph"], ["day", "hour"])
+            self.assertIn(f"sensor.magtag_{n}_chores_done", entity_refs(card_under(view, "Status")))
 
-    def test_every_summary_graph_carries_the_day_shift_note(self):
-        # Per-day AND per-week graphs on the daily summary sensors: a day's
-        # figures land under the next day, so a Sunday run counts next week.
-        summary = re.compile(r"_(?:screen_used_day|day_runs_\d|day_chores)$")
-        for view in self.doc["views"]:
-            n = 0
-            for s in view["sections"]:
-                graphs = [c for c in s["cards"] if c.get("type") == "statistics-graph"]
-                if not any(summary.search(r) for c in graphs for r in entity_refs(c)):
-                    continue
-                n += 1
-                notes = [c["content"] for c in s["cards"] if c.get("type") == "markdown"]
-                self.assertEqual(len(notes), 1, s["cards"][0])
-                self.assertIn("**following** day", notes[0])
-                self.assertIn("next week", notes[0])
-            self.assertEqual(n, 4)  # runs per day, runs per week, screen minutes per day, chores per day
+    def test_the_docs_keep_the_day_shift_explanation(self):
+        # The tab lost its markdown note; the day shift still holds for the
+        # runs graph (and for a summary graph added by hand).
+        doc = " ".join(read("docs/home_assistant.md").split())
+        self.assertIn("files each day's figures under the **following** day", doc)
 
     def test_timer_rows_say_timer_n_once(self):
         # The firmware's own names ("Timer 1 minutes") carry the slot, so
@@ -655,25 +1012,28 @@ class TestDashboard(unittest.TestCase):
             want = {g.entity_id(e.component, dev["node"], k) for k, e in FW.items()}
             self.assertEqual(set(logs[0]["target"]["entity_id"]), want)
 
-    def test_diagnostics_hold_health_memory_panic_and_the_summary(self):
+    def test_diagnostics_hold_health_memory_and_panic_only(self):
+        # The "Daily summary (last received)" card is gone, and so is the
+        # owner's empty trailing "Activity log" subtitle.
         for view in self.doc["views"]:
-            start = next(i for i, s in enumerate(view["sections"]) if is_banner(s) and headings(s) == ["Diagnostics"])
-            diag = [ID_RE.match(r).group(3) for s in view["sections"][start:-1] for r in entity_refs(s)]
-            for k in ("config_warning", "battery_mv", "nvs_free", "heap_free", "stack_net", "panic_count",
-                      "panic_stack_net", "screen_used_day", "day_runs_1", "day_chores"):
-                self.assertIn(k, diag)
-            self.assertFalse({"ota_result", "ota_target", "ota_fails", "ota_dl_ms"} & set(diag))
+            sec = section_titled(view, "Diagnostics")
+            self.assertEqual([c["type"] for c in sec["cards"]], ["heading"] + ["heading", "entities"] * 3)
+            self.assertEqual([keys_of(card_under(view, t)) for t, _ in g.DIAGNOSTICS],
+                             [["config_warning", "battery_mv", "light", "last_reset", "nvs_free"],
+                              ["heap_free", "heap_min", "stack_main", "stack_net"],
+                              ["panic_count", "panic_phase", "panic_uptime", "panic_heap", "panic_stack_main",
+                               "panic_stack_net"]])
 
     def test_runtime_named_entities_take_their_name_from_discovery(self):
         # Per-slot rows are named "<timer> remaining" etc. by the device at
-        # runtime, chore_N "<chore> done": a hard-coded name would hide a rename.
+        # runtime: a hard-coded name would hide a rename.
         runtime = re.compile(r"_(?:(?:remaining|limit|completions|day_runs)_\d|chore_\d)$")
         n = 0
         for d in walk(self.doc):
             if isinstance(d.get("entity"), str) and runtime.search(d["entity"]):
                 n += 1
                 self.assertEqual(d.get("name"), {"type": "entity"}, d)
-        self.assertGreater(n, 20)
+        self.assertEqual(n, 2 * 12)  # per tab: remaining, completions and day_runs, 4 each
 
 
 class TestParts(unittest.TestCase):
@@ -775,22 +1135,42 @@ class TestParts(unittest.TestCase):
     def test_file_mode_names_every_slot_and_chore_and_says_so(self):
         for text in (g.render("setup", DEVICES, SETS), g.render("dashboard", DEVICES, SETS)):
             flat = " ".join(text.replace("#", " ").split())
-            for s in ("every timer slot (1-4)", "every chore row (1-3)", '"entity not available"',
+            for s in ("every timer slot (1-4) on every tab",
+                      "names every chore flag (1-3) in every tab's Activity Log", '"entity not available"',
+                      "the Activity Log of a device with fewer than 3 chores names flags it does not have",
                       "Run with --mqtt to build each tab from the device's real entity set"):
                 self.assertIn(s, flat)
             self.assertNotIn("M4-T3", flat)
-        # ...and it does: the full slot/chore set is on every tab.
+            self.assertNotIn("chore row", flat)
+        # ...and it does: the full slot set is on every tab, the chore
+        # flags in its Activity Log (their rows are LEFT_OUT).
         for view in dashboard()["views"]:
-            keys = {ID_RE.match(r).group(3) for r in entity_refs(view) if not r.startswith("todo.")}
+            keys = {ID_RE.match(r).group(3) for r in non_log_refs(view) if not r.startswith("todo.")}
             for n in g.SLOTS:
                 self.assertTrue({f"remaining_{n}", f"timer{n}_name", f"day_runs_{n}"} <= keys)
+            (log,) = [c for c in walk(view) if c.get("type") == "logbook"]
             for n in g.CHORES:
-                self.assertIn(f"chore_{n}", keys)
+                self.assertIn(f"chore_{n}", {ID_RE.match(r).group(3) for r in log["target"]["entity_id"]})
 
     def test_dashboard_part_is_yaml_alone(self):
         part = g.render("dashboard", DEVICES, SETS)
         self.assertNotIn("PART", part)
         self.assertEqual(len(yaml.safe_load(part)["views"]), 2)
+        # the owner pastes and reads it: no &id/*id aliases...
+        self.assertNotIn("&id", part)
+        self.assertNotIn("*id", part)
+        # ...and none waiting to happen: no dict or list is shared between
+        # two places in the built dashboard
+        seen: dict[int, object] = {}
+
+        def visit(node):
+            if isinstance(node, (dict, list)):
+                self.assertFalse(id(node) in seen, f"shared object: {node!r}")
+                seen[id(node)] = node
+                for child in node.values() if isinstance(node, dict) else node:
+                    visit(child)
+
+        visit(g.build_dashboard(DEVICES, SETS))
 
     def test_all_is_the_three_parts_in_order(self):
         out = g.render("all", DEVICES, SETS)
@@ -1102,21 +1482,42 @@ class TestMqttCollect(unittest.TestCase):
             self.assertIn(k, w[0])
         for k in ("chore_1", "day_runs_1"):
             self.assertNotIn(k, w[0])
-        self.assertIn("No state class on battery", w[0])
+        self.assertIn("No state class on battery, so HA keeps no statistics for it, and a statistics graph "
+                      "that needs it leaves it out.", w[0])
+        self.assertIn("Its tab has no Battery Charge graph; Battery is on the Status card instead.", w[0])
         self.assertNotIn("schema v20", w[0])
-        # the tab: no statistics graph (battery has no stat_cla, the rest
-        # are absent), and no empty graph card; the history graph stays
+        # the tab degrades cleanly: no statistics graph (battery has no
+        # stat_cla, day_runs_N are absent), the history graph alone in the
+        # graphs section, still two columns wide and full width; no
+        # chore_free row, no divider left standing, no empty card or heading
         view = g.build_view("1aaa76", "Julia's Timer", ents)
         cards = list(walk(view))
         self.assertFalse([c for c in cards if c.get("type") == "statistics-graph"])
-        self.assertEqual(len([c for c in cards if c.get("type") == "history-graph"]), 1)
-        self.assertIn("sensor.magtag_1aaa76_battery", entity_refs(view))  # still on the tab, as a row
-        headings = [c.get("heading") for c in cards if c.get("type") == "heading"]
-        for t, _ in g.GRAPHS:
-            self.assertNotIn(t, headings)
-        # ...while the current device keeps every graph its slots allow
+        (graphs,) = [s for s in view["sections"] if outline({"sections": [s]}) == [(GRAPHS_SECTION,)]]
+        self.assertEqual([c["type"] for c in graphs["cards"]], ["history-graph"])
+        self.assertEqual(graphs.get("column_span"), 2)
+        self.assertEqual(graphs["cards"][0]["grid_options"], {"columns": "full"})
+        self.assertEqual(outline(view), [("Screen Timer Settings",), ("Additional Timers",),
+                                         ("Quiet hours & bed time", "Tones & volume", "Daily Chores"),
+                                         (GRAPHS_SECTION,), ("System & OTA", "Status"),
+                                         ("Diagnostics", "Health", "Memory", "Panic"), ("Activity Log",)])
+        self.assertEqual(" ".join(keys_of(card_under(view, "Screen Timer Settings"))).split(" -- "),
+                         ["weekday_min", "weekend_min", "holiday_min", "summer_min", "screen_bonus",
+                          "break_interval_min break_duration_min"])
+        self.assertNotIn("config_warning", keys_of(card_under(view, "Health")))
+        assert_nothing_empty(self, view)
+        # no Battery Charge graph, so battery is back on Status, after
+        # day_type: the logbook skips a sensor with a unit, so it would
+        # otherwise show nowhere
+        self.assertEqual(keys_of(card_under(view, "Status")),
+                         ["state", "active_timer", "screen_limit", "screen_break", "break_remaining",
+                          "screen_exposure", "charge_lock", "day_type", "battery",
+                          "completions_1", "completions_2", "completions_3", "completions_4"])
+        # ...while the current device keeps every graph its slots allow, and
+        # its Status has no battery (the graph has it)
         tv = g.build_view("1a0a5c", "Testing Timer", self.scan.entity_sets["1a0a5c"])
         self.assertEqual(len([c for c in walk(tv) if c.get("type") == "statistics-graph"]), len(g.GRAPHS))
+        self.assertNotIn("battery", keys_of(card_under(tv, "Status")))
 
     def test_graph_entities_follow_the_published_stat_cla(self):
         # One card, two entities: only the one whose stat_cla suits `change`
@@ -1127,11 +1528,11 @@ class TestMqttCollect(unittest.TestCase):
                 disc("sensor", "abcdef", "remaining_1", "Rem", "X")]
         view = g.build_view("abcdef", "X", g.collect_discovery(msgs).entity_sets["abcdef"])
         graphs = [c for c in walk(view) if c.get("type") == "statistics-graph"]
-        self.assertEqual([entity_refs(c) for c in graphs], [["sensor.magtag_abcdef_day_runs_1"]] * 2)
-        for c in graphs:
-            self.assertEqual(c["stat_types"], ["change"])
+        self.assertEqual([entity_refs(c) for c in graphs], [["sensor.magtag_abcdef_day_runs_1"]])  # no battery
+        self.assertEqual(graphs[0]["stat_types"], ["change"])
         hist = [c for c in walk(view) if c.get("type") == "history-graph"]
         self.assertEqual([entity_refs(c) for c in hist], [["sensor.magtag_abcdef_remaining_1"]])  # exempt
+        self.assertEqual(keys_of(card_under(view, "Status")), ["battery"])  # no graph has it
 
     def test_older_firmware_check_needs_the_firmware_table_and_spares_current_devices(self):
         self.assertFalse(g.collect_discovery(JULIA_MSGS).warnings)  # fw=None: no check
@@ -1148,12 +1549,11 @@ class TestMqttCollect(unittest.TestCase):
         self.assertIn("No state class on screen_used_day,", cla[0])
         self.assertNotIn("Missing entities", cla[0])
 
-    def test_a_device_without_day_chores_is_older_firmware_and_loses_only_that_graph(self):
+    def test_a_device_without_day_chores_is_older_firmware_and_its_tab_loses_nothing(self):
         # The M3 build (and M4-T1..T3) publishes no day_chores. It is not a
         # conditional key (never retired), so its absence means older
-        # firmware: a warning naming it, and the tab keeps every other
-        # graph while the chores graph is dropped, never emitted empty or
-        # fed from chores_done.
+        # firmware: a warning naming it. day_chores is on LEFT_OUT, so the
+        # tab is the current device's but for the Activity Log.
         self.assertNotIn("day_chores", g.conditional_keys())
         msgs = [m for m in TESTING_MSGS if "_day_chores/" not in m[0]]
         self.assertEqual(len(msgs), len(TESTING_MSGS) - 1)
@@ -1162,11 +1562,9 @@ class TestMqttCollect(unittest.TestCase):
         self.assertIn("runs older firmware", scan.warnings[0])
         self.assertIn("Missing entities current firmware always publishes: day_chores.", scan.warnings[0])
         view = g.build_view("1a0a5c", "Testing Timer", scan.entity_sets["1a0a5c"])
-        headings = [c.get("heading") for c in walk(view) if c.get("type") == "heading"]
-        self.assertNotIn("Chores done per day", headings)
-        graphs = [c for c in walk(view) if c.get("type") == "statistics-graph"]
-        self.assertEqual(len(graphs), len(g.GRAPHS) - 1)
-        self.assertFalse([c for c in graphs if "sensor.magtag_1a0a5c_chores_done" in entity_refs(c)])
+        full = g.build_view("1a0a5c", "Testing Timer", self.scan.entity_sets["1a0a5c"])
+        self.assertEqual(view["sections"][:-1], full["sections"][:-1])
+        self.assertEqual(len([c for c in walk(view) if c.get("type") == "statistics-graph"]), len(g.GRAPHS))
 
     def test_def_ent_id_that_disagrees_with_the_topic_warns(self):
         t, p = disc("sensor", "abcdef", "battery", "B", "X")
@@ -1196,9 +1594,8 @@ class TestMqttCollect(unittest.TestCase):
 
     def test_a_partial_device_renders_only_what_it_has_without_empty_groups_or_labels(self):
         # A device with no OTA-result keys, no chores, no holiday pair and
-        # no Health keys: each group, label and section goes with its keys
-        # (no leading, trailing or doubled divider). A part's banner stays
-        # while any of its sections is left, and goes with the last one.
+        # no Health keys: each group, heading, card and section goes with
+        # its keys (no leading, trailing or doubled divider).
         gone = ({"ota_result", "ota_target", "ota_fails", "ota_dl_ms", "holiday_min", "chore_free_hol"}
                 | {f"chore_{n}" for n in g.CHORES} | set(g.DIAGNOSTICS[0][1]))
         msgs = [m for m in TESTING_MSGS if not any(f"_{k}/" in m[0] for k in gone)]
@@ -1207,41 +1604,38 @@ class TestMqttCollect(unittest.TestCase):
         view = g.build_view("1a0a5c", "Testing Timer", ents)
         keys = {ID_RE.match(r).group(3) for r in entity_refs(view) if not r.startswith("todo.")}
         self.assertEqual(keys, set(ents))
-        first = view["sections"][0]["cards"]
-        self.assertEqual([c["type"] for c in first], ["heading", "todo-list"])  # no "Chores Status" label
-        self.assertEqual(headings(view["sections"][0]), ["Chores Settings"])
-        (ota,) = [c for c in section_titled(view, "System & OTA")["cards"] if c.get("type") == "entities"]
-        self.assertEqual(keys_of(ota), ["name", "tz", "ota_url", "ota_on_sync", "locate"])
-        (scr,) = [c for c in section_titled(view, "Screen Timer Settings")["cards"] if c.get("type") == "entities"]
-        self.assertEqual(" ".join(keys_of(scr)).split(" -- "),
+        self.assertEqual(keys_of(card_under(view, "System & OTA")), ["name", "tz", "ota_url", "ota_on_sync", "locate"])
+        self.assertEqual(" ".join(keys_of(card_under(view, "Screen Timer Settings"))).split(" -- "),
                          ["weekday_min chore_free_wd", "weekend_min chore_free_we", "summer_min chore_free_sum",
                           "screen_bonus", "break_interval_min break_duration_min"])
-        for c in walk(view):
-            if c.get("type") == "entities":
-                ks = keys_of(c)
-                self.assertTrue(ks and ks[0] != "--" and ks[-1] != "--" and "-- --" not in " ".join(ks))
-        self.assertNotIn("Health", [h for s in view["sections"] for h in headings(s)])
-        # Health gone, the Diagnostics banner stays, right above Memory
-        out = outline(view)
-        self.assertEqual(parts_of(view), ["Status", "Graphs", "Diagnostics"])
-        i = out.index(("banner", "Diagnostics"))
-        self.assertEqual(out[i + 1], ("section", "Memory"))
-        # every Diagnostics entity card gone: the banner stays over the Activity log
-        bare = {k: e for k, e in ents.items() if k not in {x for _, ks in g.DIAGNOSTICS for x in ks}}
-        self.assertEqual(outline(g.build_view("1a0a5c", "Testing Timer", bare))[-2:],
-                         [("banner", "Diagnostics"), ("section", "Activity log")])
-        # no Now keys and nothing to graph: no Status and no Graphs banner,
-        # and System & OTA runs straight into the Diagnostics banner
-        graphed = set(g.HISTORY_KEYS) | {k for _, spec in g.GRAPHS for k in spec["keys"]}
-        empty = {k: e for k, e in ents.items() if k not in set(g.NOW) | graphed}
-        out = outline(g.build_view("1a0a5c", "Testing Timer", empty))
-        self.assertEqual([n for k, n in out if k == "banner"], ["Diagnostics"])
-        i = out.index(("banner", "Diagnostics"))
-        self.assertEqual(out[i - 1: i + 2], [("section", "System & OTA"), ("banner", "Diagnostics"),
-                                             ("section", "Memory")])
-        # only Now left of Status and Graphs: Status keeps its banner
-        only_now = {k: e for k, e in ents.items() if k not in graphed}
-        self.assertEqual(parts_of(g.build_view("1a0a5c", "Testing Timer", only_now)), ["Status", "Diagnostics"])
+        # Health gone: Diagnostics opens straight onto Memory
+        self.assertEqual(headings(section_titled(view, "Diagnostics")), ["Diagnostics", "Memory", "Panic"])
+        assert_nothing_empty(self, view)
+
+        def build(drop):
+            v = g.build_view("1a0a5c", "Testing Timer", {k: e for k, e in ents.items() if k not in drop})
+            assert_nothing_empty(self, v)
+            return outline(v)
+
+        diag_keys = {x for _, ks in g.DIAGNOSTICS for x in ks}
+        graphed = set(g.HISTORY_GRAPH["keys"]) | {k for spec in g.GRAPHS for k in spec["keys"]}
+        status, system = set(g.STATUS[1]), {k for grp in g.SYSTEM[1] for k in grp}
+        # no Diagnostics card left: no lone "Diagnostics" title either
+        self.assertEqual(build(diag_keys)[-2:], [("System & OTA", "Status"), ("Activity Log",)])
+        # nothing to graph: no graphs section
+        self.assertNotIn((GRAPHS_SECTION,), build(graphed))
+        # no Status keys: System & OTA alone; no System keys: Status alone;
+        # neither: the section goes
+        self.assertIn(("System & OTA",), build(status))
+        self.assertIn(("Status",), build(system))
+        self.assertEqual(build(status | system)[3:5], [(GRAPHS_SECTION,), ("Diagnostics", "Memory", "Panic")])
+        # no quiet-hours or tone keys: the To-do card stands alone
+        quiet_tones = {k for spec in (g.QUIET, g.TONES) for grp in spec[1] for k in grp}
+        self.assertEqual(build(quiet_tones)[2], ("Daily Chores",))
+        # a device publishing one entity: the To-do card, that entity's card, the log
+        one = g.build_view("1a0a5c", "T", {"heap_free": ents["heap_free"]})
+        self.assertEqual(outline(one), [("Daily Chores",), ("Diagnostics", "Memory"), ("Activity Log",)])
+        assert_nothing_empty(self, one)
 
     def test_the_last_payload_on_a_topic_wins(self):
         on, off = disc("sensor", "abcdef", "battery", "Battery", "X")[1], b""
@@ -1297,18 +1691,22 @@ class TestMqttCollect(unittest.TestCase):
         self.assertEqual(len(w), 1)
         self.assertIn("fake_future, reboot_now", w[0])
         self.assertIn("Testing Timer (magtag-1a0a5c)", w[0])
+        self.assertIn("listed under 'Other' on its tab", w[0])
         view = g.build_view("1a0a5c", "Testing Timer", scan.entity_sets["1a0a5c"])
-        self.assertEqual(parts_of(view), ["Status", "Graphs", "Other", "Diagnostics"])
+        self.assertTrue(g.OTHER_TITLE.startswith("Other"))
         out = outline(view)
-        i = out.index(("banner", "Other"))
-        self.assertEqual(out[i + 1:i + 3], [("section", g.OTHER_TITLE), ("banner", "Diagnostics")])
-        other = view["sections"][i + 1]
+        i = out.index((g.OTHER_TITLE,))
+        self.assertEqual(out[i - 1:i + 2], [("System & OTA", "Status"), (g.OTHER_TITLE,),
+                                            ("Diagnostics", "Health", "Memory", "Panic")])
+        other = view["sections"][i]
+        self.assertEqual(other["cards"][0], {"type": "heading", "heading": g.OTHER_TITLE, "heading_style": "subtitle"})
         self.assertEqual(sorted(entity_refs(other)),
                          ["button.magtag_1a0a5c_reboot_now", "sensor.magtag_1a0a5c_fake_future"])
-        # ...and nothing else is there, and the file-mode tab has no Other part.
+        assert_nothing_empty(self, view)
+        # ...and nothing else is there, and the file-mode tab has no Other section.
         self.assertFalse([x for x in self.scan.warnings if "layout does not know" in x])
         for v in dashboard()["views"]:
-            self.assertNotIn("Other", [c.get("heading") for s in v["sections"] for c in s["cards"]])
+            self.assertNotIn(g.OTHER_TITLE, [c.get("heading") for s in v["sections"] for c in s["cards"]])
 
     def test_labels_disagreeing_pick_the_most_common_and_warn(self):
         msgs = [disc("sensor", "abcdef", k, k, n) for k, n in

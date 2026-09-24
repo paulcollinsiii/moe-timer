@@ -186,8 +186,8 @@ int stats_json_summary(char *buf, size_t len, const char *date, int32_t screen_u
 #define SUMMARY_LAST_RESET "{{ value_json.date ~ 'T00:00:00+00:00' }}"
 
 static const ha_entity_t ENTITIES[] = {
-    /* state_class "measurement" (v23): "battery over weeks" is a
-       statistics graph, and HA keeps long-term statistics only for a
+    /* state_class "measurement" (v23): the dashboard's "Battery Charge"
+       is a statistics graph (hourly mean), and HA keeps long-term statistics only for a
        sensor that declares one. The logbook loses nothing by it: HA
        already left the battery out for its unit (%). */
     {"sensor", "battery", "Battery", "%", "battery", "{{ value_json.batt_pct }}", "stat", STAT_EXPIRE_SEC, false, NULL,
@@ -207,8 +207,9 @@ static const ha_entity_t ENTITIES[] = {
      "{{ (value_json.remaining_s[0] / 60) | round(0) }}", "stat", STAT_EXPIRE_SEC, false, NULL, NULL, NULL},
     {"sensor", "screen_limit", "Screen time limit", "min", "duration",
      "{{ (value_json.allocation_s[0] / 60) | round(0) }}", "stat", STAT_EXPIRE_SEC, false, DIAG, NULL, NULL},
-    /* The finished day's Screen minutes (v23), the "screen minutes per
-       day" statistics graph, and a summary-topic row (see
+    /* The finished day's Screen minutes (v23), the source for a "screen
+       minutes per day" statistics graph (added by hand: the generated
+       dashboard has none since M4-T7), and a summary-topic row (see
        SUMMARY_LAST_RESET): mqtt_ha.c publishes the retained summary once,
        at the first window after the rollover, so expire_after is 0 — an
        expiry would blank the value for the 23 hours in which nothing new
@@ -216,7 +217,8 @@ static const ha_entity_t ENTITIES[] = {
 
        DAY SHIFT: the summary lands after midnight, so HA files the value
        under the day AFTER the one it describes. Nothing here can move it —
-       HA stamps a state with its arrival time — so the dashboard says so.
+       HA stamps a state with its arrival time — so docs/home_assistant.md
+       says so.
 
        The key is NOT "screen_used": mqtt_ha.c's RETIRED[] publishes an
        empty discovery for that one on every pass, which would delete this
@@ -406,7 +408,7 @@ static const ha_entity_t ENTITIES[] = {
        of it — and it is affordable here because the chore_N binary
        sensors below carry the per-chore audit trail ("Homework done" on,
        off) on their own. Still no unit: a count of chores has none.
-       They are NOT the "chores done per day" graph's source: a daily
+       They are NOT the source for a "chores done per day" graph: a daily
        `max` of chores_done includes the value carried across midnight, so
        a day with nothing done can show the day before's full count.
        day_chores, below, reads the summary instead.
@@ -418,8 +420,9 @@ static const ha_entity_t ENTITIES[] = {
      NULL, "measurement", NULL},
     {"sensor", "chores_done", "Chores done", NULL, NULL, "{{ value_json.chores_done }}", "stat", STAT_EXPIRE_SEC, false,
      DIAG, "measurement", NULL},
-    /* The finished day's acked chores (v23, M4-T5), the "chores done per
-       day" statistics graph: a summary-topic row like day_runs_N (see
+    /* The finished day's acked chores (v23, M4-T5), the source for a
+       "chores done per day" statistics graph (added by hand: the generated
+       dashboard has none since M4-T7): a summary-topic row like day_runs_N (see
        SUMMARY_LAST_RESET), with the same day shift. The rollover captures
        it before anything resets the acks (wake_flow.c
        queue_rollover_summary). No unit, DIAG, no expire, as day_runs_N.
