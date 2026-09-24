@@ -252,3 +252,23 @@ add_test(NAME test_check_status_led_wrapper
 add_test(NAME test_check_ack_hold_default
          COMMAND ${Python3_EXECUTABLE}
                  ${CMAKE_CURRENT_SOURCE_DIR}/test_check_ack_hold_default/test_check_ack_hold_default.py)
+
+# tools/gen_ha_dashboard.py prints the HA dashboard, its automation and the
+# setup steps. Unlike the tools above it needs libraries (pyyaml; paho-mqtt
+# for --mqtt), declared in its PEP 723 header and supplied by uv, never
+# hand-rolled -- so its suite runs under uv as well. A missing uv FAILS the
+# test instead of dropping it: the suite's coverage check is what stops a
+# new firmware entity from going missing on the dashboard, and a skipped
+# check is one nobody notices is gone.
+# A cold uv cache needs the network once, to fetch the script's dependencies.
+find_program(UV_EXECUTABLE uv HINTS $ENV{HOME}/.local/bin)
+if(UV_EXECUTABLE)
+  add_test(NAME test_gen_ha_dashboard
+           COMMAND ${UV_EXECUTABLE} run --no-project --with pyyaml python3
+                   ${CMAKE_CURRENT_SOURCE_DIR}/test_gen_ha_dashboard/test_gen_ha_dashboard.py)
+  set_tests_properties(test_gen_ha_dashboard PROPERTIES ENVIRONMENT "UV=${UV_EXECUTABLE}")
+else()
+  message(WARNING "uv not found: test_gen_ha_dashboard will FAIL. Install uv (~/.local/bin/uv).")
+  add_test(NAME test_gen_ha_dashboard
+           COMMAND sh -c "echo 'test_gen_ha_dashboard: uv not found; install uv (https://docs.astral.sh/uv/) and re-run cmake' >&2; exit 1")
+endif()

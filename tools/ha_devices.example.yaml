@@ -1,0 +1,11 @@
+# Devices for tools/gen_ha_dashboard.py. Copy to tools/ha_devices.yaml
+# (gitignored) and edit. One entry per MagTag, one dashboard tab each:
+#   node:  the 6 lowercase hex digits after "magtag-" in the device id
+#          (its entity ids are <component>.magtag_<node>_<key>).
+#          Quote it: unquoted, 123456 reads as a number.
+#   label: the tab's title.
+devices:
+  - node: "1a0a5c"
+    label: "Testing Timer"
+  - node: "1aaa76"
+    label: "Julia's Timer"
