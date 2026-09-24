@@ -329,21 +329,13 @@ static int publish_discovery(esp_mqtt_client_handle_t client, const char *dev_na
             case STATS_CHORE_DISC_NOT_CHORE:
                 break;
         }
-        /* Per-slot sensors (completions_N / remaining_N / limit_N) carry
-           the configured timer's name; disabled slots get no entity. */
+        /* Per-slot sensors (completions_N / day_runs_N / remaining_N /
+           limit_N) carry the configured timer's name; disabled slots get
+           no entity. stats_json_slot_of() decides which rows (the host
+           suite pins it); this carries it out. */
         const char *suffix = NULL;
-        int slot = 0;
-        if (strncmp(ents[i].key, "completions_", 12) == 0) {
-            slot = ents[i].key[12] - '0';
-            suffix = "runs";
-        } else if (strncmp(ents[i].key, "remaining_", 10) == 0) {
-            slot = ents[i].key[10] - '0';
-            suffix = "remaining";
-        } else if (strncmp(ents[i].key, "limit_", 6) == 0) {
-            slot = ents[i].key[6] - '0';
-            suffix = "limit";
-        }
-        if (suffix != NULL) {
+        const int slot = stats_json_slot_of(&ents[i], &suffix);
+        if (slot > 0) {
             const timer_def_t *def = timer_slot_def(slot);
             if (def == NULL) {
                 /* Slot disabled: RETIRE the entity rather than just

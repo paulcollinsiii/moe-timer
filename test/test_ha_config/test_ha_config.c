@@ -834,7 +834,8 @@ void test_discovery_stale_on_fingerprint_change_alone(void) {
 
 /* ---- slot names in the discovery fingerprint ----
    mqtt_ha publishes `<Name> remaining` / `<Name> limit` / `<Name> runs`
-   per enabled slot, named from the HA-editable timerN_name. Neither the
+   / `<Name> runs per day` per enabled slot, named from the HA-editable
+   timerN_name. Neither the
    name nor the slot's existence is in DISC_SCHEMA_VER. */
 
 void test_discovery_hash_changes_when_a_slot_is_renamed(void) {
@@ -2199,11 +2200,13 @@ void test_config_registry_count_moves_with_the_discovery_schema(void) {
     int n = 0;
     (void)ha_config_fields(&n);
     TEST_ASSERT_EQUAL_INT(37, n);
-    /* 22 with the registry count unchanged: v22 added stat ENTITIES rows
-       (M3-T1's chore entities and config warning), not editable fields —
+    /* 23 with the registry count unchanged: v22 added stat ENTITIES rows
+       (M3-T1's chore entities and config warning) and v23 changed them
+       (M4-T1's summary sensors, screen_used_day and day_runs_N, and the
+       battery's state_class), not editable fields —
        the mirror of v21, which moved this registry and left ENTITIES
        alone. test_stats_json's joint pin records that side. */
-    TEST_ASSERT_EQUAL_INT(22, STATS_JSON_DISC_SCHEMA_VER);
+    TEST_ASSERT_EQUAL_INT(23, STATS_JSON_DISC_SCHEMA_VER);
 }
 
 int main(void) {

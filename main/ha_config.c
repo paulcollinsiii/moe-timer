@@ -136,7 +136,7 @@ uint16_t ha_config_device_hash(const char *dev_name, const char *fw) {
     }
 /* "Break eligible": may be started during a Screen Break, and drains the
    exposure balance instead of feeding it. Key stays clear of the
-   remaining_/limit_/completions_ prefixes mqtt_ha.c matches on. */
+   per-slot prefixes mqtt_ha.c matches on (stats_json_slot_of). */
 #define TIMER_BREAK(n)                                                                                                \
     {                                                                                                                 \
         .key = "timer" #n "_break", .component = "switch", .name = "Timer " #n " break eligible", .kind = CFG_TBREAK, \
@@ -513,7 +513,8 @@ uint16_t ha_config_discovery_hash(const char *dev_name, const char *fw, const ha
        then the chore list (after the loop, where it says why). The slot
        names are the second mutable input to discovery: mqtt_ha's
        per-timer stat entities (`<Name> remaining` / `<Name> limit` /
-       `<Name> runs`) take their published names from timerN_name, and
+       `<Name> runs` / `<Name> runs per day`) take their published names
+       from timerN_name, and
        which of them exist at all depends on whether the slot is enabled.
        Neither is covered by DISC_SCHEMA_VER, so without this a rename in
        HA left the old entity names in place until someone bumped the

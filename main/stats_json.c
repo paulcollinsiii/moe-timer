@@ -156,80 +156,142 @@ int stats_json_summary(char *buf, size_t len, const char *date, int32_t screen_u
 /* Discovery entity table. expire_after on stat-fed sensors is 2x the
    default idle sync interval + margin, so entities read available while
    the device sleeps but flag a genuinely dead device. The daily summary
-   sensor never expires. Order matters only for [0] (battery) in tests. */
+   sensors never expire. Order matters only for [0] (battery) in tests. */
 #define STAT_EXPIRE_SEC 7500
 
 /* Fields: component, key, name, unit, dev_class, tpl, topic_suffix,
-   expire_after, binary, ent_cat, state_class. ent_cat "diagnostic" tucks
-   noisy read-onlys into HA's Diagnostic group; NULL = primary
-   (top-level). state_class NULL = omit; ha_entity_t says what it costs. */
+   expire_after, binary, ent_cat, state_class, last_reset_tpl. ent_cat
+   "diagnostic" tucks noisy read-onlys into HA's Diagnostic group; NULL =
+   primary (top-level). state_class NULL = omit; ha_entity_t says what it
+   costs. last_reset_tpl NULL = omit; only the summary-topic rows set it. */
 #define DIAG "diagnostic"
+
+/* The summary-topic rows (v23): state_class "total", and a last_reset
+   read from the summary's own date, which stats_json_summary writes as
+   the device's local "YYYY-MM-DD". Each summary is one finished day, so a
+   new date is a new cycle, and HA's statistics `change` for a period is
+   exactly what the summaries in it reported. A retained redelivery or an
+   HA restart carries the same date and value, and adds nothing.
+
+   HA parses last_reset as a datetime, so the date alone will not do. It
+   is a cycle marker, compared only for "did it change": any time that is
+   distinct per date and rises with it works. The fixed +00:00 makes it
+   parse the same way on every HA, whatever its time zone; the local
+   midnight it is not is visible only in the entity's attributes. */
+#define SUMMARY_STATE_CLASS "total"
+#define SUMMARY_LAST_RESET "{{ value_json.date ~ 'T00:00:00+00:00' }}"
+
 static const ha_entity_t ENTITIES[] = {
+    /* state_class "measurement" (v23): "battery over weeks" is a
+       statistics graph, and HA keeps long-term statistics only for a
+       sensor that declares one. The logbook loses nothing by it: HA
+       already left the battery out for its unit (%). */
     {"sensor", "battery", "Battery", "%", "battery", "{{ value_json.batt_pct }}", "stat", STAT_EXPIRE_SEC, false, NULL,
-     NULL},
+     "measurement", NULL},
     {"sensor", "battery_mv", "Battery voltage", "mV", "voltage", "{{ value_json.batt_mv }}", "stat", STAT_EXPIRE_SEC,
-     false, DIAG, NULL},
+     false, DIAG, NULL, NULL},
     {"sensor", "light", "Ambient light", "mV", NULL, "{{ value_json.light_mv }}", "stat", STAT_EXPIRE_SEC, false, DIAG,
-     NULL},
-    {"sensor", "state", "Timer state", NULL, NULL, "{{ value_json.state }}", "stat", STAT_EXPIRE_SEC, false, NULL,
+     NULL, NULL},
+    {"sensor", "state", "Timer state", NULL, NULL, "{{ value_json.state }}", "stat", STAT_EXPIRE_SEC, false, NULL, NULL,
      NULL},
     {"sensor", "active_timer", "Active timer", NULL, NULL, "{{ value_json.active_timer }}", "stat", STAT_EXPIRE_SEC,
-     false, DIAG, NULL},
+     false, DIAG, NULL, NULL},
     /* Per-slot remaining/limit ([0] = Screen; extra slots below, runtime-
        named like completions_N) so each timer keeps its own HA history.
        "Used" is derivable: limit - remaining. */
     {"sensor", "screen_remaining", "Screen time remaining", "min", "duration",
-     "{{ (value_json.remaining_s[0] / 60) | round(0) }}", "stat", STAT_EXPIRE_SEC, false, NULL, NULL},
+     "{{ (value_json.remaining_s[0] / 60) | round(0) }}", "stat", STAT_EXPIRE_SEC, false, NULL, NULL, NULL},
     {"sensor", "screen_limit", "Screen time limit", "min", "duration",
-     "{{ (value_json.allocation_s[0] / 60) | round(0) }}", "stat", STAT_EXPIRE_SEC, false, DIAG, NULL},
+     "{{ (value_json.allocation_s[0] / 60) | round(0) }}", "stat", STAT_EXPIRE_SEC, false, DIAG, NULL, NULL},
+    /* The finished day's Screen minutes (v23), the "screen minutes per
+       day" statistics graph, and a summary-topic row (see
+       SUMMARY_LAST_RESET): mqtt_ha.c publishes the retained summary once,
+       at the first window after the rollover, so expire_after is 0 — an
+       expiry would blank the value for the 23 hours in which nothing new
+       is due.
+
+       DAY SHIFT: the summary lands after midnight, so HA files the value
+       under the day AFTER the one it describes. Nothing here can move it —
+       HA stamps a state with its arrival time — so the dashboard says so.
+
+       The key is NOT "screen_used": mqtt_ha.c's RETIRED[] publishes an
+       empty discovery for that one on every pass, which would delete this
+       entity as fast as it is created. And it is clear of every prefix
+       stats_json_slot_of() matches. */
+    {"sensor", "screen_used_day", "Screen time per day", "min", "duration",
+     "{{ (value_json.screen_used_s / 60) | round(0) }}", "summary", 0, false, DIAG, SUMMARY_STATE_CLASS,
+     SUMMARY_LAST_RESET},
     {"sensor", "day_type", "Day type", NULL, NULL, "{{ value_json.day_type }}", "stat", STAT_EXPIRE_SEC, false, DIAG,
-     NULL},
+     NULL, NULL},
     {"binary_sensor", "charge_lock", "Charge lock", NULL, NULL, "{{ 'ON' if value_json.charge_lock else 'OFF' }}",
-     "stat", STAT_EXPIRE_SEC, true, NULL, NULL},
+     "stat", STAT_EXPIRE_SEC, true, NULL, NULL, NULL},
     /* Screen Break: a break runs behind whatever timer is selected, so
        the "state" sensor reports BREAK only when Screen happens to be
        selected — these two are the honest signal. Keys deliberately do
-       NOT start with remaining_/limit_/completions_, which mqtt_ha.c
-       matches by prefix to attach a runtime slot name. */
+       NOT start with any per-slot prefix (stats_json_slot_of), which
+       mqtt_ha.c matches to attach a runtime slot name. */
     {"binary_sensor", "screen_break", "Screen break", NULL, NULL, "{{ 'ON' if value_json.break_s > 0 else 'OFF' }}",
-     "stat", STAT_EXPIRE_SEC, true, NULL, NULL},
+     "stat", STAT_EXPIRE_SEC, true, NULL, NULL, NULL},
     {"sensor", "break_remaining", "Screen break remaining", "min", "duration",
-     "{{ (value_json.break_s / 60) | round(0) }}", "stat", STAT_EXPIRE_SEC, false, DIAG, NULL},
+     "{{ (value_json.break_s / 60) | round(0) }}", "stat", STAT_EXPIRE_SEC, false, DIAG, NULL, NULL},
     /* The exposure balance driving the break: rises while a non-eligible
        timer runs, falls while a break-eligible one does. Read against the
        configured interval it explains every break that did or did not
-       fire. Key clear of the remaining_/limit_/completions_ prefixes for
-       the same reason as the two above. */
+       fire. Key clear of the per-slot prefixes for the same reason as the
+       two above. */
     {"sensor", "screen_exposure", "Screen exposure", "min", "duration", "{{ (value_json.accum_s / 60) | round(0) }}",
-     "stat", STAT_EXPIRE_SEC, false, DIAG, NULL},
+     "stat", STAT_EXPIRE_SEC, false, DIAG, NULL, NULL},
+    /* The live run counts: NO state_class, so each run keeps its logbook
+       line. They are not the runs graph's source: the rollover zeroes
+       them, and a run finished after the day's last window never reaches
+       HA through them. day_runs_N below reads the summary, which has it. */
     {"sensor", "completions_1", "Timer 1 runs", NULL, NULL, "{{ value_json.completions[0] }}", "stat", STAT_EXPIRE_SEC,
-     false, DIAG, NULL},
+     false, DIAG, NULL, NULL},
     {"sensor", "completions_2", "Timer 2 runs", NULL, NULL, "{{ value_json.completions[1] }}", "stat", STAT_EXPIRE_SEC,
-     false, DIAG, NULL},
+     false, DIAG, NULL, NULL},
     {"sensor", "completions_3", "Timer 3 runs", NULL, NULL, "{{ value_json.completions[2] }}", "stat", STAT_EXPIRE_SEC,
-     false, DIAG, NULL},
+     false, DIAG, NULL, NULL},
     {"sensor", "completions_4", "Timer 4 runs", NULL, NULL, "{{ value_json.completions[3] }}", "stat", STAT_EXPIRE_SEC,
-     false, DIAG, NULL},
+     false, DIAG, NULL, NULL},
+    /* The finished day's runs of each extra timer (v23), the "how often
+       was Violin finished" graph: summary-topic rows (see
+       SUMMARY_LAST_RESET), so every run of the day is counted, the last
+       one before midnight included, under the day after (screen_used_day's
+       day shift). Named "<timer> runs per day" and retired with a disabled
+       slot, like completions_N (stats_json_slot_of). No unit, like the
+       live counts: a number of runs has none, and a unit would buy
+       nothing — state_class already takes these out of the logbook.
+       DIAG, as screen_used_day. The key avoids every prefix and RETIRED[]
+       key mqtt_ha.c treats specially; "completions_" in particular must
+       not match it, or the slot name would be "Violin runs" twice. */
+    {"sensor", "day_runs_1", "Timer 1 runs per day", NULL, NULL, "{{ value_json.completions[0] }}", "summary", 0, false,
+     DIAG, SUMMARY_STATE_CLASS, SUMMARY_LAST_RESET},
+    {"sensor", "day_runs_2", "Timer 2 runs per day", NULL, NULL, "{{ value_json.completions[1] }}", "summary", 0, false,
+     DIAG, SUMMARY_STATE_CLASS, SUMMARY_LAST_RESET},
+    {"sensor", "day_runs_3", "Timer 3 runs per day", NULL, NULL, "{{ value_json.completions[2] }}", "summary", 0, false,
+     DIAG, SUMMARY_STATE_CLASS, SUMMARY_LAST_RESET},
+    {"sensor", "day_runs_4", "Timer 4 runs per day", NULL, NULL, "{{ value_json.completions[3] }}", "summary", 0, false,
+     DIAG, SUMMARY_STATE_CLASS, SUMMARY_LAST_RESET},
     {"sensor", "remaining_1", "Timer 1 remaining", "min", "duration",
-     "{{ (value_json.remaining_s[1] / 60) | round(0) }}", "stat", STAT_EXPIRE_SEC, false, DIAG, NULL},
+     "{{ (value_json.remaining_s[1] / 60) | round(0) }}", "stat", STAT_EXPIRE_SEC, false, DIAG, NULL, NULL},
     {"sensor", "remaining_2", "Timer 2 remaining", "min", "duration",
-     "{{ (value_json.remaining_s[2] / 60) | round(0) }}", "stat", STAT_EXPIRE_SEC, false, DIAG, NULL},
+     "{{ (value_json.remaining_s[2] / 60) | round(0) }}", "stat", STAT_EXPIRE_SEC, false, DIAG, NULL, NULL},
     {"sensor", "remaining_3", "Timer 3 remaining", "min", "duration",
-     "{{ (value_json.remaining_s[3] / 60) | round(0) }}", "stat", STAT_EXPIRE_SEC, false, DIAG, NULL},
+     "{{ (value_json.remaining_s[3] / 60) | round(0) }}", "stat", STAT_EXPIRE_SEC, false, DIAG, NULL, NULL},
     {"sensor", "remaining_4", "Timer 4 remaining", "min", "duration",
-     "{{ (value_json.remaining_s[4] / 60) | round(0) }}", "stat", STAT_EXPIRE_SEC, false, DIAG, NULL},
+     "{{ (value_json.remaining_s[4] / 60) | round(0) }}", "stat", STAT_EXPIRE_SEC, false, DIAG, NULL, NULL},
     {"sensor", "limit_1", "Timer 1 limit", "min", "duration", "{{ (value_json.allocation_s[1] / 60) | round(0) }}",
-     "stat", STAT_EXPIRE_SEC, false, DIAG, NULL},
+     "stat", STAT_EXPIRE_SEC, false, DIAG, NULL, NULL},
     {"sensor", "limit_2", "Timer 2 limit", "min", "duration", "{{ (value_json.allocation_s[2] / 60) | round(0) }}",
-     "stat", STAT_EXPIRE_SEC, false, DIAG, NULL},
+     "stat", STAT_EXPIRE_SEC, false, DIAG, NULL, NULL},
     {"sensor", "limit_3", "Timer 3 limit", "min", "duration", "{{ (value_json.allocation_s[3] / 60) | round(0) }}",
-     "stat", STAT_EXPIRE_SEC, false, DIAG, NULL},
+     "stat", STAT_EXPIRE_SEC, false, DIAG, NULL, NULL},
     {"sensor", "limit_4", "Timer 4 limit", "min", "duration", "{{ (value_json.allocation_s[4] / 60) | round(0) }}",
-     "stat", STAT_EXPIRE_SEC, false, DIAG, NULL},
+     "stat", STAT_EXPIRE_SEC, false, DIAG, NULL, NULL},
     /* Boot forensics: anything but DEEPSLEEP on a wake means the previous
        wake died (BROWNOUT/PANIC/...) — the USB CDC console loses that
        evidence, MQTT doesn't. Never expires. */
-    {"sensor", "last_reset", "Last reset", NULL, NULL, "{{ value_json.reset }}", "stat", 0, false, DIAG, NULL},
+    {"sensor", "last_reset", "Last reset", NULL, NULL, "{{ value_json.reset }}", "stat", 0, false, DIAG, NULL, NULL},
     /* ---- OTA. All four carry expire_after 0, and that is a decision,
        not a copy of the neighbour above.
 
@@ -251,16 +313,20 @@ static const ha_entity_t ENTITIES[] = {
        the whole point of the entry in docs/planning/ota.plan.md is that
        a rollback was invisible. The other three are the supporting
        detail consulted after that answer, so they sit in the Diagnostic
-       group. Keys are clear of the remaining_/limit_/completions_
-       prefixes mqtt_ha.c matches on to attach a runtime slot name. */
-    {"sensor", "ota_result", "Update result", NULL, NULL, "{{ value_json.ota_result }}", "stat", 0, false, NULL, NULL},
-    {"sensor", "ota_target", "Update target", NULL, NULL, "{{ value_json.ota_target }}", "stat", 0, false, DIAG, NULL},
-    {"sensor", "ota_fails", "Update failures", NULL, NULL, "{{ value_json.ota_fails }}", "stat", 0, false, DIAG, NULL},
+       group. Keys are clear of the per-slot prefixes
+       (stats_json_slot_of) mqtt_ha.c matches on to attach a runtime slot
+       name. */
+    {"sensor", "ota_result", "Update result", NULL, NULL, "{{ value_json.ota_result }}", "stat", 0, false, NULL, NULL,
+     NULL},
+    {"sensor", "ota_target", "Update target", NULL, NULL, "{{ value_json.ota_target }}", "stat", 0, false, DIAG, NULL,
+     NULL},
+    {"sensor", "ota_fails", "Update failures", NULL, NULL, "{{ value_json.ota_fails }}", "stat", 0, false, DIAG, NULL,
+     NULL},
     /* Milliseconds, unconverted: the number is read against the download
        deadline (CONFIG_MAGTAG_OTA_MAX_SEC), and a link trending toward it
        shows up as a rising figure long before it becomes a timeout. */
     {"sensor", "ota_dl_ms", "Update download time", "ms", "duration", "{{ value_json.ota_dl_ms }}", "stat", 0, false,
-     DIAG, NULL},
+     DIAG, NULL, NULL},
     /* ---- panic forensics. See include/panic_diag.h for the whole
        argument; what matters HERE is expire_after and the primary/
        diagnostic split.
@@ -283,19 +349,21 @@ static const ha_entity_t ENTITIES[] = {
        reading is the difference between two points, which works either
        way.
 
-       Keys are clear of the remaining_/limit_/completions_ prefixes
+       Keys are clear of the per-slot prefixes (stats_json_slot_of)
        mqtt_ha.c matches on to attach a runtime slot name. */
-    {"sensor", "panic_count", "Panic count", NULL, NULL, "{{ value_json.panics }}", "stat", 0, false, NULL, NULL},
+    {"sensor", "panic_count", "Panic count", NULL, NULL, "{{ value_json.panics }}", "stat", 0, false, NULL, NULL, NULL},
     /* Blank means no breadcrumb is on file; "NONE" means a panic landed
        outside every marked phase. panic_diag.c keeps those distinct on
        purpose. */
-    {"sensor", "panic_phase", "Panic phase", NULL, NULL, "{{ value_json.pphase }}", "stat", 0, false, DIAG, NULL},
-    {"sensor", "panic_uptime", "Panic uptime", "s", "duration", "{{ value_json.pup_s }}", "stat", 0, false, DIAG, NULL},
-    {"sensor", "panic_heap", "Panic free heap", "B", NULL, "{{ value_json.pheap }}", "stat", 0, false, DIAG, NULL},
+    {"sensor", "panic_phase", "Panic phase", NULL, NULL, "{{ value_json.pphase }}", "stat", 0, false, DIAG, NULL, NULL},
+    {"sensor", "panic_uptime", "Panic uptime", "s", "duration", "{{ value_json.pup_s }}", "stat", 0, false, DIAG, NULL,
+     NULL},
+    {"sensor", "panic_heap", "Panic free heap", "B", NULL, "{{ value_json.pheap }}", "stat", 0, false, DIAG, NULL,
+     NULL},
     {"sensor", "panic_stack_main", "Panic stack free (main)", "B", NULL, "{{ value_json.pstk_main }}", "stat", 0, false,
-     DIAG, NULL},
+     DIAG, NULL, NULL},
     {"sensor", "panic_stack_net", "Panic stack free (net)", "B", NULL, "{{ value_json.pstk_net }}", "stat", 0, false,
-     DIAG, NULL},
+     DIAG, NULL, NULL},
     /* ---- live health. These five ARE telemetry, so they take
        STAT_EXPIRE_SEC like the battery: a device that has stopped
        checking in should read unavailable rather than show a heap figure
@@ -306,21 +374,21 @@ static const ha_entity_t ENTITIES[] = {
        against fixed budgets (the 10 KB net_win stack, the 16 KB ota_dl
        stack) where a helpfully rescaled "9.8 kB" is harder to compare,
        not easier. */
-    {"sensor", "heap_free", "Free heap", "B", NULL, "{{ value_json.heap }}", "stat", STAT_EXPIRE_SEC, false, DIAG,
+    {"sensor", "heap_free", "Free heap", "B", NULL, "{{ value_json.heap }}", "stat", STAT_EXPIRE_SEC, false, DIAG, NULL,
      NULL},
     {"sensor", "heap_min", "Free heap low water", "B", NULL, "{{ value_json.heap_min }}", "stat", STAT_EXPIRE_SEC,
-     false, DIAG, NULL},
+     false, DIAG, NULL, NULL},
     {"sensor", "stack_main", "Main task stack free", "B", NULL, "{{ value_json.stk_main }}", "stat", STAT_EXPIRE_SEC,
-     false, DIAG, NULL},
+     false, DIAG, NULL, NULL},
     {"sensor", "stack_net", "Network task stack free", "B", NULL, "{{ value_json.stk_net }}", "stat", STAT_EXPIRE_SEC,
-     false, DIAG, NULL},
+     false, DIAG, NULL, NULL},
     /* Free ENTRIES, not bytes, and the only NVS figure published: total
        is a constant of a partition table frozen for OTA'd devices and
        used is total - free, so either would be the same fact twice.
        Answers the headroom question behind main.c's silent
        nvs_flash_erase() on ESP_ERR_NVS_NO_FREE_PAGES. */
     {"sensor", "nvs_free", "NVS free entries", NULL, NULL, "{{ value_json.nvs_free }}", "stat", STAT_EXPIRE_SEC, false,
-     DIAG, NULL},
+     DIAG, NULL, NULL},
     /* ---- the chore checklist (design 1.4). Read-only: the device is the
        sole authority on acks, and HA displays them. All live state, so
        STAT_EXPIRE_SEC like the battery.
@@ -328,18 +396,21 @@ static const ha_entity_t ENTITIES[] = {
        chores_left is PRIMARY and chores_done DIAGNOSTIC, as the design
        lists them: "how much is still to do" is the parent's question.
 
-       state_class "measurement" on both, and only on these two: HA keeps
-       LONG-TERM STATISTICS only for a sensor that declares one, and chore
-       completion over weeks is the graph the dashboard work (M4) is
-       planned around. The price is the logbook — HA leaves any sensor
-       with a state_class (or a unit) out of it — and it is affordable
-       here because the chore_N binary sensors below carry the per-chore
-       audit trail ("Homework done" on, off) on their own. Still no unit:
-       a count of chores has none. */
+       state_class "measurement" on both: HA keeps LONG-TERM STATISTICS
+       only for a sensor that declares one, and chore completion over
+       weeks is one of the dashboard's graphs (M4). The price is the
+       logbook — HA leaves any sensor with a state_class (or a unit) out
+       of it — and it is affordable here because the chore_N binary
+       sensors below carry the per-chore audit trail ("Homework done" on,
+       off) on their own. Still no unit: a count of chores has none.
+
+       The full list of rows that declare a state_class, each a graph on
+       the dashboard: battery, screen_used_day, day_runs_1..4 and these
+       two (v23; test_stats_json pins it). Every other row stays NULL. */
     {"sensor", "chores_left", "Chores left", NULL, NULL, "{{ value_json.chores_left }}", "stat", STAT_EXPIRE_SEC, false,
-     NULL, "measurement"},
+     NULL, "measurement", NULL},
     {"sensor", "chores_done", "Chores done", NULL, NULL, "{{ value_json.chores_done }}", "stat", STAT_EXPIRE_SEC, false,
-     DIAG, "measurement"},
+     DIAG, "measurement", NULL},
     /* One per possible chore, named at discovery time from the list
        ("<name> done") by mqtt_ha.c through stats_json_chore_index(); a row
        past the configured count is RETIRED there, exactly as a disabled
@@ -349,11 +420,11 @@ static const ha_entity_t ENTITIES[] = {
        chore_1..chore_N and are matched EXACTLY — chores_left shares the
        first five characters and must never be read as a chore. */
     {"binary_sensor", "chore_1", "Chore 1 done", NULL, NULL, "{{ 'ON' if value_json.chore_ack[0] else 'OFF' }}", "stat",
-     STAT_EXPIRE_SEC, true, NULL, NULL},
+     STAT_EXPIRE_SEC, true, NULL, NULL, NULL},
     {"binary_sensor", "chore_2", "Chore 2 done", NULL, NULL, "{{ 'ON' if value_json.chore_ack[1] else 'OFF' }}", "stat",
-     STAT_EXPIRE_SEC, true, NULL, NULL},
+     STAT_EXPIRE_SEC, true, NULL, NULL, NULL},
     {"binary_sensor", "chore_3", "Chore 3 done", NULL, NULL, "{{ 'ON' if value_json.chore_ack[2] else 'OFF' }}", "stat",
-     STAT_EXPIRE_SEC, true, NULL, NULL},
+     STAT_EXPIRE_SEC, true, NULL, NULL, NULL},
     /* M2-D6: a broken chore_free pair on ANY day type, by name ("OK" when
        every pair is valid). It exists because nothing else reports a
        broken pair durably: the config_ack names it once and the next
@@ -376,7 +447,7 @@ static const ha_entity_t ENTITIES[] = {
        still sitting in its NVS waiting for it to come back. The key is
        clear of every prefix mqtt_ha.c matches. */
     {"sensor", "config_warning", "Config warning", NULL, NULL, "{{ value_json.cfg_warn }}", "stat", 0, false, DIAG,
-     NULL},
+     NULL, NULL},
 };
 
 const ha_entity_t *stats_json_entities(int *count) {
@@ -393,6 +464,30 @@ int stats_json_chore_index(const ha_entity_t *ent) {
     if (k[6] < '1' || k[6] > '0' + CHORE_MAX || k[7] != '\0')
         return -1;
     return k[6] - '1';
+}
+
+/* One digit per slot key. */
+_Static_assert(TIMER_EXTRA_SLOTS >= 1 && TIMER_EXTRA_SLOTS <= 9, "per-slot keys are single-digit");
+int stats_json_slot_of(const ha_entity_t *ent, const char **suffix) {
+    static const struct {
+        const char *prefix, *suffix;
+    } SLOT_ROWS[] = {
+        {"completions_", "runs"},
+        {"day_runs_", "runs per day"},
+        {"remaining_", "remaining"},
+        {"limit_", "limit"},
+    };
+    for (size_t i = 0; i < sizeof(SLOT_ROWS) / sizeof(SLOT_ROWS[0]); i++) {
+        const size_t n = strlen(SLOT_ROWS[i].prefix);
+        if (strncmp(ent->key, SLOT_ROWS[i].prefix, n) != 0)
+            continue;
+        const char *d = ent->key + n;
+        if (d[0] < '1' || d[0] > '0' + TIMER_EXTRA_SLOTS || d[1] != '\0')
+            return 0;
+        *suffix = SLOT_ROWS[i].suffix;
+        return d[0] - '0';
+    }
+    return 0;
 }
 
 stats_chore_disc_t stats_json_chore_discovery(const ha_entity_t *ent, const char names[][CHORE_NAME_BUF], int n,
@@ -459,6 +554,8 @@ int stats_json_discovery_named(char *buf, size_t len, const char *dev_id, const 
         pos = jcat(buf, len, pos, ",\"dev_cla\":\"%s\"", ent->dev_class);
     if (ent->state_class != NULL)
         pos = jcat(buf, len, pos, ",\"stat_cla\":\"%s\"", ent->state_class);
+    if (ent->last_reset_tpl != NULL)
+        pos = jcat(buf, len, pos, ",\"lrst_val_tpl\":\"%s\"", ent->last_reset_tpl);
     if (ent->binary)
         pos = jcat(buf, len, pos, ",\"pl_on\":\"ON\",\"pl_off\":\"OFF\"");
     if (ent->ent_cat != NULL)

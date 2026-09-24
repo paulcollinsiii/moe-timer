@@ -266,10 +266,10 @@ void test_discovery_entity_table_is_populated(void) {
        panic_count, panic_phase, panic_uptime, panic_heap,
        panic_stack_main, panic_stack_net,
        heap_free, heap_min, stack_main, stack_net, nvs_free,
-       chores_left, chores_done, config_warning
-       + per extra slot: completions, remaining, limit
+       chores_left, chores_done, config_warning, screen_used_day
+       + per extra slot: completions, day_runs, remaining, limit
        + per possible chore: chore_N */
-    TEST_ASSERT_EQUAL_INT(31 + 3 * TIMER_EXTRA_SLOTS + CHORE_MAX, count);
+    TEST_ASSERT_EQUAL_INT(32 + 4 * TIMER_EXTRA_SLOTS + CHORE_MAX, count);
 }
 
 /* THE BUMP, pinned to the table it describes.
@@ -285,8 +285,15 @@ void test_discovery_entity_table_is_populated(void) {
 void test_discovery_schema_version_moves_with_the_entity_table(void) {
     int count = 0;
     (void)stats_json_entities(&count);
-    TEST_ASSERT_EQUAL_INT(31 + 3 * TIMER_EXTRA_SLOTS + CHORE_MAX, count);
-    /* v22: + chores_left, chores_done, config_warning and the CHORE_MAX
+    TEST_ASSERT_EQUAL_INT(32 + 4 * TIMER_EXTRA_SLOTS + CHORE_MAX, count);
+    /* v23: + screen_used_day and the TIMER_EXTRA_SLOTS day_runs_N rows
+       (the summary-topic rows, state_class "total" with a last_reset),
+       and state_class "measurement" on battery (M4-T1, the dashboard's
+       graph data). The battery half changes no count: a changed payload
+       on an existing row needs the bump as much as a new row does, and
+       test_only_the_graphed_rows_declare_a_state_class pins that half.
+
+       v22: + chores_left, chores_done, config_warning and the CHORE_MAX
        chore_N rows (M3-T1, one bump covering the chore entities,
        M2-D6's warning, and the state_class on the two chore counts).
 
@@ -300,7 +307,7 @@ void test_discovery_schema_version_moves_with_the_entity_table(void) {
        whose cause is outside ENTITIES is legitimate and is recorded here
        as such. The config registry has a joint pin of its own in
        test_ha_config. */
-    TEST_ASSERT_EQUAL_INT(22, STATS_JSON_DISC_SCHEMA_VER);
+    TEST_ASSERT_EQUAL_INT(23, STATS_JSON_DISC_SCHEMA_VER);
 }
 
 /* ---- the OTA leg of the stat payload ---- */
@@ -648,7 +655,7 @@ void test_discovery_battery_payload(void) {
         "{\"name\":\"Battery\",\"uniq_id\":\"magtag-a1b2c3_battery\","
         "\"def_ent_id\":\"sensor.magtag-a1b2c3_battery\","
         "\"stat_t\":\"magtag/magtag-a1b2c3/stat\",\"val_tpl\":\"{{ value_json.batt_pct }}\","
-        "\"unit_of_meas\":\"%\",\"dev_cla\":\"battery\",\"expire_after\":7500,"
+        "\"unit_of_meas\":\"%\",\"dev_cla\":\"battery\",\"stat_cla\":\"measurement\",\"expire_after\":7500,"
         "\"dev\":{\"ids\":[\"magtag-a1b2c3\"],\"name\":\"Kitchen MagTag\",\"mf\":\"Adafruit\","
         "\"mdl\":\"MagTag 2.9\",\"sw\":\"v1.4.0-test\"}}",
         buf);
@@ -772,27 +779,26 @@ void test_screen_exposure_entity(void) {
     TEST_ASSERT_EQUAL_STRING("duration", exp->dev_class);
     TEST_ASSERT_EQUAL_STRING("diagnostic", exp->ent_cat);
     TEST_ASSERT_NOT_NULL(strstr(exp->tpl, "value_json.accum_s"));
-    /* mqtt_ha.c attaches runtime slot names by matching these three
-       prefixes; screen_exposure must stay clear of all of them or it
-       would be renamed after a timer that has nothing to do with it. */
-    TEST_ASSERT_NOT_EQUAL(0, strncmp(exp->key, "remaining_", 10));
-    TEST_ASSERT_NOT_EQUAL(0, strncmp(exp->key, "limit_", 6));
-    TEST_ASSERT_NOT_EQUAL(0, strncmp(exp->key, "completions_", 12));
+    /* mqtt_ha.c attaches runtime slot names to the rows
+       stats_json_slot_of() matches; screen_exposure must not be one of
+       them or it would be renamed after a timer that has nothing to do
+       with it. */
+    const char *suffix = NULL;
+    TEST_ASSERT_EQUAL_INT(0, stats_json_slot_of(exp, &suffix));
 }
 
 void test_break_entities_are_not_mistaken_for_per_slot_sensors(void) {
-    /* mqtt_ha.c matches per-slot keys by prefix ("remaining_", "limit_",
-       "completions_") to attach the runtime timer name. "break_remaining"
-       must not collide with that, or discovery would look up a slot and
-       skip the entity entirely. */
+    /* mqtt_ha.c matches per-slot keys by prefix (stats_json_slot_of) to
+       attach the runtime timer name. "break_remaining" must not collide
+       with that, or discovery would look up a slot and retire the entity
+       entirely. */
+    const char *suffix = NULL;
     const ha_entity_t *rem = find_entity("break_remaining");
     TEST_ASSERT_NOT_NULL(rem);
-    TEST_ASSERT_TRUE(strncmp(rem->key, "remaining_", 10) != 0);
-    TEST_ASSERT_TRUE(strncmp(rem->key, "limit_", 6) != 0);
-    TEST_ASSERT_TRUE(strncmp(rem->key, "completions_", 12) != 0);
+    TEST_ASSERT_EQUAL_INT(0, stats_json_slot_of(rem, &suffix));
     const ha_entity_t *brk = find_entity("screen_break");
     TEST_ASSERT_NOT_NULL(brk);
-    TEST_ASSERT_TRUE(strncmp(brk->key, "remaining_", 10) != 0);
+    TEST_ASSERT_EQUAL_INT(0, stats_json_slot_of(brk, &suffix));
 }
 
 /* ---- chore entities (M3-T1, design 1.4) ---- */
@@ -834,26 +840,271 @@ void test_discovery_chore_count_entities(void) {
 
 /* state_class buys HA's long-term statistics and costs the logbook: HA
    leaves every sensor that declares one out of it. So it is on exactly
-   the two chore counts (the M4 completion graphs) and nowhere else — the
-   config warning above all, whose logbook line IS the feature. A row
-   gaining one by accident fails here, as does the builder dropping it. */
-void test_only_the_chore_counts_declare_a_state_class(void) {
-    char buf[STATS_JSON_PAYLOAD_MAX];
+   the rows the M4 dashboard graphs, each with the class its graph needs,
+   and nowhere else — the config warning above all, whose logbook line IS
+   the feature. A row gaining one by accident fails here, as does a graphed
+   row losing its class or taking the wrong one, and the builder dropping
+   it from the payload. */
+static const struct {
+    const char *key, *state_class;
+} GRAPHED[] = {
+    {"battery", "measurement"},     /* battery over weeks */
+    {"screen_used_day", "total"},   /* screen minutes per day: `change` */
+    {"day_runs_1", "total"},        /* runs per day/week per extra timer */
+    {"day_runs_2", "total"},        /* ... */
+    {"day_runs_3", "total"},        /* ... */
+    {"day_runs_4", "total"},        /* ... */
+    {"chores_left", "measurement"}, /* chores over weeks (v22) */
+    {"chores_done", "measurement"},
+};
+_Static_assert(TIMER_EXTRA_SLOTS == 4, "GRAPHED lists one day_runs_N per extra slot");
+#define GRAPHED_COUNT (sizeof(GRAPHED) / sizeof(GRAPHED[0]))
+
+void test_only_the_graphed_rows_declare_a_state_class(void) {
+    char buf[STATS_JSON_PAYLOAD_MAX], want[64];
     int count = 0, declared = 0;
     const ha_entity_t *ents = stats_json_entities(&count);
     for (int i = 0; i < count; i++) {
         stats_json_discovery(buf, sizeof(buf), "magtag-a1b2c3", "Kitchen", "fw", &ents[i]);
-        if (ents[i].state_class == NULL) {
+        const char *expect = NULL;
+        for (size_t g = 0; g < GRAPHED_COUNT; g++) {
+            if (strcmp(ents[i].key, GRAPHED[g].key) == 0)
+                expect = GRAPHED[g].state_class;
+        }
+        if (expect == NULL) {
+            TEST_ASSERT_NULL_MESSAGE(ents[i].state_class, ents[i].key);
             TEST_ASSERT_NULL_MESSAGE(strstr(buf, "stat_cla"), ents[i].key);
             continue;
         }
         declared++;
-        TEST_ASSERT_TRUE_MESSAGE(strcmp(ents[i].key, "chores_left") == 0 || strcmp(ents[i].key, "chores_done") == 0,
-                                 ents[i].key);
-        TEST_ASSERT_NOT_NULL_MESSAGE(strstr(buf, "\"stat_cla\":\"measurement\""), ents[i].key);
+        TEST_ASSERT_EQUAL_STRING_MESSAGE(expect, ents[i].state_class, ents[i].key);
+        snprintf(want, sizeof(want), "\"stat_cla\":\"%s\"", expect);
+        TEST_ASSERT_NOT_NULL_MESSAGE(strstr(buf, want), ents[i].key);
     }
-    TEST_ASSERT_EQUAL_INT(2, declared);
+    /* Every graphed key is a row: a renamed or dropped row fails here
+       rather than quietly shrinking the allowlist's reach. */
+    TEST_ASSERT_EQUAL_INT((int)GRAPHED_COUNT, declared);
     TEST_ASSERT_NULL(find_entity("config_warning")->state_class);
+}
+
+/* last_reset_value_template is legal ONLY beside state_class "total": HA's
+   MQTT sensor schema rejects the whole discovery config otherwise, so the
+   entity would silently never appear. It is on exactly the summary-topic
+   rows, which are exactly the "total" rows, and it reaches the payload
+   under HA's abbreviation for it. */
+void test_only_the_summary_rows_carry_a_last_reset(void) {
+    char buf[STATS_JSON_PAYLOAD_MAX];
+    int count = 0, carried = 0;
+    const ha_entity_t *ents = stats_json_entities(&count);
+    for (int i = 0; i < count; i++) {
+        stats_json_discovery(buf, sizeof(buf), "magtag-a1b2c3", "Kitchen", "fw", &ents[i]);
+        const bool summary = strcmp(ents[i].topic_suffix, "summary") == 0;
+        const bool total = ents[i].state_class != NULL && strcmp(ents[i].state_class, "total") == 0;
+        TEST_ASSERT_EQUAL_MESSAGE(summary, total, ents[i].key);
+        if (!summary) {
+            TEST_ASSERT_NULL_MESSAGE(ents[i].last_reset_tpl, ents[i].key);
+            TEST_ASSERT_NULL_MESSAGE(strstr(buf, "lrst_val_tpl"), ents[i].key);
+            continue;
+        }
+        carried++;
+        TEST_ASSERT_NOT_NULL_MESSAGE(ents[i].last_reset_tpl, ents[i].key);
+        TEST_ASSERT_NOT_NULL_MESSAGE(strstr(buf, "\"lrst_val_tpl\":\"{{ value_json.date ~ 'T00:00:00+00:00' }}\""),
+                                     ents[i].key);
+        TEST_ASSERT_EQUAL_INT_MESSAGE(0, ents[i].expire_after, ents[i].key);
+    }
+    TEST_ASSERT_EQUAL_INT(1 + TIMER_EXTRA_SLOTS, carried);
+}
+
+/* The live run counts keep NO state_class (v23 reverted the first draft's
+   total_increasing): the rollover zeroes them before HA sees a run
+   finished after the day's last window, so they cannot be the runs graph,
+   and without a class each run keeps its logbook line. day_runs_N reads
+   the summary instead. */
+void test_discovery_completions_keep_no_state_class(void) {
+    char buf[STATS_JSON_PAYLOAD_MAX];
+    for (int s = 1; s <= TIMER_EXTRA_SLOTS; s++) {
+        char key[24];
+        snprintf(key, sizeof(key), "completions_%d", s);
+        const ha_entity_t *c = find_entity(key);
+        TEST_ASSERT_NOT_NULL_MESSAGE(c, key);
+        TEST_ASSERT_NULL_MESSAGE(c->state_class, key);
+        TEST_ASSERT_EQUAL_STRING_MESSAGE("stat", c->topic_suffix, key);
+        stats_json_discovery_named(buf, sizeof(buf), "magtag-a1b2c3", "Kitchen", "fw", c, "Violin runs");
+        TEST_ASSERT_NULL_MESSAGE(strstr(buf, "stat_cla"), key);
+        TEST_ASSERT_NOT_NULL_MESSAGE(strstr(buf, "\"name\":\"Violin runs\""), key);
+    }
+}
+
+/* The finished day's Screen minutes, the "screen minutes per day" graph.
+   The whole payload is pinned: the state topic is the retained SUMMARY
+   topic (not stat), the template reads the summary's own field, the unit
+   matches the other minute sensors, state_class "total" with a
+   last_reset from the summary's date (each summary a new cycle), and NO
+   expire_after — the summary arrives once a day, and an expiry would
+   blank it for the hours in between. */
+void test_discovery_screen_used_day_payload(void) {
+    char buf[STATS_JSON_PAYLOAD_MAX];
+    const ha_entity_t *e = find_entity("screen_used_day");
+    TEST_ASSERT_NOT_NULL(e);
+    int n = stats_json_discovery(buf, sizeof(buf), "magtag-a1b2c3", "Kitchen MagTag", "v1.4.0-test", e);
+    TEST_ASSERT_EQUAL_STRING(
+        "{\"name\":\"Screen time per day\",\"uniq_id\":\"magtag-a1b2c3_screen_used_day\","
+        "\"def_ent_id\":\"sensor.magtag-a1b2c3_screen_used_day\","
+        "\"stat_t\":\"magtag/magtag-a1b2c3/summary\","
+        "\"val_tpl\":\"{{ (value_json.screen_used_s / 60) | round(0) }}\","
+        "\"unit_of_meas\":\"min\",\"dev_cla\":\"duration\",\"stat_cla\":\"total\","
+        "\"lrst_val_tpl\":\"{{ value_json.date ~ 'T00:00:00+00:00' }}\","
+        "\"ent_cat\":\"diagnostic\","
+        "\"dev\":{\"ids\":[\"magtag-a1b2c3\"],\"name\":\"Kitchen MagTag\",\"mf\":\"Adafruit\","
+        "\"mdl\":\"MagTag 2.9\",\"sw\":\"v1.4.0-test\"}}",
+        buf);
+    TEST_ASSERT_EQUAL_INT((int)strlen(buf), n);
+    TEST_ASSERT_EQUAL_INT(0, e->expire_after);
+}
+
+/* The finished day's runs of each extra timer, the "how often was Violin
+   finished" graph. Pinned whole, per slot: the summary topic, the slot's
+   OWN position of the summary's completions array (a neighbour's index
+   would graph the wrong timer for ever), "total" with the summary's
+   last_reset, no unit, diagnostic like screen_used_day, no expire. Once
+   under the table name and once under the runtime slot name mqtt_ha.c
+   passes, which must also fit the payload buffer. */
+void test_discovery_day_runs_payloads(void) {
+    char buf[STATS_JSON_PAYLOAD_MAX], key[16], want[640];
+    for (int s = 1; s <= TIMER_EXTRA_SLOTS; s++) {
+        snprintf(key, sizeof(key), "day_runs_%d", s);
+        const ha_entity_t *e = find_entity(key);
+        TEST_ASSERT_NOT_NULL_MESSAGE(e, key);
+        for (int named = 0; named < 2; named++) {
+            char name[32];
+            snprintf(name, sizeof(name), named ? "Violin runs per day" : "Timer %d runs per day", s);
+            int n = stats_json_discovery_named(buf, sizeof(buf), "magtag-a1b2c3", "Kitchen MagTag", "v1.4.0-test", e,
+                                               named ? name : NULL);
+            snprintf(want, sizeof(want),
+                     "{\"name\":\"%s\",\"uniq_id\":\"magtag-a1b2c3_day_runs_%d\","
+                     "\"def_ent_id\":\"sensor.magtag-a1b2c3_day_runs_%d\","
+                     "\"stat_t\":\"magtag/magtag-a1b2c3/summary\","
+                     "\"val_tpl\":\"{{ value_json.completions[%d] }}\","
+                     "\"stat_cla\":\"total\","
+                     "\"lrst_val_tpl\":\"{{ value_json.date ~ 'T00:00:00+00:00' }}\","
+                     "\"ent_cat\":\"diagnostic\","
+                     "\"dev\":{\"ids\":[\"magtag-a1b2c3\"],\"name\":\"Kitchen MagTag\",\"mf\":\"Adafruit\","
+                     "\"mdl\":\"MagTag 2.9\",\"sw\":\"v1.4.0-test\"}}",
+                     name, s, s, s - 1);
+            TEST_ASSERT_EQUAL_STRING_MESSAGE(want, buf, key);
+            TEST_ASSERT_EQUAL_INT_MESSAGE((int)strlen(buf), n, key);
+            TEST_ASSERT_LESS_THAN_INT_MESSAGE(STATS_JSON_PAYLOAD_MAX, n, key);
+        }
+    }
+}
+
+/* The name of the summary field a template reads: what follows
+   "value_json." up to the first character that cannot be part of it. */
+static void summary_field(const char *tpl, char *out, size_t len) {
+    TEST_ASSERT_NOT_NULL(tpl);
+    const char *field = strstr(tpl, "value_json.");
+    TEST_ASSERT_NOT_NULL_MESSAGE(field, tpl);
+    field += strlen("value_json.");
+    snprintf(out, len, "\"%.*s\":", (int)strcspn(field, " )|}[~"), field);
+}
+
+/* The templates and the summary builder are two ends of one wire: every
+   field a summary-topic row reads — its value AND its last_reset — must
+   be one stats_json_summary writes, under that exact name, or HA renders
+   the sensor "unknown" (or drops every last_reset) every day. The date is
+   also pinned as the "YYYY-MM-DD" the last_reset template appends a time
+   to: anything else would not parse as the datetime HA requires. */
+void test_summary_rows_read_fields_the_summary_writes(void) {
+    char buf[256], quoted[32];
+    const uint16_t comp[TIMER_EXTRA_SLOTS] = {3, 0, 1, 2};
+    stats_json_summary(buf, sizeof(buf), "2026-09-24", 5400, comp);
+    TEST_ASSERT_NOT_NULL(strstr(buf, "\"date\":\"2026-09-24\","));
+    int count = 0, rows = 0;
+    const ha_entity_t *ents = stats_json_entities(&count);
+    for (int i = 0; i < count; i++) {
+        if (strcmp(ents[i].topic_suffix, "summary") != 0)
+            continue;
+        rows++;
+        summary_field(ents[i].tpl, quoted, sizeof(quoted));
+        TEST_ASSERT_NOT_NULL_MESSAGE(strstr(buf, quoted), ents[i].key);
+        summary_field(ents[i].last_reset_tpl, quoted, sizeof(quoted));
+        TEST_ASSERT_EQUAL_STRING_MESSAGE("\"date\":", quoted, ents[i].key);
+        TEST_ASSERT_NOT_NULL_MESSAGE(strstr(buf, quoted), ents[i].key);
+    }
+    TEST_ASSERT_EQUAL_INT(1 + TIMER_EXTRA_SLOTS, rows);
+    summary_field(find_entity("screen_used_day")->tpl, quoted, sizeof(quoted));
+    TEST_ASSERT_EQUAL_STRING("\"screen_used_s\":", quoted);
+    summary_field(find_entity("day_runs_1")->tpl, quoted, sizeof(quoted));
+    TEST_ASSERT_EQUAL_STRING("\"completions\":", quoted);
+}
+
+/* The key must not be "screen_used": mqtt_ha.c's RETIRED[] publishes an
+   EMPTY retained discovery for sensor/<id>_screen_used on every pass, so
+   an entity under that key would be deleted as fast as it was created.
+   And it must not be read as a per-slot or per-chore row. */
+void test_screen_used_day_key_avoids_the_retired_and_per_slot_keys(void) {
+    const char *suffix = NULL;
+    const ha_entity_t *e = find_entity("screen_used_day");
+    TEST_ASSERT_NOT_NULL(e);
+    TEST_ASSERT_NOT_EQUAL(0, strcmp(e->key, "screen_used"));
+    TEST_ASSERT_EQUAL_INT(0, stats_json_slot_of(e, &suffix));
+    TEST_ASSERT_EQUAL_INT(-1, stats_json_chore_index(e));
+}
+
+/* mqtt_ha.c names each per-slot row after the slot's timer and retires it
+   when the slot is disabled, by what stats_json_slot_of() answers. So:
+   every per-slot row resolves to its own slot and suffix, each slot has
+   exactly its four rows, and nothing else — above all no key that only
+   shares a prefix — resolves at all. day_runs_N must not read as
+   completions_N (its name would then be "Violin runs", twice) or the
+   reverse. */
+void test_slot_of_matches_only_the_per_slot_rows(void) {
+    static const struct {
+        const char *key, *suffix;
+        int slot;
+    } WANT[] = {
+        {"completions_1", "runs", 1},      {"completions_4", "runs", 4},    {"day_runs_1", "runs per day", 1},
+        {"day_runs_4", "runs per day", 4}, {"remaining_2", "remaining", 2}, {"limit_3", "limit", 3},
+    };
+    for (size_t w = 0; w < sizeof(WANT) / sizeof(WANT[0]); w++) {
+        const char *suffix = NULL;
+        const ha_entity_t *e = find_entity(WANT[w].key);
+        TEST_ASSERT_NOT_NULL_MESSAGE(e, WANT[w].key);
+        TEST_ASSERT_EQUAL_INT_MESSAGE(WANT[w].slot, stats_json_slot_of(e, &suffix), WANT[w].key);
+        TEST_ASSERT_EQUAL_STRING_MESSAGE(WANT[w].suffix, suffix, WANT[w].key);
+    }
+
+    int count = 0, per_slot[TIMER_EXTRA_SLOTS + 1] = {0};
+    const ha_entity_t *ents = stats_json_entities(&count);
+    for (int i = 0; i < count; i++) {
+        const char *suffix = NULL;
+        const int slot = stats_json_slot_of(&ents[i], &suffix);
+        TEST_ASSERT_TRUE_MESSAGE(slot >= 0 && slot <= TIMER_EXTRA_SLOTS, ents[i].key);
+        per_slot[slot]++;
+        if (slot > 0) {
+            /* The slot's rows read the slot's own index. */
+            char idx[16];
+            snprintf(idx, sizeof(idx), "[%d]",
+                     strncmp(ents[i].key, "completions_", 12) == 0 || strncmp(ents[i].key, "day_runs_", 9) == 0
+                         ? slot - 1
+                         : slot);
+            TEST_ASSERT_NOT_NULL_MESSAGE(strstr(ents[i].tpl, idx), ents[i].key);
+        }
+    }
+    for (int s = 1; s <= TIMER_EXTRA_SLOTS; s++)
+        TEST_ASSERT_EQUAL_INT(4, per_slot[s]);
+    TEST_ASSERT_EQUAL_INT(count - 4 * TIMER_EXTRA_SLOTS, per_slot[0]);
+
+    /* Keys that only LOOK like a per-slot row. */
+    const ha_entity_t fake[] = {
+        {.key = "day_runs_0"},   {.key = "day_runs_5"},       {.key = "day_runs_12"}, {.key = "day_runs_"},
+        {.key = "completions_"}, {.key = "completions_1x"},   {.key = "day_runs"},    {.key = "limit_9"},
+        {.key = "day_type"},     {.key = "screen_remaining"},
+    };
+    for (size_t i = 0; i < sizeof(fake) / sizeof(fake[0]); i++) {
+        const char *suffix = NULL;
+        TEST_ASSERT_EQUAL_INT_MESSAGE(0, stats_json_slot_of(&fake[i], &suffix), fake[i].key);
+    }
 }
 
 /* One binary_sensor per POSSIBLE chore, chore_1..chore_CHORE_MAX, each
@@ -939,9 +1190,8 @@ void test_chore_entities_are_not_mistaken_for_per_slot_sensors(void) {
     for (size_t k = 0; k < sizeof(keys) / sizeof(keys[0]); k++) {
         const ha_entity_t *e = find_entity(keys[k]);
         TEST_ASSERT_NOT_NULL_MESSAGE(e, keys[k]);
-        TEST_ASSERT_NOT_EQUAL_MESSAGE(0, strncmp(e->key, "remaining_", 10), keys[k]);
-        TEST_ASSERT_NOT_EQUAL_MESSAGE(0, strncmp(e->key, "limit_", 6), keys[k]);
-        TEST_ASSERT_NOT_EQUAL_MESSAGE(0, strncmp(e->key, "completions_", 12), keys[k]);
+        const char *suffix = NULL;
+        TEST_ASSERT_EQUAL_INT_MESSAGE(0, stats_json_slot_of(e, &suffix), keys[k]);
     }
 }
 
@@ -1326,7 +1576,14 @@ int main(void) {
     RUN_TEST(test_chore_index_matches_only_the_per_chore_rows);
     RUN_TEST(test_chore_entities_are_not_mistaken_for_per_slot_sensors);
     RUN_TEST(test_discovery_config_warning_entity);
-    RUN_TEST(test_only_the_chore_counts_declare_a_state_class);
+    RUN_TEST(test_only_the_graphed_rows_declare_a_state_class);
+    RUN_TEST(test_only_the_summary_rows_carry_a_last_reset);
+    RUN_TEST(test_discovery_completions_keep_no_state_class);
+    RUN_TEST(test_discovery_screen_used_day_payload);
+    RUN_TEST(test_discovery_day_runs_payloads);
+    RUN_TEST(test_summary_rows_read_fields_the_summary_writes);
+    RUN_TEST(test_screen_used_day_key_avoids_the_retired_and_per_slot_keys);
+    RUN_TEST(test_slot_of_matches_only_the_per_slot_rows);
     RUN_TEST(test_chore_discovery_names_configured_rows_and_retires_the_rest);
     RUN_TEST(test_chore_discovery_skips_every_chore_row_when_the_list_is_unknown);
     RUN_TEST(test_chore_discovery_leaves_every_other_row_to_the_caller);

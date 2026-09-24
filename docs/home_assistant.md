@@ -60,7 +60,9 @@ Everything appears under one device, grouped by HA `entity_category`:
   `<Name> runs`. Remaining/limit are **per-slot** (not active-timer
   scoped), so each timer keeps its own recorder history; screen time used
   = limit − remaining (a template sensor if you want it as an entity).
-  Also **Chores done** and **Config warning** (see
+  **Screen time per day** and, per extra timer, `<Name> runs per day` are
+  the finished day's figures, read from the daily summary (below). Also
+  **Chores done** and **Config warning** (see
   [Chore checklist](#chore-checklist-read-only-in-ha)).
 
 Recorder history on the read-only sensors IS the usage-stats feature —
@@ -80,6 +82,26 @@ Notes:
   first.
 - The daily summary publishes at the first wake after midnight and covers
   the finished day: `screen_used_s` + completions per extra timer.
+  *Screen time per day* and the `<Name> runs per day` sensors read it, so
+  HA files each day's figures under the **next** day (the time they
+  arrived). No run is lost to that: a run finished late in the evening,
+  after the day's last window, is in the summary.
+- **Statistics vs the logbook.** Battery %, the summary sensors and the
+  two chore counts declare a `state_class`, so HA keeps long-term
+  statistics for them. The summary sensors are `total` with a
+  `last_reset` taken from the summary's date: each summary is one new
+  day, so a period's statistics *change* is exactly what its summaries
+  reported, and a repeat of the same summary adds nothing. HA keeps no
+  logbook entries for an entity with a `state_class` or a unit, so none
+  of these appear in the activity log. The live `<Name> runs` counts
+  keep no `state_class` and still log each run.
+- **First summary.** HA's statistics take the first value they ever see
+  for a sensor as the starting point, not as a change. After the OTA
+  that adds the summary sensors, that is the summary already retained on
+  the broker, which is therefore recorded once as a state but counted in
+  no graph; the next day's summary is the first to count. On a device
+  that has never published a summary the sensors read *unknown* until
+  one arrives, and that one is the starting point instead.
 
 ### Entity IDs are stable, and do not follow the device name
 

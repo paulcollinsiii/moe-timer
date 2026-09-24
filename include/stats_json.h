@@ -189,15 +189,21 @@ typedef struct {
     const char *unit;         /* NULL = omit */
     const char *dev_class;    /* NULL = omit */
     const char *tpl;          /* value_template */
-    const char *topic_suffix; /* "stat" or "summary" */
+    const char *topic_suffix; /* stat_t is magtag/<id>/<this>: "stat" or "summary" */
     int expire_after;         /* seconds; 0 = omit (value persists) */
     bool binary;              /* adds pl_on/pl_off */
     const char *ent_cat;      /* "diagnostic" / NULL = primary (top-level in HA) */
     /* "measurement" etc. / NULL = omit. HA keeps long-term statistics
        ONLY for a sensor that declares one — and leaves every such sensor
        out of the logbook, so a text or event-like sensor whose changes
-       are the point must stay NULL. Added in v22 for the chore counts. */
+       are the point must stay NULL. Added in v22 for the chore counts;
+       v23 set it on the battery and the summary-topic rows. */
     const char *state_class;
+    /* last_reset_value_template (lrst_val_tpl) / NULL = omit. HA accepts
+       it ONLY with state_class "total" and rejects the whole discovery
+       config otherwise. Added in v23 for the summary-topic rows: each
+       summary is one finished day, so a new date is a new cycle. */
+    const char *last_reset_tpl;
 } ha_entity_t;
 
 /* Home Assistant re-reads a discovery config only when something in it
@@ -281,8 +287,48 @@ typedef struct {
         report of a broken chore_free pair on ANY day type. And the
         table's state_class column (ha_entity_t), set on chores_left and
         chores_done only, so HA keeps long-term statistics for them. One
-        bump for all of it, as the plan's M3-T1 requires. */
-#define STATS_JSON_DISC_SCHEMA_VER 22
+        bump for all of it, as the plan's M3-T1 requires.
+
+   v23: the dashboard's graph data (M4-T1). + the summary-topic rows, the
+        first whose topic column is "summary", not "stat" (the column
+        already fed stat_t, so no code moved): screen_used_day, the
+        finished day's Screen minutes, and day_runs_1..4, the finished
+        day's runs of each extra timer (named and retired with their slot,
+        like completions_N; see stats_json_slot_of). All five carry
+        state_class "total" and the new last_reset_tpl column, which reads
+        the summary's own date, so each summary starts a new cycle and the
+        statistics `change` for a period is exactly what the summaries in
+        it reported. A retained redelivery or an HA restart repeats the
+        same value under the same last_reset and adds nothing; a day with
+        no summary adds nothing. No expire_after: the summary arrives once
+        a day. + state_class "measurement" on battery.
+        completions_1..4 keep NO state_class. The live counters were the
+        first draft's source for the runs graph, and they lose every run
+        finished after the day's last window: the rollover zeroes them
+        before HA sees the count. The summary carries those runs.
+        WHY BUMP: a changed state_class is a changed discovery payload, and
+        a new row is a new entity; neither reaches HA on a same-version
+        reflash without it (the v21 note's reasoning). Costs one more
+        retained discovery message per republish burst than v22 for each
+        of the five new rows.
+        THE LOGBOOK: HA keeps no logbook entries for a sensor with a
+        state_class OR a unit. The battery (%) and screen_used_day (min)
+        would be left out by their unit alone, so this bump costs the
+        logbook only the day_runs_N lines — and the owner chose the graphs
+        over those. completions_N and every other row still log.
+        THE FIRST SUMMARY: HA's statistics take the first value they ever
+        see for a sensor as its zero point, not as a change. On the first
+        registration after the OTA, that is the broker's existing retained
+        summary (yesterday's, from older firmware), which is thus recorded
+        once as a state and counted in no graph; the next day's summary is
+        the first to count. On a device whose summary was never published,
+        the five read "unknown" until one is, and that one is the zero
+        point instead.
+        THE DAY SHIFT: a day's summary is published at the first window
+        after midnight, and HA stamps a state with its arrival time, so the
+        per-day graphs file each day's figures under the NEXT day. No run
+        is lost to it. */
+#define STATS_JSON_DISC_SCHEMA_VER 23
 
 /* Buffer the stat/summary/discovery payloads are built into (mqtt_ha.c).
    Named here because stats_json_stat is what can outgrow it, and a stat
@@ -322,6 +368,14 @@ int stats_json_discovery_named(char *buf, size_t len, const char *dev_id, const 
    configured count. An exact match on the whole key, not a prefix test,
    so chores_left / chores_done can never be mistaken for a chore. */
 int stats_json_chore_index(const ha_entity_t *ent);
+
+/* Which extra timer slot a per-slot row reports: 1..TIMER_EXTRA_SLOTS for
+   completions_N, day_runs_N, remaining_N and limit_N, 0 for every other
+   row. On a match *suffix is the word mqtt_ha.c appends to the slot's
+   timer name ("Violin runs", "Violin runs per day"), and mqtt_ha.c
+   retires the row when the slot is disabled. The prefix must be followed
+   by exactly one digit in range, so no other key can be read as a slot. */
+int stats_json_slot_of(const ha_entity_t *ent, const char **suffix);
 
 /* What mqtt_ha.c's discovery pass does with one ENTITIES row, as far as
    the chore list is concerned. The decision lives here, pure, so the host
