@@ -362,27 +362,47 @@ dashboard by hand.
 
 ### What a tab shows
 
-Each device is one tab (a sections view), top to bottom:
+Each device is one tab (a sections view), top to bottom. Every section is
+named by its own heading. Status, Graphs and Diagnostics (and "Other",
+when `--mqtt` finds one) each open with a full-width banner holding just
+the part's name; the settings at the top have none.
 
-- **Settings** — the device's **To-do list card**, where its chores are
-  edited, and a done flag per chore; each day type's **allocation next to
-  its chore-free minutes** in the same row, since the two are a pair (see
-  [Chore-free minutes and their
-  allocation](#editing-config-from-the-ha-card-no-setup)); timers 1–4;
-  breaks; quiet hours and bed time; tones and volume; system and OTA
-  controls.
-- **Activity** — the live state (*Now*: timer state, active timer, Screen
-  time left and limit, break, exposure, charge lock, chores left and done,
-  battery, day type, and each extra timer's remaining, limit and runs) and
-  an **Activity log**: a logbook card over every entity of the device, for
-  the last 48 hours. Some entities never appear in it; see [what the
-  Activity log cannot show](#what-the-activity-log-cannot-show).
+- **Chores Settings** — the device's **To-do list card**, where its
+  chores are edited, and below it, labelled **Chores Status**, a done flag
+  per chore. The other settings follow, each section one card with
+  divider-separated groups:
+  - **Screen Timer Settings** — per day type, the **allocation directly
+    followed by its chore-free minutes**, since the two are a pair (see
+    [Chore-free minutes and their
+    allocation](#editing-config-from-the-ha-card-no-setup)); then Screen
+    adjust (min) today; then the break interval and duration.
+  - **Additional Timers** — timers 1–4: name, minutes, reloadable and
+    break eligible.
+  - **Quiet hours & bed time**, and **Tones & volume**.
+  - **System & OTA** — the device name, time zone, OTA manifest URL, OTA
+    check on sync and Find my timer; then the last update's result,
+    target, failures and download time.
+- **Status** — the live state (*Now*: timer state, active timer, Screen
+  time remaining and limit, Screen break and its time remaining, exposure,
+  charge lock, chores left and done, Battery, day type, and each extra
+  timer's runs today; no graph shows the current day's runs). Battery and
+  Screen time remaining are here as well as in their graphs, since the
+  battery graph is a daily mean and the remaining-time graph shows a value
+  only on hover. There are no per-timer rows beyond the runs: each extra
+  timer's remaining is in the remaining-time graph, and its limit is left
+  off. The limit is the minutes set under Additional Timers, except on a
+  day a [raw-command grant](#raw-command-topic-power-users--per-timer-grants)
+  moved it, or after its minutes were changed while the timer had run out
+  (it keeps the old figure until its next start or the next day).
 - **Graphs** — remaining time today per timer (a 24-hour history graph),
   battery over weeks, extra-timer runs per day and per week, Screen minutes
   per day, and chores done per day (statistics graphs; see below).
 - **Diagnostics** — health (config warning, battery voltage, light, last
-  reset, NVS free), memory, the last panic, OTA updates, and the last
-  daily summary received.
+  reset, NVS free), memory, the last panic, the last daily summary
+  received, and at the bottom the **Activity log**: a logbook card over
+  every entity of the device, for the last 48 hours. Some entities never
+  appear in it; see [what the Activity log cannot
+  show](#what-the-activity-log-cannot-show).
 
 ### Graphs and statistics
 
@@ -456,8 +476,12 @@ never shows:
   time (ms); and Panic uptime (s), Panic free heap and the two panic stack
   figures (bytes).
 
-Their current values are in the *Now* card and the Diagnostics section,
-and their history in the graphs. What the log does show: timer state
+Their current values are on the *Now* card, in the Diagnostics sections
+and, for Update download time, under System & OTA, except each extra
+timer's remaining, which its graph shows, and its limit, which is the
+minutes set under Additional Timers. The graphs keep the history of the
+ones they plot. What the log
+does show: timer state
 changes, the charge lock and Screen Break, each extra timer's live
 `<Name> runs` count (no `state_class`, so every run is logged), each
 chore's done flag (the day-by-day chore record), Config warning, and the

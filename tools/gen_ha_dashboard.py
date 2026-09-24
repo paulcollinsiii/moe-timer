@@ -380,48 +380,95 @@ def firmware_entities(repo: str = REPO) -> dict[str, Entity]:
 # Layout
 # --------------------------------------------------------------------------
 #
-# The tab, top to bottom: Settings, Activity, Graphs, Diagnostics (owner,
-# 2026-09-24). Each tuple below is one HA "sections" section. Rows name
-# firmware keys; the builder turns them into cards and skips a key the
+# The tab, top to bottom (owner, 2026-09-24, revised after applying it,
+# M4-T6): Chores Settings and the settings sections below it, Status,
+# Graphs, [Other], Diagnostics. Each tuple below is one HA "sections"
+# section, named by its own subtitle heading; Status, Graphs, Other and
+# Diagnostics each open with a full-width banner section (_banner()). Rows
+# name firmware keys; the builder turns them into cards and skips a key the
 # device does not have.
 #
-# NAMES. Rows default to `name: {type: entity}` (HA 2025.11+): the card
-# shows the entity's own name from discovery, without the device name in
-# front, so a timer or chore renamed on the device shows through (the
-# per-slot rows are named "<timer> remaining" etc. at runtime). An explicit
-# string is given only where the discovery name is too long for the space
-# it gets: the paired allocation tiles, half a row wide each.
+# NAMES. Every row is `name: {type: entity}` (HA 2025.11+): the card shows
+# the entity's own name from discovery, without the device name in front,
+# so a timer or chore renamed on the device shows through (the per-slot
+# rows are named "<timer> remaining" etc. at runtime). The firmware names
+# are unambiguous everywhere they are shown: an allocation and its
+# chore_free read "Weekday allocation" / "Weekday chore-free", the timer
+# rows "Timer N minutes" and so on, so no row needs a name of its own.
 
 PER_SLOT = ("remaining", "limit", "completions", "day_runs")
 SLOTS = (1, 2, 3, 4)
 CHORES = (1, 2, 3)
 
-# (day type, allocation key, chore_free key) -- the pairs ha_config.c's
-# NUM_CHORE_FREE rows name; the test re-derives them from source.
+# (allocation key, chore_free key) per day type, in the order the tab
+# shows them -- the pairs ha_config.c's NUM_CHORE_FREE rows name; the test
+# re-derives them from source.
 ALLOC_PAIRS = (
-    ("Weekday", "weekday_min", "chore_free_wd"),
-    ("Weekend", "weekend_min", "chore_free_we"),
-    ("Holiday", "holiday_min", "chore_free_hol"),
-    ("Summer", "summer_min", "chore_free_sum"),
+    ("weekday_min", "chore_free_wd"),
+    ("weekend_min", "chore_free_we"),
+    ("holiday_min", "chore_free_hol"),
+    ("summer_min", "chore_free_sum"),
 )
 
-# Firmware keys deliberately not on the tab, each with its reason. Empty
-# today; the coverage test fails on any firmware key that is neither placed
-# nor listed here.
-LEFT_OUT: dict[str, str] = {}
+# Firmware keys deliberately not on the tab, each with its reason; the
+# coverage test fails on any firmware key that is neither placed nor
+# listed here. (The Activity log still lists them: it covers every entity.)
+#
+# limit_N is the slot's EFFECTIVE limit (app_state.c effective_allocation()
+# over the configured duration), which is timerN_min, shown under
+# Additional Timers, except:
+# - on a day a per-timer grant from the raw command topic moved it (while
+#   the slot is IDLE the banked grant counts too: idle_allocation());
+# - after a timerN_min edit while the slot is EXPIRED: timer_reconcile_def()
+#   (timer.c) leaves an IDLE or EXPIRED slot alone, so it keeps the old
+#   figure until its next start or the day rollover. A RUNNING or PAUSED
+#   slot follows the edit (its allocation is delta-shifted).
+# remaining_N, graphed, shows a grant as a jump.
+LEFT_OUT: dict[str, str] = {
+    f"limit_{n}": (
+        f"the effective minutes; Additional Timers shows timer{n}_min, which it equals except on a day a "
+        f"raw-command grant moved it (the remaining-time graph shows that as a jump), or after a "
+        f"timer{n}_min edit while the timer is expired (until its next start or the next day)"
+    )
+    for n in SLOTS
+}
 
 TIMER_FIELDS = ("name", "min", "reload", "break")
 
+# The first section: the To-do card under the "Chores Settings" heading,
+# and the done flags under a "Chores Status" label.
+CHORES_SETTINGS = "Chores Settings"
+CHORES_STATUS = "Chores Status"
+CHORE_FLAGS = [f"chore_{i}" for i in CHORES]
+
+# The settings sections below it: (title, groups). Each section is ONE
+# entities card; its groups are separated by dividers, and a group the
+# device has none of is dropped with its divider.
 SETTINGS = [
-    ("Chores", ["todo"] + [f"chore_{i}" for i in CHORES]),
-    ("Allocations & chore-free (min)", ["alloc_pairs", "screen_bonus"]),
-    ("Timers", [("timer", n) for n in SLOTS]),
-    ("Breaks", ["break_interval_min", "break_duration_min"]),
-    ("Quiet hours & bed time", ["quiet_start", "quiet_end", "bedtime"]),
-    ("Tones & volume", ["tone_expiry", "tone_break", "tone_bed", "alert_volume"]),
-    ("System & OTA", ["name", "tz", "ota_url", "ota_on_sync", "locate"]),
+    (
+        "Screen Timer Settings",
+        # each allocation directly followed by its chore_free: the two are
+        # a pair (the chore-free minutes must stay within the allocation)
+        [[a, f] for a, f in ALLOC_PAIRS] + [["screen_bonus"], ["break_interval_min", "break_duration_min"]],
+    ),
+    # The firmware names these "Timer N name", "Timer N minutes"... and
+    # {type: entity} shows exactly that, so a "Timer N" label above them
+    # would say it twice. A divider groups each slot instead.
+    ("Additional Timers", [[f"timer{n}_{fld}" for fld in TIMER_FIELDS] for n in SLOTS]),
+    ("Quiet hours & bed time", [["quiet_start", "quiet_end", "bedtime"]]),
+    ("Tones & volume", [["tone_expiry", "tone_break", "tone_bed", "alert_volume"]]),
+    (
+        "System & OTA",
+        [["name", "tz", "ota_url", "ota_on_sync", "locate"], ["ota_result", "ota_target", "ota_fails", "ota_dl_ms"]],
+    ),
 ]
 
+# The Status part's one card: the live state. The former per-slot card is
+# gone: remaining_N is in the history graph, limit_N on LEFT_OUT. battery
+# and screen_remaining stay although a graph shows them too: the battery
+# graph is a daily mean and the remaining-time graph needs a hover, so
+# neither shows the current value. Today's completions_N are here, since no
+# graph shows the current day.
 NOW = [
     "state",
     "active_timer",
@@ -435,8 +482,7 @@ NOW = [
     "chores_done",
     "battery",
     "day_type",
-]
-NOW_SLOTS = [f"{p}_{n}" for n in SLOTS for p in ("remaining", "limit", "completions")]
+] + [f"completions_{n}" for n in SLOTS]
 
 # Graphs: (title, card spec). stat_types / period per the owner's list.
 HISTORY_KEYS = ["screen_remaining"] + [f"remaining_{n}" for n in SLOTS]
@@ -508,26 +554,21 @@ DIAGNOSTICS = [
     ("Health", ["config_warning", "battery_mv", "light", "last_reset", "nvs_free"]),
     ("Memory", ["heap_free", "heap_min", "stack_main", "stack_net"]),
     ("Panic", ["panic_count", "panic_phase", "panic_uptime", "panic_heap", "panic_stack_main", "panic_stack_net"]),
-    ("Updates", ["ota_result", "ota_target", "ota_fails", "ota_dl_ms"]),
     ("Daily summary (last received)", ["screen_used_day"] + [f"day_runs_{n}" for n in SLOTS] + ["day_chores"]),
 ]
+# ...followed, still under Diagnostics, by the Activity log: a logbook card
+# over every entity of the device.
+ACTIVITY_LOG = "Activity log"
 
 
 def placed_keys() -> set[str]:
-    """Every firmware key the layout places (whether or not a device has it)."""
-    keys: set[str] = set()
-    for _, rows in SETTINGS:
-        for r in rows:
-            if r == "todo":
-                continue
-            if r == "alloc_pairs":
-                for _, a, f in ALLOC_PAIRS:
-                    keys |= {a, f}
-            elif isinstance(r, tuple):
-                keys |= {f"timer{r[1]}_{fld}" for fld in TIMER_FIELDS}
-            else:
-                keys.add(r)
-    keys |= set(NOW) | set(NOW_SLOTS) | set(HISTORY_KEYS)
+    """Every firmware key the layout places (whether or not a device has it).
+    The Activity log is not counted: it lists every entity, placed or not."""
+    keys: set[str] = set(CHORE_FLAGS)
+    for _, groups in SETTINGS:
+        for grp in groups:
+            keys |= set(grp)
+    keys |= set(NOW) | set(HISTORY_KEYS)
     for _, g in GRAPHS:
         keys |= set(g["keys"])
     for _, rows in DIAGNOSTICS:
@@ -547,16 +588,33 @@ def coverage_gaps(fw_keys) -> set[str]:
 OTHER_PART = "Other"
 OTHER_TITLE = "Not in this generator's layout (newer firmware?)"
 
+# The parts that open with a banner, in tab order (OTHER_PART, when there is
+# one, goes between Graphs and Diagnostics). The settings sections at the top
+# have none: the owner renamed the "Settings" heading away.
+STATUS_PART, GRAPHS_PART, DIAGNOSTICS_PART = "Status", "Graphs", "Diagnostics"
+
 
 # --------------------------------------------------------------------------
 # Dashboard
 # --------------------------------------------------------------------------
 
 ENTITY_NAME = {"type": "entity"}
+MAX_COLUMNS = 4  # the view's max_columns; a part banner spans all of them
 
 
 def _heading(text: str, style: str = "title") -> dict:
     return {"type": "heading", "heading": text, "heading_style": style}
+
+
+def _banner(part: str) -> dict:
+    """A part's banner: a full-width section holding only its title heading.
+    A title heading inside a part's first section reads as that section's
+    name, not as a wrapper. HA's sections view places sections row by row
+    (grid-auto-flow: row, hui-sections-view.ts) and caps column_span at the
+    columns shown, so a section spanning every column always starts a new
+    row. A grid section holding only a heading card is what HA's own "add
+    section" creates (views/default-section.ts)."""
+    return {"type": "grid", "column_span": MAX_COLUMNS, "cards": [_heading(part, "title")]}
 
 
 def _row(eid: str, name=None) -> dict:
@@ -573,73 +631,66 @@ def build_view(node: str, label: str, entities: dict[str, Entity]) -> dict:
     def rows(keys):
         return [_row(eid(k)) for k in keys if k in entities]
 
-    sections = []
+    # (part name or None, that part's sections). A part opens with a banner
+    # (see _banner()) only if at least one of its sections is emitted: a
+    # device lacking a whole part (--mqtt) gets no empty banner.
+    parts: list[tuple[str | None, list]] = [(None, [])]  # the settings: no banner
 
-    def section(title, cards, part=None, span=None):
+    def part(name):
+        parts.append((name, []))
+
+    def section(title, cards, span=None):
+        """A content section, named by its own subtitle heading; dropped
+        when the device has none of its cards."""
         cards = [c for c in cards if c]
         if not cards:
             return
-        head = [_heading(part, "title")] if part else []
-        s = {"type": "grid", "cards": head + [_heading(title, "subtitle")] + cards}
+        s = {"type": "grid", "cards": [_heading(title, "subtitle")] + cards}
         if span:
             s["column_span"] = span
-        sections.append(s)
+        parts[-1][1].append(s)
 
     def entities_card(keys):
         r = rows(keys)
         return {"type": "entities", "entities": r} if r else None
 
-    # ---- Settings
-    for i, (title, spec) in enumerate(SETTINGS):
-        cards = []
-        plain = []
-        for r in spec:
-            if r == "todo":
-                cards.append({"type": "todo-list", "entity": todo_entity_id(node)})
-            elif r == "alloc_pairs":
-                for day, a, f in ALLOC_PAIRS:
-                    # Tiles without a numeric-input feature: its buttons
-                    # step by 1 over a 1..1440 range and its slider cannot
-                    # land on an exact minute. A tap opens the more-info
-                    # dialog, where the number's box mode takes a typed value.
-                    pair = [
-                        {"type": "tile", "entity": eid(k), "name": nm}
-                        for k, nm in ((a, day), (f, "Chore-free"))
-                        if k in entities
-                    ]
-                    if pair:
-                        cards.append({"type": "horizontal-stack", "cards": pair})
-            elif isinstance(r, tuple):
-                n = r[1]
-                keys = [f"timer{n}_{fld}" for fld in TIMER_FIELDS if f"timer{n}_{fld}" in entities]
-                if keys:
-                    # The firmware names these "Timer N name", "Timer N
-                    # minutes"... and {type: entity} shows exactly that, so
-                    # a "Timer N" label above them would say it twice. A
-                    # divider groups them instead; hard-coding short names
-                    # ("Minutes") would copy firmware strings into this file.
-                    if plain:
-                        plain.append({"type": "divider"})
-                    plain.extend(rows(keys))
-            else:
-                plain.extend(rows([r]))
-        if plain:
-            cards.append({"type": "entities", "entities": plain})
-        # The paired tiles are half a row each: a double-width section keeps
-        # their labels whole on a wide screen (a phone shows one column).
-        section(title, cards, part="Settings" if i == 0 else None, span=2 if "alloc_pairs" in spec else None)
+    def grouped_card(groups):
+        """One entities card; the groups the device has, divider-separated."""
+        out = []
+        for grp in groups:
+            r = rows(grp)
+            if r:
+                if out:
+                    out.append({"type": "divider"})
+                out.extend(r)
+        return {"type": "entities", "entities": out} if out else None
 
-    # ---- Activity
-    section("Now", [entities_card(NOW), entities_card(NOW_SLOTS)], part="Activity")
-    all_ids = sorted(eid(k) for k in entities)
-    section("Activity log", [{"type": "logbook", "hours_to_show": 48, "target": {"entity_id": all_ids}}], span=2)
+    # ---- Chores Settings: the To-do card, then the done flags. The
+    # "Chores Status" label is a subtitle heading card rather than the
+    # entities card's own `title:`: it then reads like every other label on
+    # the tab (a card title is a larger header inside the card), and it
+    # goes with the flags when a device has none (--mqtt, no chores).
+    flags = entities_card(CHORE_FLAGS)
+    section(
+        CHORES_SETTINGS,
+        [{"type": "todo-list", "entity": todo_entity_id(node)}]
+        + ([_heading(CHORES_STATUS, "subtitle"), flags] if flags else []),
+    )
+
+    # ---- The other settings, one entities card each
+    for title, groups in SETTINGS:
+        section(title, [grouped_card(groups)])
+
+    # ---- Status
+    part(STATUS_PART)
+    section("Now", [entities_card(NOW)])
 
     # ---- Graphs
+    part(GRAPHS_PART)
     hist = rows(HISTORY_KEYS)
     section(
         "Remaining time today",
         [{"type": "history-graph", "hours_to_show": 24, "entities": hist} if hist else None],
-        part="Graphs",
         span=2,
     )
     for title, g in GRAPHS:
@@ -665,13 +716,28 @@ def build_view(node: str, label: str, entities: dict[str, Entity]) -> dict:
         )
 
     # ---- Other: entities the layout does not place (see OTHER_PART)
-    section(OTHER_TITLE, [entities_card(sorted(coverage_gaps(entities)))], part=OTHER_PART)
+    part(OTHER_PART)
+    section(OTHER_TITLE, [entities_card(sorted(coverage_gaps(entities)))])
 
-    # ---- Diagnostics (bottom)
-    for i, (title, keys) in enumerate(DIAGNOSTICS):
-        section(title, [entities_card(keys)], part="Diagnostics" if i == 0 else None)
+    # ---- Diagnostics (bottom), ending with the Activity log
+    part(DIAGNOSTICS_PART)
+    for title, keys in DIAGNOSTICS:
+        section(title, [entities_card(keys)])
+    all_ids = sorted(eid(k) for k in entities)
+    section(ACTIVITY_LOG, [{"type": "logbook", "hours_to_show": 48, "target": {"entity_id": all_ids}}], span=2)
 
-    return {"title": label, "path": f"magtag-{node}", "type": "sections", "max_columns": 4, "sections": sections}
+    sections = []
+    for name, secs in parts:
+        if name and secs:
+            sections.append(_banner(name))
+        sections += secs
+    return {
+        "title": label,
+        "path": f"magtag-{node}",
+        "type": "sections",
+        "max_columns": MAX_COLUMNS,
+        "sections": sections,
+    }
 
 
 def build_dashboard(devices: list[dict], entity_sets: dict[str, dict[str, Entity]]) -> dict:

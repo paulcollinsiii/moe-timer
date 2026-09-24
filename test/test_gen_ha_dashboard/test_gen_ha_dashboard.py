@@ -20,8 +20,18 @@ What is pinned, and why each matters:
     suite checks against independent crude row counts -- is on the tab or
     on LEFT_OUT with a reason. A firmware entity added later fails here
     instead of silently missing from the dashboard;
-  - each allocation shares a row with its chore_free (pairs re-derived from
-    ha_config.c, not from the tool's table);
+  - the tab's layout (owner, revised after applying it, M4-T6): the parts
+    and sections in order, Status, Graphs, [Other] and Diagnostics each
+    opening with a full-width, heading-only banner (dropped with its last
+    section), the settings with none, and no title heading anywhere
+    else; one Screen Timer Settings card in which each
+    allocation is directly followed by its chore_free inside one divider
+    group (pairs re-derived from ha_config.c, not from the tool's table),
+    then screen_bonus, then the breaks; the Updates keys under System & OTA
+    and no Updates section; the Activity log at the bottom, under
+    Diagnostics; no per-slot remaining_N / limit_N row on the Now card,
+    which keeps battery and screen_remaining; limit_N on LEFT_OUT; a device's missing keys, dividers and labels dropped, never
+    rendered empty;
   - each statistics-graph entity carries a state_class compatible with the
     card's stat_types, judged by the tool's own rule (graph_compatible();
     history-graph is exempt: recorder history is enough);
@@ -129,6 +139,54 @@ def entity_refs(tree):
 
 def dashboard():
     return yaml.safe_load(g.render("dashboard", DEVICES, SETS))
+
+
+def headings(section, style=None):
+    return [c["heading"] for c in section["cards"]
+            if c.get("type") == "heading" and (style is None or c.get("heading_style") == style)]
+
+
+def section_titled(view, title):
+    """The one section carrying `title` as a heading."""
+    found = [s for s in view["sections"] if title in headings(s)]
+    assert len(found) == 1, (title, len(found))
+    return found[0]
+
+
+def is_banner(section):
+    """A part banner: full width, holding one title heading and nothing else."""
+    cards = section["cards"]
+    return (section.get("column_span") == 4 and len(cards) == 1 and cards[0].get("type") == "heading"
+            and cards[0].get("heading_style") == "title")
+
+
+def outline(view):
+    """The tab in order: ("banner", part) for a part banner, ("section",
+    label) for a content section, labelled by its first card, which must be
+    a subtitle heading."""
+    out = []
+    for s in view["sections"]:
+        if is_banner(s):
+            out.append(("banner", s["cards"][0]["heading"]))
+        else:
+            first = s["cards"][0]
+            assert first.get("type") == "heading" and first.get("heading_style") == "subtitle", first
+            out.append(("section", first["heading"]))
+    return out
+
+
+def parts_of(view):
+    return [name for kind, name in outline(view) if kind == "banner"]
+
+
+def keys_of(card):
+    """The firmware keys an entities card lists, dividers as '--'."""
+    return [ID_RE.match(r["entity"]).group(3) if "entity" in r else "--" for r in card["entities"]]
+
+
+def non_log_refs(view):
+    """entity_refs() of every card but the Activity log, which lists every entity."""
+    return [r for s in view["sections"] for c in s["cards"] if c.get("type") != "logbook" for r in entity_refs(c)]
 
 
 def find_uv():
@@ -296,10 +354,34 @@ class TestCoverage(unittest.TestCase):
         self.assertEqual(g.placed_keys() - set(FW), set())
 
     def test_every_placed_key_is_rendered_on_every_tab(self):
-        # placed_keys() is the layout's claim; this checks the builder keeps it.
+        # placed_keys() is the layout's claim; this checks the builder keeps
+        # it. The Activity log lists every entity, LEFT_OUT ones too, so it
+        # is not counted as placing anything.
         for view, dev in zip(dashboard()["views"], DEVICES):
-            seen = {ID_RE.match(r).group(3) for r in entity_refs(view) if not r.startswith("todo.")}
+            seen = {ID_RE.match(r).group(3) for r in non_log_refs(view) if not r.startswith("todo.")}
             self.assertEqual(seen, set(FW) - set(g.LEFT_OUT), view["title"])
+
+    def test_limit_n_is_left_out_as_the_effective_minutes(self):
+        # limit_N is the slot's effective limit, i.e. timerN_min (under
+        # Additional Timers) except on a day a raw-command grant moved it,
+        # or after a timerN_min edit while the slot is EXPIRED (timer.c
+        # timer_reconcile_def() leaves IDLE/EXPIRED alone; RUNNING/PAUSED
+        # follow the edit). app_state_stats() must still derive it from the
+        # configured duration, or the reason below is false.
+        self.assertEqual(set(g.LEFT_OUT), {f"limit_{n}" for n in g.SLOTS})
+        for n in g.SLOTS:
+            why = g.LEFT_OUT[f"limit_{n}"]
+            self.assertIn("the effective minutes; Additional Timers shows", why)
+            self.assertIn(f"timer{n}_min", why)
+            self.assertIn("grant", why)
+            self.assertIn(f"timer{n}_min edit while the timer is expired", why)
+            self.assertNotIn("run", why)  # a running slot follows the edit
+            self.assertIn(f"timer{n}_min", [k for _, grps in g.SETTINGS for grp in grps for k in grp])
+        self.assertIn("return TIMER_RECONCILE_NONE; /* IDLE/EXPIRED pick up the new def at next start */",
+                      read("main/timer.c"))
+        self.assertIn('"{{ (value_json.allocation_s[1] / 60) | round(0) }}"', read("main/stats_json.c"))
+        self.assertIn("effective_allocation((i == 0) ? schedule_get_allocation_sec(dt) : (uint32_t)sd->duration_sec,",
+                      read("main/app_state.c"))
 
     def test_missing_entities_are_skipped_not_rendered(self):
         # The entity set is an input (M4-T3 supplies it from discovery).
@@ -343,27 +425,132 @@ class TestDashboard(unittest.TestCase):
         self.assertEqual(g.todo_entity_id("1a0a5c"), "todo.magtag_1a0a5c_chores")
         self.assertEqual(g.todo_list_name("1a0a5c"), "MagTag 1a0a5c chores")
 
-    def test_settings_start_with_the_todo_card_and_chore_flags(self):
+    def test_chores_settings_holds_the_todo_card_then_the_chores_status_flags(self):
         for view, dev in zip(self.doc["views"], DEVICES):
+            n = dev["node"]
             first = view["sections"][0]["cards"]
-            self.assertEqual(first[0], {"type": "heading", "heading": "Settings", "heading_style": "title"})
-            todo = [c for c in first if c.get("type") == "todo-list"]
-            self.assertEqual(todo, [{"type": "todo-list", "entity": g.todo_entity_id(dev["node"])}])
-            flags = entity_refs(first)
-            for i in (1, 2, 3):
-                self.assertIn(f"binary_sensor.magtag_{dev['node']}_chore_{i}", flags)
+            self.assertEqual([c["type"] for c in first], ["heading", "todo-list", "heading", "entities"])
+            self.assertEqual(first[0], {"type": "heading", "heading": "Chores Settings", "heading_style": "subtitle"})
+            self.assertEqual(first[1], {"type": "todo-list", "entity": g.todo_entity_id(n)})
+            self.assertEqual(first[2], {"type": "heading", "heading": "Chores Status", "heading_style": "subtitle"})
+            self.assertEqual(entity_refs(first[3]), [f"binary_sensor.magtag_{n}_chore_{i}" for i in (1, 2, 3)])
+            # no "Settings" part heading any more, anywhere
+            self.assertNotIn("Settings", [h for s in view["sections"] for h in headings(s)])
 
-    def test_each_allocation_shares_a_row_with_its_chore_free(self):
+    def test_the_tab_runs_in_the_owners_order(self):
+        # Status, Graphs and Diagnostics each open with a banner; the
+        # settings sections at the top have none. Every content section is
+        # named by its own subtitle.
+        S = "section"
+        want = [(S, "Chores Settings"),
+                (S, "Screen Timer Settings"),
+                (S, "Additional Timers"),
+                (S, "Quiet hours & bed time"),
+                (S, "Tones & volume"),
+                (S, "System & OTA"),
+                ("banner", "Status"),
+                (S, "Now"),
+                ("banner", "Graphs"),
+                (S, "Remaining time today")] + [(S, t) for t, _ in g.GRAPHS] + [
+                ("banner", "Diagnostics"),
+                (S, "Health"),
+                (S, "Memory"),
+                (S, "Panic"),
+                (S, "Daily summary (last received)"),
+                (S, "Activity log")]
+        for view in self.doc["views"]:
+            self.assertEqual(outline(view), want)
+
+    def test_part_banners_are_full_width_title_only_sections(self):
+        for view in self.doc["views"]:
+            banners = [s for s in view["sections"] if is_banner(s)]
+            self.assertEqual([s["cards"][0]["heading"] for s in banners], ["Status", "Graphs", "Diagnostics"])
+            for s in banners:
+                # full width (the view's max_columns), so it starts a new row
+                self.assertEqual(s, {"type": "grid", "column_span": view["max_columns"],
+                                     "cards": [{"type": "heading", "heading": s["cards"][0]["heading"],
+                                                "heading_style": "title"}]})
+            # no title-style heading anywhere but in a banner
+            titles = [c for s in view["sections"] if not is_banner(s) for c in walk(s)
+                      if c.get("type") == "heading" and c.get("heading_style", "title") == "title"]
+            self.assertEqual(titles, [])
+            # and every heading card states its style (HA's default is title)
+            self.assertTrue(all("heading_style" in c for c in walk(view) if c.get("type") == "heading"))
+
+    def test_screen_timer_settings_pairs_each_allocation_with_its_chore_free(self):
         # Pairs from the source (NUM_CHORE_FREE's third argument), not the tool.
         pairs = re.findall(r'NUM_CHORE_FREE\("(\w+)",\s*"[^"]*",\s*"(\w+)"', read("main/ha_config.c"))
         self.assertEqual(len(pairs), 4)
-        self.assertEqual({(a, f) for _, a, f in g.ALLOC_PAIRS}, {(a, f) for f, a in pairs})
-        for view, dev in zip(self.doc["views"], DEVICES):
-            rows = [sorted(entity_refs(c)) for c in walk(view) if c.get("type") == "horizontal-stack"]
-            for free, alloc in pairs:
-                with self.subTest(view=view["title"], alloc=alloc):
-                    want = sorted([f"number.magtag_{dev['node']}_{alloc}", f"number.magtag_{dev['node']}_{free}"])
-                    self.assertIn(want, rows)
+        self.assertEqual(set(g.ALLOC_PAIRS), {(a, f) for f, a in pairs})
+        for view in self.doc["views"]:
+            sec = section_titled(view, "Screen Timer Settings")
+            cards = [c for c in sec["cards"] if c.get("type") != "heading"]
+            self.assertEqual([c["type"] for c in cards], ["entities"])  # one card; no tiles, no stacks
+            self.assertNotIn("column_span", sec)
+            groups = " ".join(keys_of(cards[0])).split(" -- ")
+            # allocation then its chore_free, alone in their divider group;
+            # then screen adjust; then the breaks
+            self.assertEqual(groups[:4], [f"{a} {f}" for f, a in pairs])
+            self.assertEqual(groups[4:], ["screen_bonus", "break_interval_min break_duration_min"])
+            for r in cards[0]["entities"]:
+                if "entity" in r:
+                    self.assertEqual(r["name"], {"type": "entity"})
+        # ...and the firmware names tell the two rows of a pair apart
+        for a, f in g.ALLOC_PAIRS:
+            day = FW[a].name.split()[0]
+            self.assertEqual((FW[a].name, FW[f].name), (f"{day} allocation", f"{day} chore-free"))
+        for view in self.doc["views"]:
+            self.assertFalse([c for c in walk(view) if c.get("type") in ("horizontal-stack", "tile")])
+
+    def test_updates_are_under_system_and_ota_after_a_divider(self):
+        for view in self.doc["views"]:
+            self.assertNotIn("Updates", [h for s in view["sections"] for h in headings(s)])
+            sec = section_titled(view, "System & OTA")
+            (card,) = [c for c in sec["cards"] if c.get("type") == "entities"]
+            self.assertEqual(" ".join(keys_of(card)).split(" -- "),
+                             ["name tz ota_url ota_on_sync locate", "ota_result ota_target ota_fails ota_dl_ms"])
+
+    def test_additional_timers_is_the_former_timers_section(self):
+        for view in self.doc["views"]:
+            self.assertNotIn("Timers", [h for s in view["sections"] for h in headings(s)])
+            sec = section_titled(view, "Additional Timers")
+            (card,) = [c for c in sec["cards"] if c.get("type") == "entities"]
+            want = [" ".join(f"timer{n}_{f}" for f in ("name", "min", "reload", "break")) for n in (1, 2, 3, 4)]
+            self.assertEqual(" ".join(keys_of(card)).split(" -- "), want)
+
+    def test_the_now_card_drops_the_per_slot_rows_keeps_battery_and_screen_remaining(self):
+        # The owner's "drop what a graph shows" is the per-slot card:
+        # remaining_N is graphed, limit_N on LEFT_OUT. battery and
+        # screen_remaining stay (plan item 9): the battery graph is a daily
+        # mean and the remaining graph needs a hover, so neither shows the
+        # current value. Today's completions_N stay: no graph shows today.
+        for view in self.doc["views"]:
+            graphed = {ID_RE.match(r).group(3) for c in walk(view)
+                       if c.get("type") in ("history-graph", "statistics-graph") for r in entity_refs(c)}
+            self.assertTrue({"screen_remaining", "battery", "remaining_1", "day_runs_4"} <= graphed)
+            now = section_titled(view, "Now")
+            cards = [c for c in now["cards"] if c.get("type") != "heading"]
+            self.assertEqual([c["type"] for c in cards], ["entities"])  # the per-slot card is gone
+            now_keys = keys_of(cards[0])
+            self.assertEqual(now_keys, g.NOW)
+            self.assertEqual(set(now_keys) & graphed, {"battery", "screen_remaining"})
+            for n in g.SLOTS:
+                self.assertIn(f"completions_{n}", now_keys)  # no graph shows the current day
+                self.assertNotIn(f"remaining_{n}", now_keys)
+                self.assertNotIn(f"limit_{n}", now_keys)
+            self.assertFalse([k for k in now_keys if re.fullmatch(r"(remaining|limit)_\d", k)])
+            for k in ("state", "active_timer", "screen_remaining", "screen_limit", "battery", "chores_left",
+                      "chores_done", "day_type"):
+                self.assertIn(k, now_keys)
+
+    def test_the_activity_log_is_the_last_section_under_diagnostics(self):
+        for view in self.doc["views"]:
+            last = view["sections"][-1]
+            self.assertEqual(headings(last), ["Activity log"])
+            self.assertEqual([c["type"] for c in last["cards"][1:]], ["logbook"])
+            self.assertEqual(last.get("column_span"), 2)
+            self.assertEqual(parts_of(view)[-1], "Diagnostics")
+            self.assertEqual([c for c in walk(view) if c.get("type") == "logbook"], last["cards"][1:])
 
     def test_statistics_graphs_carry_a_compatible_state_class(self):
         for view in self.doc["views"]:
@@ -450,7 +637,7 @@ class TestDashboard(unittest.TestCase):
         # The firmware's own names ("Timer 1 minutes") carry the slot, so
         # no "Timer N" section label repeats it; dividers group the slots.
         for view in self.doc["views"]:
-            sec = [s for s in view["sections"] if any(c.get("heading") == "Timers" for c in s["cards"])]
+            sec = [s for s in view["sections"] if any(c.get("heading") == "Additional Timers" for c in s["cards"])]
             self.assertEqual(len(sec), 1)
             rows = [r for c in sec[0]["cards"] if c.get("type") == "entities" for r in c["entities"]]
             self.assertEqual([r for r in rows if "entity" not in r], [{"type": "divider"}] * 3)
@@ -468,17 +655,14 @@ class TestDashboard(unittest.TestCase):
             want = {g.entity_id(e.component, dev["node"], k) for k, e in FW.items()}
             self.assertEqual(set(logs[0]["target"]["entity_id"]), want)
 
-    def test_parts_run_settings_activity_graphs_diagnostics(self):
+    def test_diagnostics_hold_health_memory_panic_and_the_summary(self):
         for view in self.doc["views"]:
-            titles = [c["heading"] for s in view["sections"] for c in s["cards"]
-                      if c.get("type") == "heading" and c.get("heading_style") == "title"]
-            self.assertEqual(titles, ["Settings", "Activity", "Graphs", "Diagnostics"])
-            last = entity_refs(view["sections"][-1])
-            self.assertTrue(last)
-            diag = {ID_RE.match(r).group(3) for s in view["sections"][-5:] for r in entity_refs(s)}
-            for k in ("battery_mv", "heap_free", "stack_net", "panic_count", "ota_result", "nvs_free",
-                      "config_warning"):
+            start = next(i for i, s in enumerate(view["sections"]) if is_banner(s) and headings(s) == ["Diagnostics"])
+            diag = [ID_RE.match(r).group(3) for s in view["sections"][start:-1] for r in entity_refs(s)]
+            for k in ("config_warning", "battery_mv", "nvs_free", "heap_free", "stack_net", "panic_count",
+                      "panic_stack_net", "screen_used_day", "day_runs_1", "day_chores"):
                 self.assertIn(k, diag)
+            self.assertFalse({"ota_result", "ota_target", "ota_fails", "ota_dl_ms"} & set(diag))
 
     def test_runtime_named_entities_take_their_name_from_discovery(self):
         # Per-slot rows are named "<timer> remaining" etc. by the device at
@@ -1010,6 +1194,55 @@ class TestMqttCollect(unittest.TestCase):
         for k in ("chore_1", "chore_2", "remaining_2", "timer3_name", "timer4_min"):
             self.assertIn(k, keys)
 
+    def test_a_partial_device_renders_only_what_it_has_without_empty_groups_or_labels(self):
+        # A device with no OTA-result keys, no chores, no holiday pair and
+        # no Health keys: each group, label and section goes with its keys
+        # (no leading, trailing or doubled divider). A part's banner stays
+        # while any of its sections is left, and goes with the last one.
+        gone = ({"ota_result", "ota_target", "ota_fails", "ota_dl_ms", "holiday_min", "chore_free_hol"}
+                | {f"chore_{n}" for n in g.CHORES} | set(g.DIAGNOSTICS[0][1]))
+        msgs = [m for m in TESTING_MSGS if not any(f"_{k}/" in m[0] for k in gone)]
+        ents = g.collect_discovery(msgs).entity_sets["1a0a5c"]
+        self.assertFalse(gone & set(ents))
+        view = g.build_view("1a0a5c", "Testing Timer", ents)
+        keys = {ID_RE.match(r).group(3) for r in entity_refs(view) if not r.startswith("todo.")}
+        self.assertEqual(keys, set(ents))
+        first = view["sections"][0]["cards"]
+        self.assertEqual([c["type"] for c in first], ["heading", "todo-list"])  # no "Chores Status" label
+        self.assertEqual(headings(view["sections"][0]), ["Chores Settings"])
+        (ota,) = [c for c in section_titled(view, "System & OTA")["cards"] if c.get("type") == "entities"]
+        self.assertEqual(keys_of(ota), ["name", "tz", "ota_url", "ota_on_sync", "locate"])
+        (scr,) = [c for c in section_titled(view, "Screen Timer Settings")["cards"] if c.get("type") == "entities"]
+        self.assertEqual(" ".join(keys_of(scr)).split(" -- "),
+                         ["weekday_min chore_free_wd", "weekend_min chore_free_we", "summer_min chore_free_sum",
+                          "screen_bonus", "break_interval_min break_duration_min"])
+        for c in walk(view):
+            if c.get("type") == "entities":
+                ks = keys_of(c)
+                self.assertTrue(ks and ks[0] != "--" and ks[-1] != "--" and "-- --" not in " ".join(ks))
+        self.assertNotIn("Health", [h for s in view["sections"] for h in headings(s)])
+        # Health gone, the Diagnostics banner stays, right above Memory
+        out = outline(view)
+        self.assertEqual(parts_of(view), ["Status", "Graphs", "Diagnostics"])
+        i = out.index(("banner", "Diagnostics"))
+        self.assertEqual(out[i + 1], ("section", "Memory"))
+        # every Diagnostics entity card gone: the banner stays over the Activity log
+        bare = {k: e for k, e in ents.items() if k not in {x for _, ks in g.DIAGNOSTICS for x in ks}}
+        self.assertEqual(outline(g.build_view("1a0a5c", "Testing Timer", bare))[-2:],
+                         [("banner", "Diagnostics"), ("section", "Activity log")])
+        # no Now keys and nothing to graph: no Status and no Graphs banner,
+        # and System & OTA runs straight into the Diagnostics banner
+        graphed = set(g.HISTORY_KEYS) | {k for _, spec in g.GRAPHS for k in spec["keys"]}
+        empty = {k: e for k, e in ents.items() if k not in set(g.NOW) | graphed}
+        out = outline(g.build_view("1a0a5c", "Testing Timer", empty))
+        self.assertEqual([n for k, n in out if k == "banner"], ["Diagnostics"])
+        i = out.index(("banner", "Diagnostics"))
+        self.assertEqual(out[i - 1: i + 2], [("section", "System & OTA"), ("banner", "Diagnostics"),
+                                             ("section", "Memory")])
+        # only Now left of Status and Graphs: Status keeps its banner
+        only_now = {k: e for k, e in ents.items() if k not in graphed}
+        self.assertEqual(parts_of(g.build_view("1a0a5c", "Testing Timer", only_now)), ["Status", "Diagnostics"])
+
     def test_the_last_payload_on_a_topic_wins(self):
         on, off = disc("sensor", "abcdef", "battery", "Battery", "X")[1], b""
         t = "homeassistant/sensor/magtag-abcdef_battery/config"
@@ -1065,12 +1298,12 @@ class TestMqttCollect(unittest.TestCase):
         self.assertIn("fake_future, reboot_now", w[0])
         self.assertIn("Testing Timer (magtag-1a0a5c)", w[0])
         view = g.build_view("1a0a5c", "Testing Timer", scan.entity_sets["1a0a5c"])
-        titles = [c["heading"] for s in view["sections"] for c in s["cards"]
-                  if c.get("type") == "heading" and c.get("heading_style") == "title"]
-        self.assertEqual(titles, ["Settings", "Activity", "Graphs", "Other", "Diagnostics"])
-        other = [s for s in view["sections"] if s["cards"][0].get("heading") == "Other"]
-        self.assertEqual(len(other), 1)
-        self.assertEqual(sorted(entity_refs(other[0])),
+        self.assertEqual(parts_of(view), ["Status", "Graphs", "Other", "Diagnostics"])
+        out = outline(view)
+        i = out.index(("banner", "Other"))
+        self.assertEqual(out[i + 1:i + 3], [("section", g.OTHER_TITLE), ("banner", "Diagnostics")])
+        other = view["sections"][i + 1]
+        self.assertEqual(sorted(entity_refs(other)),
                          ["button.magtag_1a0a5c_reboot_now", "sensor.magtag_1a0a5c_fake_future"])
         # ...and nothing else is there, and the file-mode tab has no Other part.
         self.assertFalse([x for x in self.scan.warnings if "layout does not know" in x])
