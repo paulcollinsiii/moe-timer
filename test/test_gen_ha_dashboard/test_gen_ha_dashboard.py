@@ -256,6 +256,7 @@ static const cfg_field_t FIELDS[] = {
             "battery": ("sensor", "measurement"),
             "screen_used_day": ("sensor", "total"),
             "day_runs_4": ("sensor", "total"),
+            "day_chores": ("sensor", "total"),
             "chores_done": ("sensor", "measurement"),
             "completions_1": ("sensor", None),
             "chore_3": ("binary_sensor", None),
@@ -403,15 +404,33 @@ class TestDashboard(unittest.TestCase):
                      (runs, ("change",), "day"),
                      (runs, ("change",), "week"),
                      ((f"sensor.magtag_{n}_screen_used_day",), ("change",), "day"),
-                     ((f"sensor.magtag_{n}_chores_done",), ("max",), "day")]:
+                     ((f"sensor.magtag_{n}_day_chores",), ("change",), "day")]:
             self.assertIn(want, stats)
+        self.assertEqual(len(stats), 5)
         notes = [c["content"] for c in walk(view) if c.get("type") == "markdown"]
         self.assertTrue(notes and all("following" in t for t in notes))
+
+    def test_chores_per_day_reads_the_summary_not_the_live_count(self):
+        # A daily `max` of the live chores_done counts the value carried
+        # across midnight, so a day with nothing done could show the day
+        # before's full count. The graph reads day_chores with `change`;
+        # chores_done stays on the tab as the live value, in no graph.
+        view = self.doc["views"][0]
+        n = DEVICES[0]["node"]
+        graphs = [c for c in walk(view) if c.get("type") == "statistics-graph"]
+        chores = [c for c in graphs if f"sensor.magtag_{n}_day_chores" in entity_refs(c)]
+        self.assertEqual(len(chores), 1)
+        self.assertEqual(entity_refs(chores[0]), [f"sensor.magtag_{n}_day_chores"])
+        self.assertEqual((chores[0]["stat_types"], chores[0]["period"]), (["change"], "day"))
+        live = f"sensor.magtag_{n}_chores_done"
+        self.assertFalse([c for c in graphs if live in entity_refs(c)])
+        now = next(s for s in view["sections"] if any(c.get("heading") == "Now" for c in s["cards"]))
+        self.assertIn(live, [r for c in now["cards"] for r in entity_refs(c)])
 
     def test_every_summary_graph_carries_the_day_shift_note(self):
         # Per-day AND per-week graphs on the daily summary sensors: a day's
         # figures land under the next day, so a Sunday run counts next week.
-        summary = re.compile(r"_(?:screen_used_day|day_runs_\d)$")
+        summary = re.compile(r"_(?:screen_used_day|day_runs_\d|day_chores)$")
         for view in self.doc["views"]:
             n = 0
             for s in view["sections"]:
@@ -423,7 +442,7 @@ class TestDashboard(unittest.TestCase):
                 self.assertEqual(len(notes), 1, s["cards"][0])
                 self.assertIn("**following** day", notes[0])
                 self.assertIn("next week", notes[0])
-            self.assertEqual(n, 3)  # runs per day, runs per week, screen minutes per day
+            self.assertEqual(n, 4)  # runs per day, runs per week, screen minutes per day, chores per day
 
     def test_timer_rows_say_timer_n_once(self):
         # The firmware's own names ("Timer 1 minutes") carry the slot, so
@@ -717,7 +736,7 @@ FOREIGN = [
 # payload carried a stat_cla.
 V21_PLUS = ({f"chore_{n}" for n in (1, 2, 3)} | {f"day_runs_{n}" for n in (1, 2, 3, 4)}
             | {"chore_free_wd", "chore_free_we", "chore_free_hol", "chore_free_sum", "chores_left", "chores_done",
-               "config_warning", "screen_used_day"})
+               "config_warning", "screen_used_day", "day_chores"})
 
 # The recorded broker:
 #  - Testing Timer on current firmware, timer slots 3 and 4 disabled, 2 chores;
@@ -874,7 +893,7 @@ class TestMqttCollect(unittest.TestCase):
         self.assertIn("It reports firmware 1.5.4.", w[0])
         # the always-published v21-v23 keys are named; the conditional ones
         # (chore rows, day_runs_N) could be a short list, not old firmware
-        for k in ("chore_free_wd", "chores_left", "chores_done", "config_warning", "screen_used_day"):
+        for k in ("chore_free_wd", "chores_left", "chores_done", "config_warning", "screen_used_day", "day_chores"):
             self.assertIn(k, w[0])
         for k in ("chore_1", "day_runs_1"):
             self.assertNotIn(k, w[0])
@@ -923,6 +942,26 @@ class TestMqttCollect(unittest.TestCase):
         self.assertIn("runs older firmware", cla[0])
         self.assertIn("No state class on screen_used_day,", cla[0])
         self.assertNotIn("Missing entities", cla[0])
+
+    def test_a_device_without_day_chores_is_older_firmware_and_loses_only_that_graph(self):
+        # The M3 build (and M4-T1..T3) publishes no day_chores. It is not a
+        # conditional key (never retired), so its absence means older
+        # firmware: a warning naming it, and the tab keeps every other
+        # graph while the chores graph is dropped, never emitted empty or
+        # fed from chores_done.
+        self.assertNotIn("day_chores", g.conditional_keys())
+        msgs = [m for m in TESTING_MSGS if "_day_chores/" not in m[0]]
+        self.assertEqual(len(msgs), len(TESTING_MSGS) - 1)
+        scan = g.collect_discovery(msgs, fw=FW)
+        self.assertEqual(len(scan.warnings), 1, scan.warnings)
+        self.assertIn("runs older firmware", scan.warnings[0])
+        self.assertIn("Missing entities current firmware always publishes: day_chores.", scan.warnings[0])
+        view = g.build_view("1a0a5c", "Testing Timer", scan.entity_sets["1a0a5c"])
+        headings = [c.get("heading") for c in walk(view) if c.get("type") == "heading"]
+        self.assertNotIn("Chores done per day", headings)
+        graphs = [c for c in walk(view) if c.get("type") == "statistics-graph"]
+        self.assertEqual(len(graphs), len(g.GRAPHS) - 1)
+        self.assertFalse([c for c in graphs if "sensor.magtag_1a0a5c_chores_done" in entity_refs(c)])
 
     def test_def_ent_id_that_disagrees_with_the_topic_warns(self):
         t, p = disc("sensor", "abcdef", "battery", "B", "X")

@@ -176,8 +176,22 @@ typedef struct {
 
 int stats_json_act(char *buf, size_t len, const act_state_t *a);
 
+/* The finished day, retained on magtag/<id>/summary:
+   {"date":..,"screen_used_s":..,"completions":[..],"chores_done":N,"chores":M}.
+   Fields only ever APPEND: the summary-topic rows' templates read them by
+   name. chores_done is the day's acked chores among the `chores` that
+   were configured when the rollover captured it (0 and 0 with no list);
+   `chores` is carried so a reader can tell "none of 3 done" from "no
+   list", and has no entity of its own.
+
+   chores = STATS_JSON_CHORES_UNKNOWN (any negative) when the chore list
+   could not be read at the rollover (chore_store_names_known() false):
+   both fields are then OMITTED, chores_done ignored. The day's count is
+   unknown, and day_chores' template renders "None" for a missing field,
+   so HA records the day as unknown instead of a permanent 0. */
+#define STATS_JSON_CHORES_UNKNOWN (-1)
 int stats_json_summary(char *buf, size_t len, const char *date, int32_t screen_used_s,
-                       const uint16_t completions[TIMER_EXTRA_SLOTS]);
+                       const uint16_t completions[TIMER_EXTRA_SLOTS], unsigned chores_done, int chores);
 
 /* One HA MQTT-discovery entity. The static table (stats_json_entities)
    fully describes the fixed entities; the per-slot completion sensors use
@@ -294,7 +308,11 @@ typedef struct {
         already fed stat_t, so no code moved): screen_used_day, the
         finished day's Screen minutes, and day_runs_1..4, the finished
         day's runs of each extra timer (named and retired with their slot,
-        like completions_N; see stats_json_slot_of). All five carry
+        like completions_N; see stats_json_slot_of), and day_chores, the
+        finished day's acked chores (M4-T5, added before v23 shipped, so
+        the number was reused: the summary gained "chores_done" and
+        "chores", appended after "completions", captured at the rollover
+        before anything resets the acks). All six carry
         state_class "total" and the new last_reset_tpl column, which reads
         the summary's own date, so each summary starts a new cycle and the
         statistics `change` for a period is exactly what the summaries in
@@ -306,28 +324,48 @@ typedef struct {
         first draft's source for the runs graph, and they lose every run
         finished after the day's last window: the rollover zeroes them
         before HA sees the count. The summary carries those runs.
+        chores_left/chores_done keep their v22 "measurement" but are not
+        the chores graph: a daily `max` of chores_done counts the value
+        carried across midnight, so a day with nothing done could show
+        the previous day's full count. day_chores replaces it.
         WHY BUMP: a changed state_class is a changed discovery payload, and
         a new row is a new entity; neither reaches HA on a same-version
         reflash without it (the v21 note's reasoning). Costs one more
         retained discovery message per republish burst than v22 for each
-        of the five new rows.
+        of the six new rows.
         THE LOGBOOK: HA keeps no logbook entries for a sensor with a
         state_class OR a unit. The battery (%) and screen_used_day (min)
         would be left out by their unit alone, so this bump costs the
-        logbook only the day_runs_N lines — and the owner chose the graphs
-        over those. completions_N and every other row still log.
+        logbook only the day_runs_N and day_chores lines — and the owner
+        chose the graphs over those. completions_N, the chore_N flags and
+        every other row still log.
         THE FIRST SUMMARY: HA's statistics take the first value they ever
         see for a sensor as its zero point, not as a change. On the first
         registration after the OTA, that is the broker's existing retained
         summary (yesterday's, from older firmware), which is thus recorded
         once as a state and counted in no graph; the next day's summary is
         the first to count. On a device whose summary was never published,
-        the five read "unknown" until one is, and that one is the zero
-        point instead.
+        the six read "unknown" until one is, and that one is the zero
+        point instead. day_chores has one more case: a summary without
+        "chores_done" (retained by firmware older than M4-T5, or sent
+        with the field omitted because the chore list could not be read)
+        makes its template render "None", which HA's MQTT sensor takes as
+        "no value": the state is set to "unknown", which the statistics
+        skip. On a sensor that never had a value it stays "unknown" until
+        the first summary carrying the field, which is then its zero
+        point; on one that had a value (a later rollback, or a failed
+        read) that day is recorded as unknown, not as 0 and not as the
+        previous day's count repeated, and the next summary carrying the
+        field counts normally. An empty render would have been worse: HA
+        ignores an empty numeric state but still takes the new
+        last_reset, so the old value would count again as a new day.
         THE DAY SHIFT: a day's summary is published at the first window
         after midnight, and HA stamps a state with its arrival time, so the
-        per-day graphs file each day's figures under the NEXT day. No run
-        is lost to it. */
+        per-day graphs file each day's figures under the NEXT day. The
+        shift loses no run: a run finished after the day's last window is
+        still in that summary. (A day whose summary is never published is
+        lost, which is a different matter: the pending summary is plain
+        RAM, see mqtt_ha.c's s_summary.) */
 #define STATS_JSON_DISC_SCHEMA_VER 23
 
 /* Buffer the stat/summary/discovery payloads are built into (mqtt_ha.c).

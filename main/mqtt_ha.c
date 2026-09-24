@@ -189,19 +189,30 @@ bool mqtt_ha_take_grant(int *slot, int32_t *sec) {
     return true;
 }
 
-/* Pending daily summary (captured at rollover, published next window;
-   plain RAM — an unsent summary after a crash is an acceptable loss). */
+/* Pending daily summary (captured at rollover, published next window).
+   Plain RAM, which deep sleep does not keep: pending is cleared only
+   once a window's publishes are acked (below), so the summary is lost
+   after a crash AND whenever the device sleeps before any window got it
+   out, e.g. when the rollover's own window fails (no Wi-Fi, no broker):
+   the next wake starts with pending false.
+   That day is then missing from HA, and a bar graph shows it as a zero
+   day. Tracked as M4-D1 (a dated pending summary kept across sleep). */
 static struct {
     bool pending;
     char date[11];
     int32_t used_s;
     uint16_t completions[TIMER_EXTRA_SLOTS];
+    uint8_t chores_done; /* the day's acked chores, of ... */
+    int chores;          /* ... this many configured; STATS_JSON_CHORES_UNKNOWN = unread list */
 } s_summary;
 
-void mqtt_ha_queue_summary(const char *date, int32_t screen_used_s, const uint16_t completions[TIMER_EXTRA_SLOTS]) {
+void mqtt_ha_queue_summary(const char *date, int32_t screen_used_s, const uint16_t completions[TIMER_EXTRA_SLOTS],
+                           uint8_t chores_done, int chores) {
     snprintf(s_summary.date, sizeof(s_summary.date), "%s", date);
     s_summary.used_s = screen_used_s;
     memcpy(s_summary.completions, completions, sizeof(s_summary.completions));
+    s_summary.chores_done = chores_done;
+    s_summary.chores = chores;
     s_summary.pending = true;
 }
 
@@ -667,7 +678,8 @@ static int publish_states(esp_mqtt_client_handle_t client, const stats_snapshot_
     if (s_summary.pending) {
         mqtt_topic(s_mem->topic, sizeof(s_mem->topic), device_id(), "summary");
         if (stats_json_summary(s_mem->payload, sizeof(s_mem->payload), s_summary.date, s_summary.used_s,
-                               s_summary.completions) < (int)sizeof(s_mem->payload)) {
+                               s_summary.completions, s_summary.chores_done,
+                               s_summary.chores) < (int)sizeof(s_mem->payload)) {
             published += publish(client, s_mem->topic, s_mem->payload, 1);
         }
     }

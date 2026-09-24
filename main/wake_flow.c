@@ -12,6 +12,7 @@
 #include "button_latch.h"
 #include "buttons.h"
 #include "chore_store.h" /* chore_store_load_names(): the strip's row count */
+#include "chores.h"      /* chores_is_acked(): the summary's chores_done */
 #include "config_cache.h"
 #include "display.h"
 #include "hal_time.h"
@@ -1865,7 +1866,15 @@ void wake_flow_fire_expiry_alert(void) {
 /* ---- day rollover ------------------------------------------------------- */
 
 /* Yesterday's usage numbers for HA, captured BEFORE the rollover resets
-   the slots; published by the rollover's own network window. */
+   the slots; published by the rollover's own network window.
+
+   The chore acks too, and the ordering matters as much for them: the
+   window below can apply a config document whose chore-list edit
+   reconciles the acks (config_apply.c), a same-day restore rewrites them,
+   and timer_reset()'s memset zeroes them. Only here, first, are they
+   still the finished day's. Counted exactly as the live chores_done is
+   (app_state_stats): acks among the CONFIGURED chores only, so a stale
+   bit above the count is not a chore done. */
 static void queue_rollover_summary(void) {
     if (timer_current_date()[0] == '\0') {
         return; /* cold boot / restored-from-nothing: no day to report */
@@ -1875,7 +1884,25 @@ static void queue_rollover_summary(void) {
     for (int i = 0; i < TIMER_EXTRA_SLOTS; i++) {
         comp[i] = timer_slot_completions(1 + i);
     }
-    mqtt_ha_queue_summary(timer_current_date(), used, comp);
+    char names[CHORE_MAX][CHORE_NAME_BUF];
+    uint8_t n = 0;
+    const esp_err_t names_ret = chore_store_load_names(names, &n);
+    if (!chore_store_names_known(names_ret)) {
+        /* The read failed and the list is unknown (n = 0 is not the
+           truth): leave the chore fields out, so HA records the day as
+           unknown rather than a permanent "0 chores done". A list that
+           is known to be empty still reports 0 of 0 below. */
+        mqtt_ha_queue_summary(timer_current_date(), used, comp, 0, STATS_JSON_CHORES_UNKNOWN);
+        return;
+    }
+    const uint8_t acked = timer_chore_acked();
+    uint8_t done = 0;
+    for (uint8_t i = 0; i < CHORE_MAX; i++) {
+        if (chores_is_acked(acked, i, n)) {
+            done++;
+        }
+    }
+    mqtt_ha_queue_summary(timer_current_date(), used, comp, done, (n > CHORE_MAX) ? CHORE_MAX : n);
 }
 
 void wake_flow_handle_day_rollover(time_t *now) {

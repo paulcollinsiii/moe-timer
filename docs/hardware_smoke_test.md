@@ -273,8 +273,9 @@ these items cover the on-hardware behaviour.
         (or ~10 min). Confirm it does not trip the awake failsafe early and
         that the normal layout returns after dismissal.
 39. [ ] **Daily summary**: after a day rollover, the log/HA shows a
-        `summary` publish (screen seconds used + per-timer completions) for
-        the finished day; the charge-lock entry (case 23) publishes one
+        `summary` publish (screen seconds used + per-timer completions +
+        `chores_done` of `chores`, the ticks as they stood before
+        midnight) for the finished day; the charge-lock entry (case 23) publishes one
         final stat with `charge_lock` true before the long sleeps.
 
 Record failures with the monitor log snippet and the step number.

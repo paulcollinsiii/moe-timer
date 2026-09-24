@@ -20,11 +20,16 @@
    would make every such row an assertion about the stub's precedence
    rather than about the painter's. It is pure (no LVGL, no device) and
    collides with none of the display stubs below, which cover the paint
-   entry points and not the layout rules. Everything with a device behind
-   it gets a link-time spy stub in the preamble below. */
+   entry points and not the layout rules. chores.c (pure, layer 1) joins
+   for chores_is_acked() alone: the rollover summary counts the day's
+   acks through it, so the "bits above the configured count are not a
+   chore done" rule is the shipping one, not a restatement. Everything
+   with a device behind it gets a link-time spy stub in the preamble
+   below. */
 // clang-format off
 #include "../../main/bedtime.c"
 #include "../../main/button_latch.c"
+#include "../../main/chores.c"
 #include "../../main/display_layout.c"
 #include "../../main/quiet_hours.c"
 #include "../../main/wake_policy.c"
@@ -841,6 +846,12 @@ static int flow_comps_asked_when_used_read;
 static const char *flow_summary_date;
 static int32_t flow_summary_used;
 static uint16_t flow_summary_comp[TIMER_EXTRA_SLOTS];
+static int flow_summary_chores_done; /* poisoned per case: -1 = never queued */
+static int flow_summary_chores;
+/* The window rewriting the acks, as a config document's chore-list edit
+   does on device (config_apply.c reconciles them mid-window). -1 (the
+   default) leaves them alone. */
+static int flow_acked_after_window;
 
 static bool flow_restore_ok;
 static time_t flow_restore_arg;
@@ -898,10 +909,23 @@ bool timer_chore_released(void) {
    the one the panel assertions use. The names themselves are never read
    by anything this suite compiles — the strip is a function of the COUNT
    — so the rows are left empty, exactly as the real loader leaves them
-   above *n_out. */
+   above *n_out.
+
+   flow_chore_load_ret (ESP_OK by default) is the read's verdict. A
+   failure is reported the way the real loader reports one: n = 0 and an
+   error chore_store_names_known() calls unknown (ESP_FAIL here, a flash
+   read error on device). test_chore_store owns which errors are which;
+   this suite's stub cannot be reached by mock_nvs_fail_reads(), so the
+   knob stands in for it. */
+static esp_err_t flow_chore_load_ret;
+
 esp_err_t chore_store_load_names(char names[][CHORE_NAME_BUF], uint8_t *n_out) {
     for (int i = 0; i < CHORE_MAX; i++) {
         names[i][0] = '\0';
+    }
+    if (flow_chore_load_ret != ESP_OK) {
+        *n_out = 0;
+        return flow_chore_load_ret;
     }
     *n_out = flow_chore_count;
     return ESP_OK;
@@ -974,11 +998,14 @@ uint16_t timer_slot_completions(int slot) {
     return flow_completions[slot];
 }
 
-void mqtt_ha_queue_summary(const char *date, int32_t screen_used_s, const uint16_t completions[TIMER_EXTRA_SLOTS]) {
+void mqtt_ha_queue_summary(const char *date, int32_t screen_used_s, const uint16_t completions[TIMER_EXTRA_SLOTS],
+                           uint8_t chores_done, int chores) {
     flow_log_push(EV_QUEUE_SUMMARY);
     flow_summary_date = date;
     flow_summary_used = screen_used_s;
     memcpy(flow_summary_comp, completions, sizeof flow_summary_comp);
+    flow_summary_chores_done = chores_done;
+    flow_summary_chores = chores;
 }
 
 void mqtt_ha_queue_bonus_clear(void) {
@@ -998,6 +1025,9 @@ esp_err_t net_apply_try_window(void) {
     }
     if (flow_state_after_window >= 0) {
         flow_state = (timer_state_t)flow_state_after_window;
+    }
+    if (flow_acked_after_window >= 0) {
+        flow_chore_acked = (uint8_t)flow_acked_after_window;
     }
     if (flow_window_join_press != BTN_NONE) {
         flow_press(flow_window_join_press);
@@ -1037,8 +1067,12 @@ void timer_reset(void) {
        (test_a_day_rollover_clears_the_acks_the_release_and_the_mode,
        test_timers_is_the_zero_mode_so_a_zeroed_struct_paints_timers); this
        models the consequence so the wake-flow side can be asked about it.
-       Deliberately NOT logged as EV_SET_MODE: nothing called the setter. */
+       Deliberately NOT logged as EV_SET_MODE: nothing called the setter.
+       The acks ride the same memset (row C13), so they are cleared here
+       too: the summary's chores_done case below relies on a reset that
+       really does wipe them. */
     flow_mode = APP_MODE_TIMERS;
+    flow_chore_acked = 0;
     mock_time_set(hal_time_now() + 5);
 }
 
@@ -2016,6 +2050,10 @@ void setUp(void) {
     flow_screen_used_arg = -1;
     flow_summary_date = NULL;
     flow_summary_used = -424242;
+    flow_summary_chores_done = -1;
+    flow_summary_chores = -424242; /* not -1: that is STATS_JSON_CHORES_UNKNOWN */
+    flow_acked_after_window = -1;
+    flow_chore_load_ret = ESP_OK;
     flow_restore_arg = -1;
     flow_record_date_arg = -1;
     flow_needs_sync_arg = -1;
@@ -4319,6 +4357,83 @@ void test_the_summary_reads_the_extra_slots_not_the_screen_slot(void) {
         TEST_ASSERT_EQUAL_INT(1 + i, flow_completion_slots[i]);
         TEST_ASSERT_EQUAL_UINT16((uint16_t)(100 + 1 + i), flow_summary_comp[i]);
     }
+}
+
+/* The finished day's chores (M4-T5): the acked chores among the
+   configured ones, and the configured count beside them. */
+void test_the_summary_counts_the_days_acked_chores(void) {
+    time_t now = flow_at(0, 5);
+    flow_new_day = true;
+    flow_chore_count = 3;
+    flow_chore_acked = 0x05; /* chores 1 and 3 */
+    wake_flow_handle_day_rollover(&now);
+    TEST_ASSERT_EQUAL_INT(2, flow_summary_chores_done);
+    TEST_ASSERT_EQUAL_INT(3, flow_summary_chores);
+}
+
+/* THE ORDERING, by value rather than by the effect log: the window
+   rewrites the acks (a chore-list edit reconciled mid-window) and the
+   reset then zeroes them (the stub models the memset), so a capture
+   taken anywhere but first would report 0 or the rewritten mask. All
+   three were done yesterday, and the summary must say so. */
+void test_the_summary_chores_are_read_before_the_window_and_the_reset(void) {
+    time_t now = flow_at(0, 5);
+    flow_new_day = true;
+    flow_restore_ok = false;
+    flow_chore_count = 3;
+    flow_chore_acked = 0x07;
+    flow_acked_after_window = 0x01;
+    wake_flow_handle_day_rollover(&now);
+    TEST_ASSERT_TRUE(flow_reset_called);
+    TEST_ASSERT_EQUAL_HEX8(0, flow_chore_acked); /* the reset did wipe them */
+    TEST_ASSERT_EQUAL_INT(3, flow_summary_chores_done);
+    TEST_ASSERT_EQUAL_INT(3, flow_summary_chores);
+}
+
+/* A stale ack bit above the configured count is not a chore done: the
+   RTC byte is stored raw (a three-chore list shortened to two keeps bit
+   2), and counting it would report 3 of 2. Same rule as the live
+   chores_done. */
+void test_the_summary_ignores_ack_bits_above_the_configured_count(void) {
+    time_t now = flow_at(0, 5);
+    flow_new_day = true;
+    flow_chore_count = 2;
+    flow_chore_acked = 0x07;
+    wake_flow_handle_day_rollover(&now);
+    TEST_ASSERT_EQUAL_INT(2, flow_summary_chores_done);
+    TEST_ASSERT_EQUAL_INT(2, flow_summary_chores);
+}
+
+/* No list configured (row C1, the shipped default): 0 of 0, whatever
+   the ack byte holds, and the summary is still queued. */
+void test_the_summary_reports_no_chores_without_a_list(void) {
+    time_t now = flow_at(0, 5);
+    flow_new_day = true;
+    flow_chore_count = 0;
+    flow_chore_acked = 0x03;
+    wake_flow_handle_day_rollover(&now);
+    TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_QUEUE_SUMMARY));
+    TEST_ASSERT_EQUAL_INT(0, flow_summary_chores_done);
+    TEST_ASSERT_EQUAL_INT(0, flow_summary_chores);
+}
+
+/* The list could not be READ (a flash error, chore_store_names_known()
+   false): the day's count is unknown, not 0 of 0, so the summary goes
+   out with the chore fields marked unknown (stats_json_summary omits
+   them) while the rest of the day is still reported. Acks are set so a
+   capture that ignored the verdict and counted with n = 0 would still
+   report 0 of 0, which this rejects. */
+void test_the_summary_marks_the_chores_unknown_when_the_list_cannot_be_read(void) {
+    time_t now = flow_at(0, 5);
+    flow_new_day = true;
+    flow_chore_count = 3;
+    flow_chore_acked = 0x07;
+    flow_chore_load_ret = ESP_FAIL;
+    flow_screen_used = 1200;
+    wake_flow_handle_day_rollover(&now);
+    TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_QUEUE_SUMMARY));
+    TEST_ASSERT_EQUAL_INT(STATS_JSON_CHORES_UNKNOWN, flow_summary_chores);
+    TEST_ASSERT_EQUAL_INT32(1200, flow_summary_used); /* the rest of the day still reported */
 }
 
 /* Nothing to report before the first day was ever recorded. */
@@ -10579,6 +10694,11 @@ int main(void) {
     RUN_TEST(test_yesterdays_summary_is_queued_before_anything_is_reset);
     RUN_TEST(test_the_summary_carries_the_stored_date_and_the_days_screen_usage);
     RUN_TEST(test_the_summary_reads_the_extra_slots_not_the_screen_slot);
+    RUN_TEST(test_the_summary_counts_the_days_acked_chores);
+    RUN_TEST(test_the_summary_chores_are_read_before_the_window_and_the_reset);
+    RUN_TEST(test_the_summary_ignores_ack_bits_above_the_configured_count);
+    RUN_TEST(test_the_summary_reports_no_chores_without_a_list);
+    RUN_TEST(test_the_summary_marks_the_chores_unknown_when_the_list_cannot_be_read);
     RUN_TEST(test_a_cold_boot_with_no_stored_date_queues_no_summary);
     RUN_TEST(test_a_cold_boot_rollover_still_clears_the_bonus_and_resets);
     RUN_TEST(test_the_retained_bonus_target_is_cleared_on_every_rollover);

@@ -2202,8 +2202,8 @@ void test_config_registry_count_moves_with_the_discovery_schema(void) {
     TEST_ASSERT_EQUAL_INT(37, n);
     /* 23 with the registry count unchanged: v22 added stat ENTITIES rows
        (M3-T1's chore entities and config warning) and v23 changed them
-       (M4-T1's summary sensors, screen_used_day and day_runs_N, and the
-       battery's state_class), not editable fields —
+       (M4-T1's summary sensors, screen_used_day and day_runs_N, M4-T5's
+       day_chores, and the battery's state_class), not editable fields —
        the mirror of v21, which moved this registry and left ENTITIES
        alone. test_stats_json's joint pin records that side. */
     TEST_ASSERT_EQUAL_INT(23, STATS_JSON_DISC_SCHEMA_VER);

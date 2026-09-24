@@ -468,7 +468,14 @@ GRAPHS = [
         "Screen minutes per day",
         dict(keys=["screen_used_day"], stat_types=["change"], period="day", days=28, chart_type="bar", note=True),
     ),
-    ("Chores done per day", dict(keys=["chores_done"], stat_types=["max"], period="day", days=56, chart_type="bar")),
+    # day_chores, not a daily `max` of the live chores_done: the max counts
+    # the value carried across midnight, so a day with nothing done would
+    # show the day before's full count. The summary captures the finished
+    # day exactly (firmware M4-T5).
+    (
+        "Chores done per day",
+        dict(keys=["day_chores"], stat_types=["change"], period="day", days=56, chart_type="bar", note=True),
+    ),
 ]
 
 # The state_classes each statistics-graph stat_type can read (HA
@@ -492,7 +499,7 @@ def graph_compatible(state_class: str | None, stat_types) -> bool:
 
 
 DAY_SHIFT_NOTE = (
-    "Screen minutes and extra timer runs come from the daily summary, which the device "
+    "Screen minutes, extra timer runs and chores done come from the daily summary, which the device "
     "sends at its first check-in after midnight. HA files each day's figures under the "
     "**following** day, so a run finished on a Sunday counts in the next week."
 )
@@ -502,7 +509,7 @@ DIAGNOSTICS = [
     ("Memory", ["heap_free", "heap_min", "stack_main", "stack_net"]),
     ("Panic", ["panic_count", "panic_phase", "panic_uptime", "panic_heap", "panic_stack_main", "panic_stack_net"]),
     ("Updates", ["ota_result", "ota_target", "ota_fails", "ota_dl_ms"]),
-    ("Daily summary (last received)", ["screen_used_day"] + [f"day_runs_{n}" for n in SLOTS]),
+    ("Daily summary (last received)", ["screen_used_day"] + [f"day_runs_{n}" for n in SLOTS] + ["day_chores"]),
 ]
 
 

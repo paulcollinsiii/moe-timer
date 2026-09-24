@@ -144,12 +144,16 @@ int stats_json_act(char *buf, size_t len, const act_state_t *a) {
 }
 
 int stats_json_summary(char *buf, size_t len, const char *date, int32_t screen_used_s,
-                       const uint16_t completions[TIMER_EXTRA_SLOTS]) {
+                       const uint16_t completions[TIMER_EXTRA_SLOTS], unsigned chores_done, int chores) {
     int pos = jcat(buf, len, 0, "{\"date\":\"%s\",\"screen_used_s\":%ld,\"completions\":[", date, (long)screen_used_s);
     for (int i = 0; i < TIMER_EXTRA_SLOTS; i++) {
         pos = jcat(buf, len, pos, i ? ",%u" : "%u", (unsigned)completions[i]);
     }
-    pos = jcat(buf, len, pos, "]}");
+    pos = jcat(buf, len, pos, "]");
+    if (chores >= 0) { /* a list that could not be read: both fields omitted */
+        pos = jcat(buf, len, pos, ",\"chores_done\":%u,\"chores\":%d", chores_done, chores);
+    }
+    pos = jcat(buf, len, pos, "}");
     return pos;
 }
 
@@ -396,21 +400,42 @@ static const ha_entity_t ENTITIES[] = {
        chores_left is PRIMARY and chores_done DIAGNOSTIC, as the design
        lists them: "how much is still to do" is the parent's question.
 
-       state_class "measurement" on both: HA keeps LONG-TERM STATISTICS
-       only for a sensor that declares one, and chore completion over
-       weeks is one of the dashboard's graphs (M4). The price is the
+       state_class "measurement" on both (v22): HA keeps LONG-TERM
+       STATISTICS only for a sensor that declares one. The price is the
        logbook — HA leaves any sensor with a state_class (or a unit) out
        of it — and it is affordable here because the chore_N binary
        sensors below carry the per-chore audit trail ("Homework done" on,
        off) on their own. Still no unit: a count of chores has none.
+       They are NOT the "chores done per day" graph's source: a daily
+       `max` of chores_done includes the value carried across midnight, so
+       a day with nothing done can show the day before's full count.
+       day_chores, below, reads the summary instead.
 
-       The full list of rows that declare a state_class, each a graph on
-       the dashboard: battery, screen_used_day, day_runs_1..4 and these
-       two (v23; test_stats_json pins it). Every other row stays NULL. */
+       The full list of rows that declare a state_class (test_stats_json
+       pins it): battery, screen_used_day, day_runs_1..4, day_chores and
+       these two. Every other row stays NULL. */
     {"sensor", "chores_left", "Chores left", NULL, NULL, "{{ value_json.chores_left }}", "stat", STAT_EXPIRE_SEC, false,
      NULL, "measurement", NULL},
     {"sensor", "chores_done", "Chores done", NULL, NULL, "{{ value_json.chores_done }}", "stat", STAT_EXPIRE_SEC, false,
      DIAG, "measurement", NULL},
+    /* The finished day's acked chores (v23, M4-T5), the "chores done per
+       day" statistics graph: a summary-topic row like day_runs_N (see
+       SUMMARY_LAST_RESET), with the same day shift. The rollover captures
+       it before anything resets the acks (wake_flow.c
+       queue_rollover_summary). No unit, DIAG, no expire, as day_runs_N.
+       The key is clear of every stats_json_slot_of() prefix ("day_runs_"
+       included), of the exact chore_N match, and of RETIRED[].
+
+       The template renders "None" when the summary has no chores_done
+       (older firmware, or a list that could not be read): HA's MQTT
+       sensor sets "unknown" for that, which the statistics skip. A bare
+       {{ value_json.chores_done }} would render "" there, and HA ignores
+       an empty numeric state while still taking the new last_reset, so
+       the previous day's count would be counted again. `is defined` also
+       keeps HA from logging an undefined-variable warning per summary. */
+    {"sensor", "day_chores", "Chores done per day", NULL, NULL,
+     "{{ value_json.chores_done if value_json.chores_done is defined else 'None' }}", "summary", 0, false, DIAG,
+     SUMMARY_STATE_CLASS, SUMMARY_LAST_RESET},
     /* One per possible chore, named at discovery time from the list
        ("<name> done") by mqtt_ha.c through stats_json_chore_index(); a row
        past the configured count is RETIRED there, exactly as a disabled

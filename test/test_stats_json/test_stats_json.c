@@ -248,9 +248,42 @@ void test_stat_payload_null_string_fields_are_safe(void) {
 void test_summary_payload_exact(void) {
     char buf[256];
     const uint16_t comp[TIMER_EXTRA_SLOTS] = {1, 2, 0, 0};
-    int n = stats_json_summary(buf, sizeof(buf), "2026-07-08", 3200, comp);
-    TEST_ASSERT_EQUAL_STRING("{\"date\":\"2026-07-08\",\"screen_used_s\":3200,\"completions\":[1,2,0,0]}", buf);
+    int n = stats_json_summary(buf, sizeof(buf), "2026-07-08", 3200, comp, 2, 3);
+    TEST_ASSERT_EQUAL_STRING(
+        "{\"date\":\"2026-07-08\",\"screen_used_s\":3200,\"completions\":[1,2,0,0],"
+        "\"chores_done\":2,\"chores\":3}",
+        buf);
     TEST_ASSERT_EQUAL_INT((int)strlen(buf), n);
+}
+
+/* The two chore figures are distinct arguments landing in distinct
+   fields: swapped, a day with 1 of 3 done would graph 3. And no list at
+   all is written as 0 of 0, not omitted, so day_chores records the day. */
+void test_summary_payload_chore_fields_are_not_swapped(void) {
+    char buf[256];
+    const uint16_t comp[TIMER_EXTRA_SLOTS] = {0, 0, 0, 0};
+    stats_json_summary(buf, sizeof(buf), "2026-09-24", 0, comp, 1, 3);
+    TEST_ASSERT_NOT_NULL(strstr(buf, ",\"chores_done\":1,\"chores\":3}"));
+    stats_json_summary(buf, sizeof(buf), "2026-09-24", 0, comp, 0, 0);
+    TEST_ASSERT_EQUAL_STRING(
+        "{\"date\":\"2026-09-24\",\"screen_used_s\":0,\"completions\":[0,0,0,0],"
+        "\"chores_done\":0,\"chores\":0}",
+        buf);
+}
+
+/* A chore list that could not be read at the rollover: both chore fields
+   are OMITTED (chores_done ignored), so day_chores' template renders
+   "None" and HA records an unknown day, not a durable 0. Any negative
+   count means unknown; 0 does not. The returned length stays the built
+   length, as for every other payload. */
+void test_summary_payload_omits_the_chore_fields_when_the_list_is_unknown(void) {
+    char buf[256];
+    const uint16_t comp[TIMER_EXTRA_SLOTS] = {1, 0, 0, 2};
+    int n = stats_json_summary(buf, sizeof(buf), "2026-09-24", 60, comp, 2, STATS_JSON_CHORES_UNKNOWN);
+    TEST_ASSERT_EQUAL_STRING("{\"date\":\"2026-09-24\",\"screen_used_s\":60,\"completions\":[1,0,0,2]}", buf);
+    TEST_ASSERT_EQUAL_INT((int)strlen(buf), n);
+    stats_json_summary(buf, sizeof(buf), "2026-09-24", 60, comp, 0, -7);
+    TEST_ASSERT_NULL(strstr(buf, "chores"));
 }
 
 /* ---- HA discovery ---- */
@@ -266,10 +299,11 @@ void test_discovery_entity_table_is_populated(void) {
        panic_count, panic_phase, panic_uptime, panic_heap,
        panic_stack_main, panic_stack_net,
        heap_free, heap_min, stack_main, stack_net, nvs_free,
-       chores_left, chores_done, config_warning, screen_used_day
+       chores_left, chores_done, config_warning, screen_used_day,
+       day_chores
        + per extra slot: completions, day_runs, remaining, limit
        + per possible chore: chore_N */
-    TEST_ASSERT_EQUAL_INT(32 + 4 * TIMER_EXTRA_SLOTS + CHORE_MAX, count);
+    TEST_ASSERT_EQUAL_INT(33 + 4 * TIMER_EXTRA_SLOTS + CHORE_MAX, count);
 }
 
 /* THE BUMP, pinned to the table it describes.
@@ -285,13 +319,16 @@ void test_discovery_entity_table_is_populated(void) {
 void test_discovery_schema_version_moves_with_the_entity_table(void) {
     int count = 0;
     (void)stats_json_entities(&count);
-    TEST_ASSERT_EQUAL_INT(32 + 4 * TIMER_EXTRA_SLOTS + CHORE_MAX, count);
+    TEST_ASSERT_EQUAL_INT(33 + 4 * TIMER_EXTRA_SLOTS + CHORE_MAX, count);
     /* v23: + screen_used_day and the TIMER_EXTRA_SLOTS day_runs_N rows
        (the summary-topic rows, state_class "total" with a last_reset),
        and state_class "measurement" on battery (M4-T1, the dashboard's
-       graph data). The battery half changes no count: a changed payload
-       on an existing row needs the bump as much as a new row does, and
-       test_only_the_graphed_rows_declare_a_state_class pins that half.
+       graph data). + day_chores (M4-T5), a sixth summary-topic row, added
+       before v23 shipped and so under the same number: the count moved,
+       the version rightly did not. The battery half changes no count: a
+       changed payload on an existing row needs the bump as much as a new
+       row does, and test_only_the_graphed_rows_declare_a_state_class pins
+       that half.
 
        v22: + chores_left, chores_done, config_warning and the CHORE_MAX
        chore_N rows (M3-T1, one bump covering the chore entities,
@@ -854,7 +891,8 @@ static const struct {
     {"day_runs_2", "total"},        /* ... */
     {"day_runs_3", "total"},        /* ... */
     {"day_runs_4", "total"},        /* ... */
-    {"chores_left", "measurement"}, /* chores over weeks (v22) */
+    {"day_chores", "total"},        /* chores done per day: `change` */
+    {"chores_left", "measurement"}, /* long-term statistics since v22 */
     {"chores_done", "measurement"},
 };
 _Static_assert(TIMER_EXTRA_SLOTS == 4, "GRAPHED lists one day_runs_N per extra slot");
@@ -912,7 +950,8 @@ void test_only_the_summary_rows_carry_a_last_reset(void) {
                                      ents[i].key);
         TEST_ASSERT_EQUAL_INT_MESSAGE(0, ents[i].expire_after, ents[i].key);
     }
-    TEST_ASSERT_EQUAL_INT(1 + TIMER_EXTRA_SLOTS, carried);
+    /* screen_used_day, day_runs_1..N, day_chores */
+    TEST_ASSERT_EQUAL_INT(2 + TIMER_EXTRA_SLOTS, carried);
 }
 
 /* The live run counts keep NO state_class (v23 reverted the first draft's
@@ -1017,7 +1056,7 @@ static void summary_field(const char *tpl, char *out, size_t len) {
 void test_summary_rows_read_fields_the_summary_writes(void) {
     char buf[256], quoted[32];
     const uint16_t comp[TIMER_EXTRA_SLOTS] = {3, 0, 1, 2};
-    stats_json_summary(buf, sizeof(buf), "2026-09-24", 5400, comp);
+    stats_json_summary(buf, sizeof(buf), "2026-09-24", 5400, comp, 2, 3);
     TEST_ASSERT_NOT_NULL(strstr(buf, "\"date\":\"2026-09-24\","));
     int count = 0, rows = 0;
     const ha_entity_t *ents = stats_json_entities(&count);
@@ -1031,11 +1070,68 @@ void test_summary_rows_read_fields_the_summary_writes(void) {
         TEST_ASSERT_EQUAL_STRING_MESSAGE("\"date\":", quoted, ents[i].key);
         TEST_ASSERT_NOT_NULL_MESSAGE(strstr(buf, quoted), ents[i].key);
     }
-    TEST_ASSERT_EQUAL_INT(1 + TIMER_EXTRA_SLOTS, rows);
+    TEST_ASSERT_EQUAL_INT(2 + TIMER_EXTRA_SLOTS, rows);
     summary_field(find_entity("screen_used_day")->tpl, quoted, sizeof(quoted));
     TEST_ASSERT_EQUAL_STRING("\"screen_used_s\":", quoted);
     summary_field(find_entity("day_runs_1")->tpl, quoted, sizeof(quoted));
     TEST_ASSERT_EQUAL_STRING("\"completions\":", quoted);
+    const ha_entity_t *day_chores = find_entity("day_chores");
+    TEST_ASSERT_NOT_NULL(day_chores);
+    summary_field(day_chores->tpl, quoted, sizeof(quoted));
+    TEST_ASSERT_EQUAL_STRING("\"chores_done\":", quoted);
+}
+
+/* The finished day's acked chores, the "chores done per day" graph.
+   Pinned whole: the summary topic, the summary's chores_done (NOT the
+   configured count beside it) or the literal 'None' when the summary has
+   no such field (HA's MQTT sensor maps a "None" render to unknown; an
+   empty render would keep the old value under a new last_reset and count
+   it again), "total" with the summary's last_reset, no unit, diagnostic
+   like day_runs_N, no expire. The template's quotes are single, so they
+   pass through the JSON string unescaped. */
+void test_discovery_day_chores_payload(void) {
+    char buf[STATS_JSON_PAYLOAD_MAX];
+    const ha_entity_t *e = find_entity("day_chores");
+    TEST_ASSERT_NOT_NULL(e);
+    int n = stats_json_discovery(buf, sizeof(buf), "magtag-a1b2c3", "Kitchen MagTag", "v1.4.0-test", e);
+    TEST_ASSERT_EQUAL_STRING(
+        "{\"name\":\"Chores done per day\",\"uniq_id\":\"magtag-a1b2c3_day_chores\","
+        "\"def_ent_id\":\"sensor.magtag-a1b2c3_day_chores\","
+        "\"stat_t\":\"magtag/magtag-a1b2c3/summary\","
+        "\"val_tpl\":\"{{ value_json.chores_done if value_json.chores_done is defined else 'None' }}\","
+        "\"stat_cla\":\"total\","
+        "\"lrst_val_tpl\":\"{{ value_json.date ~ 'T00:00:00+00:00' }}\","
+        "\"ent_cat\":\"diagnostic\","
+        "\"dev\":{\"ids\":[\"magtag-a1b2c3\"],\"name\":\"Kitchen MagTag\",\"mf\":\"Adafruit\","
+        "\"mdl\":\"MagTag 2.9\",\"sw\":\"v1.4.0-test\"}}",
+        buf);
+    TEST_ASSERT_EQUAL_INT((int)strlen(buf), n);
+    TEST_ASSERT_EQUAL_INT(0, e->expire_after);
+    TEST_ASSERT_FALSE(e->binary);
+}
+
+/* mqtt_ha.c renames and retires rows by key: a per-slot prefix match
+   would name it after a timer and retire it with a disabled slot, a
+   chore_N match would retire it past the configured chore count, and a
+   RETIRED[] key would be emptied on every pass. It must be none of them,
+   and no other row may share the key. */
+void test_day_chores_key_avoids_the_per_slot_chore_and_retired_keys(void) {
+    const char *suffix = NULL;
+    const ha_entity_t *e = find_entity("day_chores");
+    TEST_ASSERT_NOT_NULL(e);
+    TEST_ASSERT_EQUAL_INT(0, stats_json_slot_of(e, &suffix));
+    TEST_ASSERT_EQUAL_INT(-1, stats_json_chore_index(e));
+    /* A hand copy: the source of truth is mqtt_ha.c's RETIRED[] (inside
+       its discovery pass, and mqtt_ha.c is linked into no host suite, so
+       a C test cannot read it). A key added there must be added here. */
+    static const char *RETIRED_KEYS[] = {"remaining", "allocation", "screen_used"};
+    for (size_t i = 0; i < sizeof(RETIRED_KEYS) / sizeof(RETIRED_KEYS[0]); i++)
+        TEST_ASSERT_NOT_EQUAL(0, strcmp(e->key, RETIRED_KEYS[i]));
+    int count = 0, same = 0;
+    const ha_entity_t *ents = stats_json_entities(&count);
+    for (int i = 0; i < count; i++)
+        same += strcmp(ents[i].key, "day_chores") == 0;
+    TEST_ASSERT_EQUAL_INT(1, same);
 }
 
 /* The key must not be "screen_used": mqtt_ha.c's RETIRED[] publishes an
@@ -1532,6 +1628,8 @@ int main(void) {
     RUN_TEST(test_stat_payload_reports_needed_length_when_truncated);
     RUN_TEST(test_stat_payload_null_string_fields_are_safe);
     RUN_TEST(test_summary_payload_exact);
+    RUN_TEST(test_summary_payload_chore_fields_are_not_swapped);
+    RUN_TEST(test_summary_payload_omits_the_chore_fields_when_the_list_is_unknown);
     RUN_TEST(test_discovery_entity_table_is_populated);
     RUN_TEST(test_discovery_schema_version_moves_with_the_entity_table);
     RUN_TEST(test_stat_payload_carries_the_ota_fields);
@@ -1583,6 +1681,8 @@ int main(void) {
     RUN_TEST(test_discovery_day_runs_payloads);
     RUN_TEST(test_summary_rows_read_fields_the_summary_writes);
     RUN_TEST(test_screen_used_day_key_avoids_the_retired_and_per_slot_keys);
+    RUN_TEST(test_discovery_day_chores_payload);
+    RUN_TEST(test_day_chores_key_avoids_the_per_slot_chore_and_retired_keys);
     RUN_TEST(test_slot_of_matches_only_the_per_slot_rows);
     RUN_TEST(test_chore_discovery_names_configured_rows_and_retires_the_rest);
     RUN_TEST(test_chore_discovery_skips_every_chore_row_when_the_list_is_unknown);

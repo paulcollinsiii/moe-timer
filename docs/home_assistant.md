@@ -60,8 +60,9 @@ Everything appears under one device, grouped by HA `entity_category`:
   `<Name> runs`. Remaining/limit are **per-slot** (not active-timer
   scoped), so each timer keeps its own recorder history; screen time used
   = limit − remaining (a template sensor if you want it as an entity).
-  **Screen time per day** and, per extra timer, `<Name> runs per day` are
-  the finished day's figures, read from the daily summary (below). Also
+  **Screen time per day**, **Chores done per day** and, per extra timer,
+  `<Name> runs per day` are the finished day's figures, read from the
+  daily summary (below). Also
   **Chores done** and **Config warning** (see
   [Chore checklist](#chore-checklist-read-only-in-ha)).
 
@@ -81,11 +82,22 @@ Notes:
   button and opens no window; press A to get back to the timer screen
   first.
 - The daily summary publishes at the first wake after midnight and covers
-  the finished day: `screen_used_s` + completions per extra timer.
-  *Screen time per day* and the `<Name> runs per day` sensors read it, so
+  the finished day: `screen_used_s`, completions per extra timer, and
+  `chores_done` of `chores` configured (captured before the rollover
+  clears the ticks). *Screen time per day*, *Chores done per day* and the
+  `<Name> runs per day` sensors read it, so
   HA files each day's figures under the **next** day (the time they
-  arrived). No run is lost to that: a run finished late in the evening,
-  after the day's last window, is in the summary.
+  arrived). The shift loses no run: a run finished late in the evening,
+  after the day's last window, is in the summary. What can go missing is
+  a whole day: the device holds the unsent summary in RAM only, so if it
+  goes back to sleep before a window has published it (the first window
+  after midnight fails: no Wi-Fi, no broker), that day's summary is
+  never sent. The per-day graphs then show a gap, which on a bar graph
+  looks like a zero day. (A summary kept across sleep and retried is a
+  planned follow-up, M4-D1.) If the chore list cannot be read at the rollover (a flash error), the
+  summary leaves `chores_done` and `chores` out and *Chores done per
+  day* records that day as *unknown*; a list that is simply empty
+  reports 0 of 0.
 - **Statistics vs the logbook.** Battery %, the summary sensors and the
   two chore counts declare a `state_class`, so HA keeps long-term
   statistics for them. The summary sensors are `total` with a
@@ -101,7 +113,16 @@ Notes:
   the broker, which is therefore recorded once as a state but counted in
   no graph; the next day's summary is the first to count. On a device
   that has never published a summary the sensors read *unknown* until
-  one arrives, and that one is the starting point instead.
+  one arrives, and that one is the starting point instead. A summary
+  with no `chores_done` (one retained by older firmware, or one sent
+  while the chore list could not be read) sets *Chores done per day* to
+  *unknown*, which the statistics skip. Before the sensor has ever had a
+  value it stays *unknown* until the first summary that carries the
+  field, which is then the starting point. After it has had one (say a
+  rollback to older firmware), that day is *unknown*, not 0 and not the
+  previous day's count again, and the next summary with the field counts
+  as usual. Its template checks for the field first, so HA logs no
+  template warning for such a summary.
 
 ### Entity IDs are stable, and do not follow the device name
 
@@ -881,12 +902,17 @@ section is what Home Assistant sees.
 |--------|-----------|----------|-------|
 | `sensor.magtag_xxxxxx_chores_left` | Chores left | Primary | Configured chores not yet ticked today |
 | `sensor.magtag_xxxxxx_chores_done` | Chores done | Diagnostic | Chores ticked today |
+| `sensor.magtag_xxxxxx_day_chores` | Chores done per day | Diagnostic | Chores ticked on the finished day, from the daily summary |
 | `binary_sensor.magtag_xxxxxx_chore_1` … `_chore_3` | `<chore name> done` | Primary | On = ticked today |
 | `sensor.magtag_xxxxxx_config_warning` | Config warning | Diagnostic | `OK`, or the day types whose `chore_free` pair is broken |
 
 - **The two counts** carry `state_class: measurement`, so HA keeps
-  **long-term statistics** for them — chore completion over weeks, which
-  is what they are for. The price is the logbook: HA leaves any sensor
+  **long-term statistics** for them. They are not the per-day chores
+  graph: a daily *max* of *Chores done* includes the count carried over
+  midnight, so a day with nothing ticked can show the day before's full
+  count. **Chores done per day** reads the daily summary instead
+  (`state_class: total`, like the other summary sensors). The price of a
+  state class is the logbook: HA leaves any sensor
   with a state class out of it, so a change in either count does **not**
   appear in the activity log. The per-chore binary sensors do, which is
   where the day-by-day record lives. With no list configured both counts
