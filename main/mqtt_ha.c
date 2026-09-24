@@ -41,19 +41,19 @@ static EventGroupHandle_t s_eg;
 
 static volatile int s_pub_acks;
 
-/* Largest retained config document the window will take. MEASURED, not
-   guessed: every documented field at its longest honoured form, minified,
-   is 1708 B — 1097 B of scalar and string fields plus 46 holiday dates,
-   which is what HOLIDAY_BLOB_CAP (512) / 11 B per date allows. 2048 is the
-   next power of two above that, and the gate in mqtt_rx.c is
-   `total_len < config_cap`, so the largest document actually accepted is
-   2047 B and the real headroom is 339 B.
+/* CONFIG_BUF_MAX — the largest retained config document the window will
+   take — is defined in config_apply.h. Its sizing is not restated here:
+   test_config_apply's test_the_worst_case_document_fits_the_receive_buffer
+   builds the compact worst-case document (every parsed field at its
+   longest honoured value, 46 holiday dates included), asserts it fits
+   under the `total_len < config_cap` gate in mqtt_rx.c, and prints the
+   headroom. A hand-written figure here went stale the moment the chore
+   fields were added; the test cannot.
 
-   A document past that is now REFUSED OUT LOUD (config_ack "too_long")
+   A document past the cap is REFUSED OUT LOUD (config_ack "too_long")
    rather than dropped into the same MQTT_RX_IGNORED bucket as a topic that
    was never ours — a retained over-size document used to be re-delivered
    and re-dropped on every reconnect, forever, with no log and no ack. */
-#define CONFIG_BUF_MAX 2048
 #define CMD_BUF_MAX 256
 
 /* MQTT packet bytes the receive buffer must hold ON TOP of the document:

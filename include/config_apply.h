@@ -25,6 +25,20 @@ typedef enum {
    this; callers must not pass less. */
 #define CONFIG_ACK_MIN 256
 
+/* The receive buffer for the retained config document (mqtt_ha.c). The
+   gate in mqtt_rx.c is `total_len < config_cap`, so the largest document
+   actually accepted is CONFIG_BUF_MAX - 1 bytes; a longer one is refused
+   with config_ack_too_long() below.
+
+   Its sizing is PINNED BY A TEST, not by a number written here:
+   test_config_apply's test_the_worst_case_document_fits_the_receive_buffer
+   builds the compact worst-case document — every field config_apply()
+   parses, each at its longest honoured value — asserts it fits, and
+   prints the headroom. Add a field to config_apply() and that builder is
+   where it has to go too. Here (rather than private to mqtt_ha.c) only so
+   that test can see the real value. */
+#define CONFIG_BUF_MAX 2048
+
 /* Writes an ack JSON document into ack for publishing on config_ack:
    {"ver":...,"ok":bool[,"errors":[...][,"errors_truncated":true]]}.
    errors_truncated means more fields failed than the list could name. */

@@ -1,3 +1,4 @@
+#include <stdio.h>
 #include <string.h>
 #include <unity.h>
 
@@ -1175,13 +1176,10 @@ void test_a_field_that_fails_both_checks_is_named_once(void) {
     TEST_ASSERT_NULL_MESSAGE(strstr(first + 1, "chore_free_wd"), ack);
 }
 
-/* The whole feature in one document, which is also the CONFIG_BUF_MAX
-   headroom case: three 20-byte names plus all four minute keys. 2048 is
-   CONFIG_BUF_MAX in mqtt_ha.c, which is private to that file — and the
-   gate there is `total_len < CONFIG_BUF_MAX`, so the largest document
-   that is actually accepted is 2047 bytes. The `<` below is therefore the
-   right comparison against 2048 by luck rather than by reasoning; it is
-   two orders of magnitude clear of the real ceiling either way. */
+/* The whole feature in one document. NOT the CONFIG_BUF_MAX headroom case
+   — that is test_the_worst_case_document_fits_the_receive_buffer below,
+   which carries every field, not only the chore ones. The `<` matches the
+   receive gate in mqtt_rx.c (`total_len < config_cap`). */
 void test_a_full_chore_document_applies_whole(void) {
     char ack[CONFIG_ACK_MIN];
     const char *doc =
@@ -1190,12 +1188,149 @@ void test_a_full_chore_document_applies_whole(void) {
         "\"weekday_min\":1440,\"weekend_min\":1440,\"holiday_min\":1440,\"summer_min\":1440,"
         "\"chore_free_wd\":1440,\"chore_free_we\":1440,\"chore_free_hol\":1440,"
         "\"chore_free_sum\":1440}";
-    TEST_ASSERT_TRUE_MESSAGE(strlen(doc) < 2048, doc);
+    TEST_ASSERT_TRUE_MESSAGE(strlen(doc) < CONFIG_BUF_MAX, doc);
     TEST_ASSERT_EQUAL(CONFIG_APPLIED, apply(doc, ack, sizeof(ack)));
     TEST_ASSERT_NOT_NULL_MESSAGE(strstr(ack, "\"ok\":true"), ack);
     char names[CHORE_MAX][CHORE_NAME_BUF];
     TEST_ASSERT_EQUAL_UINT8(3, stored_chores(names));
     TEST_ASSERT_EQUAL_STRING("12345678901234567890", names[2]);
+}
+
+/* ---- the receive-buffer ceiling (CONFIG_BUF_MAX) ---- */
+
+static size_t wc_pos;
+static char wc_doc[4096]; /* twice the cap: an overgrown builder fails the assert, not the stack */
+
+static void wc_cat(const char *s) {
+    size_t n = strlen(s);
+    TEST_ASSERT_TRUE_MESSAGE(wc_pos + n < sizeof(wc_doc), "worst-case builder outgrew its scratch buffer");
+    memcpy(wc_doc + wc_pos, s, n + 1);
+    wc_pos += n;
+}
+
+/* `"key":"<fill x len>"` */
+static void wc_str(const char *key, char fill, size_t len) {
+    char val[256];
+    TEST_ASSERT_TRUE(len < sizeof(val));
+    memset(val, fill, len);
+    val[len] = '\0';
+    char kv[320];
+    snprintf(kv, sizeof(kv), "\"%s\":\"%s\",", key, val);
+    wc_cat(kv);
+}
+
+static void wc_num(const char *key, int v) {
+    char kv[64];
+    snprintf(kv, sizeof(kv), "\"%s\":%d,", key, v);
+    wc_cat(kv);
+}
+
+/* The longest document config_apply() will HONOUR, in the encoding Home
+   Assistant's to_json emits: compact (no whitespace), no \u escapes. Every
+   field config_apply() parses is here, each at the longest value it
+   accepts, and every length is derived from the constant that bounds it —
+   so widening a bound widens this document. It must also stay VALID
+   (asserted below): a field refused for being too long is not the worst
+   case, it is a different test.
+
+   Deliberately excluded, because they are not a size the device honours:
+   extra holidays past the 46 the blob keeps (dropped), a `ver` past 23
+   characters (truncated — ver_str[24] in config_apply()), timer entries
+   past TIMER_EXTRA_SLOTS (ignored), whitespace and escapes (any JSON can
+   be padded without limit). A pretty-printed document CAN pass the cap;
+   that is what the too_long refusal is for.
+
+   ADD A FIELD TO config_apply() AND ADD IT HERE, or this stops being the
+   worst case. */
+static size_t build_worst_case_document(void) {
+    wc_pos = 0;
+    wc_doc[0] = '\0';
+    wc_cat("{");
+    wc_str("ver", 'v', 23);
+    wc_str("name", 'N', CFG_BOUND_NAME_MAX - 1);
+    wc_str("tz", 'T', CFG_BOUND_TZ_MAX - 1);
+    wc_num("weekday_min", CFG_BOUND_ALLOC_HI);
+    wc_num("weekend_min", CFG_BOUND_ALLOC_HI);
+    wc_num("holiday_min", CFG_BOUND_ALLOC_HI);
+    wc_num("summer_min", CFG_BOUND_ALLOC_HI);
+    /* At the allocation, so every pair stays valid (chore_free <= allocation). */
+    wc_num("chore_free_wd", CFG_BOUND_CHORE_FREE_HI);
+    wc_num("chore_free_we", CFG_BOUND_CHORE_FREE_HI);
+    wc_num("chore_free_hol", CFG_BOUND_CHORE_FREE_HI);
+    wc_num("chore_free_sum", CFG_BOUND_CHORE_FREE_HI);
+    wc_num("quiet_start", 2359);
+    wc_num("quiet_end", 2359);
+    wc_num("bedtime", 2359);
+    wc_num("break_interval_min", CFG_BOUND_BREAK_INT_HI);
+    wc_num("break_duration_min", CFG_BOUND_BREAK_DUR_HI);
+    const char *tone = tones_names[0];
+    for (int i = 1; i < TONE_COUNT; i++) {
+        if (strlen(tones_names[i]) > strlen(tone))
+            tone = tones_names[i];
+    }
+    char kv[128];
+    static const char *const tone_keys[] = {"tone_expiry", "tone_break", "tone_bed"};
+    for (size_t i = 0; i < sizeof(tone_keys) / sizeof(tone_keys[0]); i++) {
+        snprintf(kv, sizeof(kv), "\"%s\":\"%s\",", tone_keys[i], tone);
+        wc_cat(kv);
+    }
+    wc_num("alert_volume", TONES_VOLUME_MAX);
+    wc_cat("\"summer_start\":\"2026-05-29\",\"school_start\":\"2026-08-20\",\"school_end\":\"2027-05-28\",");
+    /* "https://" plus fill, CFG_BOUND_OTA_URL_MAX - 1 in all */
+    char url[CFG_BOUND_OTA_URL_MAX];
+    memset(url, 'u', sizeof(url) - 1);
+    memcpy(url, "https://", 8);
+    url[sizeof(url) - 1] = '\0';
+    wc_cat("\"ota_url\":\"");
+    wc_cat(url);
+    wc_cat("\",\"ota_on_sync\":false,"); /* false is the longer boolean */
+    wc_cat("\"holidays\":[");
+    for (int i = 0; i < HOLIDAY_BLOB_CAP / 11; i++)
+        wc_cat(i ? ",\"2026-12-25\"" : "\"2026-12-25\"");
+    wc_cat("],\"chores\":[");
+    for (int i = 0; i < CHORE_MAX; i++) {
+        char nm[CHORE_NAME_MAX + 4];
+        memset(nm, 'C', CHORE_NAME_MAX);
+        nm[CHORE_NAME_MAX] = '\0';
+        snprintf(kv, sizeof(kv), "%s\"%s\"", i ? "," : "", nm);
+        wc_cat(kv);
+    }
+    wc_cat("],\"timers\":[");
+    const size_t tname_len = sizeof(((nvs_timer_def_t *)0)->name) - 1;
+    for (int i = 0; i < TIMER_EXTRA_SLOTS; i++) {
+        char nm[sizeof(((nvs_timer_def_t *)0)->name)];
+        memset(nm, 'X', tname_len);
+        nm[tname_len] = '\0';
+        snprintf(kv, sizeof(kv), "%s{\"name\":\"%s\",\"min\":%d,\"reload\":false,\"break\":false}", i ? "," : "", nm,
+                 CFG_BOUND_TIMER_MIN_HI);
+        wc_cat(kv);
+    }
+    wc_cat("]}");
+    return wc_pos;
+}
+
+void test_the_worst_case_document_fits_the_receive_buffer(void) {
+    size_t n = build_worst_case_document();
+    printf("config worst case %d of %d B accepted, headroom %d B\n", (int)n, CONFIG_BUF_MAX - 1,
+           (int)(CONFIG_BUF_MAX - 1 - n));
+    /* The receive gate in mqtt_rx.c, verbatim: total_len < config_cap. */
+    TEST_ASSERT_TRUE_MESSAGE(n < CONFIG_BUF_MAX, "worst-case config document no longer fits CONFIG_BUF_MAX");
+
+    /* And it is a document the device takes WHOLE — otherwise it is not
+       the worst case of anything the device honours. */
+    char ack[CONFIG_ACK_MIN];
+    TEST_ASSERT_EQUAL(CONFIG_APPLIED, apply(wc_doc, ack, sizeof(ack)));
+    TEST_ASSERT_NOT_NULL_MESSAGE(strstr(ack, "\"ok\":true"), ack);
+    TEST_ASSERT_NULL_MESSAGE(strstr(ack, "errors"), ack);
+    char hol[HOLIDAY_BLOB_CAP];
+    size_t hol_len = sizeof(hol);
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_holidays(hol, &hol_len));
+    TEST_ASSERT_EQUAL_size_t((HOLIDAY_BLOB_CAP / 11) * 11, hol_len); /* all 46 kept */
+    char url[CFG_BOUND_OTA_URL_MAX];
+    nvs_config_get_ota_url(url, sizeof(url));
+    TEST_ASSERT_EQUAL_size_t(CFG_BOUND_OTA_URL_MAX - 1, strlen(url));
+    char names[CHORE_MAX][CHORE_NAME_BUF];
+    TEST_ASSERT_EQUAL_UINT8(CHORE_MAX, stored_chores(names));
 }
 
 /* The refusal ack lives here rather than in mqtt_ha.c because mqtt_ha.c
@@ -1305,6 +1440,7 @@ int main(void) {
     RUN_TEST(test_a_pair_the_document_does_not_touch_is_not_revalidated);
     RUN_TEST(test_a_field_that_fails_both_checks_is_named_once);
     RUN_TEST(test_a_full_chore_document_applies_whole);
+    RUN_TEST(test_the_worst_case_document_fits_the_receive_buffer);
     RUN_TEST(test_the_too_long_ack_states_the_size_and_the_ceiling);
     RUN_TEST(test_the_too_long_ack_fits_the_minimum_ack_buffer);
     return UNITY_END();

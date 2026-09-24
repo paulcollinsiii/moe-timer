@@ -771,8 +771,8 @@ ha_cfg_result_t ha_config_set(const char *key, const char *value, char *ack, siz
             if (f->set_u16((uint16_t)v) != ESP_OK)
                 return reject(ack, ack_len, key, "nvs");
             /* A clamp is not silent, but MIND WHERE THE SIGNAL GOES. This
-               ack is never published: mqtt_ha.c:466 hands it to
-               ESP_LOGI("set %s: %s") and nothing else, and the retained
+               ack is never published: mqtt_ha.c's apply_sets() hands it
+               to ESP_LOGI("set %s: %s") and nothing else, and the retained
                config_ack topic carries only config_apply's and cmd_apply's
                acks. The annotation is therefore a SERIAL-ONLY record, and
                design 5.3's "says so in the ack" is satisfied on serial
@@ -794,9 +794,10 @@ ha_cfg_result_t ha_config_set(const char *key, const char *value, char *ack, siz
                mqtt_ha.c's buffer is 256 B.
 
                A SAME-WAKE COLLISION IS REAL AND UNTESTED (recorded for
-               M2/M3 — do not fix the ordering here): apply_incoming() runs
-               config_apply and publishes the retained config_ack FIRST
-               (mqtt_ha.c:710-713), then apply_sets (line 741). A retained
+               M2/M3 — do not fix the ordering here): mqtt_ha.c's
+               apply_incoming() runs config_apply and publishes the
+               retained config_ack FIRST, then calls apply_sets() as its
+               last step. A retained
                bulk document carrying chore_free_wd:120 plus a retained
                set/weekday_min:30 therefore ends the window with a VALID
                pair — this clamp fixed it — behind a retained config_ack

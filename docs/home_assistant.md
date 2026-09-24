@@ -40,8 +40,12 @@ magtag/<id>/cmd         retained  HA → device   one-shot command (phase 3)
 Everything appears under one device, grouped by HA `entity_category`:
 
 - **Primary** (top of the device page): Battery %, Timer state, Screen
-  time remaining, Charge-lock.
-- **Configuration** (editable — see below): allocations, quiet hours,
+  time remaining, Charge-lock, **Chores left**, and one **`<chore> done`**
+  binary sensor per configured chore (see
+  [Chore checklist](#chore-checklist-read-only-in-ha)).
+- **Configuration** (editable — see below): allocations, the four
+  chore-free numbers (Weekday / Weekend / Holiday / Summer chore-free),
+  quiet hours,
   bed time (HHMM number; 0 disables, otherwise 1800–2359 — the device
   rejects daytime values), break settings, alert-tone selects (Expiry /
   Break / Bed time tone, incl. "Custom WAV" from the assets partition),
@@ -56,6 +60,8 @@ Everything appears under one device, grouped by HA `entity_category`:
   `<Name> runs`. Remaining/limit are **per-slot** (not active-timer
   scoped), so each timer keeps its own recorder history; screen time used
   = limit − remaining (a template sensor if you want it as an entity).
+  Also **Chores done** and **Config warning** (see
+  [Chore checklist](#chore-checklist-read-only-in-ha)).
 
 Recorder history on the read-only sensors IS the usage-stats feature —
 graph battery over weeks, screen minutes per day, practice completions.
@@ -68,7 +74,10 @@ Notes:
   `binary_sensor.magtag_xxxxxx_charge_lock` ON, a good automation trigger
   for a "charge the timer" notification).
 - Update cadence = the sync cadence: every 10 min while a timer runs,
-  hourly while idle (menuconfig). Button D forces a window immediately.
+  hourly while idle (menuconfig). Button D forces a window immediately —
+  from the **timer screen**. On the chore checklist Button D is the ✓3
+  button and opens no window; press A to get back to the timer screen
+  first.
 - The daily summary publishes at the first wake after midnight and covers
   the finished day: `screen_used_s` + completions per extra timer.
 
@@ -156,10 +165,12 @@ automation:
 ## Editing config from the HA card (no setup)
 
 The Configuration section of the device page holds native editable
-controls — **Number** for the allocations, quiet hours, break interval /
-duration; **Text** for the device name, timezone, and each timer's name;
+controls — **Number** for the allocations, the four chore-free minutes,
+quiet hours, break interval / duration; **Text** for the device name,
+timezone, and each timer's name;
 **Switch** for each timer's reloadable flag. Change one and the device
-applies it on its next window (Button D forces one), then republishes the
+applies it on its next window (Button D on the timer screen forces one —
+on the chore checklist D ticks chore 3 instead), then republishes the
 confirmed value to `magtag/<id>/cfg` so the control reflects reality.
 
 - **Add / edit an extra timer:** the four slots are fixed (the firmware
@@ -215,11 +226,31 @@ confirmed value to `magtag/<id>/cfg` so the control reflects reality.
   is not lost.
 - **The per-field ack is a log line, not a topic.** `config_ack` carries the
   ack for the **bulk config document** only. A per-field `set/<key>` result
-  — `ok`, or `err` of `range` / `char` / `value` / `nodefs` — is written to
+  — `ok`, or `err` of `range` / `char` / `value` / `nodefs` / `pair` — is written to
   the device's serial log and nowhere else. There is no `set_ack` topic and
   no HA entity for it. To confirm a control edit took, watch the value the
   device republishes to `magtag/<id>/cfg`: it is what the device now
   believes, so a control that snaps back was rejected.
+- **Chore-free minutes and their allocation are a pair.** Each
+  `chore_free_*` control (0–1440 min) must stay at or below the allocation
+  for the same day type; the device enforces it differently from each end,
+  so the pair can never go invalid from these controls:
+  - Raising a **chore-free** number above its allocation is **refused**
+    (`err` `pair` — the value is in range, it is the *other* field that
+    makes it impossible). Nothing is written, and because a refused
+    `set/` is left retained it is re-tried every window, and the control
+    snaps back at each `cfg` republish. It is not forgotten: raise the
+    allocation and the waiting chore-free value **applies by itself** —
+    in the same window if the device happens to process the allocation
+    edit first, otherwise in the one after. Setting the chore-free number
+    back down replaces the waiting value instead.
+  - Lowering an **allocation** below its chore-free number **clamps** the
+    chore-free number down to the new allocation and applies both. The
+    serial log shows `"clamped":"chore_free_wd","clamped_to":30`; in HA
+    you see the chore-free control move at the next `cfg` republish.
+  A bulk document, or a firmware flash that reseeds the allocations, can
+  still leave an invalid pair standing — see
+  [below](#chore_free-pairs-in-the-document).
 - **Firmware updates:** **OTA manifest URL** (Text) is the https endpoint
   the device checks for a new build; **OTA check on sync** (Switch) makes
   it also check during a Button D full sync, on top of the daily
@@ -265,8 +296,9 @@ The IDs are `<component>.magtag_xxxxxx_<key>`, where `<key>` is the
 registry key in `main/ha_config.c` — **not** a slug of the display name the
 card shows. "Weekday allocation" is `weekday_min`; "Quiet hours start
 (HHMM)" is `quiet_start`; "Break interval" is `break_interval_min`; "Device
-name" is `name`; "Timer 1 name" is `timer1_name`. Use the entity picker if
-in doubt.
+name" is `name`; "Timer 1 name" is `timer1_name`; "Weekday chore-free" is
+`chore_free_wd` (`_we`, `_hol`, `_sum` for the others). Use the entity
+picker if in doubt.
 
 ```yaml
 type: entities
@@ -280,6 +312,12 @@ entities:
   - entity: number.magtag_xxxxxx_weekend_min
   - entity: number.magtag_xxxxxx_holiday_min
   - entity: number.magtag_xxxxxx_summer_min
+  - type: section
+    label: Chore-free minutes (each ≤ its allocation above)
+  - entity: number.magtag_xxxxxx_chore_free_wd
+  - entity: number.magtag_xxxxxx_chore_free_we
+  - entity: number.magtag_xxxxxx_chore_free_hol
+  - entity: number.magtag_xxxxxx_chore_free_sum
   - type: section
     label: Quiet hours
   - entity: number.magtag_xxxxxx_quiet_start
@@ -359,27 +397,63 @@ an automation has to act on the new limit in the same breath, key it on
 
 ### Bulk config document (holidays, scripted setup)
 
-For values that aren't a single control — chiefly the **holiday list** —
-publish a **retained** JSON document to `magtag/<id>/config`; the device
-applies it and republishes the applied version to
-`magtag/<id>/config_ack`. Every field is optional except `ver` — applied
-only when `ver` differs from the last one, so a retained message is safe
-to leave on the topic. A rejected field is named in the ack's `errors`
+For values that aren't a single control — chiefly the **holiday list**
+and the **chore list**, which exist *only* here — publish a **retained**
+JSON document to `magtag/<id>/config`; the device applies it and
+republishes the applied version to `magtag/<id>/config_ack`. Every field
+is optional except `ver`. A rejected field is named in the ack's `errors`
 list but never blocks the others. If more fields fail than the ack can
 name, it carries `"errors_truncated": true` alongside the ones it did —
 so a shortened list never reads as "everything else was fine".
 
-**The document has a size limit: 2047 bytes.** Every documented field at
-its longest, including 46 holidays, comes to 1708, so the limit is not
-one a real document meets by accident. A document past it is refused
+> **Two requirements that fail silently.** Get either wrong and the device
+> does nothing and says nothing — no ack at all, not even an error:
+>
+> 1. **Publish it retained** (`retain: true`, or `-r` for
+>    `mosquitto_pub`). The device is asleep almost all the time; it only
+>    reads the topic during a network window, and a non-retained message
+>    published while it sleeps is gone by the time it wakes.
+> 2. **Change `ver` every time you change the document.** The device
+>    applies a document only when its `ver` differs from the last one it
+>    applied (stored in NVS as `cfg_ver`), which is what makes a retained
+>    message safe to leave on the topic. Republish edited content under
+>    the same `ver` and it is skipped, and a skipped document publishes no
+>    ack. A timestamp (`"ver": "1758650000"`) or a date-and-counter
+>    (`"ver": "20260923-2"`) both work; `ver` may be a JSON string or
+>    number, and a string must not contain `"`, `\` or control characters
+>    (`{"ok":false,"err":"ver"}`). A document with no `ver` is refused as
+>    `{"ok":false,"err":"no_ver"}`. Only the first **23 characters** of
+>    `ver` are kept and compared, so two versions that differ only after
+>    the 23rd character count as the same one and the second is skipped
+>    silently — keep `ver` short.
+>
+> **`config_ack` is the diagnostic.** After the next window it should carry
+> your new `ver` with `"ok":true`, or `"ok":false` and an `errors` list
+> naming each field that was refused. If it still shows the *previous*
+> `ver`, the device never applied your document: it was not retained, the
+> `ver` did not change, or the device has not had a window yet (Button D
+> on the timer screen forces one).
+
+**The document has a size limit: 2047 bytes.** Every field below, each at
+its longest accepted value — 46 holidays, three 20-byte chore names, four
+timers with 15-character names, a 127-character `ota_url` — comes to
+**1717 bytes as compact JSON** (no spaces or line breaks, which is what
+HA's `to_json` filter produces), leaving 330 bytes spare; the chore fields
+account for 166 of those 1717. That figure is measured by a host test
+(`test_the_worst_case_document_fits_the_receive_buffer` in
+`test/test_config_apply/`), not estimated, so it tracks the code. Layout
+counts: the same document written with `", "` / `": "` separators is about
+1850 bytes and still fits, but **pretty-printed** (indented, one field per
+line) it is about 2250 and does not — nor does text inflated with `\u`
+escapes. A document past the limit is refused
 whole — nothing in it is applied — and the refusal is published to
 `config_ack` as `{"ok":false,"err":"too_long","len":<size>,"max":2047}`,
 where `len` is the size of the document you published. Because a retained
 document is re-delivered on every reconnect, an over-size one would
 otherwise be refused again on every wake for the life of the retained
-message with no sign of it anywhere; the ack is that sign. Shorten the
-document (the holiday list is usually the reason) and republish with a
-new `ver`.
+message with no sign of it anywhere; the ack is that sign. Publish it
+compact, shorten it (the holiday list is usually the reason) and
+republish with a new `ver`.
 
 ```json
 {
@@ -387,6 +461,8 @@ new `ver`.
   "name": "Kitchen MagTag",
   "tz": "EST5EDT,M3.2.0,M11.1.0",
   "weekday_min": 60, "weekend_min": 120, "holiday_min": 120, "summer_min": 120,
+  "chore_free_wd": 0, "chore_free_we": 30, "chore_free_hol": 30, "chore_free_sum": 60,
+  "chores": ["Dishes away", "Trash out", "Homework"],
   "quiet_start": 2230, "quiet_end": 800,
   "break_interval_min": 30, "break_duration_min": 15,
   "summer_start": "2026-05-29", "school_start": "2026-08-20", "school_end": "2027-05-28",
@@ -459,11 +535,156 @@ new `ver`.
   without being named in the ack** — unlike `chores`, which refuses rather
   than truncates — so publish the next twelve months rather than every
   date you know. 46 dates cost about 600 bytes of the document, which
-  leaves the whole rest of the schema inside the size limit below.
+  leaves the whole rest of the schema inside the size limit above.
+- `chores` is the chore checklist (see
+  [Chore checklist](#chore-checklist-read-only-in-ha)) — an array of up to
+  **3** names, in the order they appear on the device, one per ack button
+  (B, C, D). It is **document-only**: there is no HA control for it, and
+  the bulk document is the one place a chore list can come from. The
+  rules, each enforced by refusal, never by truncation:
+  - at most **3** entries (`CHORE_MAX`);
+  - each a non-empty JSON **string** of at most **20 bytes**
+    (`CHORE_NAME_MAX`). Bytes, not characters: names are UTF-8, so
+    `"Räum dein Zimmer"` is 16 characters in 17 bytes and an emoji costs
+    four;
+  - no `"`, no `\`, and no control characters (the same rule every
+    config string follows).
+
+  Break any rule and the **whole array is refused**: `"chores"` is named in
+  the ack's `errors`, nothing is written, and the list already on the
+  device stays exactly as it was — the device never keeps "the entries
+  that were fine", because the acks are positional and a half-applied list
+  would have the kid ticking rows nobody asked for. A fourth to-do item is
+  the easy way to hit this.
+
+  **Absent and empty mean different things.** Leave `chores` out and the
+  stored list is untouched (so a document written before the feature
+  cannot wipe it). `"chores": []` is the way to **turn the feature off**:
+  no list, no gate, no mode button — the device behaves as if the feature
+  did not exist.
+
+  Changing the list (a rename, an addition, a removal or a reorder)
+  **clears today's ticks** — they are positional, so they stop meaning
+  anything — but if the day's screen time has already been unlocked it
+  **stays unlocked**; a list edit never re-locks a day. The HA side of a
+  list change is under
+  [When HA sees a list change](#when-ha-sees-a-list-change).
+- `chore_free_wd`, `chore_free_we`, `chore_free_hol`, `chore_free_sum` are
+  the chore gate's free minutes for weekday / weekend / holiday / summer
+  days — integer **minutes, 0–1440**, the same keys as the four chore-free
+  controls. The day's first `chore_free` minutes of Screen time are
+  unconditional; the rest of that day's allocation is withheld until every
+  chore is ticked. So `0` (the default, on every day type) is **fully
+  gated** — no Screen time at all until the chores are done — and a value
+  **equal** to the allocation withholds nothing, which is how you switch
+  the gate off for one day type while keeping it on the others. The gate
+  does nothing at all while no chore list is configured. Like every other
+  optional field, an omitted one leaves the stored value alone. Out of
+  range, or not a JSON number (`"30"` in quotes is refused), names that
+  key in the ack and leaves it unchanged.
+
+#### `chore_free` pairs in the document
+
+Each `chore_free_*` must be **at most** the allocation it is paired with —
+`chore_free_wd` ≤ `weekday_min`, `_we` ≤ `weekend_min`, `_hol` ≤
+`holiday_min`, `_sum` ≤ `summer_min`. The document is judged on the values
+that actually land, after every field in it has been applied, so key order
+does not matter. The rule is checked for each pair the document mentions
+from **either** side (it can break a pair by raising the free minutes or by
+lowering the allocation under them), whatever day it is.
+
+A broken pair **is applied anyway**. The chore-free key is named in the
+ack's `errors`, but nothing is clamped and nothing is rolled back — the
+device does not guess which half you meant. The HA controls refuse or
+clamp (see [above](#editing-config-from-the-ha-card-no-setup)), so they
+cannot break a pair. Two things can:
+
+- **a document** that breaks it, as above; and
+- **a reseed** — a firmware flash that changes the compiled-in defaults
+  resets the four allocations to their menuconfig values but leaves the
+  `chore_free_*` minutes alone (see
+  [What a reseed resets](#the-document-and-the-controls-give-each-field-one-home)).
+  With `chore_free_we` at 150 and `weekend_min` at 180, a reseed to a
+  120-minute weekend default breaks the weekend pair with no document
+  involved and no ack. It repairs itself in the next window if the
+  retained document carries that allocation (the reseed makes the device
+  re-apply it); if the allocation lives on its control, set it again
+  there.
+
+What happens next depends on the day:
+
+- If the broken pair is **today's** day type, the device locks with a
+  **Config Error** screen until it is fixed — see
+  [The config-error lock](#the-config-error-lock).
+- If it is **another** day type (a broken summer pair written in
+  December), nothing locks today. The ack names it once, and the next
+  document overwrites that ack — so the durable report is the
+  **Config warning** sensor, which names every day type whose stored pair
+  is broken in every network window until it is fixed. Fix it before that
+  day type comes round, or the device locks on its first day.
+
+Fix a broken pair by publishing a corrected document (new `ver`), or from
+the HA controls: lowering the chore-free number, or raising the allocation,
+both repair it.
 
 The same fields are available here as on the native controls (`name`, `tz`,
-`weekday_min`, …, and a `timers` array), so scripted/bulk setup stays
-possible — but for day-to-day tweaks the Configuration controls are easier.
+`weekday_min`, `chore_free_wd`, …, and a `timers` array), so scripted/bulk
+setup stays possible — but for day-to-day tweaks the Configuration controls
+are easier. The fields that exist *only* here are `holidays`, `chores`,
+`summer_start`, `school_start` and `school_end`.
+
+#### The document and the controls: give each field one home
+
+The device's NVS holds the live value of every setting. The two ways of
+changing one behave differently afterwards:
+
+- **A control edit is consumed.** HA publishes it retained on
+  `set/<key>`; the device applies it in its next window and then **clears**
+  that retained `set/` topic (a refused edit is the exception — it stays
+  retained and is retried). From then on the edit exists only in the
+  device's NVS and in what `cfg` reports.
+- **A document is replayed.** The broker keeps it retained, and the device
+  applies it whenever its `ver` is new — and also after a *reseed* (below),
+  which forgets the applied `ver` precisely so the retained document is
+  re-applied.
+
+**The override rule: a document that includes a field overwrites that
+field every time it applies**, including an edit you made from the control
+since the last time. There is no merge and no warning; the control simply
+moves back at the next `cfg` republish. The one exception is timing inside
+a single window: the device applies the document first and pending `set/`
+edits after it, so a control edit still waiting on the broker when a new
+document lands wins. An earlier, already-applied control edit does not.
+
+So pick **one home per field**. A field you adjust from the Configuration
+controls should be left **out** of any document that gets republished
+(omitted = unchanged); a field you keep in the document should not be
+edited from its control, because the next document puts it back. This
+matters most for a document that is republished often — the To-do bridge
+below publishes on every chore-list change.
+
+**What a reseed resets, and what brings it back.** When a firmware flash
+changes the compiled-in defaults (the menuconfig allocations, or the WiFi /
+MQTT credentials), the device resets the **four allocations** and the
+**holiday list** to those defaults and forgets its applied `ver`. The
+retained document is then re-applied at the next window, so every field it
+carries comes back; control edits do not (their `set/` topics were cleared
+when they applied). An allocation you manage from the controls therefore
+returns to its menuconfig default after such a flash — check the
+allocation controls afterwards. Everything else (`chore_free_*`, quiet
+hours, names, tones, the chore list, …) is not touched by a reseed.
+
+**The retained document is the replay copy — one publisher, one
+document.** The broker holds exactly one retained document on
+`magtag/<id>/config`, and each publish replaces it outright. Anything the
+new document leaves out is no longer replayed after a reseed, and the
+unreadable-timer-table recovery described
+[above](#editing-config-from-the-ha-card-no-setup) re-applies only a
+`timers` array the retained document still carries. So whatever publishes
+this topic should publish **every field that lives in the document** each
+time, not just the one it is changing — and if two things publish it,
+they must build one document between them, or each publish drops the
+other's fields from the replay copy.
 
 ### Holidays from a calendar
 
@@ -471,7 +692,278 @@ Keep school days-off in an HA **Local Calendar** ("School Days Off") and
 run a nightly automation that reads the next 12 months of all-day events
 and republishes the config with the extracted `holidays` array — so the
 family manages no-school days on a normal calendar UI, and the device
-picks them up automatically.
+picks them up automatically. (This is a pattern, not a ready-made
+automation; no YAML for it is given here.) If you also use the To-do
+bridge below, do not give the holidays a publisher of their own: the
+retained document has one slot, so two automations would keep replacing
+each other's fields. Put the calendar lookup into the bridge's
+`doc_fields` instead, so one automation publishes one document.
+
+### Chores from a To-do list (optional bridge)
+
+HA's **To-do list** integration (a Local To-do list is enough) gives the
+chore list a real checklist UI — add, rename, remove and drag to reorder
+from the phone — and one automation turns it into the `chores` field. It is
+a convenience, not the contract: publishing the document by hand or from
+any other script is equally supported.
+
+It needs one helper, which remembers the list last published so that the
+automation publishes (and moves `ver`) only when the list actually changed:
+Settings → Devices & Services → Helpers → **Text**, named
+`magtag_chores_published`, maximum length **255**.
+
+```yaml
+automation:
+  - alias: "MagTag — publish chore list"
+    mode: queued
+    triggers:
+      # Adding, completing or deleting an item changes the open-item count.
+      - trigger: state
+        entity_id: todo.daily_chores
+      # A rename or a reorder does NOT change the count, so a state
+      # trigger alone never sees it. The periodic check catches it.
+      - trigger: time_pattern
+        minutes: "/15"
+      - trigger: homeassistant
+        event: start
+    variables:
+      device: magtag-xxxxxx
+      # ONLY the fields that have no HA control. Anything with a control
+      # (allocations, chore-free minutes, quiet hours, names, ...) stays
+      # OUT: this document is republished on every list change, and a
+      # field in it would overwrite that control's edits each time.
+      doc_fields:
+        holidays: ["2026-10-16", "2026-11-03"]
+        summer_start: "2026-05-29"
+        school_start: "2026-08-20"
+        school_end: "2027-05-28"
+    actions:
+      - action: todo.get_items
+        target:
+          entity_id: todo.daily_chores
+        data:
+          status: needs_action
+        response_variable: items
+      - variables:
+          # Items the device would refuse (over 20 BYTES, empty, or
+          # containing " \ or a control character) are set aside rather
+          # than sent: one of them would get the whole list refused.
+          # Then the first three that are left, in list order.
+          checked: >-
+            {%- set ns = namespace(ok=[], bad=[]) -%}
+            {%- for n in items['todo.daily_chores']['items']
+                         | map(attribute='summary') -%}
+              {%- if n | length > 0
+                     and (n.encode('utf-8') | length) <= 20
+                     and not (n is search('[\\x00-\\x1f"\\\\]')) -%}
+                {%- set ns.ok = ns.ok + [n] -%}
+              {%- else -%}
+                {%- set ns.bad = ns.bad + [n] -%}
+              {%- endif -%}
+            {%- endfor -%}
+            {{ {'chores': ns.ok[:3], 'skipped': ns.bad} }}
+      - condition: template
+        value_template: >-
+          {{ checked.chores | to_json
+             != states('input_text.magtag_chores_published') }}
+      - action: mqtt.publish
+        data:
+          topic: "magtag/{{ device }}/config"
+          retain: true
+          payload: >-
+            {{ dict(doc_fields, ver=(now().timestamp() | int | string),
+                    chores=checked.chores) | to_json }}
+      - action: input_text.set_value
+        target:
+          entity_id: input_text.magtag_chores_published
+        data:
+          value: "{{ checked.chores | to_json }}"
+      - if:
+          - condition: template
+            value_template: "{{ checked.skipped | count > 0 }}"
+        then:
+          - action: persistent_notification.create
+            data:
+              notification_id: magtag_chores_skipped
+              title: "MagTag: chores not sent"
+              message: >-
+                Too long for the device (20 bytes), or containing a
+                quote, backslash or control character:
+                {{ checked.skipped | join(', ') }}
+```
+
+What it does and does not do:
+
+- **Retained, and `ver` moves only on a real change.** `ver` is the
+  publish time, so it is new on every publish, and the helper comparison
+  keeps the 15-minute check from publishing an unchanged list — which
+  would otherwise make the device re-apply the whole document every
+  window. An empty list publishes `"chores": []`, which turns the feature
+  off on the device.
+- **Only open items are sent** (`status: needs_action`). The To-do list is
+  the *authoring* surface, not a place to tick chores: the device is the
+  only thing that records a chore as done. Completing an item in HA
+  removes it from the device's list — and, like any list change, clears
+  the day's ticks on the device.
+- **Names the device would refuse are skipped, not sent.** The device
+  refuses the **whole** list if any one name is over 20 bytes or contains
+  `"`, `\` or a control character, and keeps the old list. So the template
+  checks each open item first — by **bytes**, not characters, so `Räum
+  dein Zimmer auf` (21 bytes, 20 characters) is caught — sets the bad ones
+  aside, sends the first three of the rest, and raises an HA notification
+  (*MagTag: chores not sent*) naming what it skipped. On the device the
+  skipped item is simply absent, and the item after it moves up. Names are
+  never shortened: a cut-off name on a kid's checklist is worse than a
+  visible "fix this" in HA. Rename the item and it is sent at the next
+  check. `config_ack` stays the place to confirm the device took the list.
+- **The helper can always hold what it is given.** It stores the sent
+  list as JSON, and three names of at most 20 bytes come to well under the
+  helper's 255-character limit. (That is the second reason the check runs
+  *before* the list is stored: a helper value over 255 characters is
+  rejected by HA, the guard never settles, and the automation would
+  publish a new `ver` every 15 minutes.)
+- **`doc_fields` holds only fields with no HA control** — here the
+  holidays and the three season dates. Everything with a control is left
+  out on purpose: this document is republished on every list change, and
+  a field in it would overwrite that control's edits each time (see
+  [give each field one home](#the-document-and-the-controls-give-each-field-one-home)).
+  If you would rather keep some controllable field in the document (for
+  example so it survives a reseed), add it here **and stop editing it
+  from its control**. The same goes for a `timers` array.
+- **Editing `doc_fields` publishes nothing by itself.** The guard compares
+  only the chore list, so a changed holiday list waits for the next chore
+  edit. To push it now, clear the helper — set
+  `input_text.magtag_chores_published` to an empty value (Developer tools
+  → Actions → `input_text.set_value`) — and the next check (at most 15
+  minutes) republishes the whole document with a new `ver`.
+- **This automation owns the retained document.** Do not publish to
+  `magtag/<id>/config` from anywhere else while it runs: the next list
+  change replaces whatever you published with `doc_fields` plus the
+  chores. Put holidays and any other document field here instead.
+- Replace `magtag-xxxxxx` with your device id (Settings → Devices &
+  Services → MQTT shows it) and `todo.daily_chores` with your list.
+
+## Chore checklist (read-only in HA)
+
+Up to three chores, pushed as the document's `chores` field, gate part of
+each day's Screen time: the first `chore_free_*` minutes are free, the rest
+unlocks when every chore is ticked. The kid ticks them **on the device** —
+Button A switches the panel to the checklist, and B, C and D tick (and
+untick) chores 1, 2 and 3. The device-side behaviour is described in
+[ProductOverview.md §5c](ProductOverview.md#5c--chore-checklist); this
+section is what Home Assistant sees.
+
+### The entities
+
+| Entity | Name in HA | Category | State |
+|--------|-----------|----------|-------|
+| `sensor.magtag_xxxxxx_chores_left` | Chores left | Primary | Configured chores not yet ticked today |
+| `sensor.magtag_xxxxxx_chores_done` | Chores done | Diagnostic | Chores ticked today |
+| `binary_sensor.magtag_xxxxxx_chore_1` … `_chore_3` | `<chore name> done` | Primary | On = ticked today |
+| `sensor.magtag_xxxxxx_config_warning` | Config warning | Diagnostic | `OK`, or the day types whose `chore_free` pair is broken |
+
+- **The two counts** carry `state_class: measurement`, so HA keeps
+  **long-term statistics** for them — chore completion over weeks, which
+  is what they are for. The price is the logbook: HA leaves any sensor
+  with a state class out of it, so a change in either count does **not**
+  appear in the activity log. The per-chore binary sensors do, which is
+  where the day-by-day record lives. With no list configured both counts
+  read 0.
+- **One binary sensor per configured chore**, named from the list —
+  `"Homework"` gives *Homework done*. Rows past the configured count are
+  **removed** from HA, not left unavailable: with two chores there is no
+  `chore_3`. A row whose stored name is empty (which the document cannot
+  produce) falls back to its default name, *Chore 3 done*. The entity
+  **ID** is positional and never follows the name — `chore_1` is whatever
+  chore is first on the list today — so renaming or reordering chores
+  keeps the ID and its history, and the history of `chore_1` then spans
+  both chores.
+- **Config warning** is the durable report of a broken `chore_free` pair
+  (see [above](#chore_free-pairs-in-the-document)): `OK` when every pair is
+  valid, otherwise every broken day type by name, in the order Weekday,
+  Weekend, Holiday, Summer — e.g. `Weekday, Summer`. It is recomputed from
+  the stored settings for **every** stat publish (every network window), so it stays until the
+  pair is fixed, unlike the retained `config_ack`, which the next document
+  overwrites. It has no state class, so its appearing and clearing *are*
+  logged ("Config warning changed to Summer"), and unlike the stat-fed
+  sensors it has no `expire_after`: it describes stored configuration,
+  which stays broken while the device is quiet.
+- The counts and the chore sensors carry the same `expire_after` as the
+  other stat-fed sensors (see the notes above).
+
+### HA can see the ticks, not make them
+
+The device is the **only** authority on whether a chore is done. HA shows
+the ticks and cannot set or clear one: there is no control, no `set/` key
+and no command for it, by design. A parent override would need a retained
+command and a rule for when it collides with a press; a mis-press is
+instead undone on the device, where every chore button **toggles**. If the
+ticks are being gamed, that is a conversation, not a race over MQTT.
+
+**The timestamps are sync times, not press times.** Ticking a chore does
+not open a network window — the device ticks, repaints and goes back to
+sleep — so HA hears about it in the **next** window the device opens, and
+the logbook time is the time of that window. In practice that is often the
+moment the unlocked Screen time is started (starting a timer opens one),
+otherwise the next scheduled sync: the checklist can only be up while no
+timer is running, so that is the idle cadence
+(`MAGTAG_IDLE_SYNC_INTERVAL_MIN`, default 60 min). Button D on the timer
+screen forces one. "Homework done at 16:04" means the device reported it
+by 16:04.
+
+At the day rollover every tick clears and `chores_left` goes back to the
+full count, reported by the rollover's own window.
+
+### When HA sees a list change
+
+The device fingerprints what its discovery documents depend on — the device
+name, the firmware version, the four timer slots' names (and whether each
+slot is enabled), and the chore list — and republishes discovery once
+whenever that fingerprint moves. For the chore list that is a rename, an
+addition, a removal or a reorder.
+
+Within one network window the device publishes discovery and the stat
+payload **first** and applies the config document **after**. So a list
+change applied in window *N* reaches HA's entity names — and the cleared
+ticks — in window *N + 1*. Publish, then press Button D on the timer screen
+twice (one window applies it, the next reports it), or let the scheduled
+syncs do it.
+
+If the stored list **cannot be read** in a window (an NVS fault, a stored
+record from an incompatible layout), the chore entities are left exactly as
+they are rather than renamed or removed on a guess, the discovery pass is
+not marked done, and it is retried every window until a read succeeds.
+
+### The config-error lock
+
+The device has three locks, each a full-screen takeover it sleeps behind:
+the **charge lock** (battery ≤ 10 %), the **Bed Time** lock, and the
+**config-error lock**. The last is the chore feature's, and it engages when
+**today's** `chore_free` minutes exceed today's allocation — a setting
+that cannot mean anything, so the device refuses to guess. The HA controls
+cannot create that state; a bulk document or a reseeding firmware flash
+can (see [above](#chore_free-pairs-in-the-document)), and a broken pair for some
+*other* day type does not lock today; it shows in **Config warning**
+instead.
+
+On the device: a running timer is paused, and the panel shows
+**Config Error** with the pair it objects to — e.g. `Weekday: free 90 > 60
+min` — and `Fix in Home Assistant, press D`. Every button except **D** is
+dead. The device then sleeps 30-minute intervals (`CONFIG_ERR_SLEEP_SEC`,
+`include/sleep_plan.h`), and every one of those wakes, like every D press,
+runs a network window — so HA keeps receiving stats, and the fix can
+arrive — and then re-checks the pair.
+
+To clear it, fix the pair from HA — lower that day's chore-free number or
+raise its allocation, or publish a corrected document with a new `ver` —
+then **press D**. That wake's window applies the fix, the re-check passes,
+and the lock lets go and repaints the normal screen. Without the press it
+clears by itself at the next 30-minute wake, and it also lets go if the day
+type changes to one whose pair is valid.
+
+The other two locks outrank it. At bed time the Bed Time screen wins, and a
+device that is both config- and charge-locked has no exit — neither a
+button nor a network window — until the battery recovers.
 
 ## Actions (native controls)
 
