@@ -75,8 +75,9 @@ void timer_persist_save(void);
    first guard. timer_defs_install() must have run first —
    the restore ends in timer_ensure_active_slot_enabled(), which reads the
    defs table to decide whether the restored selection still exists, and
-   with no table every extra slot reads as disabled and the selection is
-   dragged to Screen. */
+   with no table every extra slot reads as disabled: the selection is
+   dragged to Screen and every RUNNING extra is retired as an orphan
+   (BUG-7; a PAUSED one keeps its state). */
 bool timer_persist_try_restore(time_t now);
 
 /* Put today's chore acks back into RTC from the "chore_ack" NVS record —

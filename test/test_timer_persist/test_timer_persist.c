@@ -709,7 +709,8 @@ void test_restore_depends_on_the_defs_table_being_installed_first(void) {
        timer_ensure_active_slot_enabled(), which reads the defs table to
        decide whether the restored selection still exists. Run it with no
        table and every extra slot reads as disabled, so the selection is
-       dragged to Screen — a quietly wrong device rather than a crash,
+       dragged to Screen and the running Piano is retired as an orphan
+       (BUG-7) — a quietly wrong device rather than a crash,
        which is why the ordering needs a test and not a comment. */
     arm_rich_state(NOON); /* selection on Piano */
     timer_persist_save();
@@ -718,24 +719,39 @@ void test_restore_depends_on_the_defs_table_being_installed_first(void) {
     timer_set_defs(NULL, 0); /* as if timer_defs_install() had not run */
     TEST_ASSERT_TRUE(timer_persist_try_restore(NOON));
     TEST_ASSERT_EQUAL_INT(0, timer_active_slot());
+    TEST_ASSERT_EQUAL(TIMER_IDLE, timer_slot_state(SLOT_PIANO));
 
     wipe_rtc();
     timer_set_defs(TEST_DEFS, TIMER_SLOT_COUNT);
     TEST_ASSERT_TRUE(timer_persist_try_restore(NOON));
     TEST_ASSERT_EQUAL_INT(SLOT_PIANO, timer_active_slot());
+    TEST_ASSERT_EQUAL(TIMER_RUNNING, timer_slot_state(SLOT_PIANO));
 }
 
 void test_restore_of_a_slot_the_firmware_no_longer_defines_lands_on_screen(void) {
-    /* Reflash with a slot removed from menuconfig: the slot's state is
-       still restored, only the selection moves, so nothing is refunded. */
+    /* Reflash with a slot removed from menuconfig: the selection moves,
+       and the other slots' state is still restored, so nothing is
+       refunded. The removed slot is IDLE here, so there is no run to
+       retire; test_timer covers a RUNNING one, and a PAUSED one kept
+       (BUG-7).
+
+       arm_rich_state leaves Piano RUNNING and selected. Moving the
+       selection off it alone would snapshot a RUNNING slot that is not
+       the active slot (I3), a state only a corrupt snapshot holds, so
+       Piano is paused and the segment it armed disarmed first. */
     arm_rich_state(NOON);
+    g_rtc_state.slots[SLOT_PIANO].state = TIMER_PAUSED;
+    g_rtc_state.slots[SLOT_PIANO].remaining_at_pause = 600;
+    g_rtc_state.slots[SLOT_PIANO].expiry_wall_time = 0;
+    g_rtc_state.slots[0].run_started_wall = 0;
     g_rtc_state.active_slot = SLOT_DISABLED;
     timer_persist_save();
     wipe_rtc();
 
     TEST_ASSERT_TRUE(timer_persist_try_restore(NOON));
     TEST_ASSERT_EQUAL_INT(0, timer_active_slot());
-    TEST_ASSERT_EQUAL_INT(TIMER_RUNNING, timer_slot_state(SLOT_PIANO));
+    TEST_ASSERT_EQUAL_INT(TIMER_PAUSED, timer_slot_state(SLOT_PIANO));
+    TEST_ASSERT_EQUAL_INT32(600, timer_slot_remaining(SLOT_PIANO, NOON, 0));
 }
 
 /* ---- the RTC-state guard ------------------------------------------------ */

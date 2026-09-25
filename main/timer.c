@@ -71,7 +71,46 @@ int timer_active_slot(void) {
     return g_rtc_state.active_slot;
 }
 
-void timer_ensure_active_slot_enabled(void) {
+static void fold_run_segment_signed(time_t now, bool eligible);
+
+/* BUG-7: a run must not outlive its own definition. Moving only the
+   selection left an orphan RUNNING behind it (I2/I3), and its live
+   segment then kept accruing until some later fold swept the whole gap
+   into the balance. So every RUNNING extra whose definition is gone is
+   retired first: reset like timer_reload (completions stay, the old
+   timer's grants go), as timer_reconcile_def resets a mid-window disable.
+
+   Only RUNNING (decided 2026-09-25). A PAUSED orphan breaks no invariant,
+   and on a restore "no definition" may be a lie: timer_defs_install falls
+   back to the menuconfig table on any read failure or blob-version
+   change, and an HA-defined slot menuconfig leaves empty then reads as
+   disabled for that one boot. Resetting it would destroy a paused timer
+   that comes back intact on the next boot. So a PAUSED orphan keeps its
+   state and only the selection moves off it; IDLE and EXPIRED hold no
+   run. A RUNNING orphan is still reset on such a boot — that needs a
+   running extra, lost RTC memory and a fallback table at once, and
+   resetting is the simple way to restore I3.
+
+   The segment folds at `now` and NON-eligible (decided 2026-08-07, see
+   include/timer.h) — never at the slot's own sign, which went with the
+   definition. It folds when the orphan armed it, or when the slot that
+   armed it is not RUNNING (only a corrupt snapshot names one): the orphan
+   was then the only run feeding it, and resetting the orphan without
+   the fold would leave the balance moving with nothing RUNNING (I8). A
+   segment another RUNNING slot armed is that slot's, and stays armed. */
+void timer_ensure_active_slot_enabled(time_t now) {
+    for (int i = 1; i < TIMER_SLOT_COUNT; i++) {
+        timer_slot_state_t *sl = &g_rtc_state.slots[i];
+        if (slot_enabled(i) || sl->state != TIMER_RUNNING)
+            continue;
+        uint8_t owner = g_rtc_state.run_segment_slot;
+        if (owner == (uint8_t)i || g_rtc_state.slots[owner].state != TIMER_RUNNING)
+            fold_run_segment_signed(now, false);
+        uint16_t completions = sl->completions;
+        memset(sl, 0, sizeof(*sl));
+        sl->state = TIMER_IDLE;
+        sl->completions = completions;
+    }
     if (!slot_enabled(g_rtc_state.active_slot))
         g_rtc_state.active_slot = 0;
 }
@@ -377,9 +416,9 @@ static void fold_run_segment_signed(time_t now, bool eligible) {
 
 /* Fold at the sign of the slot that ARMED the segment. Never the active
    slot: the segment lives on slot 0 and the selection can move
-   underneath it (timer_ensure_active_slot_enabled runs unconditionally on
-   a snapshot restore and does not check RUNNING), which would turn a
-   drain into an accrual. The sign is a property of the run. */
+   underneath it (a snapshot restore moves it off a slot whose definition
+   is gone), which would turn a drain into an accrual. The sign is a
+   property of the run. */
 static void fold_run_segment(time_t now) {
     fold_run_segment_signed(now, timer_slot_break_eligible(g_rtc_state.run_segment_slot));
 }
@@ -1032,7 +1071,26 @@ bool timer_restore_snapshot(const timer_snapshot_t *snap, time_t now) {
     memcpy(g_rtc_state.last_date, snap->date, sizeof(g_rtc_state.last_date));
     /* The firmware may have been reflashed with this slot removed from
        menuconfig — never strand the device on a slot the buttons can no
-       longer reach (its state stays restored; only the selection moves). */
-    timer_ensure_active_slot_enabled();
+       longer reach, and never let its run survive the definition (BUG-7).
+
+       The orphan's segment folds at `now`, the restore time. The snapshot
+       carries no save timestamp, and a timestamp would not help: a
+       RUNNING slot's snapshot bytes do not change from wake to wake, so
+       timer_persist_save skips the write and the blob's age is that of the
+       last state change, not of the last wake. Nothing later than `now`
+       can be swept in, which is what the defect was.
+
+       The time up to `now` CAN include a power-off. There are two restore
+       sites: the boot restore (main.c), which needs a clock that survived,
+       and the rollover restore (wake_flow_handle_day_rollover), which runs
+       after a genuine power-off once NTP has corrected the clock. On that
+       path the dark time folds as exposure — but bounded by the run's own
+       remaining time: the restore loop above has already made an orphan
+       that expired in the dark EXPIRED and folded it at its expiry, and
+       this call leaves it alone. That is the same span a still-defined
+       timer's wall-clock countdown uses up across the same power-off.
+       Accepted (2026-09-25): it errs toward more eye rest, as the
+       2026-08-07 sign decision does. */
+    timer_ensure_active_slot_enabled(now);
     return true;
 }

@@ -206,7 +206,7 @@ constraint remains; everything else is independent and can be reordered freely.
 | — | **BUG-10** — recurring PANIC resets on an idle device | **RESOLVED** (owner, 2026-09-25); see the entry. | — |
 | **Owner triage, 2026-09-25** | **BUG-13, then BUG-7, then BUG-11.** | The owner rates BUG-5 and BUG-12 theoretical, and they stay open but unscheduled. BUG-1 and BUG-2 stay parked: the button remap has probably moved the ground under them, so revisit them only if lost presses are seen. | — |
 | 0.9 | **BUG-13** — blanking a text control in HA never reaches the device | **FIXED 2026-09-25 (v24)**, and waiting for a hardware check | — |
-| 1 | **BUG-7** — a RUNNING slot outliving its own definition | State-machine change to an uncovered path; independent | — |
+| 1 | **BUG-7** — a RUNNING slot outliving its own definition | **FIXED 2026-09-25**: a RUNNING orphan is folded as non-eligible and reset; a PAUSED one is kept | — |
 | 2 | **BUG-2** | **BUG-3 is RESOLVED** (2026-09-16, M2-T4a/T4b) and is no longer part of this item — its condition fired when Button D gained a chore-ack arm, and the decision it was waiting for was made there with cases at both call sites. BUG-2 stands alone now, and still needs a re-baselined sweep to show the fix changed *only* the intended cases. | — |
 | 3 | **BUG-5** — the v1→v2 migration | Only bites on a version bump, and **R4** means it has to be written *before* one rather than after. Nothing in flight bumps the version, which is why it sits last. | — |
 | 4 | **BUG-11** — bed time is evaluated against an unvalidated clock | **No longer blocked, and no longer 0.6.** Both were derived from a mechanism review refuted on 2026-08-21: a panic does *not* clear the wall clock, so this is not downstream of BUG-10. The real trigger is a power-on reset alone, which is rare, and the fix needs a design decision rather than a patch. Settle the OPEN QUESTION in the entry before touching the code — it lives on the same path | — |
@@ -559,7 +559,9 @@ by accident rather than by decision.
 
 ## BUG-7 — a RUNNING slot outlives its own definition
 
-**Status:** OPEN · **Found:** during `feature/break-eligible` review · **Severity:**
+**Status:** FIXED 2026-09-25. See "Settled in the 2026-09-25 fix review"
+at the end of this entry. The line references and the quoted snippet below
+predate the fix. · **Found:** during `feature/break-eligible` review · **Severity:**
 user-visible; corrupts the screen-exposure balance and breaks two documented
 state invariants
 

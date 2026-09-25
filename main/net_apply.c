@@ -93,8 +93,10 @@ static net_finish_t reconcile_defs(void) {
         ESP_LOGW(TAG, "slot %d redefined during window: reconcile=%d", slot, (int)rc);
         if (timer_slot_def(slot) == NULL && timer_active_slot() == slot) {
             /* Slot disabled by the edit — same-wake analogue of the snapshot
-               restore guard: never strand the selection on a dead slot. */
-            timer_ensure_active_slot_enabled();
+               restore guard: never strand the selection on a dead slot. The
+               reconcile above already folded and reset the run, so the
+               guard finds the slot IDLE and folds nothing a second time. */
+            timer_ensure_active_slot_enabled(hal_time_now());
         }
         if (slot != active_slot)
             continue; /* background slot: state fixed, seen at swap */

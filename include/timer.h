@@ -196,8 +196,9 @@ typedef struct {
     uint8_t break_prev_state;
     /* Slot that ARMED the live run segment on slot 0. The segment's sign
        is a property of the run, not of the selection — which can move
-       underneath it (timer_ensure_active_slot_enabled on a restore) and
-       would otherwise invert a drain into an accrual. */
+       underneath it (timer_ensure_active_slot_enabled on a restore, which
+       folds an orphaned run before it moves) and would otherwise invert a
+       drain into an accrual. */
     uint8_t run_segment_slot;
     char last_date[11]; /* "YYYY-MM-DD\0" */
     /* ---- the chore checklist (design §5.1) ------------------------------
@@ -484,8 +485,31 @@ void timer_record_ntp_sync(time_t now);
    0 = none since RTC loss or day rollover. */
 time_t timer_last_ntp_sync(void);
 /* Revert selection to Screen (slot 0) when the active slot's definition
-   is disabled (snapshot restore, or a config edit mid-window). */
-void timer_ensure_active_slot_enabled(void);
+   is disabled (snapshot restore, or a config edit mid-window) — and first
+   retire any extra whose definition is gone while it is RUNNING (BUG-7: a
+   run must not outlive its definition, or it breaks I2/I3). A retired
+   slot is reset like timer_reload (completions stay), as timer_reconcile_def
+   resets a mid-window disable, so after that reconcile this finds the
+   slot IDLE and folds nothing twice.
+
+   A PAUSED orphan is NOT reset; only the selection moves off it. It
+   breaks no invariant, and on a restore its "missing" definition may be
+   a one-boot fallback to the menuconfig table (timer_defs_install on a
+   read failure or blob-version change), so resetting it would destroy a
+   paused timer the next boot would have found intact (decided 2026-09-25).
+
+   A RUNNING orphan's live segment folds at `now` and NON-eligible —
+   counted as screen exposure. Decided 2026-08-07: the slot's own
+   break_eligible went with its definition and cannot be recovered, so the
+   fold errs toward more eye rest. Folding here, at the retire, is what
+   stops the time AFTER `now` being swept in at some later fold. The time
+   before it is swept in, bounded: the rollover restore
+   (wake_flow_handle_day_rollover) runs after a genuine power-off, so the
+   dark time counts — but a run that expired in the dark was already
+   folded at its expiry by the restore, so the fold never exceeds the
+   run's own remaining time (accepted 2026-09-25; see
+   timer_restore_snapshot). */
+void timer_ensure_active_slot_enabled(time_t now);
 int64_t timer_expiry_wall(void);  /* active slot's expiry wall time (0 if unset) */
 uint16_t timer_completions(void); /* active slot's completed runs today */
 /* Read-only per-slot views (stats/summary builders): out-of-range slots

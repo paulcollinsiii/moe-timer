@@ -1528,6 +1528,305 @@ void test_snapshot_restore_falls_back_when_active_slot_disabled(void) {
     TEST_ASSERT_TRUE(timer_restore_snapshot(&snap, T0 + 500));
     TEST_ASSERT_EQUAL_INT(0, timer_active_slot());
     TEST_ASSERT_EQUAL(TIMER_IDLE, timer_get_state()); /* Screen was idle */
+    /* ...and the paused run keeps its state: only RUNNING orphans are
+       retired (BUG-7, decided 2026-09-25). */
+    TEST_ASSERT_EQUAL(TIMER_PAUSED, timer_slot_state(SLOT_PIANO));
+    TEST_ASSERT_EQUAL_INT32(700, g_rtc_state.slots[SLOT_PIANO].remaining_at_pause);
+}
+
+/* ---- BUG-7: a run must not outlive its own definition ----
+
+   A restore used to move only the selection, leaving the orphan RUNNING
+   behind it (I3, and I2 as soon as Screen started), and its segment then
+   kept feeding the balance until some later fold swept the whole gap in.
+   The fix retires the orphan inside timer_ensure_active_slot_enabled: fold
+   at the restore's `now`, NON-eligible (decided 2026-08-07), reset like
+   timer_reload. Only a RUNNING orphan: a PAUSED one keeps its state and
+   loses only the selection (decided 2026-09-25). The balance figures are
+   chosen so that each wrong answer is a distinct number: 1300 right, 700
+   eligible sign, 1000 segment dropped, anything larger the gap swept in. */
+
+/* Piano gone, everything else as TEST_DEFS. */
+static const timer_def_t DEFS_NO_PIANO[TIMER_SLOT_COUNT] = {
+    {"Screen", 0, false, false},   {"", 0, false, false},        {"", 0, false, false},
+    {"Laundry", 600, true, false}, {"Violin", 900, false, true},
+};
+
+/* 1000 s of non-eligible Screen time folded and parked, Screen PAUSED:
+   a balance for the tests below to move, so a sign error cannot hide at
+   the zero floor. */
+static void bank_screen_exposure(void) {
+    timer_start(T0, 3600);
+    timer_pause(T0 + 1000);
+    TEST_ASSERT_EQUAL_INT32(1000, g_rtc_state.slots[0].run_accum_sec);
+}
+
+void test_bug7_restore_retires_a_running_orphan_without_the_gap(void) {
+    bank_screen_exposure();
+    timer_select_next(); /* Piano: break-eligible, so it was DRAINING */
+    g_rtc_state.slots[SLOT_PIANO].completions = 2;
+    timer_adjust(SLOT_PIANO, 60); /* banked grant: belongs to the old timer */
+    timer_start(T0 + 1000, 900);
+    timer_record_date(T0);
+    timer_snapshot_t snap;
+    timer_make_snapshot(&snap);
+
+    timer_reset();
+    timer_set_defs(DEFS_NO_EXTRAS, TIMER_SLOT_COUNT); /* reflash: Piano gone */
+    TEST_ASSERT_TRUE(timer_restore_snapshot(&snap, T0 + 1300));
+    assert_state_legal(); /* I3 used to fail right here */
+
+    TEST_ASSERT_EQUAL_INT(0, timer_active_slot());
+    TEST_ASSERT_EQUAL(TIMER_IDLE, timer_slot_state(SLOT_PIANO));
+    TEST_ASSERT_EQUAL_UINT16(2, timer_slot_completions(SLOT_PIANO)); /* today's history stays */
+    TEST_ASSERT_EQUAL_INT32(0, timer_slot_allocation(SLOT_PIANO));
+    TEST_ASSERT_EQUAL_INT32(0, timer_slot_banked_bonus(SLOT_PIANO));
+    TEST_ASSERT_EQUAL_INT32(0, timer_slot_adjust_today(SLOT_PIANO));
+    TEST_ASSERT_EQUAL_INT64(0, g_rtc_state.slots[SLOT_PIANO].expiry_wall_time);
+
+    /* Folded at the restore, as exposure: 1000 + 300. */
+    TEST_ASSERT_EQUAL_INT64(0, g_rtc_state.slots[0].run_started_wall);
+    TEST_ASSERT_EQUAL_INT32(1300, g_rtc_state.slots[0].run_accum_sec);
+    /* The gap after the restore is not the orphan's: nothing accrues. */
+    TEST_ASSERT_EQUAL_INT32(1300, timer_run_accum(T0 + 5000));
+
+    /* The spec's trigger: A on the now-selected Screen. Pre-fix this left
+       two RUNNING slots and folded the whole gap as exposure. */
+    TEST_ASSERT_EQUAL(TIMER_PAUSED, timer_get_state());
+    timer_resume(T0 + 2000);
+    assert_state_legal();
+    TEST_ASSERT_EQUAL_INT32(1300, timer_run_accum(T0 + 2000));
+}
+
+void test_bug7_restore_keeps_a_paused_orphan_intact(void) {
+    /* PAUSED is NOT retired (decided 2026-09-25): it breaks no invariant,
+       and on a restore the missing definition may be a one-boot fallback
+       to the menuconfig table, after which the next boot finds the slot
+       defined again with its paused run and grants intact. A still-defined
+       RUNNING slot beside it is untouched too. */
+    timer_select_next(); /* Piano */
+    g_rtc_state.slots[SLOT_PIANO].completions = 1;
+    timer_start(T0, 900);
+    timer_adjust(SLOT_PIANO, 120);
+    timer_pause(T0 + 300);
+    TEST_ASSERT_TRUE(timer_select_next()); /* Laundry: non-eligible, feeds the balance */
+    TEST_ASSERT_EQUAL_INT(SLOT_LAUNDRY, timer_active_slot());
+    timer_start(T0 + 300, 600);
+    timer_record_date(T0);
+    timer_snapshot_t snap;
+    timer_make_snapshot(&snap);
+
+    timer_reset();
+    timer_set_defs(DEFS_NO_PIANO, TIMER_SLOT_COUNT);
+    TEST_ASSERT_TRUE(timer_restore_snapshot(&snap, T0 + 400));
+    assert_state_legal();
+
+    TEST_ASSERT_EQUAL(TIMER_PAUSED, timer_slot_state(SLOT_PIANO));
+    TEST_ASSERT_EQUAL_UINT16(1, timer_slot_completions(SLOT_PIANO));
+    TEST_ASSERT_EQUAL_INT32(720, g_rtc_state.slots[SLOT_PIANO].remaining_at_pause); /* 900 + 120 - 300 */
+    TEST_ASSERT_EQUAL_INT32(1020, timer_slot_allocation(SLOT_PIANO));
+    TEST_ASSERT_EQUAL_INT32(120, timer_slot_adjust_today(SLOT_PIANO));
+
+    TEST_ASSERT_EQUAL_INT(SLOT_LAUNDRY, timer_active_slot());
+    TEST_ASSERT_EQUAL(TIMER_RUNNING, timer_get_state());
+    TEST_ASSERT_EQUAL_INT64(T0 + 900, timer_expiry_wall());
+    TEST_ASSERT_EQUAL_INT64(T0 + 300, g_rtc_state.slots[0].run_started_wall); /* still Laundry's */
+    TEST_ASSERT_EQUAL_INT32(100, timer_run_accum(T0 + 400));
+}
+
+void test_bug7_restore_leaves_a_still_defined_running_slot_alone(void) {
+    bank_screen_exposure();
+    TEST_ASSERT_TRUE(timer_select_next()); /* Piano */
+    TEST_ASSERT_TRUE(timer_select_next()); /* Laundry */
+    TEST_ASSERT_TRUE(timer_select_next()); /* Violin: break-eligible */
+    TEST_ASSERT_EQUAL_INT(SLOT_VIOLIN, timer_active_slot());
+    timer_start(T0 + 1000, 900);
+    timer_record_date(T0);
+    timer_snapshot_t snap;
+    timer_make_snapshot(&snap);
+
+    timer_reset();
+    timer_set_defs(DEFS_NO_PIANO, TIMER_SLOT_COUNT); /* Violin survives */
+    TEST_ASSERT_TRUE(timer_restore_snapshot(&snap, T0 + 1300));
+    assert_state_legal();
+
+    TEST_ASSERT_EQUAL_INT(SLOT_VIOLIN, timer_active_slot());
+    TEST_ASSERT_EQUAL(TIMER_RUNNING, timer_get_state());
+    TEST_ASSERT_EQUAL_INT64(T0 + 1900, timer_expiry_wall());
+    /* Segment still armed, still Violin's, still draining at its own sign. */
+    TEST_ASSERT_EQUAL_INT64(T0 + 1000, g_rtc_state.slots[0].run_started_wall);
+    TEST_ASSERT_EQUAL_INT32(1000, g_rtc_state.slots[0].run_accum_sec);
+    TEST_ASSERT_EQUAL_INT32(700, timer_run_accum(T0 + 1300));
+}
+
+void test_bug7_orphan_that_expired_in_the_dark_stays_expired(void) {
+    /* The restore loop already ends a run whose expiry passed while the
+       device was down, folding at the expiry. The retire must leave that
+       EXPIRED slot alone: the run reached 00:00 and is counted. */
+    bank_screen_exposure();
+    timer_select_next();         /* Piano */
+    timer_start(T0 + 1000, 900); /* expires T0+1900 */
+    timer_record_date(T0);
+    timer_snapshot_t snap;
+    timer_make_snapshot(&snap);
+
+    timer_reset();
+    timer_set_defs(DEFS_NO_EXTRAS, TIMER_SLOT_COUNT);
+    TEST_ASSERT_TRUE(timer_restore_snapshot(&snap, T0 + 5000));
+    assert_state_legal();
+
+    TEST_ASSERT_EQUAL_INT(0, timer_active_slot());
+    TEST_ASSERT_EQUAL(TIMER_EXPIRED, timer_slot_state(SLOT_PIANO));
+    TEST_ASSERT_EQUAL_UINT16(1, timer_slot_completions(SLOT_PIANO));
+    /* Folded at the expiry, non-eligible (its flag is gone): 1000 + 900. */
+    TEST_ASSERT_EQUAL_INT32(1900, timer_run_accum(T0 + 5000));
+}
+
+void test_bug7_reconcile_then_guard_folds_once(void) {
+    /* net_apply's order: timer_reconcile_def resets the disabled slot,
+       THEN the guard runs. The guard must find nothing left to fold. */
+    TEST_ASSERT_TRUE(timer_select_next()); /* Piano */
+    TEST_ASSERT_TRUE(timer_select_next()); /* Laundry: non-eligible */
+    timer_start(T0, 600);
+    timer_set_defs(DEFS_NO_EXTRAS, TIMER_SLOT_COUNT); /* the window's edit */
+    bool was_running = false;
+    TEST_ASSERT_EQUAL(TIMER_RECONCILE_RESET, timer_reconcile_def(SLOT_LAUNDRY, &TEST_DEFS[SLOT_LAUNDRY],
+                                                                 timer_slot_def(SLOT_LAUNDRY), T0 + 200, &was_running));
+    TEST_ASSERT_TRUE(was_running);
+    timer_ensure_active_slot_enabled(T0 + 500);
+
+    TEST_ASSERT_EQUAL_INT(0, timer_active_slot());
+    TEST_ASSERT_EQUAL(TIMER_IDLE, timer_slot_state(SLOT_LAUNDRY));
+    TEST_ASSERT_EQUAL_INT32(200, timer_run_accum(T0 + 900));
+}
+
+void test_bug7_rollover_restore_after_power_off_folds_up_to_expiry_only(void) {
+    /* The bound on the accepted sweep (decided 2026-09-25). The rollover
+       restore in wake_flow_handle_day_rollover runs after a genuine
+       power-off, once NTP has corrected the clock, so the restore's `now`
+       can be hours past the last wake: the dark time is folded in, as
+       exposure. It must never exceed the run's own remaining time. Zero
+       starting balance, eligible Piano: the eligible sign would floor to
+       0, so each figure below is only reachable the right way. */
+    timer_select_next();  /* Piano: break-eligible */
+    timer_start(T0, 900); /* expires T0+900 */
+    timer_record_date(T0);
+    timer_snapshot_t snap;
+    timer_make_snapshot(&snap);
+
+    /* Power back before the expiry: everything up to `now`. */
+    timer_reset(); /* RTC memory lost with the power */
+    timer_set_defs(DEFS_NO_EXTRAS, TIMER_SLOT_COUNT);
+    TEST_ASSERT_TRUE(timer_restore_snapshot(&snap, T0 + 800));
+    assert_state_legal();
+    TEST_ASSERT_EQUAL(TIMER_IDLE, timer_slot_state(SLOT_PIANO));
+    TEST_ASSERT_EQUAL_INT32(800, timer_run_accum(T0 + 4 * 3600));
+
+    /* Power back hours after the expiry: folded at the expiry, 900 and
+       not a second more, and the run is counted. */
+    timer_reset();
+    timer_set_defs(DEFS_NO_EXTRAS, TIMER_SLOT_COUNT);
+    TEST_ASSERT_TRUE(timer_restore_snapshot(&snap, T0 + 6 * 3600));
+    assert_state_legal();
+    TEST_ASSERT_EQUAL(TIMER_EXPIRED, timer_slot_state(SLOT_PIANO));
+    TEST_ASSERT_EQUAL_UINT16(1, timer_slot_completions(SLOT_PIANO));
+    TEST_ASSERT_EQUAL_INT64(0, g_rtc_state.slots[0].run_started_wall);
+    TEST_ASSERT_EQUAL_INT32(900, timer_run_accum(T0 + 6 * 3600));
+}
+
+void test_bug7_fallback_table_leaves_a_paused_ha_slot_paused(void) {
+    /* timer_defs_install falls back to the menuconfig table on a read
+       failure or a blob-version change (an OTA that bumps it restores
+       right after the restart). An HA-defined slot menuconfig leaves
+       empty — Violin here — then reads as undefined for that one boot.
+       Its PAUSED run must survive that boot AND the save it makes, so the
+       next boot, with the real table back, finds it where it was. */
+    TEST_ASSERT_TRUE(timer_select_next()); /* Piano */
+    TEST_ASSERT_TRUE(timer_select_next()); /* Laundry */
+    TEST_ASSERT_TRUE(timer_select_next()); /* Violin */
+    g_rtc_state.slots[SLOT_VIOLIN].completions = 1;
+    timer_start(T0, 900);
+    timer_adjust(SLOT_VIOLIN, 60);
+    timer_pause(T0 + 300);
+    const int32_t remaining = g_rtc_state.slots[SLOT_VIOLIN].remaining_at_pause;
+    const int32_t allocation = timer_slot_allocation(SLOT_VIOLIN);
+    TEST_ASSERT_TRUE(remaining > 0);
+    timer_record_date(T0);
+    timer_snapshot_t snap;
+    timer_make_snapshot(&snap);
+
+    /* The fallback boot: menuconfig has no Violin. */
+    static const timer_def_t MENUCONFIG_NO_VIOLIN[TIMER_SLOT_COUNT] = {
+        {"Screen", 0, false, false},   {"Piano", 900, true, true}, {"", 0, false, false},
+        {"Laundry", 600, true, false}, {"", 0, false, false},
+    };
+    timer_reset();
+    timer_set_defs(MENUCONFIG_NO_VIOLIN, TIMER_SLOT_COUNT);
+    TEST_ASSERT_TRUE(timer_restore_snapshot(&snap, T0 + 400));
+    assert_state_legal();
+    TEST_ASSERT_EQUAL_INT(0, timer_active_slot()); /* the selection moved */
+    TEST_ASSERT_EQUAL(TIMER_PAUSED, timer_slot_state(SLOT_VIOLIN));
+    timer_snapshot_t saved; /* what that boot's timer_persist_save writes */
+    timer_make_snapshot(&saved);
+
+    /* The next boot reads the HA table again. */
+    timer_reset();
+    timer_set_defs(TEST_DEFS, TIMER_SLOT_COUNT);
+    TEST_ASSERT_TRUE(timer_restore_snapshot(&saved, T0 + 500));
+    assert_state_legal();
+    TEST_ASSERT_EQUAL(TIMER_PAUSED, timer_slot_state(SLOT_VIOLIN));
+    TEST_ASSERT_EQUAL_INT32(remaining, g_rtc_state.slots[SLOT_VIOLIN].remaining_at_pause);
+    TEST_ASSERT_EQUAL_INT32(allocation, timer_slot_allocation(SLOT_VIOLIN));
+    TEST_ASSERT_EQUAL_INT32(60, timer_slot_adjust_today(SLOT_VIOLIN));
+    TEST_ASSERT_EQUAL_UINT16(1, timer_slot_completions(SLOT_VIOLIN));
+}
+
+void test_bug7_retire_leaves_a_segment_another_running_slot_armed(void) {
+    /* The run_segment_slot guard. Only a corrupt snapshot can hold an
+       orphan RUNNING beside another RUNNING slot (I2), but if one does,
+       the segment belongs to the slot that armed it: Laundry, still
+       defined and selected. Retiring Piano must not fold Laundry's run. */
+    TEST_ASSERT_TRUE(timer_select_next()); /* Piano */
+    TEST_ASSERT_TRUE(timer_select_next()); /* Laundry: non-eligible */
+    timer_start(T0, 600);                  /* arms the segment for Laundry */
+
+    /* The corruption: Piano RUNNING too. */
+    g_rtc_state.slots[SLOT_PIANO].state = TIMER_RUNNING;
+    g_rtc_state.slots[SLOT_PIANO].allocation_sec = 900;
+    g_rtc_state.slots[SLOT_PIANO].expiry_wall_time = T0 + 900;
+    timer_set_defs(DEFS_NO_PIANO, TIMER_SLOT_COUNT);
+
+    timer_ensure_active_slot_enabled(T0 + 300);
+    assert_state_legal();
+    TEST_ASSERT_EQUAL(TIMER_IDLE, timer_slot_state(SLOT_PIANO));
+    TEST_ASSERT_EQUAL_INT(SLOT_LAUNDRY, timer_active_slot());
+    TEST_ASSERT_EQUAL(TIMER_RUNNING, timer_get_state());
+    TEST_ASSERT_EQUAL_INT64(T0, g_rtc_state.slots[0].run_started_wall); /* not folded */
+    TEST_ASSERT_EQUAL_UINT8(SLOT_LAUNDRY, g_rtc_state.run_segment_slot);
+    TEST_ASSERT_EQUAL_INT32(0, g_rtc_state.slots[0].run_accum_sec);
+    TEST_ASSERT_EQUAL_INT32(500, timer_run_accum(T0 + 500)); /* still Laundry's, still feeding */
+}
+
+void test_bug7_retire_disarms_a_segment_no_running_slot_owns(void) {
+    /* The other corrupt shape: the segment names an arming slot that is
+       not RUNNING, so the orphan was the only run feeding it. Resetting
+       the orphan without folding would leave the balance moving with
+       nothing RUNNING (I8), at the named slot's sign. Folded
+       NON-eligible at `now` like any orphan's segment: Violin, the named
+       slot, is eligible, so its sign would floor to 0 instead of 300. */
+    timer_select_next();  /* Piano */
+    timer_start(T0, 900); /* arms the segment for Piano */
+
+    /* The corruption: the segment names Violin, which is IDLE. */
+    g_rtc_state.run_segment_slot = SLOT_VIOLIN;
+    timer_set_defs(DEFS_NO_PIANO, TIMER_SLOT_COUNT);
+
+    timer_ensure_active_slot_enabled(T0 + 300);
+    assert_state_legal();
+    TEST_ASSERT_EQUAL(TIMER_IDLE, timer_slot_state(SLOT_PIANO));
+    TEST_ASSERT_EQUAL_INT(0, timer_active_slot());
+    TEST_ASSERT_EQUAL_INT64(0, g_rtc_state.slots[0].run_started_wall);
+    TEST_ASSERT_EQUAL_INT32(300, timer_run_accum(T0 + 5000)); /* and it stopped */
 }
 
 /* ---- display-remaining + screen-used primitives (shared, pure) ---- */
@@ -2437,13 +2736,13 @@ void test_last_ntp_sync_cleared_by_reset(void) {
 
 void test_ensure_active_slot_keeps_enabled_slot(void) {
     g_rtc_state.active_slot = 1; /* Piano — enabled in TEST_DEFS */
-    timer_ensure_active_slot_enabled();
+    timer_ensure_active_slot_enabled(T0);
     TEST_ASSERT_EQUAL_INT(1, timer_active_slot());
 }
 
 void test_ensure_active_slot_reverts_when_disabled(void) {
     g_rtc_state.active_slot = 2; /* hole in TEST_DEFS */
-    timer_ensure_active_slot_enabled();
+    timer_ensure_active_slot_enabled(T0);
     TEST_ASSERT_EQUAL_INT(0, timer_active_slot());
 }
 
@@ -3397,6 +3696,15 @@ int main(void) {
     RUN_TEST(test_tick_with_clock_stepped_backwards_stays_running);
     RUN_TEST(test_completions_saturate_at_uint16_max);
     RUN_TEST(test_snapshot_restore_falls_back_when_active_slot_disabled);
+    RUN_TEST(test_bug7_restore_retires_a_running_orphan_without_the_gap);
+    RUN_TEST(test_bug7_restore_keeps_a_paused_orphan_intact);
+    RUN_TEST(test_bug7_restore_leaves_a_still_defined_running_slot_alone);
+    RUN_TEST(test_bug7_orphan_that_expired_in_the_dark_stays_expired);
+    RUN_TEST(test_bug7_reconcile_then_guard_folds_once);
+    RUN_TEST(test_bug7_rollover_restore_after_power_off_folds_up_to_expiry_only);
+    RUN_TEST(test_bug7_fallback_table_leaves_a_paused_ha_slot_paused);
+    RUN_TEST(test_bug7_retire_leaves_a_segment_another_running_slot_armed);
+    RUN_TEST(test_bug7_retire_disarms_a_segment_no_running_slot_owns);
     RUN_TEST(test_reconcile_rename_running_resets_with_was_running);
     RUN_TEST(test_reconcile_rename_paused_resets_without_was_running);
     RUN_TEST(test_reconcile_rename_preserves_completions);
