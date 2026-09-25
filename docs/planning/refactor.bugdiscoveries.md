@@ -203,7 +203,9 @@ constraint remains; everything else is independent and can be reordered freely.
 | # | Item | Why here | Blocked by |
 |---|---|---|---|
 | 0 | **S1 + S2 smoke tests** | The only item that needs the device. Two merged fixes stay unconfirmed until it happens, and everything below is engineering time that can proceed in parallel | a USB flash, then an OTA |
-| 0.5 | **BUG-10** — recurring PANIC resets on an idle device | A device that reboots itself several times a day is the most serious thing on this page, and the cause is unknown. Diagnostics first: inference from an HA activity stream has already produced one retracted answer, so the device needs to report what it was doing when it died | — |
+| — | **BUG-10** — recurring PANIC resets on an idle device | **RESOLVED** (owner, 2026-09-25); see the entry. | — |
+| **Owner triage, 2026-09-25** | **BUG-13, then BUG-7, then BUG-11.** | The owner rates BUG-5 and BUG-12 theoretical, and they stay open but unscheduled. BUG-1 and BUG-2 stay parked: the button remap has probably moved the ground under them, so revisit them only if lost presses are seen. | — |
+| 0.9 | **BUG-13** — blanking a text control in HA never reaches the device | Hit on hardware; the documented way to disable a timer does not work | — |
 | 1 | **BUG-7** — a RUNNING slot outliving its own definition | State-machine change to an uncovered path; independent | — |
 | 2 | **BUG-2** | **BUG-3 is RESOLVED** (2026-09-16, M2-T4a/T4b) and is no longer part of this item — its condition fired when Button D gained a chore-ack arm, and the decision it was waiting for was made there with cases at both call sites. BUG-2 stands alone now, and still needs a re-baselined sweep to show the fix changed *only* the intended cases. | — |
 | 3 | **BUG-5** — the v1→v2 migration | Only bites on a version bump, and **R4** means it has to be written *before* one rather than after. Nothing in flight bumps the version, which is why it sits last. | — |
@@ -663,6 +665,12 @@ powered-off gap.
 
 ## BUG-10 — recurring PANIC resets on an idle device
 
+> **RESOLVED (owner, 2026-09-25).** `panic_count` has not moved since the
+> last debugging run on this bug. The owner recalls the cause as a
+> logging-related sdkconfig option: the USB-CDC `ETS_PRINTF` path taken
+> during sleep. The exact symbol was not re-derived, and the owner asked
+> for no further digging. The entry below is kept as history.
+
 **Reported 2026-08-19 from the testing device, with an HA activity-stream
 export.** The device panics on its own, unattended, several times a day.
 
@@ -1032,6 +1040,23 @@ never appears while the read-back looks correct points somewhere else entirely
 and this question stays open; a screen at the wrong hour, or a read-back that
 disagrees with the operator, closes it as configuration.
 
+### Settled 2026-09-25 (owner triage, orchestrator)
+
+**Scheduled after BUG-13 and BUG-7.** The guard asks whether the clock is
+plausible: `now` earlier than the firmware's build time means "never set".
+It does **not** use the OTA gate's "NTP set it this session". NTP runs
+hourly, so that question is false on most wakes, and copying it would skip
+bed time nearly every night.
+
+On an implausible clock, skip the bed-time evaluation (today's outcome,
+now deliberate). The next wake, after NTP, engages normally. Skipping also
+closes a worse case: in a time zone where the near-epoch clock falls
+**inside** the bed-time window, the device today locks wrongly for
+`BEDTIME_SLEEP_SEC`.
+
+The OPEN QUESTION below is left as it stands. BUG-10 is resolved, and the
+owner will say whether bed time engages on schedule now.
+
 ### Fix shape, for whoever picks this up later
 
 Not prescriptive, and recorded because the reasoning is cheap to lose:
@@ -1116,6 +1141,70 @@ Registered rather than patched in a review-fix pass.
 **No pinning test yet.** The pure layer is host-tested and behaves correctly;
 what is missing is a test of `net_window_task`'s sequence, which has no host
 harness today.
+
+## BUG-13 — blanking a text control in HA never reaches the device
+
+**Status:** OPEN, fix approved 2026-09-25 · **Found:** 2026-09-11, hardware
+(the Testing Timer), by the owner · **Severity:** user-visible. The documented
+way to disable an extra timer does not work, and HA offers no other control
+that can disable one.
+
+### Observed (owner, 2026-09-11)
+
+On the Testing Timer, blanking the names of timers 1 and 2 in HA did not
+disable those timers, even after several manual syncs. Expected: a blank name
+disables that extra timer.
+
+### Root cause (diagnosed 2026-09-25, by reading)
+
+Two independent causes. Either one alone loses the blank:
+
+1. **HA publishes the command retained.** Every config control's discovery
+   has `"retain":true` on `magtag/<id>/set/<key>` (`main/ha_config.c:~1001`).
+   HA therefore publishes a blank text value as a **retained zero-length
+   message**, which MQTT defines as "delete this topic's retained message".
+   The device is asleep, so it never receives anything.
+2. **The device ignores empty payloads.** `main/mqtt_rx.c:43-50` drops any
+   message with `total_len <= 0`, on purpose. The device clears its own
+   retained sets the same way, so it must ignore them.
+
+The device side would accept the blank if it arrived. The `CFG_TNAME` set
+(`ha_config.c:~843`) takes `""`, and `timer.c` disables a slot that has no
+name. A blank arriving mid-sync on a RUNNING slot is already handled:
+`net_apply.c` `reconcile_defs()` calls `timer_reconcile_def()`, which folds
+the run and resets the slot. That is not BUG-7, which is only the
+snapshot-restore path after a reflash.
+
+**The same bug affects every text control.** `ota_url` documents `""` as
+"disable updates" (`docs/home_assistant.md:~904`), so it almost certainly
+fails the same way. That one has not been reproduced. `timerN_min` accepts
+1-1440, so HA's controls have no working way to disable a slot at all.
+
+**Workaround until fixed:** a bulk config document whose `timers` entry for
+the slot is `{}`.
+
+### Fix (approved by the owner 2026-09-25)
+
+1. **Discovery.** Every `text` config control gets a command template
+   `{{ value if value else '""' }}`, correctly JSON-escaped inside the
+   payload. For a blank value HA then publishes the two characters `""`,
+   which the broker keeps retained.
+2. **Device.** A set payload that is exactly `""` decodes to the empty
+   string before the field's own checks run. Each field's existing rules
+   still decide whether a blank is allowed. The sentinel is unambiguous:
+   `config_is_clean_str()` (`config_validate.c:75`) already rejects `"` in
+   every text value.
+3. **Schema.** `STATS_JSON_DISC_SCHEMA_VER` goes 23 → 24, so a device
+   republishes its discovery. The Testing Timer already runs 23. Every site
+   that states the version moves with it.
+4. **Tests (host).**
+   - The decode.
+   - The template, present on every text control and on no other kind.
+   - End to end: a blank `timerN_name` set disables the slot.
+   - A literal `""` never becomes a stored name.
+   - The pinned `mqtt_rx` empty-drop still holds.
+5. **Docs.** `docs/home_assistant.md`: clearing a name, or `ota_url`, now
+   works, after an OTA to this firmware.
 
 ## Closed — moved to the archive
 
