@@ -93,6 +93,14 @@ void lock_gate_bedtime_engage(time_t now, bool alert);
    handlers right after day rollover (rollover-first ordering is what
    clears the lock on the new day). May not return.
 
+   A CLOCK THAT WAS NEVER SET GETS NO BED-TIME DECISION (BUG-11): when
+   `now` fails time_util_clock_plausible() the bed-time half neither
+   engages nor releases and leaves its flag as it stood. The config-error
+   half still runs. On a power-on reset the day-rollover window normally
+   syncs NTP before this gate runs; the skip fires only when that attempt
+   failed, and then on every wake until NTP works. So a device that lost
+   power and has no WiFi does not enter bed time until it syncs.
+
    AND THE CONFIG-ERROR GATE, WHICH RUNS HERE TOO (design 5.3). The name
    is now narrower than the function, which is a cost paid deliberately
    and is worth reading before "tidying" it into two entry points:
@@ -126,10 +134,16 @@ void lock_gate_bedtime_engage(time_t now, bool alert);
    the post-window re-check (an edit or a clock step in the window) for
    either lock, and for the config-error lock alone an engage and a
    release inside the same call (a bed-time engage never returns). False
-   when there was nothing to release. When it returns at all, both locks
-   are off; what the bool adds is that one of them was ON a moment ago, so
-   the panel is still holding its screen and every press made until that
-   screen is repainted BELONGS TO THE LOCK. The wake handlers act on that
+   when there was nothing to release, and false on an unset-clock skip.
+   When it returns at all, both locks are off, with one exception: an
+   unset-clock skip leaves a bed-time flag that was already up standing.
+   Nothing can raise that flag on an unset clock: the power-on reset that
+   unsets the clock also zeroes it (RTC), and the break planner's
+   bed-time crossing (wake_flow_maybe_start_break) is guarded by the same
+   plausibility check. What the bool adds is that one of them was ON a
+   moment ago, so the panel is still holding its screen and every press
+   made until that screen is repainted BELONGS TO THE LOCK. The wake
+   handlers act on that
    (wake_flow.c, s_lock_screen_on_glass): the press that woke the device
    is consumed rather than also run as ✓3 or a sync, B is dropped by the
    join poll, the latch is emptied of every press made before the repaint,

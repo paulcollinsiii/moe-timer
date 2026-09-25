@@ -1426,6 +1426,136 @@ void test_m3t4_a_lock_that_holds_never_answers(void) {
     TEST_ASSERT_EQUAL_INT(-1, gate_body_released);
 }
 
+/* ---- bed time on a clock that was never set (BUG-11) --------------------
+
+   After a genuine power-on reset the wall clock reads the 1970 epoch plus
+   uptime until NTP lands. The power-on's day-rollover window normally
+   syncs NTP before this gate runs, so the gate sees such a clock only
+   when that attempt failed (no WiFi), and then on every wake until NTP
+   works. The gate must not judge that clock: no engage, no release, no
+   window, no paint, and s_bedtime_locked left exactly as it was.
+
+   The near-epoch instant used here is 90 s after the epoch: the first
+   wake after power-on, with NTP out of reach. In "<-02>2" (UTC-2, fixed offset, no
+   DST) that reads 22:01 local on 1969-12-31, INSIDE a 22:00 bed time.
+   That is the worse case the register names: before the fix this exact
+   wake engaged a two-hour lock on a clock nobody had set (pinned against
+   the unfixed code first, then flipped). */
+#define GATE_NEAR_EPOCH ((time_t)90)
+#define GATE_BEDTIME_2200 (22 * 60)
+
+static void gate_tz_utc_minus_2(void) {
+    setenv("TZ", "<-02>2", 1);
+    tzset();
+}
+
+void test_bug11_an_unset_clock_inside_the_window_does_not_lock(void) {
+    gate_tz_utc_minus_2();
+    gate_set_bedtime(GATE_BEDTIME_2200);
+    gate_timer_state = TIMER_RUNNING; /* an engage would pause it */
+    gate_set_now(GATE_NEAR_EPOCH);
+    /* Non-vacuity: this instant really is inside the window, so only the
+       clock guard stands between it and an engage. */
+    TEST_ASSERT_TRUE(bedtime_active(time_util_minutes_of_day(GATE_NEAR_EPOCH), GATE_BEDTIME_2200));
+
+    TEST_ASSERT_FALSE_MESSAGE(gate_run(gate_body_check_bedtime), "an unset clock ended the wake");
+
+    TEST_ASSERT_FALSE(s_bedtime_locked);
+    TEST_ASSERT_FALSE(s_bedtime_released);
+    TEST_ASSERT_EQUAL_INT(0, gate_body_released);
+    TEST_ASSERT_EQUAL_INT(0, gate_log_n); /* no pause, save, paint, alert, window or sleep */
+    TEST_ASSERT_EQUAL(TIMER_RUNNING, gate_timer_state);
+}
+
+/* A lock already standing is HELD, not re-engaged and not released. The
+   flag cannot be raised on an unset clock: the power-on zeroes it
+   (RTC_DATA_ATTR), and the break planner, the one other path that raises
+   it, is guarded by the same plausibility check (test_wake_flow's row-21
+   unset-clock case pins that guard). So this state is unreachable only
+   while that guard holds, and "neutral" has to mean neutral on both
+   halves of the flag. */
+void test_bug11_an_unset_clock_inside_the_window_holds_a_standing_lock(void) {
+    gate_tz_utc_minus_2();
+    gate_set_bedtime(GATE_BEDTIME_2200);
+    s_bedtime_locked = true;
+    gate_set_now(GATE_NEAR_EPOCH);
+
+    TEST_ASSERT_FALSE(gate_run(gate_body_check_bedtime));
+
+    TEST_ASSERT_TRUE(s_bedtime_locked);
+    TEST_ASSERT_FALSE(s_bedtime_released);
+    TEST_ASSERT_EQUAL_INT(0, gate_body_released);
+    TEST_ASSERT_EQUAL_INT(0, gate_log_n); /* no locked re-wake window, no repaint, no sleep */
+}
+
+/* Outside the window the unset clock would RELEASE a standing lock. That
+   is a decision too, and it is skipped the same way. */
+void test_bug11_an_unset_clock_outside_the_window_does_not_release(void) {
+    gate_set_bedtime(GATE_BEDTIME_2200); /* UTC: 90 s past the epoch reads 00:01 */
+    s_bedtime_locked = true;
+    gate_set_now(GATE_NEAR_EPOCH);
+    TEST_ASSERT_FALSE(bedtime_active(time_util_minutes_of_day(GATE_NEAR_EPOCH), GATE_BEDTIME_2200));
+
+    TEST_ASSERT_FALSE(gate_run(gate_body_check_bedtime));
+
+    TEST_ASSERT_TRUE(s_bedtime_locked);
+    TEST_ASSERT_FALSE(s_bedtime_released);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(0, gate_body_released, "an unset clock released the lock");
+    TEST_ASSERT_FALSE(lock_gate_promote_render(WAKE_RENDER_PARTIAL) == WAKE_RENDER_FULL);
+}
+
+void test_bug11_an_unset_clock_outside_the_window_stays_unlocked(void) {
+    gate_set_bedtime(GATE_BEDTIME_2200);
+    gate_set_now(GATE_NEAR_EPOCH);
+
+    TEST_ASSERT_FALSE(gate_run(gate_body_check_bedtime));
+
+    TEST_ASSERT_FALSE(s_bedtime_locked);
+    TEST_ASSERT_FALSE(s_bedtime_released);
+    TEST_ASSERT_EQUAL_INT(0, gate_body_released);
+    TEST_ASSERT_EQUAL_INT(0, gate_log_n);
+}
+
+/* The skip covers the bed-time half only: the config gate that shares
+   this call still runs, and still engages on a broken pair. */
+void test_bug11_an_unset_clock_still_runs_the_config_gate(void) {
+    gate_tz_utc_minus_2();
+    gate_set_bedtime(GATE_BEDTIME_2200);
+    gate_set_pair(DAY_WEEKDAY, 120, 60);
+    gate_set_now(GATE_NEAR_EPOCH);
+
+    TEST_ASSERT_TRUE(gate_run(gate_body_check_bedtime)); /* the config lock ended the wake */
+
+    TEST_ASSERT_FALSE(s_bedtime_locked);
+    TEST_ASSERT_TRUE(s_config_locked);
+    TEST_ASSERT_EQUAL_INT(0, gate_log_count(EV_BEDTIME_SCREEN));
+    TEST_ASSERT_EQUAL(EV_CONFIG_ERR_SCREEN, gate_last_paint_before_sleep());
+}
+
+/* THE BOUNDARY, with both instants inside the window so the floor is the
+   only thing that differs: in UTC-2 the floor reads 22:00 local and one
+   second earlier reads 21:59:59, both past an 18:00 bed time. */
+void test_bug11_one_second_below_the_floor_is_skipped(void) {
+    gate_tz_utc_minus_2();
+    gate_set_bedtime(18 * 60);
+    gate_set_now(TIME_UTIL_CLOCK_FLOOR - 1);
+    TEST_ASSERT_TRUE(bedtime_active(time_util_minutes_of_day(TIME_UTIL_CLOCK_FLOOR - 1), 18 * 60));
+
+    TEST_ASSERT_FALSE(gate_run(gate_body_check_bedtime));
+    TEST_ASSERT_FALSE(s_bedtime_locked);
+    TEST_ASSERT_EQUAL_INT(0, gate_log_n);
+}
+
+void test_bug11_the_floor_itself_is_judged_normally(void) {
+    gate_tz_utc_minus_2();
+    gate_set_bedtime(18 * 60);
+    gate_set_now(TIME_UTIL_CLOCK_FLOOR);
+
+    TEST_ASSERT_TRUE(gate_run(gate_body_check_bedtime)); /* engaged */
+    TEST_ASSERT_TRUE(s_bedtime_locked);
+    TEST_ASSERT_EQUAL(EV_BEDTIME_SCREEN, gate_last_paint_before_sleep());
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_healthy_battery_leaves_the_wake_alone);
@@ -1496,5 +1626,12 @@ int main(void) {
     RUN_TEST(test_m3t4_a_bedtime_release_in_the_window_says_so);
     RUN_TEST(test_m3t4_an_unlocked_wake_reports_no_release);
     RUN_TEST(test_m3t4_a_lock_that_holds_never_answers);
+    RUN_TEST(test_bug11_an_unset_clock_inside_the_window_does_not_lock);
+    RUN_TEST(test_bug11_an_unset_clock_inside_the_window_holds_a_standing_lock);
+    RUN_TEST(test_bug11_an_unset_clock_outside_the_window_does_not_release);
+    RUN_TEST(test_bug11_an_unset_clock_outside_the_window_stays_unlocked);
+    RUN_TEST(test_bug11_an_unset_clock_still_runs_the_config_gate);
+    RUN_TEST(test_bug11_one_second_below_the_floor_is_skipped);
+    RUN_TEST(test_bug11_the_floor_itself_is_judged_normally);
     return UNITY_END();
 }

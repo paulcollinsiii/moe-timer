@@ -53,6 +53,52 @@ void test_uses_local_time_not_utc(void) {
     TEST_ASSERT_EQUAL_INT(19 * 60, time_util_minutes_of_day(T_NEW_YEAR));
 }
 
+/* ---- time_util_clock_plausible (BUG-11) ---------------------------------- */
+
+/* The floor is a literal, and the literal is the date its comment names.
+   Checked through gmtime_r rather than restated as a number, so an edit to
+   the constant that forgets the prose (or the reverse) fails here. */
+void test_the_floor_is_new_year_2026_utc(void) {
+    const time_t floor_t = TIME_UTIL_CLOCK_FLOOR;
+    struct tm tm;
+    gmtime_r(&floor_t, &tm);
+    TEST_ASSERT_EQUAL_INT(2026, tm.tm_year + 1900);
+    TEST_ASSERT_EQUAL_INT(0, tm.tm_mon);
+    TEST_ASSERT_EQUAL_INT(1, tm.tm_mday);
+    TEST_ASSERT_EQUAL_INT(0, tm.tm_hour * 3600 + tm.tm_min * 60 + tm.tm_sec);
+}
+
+void test_the_floor_itself_is_plausible(void) {
+    TEST_ASSERT_TRUE(time_util_clock_plausible(TIME_UTIL_CLOCK_FLOOR));
+}
+
+void test_one_second_below_the_floor_is_not(void) {
+    TEST_ASSERT_FALSE(time_util_clock_plausible(TIME_UTIL_CLOCK_FLOOR - 1));
+}
+
+/* What a power-on reset actually produces: the epoch plus uptime. A day
+   of uptime is far more than any wake takes to reach NTP. */
+void test_a_near_epoch_clock_is_not_plausible(void) {
+    TEST_ASSERT_FALSE(time_util_clock_plausible(0));
+    TEST_ASSERT_FALSE(time_util_clock_plausible(90));
+    TEST_ASSERT_FALSE(time_util_clock_plausible(86400));
+    TEST_ASSERT_FALSE(time_util_clock_plausible(-1));
+}
+
+void test_a_set_clock_is_plausible(void) {
+    TEST_ASSERT_TRUE(time_util_clock_plausible(1785283200)); /* 2026-07-29 */
+    TEST_ASSERT_TRUE(time_util_clock_plausible(T_NEW_YEAR + 10 * 365 * 86400));
+}
+
+/* UTC in, no TZ applied: the floor is an instant, not a local date, so a
+   zone change cannot move it. */
+void test_plausibility_ignores_the_time_zone(void) {
+    setenv("TZ", "<-02>2", 1);
+    tzset();
+    TEST_ASSERT_FALSE(time_util_clock_plausible(TIME_UTIL_CLOCK_FLOOR - 1));
+    TEST_ASSERT_TRUE(time_util_clock_plausible(TIME_UTIL_CLOCK_FLOOR));
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_midnight_is_zero);
@@ -61,5 +107,11 @@ int main(void) {
     RUN_TEST(test_last_minute_of_day);
     RUN_TEST(test_wraps_to_zero_at_next_midnight);
     RUN_TEST(test_uses_local_time_not_utc);
+    RUN_TEST(test_the_floor_is_new_year_2026_utc);
+    RUN_TEST(test_the_floor_itself_is_plausible);
+    RUN_TEST(test_one_second_below_the_floor_is_not);
+    RUN_TEST(test_a_near_epoch_clock_is_not_plausible);
+    RUN_TEST(test_a_set_clock_is_plausible);
+    RUN_TEST(test_plausibility_ignores_the_time_zone);
     return UNITY_END();
 }

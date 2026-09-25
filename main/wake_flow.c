@@ -1781,8 +1781,14 @@ bool wake_flow_maybe_start_break(time_t now) {
     /* A break that would still be running at bedtime is pointless - the
        device would lock mid-break. Skip it and go straight to Bed Time,
        audibly (this is the one alerting path that starts before the
-       threshold itself is reached). */
-    if (bedtime_break_would_cross(time_util_minutes_of_day(now), (int)duration_min, config_cache_bedtime_minutes())) {
+       threshold itself is reached).
+
+       Not on a clock that was never set (BUG-11): this is the only path
+       besides lock_gate_check_bedtime() that raises the bed-time flag, and
+       that gate holds the flag on an unset clock, so an engage here would
+       stand until NTP worked. The break just starts instead. */
+    if (time_util_clock_plausible(now) &&
+        bedtime_break_would_cross(time_util_minutes_of_day(now), (int)duration_min, config_cache_bedtime_minutes())) {
         ESP_LOGW(TAG, "Screen break due but would cross bed time");
         lock_gate_bedtime_engage(now, true); /* no return */
     }

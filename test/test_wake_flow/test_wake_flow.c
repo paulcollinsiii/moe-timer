@@ -4127,6 +4127,28 @@ void test_row21_the_bed_time_engage_gets_the_gates_own_clock(void) {
     TEST_ASSERT_EQUAL_INT64(flow_at(19, 50), flow_bed_engage_now);
 }
 
+/* ROW 21 ON A CLOCK THAT WAS NEVER SET (BUG-11). The same crossing as the
+   first row-21 case, but on the 1970 calendar a power-on reset leaves
+   behind until NTP lands: 19:50 on 1970-01-01, the kind of fake evening a
+   US zone reads at boot. This is the only path besides
+   lock_gate_check_bedtime() that can raise the bed-time flag, and the
+   gate's unset-clock skip holds that flag rather than clearing it. So
+   without the guard here a break falling due offline would lock the
+   buttons for as long as NTP kept failing. The break starts instead. */
+void test_row21_on_an_unset_clock_the_break_starts_and_bed_time_waits(void) {
+    const time_t near_epoch = (time_t)19 * 3600 + 50 * 60;
+    TEST_ASSERT_FALSE(time_util_clock_plausible(near_epoch));
+    flow_break_due_ret = true;
+    flow_duration_min = 15;
+    flow_bed_min = flow_bed_at(20, 0);
+    /* Non-vacuity: the crossing arithmetic alone says "go to bed" here. */
+    TEST_ASSERT_TRUE(bedtime_break_would_cross(time_util_minutes_of_day(near_epoch), 15, flow_bed_min));
+
+    TEST_ASSERT_EQUAL_INT(FLOW_GATE_STARTED, flow_run_break_gate(near_epoch));
+    TEST_ASSERT_FALSE_MESSAGE(flow_bed_engaged, "an unset clock raised the bed-time flag");
+    TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_START_BREAK));
+}
+
 /* The crossing is decided on the DURATION, not on a fixed margin: the
    same instant with a shorter break is fine. */
 void test_a_break_that_finishes_before_bed_time_still_starts(void) {
@@ -10671,6 +10693,7 @@ int main(void) {
     RUN_TEST(test_row21_a_break_that_would_cross_bed_time_goes_to_bed_instead);
     RUN_TEST(test_row21_the_bed_time_engage_is_always_audible);
     RUN_TEST(test_row21_the_bed_time_engage_gets_the_gates_own_clock);
+    RUN_TEST(test_row21_on_an_unset_clock_the_break_starts_and_bed_time_waits);
     RUN_TEST(test_a_break_that_finishes_before_bed_time_still_starts);
     RUN_TEST(test_a_break_landing_exactly_on_bed_time_is_skipped);
     RUN_TEST(test_bed_time_disabled_never_skips_a_break);

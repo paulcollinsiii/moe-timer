@@ -21,6 +21,7 @@
 #include "esp_log.h"
 #else
 #define ESP_LOGW(tag, ...) ((void)(tag))
+#define ESP_LOGI(tag, ...) ((void)(tag))
 #endif
 
 static const char *TAG = "lock_gate";
@@ -39,7 +40,11 @@ static bool s_charge_lock_released; /* recovery wake: repaint over Charge Me! */
    PANEL), buttons stay dark, and the device sleeps ~2 h chunks waking
    only for NTP + the rollover check. RTC-only on purpose: the gate recomputes
    from wall-clock time on every boot, so a hard reset cannot unlock the
-   night - it merely replays the engage (paint + alert) once. */
+   night - it merely replays the engage (paint + alert) once. The one
+   exception is a clock that was never set (a power-on reset whose
+   rollover window could not reach NTP): the gate skips it, and the
+   replay waits for the first wake after NTP works (check_bedtime(),
+   BUG-11). */
 static RTC_DATA_ATTR bool s_bedtime_locked;
 static bool s_bedtime_released; /* morning/config release: repaint over Bed Time */
 
@@ -212,6 +217,39 @@ void lock_gate_bedtime_engage(time_t now, bool alert) {
    Returns true when THIS call released the lock — the answer
    lock_gate_check_bedtime() hands its caller (see lock_gate.h). */
 static bool check_bedtime(time_t *now) {
+    /* A CLOCK THAT WAS NEVER SET GETS NO BED-TIME DECISION AT ALL (BUG-11).
+       After a genuine power-on reset the clock reads the 1970 epoch plus
+       uptime until NTP lands. The power-on's day-rollover window tries NTP
+       before this gate runs, so the clock is normally set by now. The
+       skip fires only when that attempt failed (no WiFi), and then on
+       every wake until NTP works. Judging an unset clock against the
+       window gives a wrong answer either way: a short sleep where bed
+       time should have held, or, in a time zone that puts near-epoch
+       local time inside the window, a wrong two-hour lock.
+
+       So the check is skipped, and skipping is neutral. Nothing engages,
+       nothing is released, s_bedtime_locked is left as it stands, and the
+       answer is false because no lock let go. The config gate still runs,
+       and the first wake after NTP works decides normally. A device that
+       lost power and has no WiFi therefore does not enter bed time until
+       it syncs.
+
+       Holding the flag is safe only because nothing can raise it on an
+       unset clock. The power-on zeroed it (RTC_DATA_ATTR), and the one
+       other path that raises it, the break planner's bed-time crossing in
+       wake_flow_maybe_start_break(), is guarded by the same check. Were
+       that guard lost, a flag raised offline would stand, buttons dead,
+       until NTP worked, because this gate is the only code that clears it.
+
+       This asks whether the clock was EVER set (time_util.h), not whether
+       NTP set it this session. The OTA gate asks the second question, and
+       asking it here would skip bed time on most wakes. Both wake handlers
+       reach this through lock_gate_check_bedtime(), so one guard covers
+       both. */
+    if (!time_util_clock_plausible(*now)) {
+        ESP_LOGI(TAG, "Bed time not evaluated: clock not set");
+        return false;
+    }
     if (!bedtime_active(time_util_minutes_of_day(*now), config_cache_bedtime_minutes())) {
         if (s_bedtime_locked) {
             s_bedtime_locked = false;

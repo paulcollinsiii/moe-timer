@@ -210,7 +210,7 @@ constraint remains; everything else is independent and can be reordered freely.
 | 1 | **BUG-7** — a RUNNING slot outliving its own definition | **FIXED 2026-09-25**: a RUNNING orphan is folded as non-eligible and reset; a PAUSED one is kept | — |
 | 2 | **BUG-2** | **BUG-3 is RESOLVED** (2026-09-16, M2-T4a/T4b) and is no longer part of this item — its condition fired when Button D gained a chore-ack arm, and the decision it was waiting for was made there with cases at both call sites. BUG-2 stands alone now, and still needs a re-baselined sweep to show the fix changed *only* the intended cases. | — |
 | 3 | **BUG-5** — the v1→v2 migration | Only bites on a version bump, and **R4** means it has to be written *before* one rather than after. Nothing in flight bumps the version, which is why it sits last. | — |
-| 4 | **BUG-11** — bed time is evaluated against an unvalidated clock | **No longer blocked, and no longer 0.6.** Both were derived from a mechanism review refuted on 2026-08-21: a panic does *not* clear the wall clock, so this is not downstream of BUG-10. The real trigger is a power-on reset alone, which is rare, and the fix needs a design decision rather than a patch. Settle the OPEN QUESTION in the entry before touching the code — it lives on the same path | — |
+| 4 | **BUG-11** — bed time is evaluated against an unvalidated clock | **FIXED 2026-09-25.** It is guarded by `time_util_clock_plausible`, and the break planner is guarded too. The difftest cycles 09/10/11 copy the body of `wake_flow_maybe_start_break` and do not have the new guard. difftest is outside every gate and off-limits to agents, so the owner decides. Earlier history: **No longer blocked, and no longer 0.6.** Both were derived from a mechanism review refuted on 2026-08-21: a panic does *not* clear the wall clock, so this is not downstream of BUG-10. The real trigger is a power-on reset alone, which is rare, and the fix needs a design decision rather than a patch. Settle the OPEN QUESTION in the entry before touching the code — it lives on the same path | — |
 | 5 | **BUG-12** — a network window that ends before MQTT leaves the net phase slot stale | Found reviewing the BOOT subdivision. Cheap, but it sequences the window the panic measurement is being read from, so it wants its own pass rather than a ride-along | — |
 | — | **BUG-1** | **Parked 2026-08-07.** Settling its fork needs an instrumented build run on hardware, which is reporter time rather than engineering time. Revisit after item 2: BUG-2's fix touches the same latch surface and may move the ground under it. | — |
 
@@ -934,7 +934,10 @@ yet, because the number that decides whether it matters does not exist: read
 
 ## BUG-11 — bed time is evaluated against a clock nothing has validated
 
-**Status:** OPEN — registered, not fixed ·
+**Status:** FIXED 2026-09-25. The bed-time gate and the break planner skip
+on an implausible clock. The OPEN QUESTION below stays open, waiting for
+the owner's observation. See "Fix review, 2026-09-25". The line
+references below predate the fix ·
 **Found:** 2026-08-20, by reading, while subdividing the BOOT panic phase ·
 **Rewritten 2026-08-21**, after review refuted the mechanism the first version
 claimed and with it the severity, the trigger set and the priority
