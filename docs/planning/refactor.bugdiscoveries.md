@@ -206,6 +206,7 @@ constraint remains; everything else is independent and can be reordered freely.
 | — | **BUG-10** — recurring PANIC resets on an idle device | **RESOLVED** (owner, 2026-09-25); see the entry. | — |
 | **Owner triage, 2026-09-25** | **BUG-13, then BUG-7, then BUG-11.** | The owner rates BUG-5 and BUG-12 theoretical, and they stay open but unscheduled. BUG-1 and BUG-2 stay parked: the button remap has probably moved the ground under them, so revisit them only if lost presses are seen. | — |
 | 0.9 | **BUG-13** — blanking a text control in HA never reaches the device | **FIXED 2026-09-25 (v24)**, and waiting for a hardware check | — |
+| — | **BUG-14** — a power-on without NTP refunds the day | Registered 2026-09-25 by the BUG-11 fix review. Waiting for owner triage | — |
 | 1 | **BUG-7** — a RUNNING slot outliving its own definition | **FIXED 2026-09-25**: a RUNNING orphan is folded as non-eligible and reset; a PAUSED one is kept | — |
 | 2 | **BUG-2** | **BUG-3 is RESOLVED** (2026-09-16, M2-T4a/T4b) and is no longer part of this item — its condition fired when Button D gained a chore-ack arm, and the decision it was waiting for was made there with cases at both call sites. BUG-2 stands alone now, and still needs a re-baselined sweep to show the fix changed *only* the intended cases. | — |
 | 3 | **BUG-5** — the v1→v2 migration | Only bites on a version bump, and **R4** means it has to be written *before* one rather than after. Nothing in flight bumps the version, which is why it sits last. | — |
@@ -1094,6 +1095,30 @@ closes a worse case: in a time zone where the near-epoch clock falls
 The OPEN QUESTION below is left as it stands. BUG-10 is resolved, and the
 owner will say whether bed time engages on schedule now.
 
+**Fix review, 2026-09-25 (orchestrator):**
+- **Fixed floor, not the build time.** The threshold is a fixed floor,
+  `TIME_UTIL_CLOCK_FLOOR` = 2026-01-01 UTC, which predates the repo. A
+  build-time bound would break reproducible builds and make host tests
+  depend on the build date. An unset clock reads near 1970, decades below
+  either bound.
+- **Corrected trigger.** On a power-on boot the rollover window normally
+  syncs NTP **before** the gate runs. So the skip fires only when that
+  first NTP attempt fails, and then on every wake until NTP works. The
+  "runs before the sync" wording in this entry was wrong.
+- **The break planner is guarded too** (`wake_flow_maybe_start_break`,
+  `bedtime_break_would_cross`). It can raise `s_bedtime_locked`, and
+  `check_bedtime` is the only code that clears it. Left unguarded, the
+  planner plus the skip could hold the lock with no release for as long
+  as NTP fails.
+- **The skip stays neutral** (it holds the flag). With the planner
+  guarded, an unset clock cannot raise it.
+- **Documented behaviour:** a device that loses power and has no WiFi does
+  not enter bed time until it syncs.
+- The other pre-NTP clock readers are follow-ups, not part of this fix:
+  - the day type in `check_config_error` (low harm, self-heals);
+  - quiet hours (cosmetic);
+  - the day refund, which is **BUG-14**.
+
 ### Fix shape, for whoever picks this up later
 
 Not prescriptive, and recorded because the reasoning is cheap to lose:
@@ -1250,6 +1275,31 @@ means UTC.** The docs warn about it: bed time, quiet hours and the day
 rollover shift by the UTC offset from the next boot. A bulk `"tz": ""` has
 always done the same. To go back to local time, type the zone string in
 again.
+
+## BUG-14 — a power-on without NTP refunds the day
+
+**Status:** OPEN, registered 2026-09-25, not scheduled; for the owner to
+triage · **Found:** by the BUG-11 fix review, by reading · **Severity:**
+user-visible. The day's used screen time is given back and the chore acks
+are wiped.
+
+### The defect (as traced by the review; not confirmed on hardware)
+
+1. After a real power-on reset (battery out or flat), the clock reads near
+   1970. The boot restore refuses the snapshot on the date check, so
+   `timer_reset()` runs.
+2. If that wake's NTP attempt fails (no WiFi), `enter_deep_sleep` calls
+   `timer_persist_save()` (`main.c:~133`). That overwrites today's NVS
+   snapshot with the 1970-dated day.
+3. When NTP later lands, the rollover sees a non-empty `last_date`.
+   `timer_persist_try_restore` then returns false, because the stored
+   snapshot is the 1970 one. So the day resets again, and the real
+   today's state is gone.
+
+This is not the `next_ntp_sync` rollover issue queued after BUG-8. The
+likely fix shape: skip the snapshot save while the clock is implausible
+(`time_util_clock_plausible`, added by BUG-11), so today's snapshot
+survives until a synced wake can restore it. Not designed yet.
 
 ## Closed — moved to the archive
 
