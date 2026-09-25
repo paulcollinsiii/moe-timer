@@ -255,10 +255,15 @@ typedef struct {
    everything else about it and leaves the entity_id alone — HA keys the
    registry on uniq_id and will not re-slug behind the user's back. So on
    a device HA already knows, this bump changes nothing visible until the
-   MQTT device is deleted in HA once and allowed to re-register. Order
-   matters: let this firmware publish the new retained discovery FIRST,
-   then delete, or HA re-adds from the old retained payload and re-slugs
-   from the name again.
+   MQTT device is deleted in HA once and allowed to re-register. HA
+   clears a deleted device's retained discovery, and this firmware
+   republishes only when its fingerprint or this number moves, so a
+   delete alone can leave the device gone for good. The order is: OTA
+   to this firmware, delete the device in HA, rename a chore to force a
+   republish, and rename it back once the device reappears. The steps,
+   and what the delete probably keeps (unconfirmed, read from HA
+   source), are in docs/home_assistant.md, "One-time step on a device HA
+   already knows".
 
    ON MAC COLLISIONS: device_id() is the last three MAC bytes, so two
    colliding devices already collided on uniq_id and this changes nothing
