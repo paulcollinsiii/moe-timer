@@ -550,10 +550,41 @@ confirmed value to `magtag/<id>/cfg` so the control reflects reality.
 
 - **Add / edit an extra timer:** the four slots are fixed (the firmware
   ceiling). Set an empty slot's **Timer N name** (e.g. "Running") + minutes
-  + reloadable to enable it; clear the name to disable it. A timer-slot
-  edit takes effect on the device's next wake (~≤1 min or a button press);
-  allocations / quiet hours / break settings apply live; timezone at the
-  next boot.
+  + reloadable to enable it; clear the name to disable it (this needs
+  discovery schema v24 or later; see *Blanking a text control* below). A
+  timer-slot edit takes effect on the device's next wake (~≤1 min or a
+  button press); allocations / quiet hours / break settings apply live;
+  timezone at the next boot.
+- **Blanking a text control** (a timer name, the OTA manifest URL, the
+  device name, the timezone) works only once the device runs discovery
+  schema **v24** (`STATS_JSON_DISC_SCHEMA_VER`) or later. HA publishes
+  every control edit retained, and a retained message with an empty
+  payload is MQTT's "delete this topic's retained message", so on older
+  firmware a blank never reaches the device (BUG-13). From v24 each text
+  control's discovery carries a command template,
+  `{{ value if value else '""' }}`, so a blank goes out as the two
+  characters `""`, and the device reads exactly `""` as empty. A real value
+  can never be spelled that way, since the device refuses `"` in every
+  text value. The device then applies the field's own rule for an empty
+  value. All four kinds accept one: an empty **Timer N name** disables that
+  slot, an empty **OTA manifest URL** turns updates off, an empty **Device
+  name** makes the device use its id (`magtag-xxxxxx`) as its name, and an
+  empty **Timezone** is stored as it is, so after the next boot the clock
+  runs on UTC. It does not bring back the build's default zone.
+  - **Blanking Timezone moves the lock by hours.** From the next boot the
+    device runs on UTC, so bed time, quiet hours and the day rollover all
+    shift by the zone's UTC offset (4-5 h on the default US Eastern zone).
+    A bulk `"tz": ""` has always done the same. To go back to local time,
+    type the zone string (e.g. `EST5EDT,M3.2.0,M11.1.0`) in again.
+  - **To get blanking at all**, OTA the device to v24 firmware or later.
+    The schema bump makes it republish its discovery at its next sync, and
+    HA picks up the template then. Until that happens, use the bulk config
+    document instead: `"name": ""`, `"tz": ""` or `"ota_url": ""`, and for
+    a timer slot a `timers` entry of `{}`.
+  - **After a rollback or downgrade to pre-v24 firmware**, a blank edited
+    in between stays retained as `""`, which the old firmware refuses
+    (`err:"char"`) at every window. Clear it by typing a real value into
+    the control, or by clearing the retained `set/<key>` topic.
 - **Timer defaults are a fallback, not a seed.** The `MAGTAG_TIMER<n>_*`
   menuconfig values are what the device runs when NVS holds no timer table,
   but boot does **not** copy them into NVS — a stored table means somebody
@@ -629,8 +660,11 @@ confirmed value to `magtag/<id>/cfg` so the control reflects reality.
 - **Firmware updates:** **OTA manifest URL** (Text) is the https endpoint
   the device checks for a new build; **OTA check on sync** (Switch) makes
   it also check during a Button D full sync, on top of the daily
-  rollover check. Clearing the URL to empty is how you turn updates off —
-  it is the only off switch, so an empty value is accepted where any
+  rollover check. Clearing the URL to empty is how you turn updates off.
+  From this control, that works only on discovery schema v24 or later (see
+  *Blanking a text control* above); older firmware needs the bulk
+  document's `"ota_url": ""`. It
+  is the only off switch, so an empty value is accepted where any
   other non-`https://` value is rejected. Plain `http://` is refused by
   both this control and the bulk document: an unauthenticated firmware
   endpoint is an arbitrary-code-execution channel. A rejected value is

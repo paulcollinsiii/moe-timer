@@ -249,6 +249,20 @@ const cfg_field_t *ha_config_fields(int *count) {
     return FIELDS;
 }
 
+/* A text control: an HA `text` entity, the only kind whose value can be
+   blank. One predicate for both halves of BUG-13's fix — the discovery
+   command template and the decode in ha_config_set — so a field cannot
+   get one without the other. */
+static bool is_text_control(const cfg_field_t *f) {
+    return strcmp(f->component, "text") == 0;
+}
+
+const char *ha_config_decode_text(const char *value) {
+    if (value != NULL && strcmp(value, HA_CONFIG_TEXT_BLANK) == 0)
+        return "";
+    return value;
+}
+
 static const cfg_field_t *find_field(const char *key) {
     if (key == NULL)
         return NULL;
@@ -647,6 +661,12 @@ ha_cfg_result_t ha_config_set(const char *key, const char *value, char *ack, siz
     if ((f->kind == CFG_TNAME || f->kind == CFG_TMIN || f->kind == CFG_TRELOAD || f->kind == CFG_TBREAK) &&
         (f->slot < 1 || f->slot > TIMER_EXTRA_SLOTS))
         return reject(ack, ack_len, key, "slot");
+    /* BUG-13: a blank text control arrives as HA_CONFIG_TEXT_BLANK (see
+       ha_config.h). Decoded here, BEFORE the field's own checks, so each
+       field still decides for itself whether a blank is allowed — and a
+       literal `""` can never be stored, since it would fail "char". */
+    if (is_text_control(f))
+        value = ha_config_decode_text(value);
     switch (f->kind) {
         case CFG_U16: {
             long v;
@@ -1015,7 +1035,7 @@ int ha_config_discovery(char *buf, size_t len, const char *dev_id, const char *d
                    f->hi, f->step);
         if (f->unit != NULL)
             pos = jcat(buf, len, pos, ",\"unit_of_meas\":\"%s\"", f->unit);
-    } else if (strcmp(f->component, "text") == 0) {
+    } else if (is_text_control(f)) {
         /* HA's text platform defaults max to 255. Without an explicit max
            the UI accepts a value the device must then reject with "len",
            and nothing surfaces that unless you watch the ack topic — the
@@ -1024,6 +1044,21 @@ int ha_config_discovery(char *buf, size_t len, const char *dev_id, const char *d
            the whole timers array. `hi` is the buffer size, so the longest
            string that fits is hi - 1. */
         pos = jcat(buf, len, pos, ",\"mode\":\"text\",\"max\":%d", f->hi - 1);
+        /* BUG-13: blank must not go out as a zero-length payload — HA
+           publishes it retained (above), and a retained empty message is
+           MQTT's "delete", so the sleeping device never sees it. The
+           template sends HA_CONFIG_TEXT_BLANK instead, which ha_config_set
+           decodes back to "". Any non-empty value passes through as-is
+           (HA renders command templates with parse_result=False, so the
+           result stays a string). JSON-escaped here, so the value HA
+           reads is: {{ value if value else '""' }}
+           One side effect, harmless: HA converts a rendered command that
+           looks like a Python bytes literal (starts b' or b") to those
+           bytes, and it does so ONLY when a template exists. So a name
+           typed as b'Piano' now arrives as Piano, and b'' as an empty
+           retained payload — the old BUG-13 no-op. cfg shows what the
+           device stored, so the operator sees it either way. */
+        pos = jcat(buf, len, pos, ",\"cmd_tpl\":\"{{ value if value else '\\\"\\\"' }}\"");
     } else if (strcmp(f->component, "switch") == 0) {
         pos = jcat(buf, len, pos, ",\"pl_on\":\"ON\",\"pl_off\":\"OFF\",\"optimistic\":true");
     } else if (strcmp(f->component, "select") == 0) {

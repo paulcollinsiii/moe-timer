@@ -110,6 +110,21 @@ const cfg_field_t *ha_config_fields(int *count);
 /* Validate `value` (a string from MQTT) for `key` and persist via the
    field's nvs setter; writes an ack ({"key":...,"ok":bool[,"err":...]}). */
 ha_cfg_result_t ha_config_set(const char *key, const char *value, char *ack, size_t ack_len);
+/* BUG-13: the wire form of a BLANK text control. HA publishes every
+   config command retained (discovery says "retain":true, because the
+   device is asleep), and a retained zero-length message is MQTT's
+   "delete this topic's retained copy" — it never reaches the device, and
+   mqtt_rx.c drops empty payloads on purpose besides (the device clears
+   its own retained sets that way). So each text control's discovery
+   carries a command template that sends these two characters instead of
+   nothing, and ha_config_set turns them back into "" before the field's
+   own checks run. Unambiguous because config_is_clean_str() refuses a
+   `"` in every text value: no real value can be spelled this way. */
+#define HA_CONFIG_TEXT_BLANK "\"\""
+/* `value` unchanged, or "" when it is exactly HA_CONFIG_TEXT_BLANK.
+   NULL passes through as NULL. Applied by ha_config_set to text controls
+   only (component "text" — the same predicate that emits the template). */
+const char *ha_config_decode_text(const char *value);
 /* Current values of every field as one JSON object (the cfg state topic). */
 int ha_config_state_json(char *buf, size_t len);
 /* Discovery topic + payload for one editable entity. */

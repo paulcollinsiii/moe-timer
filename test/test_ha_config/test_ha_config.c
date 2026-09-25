@@ -773,6 +773,166 @@ void test_discovery_ota_url_is_text_with_max(void) {
     TEST_ASSERT_NOT_NULL(strstr(buf, "\"cmd_t\":\"magtag/magtag-a1b2c3/set/ota_url\""));
 }
 
+/* ---- BUG-13: blanking a text control ----
+   HA publishes config commands retained, and a retained zero-length
+   message is MQTT's "delete", so a blank never reached the device. Text
+   controls now carry a command template that sends the two characters
+   "" instead, and ha_config_set decodes exactly that back to "". */
+
+/* The template HA must end up with, AFTER JSON decoding. */
+#define BLANK_TEMPLATE "{{ value if value else '\"\"' }}"
+
+/* Decode the JSON string value of `key` in `json` (only \" and \\ escapes,
+   which is all ha_config_discovery emits in a template) into `out`.
+   Returns false if the key is absent or the string is unterminated. This
+   is the escaping check: a template written into the payload without
+   escaping its quotes ends the JSON string early and decodes short. */
+static bool json_string_value(const char *json, const char *key, char *out, size_t cap) {
+    char needle[48];
+    snprintf(needle, sizeof(needle), "\"%s\":\"", key);
+    const char *p = strstr(json, needle);
+    if (p == NULL)
+        return false;
+    p += strlen(needle);
+    size_t o = 0;
+    for (; *p != '\0' && *p != '"'; p++) {
+        if (*p == '\\') {
+            p++;
+            if (*p == '\0')
+                return false;
+        }
+        if (o + 1 >= cap)
+            return false;
+        out[o++] = *p;
+    }
+    out[o] = '\0';
+    return *p == '"';
+}
+
+void test_decode_text_turns_only_the_exact_sentinel_into_empty(void) {
+    TEST_ASSERT_EQUAL_STRING("\"\"", HA_CONFIG_TEXT_BLANK);
+    TEST_ASSERT_EQUAL_STRING("", ha_config_decode_text("\"\""));
+    TEST_ASSERT_EQUAL_STRING("", ha_config_decode_text(""));
+    TEST_ASSERT_EQUAL_STRING("Piano", ha_config_decode_text("Piano"));
+    /* Near misses stay as they are, and then fail the field's "char"
+       rule — none of them may become a silent blank. */
+    TEST_ASSERT_EQUAL_STRING("\"", ha_config_decode_text("\""));
+    TEST_ASSERT_EQUAL_STRING("\"\"\"", ha_config_decode_text("\"\"\""));
+    TEST_ASSERT_EQUAL_STRING("\"\"x", ha_config_decode_text("\"\"x"));
+    TEST_ASSERT_EQUAL_STRING(" \"\"", ha_config_decode_text(" \"\""));
+    TEST_ASSERT_NULL(ha_config_decode_text(NULL));
+}
+
+/* Every text control carries the template, correctly escaped; no other
+   component does. A number/switch/select never has a blank value, and a
+   template there would rewrite its commands for no reason. */
+void test_blank_template_on_every_text_control_and_no_other(void) {
+    char buf[STATS_JSON_PAYLOAD_MAX];
+    char tpl[64];
+    int n = 0, texts = 0;
+    const cfg_field_t *fields = ha_config_fields(&n);
+    for (int i = 0; i < n; i++) {
+        ha_config_discovery(buf, sizeof(buf), "magtag-a1b2c3", "K", "fw", &fields[i]);
+        if (strcmp(fields[i].component, "text") == 0) {
+            texts++;
+            TEST_ASSERT_TRUE_MESSAGE(json_string_value(buf, "cmd_tpl", tpl, sizeof(tpl)), fields[i].key);
+            TEST_ASSERT_EQUAL_STRING_MESSAGE(BLANK_TEMPLATE, tpl, fields[i].key);
+            /* The payload is still well-formed after the template: the
+               field that follows it is intact. */
+            TEST_ASSERT_NOT_NULL_MESSAGE(strstr(buf, "' }}\",\"ent_cat\":\"config\""), fields[i].key);
+        } else {
+            TEST_ASSERT_NULL_MESSAGE(strstr(buf, "cmd_tpl"), fields[i].key);
+        }
+    }
+    /* name, tz, timer1..4_name, ota_url */
+    TEST_ASSERT_EQUAL_INT(7, texts);
+}
+
+/* What a text field holds, read the way the device reads it. */
+static void stored_text(const cfg_field_t *f, char *out, size_t cap) {
+    if (f->kind == CFG_TNAME) {
+        nvs_timer_defs_blob_t b;
+        TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_timer_defs(&b));
+        snprintf(out, cap, "%.*s", (int)sizeof(b.defs[0].name), b.defs[f->slot - 1].name);
+    } else {
+        TEST_ASSERT_EQUAL(ESP_OK, f->get_str(out, cap));
+    }
+}
+
+/* The sentinel clears every text field whose own rule allows a blank,
+   and every one of today's text fields does (name -> device id, tz ->
+   stored empty, timerN_name -> slot disabled, ota_url -> updates off).
+   The stored value is the EMPTY string, never the two quote characters:
+   a literal `""` stored as a name would be an enabled timer called "". */
+void test_blank_sentinel_clears_every_text_control(void) {
+    seed_blob();
+    char ack[128], got[CFG_STR_MAX];
+    int n = 0;
+    const cfg_field_t *fields = ha_config_fields(&n);
+    for (int i = 0; i < n; i++) {
+        const cfg_field_t *f = &fields[i];
+        if (strcmp(f->component, "text") != 0)
+            continue;
+        /* Something non-empty first, so the clear is observable. */
+        const char *val = (strcmp(f->key, "ota_url") == 0) ? "https://example.com/m.json" : "Abc";
+        TEST_ASSERT_EQUAL_MESSAGE(HA_CFG_OK, ha_config_set(f->key, val, ack, sizeof(ack)), f->key);
+        stored_text(f, got, sizeof(got));
+        TEST_ASSERT_EQUAL_STRING_MESSAGE(val, got, f->key);
+
+        TEST_ASSERT_EQUAL_MESSAGE(HA_CFG_OK, ha_config_set(f->key, HA_CONFIG_TEXT_BLANK, ack, sizeof(ack)), f->key);
+        stored_text(f, got, sizeof(got));
+        TEST_ASSERT_EQUAL_STRING_MESSAGE("", got, f->key);
+        TEST_ASSERT_NOT_NULL_MESSAGE(strstr(ack, "\"ok\":true"), f->key);
+    }
+}
+
+/* Anything that is not exactly the sentinel is judged as written, so a
+   near miss is refused by the cleanliness rule rather than stored. */
+void test_blank_sentinel_near_misses_are_refused_not_stored(void) {
+    seed_blob();
+    char ack[128];
+    TEST_ASSERT_EQUAL(HA_CFG_OK, ha_config_set("timer1_name", "Piano", ack, sizeof(ack)));
+    const char *misses[] = {"\"", "\"\"\"", "\"\"x", " \"\""};
+    for (unsigned i = 0; i < sizeof(misses) / sizeof(misses[0]); i++) {
+        TEST_ASSERT_EQUAL_MESSAGE(HA_CFG_REJECTED, ha_config_set("timer1_name", misses[i], ack, sizeof(ack)),
+                                  misses[i]);
+        TEST_ASSERT_NOT_NULL_MESSAGE(strstr(ack, "char"), misses[i]);
+    }
+    nvs_timer_defs_blob_t b;
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_timer_defs(&b));
+    TEST_ASSERT_EQUAL_STRING("Piano", b.defs[0].name);
+}
+
+/* THE GUARD. Both halves of the fix key on component "text"
+   (is_text_control), while the value's meaning keys on kind. They must
+   name the same fields: a string kind registered under another component
+   would get neither the template nor the decode, and BUG-13 would come
+   back for that field with every other test still green; a text control
+   with a numeric kind would advertise a free-text box the device can
+   only refuse. */
+void test_text_component_iff_string_kind(void) {
+    int n = 0;
+    const cfg_field_t *f = ha_config_fields(&n);
+    for (int i = 0; i < n; i++) {
+        const bool text = strcmp(f[i].component, "text") == 0;
+        const bool str = f[i].kind == CFG_STR || f[i].kind == CFG_TNAME;
+        TEST_ASSERT_EQUAL_MESSAGE(str, text, f[i].key);
+    }
+}
+
+/* BEHAVIOURAL DOCUMENTATION, NOT A GUARD. On a number, switch or select
+   the two quote characters are an ordinary bad value and are refused as
+   before. Decoding them there would change nothing observable today:
+   "" and `""` fail parse_int / parse_onoff / the option lookup with the
+   same err, so a decode applied to every kind passes this test too.
+   test_text_component_iff_string_kind is what protects the scoping. */
+void test_blank_sentinel_is_not_decoded_for_other_kinds(void) {
+    char ack[128];
+    TEST_ASSERT_EQUAL(HA_CFG_REJECTED, ha_config_set("weekday_min", HA_CONFIG_TEXT_BLANK, ack, sizeof(ack)));
+    TEST_ASSERT_EQUAL(HA_CFG_REJECTED, ha_config_set("timer1_reload", HA_CONFIG_TEXT_BLANK, ack, sizeof(ack)));
+    TEST_ASSERT_EQUAL(HA_CFG_REJECTED, ha_config_set("tone_expiry", HA_CONFIG_TEXT_BLANK, ack, sizeof(ack)));
+}
+
 /* ---- discovery freshness fingerprint ----
    mqtt_ha.c republishes discovery only when the schema version or this
    fingerprint changed. Discovery carries BOTH dev.name and dev.sw, so
@@ -2200,13 +2360,17 @@ void test_config_registry_count_moves_with_the_discovery_schema(void) {
     int n = 0;
     (void)ha_config_fields(&n);
     TEST_ASSERT_EQUAL_INT(37, n);
-    /* 23 with the registry count unchanged: v22 added stat ENTITIES rows
+    /* 24 with the registry count unchanged: BUG-13 CHANGED this registry's
+       payloads (cmd_tpl on every text control) without adding a field — a
+       changed discovery payload needs the bump as much as a new control
+       does, or a same-version reflash never tells HA.
+       23 with the registry count unchanged: v22 added stat ENTITIES rows
        (M3-T1's chore entities and config warning) and v23 changed them
        (M4-T1's summary sensors, screen_used_day and day_runs_N, M4-T5's
        day_chores, and the battery's state_class), not editable fields —
        the mirror of v21, which moved this registry and left ENTITIES
        alone. test_stats_json's joint pin records that side. */
-    TEST_ASSERT_EQUAL_INT(23, STATS_JSON_DISC_SCHEMA_VER);
+    TEST_ASSERT_EQUAL_INT(24, STATS_JSON_DISC_SCHEMA_VER);
 }
 
 int main(void) {
@@ -2265,6 +2429,12 @@ int main(void) {
     RUN_TEST(test_state_json_ota_on_sync_nonzero_reads_as_on);
     RUN_TEST(test_discovery_ota_on_sync_is_switch);
     RUN_TEST(test_discovery_ota_url_is_text_with_max);
+    RUN_TEST(test_decode_text_turns_only_the_exact_sentinel_into_empty);
+    RUN_TEST(test_blank_template_on_every_text_control_and_no_other);
+    RUN_TEST(test_blank_sentinel_clears_every_text_control);
+    RUN_TEST(test_blank_sentinel_near_misses_are_refused_not_stored);
+    RUN_TEST(test_text_component_iff_string_kind);
+    RUN_TEST(test_blank_sentinel_is_not_decoded_for_other_kinds);
     RUN_TEST(test_device_hash_is_deterministic);
     RUN_TEST(test_device_hash_changes_when_firmware_version_changes);
     RUN_TEST(test_device_hash_changes_when_name_changes);

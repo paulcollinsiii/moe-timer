@@ -102,6 +102,25 @@ void test_empty_retained_clear_ignored(void) {
     TEST_ASSERT_FALSE(s_rx.config_done);
 }
 
+/* BUG-13 keeps this drop: the device clears its own retained set/<key>
+   with an empty publish, and must not read that back as an edit. A blank
+   text control therefore cannot travel as an empty payload at all, which
+   is why HA sends the two-character sentinel instead (ha_config.h,
+   HA_CONFIG_TEXT_BLANK). */
+void test_empty_set_payload_ignored(void) {
+    TEST_ASSERT_EQUAL(MQTT_RX_IGNORED, feed(SET_PREFIX "timer1_name", "", 0, 0, 0));
+    TEST_ASSERT_EQUAL_INT(0, s_rx.set_count);
+}
+
+/* ...and the sentinel is buffered verbatim: the decode is ha_config_set's
+   job, per field kind, not the transport's. */
+void test_blank_sentinel_set_buffered_verbatim(void) {
+    TEST_ASSERT_EQUAL(MQTT_RX_OK, feed_whole(SET_PREFIX "timer1_name", "\"\""));
+    TEST_ASSERT_EQUAL_INT(1, s_rx.set_count);
+    TEST_ASSERT_EQUAL_STRING("timer1_name", s_sets[0].key);
+    TEST_ASSERT_EQUAL_STRING("\"\"", s_sets[0].value);
+}
+
 /* Over-capacity on OUR OWN topic is a refusal, not an ignore. The two used
    to share MQTT_RX_IGNORED, which is why a retained oversized document was
    re-delivered and re-dropped on every reconnect with nothing logged and no
@@ -262,6 +281,8 @@ int main(void) {
     RUN_TEST(test_sets_full_drops);
     RUN_TEST(test_set_key_too_long_drops);
     RUN_TEST(test_empty_retained_clear_ignored);
+    RUN_TEST(test_empty_set_payload_ignored);
+    RUN_TEST(test_blank_sentinel_set_buffered_verbatim);
     RUN_TEST(test_oversize_config_refused_and_recorded);
     RUN_TEST(test_oversize_cmd_refused_and_recorded);
     RUN_TEST(test_config_at_the_capacity_boundary);

@@ -370,8 +370,19 @@ typedef struct {
         shift loses no run: a run finished after the day's last window is
         still in that summary. (A day whose summary is never published is
         lost, which is a different matter: the pending summary is plain
-        RAM, see mqtt_ha.c's s_summary.) */
-#define STATS_JSON_DISC_SCHEMA_VER 23
+        RAM, see mqtt_ha.c's s_summary.)
+
+   v24: BUG-13. Every `text` config control (name, tz, timer1..4_name,
+        ota_url) gains "cmd_tpl", so a BLANK value reaches the device as
+        the two characters "" instead of a retained zero-length message —
+        which MQTT reads as "delete the retained copy", so it never
+        arrived. ha_config_set decodes it back to an empty string. A
+        changed payload on existing ha_config REGISTRY rows: neither the
+        ENTITIES count nor the registry count moves, and both joint pins
+        (test_stats_json, test_ha_config) record it as such. Until a
+        device republishes at v24, HA keeps the old discovery and blanking
+        a text control still does nothing. */
+#define STATS_JSON_DISC_SCHEMA_VER 24
 
 /* Buffer the stat/summary/discovery payloads are built into (mqtt_ha.c).
    Named here because stats_json_stat is what can outgrow it, and a stat

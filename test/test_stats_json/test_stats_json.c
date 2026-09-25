@@ -320,7 +320,11 @@ void test_discovery_schema_version_moves_with_the_entity_table(void) {
     int count = 0;
     (void)stats_json_entities(&count);
     TEST_ASSERT_EQUAL_INT(33 + 4 * TIMER_EXTRA_SLOTS + CHORE_MAX, count);
-    /* v23: + screen_used_day and the TIMER_EXTRA_SLOTS day_runs_N rows
+    /* v24: count unchanged, cause outside ENTITIES — BUG-13's cmd_tpl on
+       the ha_config registry's text controls (a changed payload on
+       existing config rows; test_ha_config's joint pin records it).
+
+       v23: + screen_used_day and the TIMER_EXTRA_SLOTS day_runs_N rows
        (the summary-topic rows, state_class "total" with a last_reset),
        and state_class "measurement" on battery (M4-T1, the dashboard's
        graph data). + day_chores (M4-T5), a sixth summary-topic row, added
@@ -344,7 +348,7 @@ void test_discovery_schema_version_moves_with_the_entity_table(void) {
        whose cause is outside ENTITIES is legitimate and is recorded here
        as such. The config registry has a joint pin of its own in
        test_ha_config. */
-    TEST_ASSERT_EQUAL_INT(23, STATS_JSON_DISC_SCHEMA_VER);
+    TEST_ASSERT_EQUAL_INT(24, STATS_JSON_DISC_SCHEMA_VER);
 }
 
 /* ---- the OTA leg of the stat payload ---- */

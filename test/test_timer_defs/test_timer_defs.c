@@ -64,6 +64,9 @@
 #include "../../main/config_apply.c"
 #include "../../main/ha_config.c"
 #include "../../main/timer_defs.c"
+/* BUG-13's end-to-end case: the real set/<key> router in front of the
+   real ha_config_set and the real slot table. */
+#include "../../main/mqtt_rx.c"
 // clang-format on
 
 #define SLOT_PIANO 1
@@ -519,6 +522,54 @@ void test_a_never_written_table_is_distinguishable_from_an_unreadable_one(void) 
     TEST_ASSERT_NOT_NULL(strstr(ack, "\"err\":\"nodefs\""));
 }
 
+/* BUG-13, as far as the host reaches: HA blanks "Timer 1 name", its
+   command template turns the blank into the two characters "", the broker
+   delivers them on set/timer1_name, and the slot is disabled once the
+   window re-installs the table (net_apply.c's reconcile_defs() calls
+   timer_defs_install() for exactly this). A zero-length message on the
+   same kind of topic, the form HA used to send, still never gets past the
+   router. What is not reached: HA's own template rendering, and the
+   broker. Nor a slot that is mid-run: this one is idle. The blob path
+   installs exactly the name="" def those cases use, and they are pinned
+   elsewhere — test_timer.c test_reconcile_disable_resets_like_rename (a
+   RUNNING slot disabled by name="" folds and resets), test_net_apply.c
+   test_active_slot_disabled_by_edit_reverts_selection (the active PAUSED
+   slot disabled mid-window: selection moves off it) and
+   test_background_paused_slot_fixed_silently (a background PAUSED slot
+   redefined mid-window: reset, no sound — shown with a rename, which
+   takes the same reconcile reset). */
+void test_a_blank_timer_name_from_ha_disables_the_slot(void) {
+    timer_defs_install(); /* boot: Piano and Meditation from menuconfig */
+    TEST_ASSERT_NOT_NULL(timer_slot_def(SLOT_PIANO));
+    TEST_ASSERT_NOT_NULL(timer_slot_def(SLOT_MEDITATION));
+
+    static const char PREFIX[] = "magtag/magtag-a1b2c3/set/";
+    mqtt_set_kv_t sets[4];
+    memset(sets, 0, sizeof(sets));
+    mqtt_rx_t rx = {.sets = sets, .sets_cap = 4, .set_prefix_len = (int)strlen(PREFIX)};
+    const char *t1 = "magtag/magtag-a1b2c3/set/timer1_name";
+    const char *t2 = "magtag/magtag-a1b2c3/set/timer2_name";
+    /* The old wire form: dropped, so slot 2 must survive untouched. */
+    TEST_ASSERT_EQUAL(MQTT_RX_IGNORED, mqtt_rx_on_data(&rx, t2, (int)strlen(t2), "", 0, 0, 0));
+    /* The new one. */
+    TEST_ASSERT_EQUAL(MQTT_RX_OK, mqtt_rx_on_data(&rx, t1, (int)strlen(t1), "\"\"", 2, 2, 0));
+    TEST_ASSERT_EQUAL_INT(1, rx.set_count);
+
+    /* mqtt_ha.c apply_sets(): every buffered set goes to ha_config_set. */
+    char ack[CONFIG_ACK_MIN];
+    TEST_ASSERT_EQUAL(HA_CFG_OK, ha_config_set(sets[0].key, sets[0].value, ack, sizeof(ack)));
+
+    nvs_timer_defs_blob_t b;
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_timer_defs(&b));
+    TEST_ASSERT_EQUAL_STRING("", b.defs[SLOT_PIANO - 1].name); /* never the literal "" */
+    TEST_ASSERT_EQUAL_UINT8(1, b.defs[SLOT_PIANO - 1].defined);
+    TEST_ASSERT_EQUAL_STRING("Meditation", b.defs[SLOT_MEDITATION - 1].name);
+
+    timer_defs_install(); /* the window's reconcile, or the next boot */
+    TEST_ASSERT_NULL(timer_slot_def(SLOT_PIANO));
+    TEST_ASSERT_NOT_NULL(timer_slot_def(SLOT_MEDITATION));
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_install_without_blob_does_not_write_nvs);
@@ -540,5 +591,6 @@ int main(void) {
     RUN_TEST(test_stale_version_blob_is_not_overwritten_at_boot);
     RUN_TEST(test_the_missing_blob_warnings_are_latched);
     RUN_TEST(test_a_never_written_table_is_distinguishable_from_an_unreadable_one);
+    RUN_TEST(test_a_blank_timer_name_from_ha_disables_the_slot);
     return UNITY_END();
 }

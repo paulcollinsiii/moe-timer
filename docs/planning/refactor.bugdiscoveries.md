@@ -205,7 +205,7 @@ constraint remains; everything else is independent and can be reordered freely.
 | 0 | **S1 + S2 smoke tests** | The only item that needs the device. Two merged fixes stay unconfirmed until it happens, and everything below is engineering time that can proceed in parallel | a USB flash, then an OTA |
 | — | **BUG-10** — recurring PANIC resets on an idle device | **RESOLVED** (owner, 2026-09-25); see the entry. | — |
 | **Owner triage, 2026-09-25** | **BUG-13, then BUG-7, then BUG-11.** | The owner rates BUG-5 and BUG-12 theoretical, and they stay open but unscheduled. BUG-1 and BUG-2 stay parked: the button remap has probably moved the ground under them, so revisit them only if lost presses are seen. | — |
-| 0.9 | **BUG-13** — blanking a text control in HA never reaches the device | Hit on hardware; the documented way to disable a timer does not work | — |
+| 0.9 | **BUG-13** — blanking a text control in HA never reaches the device | **FIXED 2026-09-25 (v24)**, and waiting for a hardware check | — |
 | 1 | **BUG-7** — a RUNNING slot outliving its own definition | State-machine change to an uncovered path; independent | — |
 | 2 | **BUG-2** | **BUG-3 is RESOLVED** (2026-09-16, M2-T4a/T4b) and is no longer part of this item — its condition fired when Button D gained a chore-ack arm, and the decision it was waiting for was made there with cases at both call sites. BUG-2 stands alone now, and still needs a re-baselined sweep to show the fix changed *only* the intended cases. | — |
 | 3 | **BUG-5** — the v1→v2 migration | Only bites on a version bump, and **R4** means it has to be written *before* one rather than after. Nothing in flight bumps the version, which is why it sits last. | — |
@@ -1144,7 +1144,9 @@ harness today.
 
 ## BUG-13 — blanking a text control in HA never reaches the device
 
-**Status:** OPEN, fix approved 2026-09-25 · **Found:** 2026-09-11, hardware
+**Status:** FIXED 2026-09-25 (schema v24), and waiting for a hardware
+check. OTA the Testing Timer, then blank a timer name in HA and sync. The
+slot should disable, and HA should show the name as blank. · **Found:** 2026-09-11, hardware
 (the Testing Timer), by the owner · **Severity:** user-visible. The documented
 way to disable an extra timer does not work, and HA offers no other control
 that can disable one.
