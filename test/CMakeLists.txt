@@ -141,6 +141,10 @@ add_host_test(test_mock_hal_time)
 add_host_test(test_net_apply)
 add_host_test(test_app_state)
 add_host_test(test_stats_json)
+# BUG-14: the day-scoped decisions of an HA window, lifted out of
+# mqtt_ha.c (which needs esp-mqtt) so they carry tests; compiled beside
+# the real act payload builder.
+add_host_test(test_ha_day_cmds)
 # The panic breadcrumb. Only the PURE half of panic_diag.c compiles under
 # NATIVE (the RTC/NVS/FreeRTOS half is behind the fence), which is the
 # half that carries every rule: the phase table, the slot map, the label,

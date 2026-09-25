@@ -21,6 +21,7 @@ void display_screens_build_break(const display_state_t *st);
 void display_screens_build_chores(const display_state_t *st);
 void display_screens_build_timesup(void);
 void display_screens_build_sync_failed(void);
+void display_screens_build_no_clock(void);
 void display_screens_build_charge_me(void);
 void display_screens_build_bedtime(void);
 /* The config-error lock screen (design 5.3). Both numbers are MINUTES, as

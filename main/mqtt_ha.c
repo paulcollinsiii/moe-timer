@@ -12,6 +12,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
 #include "ha_config.h"
+#include "ha_day_cmds.h"
 #include "hal_nvs.h"
 #include "mqtt_client.h"
 #include "mqtt_rx.h"
@@ -476,6 +477,11 @@ static int apply_sets(esp_mqtt_client_handle_t client, const stats_snapshot_t *s
     char *topic = s_mem->topic;
     char *ack = s_mem->ack;
     int published = 0;
+    /* A target this window HOLDS rather than buffers (BUG-14): reported in
+       the act state below, so HA's box keeps the parent's value, but never
+       handed to the orchestrator. */
+    bool held_target = false;
+    int32_t held_target_s = 0;
     int n = s_rx.set_count; /* snapshot: the handler may still be appending */
     for (int i = 0; i < n; i++) {
         const char *k = s_mem->sets[i].key, *v = s_mem->sets[i].value;
@@ -485,9 +491,30 @@ static int apply_sets(esp_mqtt_client_handle_t client, const stats_snapshot_t *s
                 m = -BONUS_MAX_MIN;
             if (m > BONUS_MAX_MIN)
                 m = BONUS_MAX_MIN;
-            s_bonus_target_s = (int32_t)m * 60; /* applied post-join (idempotent) */
-            s_bonus_target_pending = true;
-            ESP_LOGI(TAG, "screen adjust target %ld min (deferred)", m);
+            /* Day-scoped (BUG-14): the rules are ha_day_cmds.h's. */
+            switch (ha_day_bonus_fate(snap->no_clock, s_bonus_clear_pending)) {
+                case HA_BONUS_HOLD:
+                    /* The device never clears this topic except by the
+                       day's clear below, which a no_clock window drops as
+                       well, so doing nothing IS leaving it retained: the
+                       first window with a day applies it. */
+                    held_target = true;
+                    held_target_s = (int32_t)m * 60;
+                    ESP_LOGI(TAG, "screen adjust target %ld min held: no clock", m);
+                    break;
+                case HA_BONUS_DROP:
+                    /* On a midnight rollover this changes nothing: that
+                       day's reset follows the window and wipes the bonus
+                       anyway. */
+                    ESP_LOGI(TAG, "screen adjust target %ld min dropped: day cleared", m);
+                    break;
+                case HA_BONUS_BUFFER:
+                default:
+                    s_bonus_target_s = (int32_t)m * 60; /* applied post-join (idempotent) */
+                    s_bonus_target_pending = true;
+                    ESP_LOGI(TAG, "screen adjust target %ld min (deferred)", m);
+                    break;
+            }
         } else if (strcmp(k, "locate") == 0) {
             if (strcmp(v, "ON") == 0) {
                 s_locate_pending = true;
@@ -512,12 +539,22 @@ static int apply_sets(esp_mqtt_client_handle_t client, const stats_snapshot_t *s
             }
         }
     }
-    bool day_cleared = s_bonus_clear_pending;
-    if (s_bonus_clear_pending) {
+    /* A clear is day-scoped too (BUG-14): under no_clock it is dropped,
+       not deferred (ha_day_cmds.h). The pending flag is consumed either
+       way. */
+    const bool day_cleared = ha_day_publish_clear(snap->no_clock, s_bonus_clear_pending);
+    if (s_bonus_clear_pending && !day_cleared) {
+        ESP_LOGI(TAG, "bonus clear dropped: no clock");
+    }
+    /* Consumed AFTER the set loop, never above it: ha_day_bonus_fate reads
+       it there, and cleared early it would BUFFER the cleared day's target
+       onto the fresh one. No host suite runs this order (test_ha_day_cmds
+       replays it by hand); keep the two in step. */
+    s_bonus_clear_pending = false;
+    if (day_cleared) {
         /* Rollover: clear the retained bonus target so it doesn't repeat */
         mqtt_topic(topic, sizeof(s_mem->topic), device_id(), "set/screen_bonus");
         published += publish(client, topic, "0", 1);
-        s_bonus_clear_pending = false;
     }
     /* act state: the Screen-adjust value HA renders + locate off
        (momentary). A target buffered THIS window is reported NOW rather
@@ -530,12 +567,8 @@ static int apply_sets(esp_mqtt_client_handle_t client, const stats_snapshot_t *s
        dies before the join simply re-buffers the retained set next time.
        Live timer state stays off-limits on this task; the applied figure
        still comes from the snapshot. */
-    act_state_t act_in = {
-        .applied_s = snap->screen_bonus_applied_s,
-        .target_s = s_bonus_target_s,
-        .target_pending = s_bonus_target_pending,
-        .day_cleared = day_cleared,
-    };
+    const act_state_t act_in = ha_day_act_state(snap->screen_bonus_applied_s, s_bonus_target_pending, s_bonus_target_s,
+                                                held_target, held_target_s, day_cleared);
     char act[96];
     mqtt_topic(topic, sizeof(s_mem->topic), device_id(), "act");
     if (stats_json_act(act, sizeof(act), &act_in) < (int)sizeof(act))
@@ -766,7 +799,14 @@ static int apply_incoming(esp_mqtt_client_handle_t client, const stats_snapshot_
 
     if (s_rx.cmd_done) {
         cmd_action_t act;
-        cmd_result_t cr = cmd_apply(s_mem->cmd_buf, &act, s_mem->ack, sizeof(s_mem->ack));
+        /* A grant is day-scoped: behind the no-clock lock it is HELD —
+           not buffered, not acked, not cleared, its id not recorded — so
+           it stays retained for the first window with a settled day (BUG-14,
+           owner decision Q1). A locate still runs. */
+        cmd_result_t cr = cmd_apply_for_snapshot(s_mem->cmd_buf, &act, s_mem->ack, sizeof(s_mem->ack), snap);
+        if (cr == CMD_HELD) {
+            ESP_LOGI(TAG, "grant held: no clock, left retained");
+        }
         if (cr == CMD_GRANT || cr == CMD_LOCATE) {
             if (cr == CMD_GRANT) {
                 /* Buffered: the orchestrator applies it after joining this

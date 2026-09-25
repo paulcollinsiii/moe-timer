@@ -13,6 +13,7 @@
 #include "nvs_config.h"
 #include "nvs_defaults.h"
 #include "schedule.h"
+#include "time_util.h"
 #include "timer.h"
 
 static const char *timer_state_str(timer_state_t st) {
@@ -274,4 +275,43 @@ void app_state_stats(const app_state_in_t *in, time_t now, stats_snapshot_t *out
        would report every device healthy. Main task, like every schedule
        read; stats_json.h says why it can ride the snapshot. */
     out->chore_free_bad = schedule_chore_free_broken_mask();
+
+    /* NO CLOCK, NO DAY (BUG-14). While the clock is unset, or RAM still
+       holds the stand-in day an unset clock dated, the device is behind
+       the no-clock lock and hands out no screen time — and everything
+       above describes a day nobody can vouch for: a fresh allocation, no
+       runs, no chores. Published as it stands, HA would show a refunded
+       day. So the stat says what the panel says: state NO_CLOCK, nothing
+       remaining and no limit (the stand-in's limit is a fresh day's,
+       which is the refund this lock exists to prevent). The other fields
+       ride along untouched; with the state saying NO_CLOCK none of them
+       reads as a day. This reaches HA only when WiFi and the broker work
+       but NTP does not (a LAN with its internet down), because a window
+       that cannot associate publishes nothing. A new value of an existing
+       field, not a new entity, so the discovery schema is unchanged.
+
+       no_clock is the same verdict for mqtt_ha: it holds the day-scoped
+       commands back (stats_json.h). THE DAY ARM IS LOAD-BEARING: it is
+       what holds them in a window whose NTP set the clock while RAM still
+       holds the stand-in day. Two paths of today's firmware reach that
+       (the cycle-2 review, MINOR-4):
+         - the charge lock's engage window (lock_gate_check_charge), on a
+           device that is also clock-locked, when that window's NTP works:
+           it runs at boot, before any gate can settle the day;
+         - the lock's own retry window, when NTP lands after the
+           after-NTP hook has looked and before the stats are posted.
+       Without the arm both would ack and apply onto the stand-in, and
+       the release would then wipe it. Do not remove it as a belt.
+       The lock's own retry window settles the day BEFORE this snapshot
+       (lock_gate.c, net_apply_try_window_then), so its release window
+       reports the real day and applies what it holds. */
+    const char *const day = timer_current_date();
+    if (!time_util_clock_plausible(now) || (day[0] != '\0' && !time_util_day_plausible(day))) {
+        out->state = "NO_CLOCK";
+        out->no_clock = true;
+        for (int i = 0; i < TIMER_SLOT_COUNT; i++) {
+            out->remaining_s[i] = 0;
+            out->allocation_s[i] = 0;
+        }
+    }
 }

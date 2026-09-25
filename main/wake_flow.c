@@ -1882,8 +1882,12 @@ void wake_flow_fire_expiry_alert(void) {
    (app_state_stats): acks among the CONFIGURED chores only, so a stale
    bit above the count is not a chore done. */
 static void queue_rollover_summary(void) {
-    if (timer_current_date()[0] == '\0') {
-        return; /* cold boot / restored-from-nothing: no day to report */
+    /* Cold boot / restored-from-nothing ("") has no day to report, and a
+       day an unset clock opened ("1970-01-01", BUG-14) is not a day
+       either: its usage was never saved and the rollover about to run
+       discards it for today's snapshot. HA gets no summary for it. */
+    if (!time_util_day_plausible(timer_current_date())) {
+        return;
     }
     int32_t used = timer_screen_used_sec(hal_time_now());
     uint16_t comp[TIMER_EXTRA_SLOTS];
@@ -1914,6 +1918,20 @@ static void queue_rollover_summary(void) {
 void wake_flow_handle_day_rollover(time_t *now) {
     if (!timer_is_new_day(*now))
         return;
+    /* NOT A ROLLOVER BEHIND THE NO-CLOCK LOCK (BUG-14). The day RAM holds
+       is the stand-in an unset clock dated, and its "midnight" (24 h
+       locked, or a clock set between wakes) closes out nothing: no
+       summary, no bonus clear, no update check (the gate needs a set
+       clock). The lock's gate, next in this wake, owns the day: it runs
+       the retry window with the day settled BEFORE the MQTT phase, and
+       queues the bonus clear only when that day starts fresh. Rolled
+       here instead, the window would run on the stand-in (holding every
+       day-scoped command) and the reset after it would leave the old
+       day's retained bonus target to land on the new one. */
+    if (lock_gate_clock_locked() && !time_util_day_plausible(timer_current_date())) {
+        ESP_LOGW(TAG, "Day rollover skipped: the no-clock lock settles the day");
+        return;
+    }
     /* last_date + wall time in the log: if a rollover ever fires when the
        date has NOT actually changed, this pinpoints why (bad stored date
        vs. stepped clock). */
@@ -1932,17 +1950,46 @@ void wake_flow_handle_day_rollover(time_t *now) {
        because the network task must not touch the ADC or the lock gate.
        They gate the check only; the download re-samples its own. */
     ota_flow_arm(OTA_TRIGGER_ROLLOVER, ota_batt_pct(), lock_gate_charge_locked());
+    /* Read before the window can step the clock: a window that runs on an
+       unset clock posts a no_clock snapshot, which refuses the clear
+       queued above and consumes it (ha_day_publish_clear). */
+    const bool clock_was_unset = !time_util_clock_plausible(*now);
     /* Fail-open: reset to IDLE with today's allocation even if sync fails */
     net_apply_try_window();
     *now = hal_time_now();
     /* Power cycling must not refund the allocation: with the clock now
        corrected, a same-day NVS snapshot beats a reset. Only a genuine
-       date change resets the day. */
+       date change resets the day. That includes the wake that first
+       syncs after a power-on without NTP (BUG-14): the day RAM holds was
+       dated by the unset clock, try_restore does not count it as intact,
+       and today's snapshot comes back. */
     if (timer_persist_try_restore(*now)) {
         return;
     }
     timer_reset();
     timer_record_date(*now);
+    /* A power-on whose NTP landed late (after the window's stats post, before
+       its join) starts a fresh day here with the clear already refused and
+       consumed, and no lock to release and re-queue it (BUG-14, cycle-3
+       review MAJOR-1). Queue it again for this fresh day. A power-on is
+       always a tick wake and the reset above wiped next_ntp_sync, so the
+       tick's sync block opens the window that carries it: no extra window.
+       Only when the window set the clock:
+         - a rollover that ran on a set clock published its clear, and a
+           second one would drop a target the parent sets for the new day
+           in the next window (ha_day_bonus_fate);
+         - a window that never synced left the stand-in date recorded just
+           above, and the lock's gate owns that day. Its release queues the
+           clear when the day starts fresh and must NOT find one pending when
+           it restores today's snapshot, or the restored day's target would
+           be dropped (owner decision Q-A).
+       A power-on whose NTP landed BEFORE the stats post published its clear
+       too, and cannot be told apart from here; it gets a second retained
+       "0" in the tick's window, seconds later. Harmless: the retained target
+       is already 0, so only a target set in those seconds would drop. */
+    if (clock_was_unset && time_util_clock_plausible(*now)) {
+        mqtt_ha_queue_bonus_clear();
+    }
 }
 
 /* ---- the awake watches -------------------------------------------------- */

@@ -546,6 +546,44 @@ void test_an_ack_reaches_rtc_and_flash(void) {
     TEST_ASSERT_FALSE(rec.released);
 }
 
+/* BUG-14: the ack record is ONE slot, so a toggle stamped by a clock that
+   was never set ("1970-01-01") would destroy today's record, which the
+   synced wake's restore is waiting to bring back. Refused on both ways in:
+   the clock itself unset, and a clock NTP has just corrected mid-wake
+   while RAM still holds the day the unset clock opened. The no-clock lock
+   keeps presses off that day on device; this pins the belt behind it. */
+void test_bug14_an_ack_on_an_unset_clock_day_leaves_todays_record_alone(void) {
+    with_chores(3);
+    timer_set_mode(APP_MODE_CHORES);
+    timer_record_date(T0);
+    TEST_ASSERT_EQUAL(BTN_ACK_TOGGLED, button_chore_ack_apply(BUTTON_CHORE_IDX_C, T0));
+    const int writes = mock_nvs_write_count(NVS_KEY_CHORE_ACK);
+
+    /* Power-on without NTP: RTC day reset and dated by the unset clock. */
+    const time_t unset = 90;
+    timer_reset();
+    timer_record_date(unset);
+    timer_set_mode(APP_MODE_CHORES);
+
+    TEST_ASSERT_EQUAL(BTN_ACK_TOGGLED, button_chore_ack_apply(BUTTON_CHORE_IDX_B, unset));
+    TEST_ASSERT_EQUAL_UINT8(0x01, timer_chore_acked());
+    TEST_ASSERT_EQUAL_INT_MESSAGE(writes, mock_nvs_write_count(NVS_KEY_CHORE_ACK),
+                                  "an unset clock stamped the ack record");
+
+    /* NTP lands mid-wake: clock fine, RAM day still the placeholder. */
+    TEST_ASSERT_EQUAL(BTN_ACK_TOGGLED, button_chore_ack_apply(BUTTON_CHORE_IDX_D, T0 + 600));
+    TEST_ASSERT_EQUAL_INT_MESSAGE(writes, mock_nvs_write_count(NVS_KEY_CHORE_ACK),
+                                  "the placeholder day's acks were stamped as today's");
+
+    /* And the clock arm on its own: no day recorded yet, clock unset. */
+    timer_reset();
+    timer_set_mode(APP_MODE_CHORES);
+    TEST_ASSERT_EQUAL(BTN_ACK_TOGGLED, button_chore_ack_apply(BUTTON_CHORE_IDX_B, unset));
+    TEST_ASSERT_EQUAL_INT_MESSAGE(writes, mock_nvs_write_count(NVS_KEY_CHORE_ACK), "an unset clock stamped the record");
+
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(0x02, stored_ack(3).acked, "today's record was overwritten");
+}
+
 /* "Acks toggle, so a mis-press is undone by pressing the same button
    again" (design 2.4). The un-ack has to reach flash too, or a reboot
    restores a tick the kid took back. */
@@ -999,6 +1037,7 @@ int main(void) {
     RUN_TEST(test_the_ack_gate_and_the_ack_map_never_disagree);
     RUN_TEST(test_each_ack_button_ticks_its_own_row);
     RUN_TEST(test_an_ack_reaches_rtc_and_flash);
+    RUN_TEST(test_bug14_an_ack_on_an_unset_clock_day_leaves_todays_record_alone);
     RUN_TEST(test_a_second_press_of_the_same_button_un_acks);
     RUN_TEST(test_the_last_ack_releases_the_withheld_seconds);
     RUN_TEST(test_the_release_is_not_recorded_as_an_adjustment);

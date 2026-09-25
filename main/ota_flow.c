@@ -967,6 +967,12 @@ void ota_flow_apply(int batt_pct, bool charge_locked) {
        already run by this point, so the blob carries TODAY'S date. The
        post-OTA boot restores it cleanly and timer_is_new_day() answers
        false — no second rollover, and no lost completions or pause.
+       (The one day it declines to write is a provisional one an unset
+       clock dated — BUG-14. Unreachable today: an update needs a clock
+       NTP set this session, and the no-clock lock ends every provisional
+       wake before this tail. Were it reached, the post-OTA boot would
+       restore the last real snapshot if it is today's, and otherwise
+       roll a fresh day, as the first synced wake would anyway.)
 
        Safe from this task for the same reason .repaint is: the main task
        is blocked in ota_task_run_apply's join and the network window was

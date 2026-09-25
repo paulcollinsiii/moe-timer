@@ -1481,6 +1481,36 @@ void test_sync_failed_screen(void) {
     assert_matches_golden("sync_failed");
 }
 
+/* BUG-14's no-clock lock: its own screen (owner decision, lock screen UX),
+   separate from sync_failed, whose golden is one of the legacy files that
+   must not be regenerated. */
+void test_no_clock_screen(void) {
+    display_screens_build_no_clock();
+    assert_matches_golden("no_clock");
+}
+
+/* LVGL clips rather than wraps, so a line too long for the panel would be
+   frozen into the golden as correct. Same margins as the config-error
+   screen's width case. */
+void test_the_no_clock_screen_fits_the_panel(void) {
+    display_screens_build_no_clock();
+    lv_refr_now(s_disp);
+    int left, right;
+    ink_columns(&left, &right);
+    char msg[96];
+    snprintf(msg, sizeof(msg), "ink spans x=%d..%d on a %d px panel", left, right, HOR);
+    TEST_ASSERT_TRUE_MESSAGE(left >= 2, msg);
+    TEST_ASSERT_TRUE_MESSAGE(right <= HOR - 3, msg);
+    lv_obj_t *scr = lv_screen_active();
+    lv_obj_update_layout(scr);
+    TEST_ASSERT_EQUAL_UINT32(4, lv_obj_get_child_count(scr));
+    for (uint32_t i = 0; i < lv_obj_get_child_count(scr); i++) {
+        lv_obj_t *o = lv_obj_get_child(scr, i);
+        TEST_ASSERT_TRUE_MESSAGE(lv_obj_get_height(o) < 40, "label wrapped onto a second line");
+        TEST_ASSERT_TRUE_MESSAGE(lv_obj_get_y(o) + lv_obj_get_height(o) <= VER, "label runs off the bottom edge");
+    }
+}
+
 void test_bedtime_screen(void) {
     /* Bed Time lock: inverted, non-dismissable until day rollover */
     display_screens_build_bedtime();
@@ -2319,6 +2349,8 @@ int main(void) {
     RUN_TEST(test_charge_me_screen);
     RUN_TEST(test_timesup_screen);
     RUN_TEST(test_sync_failed_screen);
+    RUN_TEST(test_no_clock_screen);
+    RUN_TEST(test_the_no_clock_screen_fits_the_panel);
     RUN_TEST(test_bedtime_screen);
     RUN_TEST(test_chore_screen_one_acked);
     RUN_TEST(test_chore_screen_all_acked);

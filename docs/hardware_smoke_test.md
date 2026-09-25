@@ -132,7 +132,22 @@ credentials.**
         refunded. Refunding the Screen allocation requires a genuine day
         rollover — Button B reloads only a reloadable extra (case 20). With
         WiFi unavailable on a power-on the restore cannot validate (no
-        clock) and the device fails open to IDLE. Note: EN reset mid-run
+        clock), so the device locks (BUG-14): the panel shows the No Clock
+        screen (`Time not synced - check WiFi`, `Press D to retry`), the
+        log shows `No-clock lock engaged` and a `config/no-clock lock`
+        sleep, no timer can start, and only Button D wakes it. It retries
+        every 30 min, or at once on a D press, for as long as NTP fails.
+        Bring WiFi back and press D: the log shows `No-clock lock
+        released` and `Timer state restored from NVS snapshot`, and the
+        allocation used before the power cut is still used. The timer that
+        was RUNNING is NOT frozen: it kept counting down in wall-clock time
+        through the outage and the lock, so it shows less time left, or
+        comes back expired if the lock outlasted it (a release on a later
+        day starts fresh). HA shows the `state` sensor as `NO_CLOCK` for
+        any stat published while locked, and gets no daily summary for the
+        1970 stand-in day. A grant sent from HA while locked stays pending
+        (no ack) and lands on the restored day in the releasing window.
+        Note: EN reset mid-run
         (before expiry) intentionally restores the in-flight countdown —
         that is crash recovery, not a refund; the run resumes with the
         remaining time it had.

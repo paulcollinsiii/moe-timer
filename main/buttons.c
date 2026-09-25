@@ -253,7 +253,13 @@ void buttons_configure_wakeup_if(bool enable) {
        already happen unconditionally on the charge- and bed-time-locked
        sleeps, where `enable` is false and the entire mask is discarded a
        line later. */
-    const bool config_locked = lock_gate_config_locked();
+    /* The no-clock lock (BUG-14) sleeps the config lock's sleep and wants
+       the same mask: D alone, and a D press is its retry. Folded into the
+       one field rather than given a second, because "D is the only exit"
+       is one rule and buttons_policy.c applies it in one place. The fold
+       itself is lock_gate_wake_d_only(), so test_lock_gate pins it; this
+       file is in no host suite. */
+    const bool config_locked = lock_gate_wake_d_only();
     buttons_policy_in_t pol = {
         .enable = enable,
         .config_locked = config_locked,

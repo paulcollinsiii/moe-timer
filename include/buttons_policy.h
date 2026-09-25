@@ -35,7 +35,8 @@ typedef struct {
        gate could leave the middle checkbox dead from sleep while the two
        either side of it worked. */
     bool chore_ack_allowed;
-    /* lock_gate_config_locked() — the config-error lock (design 5.3), and
+    /* lock_gate_wake_d_only() — the config-error lock (design 5.3) or,
+       since BUG-14, the no-clock lock that shares its sleep — and
        the ONLY field here that NARROWS rather than widens. True arms D
        and drops everything else, whatever the three gates above say.
 

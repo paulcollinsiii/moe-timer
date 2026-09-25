@@ -121,12 +121,14 @@ sleep_outcome_t sleep_plan_outcome(wake_sleep_mode_t mode, const sleep_plan_in_t
         case WAKE_SLEEP_CONFIG_ERR:
             /* THE ONE LOCK THAT ARMS ANYTHING, and `true` here is the
                whole of it: buttons_policy.c narrows the mask to D alone
-               off lock_gate_config_locked(), but it never gets asked
+               off lock_gate_wake_d_only(), but it never gets asked
                unless this flag says the driver may arm at all. Flipping
                this to false to "match the other two" leaves a device that
-               can only be recovered with a serial cable. */
+               can only be recovered with a serial cable. The reason names
+               both locks that sleep this sleep (BUG-14 folds no-clock in):
+               "config error" on a device whose config is fine misleads. */
             return (sleep_outcome_t){
-                .seconds = CONFIG_ERR_SLEEP_SEC, .enable_buttons = true, .reason = "config error, "};
+                .seconds = CONFIG_ERR_SLEEP_SEC, .enable_buttons = true, .reason = "config/no-clock lock, "};
     }
     /* Unreachable while wake_sleep_mode_select() is the only producer, but
        a cast value would land here. Fail CLOSED: this whole mechanism

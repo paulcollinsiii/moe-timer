@@ -380,6 +380,15 @@ void timer_set_mode(app_mode_t mode) {
 
 void timer_reset(void) {
     memset(&g_rtc_state, 0, sizeof(g_rtc_state));
+    /* The memset clears the day, not the struct's identity. Left at zero,
+       the next deep-sleep wake's timer_rtc_state_guard() read the reset
+       day as a foreign image, zeroed it and sent the boot to the NVS
+       snapshot. That was harmless while every sleep saved one; since
+       BUG-14 a day an unset clock opened is never saved, and a wiped
+       magic would then empty it on every wake, and each wake's rollover
+       would hand out a fresh allocation. */
+    g_rtc_state.magic = RTC_STATE_MAGIC;
+    g_rtc_state.version = RTC_STATE_VERSION;
     /* all slots IDLE (=0), active_slot 0 (Screen), counters cleared.
        Row C13 rides on this one memset and deliberately adds nothing:
        chore_acked and chore_released go to 0/false, and `mode` goes to
@@ -1008,7 +1017,7 @@ static bool snapshot_valid(const timer_snapshot_t *snap, time_t now) {
     return true;
 }
 
-bool timer_restore_snapshot(const timer_snapshot_t *snap, time_t now) {
+bool timer_snapshot_restorable(const timer_snapshot_t *snap, time_t now) {
     if (!snapshot_valid(snap, now))
         return false;
     /* Stale day: never restore yesterday's timer (rollover will reset) */
@@ -1016,7 +1025,11 @@ bool timer_restore_snapshot(const timer_snapshot_t *snap, time_t now) {
     localtime_r(&now, &tm_now);
     char today[11];
     date_fmt_iso(today, sizeof(today), &tm_now);
-    if (strcmp(today, snap->date) != 0)
+    return strcmp(today, snap->date) == 0;
+}
+
+bool timer_restore_snapshot(const timer_snapshot_t *snap, time_t now) {
+    if (!timer_snapshot_restorable(snap, now))
         return false;
 
     g_rtc_state.active_slot = snap->active_slot;

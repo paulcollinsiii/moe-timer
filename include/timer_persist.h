@@ -34,18 +34,38 @@ extern "C" {
    timer_snapshot_t has interior and trailing padding, and without that
    memset two snapshots of one unchanged state would differ in the
    padding alone, so the guard would never hold and the value would still
-   look correct. */
+   look correct.
+
+   NEVER WRITES A DAY IT CANNOT VOUCH FOR (BUG-14). When the live day is
+   empty or was dated by a clock that was never set
+   (time_util_day_plausible() false: a power-on whose rollover could not
+   reach NTP dates the day "1970-01-01"), this returns without touching
+   flash. The snapshot is one slot, so such a write would overwrite
+   today's real day, and the synced wake would find nothing to restore.
+   The DAY is tested and not the clock, because NTP can land mid-wake:
+   the clock is then fine while RAM still holds the provisional day. */
 void timer_persist_save(void);
 
 /* Restore today's timer state from NVS, returning whether it did.
    Callers read false as "nothing usable stored — reset the day".
 
    Refused while RTC state is intact, and the test for that is `last_date`
-   being non-empty, NOT "the stored date differs from today". The two
-   disagree in exactly one arrangement: RTC survived across midnight
-   holding yesterday while NVS holds a snapshot dated today. RTC wins
-   there, and should — that is a genuine date change, which is precisely
-   when the day is supposed to be refunded.
+   holding a plausible day (time_util_day_plausible), NOT "the stored
+   date differs from today". The two disagree in exactly one arrangement:
+   RTC survived across midnight holding yesterday while NVS holds a
+   snapshot dated today. RTC wins there, and should — that is a genuine
+   date change, which is precisely when the day is supposed to be
+   refunded.
+
+   A day an unset clock dated ("1970-01-01": a power-on whose rollover
+   could not reach NTP) does NOT count as intact (BUG-14). It is a
+   provisional day — the no-clock lock (lock_gate.c) keeps it unusable —
+   and timer_persist_save() never writes one, so
+   today's snapshot is still in flash; the first call on a corrected
+   clock clears the provisional day (timer_reset) and restores today
+   over it. The clear happens only once the snapshot is known to
+   restore, so on every wake NTP still fails the provisional day is left
+   exactly as it is.
 
    Refused too for a snapshot that is not from today, in either
    direction. Yesterday's would carry spent allocation into a new day
@@ -149,8 +169,10 @@ bool timer_persist_try_restore(time_t now);
    It remains public, and is called directly by the suite, because it is
    where every rule below lives and because nothing in it depends on
    try_restore having run: try_restore writes only the snapshot's own
-   fields (it does not memset g_rtc_state) and reads only last_date,
-   which this function neither reads nor writes.
+   fields and reads only last_date, which this function neither reads nor
+   writes. (Its one wider write, the timer_reset() that clears a
+   provisional day an unset clock dated, happens BEFORE this call, so
+   the acks it lands are never cleared behind it.)
 
    THE ONE ASYMMETRY, stated rather than buried. Flash is the AUTHORITY,
    so wherever the record and the live RTC copy disagree the record wins —

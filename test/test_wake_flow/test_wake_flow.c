@@ -1479,6 +1479,13 @@ bool lock_gate_charge_locked(void) {
     return flow_charge_locked;
 }
 
+/* The no-clock lock (BUG-14): the day rollover stands aside for it. */
+static bool flow_clock_locked;
+
+bool lock_gate_clock_locked(void) {
+    return flow_clock_locked;
+}
+
 /* ---- the OTA call sites -------------------------------------------------
 
    ota_flow.c has its own suite (test_ota_flow) and it asserts the
@@ -1994,6 +2001,7 @@ void setUp(void) {
     flow_stats_posts = 0;
     flow_light_pct = 0;
     flow_charge_locked = false;
+    flow_clock_locked = false;
 
     /* OTA: nothing armed, nothing buffered, a cell that does not move.
        Every case opts into each of the three, the same way it opts into
@@ -4467,6 +4475,63 @@ void test_a_cold_boot_with_no_stored_date_queues_no_summary(void) {
     TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_QUEUE_SUMMARY));
 }
 
+/* BUG-14: the day a power-on without NTP opened is dated by the unset
+   clock. It is not a day HA can be told about — its usage was never
+   saved, and the restore below replaces it with today's snapshot. Both
+   spellings: the epoch's own date, and the one a zone west of UTC
+   renders it as. The restore is still asked, and a successful one ends
+   the rollover without a reset. */
+void test_a_day_an_unset_clock_opened_queues_no_summary_and_still_restores(void) {
+    static const char *const placeholders[] = {"1970-01-01", "1969-12-31"};
+    for (size_t i = 0; i < sizeof placeholders / sizeof placeholders[0]; i++) {
+        setUp();
+        time_t now = flow_at(9, 0);
+        flow_new_day = true;
+        flow_date = placeholders[i];
+        flow_screen_used = 1800;
+        flow_restore_ok = true;
+        wake_flow_handle_day_rollover(&now);
+        TEST_ASSERT_EQUAL_INT_MESSAGE(0, flow_log_count(EV_QUEUE_SUMMARY), placeholders[i]);
+        TEST_ASSERT_EQUAL_INT_MESSAGE(1, flow_log_count(EV_PERSIST_RESTORE), placeholders[i]);
+        TEST_ASSERT_FALSE_MESSAGE(flow_reset_called, placeholders[i]);
+    }
+}
+
+/* BUG-14, round-2 review: BEHIND THE NO-CLOCK LOCK THE STAND-IN DAY'S
+   MIDNIGHT IS NOT A ROLLOVER. Rolled, its window would run on the
+   stand-in (every day-scoped HA command held) and its reset would follow
+   the MQTT phase, so a fresh day would inherit the old day's retained
+   bonus target with no clear queued. The lock's gate owns that day and
+   settles it before its own window's MQTT phase. So: no summary, no
+   clear, no update arm, no window, no restore, no reset — whether the
+   clock is still unset (the 24 h stand-in midnight) or was set between
+   wakes. */
+void test_bug14_a_clock_locked_stand_in_day_does_not_roll_over(void) {
+    static const time_t instants[] = {86400 + 60, 1785283200 + 9 * 3600};
+    for (size_t i = 0; i < sizeof instants / sizeof instants[0]; i++) {
+        setUp();
+        time_t now = instants[i];
+        flow_new_day = true;
+        flow_date = "1970-01-01";
+        flow_clock_locked = true;
+        wake_flow_handle_day_rollover(&now);
+        TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_BONUS_CLEAR));
+        TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_OTA_ARM));
+        TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_TRY_WINDOW));
+        TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_PERSIST_RESTORE));
+        TEST_ASSERT_FALSE(flow_reset_called);
+        TEST_ASSERT_EQUAL_INT64(instants[i], now);
+    }
+    /* A real day under the same flag (not reachable today) still rolls:
+       the stand-aside is for the stand-in only. */
+    setUp();
+    time_t now = flow_at(0, 5);
+    flow_new_day = true;
+    flow_clock_locked = true;
+    wake_flow_handle_day_rollover(&now);
+    TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_TRY_WINDOW));
+}
+
 /* ...but the rest of the rollover still happens: a cold boot must still
    land on a fresh day. */
 void test_a_cold_boot_rollover_still_clears_the_bonus_and_resets(void) {
@@ -4479,6 +4544,63 @@ void test_a_cold_boot_rollover_still_clears_the_bonus_and_resets(void) {
     TEST_ASSERT_TRUE(flow_reset_called);
 }
 
+/* BUG-14, cycle-3 review MAJOR-1: A POWER-ON WHOSE ROLLOVER NTP LANDS LATE.
+   The window posted its stats on the unset clock, so the snapshot was
+   no_clock and mqtt_ha refused the clear and consumed it. The clock is set
+   by the join, the snapshot is from an earlier day, and the reset starts a
+   fresh day with no lock to release and re-queue the clear. The rollover
+   queues it again, after the reset, for the tick's sync block to carry. */
+void test_bug14_a_late_synced_power_on_rollover_requeues_the_clear(void) {
+    time_t now = 60; /* the unset clock of a power-on */
+    mock_time_set(60);
+    flow_new_day = true;
+    flow_date = "";
+    flow_restore_ok = false;
+    flow_clock_after_window = flow_at(6, 30);
+    wake_flow_handle_day_rollover(&now);
+    TEST_ASSERT_EQUAL_INT(2, flow_log_count(EV_BONUS_CLEAR));
+    TEST_ASSERT_TRUE(flow_reset_called);
+    /* the second one is the fresh day's: queued after the reset */
+    int last = -1;
+    for (int i = 0; i < flow_log_n; i++) {
+        if (flow_log[i] == EV_BONUS_CLEAR) {
+            last = i;
+        }
+    }
+    TEST_ASSERT_TRUE(last > flow_log_at(EV_RECORD_DATE));
+}
+
+/* ...but not when today's snapshot comes back: the restored day keeps its
+   target (owner decision Q-A)... */
+void test_bug14_a_late_synced_power_on_restore_does_not_requeue_the_clear(void) {
+    time_t now = 60;
+    mock_time_set(60);
+    flow_new_day = true;
+    flow_date = "";
+    flow_restore_ok = true;
+    flow_clock_after_window = flow_at(6, 30);
+    wake_flow_handle_day_rollover(&now);
+    TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_BONUS_CLEAR));
+}
+
+/* ...nor when the window never set the clock: the reset recorded the
+   stand-in date and the lock's gate owns that day. A clear left pending
+   here would outlive a later release that restores today's snapshot. */
+void test_bug14_a_power_on_rollover_that_never_syncs_does_not_requeue_the_clear(void) {
+    time_t now = 60;
+    mock_time_set(60);
+    flow_new_day = true;
+    flow_date = "";
+    flow_restore_ok = false;
+    flow_clock_after_window = 0;
+    wake_flow_handle_day_rollover(&now);
+    TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_BONUS_CLEAR));
+    TEST_ASSERT_TRUE(flow_reset_called);
+}
+
+/* A rollover on a set clock published its clear in its own window; a
+   second one would drop a target the parent sets for the new day. Exactly
+   one (the end-to-end trace below pins the same for the reset branch). */
 void test_the_retained_bonus_target_is_cleared_on_every_rollover(void) {
     time_t now = flow_at(0, 5);
     flow_new_day = true;
@@ -10351,7 +10473,8 @@ void test_m3t4_a_tick_wake_with_no_release_keeps_its_latched_press(void) {
 /* THE JOIN POLL UNDER A LOCK. Every lock runs its window with its flag
    set, and that window's join polls B: acting there would resume the
    timer the lock just paused, behind the lock screen. Taken and dropped,
-   under each of the three locks. */
+   under each of the three lock sleeps. The no-clock lock (BUG-14) sleeps
+   the config-error one, so WAKE_SLEEP_CONFIG_ERR covers it too. */
 void test_m3t4_the_join_poll_drops_b_under_every_lock(void) {
     const wake_sleep_mode_t locks[] = {WAKE_SLEEP_CHARGE_LOCK, WAKE_SLEEP_BEDTIME, WAKE_SLEEP_CONFIG_ERR};
     for (unsigned i = 0; i < sizeof locks / sizeof locks[0]; i++) {
@@ -10723,7 +10846,12 @@ int main(void) {
     RUN_TEST(test_the_summary_reports_no_chores_without_a_list);
     RUN_TEST(test_the_summary_marks_the_chores_unknown_when_the_list_cannot_be_read);
     RUN_TEST(test_a_cold_boot_with_no_stored_date_queues_no_summary);
+    RUN_TEST(test_a_day_an_unset_clock_opened_queues_no_summary_and_still_restores);
+    RUN_TEST(test_bug14_a_clock_locked_stand_in_day_does_not_roll_over);
     RUN_TEST(test_a_cold_boot_rollover_still_clears_the_bonus_and_resets);
+    RUN_TEST(test_bug14_a_late_synced_power_on_rollover_requeues_the_clear);
+    RUN_TEST(test_bug14_a_late_synced_power_on_restore_does_not_requeue_the_clear);
+    RUN_TEST(test_bug14_a_power_on_rollover_that_never_syncs_does_not_requeue_the_clear);
     RUN_TEST(test_the_retained_bonus_target_is_cleared_on_every_rollover);
     RUN_TEST(test_the_days_usage_is_read_before_the_window_steps_the_clock);
     RUN_TEST(test_the_days_usage_is_sampled_before_the_completions_loop);

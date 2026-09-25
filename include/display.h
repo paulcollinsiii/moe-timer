@@ -204,6 +204,7 @@ void display_update(const display_state_t *state);       /* partial-refresh poli
 void display_full_refresh(const display_state_t *state); /* forced full refresh */
 void display_timesup(void);                              /* TIME'S UP layout, full refresh */
 void display_sync_failed(void);                          /* "No sync - check WiFi" layout */
+void display_no_clock(void);                             /* no-clock lock (BUG-14), full refresh */
 void display_charge_me(void);                            /* battery lock layout, full refresh */
 void display_bedtime(void);                              /* bed-time lock layout, full refresh */
 /* Config-error lock layout, full refresh (design 5.3). Names the day type

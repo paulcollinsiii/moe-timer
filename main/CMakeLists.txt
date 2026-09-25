@@ -20,6 +20,7 @@ idf_component_register(
         "wifi_session.c"
         "stats_json.c"
         "mqtt_ha.c"
+        "ha_day_cmds.c"
         "mqtt_rx.c"
         "mqtt_topics.c"
         "config_apply.c"

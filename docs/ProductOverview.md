@@ -57,7 +57,7 @@ remaining = expiry_wall_time - time(NULL)
 
 This makes the countdown inherently drift-resistant: NTP syncs correct `time(NULL)` via SNTP, so remaining time recalculates correctly without ever modifying `expiry_wall_time`. The only time `expiry_wall_time` changes is at timer start (`IDLE → RUNNING`) or resume after pause (`PAUSED → RUNNING`: `expiry_wall_time = time(NULL) + remaining_at_pause`).
 
-Timer state and `expiry_wall_time` are stored in **RTC slow memory** (survives deep sleep) and additionally snapshotted to **NVS** on every state transition (XOR checksum + version + plausibility validation). After a panic, external reset, or power cycle the boot path restores the snapshot as long as its stored date is still today — so losing power does not refund the day's allocation. The allocation resets only on a genuine day rollover.
+Timer state and `expiry_wall_time` are stored in **RTC slow memory** (survives deep sleep) and additionally snapshotted to **NVS** on every state transition (XOR checksum + version + plausibility validation). After a panic, external reset, or power cycle the boot path restores the snapshot as long as its stored date is still today — so losing power does not refund the day's allocation. A power-on with no WiFi has no clock to date the snapshot against, so the device locks (a "No Clock" screen: check WiFi, press D to retry) and hands out no screen time until NTP succeeds, however long that takes. It retries every 30 min, or at once on Button D, and the wake that sets the clock restores today's snapshot. A timer that was running keeps counting down in wall-clock time through the outage and the lock, as through any power loss, so it may come back expired. Parent grants and bonus changes sent from HA meanwhile wait on the broker and land once the day is settled. The allocation resets only on a genuine day rollover.
 
 ### 3 · Deep Sleep Architecture
 
@@ -531,7 +531,7 @@ main/
   main.c            — composition root: boot ordering, wiring, deep-sleep entry; no decisions
   wake_flow.c       — the wake orchestration: wake-cause decode, both wake handlers,
                       button guards, the event watches, the break-end owner
-  lock_gate.c       — the three screen locks (low battery, Bed Time, config error)
+  lock_gate.c       — the four screen locks (low battery, Bed Time, config error, no clock)
   chores.c          — the chore model: ack toggles, list identity, the gate arithmetic
   chore_store.c     — the chore list and today's ticks in NVS
   display.c/h       — SSD1680 SPI driver; layout rendering; partial vs full refresh logic

@@ -853,6 +853,26 @@ void display_screens_build_sync_failed(void) {
     make_label(scr, "No sync - check WiFi", &lv_font_montserrat_28, LV_ALIGN_CENTER, 0, 0);
 }
 
+/* No-clock lock (BUG-14): a power-on whose NTP attempt failed does not
+   know what day it is, so it hands out no screen time until NTP works.
+   Its own screen rather than sync_failed's one line, because this one is
+   read by the child and has to say what to DO (owner decision, "clear and
+   easy UX is important"): what is wrong, the likely cause, what it costs,
+   and that D retries at once rather than on the 30-minute cadence.
+
+   Shaped on the config-error screen, and NOT INVERTED for its reason: it
+   carries a 12 pt line, which white-on-black shreds on this panel. Full
+   refresh only, so no CLEAN_BANDS entry (as charge_me / bedtime /
+   config_error). test_the_no_clock_screen_fits_the_panel keeps every line
+   off the edges, since LVGL clips rather than wraps. */
+void display_screens_build_no_clock(void) {
+    lv_obj_t *scr = fresh_screen(false);
+    make_label(scr, "No Clock", &lv_font_montserrat_28, LV_ALIGN_TOP_MID, 0, 2);
+    make_label(scr, "Time not synced - check WiFi", &lv_font_montserrat_16, LV_ALIGN_TOP_MID, 0, 44);
+    make_label(scr, "No screen time until it syncs", &lv_font_montserrat_12, LV_ALIGN_TOP_MID, 0, 70);
+    make_label(scr, "Press D to retry", &lv_font_montserrat_16, LV_ALIGN_BOTTOM_MID, 0, -4);
+}
+
 /* Battery lock (<= 10%): the panel says only this until the pack charges
    back above the warn band. */
 void display_screens_build_charge_me(void) {

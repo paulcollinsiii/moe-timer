@@ -54,6 +54,13 @@ net_finish_t net_apply_finish(void);
    the sync that opened the window. */
 esp_err_t net_apply_try_window(void);
 
+/* The same window with a hook run on this task after the sync settles
+   and BEFORE the stats snapshot is posted. The MQTT phase waits for that
+   snapshot, so the hook runs before any HA message is acted on, and the
+   finish applies the buffered grant and bonus to whatever day the hook
+   left in RAM. Not called when no window opens. NULL = try_window. */
+esp_err_t net_apply_try_window_then(void (*after_ntp)(void));
+
 #ifdef __cplusplus
 }
 #endif

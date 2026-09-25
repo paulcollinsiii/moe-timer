@@ -1,6 +1,7 @@
-/* The three screen locks, lifted out of main.c so their edges carry
-   tests. What each one guarantees, and why they share a module, is in
-   lock_gate.h; what lives here is the flow. */
+/* The screen locks (charge, bed time, config error, and since BUG-14 no
+   clock), lifted out of main.c so their edges carry tests. What each one
+   guarantees, and why they share a module, is in lock_gate.h; what lives
+   here is the flow. */
 #include "lock_gate.h"
 
 #include "alerts.h"
@@ -11,6 +12,7 @@
 #include "config_validate.h"
 #include "display.h"
 #include "hal_time.h"
+#include "mqtt_ha.h"
 #include "net_apply.h"
 #include "schedule.h"
 #include "time_util.h"
@@ -72,14 +74,45 @@ static bool s_bedtime_released; /* morning/config release: repaint over Bed Time
    early-out sleep before rendering loses that promotion, and Config Error
    can sit on a healthy panel until something else asks for a full
    refresh. That is the shape s_bedtime_released and s_charge_lock_released
-   already have — the fix is one mechanism for all three, in RTC memory
+   already have (and s_clock_released since BUG-14) — the fix is one
+   mechanism for all of them, in RTC memory
    with an explicit clear, and it belongs to whoever takes that on rather
    than to the gate that noticed it. */
 static RTC_DATA_ATTR bool s_config_locked;
 static bool s_config_released; /* fix applied: repaint over Config Error */
 
+/* No-clock lock (BUG-14, owner decision 2026-09-25): a power-on whose
+   first NTP attempt failed has no idea what day it is, so it hands out no
+   screen time at all until NTP works. "If WiFi is down, most versions of
+   screen time are moot anyway." Without this the device ran a stand-in
+   day dated 1970, and a battery pull while offline refunded the real one.
+
+   RTC-backed like the others, for the config lock's reason: the flag is
+   what makes a locked re-wake a RE-wake (retry, repaint, sleep) rather
+   than an engage. A panic while locked zeroes it and the next boot
+   replays the engage — which is only a paint, so the replay is free.
+
+   It SHARES THE CONFIG LOCK'S SLEEP (lock_gate_sleep_mode below): the
+   same CONFIG_ERR_SLEEP_SEC cadence, a window on every locked re-wake,
+   and Button D armed alone (lock_gate_wake_d_only, read by buttons.c) so
+   a press retries at once. Both locks are "waiting for something a human
+   can fix, retried over the network", which is exactly what that sleep
+   was sized for. It holds for as long as NTP fails, with no give-up:
+   WiFi that works with NTP blocked keeps it locked indefinitely (owner
+   decision Q3, 2026-09-25). */
+static RTC_DATA_ATTR bool s_clock_locked;
+static bool s_clock_released; /* clock set: repaint over "No Clock" */
+
 wake_sleep_mode_t lock_gate_sleep_mode(void) {
-    return wake_sleep_mode_select(s_charge_locked, s_bedtime_locked, s_config_locked);
+    return wake_sleep_mode_select(s_charge_locked, s_bedtime_locked, s_config_locked || s_clock_locked);
+}
+
+bool lock_gate_wake_d_only(void) {
+    return s_config_locked || s_clock_locked;
+}
+
+bool lock_gate_clock_locked(void) {
+    return s_clock_locked;
 }
 
 bool lock_gate_charge_locked(void) {
@@ -91,7 +124,8 @@ bool lock_gate_config_locked(void) {
 }
 
 wake_render_t lock_gate_promote_render(wake_render_t wr) {
-    if ((s_charge_lock_released || s_bedtime_released || s_config_released) && wr == WAKE_RENDER_PARTIAL) {
+    if ((s_charge_lock_released || s_bedtime_released || s_config_released || s_clock_released) &&
+        wr == WAKE_RENDER_PARTIAL) {
         return WAKE_RENDER_FULL; /* the panel still shows a lock screen — repaint fully */
     }
     return wr;
@@ -182,6 +216,158 @@ void lock_gate_check_charge(void) {
     enter_deep_sleep(lock_gate_sleep_mode()); /* charge-locked here: 600 s, no button wake */
 }
 
+/* ---- no clock (BUG-14) -------------------------------------------------- */
+
+/* Put a real day in RAM on the wake the clock first reads plausible.
+   The stand-in day an unset clock dated ("1970-01-01") is never usable:
+   today's snapshot is restored over it, or, with none for today, the day
+   starts fresh — the same restore-else-reset pair the rollover ends with.
+   A no-op when RAM already holds a real day, which is the ordinary case:
+   a sync that lands in the rollover's own window has settled the day
+   before this gate runs. It matters for a sync that lands in THIS gate's
+   window, after the rollover has already been and gone.
+
+   THE RESET BRANCH QUEUES THE BONUS CLEAR, as the day rollover does
+   before its window: a fresh day must not inherit the retained HA bonus
+   target of the day the power went on. The rollover that ran on the
+   power-on queued one too, but that flag is plain RAM and its window
+   failed, so it is gone. The restore branch queues none: today's
+   snapshot carries today's bonus_applied, which the retained target
+   still matches.
+
+   Returns true when it put a day in RAM (either branch), false for the
+   no-op. */
+static bool settle_day(time_t now) {
+    if (time_util_day_plausible(timer_current_date())) {
+        return false;
+    }
+    if (!timer_persist_try_restore(now)) {
+        timer_reset();
+        timer_record_date(now);
+        mqtt_ha_queue_bonus_clear();
+    }
+    return true;
+}
+
+/* A DAY SETTLED OUTSIDE A WINDOW'S AFTER-NTP HOOK OWES ONE WINDOW (owner
+   decision Q-B, 2026-09-25). check_clock's two releases outside the hook
+   (the late sync, and the clock set between wakes) settle the day after
+   any window of this wake has posted its stats. So the reset branch's
+   bonus clear, which is plain RAM (mqtt_ha.c), and the grants and target
+   the locked windows held have no window to ride. On a D-press wake
+   nothing else opens one, and the clear would die at sleep; the next
+   window would then re-grant the old day's retained target on the fresh
+   day (the cycle-2 review, MINOR-1).
+
+   Paid at the END of lock_gate_check_bedtime(), not in check_clock(), so
+   it is never a second window: the bed-time engage (which does not
+   return) and the config gate open a window of their own on exactly the
+   wakes they act, and lock_window() below marks the debt paid by either.
+   Nor is it a second window on a tick wake: the paid window records its
+   sync (net_window.c), so the tick's sync block
+   (wake_policy_sync_due) no longer finds one due. Plain RAM, because it
+   is paid in the same call that raises it. */
+static bool s_settle_window_owed;
+
+static void lock_window(void) {
+    s_settle_window_owed = false; /* any window from here on carries it */
+    net_apply_try_window();
+}
+
+static bool release_clock(time_t now) {
+    s_clock_locked = false;
+    s_clock_released = true;
+    return settle_day(now);
+}
+
+/* The retry window's after-NTP hook (net_apply_try_window_then): runs
+   after the sync settles and before the stats snapshot is posted, which
+   is before the window's MQTT phase does anything. A release HERE settles
+   the real day first, so the HA effects that phase buffers (a cmd grant,
+   a bonus target) are acked for, and applied by the finish to, the day
+   they belong to, and the stat it publishes is that day's rather than
+   NO_CLOCK. Released any later, the finish would put them on the 1970
+   stand-in and settle_day's reset would then wipe them, after HA had
+   been told they landed (the BUG-14 round-2 review, MAJOR-1). While the
+   clock stays unset the hook does nothing: the snapshot then says
+   no_clock, and mqtt_ha leaves those commands retained (stats_json.h). */
+static void clock_after_ntp(void) {
+    const time_t t = hal_time_now();
+    if (time_util_clock_plausible(t)) {
+        (void)release_clock(t); /* settled in time for this window: nothing owed */
+        /* The window recorded this sync, and settle_day's reset (either
+           branch: try_restore clears the stand-in first) wiped it. Put it
+           back, or the regular sync block later in this wake opens a
+           second window to learn what this one just did. */
+        timer_record_ntp_sync(t);
+    }
+}
+
+/* Returns true when THIS call released the lock (lock_gate.h). Does not
+   return while the clock is still unset.
+
+   THE ENGAGE WAKE OPENS NO WINDOW OF ITS OWN. The only way to reach it is
+   a power-on (or a panic while already locked, which replays it), and
+   either way the RTC day is empty, so the day rollover has just run and
+   its window has just failed to reach NTP. A second attempt seconds later
+   would cost another full association timeout for the same answer, so
+   the engage paints and sleeps. Every locked RE-wake then carries exactly
+   one window: nothing else runs on it, and it is the retry. There is no
+   give-up: it retries every CONFIG_ERR_SLEEP_SEC, or on D, for as long
+   as NTP fails (owner decision Q3).
+
+   Nothing is paused or saved: the day in RAM is the stand-in the rollover
+   has just reset, IDLE, and timer_persist_save() refuses it anyway. */
+static bool check_clock(time_t *now) {
+    if (time_util_clock_plausible(*now)) {
+        if (!s_clock_locked) {
+            return false;
+        }
+        /* Set between wakes — an async sync that landed after the last
+           window's checks. No window has run on a settled day, so none has
+           consumed a day-scoped command, and the day rollover stood aside
+           for this gate (wake_flow_handle_day_rollover): settle_day() here
+           does the restore-or-reset, and on a reset queues the bonus
+           clear. The window that carries it, and the held commands, is
+           owed (s_settle_window_owed above). */
+        s_settle_window_owed = release_clock(*now);
+        ESP_LOGW(TAG, "No-clock lock released");
+        return true;
+    }
+    if (!s_clock_locked) {
+        s_clock_locked = true;
+        ESP_LOGW(TAG, "No-clock lock engaged: NTP failed after a power-on");
+        display_no_clock();
+        enter_deep_sleep(lock_gate_sleep_mode()); /* config-lock sleep: 30 min, D armed */
+        return false;                             /* unreachable on device */
+    }
+    /* Locked re-wake, on the cadence or on a D press: the retry. */
+    net_apply_try_window_then(clock_after_ntp);
+    *now = hal_time_now();
+    if (!s_clock_locked) {
+        ESP_LOGW(TAG, "No-clock lock released (NTP in the lock's window)");
+        return true;
+    }
+    if (time_util_clock_plausible(*now)) {
+        /* NTP settled after the hook looked (the wait timed out, the
+           sync landed during the MQTT tail). That window's snapshot said
+           no_clock, so it held every day-scoped command: nothing was put
+           on the stand-in, and releasing now loses nothing. What this
+           window's MQTT phase can no longer carry (the reset's bonus
+           clear, the held commands) rides the owed window
+           (s_settle_window_owed above). The sync is deliberately NOT
+           re-recorded here: the owed window records its own, and if that
+           one's NTP fails, a tick wake's sync block still finds a sync
+           due and tries again. A timed-out sync that still lands is rare. */
+        s_settle_window_owed = release_clock(*now);
+        ESP_LOGW(TAG, "No-clock lock released (late NTP in the lock's window)");
+        return true;
+    }
+    display_no_clock(); /* THE LAST WORD ON THE PANEL — see above */
+    enter_deep_sleep(lock_gate_sleep_mode());
+    return false; /* unreachable on device: enter_deep_sleep does not return */
+}
+
 /* ---- bed time ----------------------------------------------------------- */
 
 void lock_gate_bedtime_engage(time_t now, bool alert) {
@@ -202,7 +388,7 @@ void lock_gate_bedtime_engage(time_t now, bool alert) {
         alert_run(ALERT_BEDTIME);
     }
     /* Best-effort HA stat before the long no-button sleeps begin. */
-    net_apply_try_window();
+    lock_window();
     display_bedtime();                        /* THE LAST WORD ON THE PANEL — see above */
     enter_deep_sleep(lock_gate_sleep_mode()); /* bed-time locked here: ~2 h, no button wake */
 }
@@ -245,7 +431,13 @@ static bool check_bedtime(time_t *now) {
        NTP set it this session. The OTA gate asks the second question, and
        asking it here would skip bed time on most wakes. Both wake handlers
        reach this through lock_gate_check_bedtime(), so one guard covers
-       both. */
+       both.
+
+       SINCE BUG-14 THE NO-CLOCK GATE RUNS FIRST and does not return on an
+       unset clock, so through lock_gate_check_bedtime() this skip is no
+       longer reached. It stays as the belt: it costs one comparison, and
+       it keeps this function correct on its own terms if the order in
+       lock_gate_check_bedtime() is ever changed. */
     if (!time_util_clock_plausible(*now)) {
         ESP_LOGI(TAG, "Bed time not evaluated: clock not set");
         return false;
@@ -265,7 +457,7 @@ static bool check_bedtime(time_t *now) {
     /* Locked re-wake (~2 h cadence): NTP + HA config pickup. Re-check
        after the window - a bedtime edit landing here is the only remote
        fix path while buttons are dead, and it must not wait another 2 h. */
-    net_apply_try_window(); /* finish drops the bedtime cache with the rest */
+    lock_window(); /* finish drops the bedtime cache with the rest */
     *now = hal_time_now();
     if (!bedtime_active(time_util_minutes_of_day(*now), config_cache_bedtime_minutes())) {
         s_bedtime_locked = false;
@@ -366,7 +558,7 @@ static bool check_config_error(time_t now) {
        reach this line early — and that is ALL a D press on a locked device
        does: the true returned on a release below is what stops the wake
        handler also running D's own action (✓3 or the sync) on top. */
-    net_apply_try_window(); /* finish drops the schedule cache with the rest */
+    lock_window(); /* finish drops the schedule cache with the rest */
     if (config_pair_ok(hal_time_now(), &day_type, &free_min, &alloc_min)) {
         s_config_locked = false;
         s_config_released = true;
@@ -384,10 +576,22 @@ static bool check_config_error(time_t now) {
 }
 
 bool lock_gate_check_bedtime(time_t now) {
-    /* Each may not return; the first may advance `now` past an NTP step.
-       Both run whatever the first answered: a bed-time release is exactly
-       the morning the config gate picks the panel back up. */
+    /* Each may not return; the first two may advance `now` past an NTP
+       step. The no-clock gate is FIRST because the other two read the
+       clock: past it, `now` is plausible, so bed time and the day type
+       are judged against a real time. All three run whatever the earlier
+       ones answered: a bed-time release is exactly the morning the config
+       gate picks the panel back up, and a clock release is the wake bed
+       time and config are first judged at all. */
+    s_settle_window_owed = false;
+    const bool clock_released = check_clock(&now);
     const bool bedtime_released = check_bedtime(&now);
     const bool config_released = check_config_error(now);
-    return bedtime_released || config_released;
+    if (s_settle_window_owed) {
+        /* A day the clock gate settled outside a window, and neither gate
+           after it opened one: pay it now (s_settle_window_owed above). */
+        ESP_LOGI(TAG, "Window for the day the no-clock release settled");
+        lock_window();
+    }
+    return clock_released || bedtime_released || config_released;
 }

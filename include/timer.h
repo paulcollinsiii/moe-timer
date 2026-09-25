@@ -630,6 +630,11 @@ bool timer_break_take_ended(time_t now, int32_t *overdue_sec);
    still today (returns false otherwise, state untouched). */
 void timer_make_snapshot(timer_snapshot_t *out);
 bool timer_restore_snapshot(const timer_snapshot_t *snap, time_t now);
+/* The whole of timer_restore_snapshot()'s refusal, asked without touching
+   g_rtc_state: true exactly when that call would restore. For a caller
+   that must clear the live day first, and only if the restore will land
+   (timer_persist_try_restore on an unset-clock placeholder day, BUG-14). */
+bool timer_snapshot_restorable(const timer_snapshot_t *snap, time_t now);
 uint8_t timer_snapshot_checksum(const timer_snapshot_t *snap);
 
 #ifdef __cplusplus

@@ -1377,9 +1377,10 @@ not marked done, and it is retried every window until a read succeeds.
 
 ### The config-error lock
 
-The device has three locks, each a full-screen takeover it sleeps behind:
-the **charge lock** (battery ≤ 10 %), the **Bed Time** lock, and the
-**config-error lock**. The last is the chore feature's, and it engages when
+The device has four locks, each a full-screen takeover it sleeps behind:
+the **charge lock** (battery ≤ 10 %), the **Bed Time** lock, the
+**no-clock lock** (below), and the **config-error lock**. The last is the
+chore feature's, and it engages when
 **today's** `chore_free` minutes exceed today's allocation — a setting
 that cannot mean anything, so the device refuses to guess. The HA controls
 cannot create that state; a bulk document or a reseeding firmware flash
@@ -1410,9 +1411,55 @@ publishes the device's stats *before* it applies the fix, so the sensor
 still names the broken day type after the device has let go; it clears at
 the device's next network window (the press does not open a second one).
 
-The other two locks outrank it. At bed time the Bed Time screen wins, and a
-device that is both config- and charge-locked has no exit — neither a
-button nor a network window — until the battery recovers.
+The other three locks outrank it. At bed time the Bed Time screen wins; a
+device with no clock shows the No Clock screen instead, because that lock
+ends the wake before the config check runs; and a device that is both
+config- and charge-locked has no exit — neither a button nor a network
+window — until the battery recovers.
+
+### The no-clock lock
+
+After a power-on (battery pulled or run flat) the device has no clock
+until NTP answers. If the first sync fails, it shows a **No Clock**
+screen (time not synced, check WiFi, press D to retry) and hands out no
+screen time until NTP succeeds; every button except **D** is dead. It
+retries on the config lock's 30-minute cadence, and at once on a D press.
+There is no give-up: a network where WiFi works but NTP (UDP 123) is
+blocked keeps the device locked indefinitely.
+
+The wake whose sync works restores the day's used allocation from its
+snapshot, and the normal screen comes back. It does not freeze the day at
+the power cut: a timer that was running kept counting down in wall-clock
+time through the outage and the lock, as it would through any power loss,
+so it comes back with less time, or expired if the lock outlasted it. A
+release on a later day than the power cut starts that day fresh and clears
+the retained Screen-adjust target.
+
+In HA: a stat published while the clock is unset (possible only when WiFi
+and the broker work but NTP does not) reports the `state` sensor as
+`NO_CLOCK` and every timer's remaining time and limit as 0, and no daily
+summary is sent for the stand-in day. Automations that key on `state`
+should treat `NO_CLOCK` as "not in service".
+
+**Grants and Screen adjust wait.** While the lock holds, the device
+consumes no day-scoped command: a [raw-command grant](#raw-command-topic-power-users--per-timer-grants) and a Screen-adjust
+target stay retained on the broker, unapplied and unacked (a grant gets no
+event ack until then), and the device publishes no bonus clear. The first
+window with the clock set and the day settled applies them, so they land
+on the real day; when the sync lands too late for that wake's window, the
+device opens one more window before it sleeps. Send one grant at a time
+while No Clock shows: the broker keeps only the last retained command, so
+a second grant replaces the first, which is never applied or acked.
+Settings and config documents are not day-scoped and still apply while
+locked.
+
+**A Screen-adjust target set during the lock is dropped when the release
+starts a new day.** The device cannot tell a target set during the lock
+from the one left over from the day of the power cut (a retained topic
+carries no date), and a new day starts with no bonus, the same rule as a
+target set just before midnight. HA's Screen-adjust box then shows 0, so
+the drop is visible; set it again. A release that restores the same day
+keeps the target and applies it.
 
 ## Actions (native controls)
 

@@ -30,7 +30,10 @@ bool net_window_spawn(void) {
     return true;
 }
 
+static int mock_nw_wait_calls;
+
 bool net_window_wait_ntp(void) {
+    mock_nw_wait_calls++;
     return mock_nw_active && mock_nw_wait_ntp_ok;
 }
 
@@ -163,6 +166,7 @@ void setUp(void) {
     mock_nw_ntp_result = ESP_OK;
     mock_nw_clock_step = 0;
     mock_nw_spawn_calls = mock_nw_post_calls = mock_nw_join_polls = 0;
+    mock_nw_wait_calls = 0;
 
     mock_ha_bonus_pending = false;
     mock_ha_grant_pending = false;
@@ -238,6 +242,47 @@ void test_try_window_reports_sync_failure_but_still_finishes(void) {
     TEST_ASSERT_EQUAL(ESP_FAIL, net_apply_try_window());
     TEST_ASSERT_EQUAL_INT(1, n_post_stats); /* MQTT is best-effort regardless */
     TEST_ASSERT_FALSE(net_window_active());
+}
+
+/* ---- the after-NTP hook (BUG-14) -----------------------------------------
+
+   The no-clock lock settles the real day in this hook, and the whole fix
+   rests on WHERE it runs: after the sync (so the clock it reads is the
+   synced one), before the stats post (so the MQTT phase, which waits for
+   that post, reports the settled day and acts on nothing before it), and
+   before the finish applies the buffered grant (so the grant lands on the
+   settled day, not on the stand-in the hook replaces). */
+static int hook_calls;
+static int hook_saw_wait_calls;
+static int hook_saw_post_stats;
+static bool hook_saw_grant_pending;
+
+static void hook_after_ntp(void) {
+    hook_calls++;
+    hook_saw_wait_calls = mock_nw_wait_calls;
+    hook_saw_post_stats = n_post_stats;
+    hook_saw_grant_pending = mock_ha_grant_pending;
+}
+
+void test_try_window_then_runs_the_hook_after_ntp_and_before_stats_and_apply(void) {
+    hook_calls = 0;
+    mock_ha_grant_pending = true;
+    mock_ha_grant_slot = 0;
+    mock_ha_grant_sec = 300;
+    TEST_ASSERT_EQUAL(ESP_OK, net_apply_try_window_then(hook_after_ntp));
+    TEST_ASSERT_EQUAL_INT(1, hook_calls);
+    TEST_ASSERT_EQUAL_INT(1, hook_saw_wait_calls); /* after the sync settled */
+    TEST_ASSERT_EQUAL_INT(0, hook_saw_post_stats); /* before the snapshot */
+    TEST_ASSERT_TRUE(hook_saw_grant_pending);      /* before the apply */
+    TEST_ASSERT_EQUAL_INT(1, n_post_stats);
+    TEST_ASSERT_FALSE(mock_ha_grant_pending); /* and the apply still ran */
+}
+
+void test_try_window_then_skips_the_hook_when_no_window_opens(void) {
+    hook_calls = 0;
+    mock_nw_spawn_ok = false;
+    TEST_ASSERT_EQUAL(ESP_FAIL, net_apply_try_window_then(hook_after_ntp));
+    TEST_ASSERT_EQUAL_INT(0, hook_calls);
 }
 
 void test_finish_runs_join_poll_and_config_invalidate(void) {
@@ -629,6 +674,8 @@ int main(void) {
     RUN_TEST(test_try_window_spawn_failure_returns_fail_without_stats);
     RUN_TEST(test_try_window_posts_stats_once_and_returns_ntp_result);
     RUN_TEST(test_try_window_reports_sync_failure_but_still_finishes);
+    RUN_TEST(test_try_window_then_runs_the_hook_after_ntp_and_before_stats_and_apply);
+    RUN_TEST(test_try_window_then_skips_the_hook_when_no_window_opens);
     RUN_TEST(test_finish_runs_join_poll_and_config_invalidate);
     RUN_TEST(test_grant_applied_to_running_screen_extends_remaining);
     RUN_TEST(test_bonus_target_reconciled_against_applied);

@@ -11,6 +11,7 @@
 #include "chores.h"
 #include "date_fmt.h"
 #include "nvs_config.h"
+#include "time_util.h"
 #include "timer.h"
 
 #ifndef NATIVE
@@ -22,6 +23,20 @@
 static const char *TAG = "timer_persist";
 
 void timer_persist_save(void) {
+    /* Never on a day an unset clock opened (BUG-14). After a power-on
+       without NTP the rollover dates the day "1970-01-01"; writing that
+       day would overwrite TODAY's snapshot, and the synced wake would
+       then find nothing to restore and refund the day. Skipping leaves
+       today's snapshot for timer_persist_try_restore() to find.
+
+       The DAY is asked, not the clock, and that is deliberate: once NTP
+       lands mid-wake the clock is fine but the RAM day is still the
+       placeholder until the next rollover, and a save in that gap would
+       do the same damage. An empty day is refused on the same terms — a
+       snapshot with no date can never be restored, it can only destroy. */
+    if (!time_util_day_plausible(timer_current_date())) {
+        return;
+    }
     timer_snapshot_t snap, stored;
     timer_make_snapshot(&snap);
     /* Short-circuit order is load-bearing: a load that fails (missing,
@@ -38,11 +53,30 @@ void timer_persist_save(void) {
 }
 
 bool timer_persist_try_restore(time_t now) {
-    if (timer_current_date()[0] != '\0')
+    if (time_util_day_plausible(timer_current_date()))
         return false; /* RTC state intact — normal deep-sleep wake */
     timer_snapshot_t snap;
     if (nvs_config_load_timer_snapshot(&snap) != ESP_OK)
         return false;
+    if (!timer_snapshot_restorable(&snap, now))
+        return false;
+    /* RAM holds a day an unset clock opened (BUG-14): the power-on
+       rollover dated it "1970-01-01" because NTP failed. It is a
+       placeholder, and today's snapshot outranks it. The no-clock lock
+       (lock_gate.c) keeps it unusable, so nothing should be on it; it is
+       cleared wholesale anyway, so the restore lands on the same cleared
+       state the boot restore sees after a power loss whatever the
+       stand-in holds. An empty day is already that state.
+
+       Only once the snapshot is known to restore, which is why the check
+       above is separate: while NTP keeps failing, every locked boot-time
+       call reaches here with the placeholder day and a snapshot dated
+       another day, and clearing on THAT path would hand the rollover an
+       empty date on every locked wake — a rollover, and its window, on
+       top of the lock's own. */
+    if (timer_current_date()[0] != '\0') {
+        timer_reset();
+    }
     if (!timer_restore_snapshot(&snap, now))
         return false;
     /* Hoisted out of the log argument (HAZ-1). The (void) is not
@@ -71,8 +105,10 @@ bool timer_persist_try_restore(time_t now) {
        Ordering against timer_rtc_state_guard() — the one hard requirement
        in timer_persist.h, because the guard memsets g_rtc_state when it
        rejects an image — is satisfied by construction: this function is
-       only reached with last_date empty, and on the esp_restart path that
-       is the guard's own doing, two calls earlier in app_main.
+       only reached with last_date empty or an unset-clock placeholder,
+       and on the esp_restart path the empty date is the guard's own
+       doing, two calls earlier in app_main. (The placeholder arrives on
+       a deep-sleep wake, where the guard passes and clears nothing.)
 
        The return is discarded because there is nothing to do with it. A
        false means "no usable record" and leaves g_rtc_state untouched,

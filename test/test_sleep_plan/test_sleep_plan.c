@@ -471,7 +471,7 @@ void test_the_config_lock_outcome_keeps_the_buttons_armed(void) {
                              "the config lock armed nothing - Button D is dead and so is the device");
     TEST_ASSERT_EQUAL_UINT32(CONFIG_ERR_SLEEP_SEC, out.seconds);
     TEST_ASSERT_EQUAL_UINT32(1800, CONFIG_ERR_SLEEP_SEC);
-    TEST_ASSERT_EQUAL_STRING("config error, ", out.reason);
+    TEST_ASSERT_EQUAL_STRING("config/no-clock lock, ", out.reason);
     /* The planner's answer for this state is 43 s (the case below pins the
        same number for the fallback): a fixed interval, not a nap. */
     TEST_ASSERT_NOT_EQUAL_UINT32(43, out.seconds);

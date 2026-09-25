@@ -4,6 +4,7 @@
 #include "chores.h"
 #include "date_fmt.h" /* date_fmt_iso: a static inline, so no new link edge */
 #include "schedule.h"
+#include "time_util.h"
 #include "timer.h"
 
 /* Same shape as chore_store.c's: this file is compiled into host suites
@@ -197,6 +198,22 @@ btn_ack_action_t button_chore_ack_apply(uint8_t idx, time_t now) {
        rollback would leave a cleared checkbox against a released day. The
        ack stands in RTC, survives deep sleep, and only an esp_restart
        before the next successful write would lose it. */
+    /* NOT WHILE THE CLOCK IS UNSET, nor on a day an unset clock opened
+       (BUG-14). The record is ONE slot: a toggle after a power-on without
+       NTP would stamp it "1970-01-01" and so destroy today's acks, which
+       the synced wake's restore (timer_persist_try_restore) is waiting to
+       bring back. The no-clock lock (lock_gate.c) already ends every such
+       wake before a press can land, so this is the belt behind it, the
+       same way the snapshot save refuses the stand-in day. The day test
+       is the one the snapshot save makes, and it needs its own arm
+       because NTP can land mid-wake: the clock is then fine while RAM
+       still holds the placeholder day. An empty day passes — every wake
+       records one before any press lands, so "" only means the date has
+       not been asked for yet. */
+    const char *const ram_day = timer_current_date();
+    if (!time_util_clock_plausible(now) || (ram_day[0] != '\0' && !time_util_day_plausible(ram_day))) {
+        return act;
+    }
     struct tm tm_now;
     localtime_r(&now, &tm_now);
     char today[11];

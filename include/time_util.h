@@ -1,6 +1,9 @@
 #pragma once
 #include <stdbool.h>
+#include <string.h>
 #include <time.h>
+
+#include "date_fmt.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -36,6 +39,28 @@ extern "C" {
    bed-time crossing in wake_flow.c both do). */
 static inline bool time_util_clock_plausible(time_t t) {
     return t >= TIME_UTIL_CLOCK_FLOOR;
+}
+
+/* The same question asked of a stored local ISO date ("YYYY-MM-DD", as
+   timer_record_date() writes last_date): could a plausible clock have
+   dated it? True iff some instant of that local day passes
+   time_util_clock_plausible() — which holds exactly for the day that
+   contains the floor and every day after it. So the one threshold is
+   rendered through the one date format and compared lexicographically,
+   the way date_fmt.h compares every ISO date; there is no second floor.
+
+   WHAT IT CATCHES is a day that an unset clock opened (BUG-14): after a
+   power-on without NTP the rollover dates the day "1970-01-01" (or
+   "1969-12-31" west of UTC). Such a day is a placeholder, not a day the
+   device can vouch for, and nothing dated by it may overwrite a real
+   day's record. An empty string (no day recorded) answers false too. */
+static inline bool time_util_day_plausible(const char *iso) {
+    const time_t floor_t = TIME_UTIL_CLOCK_FLOOR;
+    struct tm tm_floor;
+    localtime_r(&floor_t, &tm_floor);
+    char floor_day[11];
+    date_fmt_iso(floor_day, sizeof(floor_day), &tm_floor);
+    return iso != NULL && strlen(iso) == 10 && strcmp(iso, floor_day) >= 0;
 }
 
 /* Local wall-clock minutes since midnight — the unit every schedule

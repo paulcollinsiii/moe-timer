@@ -820,7 +820,9 @@ void test_a_matching_magic_with_the_wrong_version_is_still_rejected(void) {
 void test_a_stamped_rtc_image_is_left_untouched(void) {
     arm_rich_state(NOON);
     timer_record_date(NOON);
-    TEST_ASSERT_TRUE(timer_rtc_state_guard()); /* stamps it the first time */
+    /* Already stamped: arm_rich_state() starts from timer_reset(), which
+       keeps the identity (BUG-14; pinned on its own below). */
+    TEST_ASSERT_EQUAL_HEX32(RTC_STATE_MAGIC, g_rtc_state.magic);
 
     const rtc_state_t before = g_rtc_state;
     TEST_ASSERT_FALSE_MESSAGE(timer_rtc_state_guard(), "a valid RTC state was thrown away");
@@ -1299,6 +1301,238 @@ void test_an_unreadable_names_blob_still_keeps_the_release_latched(void) {
     TEST_ASSERT_EQUAL_UINT8_MESSAGE(0, timer_chore_acked(), "C10: a hash mismatch must clear the acks");
 }
 
+/* ---- BUG-14: a power-on without NTP must not refund the day --------------
+
+   A genuine power-on clears the clock as well as RTC memory, so until NTP
+   lands the device reads the epoch plus its uptime. The rollover then
+   dates the day "1970-01-01". That day is a placeholder: it must never
+   overwrite today's snapshot, and the first wake on a corrected clock
+   must put today back. */
+
+/* Ninety seconds after a power-on, clock never set: 1970-01-01 in UTC0. */
+#define EPOCH_UP ((time_t)90)
+#define EPOCH_ISO "1970-01-01"
+
+/* app_main's timer boot block: the RTC guard, then the boot restore
+   (main.c; timer_defs_install() is setUp's timer_set_defs()). */
+static void model_boot(time_t now) {
+    (void)timer_rtc_state_guard();
+    (void)timer_persist_try_restore(now);
+}
+
+/* The timer half of wake_flow_handle_day_rollover(), in its order: the
+   new-day test on the wake's clock, the window (which may correct the
+   clock to `after_window`), the restore on the corrected clock, and the
+   reset only when that fails. test_wake_flow pins the rest of the
+   rollover (summary, bonus clear, OTA arm) against stubs; this is the
+   real timer and the real snapshot underneath the same four calls.
+   Answers whether a rollover ran. */
+static bool model_rollover(time_t now, time_t after_window) {
+    if (!timer_is_new_day(now)) {
+        return false;
+    }
+    if (!timer_persist_try_restore(after_window)) {
+        timer_reset();
+        timer_record_date(after_window);
+    }
+    return true;
+}
+
+/* lock_gate.c's settle_day(), the no-clock lock's release: with RAM still
+   holding the stand-in day, today's snapshot is restored at the corrected
+   clock, or the day starts fresh. test_lock_gate pins WHEN the gate calls
+   it; this is the real restore underneath. */
+static void model_lock_release(time_t now) {
+    if (time_util_day_plausible(timer_current_date())) {
+        return;
+    }
+    if (!timer_persist_try_restore(now)) {
+        timer_reset();
+        timer_record_date(now);
+    }
+}
+
+/* THE REPRO, end to end, under the no-clock lock (owner decision
+   2026-09-25). A real day with usage and two chores acked; the battery is
+   pulled; the device comes back with no WiFi and locks (nothing can be
+   used), sleeps and re-wakes locked, and then NTP lands in the lock's
+   window. The day's snapshot must come back: its usage, adjust and acks
+   are not refunded. It is not frozen at the power cut: a RUNNING slot
+   keeps its wall-clock expiry and drains through the outage and the lock
+   (owner decision Q2), which this case leaves short of expiring. */
+void test_bug14_a_power_on_without_ntp_does_not_refund_the_day(void) {
+    store_names();
+    arm_rich_state(NOON);
+    store_ack(TODAY_ISO, 0x03, false);
+    timer_chore_set_acked(0x03);
+    timer_persist_save();
+    const int snaps = snap_writes();
+
+    /* Battery out and back: RTC memory AND the clock are gone. The boot
+       restore refuses today's snapshot on the date; the rollover's NTP
+       fails; the day is reset and dated by the unset clock. */
+    wipe_rtc();
+    model_boot(EPOCH_UP);
+    TEST_ASSERT_EQUAL_STRING("", timer_current_date());
+    TEST_ASSERT_TRUE(model_rollover(EPOCH_UP, EPOCH_UP));
+    TEST_ASSERT_EQUAL_STRING(EPOCH_ISO, timer_current_date());
+
+    /* The no-clock lock engages and sleeps: enter_deep_sleep() saves. */
+    timer_persist_save();
+    TEST_ASSERT_EQUAL_INT_MESSAGE(snaps, snap_writes(), "the unset-clock day overwrote today's snapshot");
+
+    /* A locked re-wake, NTP still failing. Deep sleep kept RTC memory, and
+       the stand-in day must survive it: not wiped by the guard, not
+       rolled over — either would add a rollover window to every locked
+       wake on top of the lock's own. */
+    model_boot(EPOCH_UP + 1800);
+    TEST_ASSERT_FALSE_MESSAGE(model_rollover(EPOCH_UP + 1800, EPOCH_UP + 1800), "a locked re-wake rolled the day over");
+    TEST_ASSERT_EQUAL_STRING(EPOCH_ISO, timer_current_date());
+    timer_persist_save();
+    TEST_ASSERT_EQUAL_INT(snaps, snap_writes());
+
+    /* The next locked re-wake: NTP lands in the lock's window. */
+    const time_t synced = NOON + 300;
+    model_boot(EPOCH_UP + 3600);
+    TEST_ASSERT_FALSE(model_rollover(EPOCH_UP + 3600, EPOCH_UP + 3600));
+    model_lock_release(synced);
+    TEST_ASSERT_EQUAL_STRING_MESSAGE(TODAY_ISO, timer_current_date(), "today's snapshot did not come back");
+
+    /* The day as it was saved... */
+    TEST_ASSERT_EQUAL_INT(SLOT_PIANO, timer_active_slot());
+    TEST_ASSERT_EQUAL_INT32(1234, g_rtc_state.slots[0].remaining_at_pause);
+    TEST_ASSERT_EQUAL_INT32(3600, g_rtc_state.slots[0].allocation_sec);
+    TEST_ASSERT_EQUAL_INT32(777, g_rtc_state.slots[0].run_accum_sec);
+    TEST_ASSERT_EQUAL_INT32(-333, g_rtc_state.slots[0].adjust_today_sec);
+    TEST_ASSERT_EQUAL_INT(TIMER_RUNNING, g_rtc_state.slots[SLOT_PIANO].state);
+    /* ...with today's acks from flash. */
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(0x03, timer_chore_acked(), "today's acks were not restored");
+    TEST_ASSERT_FALSE(timer_chore_released());
+
+    /* And the first save on the real day writes it again. */
+    timer_pause(synced + 10);
+    timer_persist_save();
+    TEST_ASSERT_EQUAL_INT(snaps + 1, snap_writes());
+}
+
+/* The same restore at the NEXT wake's boot call, for a clock that became
+   plausible some other way than the lock's window (the boot restore reads
+   the wall clock, which survives deep sleep): the stand-in day does not
+   count as intact, so today comes back before the gate even runs. */
+void test_bug14_the_boot_restore_replaces_a_placeholder_day(void) {
+    arm_rich_state(NOON);
+    timer_persist_save();
+
+    wipe_rtc();
+    model_boot(EPOCH_UP);
+    (void)model_rollover(EPOCH_UP, EPOCH_UP);
+    TEST_ASSERT_EQUAL_STRING(EPOCH_ISO, timer_current_date());
+
+    model_boot(NOON + 60);
+    TEST_ASSERT_EQUAL_STRING_MESSAGE(TODAY_ISO, timer_current_date(), "the boot restore left the stand-in day");
+    TEST_ASSERT_EQUAL_INT(SLOT_PIANO, timer_active_slot());
+}
+
+/* The same restore reached from the ROLLOVER rather than from the boot
+   call: offline long enough for the epoch clock to cross its own
+   midnight, so the rollover fires while the boot restore still saw 1970,
+   and the rollover's window is what corrects the clock. last_date is
+   the placeholder, not empty — the arrangement try_restore used to read
+   as "RTC intact" and refuse. */
+void test_bug14_the_rollover_restores_today_over_a_placeholder_day(void) {
+    arm_rich_state(NOON);
+    timer_persist_save();
+
+    wipe_rtc();
+    model_boot(EPOCH_UP);
+    (void)model_rollover(EPOCH_UP, EPOCH_UP);
+
+    const time_t next_epoch_day = EPOCH_UP + 86400;
+    model_boot(next_epoch_day);
+    TEST_ASSERT_EQUAL_STRING(EPOCH_ISO, timer_current_date()); /* boot restore: wrong day, placeholder kept */
+    TEST_ASSERT_TRUE(model_rollover(next_epoch_day, NOON + 60));
+    TEST_ASSERT_EQUAL_STRING_MESSAGE(TODAY_ISO, timer_current_date(), "the rollover reset instead of restoring");
+    TEST_ASSERT_EQUAL_INT(SLOT_PIANO, timer_active_slot());
+    TEST_ASSERT_EQUAL_INT32(1234, g_rtc_state.slots[0].remaining_at_pause);
+}
+
+/* The placeholder is cleared ONLY when today's snapshot will actually
+   replace it. With nothing restorable (here: yesterday's snapshot, and a
+   locked boot whose clock is still 1970) the restore must leave the
+   stand-in day exactly as it is. Clearing it first would hand every
+   locked re-wake an empty date, so a rollover and its window on top of
+   the lock's own window. The mode byte stands in for "untouched": the
+   one field a clear would visibly reset. */
+void test_bug14_a_placeholder_day_survives_a_restore_that_cannot_land(void) {
+    arm_rich_state(YESTERDAY_NOON);
+    timer_persist_save();
+
+    wipe_rtc();
+    model_boot(EPOCH_UP);
+    (void)model_rollover(EPOCH_UP, EPOCH_UP);
+    timer_set_mode(APP_MODE_CHORES);
+
+    TEST_ASSERT_FALSE(timer_persist_try_restore(EPOCH_UP + 1800)); /* locked boot */
+    TEST_ASSERT_FALSE(timer_persist_try_restore(NOON));            /* set clock, no snapshot for today */
+    TEST_ASSERT_EQUAL_STRING(EPOCH_ISO, timer_current_date());
+    TEST_ASSERT_EQUAL_INT(APP_MODE_CHORES, timer_mode());
+}
+
+/* The save guard itself, both sides. Refused on a day an unset clock
+   dated (both spellings) and on no day at all — neither can ever be
+   restored, so writing them could only destroy the stored day. */
+void test_bug14_the_snapshot_is_not_saved_on_an_unset_clock_day(void) {
+    arm_rich_state(NOON);
+    timer_persist_save();
+    const int snaps = snap_writes();
+
+    static const time_t unset[] = {EPOCH_UP, (time_t)(TIME_UTIL_CLOCK_FLOOR - 86400)};
+    for (size_t i = 0; i < sizeof unset / sizeof unset[0]; i++) {
+        timer_reset();
+        timer_record_date(unset[i]);
+        timer_start(unset[i], 1800);
+        timer_persist_save();
+        TEST_ASSERT_EQUAL_INT(snaps, snap_writes());
+    }
+    setenv("TZ", "EST5", 1); /* the epoch renders as 1969-12-31 here */
+    tzset();
+    timer_reset();
+    timer_record_date(EPOCH_UP);
+    TEST_ASSERT_EQUAL_STRING("1969-12-31", timer_current_date());
+    timer_persist_save();
+    TEST_ASSERT_EQUAL_INT(snaps, snap_writes());
+
+    timer_reset(); /* no day recorded */
+    timer_start(NOON, 1800);
+    timer_persist_save();
+    TEST_ASSERT_EQUAL_INT(snaps, snap_writes());
+
+    timer_snapshot_t stored;
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_load_timer_snapshot(&stored));
+    TEST_ASSERT_EQUAL_STRING(TODAY_ISO, stored.date);
+}
+
+void test_bug14_the_snapshot_is_saved_on_a_set_clock_day(void) {
+    timer_record_date(TIME_UTIL_CLOCK_FLOOR); /* the first plausible day */
+    timer_start(TIME_UTIL_CLOCK_FLOOR, 1800);
+    timer_persist_save();
+    TEST_ASSERT_EQUAL_INT(1, snap_writes());
+    timer_snapshot_t stored;
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_load_timer_snapshot(&stored));
+    TEST_ASSERT_EQUAL_STRING("2026-01-01", stored.date);
+}
+
+/* The day rollover's reset keeps the RTC image's identity. Without it the
+   next deep-sleep wake's guard zeroes the day, and on a placeholder day —
+   never saved — that is a fresh allocation on every offline wake. */
+void test_bug14_a_day_reset_leaves_the_rtc_image_stamped(void) {
+    arm_rich_state(NOON);
+    timer_reset();
+    timer_record_date(EPOCH_UP);
+    TEST_ASSERT_FALSE_MESSAGE(timer_rtc_state_guard(), "the guard threw away a day timer_reset() had just opened");
+    TEST_ASSERT_EQUAL_STRING(EPOCH_ISO, timer_current_date());
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_first_save_on_a_blank_store_writes_once);
@@ -1356,5 +1590,12 @@ int main(void) {
     RUN_TEST(test_the_first_ack_after_a_restart_builds_on_the_restored_mask);
     RUN_TEST(test_an_ordinary_wake_does_not_read_the_chore_keys);
     RUN_TEST(test_an_unreadable_names_blob_still_keeps_the_release_latched);
+    RUN_TEST(test_bug14_a_power_on_without_ntp_does_not_refund_the_day);
+    RUN_TEST(test_bug14_the_boot_restore_replaces_a_placeholder_day);
+    RUN_TEST(test_bug14_the_rollover_restores_today_over_a_placeholder_day);
+    RUN_TEST(test_bug14_a_placeholder_day_survives_a_restore_that_cannot_land);
+    RUN_TEST(test_bug14_the_snapshot_is_not_saved_on_an_unset_clock_day);
+    RUN_TEST(test_bug14_the_snapshot_is_saved_on_a_set_clock_day);
+    RUN_TEST(test_bug14_a_day_reset_leaves_the_rtc_image_stamped);
     return UNITY_END();
 }

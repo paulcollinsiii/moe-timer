@@ -206,7 +206,8 @@ constraint remains; everything else is independent and can be reordered freely.
 | — | **BUG-10** — recurring PANIC resets on an idle device | **RESOLVED** (owner, 2026-09-25); see the entry. | — |
 | **Owner triage, 2026-09-25** | **BUG-13, then BUG-7, then BUG-11.** | The owner rates BUG-5 and BUG-12 theoretical, and they stay open but unscheduled. BUG-1 and BUG-2 stay parked: the button remap has probably moved the ground under them, so revisit them only if lost presses are seen. | — |
 | 0.9 | **BUG-13** — blanking a text control in HA never reaches the device | **FIXED 2026-09-25 (v24)**, and waiting for a hardware check | — |
-| 4.5 | **BUG-14** — a power-on without NTP refunds the day | Registered 2026-09-25 by the BUG-11 fix review. **The owner approved the fix** (do not save on an unset clock) | — |
+| 4.5 | **BUG-14** — a power-on without NTP refunds the day | **FIXED 2026-09-25**: no save on an unset day, a no-clock lock until NTP, and a restore on release. Waiting for a hardware check | — |
+| — | **BUG-15** — a same-day power cycle appears to revoke the HA bonus | Registered 2026-09-25 by the BUG-14 review. Waiting for owner triage | — |
 | 1 | **BUG-7** — a RUNNING slot outliving its own definition | **FIXED 2026-09-25**: a RUNNING orphan is folded as non-eligible and reset; a PAUSED one is kept | — |
 | 2 | **BUG-2** | **BUG-3 is RESOLVED** (2026-09-16, M2-T4a/T4b) and is no longer part of this item — its condition fired when Button D gained a chore-ack arm, and the decision it was waiting for was made there with cases at both call sites. BUG-2 stands alone now, and still needs a re-baselined sweep to show the fix changed *only* the intended cases. | — |
 | 3 | **BUG-5** — the v1→v2 migration | Only bites on a version bump, and **R4** means it has to be written *before* one rather than after. Nothing in flight bumps the version, which is why it sits last. | — |
@@ -1281,8 +1282,18 @@ again.
 
 ## BUG-14 — a power-on without NTP refunds the day
 
-**Status:** OPEN, registered 2026-09-25, not scheduled; for the owner to
-triage · **Found:** by the BUG-11 fix review, by reading · **Severity:**
+**Status:** FIXED 2026-09-25, after three review cycles, and waiting for a
+hardware check:
+1. Turn WiFi off and pull the battery. Expect "No Clock … Press D to
+   retry", with only D waking the device.
+2. Turn WiFi back on and press D. Expect the lock to release, today's day
+   to be restored, and no 1970 summary in HA.
+
+The rollover re-queues the bonus clear only when the clock was unset before
+the window **and** is plausible after it. "Unset before" alone would let a
+leftover clear drop a restored day's target (pinned by a test).
+
+· **Found:** by the BUG-11 fix review, by reading · **Severity:**
 user-visible. The day's used screen time is given back and the chore acks
 are wiped.
 
@@ -1307,6 +1318,107 @@ survives until a synced wake can restore it. Not designed yet.
 **Owner triage (2026-09-25): fix it.** Do not save the snapshot while the
 clock is unset. The owner notes that this also closes a workaround: pulling
 power while offline refunds the day.
+
+**Owner decision (2026-09-25, on the first implementation): lock until the
+clock is set.**
+- After a power-on, the device waits for the first NTP sync, which the
+  rollover window already attempts.
+- If that sync fails, leaving the clock implausible, the device shows a
+  lock screen and hands out no screen time until NTP succeeds. "If WiFi is
+  down, most versions of screen time are moot anyway."
+- So the offline stand-in day is never usable, and nothing from it needs to
+  be merged or discarded.
+
+The rest of the first implementation stands:
+- no save on an implausible day;
+- today's snapshot is restored over a 1970 day;
+- no 1970 ack-record write;
+- no 1970 rollover summary;
+- `timer_reset()` keeps its stamp.
+
+**Owner decision (2026-09-25, lock screen UX): the screen tells the child
+that D retries.** "Clear and easy UX is important."
+- The lock gets its own screen, saying there is no sync or clock, to check
+  WiFi, and to press D to retry. It has its own new golden image.
+- The legacy `sync_failed` screen and golden stay as they are. That golden
+  is one of the three 4737 B legacy files whose stray byte must not be
+  "fixed", so it cannot be regenerated.
+- The 30-minute automatic retry stays.
+
+**Owner decisions (2026-09-25, from the round-2 review):**
+- **Q1 (grants while locked): leave them queued.** While the no-clock lock
+  holds, the device consumes no day-scoped commands: `cmd` grants and
+  bonus targets stay retained on the broker, unapplied and unacked. The
+  release window settles the day first (restore, or reset plus a bonus
+  clear when the day was reset), and only then applies them. Settings
+  (config documents) are not day-scoped, so they still apply.
+- **Q2 (running timer across the outage): accept it and fix the docs.** A
+  running timer keeps draining in wall-clock time through the outage and
+  the lock, the same as any power loss. The docs must not promise that the
+  day comes back "as it was at the power cut".
+- **Q3 (WiFi works, NTP blocked): stay locked indefinitely.** The device
+  retries every 30 minutes or when D is pressed.
+
+**Owner decisions (2026-09-25, from the cycle-2 review):**
+- **Q-B (late NTP release): open one extra network window right away.** A
+  release on the late-NTP path (a D-press wake that opens no further window)
+  runs one more window at once. Its queued bonus clear and any held grants
+  then go out before sleep. The clear flag is plain RAM, so it would
+  otherwise be lost, and the old day's retained target re-granted.
+- **Q-A (bonus target set during the lock, release starts a new day): drop
+  it.** Today's rule stands: a new day starts with no bonus. HA shows 0, so
+  the drop is visible. This is documented.
+
+**Orchestrator calls (cycle 2):**
+- **A host-test seam for the BUG-14 logic in `mqtt_ha.c`**, done now:
+  - pure functions for the bonus decision (buffer, hold or drop), for the
+    publish-the-clear decision and for the act state;
+  - `cmd_apply` takes the snapshot, so the `no_clock` pass-through is pinned.
+- **Accepted as latency only:** held commands wait for the restored
+  `next_ntp_sync` after a restore outside the lock window. On the late path
+  the Q-B window removes this.
+- **Known gap, not fixed:** the release wake skips the rollover's
+  update-check arm, so the daily check moves to the next midnight.
+
+**Orchestrator calls (cycle 3):**
+- **The bonus clear is re-queued after a late rollover NTP (MAJOR-1, a
+  regression against HEAD).**
+  - A power-on rollover whose NTP lands after the stats post publishes a
+    `no_clock` snapshot. The clear is then refused and its flag consumed.
+    The day resets with no lock, so no release re-queues the clear.
+  - Fix: `wake_flow_handle_day_rollover` records whether the clock was
+    unset before its window, and on the reset branch calls
+    `mqtt_ha_queue_bonus_clear()` again.
+  - A power-on is always a tick wake, and the reset clears
+    `next_ntp_sync`, so the tick's sync block carries the clear in the
+    same wake. No extra window is needed.
+  - The false invariant in `include/ha_day_cmds.h` ("the release is what
+    re-queues the clear") is corrected.
+- **Keep the extra window on the "set between wakes" release too.** On a
+  tick wake it costs nothing, and on a D-press wake it is the only thing
+  that carries the clear.
+- **Accepted:** if the owed window's NTP fails on the reset branch, the
+  tick runs a second failed window. This is rare and bounded.
+
+## BUG-15 — a same-day power cycle appears to revoke the day's HA bonus
+
+**Status:** OPEN, registered 2026-09-25, not scheduled; for the owner to
+triage · **Found:** by the BUG-14 round-2 review, by reading only · **Severity:**
+user-visible if confirmed.
+
+The rollover at every power-on (`last_date` is empty) queues the clear of
+the retained bonus target to "0". The boot restore then brings back
+`bonus_applied` = X, so the next window's bonus reconcile appears to take X
+back. This is not confirmed on hardware.
+
+A related observation from the same review: a grant that lands in any
+midnight rollover window can be lost the same way as the BUG-14 lock
+window's, because it is applied before the day it belongs to is settled.
+
+The BUG-14 cycle-2 review found a second one, also predating BUG-14: an
+ordinary midnight rollover whose window fails loses the queued bonus
+clear. That flag is plain RAM and deep sleep clears it, so the next window
+applies yesterday's retained target to today. Triage it with this entry.
 
 ## Closed — moved to the archive
 

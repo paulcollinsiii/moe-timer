@@ -708,6 +708,55 @@ void test_stats_idle_screen_falls_back_to_schedule(void) {
     TEST_ASSERT_EQUAL_STRING("Weekday", s.day_type);
 }
 
+/* BUG-14: behind the no-clock lock the device hands out no screen time,
+   and the stand-in day RAM holds is not a day HA may be shown — it would
+   read as a refunded one. Both ways in: the clock itself unset, and a
+   clock NTP has just set while RAM still holds the 1970 day (the stand-in's
+   own midnight rollover window, whose restore runs after it).
+
+   no_clock is the same verdict handed to mqtt_ha, which holds the
+   day-scoped commands (a cmd grant, a bonus target) retained and unacked
+   while it is set (owner decision Q1). A snapshot that lost it would have
+   a locked window consume a grant onto the stand-in day and ack it. */
+void test_stats_on_an_unset_clock_report_no_clock_and_nothing_remaining(void) {
+    const time_t unset = 90;
+    timer_record_date(unset);
+    stats_snapshot_t s;
+    app_state_stats(&IN_HEALTHY, unset, &s);
+    TEST_ASSERT_EQUAL_STRING("NO_CLOCK", s.state);
+    TEST_ASSERT_TRUE(s.no_clock);
+    for (int i = 0; i < TIMER_SLOT_COUNT; i++) {
+        TEST_ASSERT_EQUAL_INT32(0, s.remaining_s[i]);
+        TEST_ASSERT_EQUAL_UINT32(0, s.allocation_s[i]); /* no refunded limit either */
+    }
+
+    app_state_stats(&IN_HEALTHY, T0, &s); /* clock set, day still 1970 */
+    TEST_ASSERT_EQUAL_STRING("NO_CLOCK", s.state);
+    TEST_ASSERT_TRUE(s.no_clock);
+    TEST_ASSERT_EQUAL_INT32(0, s.remaining_s[0]);
+
+    timer_reset(); /* no day at all, clock unset: still no clock */
+    app_state_stats(&IN_HEALTHY, unset, &s);
+    TEST_ASSERT_EQUAL_STRING("NO_CLOCK", s.state);
+    TEST_ASSERT_TRUE(s.no_clock);
+}
+
+/* ...and a set clock on a real day, or on no day yet (the esp_restart
+   boot before its rollover), reports as it always did. */
+void test_stats_on_a_set_clock_are_unchanged(void) {
+    stats_snapshot_t s;
+    app_state_stats(&IN_HEALTHY, T0, &s); /* no day recorded */
+    TEST_ASSERT_EQUAL_STRING("IDLE", s.state);
+    TEST_ASSERT_EQUAL_INT32(3600, s.remaining_s[0]);
+    TEST_ASSERT_FALSE(s.no_clock);
+    timer_record_date(T0);
+    app_state_stats(&IN_HEALTHY, T0, &s);
+    TEST_ASSERT_EQUAL_STRING("IDLE", s.state);
+    TEST_ASSERT_EQUAL_INT32(3600, s.remaining_s[0]);
+    TEST_ASSERT_EQUAL_UINT32(3600, s.allocation_s[0]);
+    TEST_ASSERT_FALSE(s.no_clock); /* a settled day: commands apply */
+}
+
 /* The HA limit/remaining sensors read the same IDLE fallback the panel
    does, and must fold the bank for the same reason. */
 void test_stats_idle_screen_allocation_folds_a_banked_adjustment(void) {
@@ -950,6 +999,8 @@ int main(void) {
     RUN_TEST(test_display_mode_passes_through);
     RUN_TEST(test_stats_disabled_slot_reports_zero_zero);
     RUN_TEST(test_stats_idle_screen_falls_back_to_schedule);
+    RUN_TEST(test_stats_on_an_unset_clock_report_no_clock_and_nothing_remaining);
+    RUN_TEST(test_stats_on_a_set_clock_are_unchanged);
     RUN_TEST(test_stats_idle_screen_allocation_folds_a_banked_adjustment);
     RUN_TEST(test_stats_idle_screen_allocation_clamps_at_zero);
     RUN_TEST(test_stats_allocation_never_wraps_through_the_uint32_cast);

@@ -16,7 +16,9 @@
 extern "C" {
 #endif
 
-typedef struct {
+/* Tagged so a header that only passes a pointer can forward-declare it
+   (cmd_apply.h) instead of including this one. */
+typedef struct stats_snapshot {
     int batt_pct;
     int batt_mv;
     int light_mv;
@@ -73,6 +75,16 @@ typedef struct {
        read has to stay on the main task anyway: the schedule cache it
        goes through is unsynchronised. */
     uint8_t chore_free_bad;
+    /* BUG-14: the clock is unset, or RAM still holds the stand-in day an
+       unset clock dated, so nobody knows what day it is. Set together
+       with state "NO_CLOCK" (app_state_stats). Not published: it tells
+       mqtt_ha to leave the DAY-SCOPED commands (a cmd grant, a
+       set/screen_bonus target) retained, unapplied and unacked until a
+       window whose day is settled (owner decision Q1, 2026-09-25).
+       Config documents and settings still apply. It rides the snapshot
+       because the snapshot is the one thing the MQTT phase waits for,
+       so it is exactly as current as the day the finish will apply to. */
+    bool no_clock;
 } stats_snapshot_t;
 
 /* The OTA leg of the stat payload, and the reason it is a SEPARATE

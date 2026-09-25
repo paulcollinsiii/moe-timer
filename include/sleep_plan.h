@@ -170,7 +170,15 @@ sleep_plan_in_t sleep_plan_from_timer(const sleep_plan_timer_in_t *in);
    NOT SHORTENED BY MAGTAG_PANIC_SOAK_FAST_LOCKS. That knob exists to
    reproduce the bedtime-locked re-wake's panic cluster, and it names one
    population; widening it to a second, rarer one would change what a soak
-   run is evidence about. */
+   run is evidence about.
+
+   ALSO THE NO-CLOCK LOCK'S SLEEP (BUG-14). lock_gate_sleep_mode() folds
+   that flag into `config_locked`, because its shape is the same: it ends
+   only when something outside the device is fixed (the WiFi), every wake
+   runs one window (the NTP retry), and D is the attended shortcut. So
+   the 30-minute figure is also its retry cadence, and the sleep log's
+   reason reads "config/no-clock lock, " for either; lock_gate.c logs
+   which lock it is. */
 #define CONFIG_ERR_SLEEP_SEC 1800
 
 typedef enum {

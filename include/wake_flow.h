@@ -274,7 +274,11 @@ void wake_flow_fire_expiry_alert(void);
    Yesterday's numbers are queued for HA before anything is reset. A
    same-day NVS snapshot then beats the reset: power cycling must never
    refund the day's allocation, so only a genuine date change gets a fresh
-   one. */
+   one.
+
+   ALSO A NO-OP BEHIND THE NO-CLOCK LOCK while RAM holds the stand-in day
+   an unset clock dated (BUG-14): the lock's gate settles that day itself,
+   before its own window's MQTT phase (lock_gate.h). */
 void wake_flow_handle_day_rollover(time_t *now);
 
 /* ---- the awake watches -------------------------------------------------- */

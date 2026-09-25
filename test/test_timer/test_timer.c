@@ -3509,7 +3509,8 @@ void test_the_mode_and_acks_survive_a_deep_sleep_wake(void) {
        the three fields either, since the mode selects the paint and never
        the wake logic. This is the case C14 (an esp_restart) is NOT; see
        test_timer_persist for that half. */
-    TEST_ASSERT_TRUE(timer_rtc_state_guard()); /* stamps the cold image */
+    memset(&g_rtc_state, 0, sizeof(g_rtc_state)); /* a cold image: setUp's timer_reset() leaves one stamped */
+    TEST_ASSERT_TRUE(timer_rtc_state_guard());    /* stamps the cold image */
     timer_record_date(T0);
     timer_chore_set_acked(0x03);
     timer_chore_set_released(true);

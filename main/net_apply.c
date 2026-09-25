@@ -191,11 +191,23 @@ net_finish_t net_apply_finish(void) {
     return nf;
 }
 
-esp_err_t net_apply_try_window(void) {
+esp_err_t net_apply_try_window_then(void (*after_ntp)(void)) {
     if (!net_apply_open())
         return ESP_FAIL;
     net_window_wait_ntp();
+    /* BETWEEN THE SYNC AND THE STATS POST, and nowhere else will do: the
+       window task holds its MQTT phase until the snapshot arrives
+       (net_window.c), so whatever the hook changes is what that phase
+       reports and what the finish below applies the buffered HA effects
+       to. The no-clock lock settles the real day here (BUG-14). */
+    if (after_ntp != NULL) {
+        after_ntp();
+    }
     s_ops.post_stats();
     net_apply_finish();
     return net_window_ntp_result();
+}
+
+esp_err_t net_apply_try_window(void) {
+    return net_apply_try_window_then(NULL);
 }
