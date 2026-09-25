@@ -206,7 +206,7 @@ constraint remains; everything else is independent and can be reordered freely.
 | — | **BUG-10** — recurring PANIC resets on an idle device | **RESOLVED** (owner, 2026-09-25); see the entry. | — |
 | **Owner triage, 2026-09-25** | **BUG-13, then BUG-7, then BUG-11.** | The owner rates BUG-5 and BUG-12 theoretical, and they stay open but unscheduled. BUG-1 and BUG-2 stay parked: the button remap has probably moved the ground under them, so revisit them only if lost presses are seen. | — |
 | 0.9 | **BUG-13** — blanking a text control in HA never reaches the device | **FIXED 2026-09-25 (v24)**, and waiting for a hardware check | — |
-| — | **BUG-14** — a power-on without NTP refunds the day | Registered 2026-09-25 by the BUG-11 fix review. Waiting for owner triage | — |
+| 4.5 | **BUG-14** — a power-on without NTP refunds the day | Registered 2026-09-25 by the BUG-11 fix review. **The owner approved the fix** (do not save on an unset clock) | — |
 | 1 | **BUG-7** — a RUNNING slot outliving its own definition | **FIXED 2026-09-25**: a RUNNING orphan is folded as non-eligible and reset; a PAUSED one is kept | — |
 | 2 | **BUG-2** | **BUG-3 is RESOLVED** (2026-09-16, M2-T4a/T4b) and is no longer part of this item — its condition fired when Button D gained a chore-ack arm, and the decision it was waiting for was made there with cases at both call sites. BUG-2 stands alone now, and still needs a re-baselined sweep to show the fix changed *only* the intended cases. | — |
 | 3 | **BUG-5** — the v1→v2 migration | Only bites on a version bump, and **R4** means it has to be written *before* one rather than after. Nothing in flight bumps the version, which is why it sits last. | — |
@@ -1303,6 +1303,10 @@ This is not the `next_ntp_sync` rollover issue queued after BUG-8. The
 likely fix shape: skip the snapshot save while the clock is implausible
 (`time_util_clock_plausible`, added by BUG-11), so today's snapshot
 survives until a synced wake can restore it. Not designed yet.
+
+**Owner triage (2026-09-25): fix it.** Do not save the snapshot while the
+clock is unset. The owner notes that this also closes a workaround: pulling
+power while offline refunds the day.
 
 ## Closed — moved to the archive
 
