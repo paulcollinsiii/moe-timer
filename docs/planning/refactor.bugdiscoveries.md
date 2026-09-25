@@ -205,8 +205,8 @@ constraint remains; everything else is independent and can be reordered freely.
 | 0 | **S1 + S2 smoke tests** | The only item that needs the device. Two merged fixes stay unconfirmed until it happens, and everything below is engineering time that can proceed in parallel | a USB flash, then an OTA |
 | — | **BUG-10** — recurring PANIC resets on an idle device | **RESOLVED** (owner, 2026-09-25); see the entry. | — |
 | **Owner triage, 2026-09-25** | **BUG-13, then BUG-7, then BUG-11.** | The owner rates BUG-5 and BUG-12 theoretical, and they stay open but unscheduled. BUG-1 and BUG-2 stay parked: the button remap has probably moved the ground under them, so revisit them only if lost presses are seen. | — |
-| 0.9 | **BUG-13** — blanking a text control in HA never reaches the device | **FIXED 2026-09-25 (v24)**, and waiting for a hardware check | — |
-| 4.5 | **BUG-14** — a power-on without NTP refunds the day | **FIXED 2026-09-25**: no save on an unset day, a no-clock lock until NTP, and a restore on release. Waiting for a hardware check | — |
+| 0.9 | **BUG-13** — blanking a text control in HA never reaches the device | **FIXED 2026-09-25 (v24)** and confirmed on hardware | — |
+| 4.5 | **BUG-14** — a power-on without NTP refunds the day | **FIXED 2026-09-25**: no save on an unset day, a no-clock lock until NTP, and a restore on release. The owner assumes it fixed (no hardware run) | — |
 | — | **BUG-15** — a same-day power cycle appears to revoke the HA bonus | Registered 2026-09-25 by the BUG-14 review. Waiting for owner triage | — |
 | 1 | **BUG-7** — a RUNNING slot outliving its own definition | **FIXED 2026-09-25**: a RUNNING orphan is folded as non-eligible and reset; a PAUSED one is kept | — |
 | 2 | **BUG-2** | **BUG-3 is RESOLVED** (2026-09-16, M2-T4a/T4b) and is no longer part of this item — its condition fired when Button D gained a chore-ack arm, and the decision it was waiting for was made there with cases at both call sites. BUG-2 stands alone now, and still needs a re-baselined sweep to show the fix changed *only* the intended cases. | — |
@@ -1210,9 +1210,8 @@ harness today.
 
 ## BUG-13 — blanking a text control in HA never reaches the device
 
-**Status:** FIXED 2026-09-25 (schema v24), and waiting for a hardware
-check. OTA the Testing Timer, then blank a timer name in HA and sync. The
-slot should disable, and HA should show the name as blank. · **Found:** 2026-09-11, hardware
+**Status:** FIXED 2026-09-25 (schema v24). **Confirmed on hardware by the
+owner, 2026-09-25**: blanking a timer name in HA disabled the slot. · **Found:** 2026-09-11, hardware
 (the Testing Timer), by the owner · **Severity:** user-visible. The documented
 way to disable an extra timer does not work, and HA offers no other control
 that can disable one.
@@ -1282,8 +1281,10 @@ again.
 
 ## BUG-14 — a power-on without NTP refunds the day
 
-**Status:** FIXED 2026-09-25, after three review cycles, and waiting for a
-hardware check:
+**Status:** FIXED 2026-09-25, after three review cycles. **The owner
+assumes it fixed without a hardware run (2026-09-25).** Turning WiFi off is
+disruptive, so the entry is re-opened if the problem is ever seen. The
+check, if wanted:
 1. Turn WiFi off and pull the battery. Expect "No Clock … Press D to
    retry", with only D waking the device.
 2. Turn WiFi back on and press D. Expect the lock to release, today's day
