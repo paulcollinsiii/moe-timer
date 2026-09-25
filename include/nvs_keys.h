@@ -35,9 +35,11 @@
 #define NVS_KEY_ALERT_VOL "alert_vol"
 #define NVS_KEY_DEFAULTS_VER "defaults_ver"
 #define NVS_KEY_DISC_VER "disc_ver"
-/* Stored ha_config_device_hash(): fingerprints the discovery `dev` block's
-   mutable fields — the device name AND the firmware version. The key name
-   predates the fw leg and is kept as-is deliberately: renaming it would
+/* Stored ha_config_discovery_hash(): fingerprints discovery's mutable
+   inputs — the `dev` block's device name AND firmware version
+   (ha_config_device_hash), the extra-timer slot names and enablement, and
+   the chore list. The key name predates every leg but the name and is
+   kept as-is deliberately: renaming it would
    read as missing on every deployed device and force one pointless
    discovery republish. */
 #define NVS_KEY_DISC_NAME "disc_name"
@@ -87,3 +89,27 @@
    every wake. */
 #define NVS_KEY_PANIC_CNT "panic_cnt"
 #define NVS_KEY_PANIC_REC "panic_rec"
+/* The chore checklist (chore_store.c). Two blobs, on opposite sides of the
+   settings/state line drawn above: `chores` is the name list, written by
+   config_apply from the HA config document (document-only — no accessor
+   pair, no registry row, no HA entity of its own), while `chore_ack` is
+   the day-stamped ack record, device-owned state like ota_result — written
+   on every ack toggle, never editable from Home Assistant, never
+   published. Both go through hal_nvs directly for the same reason
+   panic_cnt does: nvs_config's registry would have to grow rows that exist
+   only to leave them alone.
+   6 and 9 chars — inside the 15-char NVS cap noted at the top. */
+#define NVS_KEY_CHORES "chores"
+#define NVS_KEY_CHORE_ACK "chore_ack"
+/* The chore gate's free slice, one key per day type, mirroring the four
+   allocation keys at the top of this file. Minutes, like those — the
+   seconds conversion happens in schedule.c at the same point the
+   allocation's does. 13-14 chars, inside the 15-char cap noted above.
+
+   Settings, HA-editable, but DELIBERATELY absent from the seeded-defaults
+   registry — see the NVS_DEFAULT_CHORE_FREE_WD comment in nvs_defaults.h
+   for why adding them there would reseed every deployed device. */
+#define NVS_KEY_CHORE_FREE_WD "chore_free_wd"
+#define NVS_KEY_CHORE_FREE_WE "chore_free_we"
+#define NVS_KEY_CHORE_FREE_HOL "chore_free_hol"
+#define NVS_KEY_CHORE_FREE_SUM "chore_free_sum"

@@ -7,7 +7,11 @@
 
 #include <string.h>
 
+#include "chore_store.h"
+#include "chores.h"
+#include "date_fmt.h"
 #include "nvs_config.h"
+#include "time_util.h"
 #include "timer.h"
 
 #ifndef NATIVE
@@ -19,6 +23,20 @@
 static const char *TAG = "timer_persist";
 
 void timer_persist_save(void) {
+    /* Never on a day an unset clock opened (BUG-14). After a power-on
+       without NTP the rollover dates the day "1970-01-01"; writing that
+       day would overwrite TODAY's snapshot, and the synced wake would
+       then find nothing to restore and refund the day. Skipping leaves
+       today's snapshot for timer_persist_try_restore() to find.
+
+       The DAY is asked, not the clock, and that is deliberate: once NTP
+       lands mid-wake the clock is fine but the RAM day is still the
+       placeholder until the next rollover, and a save in that gap would
+       do the same damage. An empty day is refused on the same terms — a
+       snapshot with no date can never be restored, it can only destroy. */
+    if (!time_util_day_plausible(timer_current_date())) {
+        return;
+    }
     timer_snapshot_t snap, stored;
     timer_make_snapshot(&snap);
     /* Short-circuit order is load-bearing: a load that fails (missing,
@@ -35,11 +53,30 @@ void timer_persist_save(void) {
 }
 
 bool timer_persist_try_restore(time_t now) {
-    if (timer_current_date()[0] != '\0')
+    if (time_util_day_plausible(timer_current_date()))
         return false; /* RTC state intact — normal deep-sleep wake */
     timer_snapshot_t snap;
     if (nvs_config_load_timer_snapshot(&snap) != ESP_OK)
         return false;
+    if (!timer_snapshot_restorable(&snap, now))
+        return false;
+    /* RAM holds a day an unset clock opened (BUG-14): the power-on
+       rollover dated it "1970-01-01" because NTP failed. It is a
+       placeholder, and today's snapshot outranks it. The no-clock lock
+       (lock_gate.c) keeps it unusable, so nothing should be on it; it is
+       cleared wholesale anyway, so the restore lands on the same cleared
+       state the boot restore sees after a power loss whatever the
+       stand-in holds. An empty day is already that state.
+
+       Only once the snapshot is known to restore, which is why the check
+       above is separate: while NTP keeps failing, every locked boot-time
+       call reaches here with the placeholder day and a snapshot dated
+       another day, and clearing on THAT path would hand the rollover an
+       empty date on every locked wake — a rollover, and its window, on
+       top of the lock's own. */
+    if (timer_current_date()[0] != '\0') {
+        timer_reset();
+    }
     if (!timer_restore_snapshot(&snap, now))
         return false;
     /* Hoisted out of the log argument (HAZ-1). The (void) is not
@@ -50,5 +87,87 @@ bool timer_persist_try_restore(time_t now) {
     const timer_state_t st = timer_get_state();
     (void)st;
     ESP_LOGW(TAG, "Timer state restored from NVS snapshot, state=%d", (int)st);
+
+    /* C14, and it belongs HERE rather than in a boot block of its own:
+       this branch IS "RTC memory was lost and the day came back from
+       flash", which is the one arrangement where a re-armed gate does
+       damage. The day's allocation has just been restored already
+       carrying whatever the release granted, so leaving chore_released
+       false lets the same withheld remainder be granted a SECOND time —
+       measured at 100 minutes on a 60-minute day, repeatable per reset,
+       with adjust_today_sec still 0 (the state timer.h calls impossible).
+
+       Deliberately NOT on the failure path above. There the caller resets
+       the day to a fresh full allocation and the gate is SUPPOSED to be
+       armed: the withheld part is withheld again and one release hands it
+       back, so the day still totals one allocation and nothing is farmed.
+
+       Ordering against timer_rtc_state_guard() — the one hard requirement
+       in timer_persist.h, because the guard memsets g_rtc_state when it
+       rejects an image — is satisfied by construction: this function is
+       only reached with last_date empty or an unset-clock placeholder,
+       and on the esp_restart path the empty date is the guard's own
+       doing, two calls earlier in app_main. (The placeholder arrives on
+       a deep-sleep wake, where the guard passes and clears nothing.)
+
+       The return is discarded because there is nothing to do with it. A
+       false means "no usable record" and leaves g_rtc_state untouched,
+       which is the right answer for a device that has never had a chore
+       configured; it must NOT be turned into a restore failure, because
+       the timer day genuinely did come back. */
+    char names[CHORE_MAX][CHORE_NAME_BUF];
+    uint8_t n = 0;
+    /* Return discarded on the same terms button_actions.c discards it:
+       every failure path in chore_store_load_names() sets n = 0 first, so
+       an unreadable names blob hashes as the empty list. That mismatches
+       the stored hash and takes chores_reconcile()'s C10 arm, which
+       clears the acks but PRESERVES `released` — so the one thing a
+       transient NVS fault on this key cannot do is re-arm the gate. */
+    (void)chore_store_load_names(names, &n);
+    (void)timer_persist_restore_chore_acks(now, chores_list_hash(names, n));
+    return true;
+}
+
+/* Lives here rather than in timer.c, where the two RTC fields it writes
+   live, because it CALLS chore_store_load_ack(). main/timer.c is compiled
+   into nine host suites and eight of them link no chore_store.c —
+   test_timer, test_app_state, test_button_actions, test_net_apply,
+   test_cmd_apply, test_config_apply, test_timer_defs, test_ha_config — so
+   putting the call in timer.c ends in eight "undefined reference to
+   chore_store_load_ack" link failures unless every one of those suites
+   grows a stub. (test_wake_flow is NOT one of them: it does not compile
+   timer.c at all.) timer_persist.c already includes both sides, which is
+   what this file is for. */
+bool timer_persist_restore_chore_acks(time_t now, uint16_t current_hash) {
+    /* The date is DERIVED from the caller's `now` rather than taken as a
+       string, and that IS the contract — see timer_persist.h, IT TAKES A
+       time_t AND NOT A DATE STRING. Same idiom as timer_record_date() and
+       timer_restore_snapshot(), so the day the record is matched against
+       is the day every other date comparison in the firmware computes
+       from the same `now`.
+
+       No date guard here, and none can be needed: date_fmt_iso()
+       NUL-terminates into this 11-byte buffer and its format cannot
+       render fewer than ten characters, so `today` is always a
+       ten-character date and every one of chore_store_load_ack()'s date
+       refusals — NULL, short, overlong — is unreachable from this caller.
+       The NULL guard this function used to carry went with the string
+       parameter that made it reachable. */
+    struct tm tm_now;
+    localtime_r(&now, &tm_now);
+    char today[11];
+    date_fmt_iso(today, sizeof(today), &tm_now);
+
+    chore_ack_t ack;
+    /* Anything but ESP_OK means the record could not be believed at all —
+       never written, or a foreign layout — and the live RTC copy is then
+       a better answer than zeros, so it is left alone. ESP_OK covers the
+       rollover case too (a cleared record for another day), and writing
+       those zeros IS correct there: a new day starts locked (C13). */
+    if (chore_store_load_ack(today, current_hash, &ack) != ESP_OK) {
+        return false;
+    }
+    timer_chore_set_acked(ack.acked);
+    timer_chore_set_released(ack.released);
     return true;
 }

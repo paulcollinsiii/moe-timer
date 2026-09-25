@@ -57,7 +57,7 @@ remaining = expiry_wall_time - time(NULL)
 
 This makes the countdown inherently drift-resistant: NTP syncs correct `time(NULL)` via SNTP, so remaining time recalculates correctly without ever modifying `expiry_wall_time`. The only time `expiry_wall_time` changes is at timer start (`IDLE → RUNNING`) or resume after pause (`PAUSED → RUNNING`: `expiry_wall_time = time(NULL) + remaining_at_pause`).
 
-Timer state and `expiry_wall_time` are stored in **RTC slow memory** (survives deep sleep) and additionally snapshotted to **NVS** on every state transition (XOR checksum + version + plausibility validation). After a panic, external reset, or power cycle the boot path restores the snapshot as long as its stored date is still today — so losing power does not refund the day's allocation. The allocation resets only on a genuine day rollover or via Button B when `CONFIG_MAGTAG_PARENT_TESTING` is enabled.
+Timer state and `expiry_wall_time` are stored in **RTC slow memory** (survives deep sleep) and additionally snapshotted to **NVS** on every state transition (XOR checksum + version + plausibility validation). After a panic, external reset, or power cycle the boot path restores the snapshot as long as its stored date is still today — so losing power does not refund the day's allocation. A power-on with no WiFi has no clock to date the snapshot against, so the device locks (a "No Clock" screen: check WiFi, press D to retry) and hands out no screen time until NTP succeeds, however long that takes. It retries every 30 min, or at once on Button D, and the wake that sets the clock restores today's snapshot. A timer that was running keeps counting down in wall-clock time through the outage and the lock, as through any power loss, so it may come back expired. Parent grants and bonus changes sent from HA meanwhile wait on the broker and land once the day is settled. The allocation resets only on a genuine day rollover.
 
 ### 3 · Deep Sleep Architecture
 
@@ -89,14 +89,38 @@ time.
 
 Buttons are normally dispatched on EXT1 wake, which would make the device
 deaf while it is awake. While awake, a GPIO negative-edge ISR latches every
-press the moment it lands — even inside an e-ink flush or NTP sync — and
-the awake checkpoints consume the latch: Button A pauses from the
-render-grid wait and the final-minute event watch (cancelling the pending
-expiry), and any latched press dismisses the TIME'S UP / break alarms. The
-handlers detach at sleep entry before the pads move to the RTC mux;
-unconsumed latches are plain RAM and evaporate in deep sleep. Latched
-B/C/D presses are dropped — those buttons keep wake-press semantics — and
-held-button logic (release wait, continuation guard) stays level-based.
+press the moment it lands — even inside an e-ink flush or NTP sync — and a
+release gate fed by pad-level samples makes sure the bounce of a button
+coming back up is not counted as a second press. The awake checkpoints
+consume the latch:
+
+- Button B pauses from the render-grid wait and the final-minute event
+  watch (cancelling the pending expiry), and any latched press dismisses
+  the TIME'S UP / break alarms.
+- The two latch drains — the one at the end of a tick wake and the short
+  poll at the tail of a Screen Break — act on **one** latched press, chosen
+  B > C > D > A (the time-sensitive action wins), through the same rules as
+  a wake press. A, B and C always qualify. **D only in chore mode**, where it
+  is the ✓3 button; outside chore mode a latched D is dropped, because its
+  timer-screen job — a network sync — must not be bought by a press that
+  merely rode in on another wake.
+- On a chore wake, every tick pressed while the panel is waiting to paint
+  (see 5c) is taken and applied, so several ticks land in one refresh; a
+  tick pressed *during* that refresh is picked up after it and repainted.
+- On any other button wake, further presses made while the first is being
+  handled are treated as stale and dropped — except Button B, which still
+  acts (outside chore mode) during the network sync that follows the
+  paint.
+
+What is **not** caught yet: the interrupts arm only once the button driver
+initialises, well into boot. A second button pressed while the device is
+still waking up from the first is never seen — deep sleep records only the
+button that woke it. Until early arming lands, the cue that the device is
+listening is the first press's LED changing.
+
+The handlers detach at sleep entry before the pads move to the RTC mux;
+unconsumed latches are plain RAM and evaporate in deep sleep. Held-button
+logic (release wait, continuation guard) stays level-based.
 
 WiFi is **off by default**; it is only powered up for NTP syncs and then immediately shut down.
 
@@ -114,6 +138,9 @@ NVS namespace: `timer_cfg`
 | `weekend_min` | u16 | 120 | Weekend allocation (minutes) |
 | `holiday_min` | u16 | 120 | Holiday allocation (minutes) |
 | `summer_min` | u16 | 120 | Summer-break weekday allocation (minutes) |
+| `chore_free_wd` / `_we` / `_hol` / `_sum` | u16 | 0 | Chore gate's free minutes per day type (see 5c); must not exceed the paired allocation |
+| `chores` | blob | (none) | The chore list, up to 3 names — written only by the HA config document |
+| `chore_ack` | blob | — | Today's chore ticks (device-owned state, not config) |
 | `holidays` | blob | (pre-filled) | Newline-separated `YYYY-MM-DD` holiday dates |
 | `wifi_ssid` | str | "" | WiFi SSID |
 | `wifi_pass` | str | "" | WiFi password |
@@ -123,12 +150,18 @@ On first flash the NVS is initialised from `nvs_defaults.h` (holiday list, WiFi 
 **Day-type logic** (precedence: holiday > weekend > summer > weekday):
 1. Check if today's date is in the `holidays` blob → holiday allocation.
 2. Else if Saturday or Sunday → weekend allocation.
-3. Else if outside the school year (`NVS_DEFAULT_SUMMER_START`/`SCHOOL_START`/`SCHOOL_END` in `nvs_defaults.h`, from the Dublin City Schools calendar — update yearly) → summer allocation.
+3. Else if outside the school year (`summer_start`/`school_start`/`school_end`; first-boot fallbacks `NVS_DEFAULT_SUMMER_START`/`SCHOOL_START`/`SCHOOL_END` in `nvs_defaults.h`, from the Dublin City Schools calendar) → summer allocation.
 4. Else → weekday allocation.
 
 The holiday list is the Dublin City Schools (Grizzell MS) 2026-27 calendar's
 weekday no-school days, not generic federal holidays — days like Veterans
 Day, when school is in session, are deliberately regular weekdays.
+
+The `nvs_defaults.h` holidays and season dates are only what a device
+starts with on first boot (or after a reseed). With the [config-publishing
+automation](home_assistant.md#the-config-publishing-automation-chores-and-school-calendar)
+installed, Home Assistant keeps all of them current from its school
+calendar, so they need no yearly firmware update.
 
 ### 5 · Timer State Machine
 
@@ -156,13 +189,15 @@ a kid on a 15 min eye rest can go and run Piano or Violin.
   **inverted** SCREEN BREAK layout with its own countdown + draining bar,
   plus a swap hint over Button C. The break can be earned entirely by a
   non-eligible extra timer, with Screen never started that day.
-- During, with Screen selected: Button A is ignored (no early resume); B
-  (parent mode), C and D work.
+- During, with Screen selected: Button B is ignored — no early resume, and
+  no reload either, since Screen is never reloadable; A switches to the
+  chore checklist when one is configured (a BREAK is not RUNNING, so the
+  mode toggle stays live right through a break); C and D work.
 - During, with an extra timer selected: the normal layout for that timer,
   with an inverted `BREAK m:ss` chip in the header where `Last sync`
   normally sits. A **break-eligible** timer starts, pauses, expires and
   alerts as usual. A non-eligible one is fully visible and reachable by
-  Button C, but Button A is refused and draws no ▶ — a chore is not a break.
+  Button C, but Button B is refused and draws no ▶ — a chore is not a break.
 - The swap hint on the break screen is suppressed when no break-eligible
   timer is configured: the break has nothing to offer, so it behaves like
   the older locking break.
@@ -212,7 +247,7 @@ it.
 
 **Configure non-eligible timers with `RELOADABLE=n`.** One run of a chore
 timer is capped by its own duration, which is the earned-by-the-chore
-intent; but Button B reloads a reloadable timer without ParentTesting, so a
+intent; but Button B reloads a reloadable timer once it has expired, so a
 reloadable chore can be re-earned without doing the chore again.
 
 A kid can of course leave Violin running without touching the violin. That
@@ -225,16 +260,139 @@ Pressing Start from PAUSED re-NTP-syncs and sets `expiry_wall_time = now + remai
 
 All state is persisted in **RTC slow memory** (survives deep sleep) with an NVS snapshot as crash/power-loss backup (restored when still same-day; see section 2).
 
+### 5c · Chore checklist
+
+Up to **three** chores ("Dishes away", "Trash out", "Homework") gate part of
+the day's Screen time. The list comes from Home Assistant — it is the
+`chores` field of the bulk config document, and nowhere else
+([home_assistant.md](home_assistant.md#chore-checklist-read-only-in-ha)).
+In practice a parent edits a per-device HA To-do list, and the committed
+automation `tools/ha/magtag_publish_config.yaml` publishes it; the
+dashboard from `tools/gen_ha_dashboard.py` puts that list on the device's
+tab ([home_assistant.md](home_assistant.md#dashboard)).
+With no list configured the whole feature is inert: no mode, no gate, no
+extra wakes, and Button A does nothing.
+
+**The gate — a split allocation.** Each day type has a `chore_free` setting
+(`chore_free_wd` / `_we` / `_hol` / `_sum`, in minutes) beside its
+allocation. The day's first `chore_free` minutes of Screen time are
+unconditional; the rest of the allocation is withheld until every chore is
+ticked, and lands the moment the last one is:
+
+| Day type | Allocation | `chore_free` | Effect |
+|----------|-----------|--------------|--------|
+| Weekday | 60 | 0 | Fully gated: no Screen time until the chores are done |
+| Weekend | 120 | 30 | Cartoons first, chores for the rest |
+| Summer | 120 | 120 | `chore_free` equal to the allocation: the gate is off that day type |
+
+`chore_free` defaults to **0** on every day type, so pushing a chore list
+fully gates every day until the parent sets them. Starting Screen on a
+gated day starts only the free minutes; when they run out the timer
+expires. Ticking the last chore releases the rest: an EXPIRED or PAUSED
+Screen goes PAUSED holding it (press B), an IDLE one simply starts with the
+full allocation, and during a Screen Break it is added to the frozen time
+without moving the break's end. The gate touches **only** Screen: extra
+timers, the exposure balance and break scheduling, Bed Time and the charge
+lock all behave exactly as before.
+
+On the main screen the bar shows the withheld amount as an outlined block
+held at the **left**, labelled with the count and the minutes — e.g.
+`0/3 Chores - 40 min` — while the free minutes drain to its right; on a
+fully gated day the block is the whole bar (`0/3 Chores to unlock 60
+min`). On release the block disappears and the bar goes full width. The
+release is deliberately **not** shown in the `(±n min today)` parenthetical,
+which belongs to the HA screen adjustment alone.
+
+**Buttons — the mode.** Button A switches the panel between the timer
+screen and the checklist (labelled `Chores` on the timer screen and
+`Timers` on the checklist). It is refused while a timer is RUNNING — you
+cannot tick off dishes while the TV clock runs — but works throughout a
+Screen Break, which is when the break screen prompts for it (`Chores 2 of
+3`). On the checklist:
+
+```
+┌──────────────────────────────────────────────────┐
+│  CHORES                                  1 of 3  │
+│               Screen time unlocked               │  ← only once released
+│  ✓  Dishes away                                  │
+│     Trash out                                    │
+│     Homework                                     │
+│  Timers      ✓ 1         ✓ 2         ✓ 3         │
+└──────────────────────────────────────────────────┘
+```
+
+B, C and D tick chores 1, 2 and 3, and every tick **toggles**, so a
+mis-press is undone by pressing the same button again. The rows never move;
+with two chores there is no ✓3 and D does nothing. D is *not* a sync button
+here — press A to get back to the timer screen for that. The checklist
+stays up until you press A; ticking the last chore does not bounce you out
+(the screen says `Screen time unlocked` instead). Only the day rollover, a
+Screen Break starting or ending, the list being emptied, or a restart (the
+mode is held in RTC memory only, so a power cycle, a panic or a firmware
+update comes back on the timers) takes the panel back to the timers by
+itself.
+
+Unticking a chore **after** the release does not take the time back: the
+release is latched for the day. Unticking before it simply re-arms the
+gate.
+
+**NeoPixels are the instant feedback.** The panel takes a second or more to
+repaint, so each press is answered on the LEDs first. Each chore's pixel
+sits over its button — red while outstanding, green once ticked — and the
+pixel over A is the gate: red until the day is released (every chore
+ticked), green from then on. It follows the release, not the minutes: on
+a day type whose `chore_free` equals its allocation nothing is actually
+withheld, yet the pixel stays red until the last chore is ticked.
+A pixel over a button that has no chore stays dark. The strip lights only
+when someone is pressing buttons; a wake nobody caused repaints the panel
+and leaves the LEDs dark. The panel waits for a gesture to settle before it
+paints (`MAGTAG_CHORE_PAINT_QUIET_MS`, default 1200 ms after the last tick,
+within an overall `MAGTAG_CHORE_ACK_BURST_MS` budget, default 8000 ms), so
+ticking two or three chores in a row costs one refresh. There is no sound.
+
+**The day.** Ticks reset at the day rollover, together with the release,
+and the panel reverts to the timers. They survive a power cycle, a panic
+and a firmware update (stored in NVS alongside the RTC copy), so a kid
+never redoes a chore because the device rebooted. Editing the list in HA
+clears the day's ticks — they are positional — but never re-locks a day
+that has already been released.
+
+**Trust.** A kid can tick "Dishes away" without touching a dish; the device
+cannot see the room, and this is the same trust the Screen and Violin
+timers already assume. Home Assistant **mirrors** the ticks read-only — it
+cannot tick or untick one — and its per-chore history is the parent's
+record. The device is a ritual and a record, not an enforcer.
+
+**The config-error lock.** `chore_free` greater than the allocation cannot
+mean anything. The HA controls refuse or clamp it, so it takes one of two
+other routes to store one: a hand-published bulk document, or a firmware
+flash that changes the compiled-in defaults and so resets the allocations
+while leaving `chore_free` alone
+([home_assistant.md](home_assistant.md#chore_free-pairs-in-the-document)).
+If the broken pair is **today's**, the device
+pauses a running timer and locks on a **Config Error** screen naming the
+pair (`Weekday: free 90 > 60 min`) and saying `Fix in Home Assistant, press
+D`. Every button except D is dead. It sleeps 30-minute intervals, each
+running a network window so the fix can arrive, and releases as soon as the
+pair is valid — fix it in HA, then press D. That press only brings the
+check forward: it does not also tick chore 3 or run D's sync, and presses
+made while Config Error was showing are dropped. A broken pair for another day
+type does not lock today; HA's *Config warning* sensor names it. This is
+the device's third lock, beside the charge lock (section 3) and Bed Time,
+and both of those outrank it.
+
 ### 6 · Buttons
 
 | Button | GPIO | Action |
 |--------|------|--------|
-| A | 15 | Start (IDLE/PAUSED → RUNNING, immediate; NTP sync after) / Pause (RUNNING → PAUSED). During a Screen Break, a **start** is refused on any slot that is not break-eligible — including Screen — and the ▶ label is not drawn (see 5a/5b); pausing is never gated |
-| B | 14 | Reset the **selected** timer to IDLE at full duration — never while RUNNING (pause first): for a reloadable extra timer always, otherwise only when `CONFIG_MAGTAG_PARENT_TESTING=y` |
-| C | 12 | Swap timer type (Screen → extra 1 → … → Screen); refused while RUNNING (a Screen Break does **not** refuse — see 5a) |
-| D | 11 | Force NTP re-sync + full display refresh |
+| A | 15 | **Mode toggle**: switches the panel between the timer screen and the chore checklist (5c) — labelled `Chores` on the timer screen and `Timers` on the checklist. Refused — and not a wake source, and no label — while the active slot is RUNNING or when no chore list is configured |
+| B | 14 | Start (IDLE/PAUSED → RUNNING, immediate; NTP sync after) / Pause (RUNNING → PAUSED) / Resume. During a Screen Break, a **start** is refused on any slot that is not break-eligible — including Screen — and the ▶ label is not drawn (see 5a/5b); pausing is never gated. On an **EXPIRED** slot, where B has no start or pause job left that day, B instead **reloads** the timer to full duration when the slot is reloadable; Screen has no def and is never reloadable. **On the checklist:** ticks / unticks chore 1 |
+| C | 12 | Swap timer type (Screen → extra 1 → … → Screen); refused while RUNNING (a Screen Break does **not** refuse — see 5a). **On the checklist:** ticks / unticks chore 2 |
+| D | 11 | Force NTP re-sync + full display refresh. **On the checklist:** ticks / unticks chore 3 instead, with no sync. **Under the config-error lock** (5c) the only live button, and it only brings the lock's check forward — neither of the above |
 
-Wake sources: A and D always; B and C only when their press would succeed, since the EXT1 mask is rebuilt at every sleep entry and a press that could only be refused must not burn battery or a panel refresh. B: the selected timer is reloadable or `CONFIG_MAGTAG_PARENT_TESTING=y`, and never while RUNNING (pause first). C: extra timers configured AND the active timer not RUNNING — a Screen Break leaves C live, so the mask keeps it as a wake source throughout. Buttons are debounced in software (10 ms).
+Wake sources: B and D always (outside the locks); A and C only when their press would succeed, since the EXT1 mask is rebuilt at every sleep entry and a press that could only be refused must not burn battery or a panel refresh. C: extra timers configured AND the active timer not RUNNING — a Screen Break leaves C live, so the mask keeps it as a wake source throughout. A: a chore list configured AND the active slot not RUNNING — a Screen Break leaves A live too, which is what makes the checklist reachable during a break. **A's two gates are deliberately not C's**: the mode toggle does not inherit C's "extra timers must exist" condition, so a device with no extra timers still reaches its chore list. On a device that has never had a chore list pushed to it — which is every device until Home Assistant sends one — A never wakes at all. On the checklist C is also a wake source whenever there is a second chore for it to tick. The locks narrow all of this: the charge and Bed Time locks arm no button at all, and the config-error lock (5c) arms D alone. Buttons are debounced in software (10 ms).
+
+B is armed unconditionally even though a handful of states refuse it — an expired slot that is not reloadable, or Screen during a break. That is a deliberate overshoot of the "a press that could only be refused must not wake" rule, because the failure is asymmetric: arming B when it would do nothing costs a single wake, while failing to arm it when it *would* have acted makes the device's primary control dead to the press, with no feedback to tell that apart from a flat battery. C can be gated safely because a refused swap has a visible alternative.
 
 ### 6a · Extra timers (v1.3)
 
@@ -242,7 +400,9 @@ Up to four additional countdown timers (menuconfig: `MAGTAG_TIMER<n>_NAME/_MIN/_
 
 - No eye-rest breaks of *their own* — the break always belongs to the Screen slot — but a **non-eligible** timer feeds the shared screen-exposure balance (5b) and so can earn one, and a **break-eligible** timer stays usable during a break and drains the balance, which is what the break time is for (see 5a).
 - Fixed configured duration instead of the day-schedule allocation.
-- **Reloadable** timers reset to full via Button B on the same day, no ParentTesting needed. The mode line then counts the day's completed runs (reached 00:00): `Meditation (x2) - 10 min`. A mid-run reset does not count; non-reloadable timers never show a counter — once expired they stay depleted until rollover.
+- **Reloadable** timers reload to full via Button B on the same day, but only **once they have EXPIRED** — that is where B has no start/pause/resume job to do. The mode line then counts the day's completed runs (reached 00:00): `Meditation (x2) - 10 min`. Non-reloadable timers never show a counter — once expired they stay depleted until rollover.
+
+  There is no longer any way to reset a timer *before* it expires. Earlier firmware let Button B reset from any non-running state, including PAUSED; B now resumes a paused timer instead, and since a paused timer never expires on its own, a part-finished run cannot be restarted from the device. The `(x2)` counter is unaffected — its flow is expire-then-reload — and the parent-facing screen-time adjustment in Home Assistant remains the way to hand back time directly.
 - **Break-eligible** timers are genuine time away from a screen (see 5b). Configure chore timers non-eligible *and* `RELOADABLE=n`.
 - Day rollover resets every timer, clears the counters, and reverts the selection to Screen.
 
@@ -259,7 +419,7 @@ Only the selected timer can be RUNNING — swapping requires a pause, so pause/e
 │  ▮85%                       00:42:30             │  ← row 58–78 (battery left, remaining right)
 │                                                  │
 │  Weekday · 60 min                    RUNNING     │  ← status row (moved up)
-│     ⏸        Reset                  ⟳            │  ← button labels (A B _ D)
+│              ⏸                      ⟳            │  ← button labels (_ B _ D)
 └──────────────────────────────────────────────────┘
 ```
 
@@ -273,14 +433,18 @@ inside the header's clean band, so no other widget moves):
 │  ████████████████████░░░░░░░░░░░░░░░░░░░░░░░░░░  │
 │  ▮85%                       00:07:30             │
 │  Piano - 10 min                      RUNNING     │
-│     ⏸                               ⟳            │  ← C unlabelled: swap refused while RUNNING
+│              ⏸                      ⟳            │  ← C unlabelled: swap refused while RUNNING
 └──────────────────────────────────────────────────┘
 ```
 
 The break screen itself (Screen selected) carries a bottom row instead of
-its old centred footer whenever extra timers are configured — the frozen
-screen time on the left, the swap affordance over C, refresh over D.
-Button A stays deliberately unlabelled: the break is still enforced.
+its old centred footer whenever extra timers or a chore list are
+configured — the frozen screen time on the left, the swap affordance over
+C, refresh over D. With a chore list, cell A carries `Chores` instead (the
+mode toggle stays live through a break), and the frozen screen time moves
+up to a line of its own beside the chore prompt, `Chores 2 of 3` (a tick
+once all are done). B is never labelled there: the break is still
+enforced, a press would be refused, so the panel does not offer it.
 
 ```
 ┌──────────────────────────────────────────────────┐
@@ -291,15 +455,24 @@ Button A stays deliberately unlabelled: the break is still enforced.
 └──────────────────────────────────────────────────┘
 ```
 
-With no extra timers configured there is nothing to swap to, so the break
-screen keeps its original centred `Timer paused - 1:30:00 left` footer and
-no button row.
+With neither extra timers nor a chore list configured there is nothing to
+swap to and no checklist to open, so the break screen keeps its original
+centred `Timer paused - 1:30:00 left` footer and no button row.
 
-Button labels sit above the physical buttons: A shows the action a press
-will take (play when IDLE/PAUSED, pause when RUNNING, hidden when EXPIRED),
-"Reset" appears when `CONFIG_MAGTAG_PARENT_TESTING=y` or the selected timer
-is reloadable (and not RUNNING), C shows a swap arrow when extra timers are
-configured and the state allows swapping, D is the sync/refresh symbol.
+Button labels sit above the physical buttons. A shows `Chores` when the
+mode toggle would be honoured (a chore list configured and nothing
+RUNNING) and is blank otherwise. B shows the single action its press will take: play when
+IDLE/PAUSED (and only when a start would be allowed), pause when RUNNING,
+"Reload" when the slot is EXPIRED *and* reloadable, and nothing at all
+otherwise. C shows a swap arrow when extra timers are configured and the
+state allows swapping, D is the sync/refresh symbol.
+
+Because one cell carries all of B's actions, the label is decided by a
+single rule rather than by each drawing site, so the panel cannot offer
+something the press would refuse. Note "Reload" appears only on an
+EXPIRED slot: after you press it the timer returns to IDLE at full
+duration and the label goes back to play, even though the slot is still
+reloadable.
 When an extra timer is selected, the bottom-left mode line shows its name,
 completion counter, and duration (e.g. `Meditation (x2) · 10 min`) instead
 of the day-type + allocation.
@@ -358,7 +531,9 @@ main/
   main.c            — composition root: boot ordering, wiring, deep-sleep entry; no decisions
   wake_flow.c       — the wake orchestration: wake-cause decode, both wake handlers,
                       button guards, the event watches, the break-end owner
-  lock_gate.c       — the two screen locks (low battery, Bed Time)
+  lock_gate.c       — the four screen locks (low battery, Bed Time, config error, no clock)
+  chores.c          — the chore model: ack toggles, list identity, the gate arithmetic
+  chore_store.c     — the chore list and today's ticks in NVS
   display.c/h       — SSD1680 SPI driver; layout rendering; partial vs full refresh logic
   timer.c/h         — state machine; expiry time calculation; RTC memory persistence
   ntp.c/h           — SNTP sync inside a network window (WiFi lifecycle is wifi_session.c)

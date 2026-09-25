@@ -20,6 +20,7 @@ idf_component_register(
         "wifi_session.c"
         "stats_json.c"
         "mqtt_ha.c"
+        "ha_day_cmds.c"
         "mqtt_rx.c"
         "mqtt_topics.c"
         "config_apply.c"
@@ -52,6 +53,8 @@ idf_component_register(
         "bedtime.c"
         "sleep_plan.c"
         "lock_gate.c"
+        "chores.c"
+        "chore_store.c"
         "hal_time.c"
         "hal_nvs.c"
     INCLUDE_DIRS

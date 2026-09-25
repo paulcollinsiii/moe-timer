@@ -76,3 +76,36 @@ bool config_is_clean_str(const char *s) {
             return false;
     return true;
 }
+
+bool config_is_valid_chore_free_min(uint16_t chore_free_min, uint16_t alloc_min) {
+    /* MINUTES on both sides. The seconds pair (schedule_get_chore_free_sec
+       / schedule_get_allocation_sec) answers a different question in a
+       different unit; this one is for the config domain, where both values
+       are minutes on their way into NVS.
+
+       `<=`, not `<`, and the difference is the whole feature: equal means
+       the day's whole allocation is handed over free, which is the
+       per-day-type off switch (design 3.3). Tightening this to `<` would
+       turn every operator who typed the same number twice into a config
+       error and leave no way to disable the gate for one day type without
+       inventing another key.
+
+       False does NOT mean "reject" on its own — the two setters that share
+       this rule do deliberately different things with it (the chore_free
+       setter rejects; the allocation setter clamps the paired chore_free
+       down to alloc_min). See the header before wiring a caller, because
+       making both reject would block a parent lowering screen time on
+       account of a chore setting they never touched.
+
+       No bounds check here, on purpose. CFG_BOUND_CHORE_FREE_* is the
+       field's own range and is enforced by whatever parses the field
+       (config_apply.c's apply_u16, ha_config.c's number entity); this
+       function answers only the cross-field question, so a caller that
+       already range-checked does not get a second opinion on the range,
+       and the M2 config-error gate can ask about a pair already sitting in
+       NVS without a bound it never passed through mattering. Pinned by
+       test_chore_free_predicate_does_not_range_check, which fails if a
+       "helpful" ceiling check is added here — the (0, 0) case pins the
+       same invariant on the alloc side. */
+    return chore_free_min <= alloc_min;
+}

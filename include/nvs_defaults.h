@@ -32,6 +32,30 @@
 #define NVS_DEFAULT_HOLIDAY_MIN 120
 #define NVS_DEFAULT_SUMMER_MIN 120
 #endif
+
+/* Chore gate: the free slice of each day's allocation, in minutes, one
+   per day type, mirroring the four allocations above (design 3.3).
+   0 = fully gated, nothing free until the chores are acked — and 0 is
+   also what every device in the field reads today, which is exactly why
+   it is the default: shipping this feature changes no behaviour until
+   someone configures chores (design row C1 makes a chore-less device
+   inert regardless).
+
+   DELIBERATELY NOT IN THE SEEDED-DEFAULTS REGISTRY BELOW, for the reason
+   spelled out at NVS_DEFAULT_OTA_URL: these are HA-editable at runtime,
+   the registry drives the defaults fingerprint, and a row here would mean
+   that editing any unrelated allocation in menuconfig changes the
+   fingerprint, reseeds NVS and silently reverts an operator's HA-set
+   chore_free values on the next boot. Nothing is given up by leaving them
+   out — schedule_get_chore_free_sec() passes these as the fallback for an
+   absent key, exactly as schedule_get_allocation_sec() does, so an
+   unseeded key simply reads as 0. No menuconfig knob either: HA is the
+   only editor these ever need. */
+#define NVS_DEFAULT_CHORE_FREE_WD 0
+#define NVS_DEFAULT_CHORE_FREE_WE 0
+#define NVS_DEFAULT_CHORE_FREE_HOL 0
+#define NVS_DEFAULT_CHORE_FREE_SUM 0
+
 #ifndef NVS_DEFAULT_WIFI_SSID
 #define NVS_DEFAULT_WIFI_SSID ""
 #endif

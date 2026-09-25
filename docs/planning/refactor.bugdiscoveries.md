@@ -203,17 +203,23 @@ constraint remains; everything else is independent and can be reordered freely.
 | # | Item | Why here | Blocked by |
 |---|---|---|---|
 | 0 | **S1 + S2 smoke tests** | The only item that needs the device. Two merged fixes stay unconfirmed until it happens, and everything below is engineering time that can proceed in parallel | a USB flash, then an OTA |
-| 0.5 | **BUG-10** — recurring PANIC resets on an idle device | A device that reboots itself several times a day is the most serious thing on this page, and the cause is unknown. Diagnostics first: inference from an HA activity stream has already produced one retracted answer, so the device needs to report what it was doing when it died | — |
-| 1 | **BUG-7** — a RUNNING slot outliving its own definition | State-machine change to an uncovered path; independent | — |
-| 2 | **BUG-2**, then **BUG-3** | Same latch/mask surface — fix together so each is checked against the other. Both need a re-baselined sweep to show the fix changed *only* the intended cases. | — |
+| — | **BUG-10** — recurring PANIC resets on an idle device | **RESOLVED** (owner, 2026-09-25); see the entry. | — |
+| **Owner triage, 2026-09-25** | **BUG-13, then BUG-7, then BUG-11.** | The owner rates BUG-5 and BUG-12 theoretical, and they stay open but unscheduled. BUG-1 and BUG-2 stay parked: the button remap has probably moved the ground under them, so revisit them only if lost presses are seen. | — |
+| 0.9 | **BUG-13** — blanking a text control in HA never reaches the device | **FIXED 2026-09-25 (v24)** and confirmed on hardware | — |
+| 4.5 | **BUG-14** — a power-on without NTP refunds the day | **FIXED 2026-09-25**: no save on an unset day, a no-clock lock until NTP, and a restore on release. The owner assumes it fixed (no hardware run) | — |
+| — | **BUG-15** — a same-day power cycle appears to revoke the HA bonus | Registered 2026-09-25 by the BUG-14 review. Waiting for owner triage | — |
+| 1 | **BUG-7** — a RUNNING slot outliving its own definition | **FIXED 2026-09-25**: a RUNNING orphan is folded as non-eligible and reset; a PAUSED one is kept | — |
+| 2 | **BUG-2** | **BUG-3 is RESOLVED** (2026-09-16, M2-T4a/T4b) and is no longer part of this item — its condition fired when Button D gained a chore-ack arm, and the decision it was waiting for was made there with cases at both call sites. BUG-2 stands alone now, and still needs a re-baselined sweep to show the fix changed *only* the intended cases. | — |
 | 3 | **BUG-5** — the v1→v2 migration | Only bites on a version bump, and **R4** means it has to be written *before* one rather than after. Nothing in flight bumps the version, which is why it sits last. | — |
-| 4 | **BUG-11** — bed time is evaluated against an unvalidated clock | **No longer blocked, and no longer 0.6.** Both were derived from a mechanism review refuted on 2026-08-21: a panic does *not* clear the wall clock, so this is not downstream of BUG-10. The real trigger is a power-on reset alone, which is rare, and the fix needs a design decision rather than a patch. Settle the OPEN QUESTION in the entry before touching the code — it lives on the same path | — |
+| 4 | **BUG-11** — bed time is evaluated against an unvalidated clock | **FIXED 2026-09-25.** It is guarded by `time_util_clock_plausible`, and the break planner is guarded too. The difftest cycles 09/10/11 copy the body of `wake_flow_maybe_start_break` and do not have the new guard. difftest is outside every gate and off-limits to agents, so the owner decides. Earlier history: **No longer blocked, and no longer 0.6.** Both were derived from a mechanism review refuted on 2026-08-21: a panic does *not* clear the wall clock, so this is not downstream of BUG-10. The real trigger is a power-on reset alone, which is rare, and the fix needs a design decision rather than a patch. Settle the OPEN QUESTION in the entry before touching the code — it lives on the same path | — |
 | 5 | **BUG-12** — a network window that ends before MQTT leaves the net phase slot stale | Found reviewing the BOOT subdivision. Cheap, but it sequences the window the panic measurement is being read from, so it wants its own pass rather than a ride-along | — |
 | — | **BUG-1** | **Parked 2026-08-07.** Settling its fork needs an instrumented build run on hardware, which is reporter time rather than engineering time. Revisit after item 2: BUG-2's fix touches the same latch surface and may move the ground under it. | — |
 
-**Constraint — BUG-2 and BUG-3 together.** They share a root shape and both
-touch button-latch masks; a fix for either must be checked against the other
-rather than applied in isolation.
+*The constraint "BUG-2 and BUG-3 together" was discharged on 2026-09-16. BUG-3
+was resolved on its own, by M2-T4b, and the check it asked for was made in the
+direction that mattered: the latch pick is now a single shared helper
+(`wake_flow_pick_latched_press`), so a later BUG-2 fix cannot move one mask
+without moving the other. BUG-2 remains open and no longer waits on anything.*
 
 *The earlier constraint "BUG-4 before BUG-2/BUG-3" was discharged on 2026-08-10
 and is gone. The sweeps now derive the repository from their own location and
@@ -343,7 +349,7 @@ The press is taken from the latch and then discarded, because pause is only
 meaningful while RUNNING — so the user's press does nothing and is gone.
 
 Confirmed and deliberately preserved through cycle 10. Pinned by
-`test_row6_a_press_while_not_running_is_eaten_KNOWN_BUG` in
+`test_row6_b_press_while_not_running_is_eaten_KNOWN_BUG` in
 `test/test_wake_flow/test_wake_flow.c`, named to make clear it documents a
 defect rather than blessing it; that test must fail loudly when the bug is
 fixed, and the fixing commit must rewrite it deliberately rather than delete
@@ -376,7 +382,9 @@ other rather than applied in isolation.
 
 ## BUG-3 — Break-tail pick mask excludes BTN_D without a test
 
-**Status:** CONDITIONAL · **Severity:** none today
+**Status:** RESOLVED 2026-09-16 (M2-T4a/T4b) · **Severity:** none today, and the
+condition below fired exactly as written — see the closing note at the end of
+this entry before reading the rest of it as current.
 
 The break-tail button pick uses an explicit mask:
 
@@ -401,6 +409,35 @@ arm, which writes `selection_changed = false` and returns false; the only
 residual difference on device is one extra side-effect-free `timer_get_state()`
 read. Both call sites need a deliberate decision and a test when D gains an arm.
 Recorded on `test_a_latched_d_press_is_never_dispatched_by_the_tick_drain`.
+
+**Closed (2026-09-16, M2-T4a/T4b).** The condition fired: M2-T4a bound BTN_D to
+checkbox 3 of the chore checklist. The decision this entry asked for was made
+deliberately and is **admit D to both picks, and only while the mode byte says
+`APP_MODE_CHORES`** — `wake_flow_pick_latched_press()` is the single place both
+call sites now get their mask from, so the two can no longer drift apart. The
+shipped defect in between is the one this entry predicted: for the length of
+M2-T4a, ✓1 and ✓2 were honoured from both drains and ✓3 was silently dropped,
+including through `wake_flow_watch_break_end`'s ~250 ms tail poll — the break,
+which is the window design §2.6 most wants the checklist live in.
+
+One prediction did **not** hold, and it is worth recording because it was the
+whole reason the entry stayed open: *"both masks become load-bearing"*. They did
+not. D's TIMER action still lives only in the EXT1 decode and the shared
+dispatch still has no `BTN_D` arm, so a D that leaks into the candidates in
+Timers mode routes to `button_chore_ack_apply()`, whose first line refuses on
+the same mode byte — inert, exactly as the dispatch's default arm was. What the
+masks now decide is whether ✓3 *works*, not whether anything unsafe happens.
+
+Cases, both call sites, per the entry's "a test either way":
+`test_c4b_a_latched_d_press_in_the_break_tail_acks_row_3`,
+`test_c4b_a_latched_d_press_in_chore_mode_acks_row_3`,
+`test_c4b_a_latched_d_press_outside_chore_mode_is_still_dropped`,
+`test_c4b_a_latched_b_press_outranks_a_latched_d_in_the_break_tail`, and the
+renamed timer-leg case
+`test_a_latched_d_press_in_timers_mode_is_never_dispatched_by_the_tick_drain`
+(the old name asserted more than it tested once D gained an arm). Mutants
+W17–W22 cover the mask, the mode gate, the routing, the row mapping and the
+priority; all six are killed by the case named above as their killer.
 
 ---
 
@@ -524,7 +561,9 @@ by accident rather than by decision.
 
 ## BUG-7 — a RUNNING slot outlives its own definition
 
-**Status:** OPEN · **Found:** during `feature/break-eligible` review · **Severity:**
+**Status:** FIXED 2026-09-25. See "Settled in the 2026-09-25 fix review"
+at the end of this entry. The line references and the quoted snippet below
+predate the fix. · **Found:** during `feature/break-eligible` review · **Severity:**
 user-visible; corrupts the screen-exposure balance and breaks two documented
 state invariants
 
@@ -626,9 +665,50 @@ Add the missing test: snapshot a RUNNING extra, install a defs table without it,
 restore, assert `assert_state_legal()` passes and the balance did not gain the
 powered-off gap.
 
+### Settled in the 2026-09-25 fix review
+
+**Owner decisions:**
+
+- **Fold at the restore's `now`, and accept a bounded sweep.** There are
+  two restore sites. The boot restore needs a clock that survived.
+  The rollover restore (`wake_flow.c:~1928`) can run after a real power-off,
+  once NTP has corrected the clock. On that path the dark time counts as
+  exposure, but only up to the run's own expiry: an orphan that expired in
+  the dark is folded at its expiry. That is the same amount a still-defined
+  timer's wall-clock countdown uses up. The owner accepted it, because it
+  errs toward more eye rest, as the 2026-08-07 decision did. The comments
+  say this, and a test pins the bound.
+- **Retire only RUNNING orphans.** `timer_defs_install` falls back to the
+  menuconfig table on any read failure or a blob-version change. On such a
+  boot, an HA-defined slot that menuconfig leaves empty looks undefined.
+  Resetting PAUSED slots there would destroy a paused timer, which survived
+  before this fix. A PAUSED orphan breaks no invariant, so only the
+  selection moves off it. A RUNNING orphan is still reset on a fallback
+  boot. That needs a running extra, lost RTC memory and a fallback table
+  all at once. It is accepted as the simple way to restore I3.
+
+**Orchestrator calls:**
+
+- `test_timer_persist`'s `arm_rich_state` fixture (RUNNING Piano with
+  another slot selected) violates I3. It is made legal. No
+  `snapshot_valid` change, because that state only arises from a corrupt
+  snapshot.
+- The `run_segment_slot == i` fold guard gets a test.
+- The invariant numbers follow `test_timer.c`: I3 is "a RUNNING slot is
+  the active slot", and I2 is "at most one RUNNING".
+- A reflash that **renames** a running slot is still not reset at
+  restore, unlike a mid-window rename. It is out of scope and not
+  scheduled.
+
 ---
 
 ## BUG-10 — recurring PANIC resets on an idle device
+
+> **RESOLVED (owner, 2026-09-25).** `panic_count` has not moved since the
+> last debugging run on this bug. The owner recalls the cause as a
+> logging-related sdkconfig option: the USB-CDC `ETS_PRINTF` path taken
+> during sleep. The exact symbol was not re-derived, and the owner asked
+> for no further digging. The entry below is kept as history.
 
 **Reported 2026-08-19 from the testing device, with an HA activity-stream
 export.** The device panics on its own, unattended, several times a day.
@@ -855,7 +935,10 @@ yet, because the number that decides whether it matters does not exist: read
 
 ## BUG-11 — bed time is evaluated against a clock nothing has validated
 
-**Status:** OPEN — registered, not fixed ·
+**Status:** FIXED 2026-09-25. The bed-time gate and the break planner skip
+on an implausible clock. The OPEN QUESTION below stays open, waiting for
+the owner's observation. See "Fix review, 2026-09-25". The line
+references below predate the fix ·
 **Found:** 2026-08-20, by reading, while subdividing the BOOT panic phase ·
 **Rewritten 2026-08-21**, after review refuted the mechanism the first version
 claimed and with it the severity, the trigger set and the priority
@@ -999,6 +1082,47 @@ never appears while the read-back looks correct points somewhere else entirely
 and this question stays open; a screen at the wrong hour, or a read-back that
 disagrees with the operator, closes it as configuration.
 
+### Settled 2026-09-25 (owner triage, orchestrator)
+
+**Scheduled after BUG-13 and BUG-7.** The guard asks whether the clock is
+plausible: `now` earlier than the firmware's build time means "never set".
+It does **not** use the OTA gate's "NTP set it this session". NTP runs
+hourly, so that question is false on most wakes, and copying it would skip
+bed time nearly every night.
+
+On an implausible clock, skip the bed-time evaluation (today's outcome,
+now deliberate). The next wake, after NTP, engages normally. Skipping also
+closes a worse case: in a time zone where the near-epoch clock falls
+**inside** the bed-time window, the device today locks wrongly for
+`BEDTIME_SLEEP_SEC`.
+
+The OPEN QUESTION below is left as it stands. BUG-10 is resolved, and the
+owner will say whether bed time engages on schedule now.
+
+**Fix review, 2026-09-25 (orchestrator):**
+- **Fixed floor, not the build time.** The threshold is a fixed floor,
+  `TIME_UTIL_CLOCK_FLOOR` = 2026-01-01 UTC, which predates the repo. A
+  build-time bound would break reproducible builds and make host tests
+  depend on the build date. An unset clock reads near 1970, decades below
+  either bound.
+- **Corrected trigger.** On a power-on boot the rollover window normally
+  syncs NTP **before** the gate runs. So the skip fires only when that
+  first NTP attempt fails, and then on every wake until NTP works. The
+  "runs before the sync" wording in this entry was wrong.
+- **The break planner is guarded too** (`wake_flow_maybe_start_break`,
+  `bedtime_break_would_cross`). It can raise `s_bedtime_locked`, and
+  `check_bedtime` is the only code that clears it. Left unguarded, the
+  planner plus the skip could hold the lock with no release for as long
+  as NTP fails.
+- **The skip stays neutral** (it holds the flag). With the planner
+  guarded, an unset clock cannot raise it.
+- **Documented behaviour:** a device that loses power and has no WiFi does
+  not enter bed time until it syncs.
+- The other pre-NTP clock readers are follow-ups, not part of this fix:
+  - the day type in `check_config_error` (low harm, self-heals);
+  - quiet hours (cosmetic);
+  - the day refund, which is **BUG-14**.
+
 ### Fix shape, for whoever picks this up later
 
 Not prescriptive, and recorded because the reasoning is cheap to lose:
@@ -1083,6 +1207,219 @@ Registered rather than patched in a review-fix pass.
 **No pinning test yet.** The pure layer is host-tested and behaves correctly;
 what is missing is a test of `net_window_task`'s sequence, which has no host
 harness today.
+
+## BUG-13 — blanking a text control in HA never reaches the device
+
+**Status:** FIXED 2026-09-25 (schema v24). **Confirmed on hardware by the
+owner, 2026-09-25**: blanking a timer name in HA disabled the slot. · **Found:** 2026-09-11, hardware
+(the Testing Timer), by the owner · **Severity:** user-visible. The documented
+way to disable an extra timer does not work, and HA offers no other control
+that can disable one.
+
+### Observed (owner, 2026-09-11)
+
+On the Testing Timer, blanking the names of timers 1 and 2 in HA did not
+disable those timers, even after several manual syncs. Expected: a blank name
+disables that extra timer.
+
+### Root cause (diagnosed 2026-09-25, by reading)
+
+Two independent causes. Either one alone loses the blank:
+
+1. **HA publishes the command retained.** Every config control's discovery
+   has `"retain":true` on `magtag/<id>/set/<key>` (`main/ha_config.c:~1001`).
+   HA therefore publishes a blank text value as a **retained zero-length
+   message**, which MQTT defines as "delete this topic's retained message".
+   The device is asleep, so it never receives anything.
+2. **The device ignores empty payloads.** `main/mqtt_rx.c:43-50` drops any
+   message with `total_len <= 0`, on purpose. The device clears its own
+   retained sets the same way, so it must ignore them.
+
+The device side would accept the blank if it arrived. The `CFG_TNAME` set
+(`ha_config.c:~843`) takes `""`, and `timer.c` disables a slot that has no
+name. A blank arriving mid-sync on a RUNNING slot is already handled:
+`net_apply.c` `reconcile_defs()` calls `timer_reconcile_def()`, which folds
+the run and resets the slot. That is not BUG-7, which is only the
+snapshot-restore path after a reflash.
+
+**The same bug affects every text control.** `ota_url` documents `""` as
+"disable updates" (`docs/home_assistant.md:~904`), so it almost certainly
+fails the same way. That one has not been reproduced. `timerN_min` accepts
+1-1440, so HA's controls have no working way to disable a slot at all.
+
+**Workaround until fixed:** a bulk config document whose `timers` entry for
+the slot is `{}`.
+
+### Fix (approved by the owner 2026-09-25)
+
+1. **Discovery.** Every `text` config control gets a command template
+   `{{ value if value else '""' }}`, correctly JSON-escaped inside the
+   payload. For a blank value HA then publishes the two characters `""`,
+   which the broker keeps retained.
+2. **Device.** A set payload that is exactly `""` decodes to the empty
+   string before the field's own checks run. Each field's existing rules
+   still decide whether a blank is allowed. The sentinel is unambiguous:
+   `config_is_clean_str()` (`config_validate.c:75`) already rejects `"` in
+   every text value.
+3. **Schema.** `STATS_JSON_DISC_SCHEMA_VER` goes 23 → 24, so a device
+   republishes its discovery. The Testing Timer already runs 23. Every site
+   that states the version moves with it.
+4. **Tests (host).**
+   - The decode.
+   - The template, present on every text control and on no other kind.
+   - End to end: a blank `timerN_name` set disables the slot.
+   - A literal `""` never becomes a stored name.
+   - The pinned `mqtt_rx` empty-drop still holds.
+5. **Docs.** `docs/home_assistant.md`: clearing a name, or `ota_url`, now
+   works, after an OTA to this firmware.
+
+**Owner decision (2026-09-25, from the review): a blank `tz` is allowed and
+means UTC.** The docs warn about it: bed time, quiet hours and the day
+rollover shift by the UTC offset from the next boot. A bulk `"tz": ""` has
+always done the same. To go back to local time, type the zone string in
+again.
+
+## BUG-14 — a power-on without NTP refunds the day
+
+**Status:** FIXED 2026-09-25, after three review cycles. **The owner
+assumes it fixed without a hardware run (2026-09-25).** Turning WiFi off is
+disruptive, so the entry is re-opened if the problem is ever seen. The
+check, if wanted:
+1. Turn WiFi off and pull the battery. Expect "No Clock … Press D to
+   retry", with only D waking the device.
+2. Turn WiFi back on and press D. Expect the lock to release, today's day
+   to be restored, and no 1970 summary in HA.
+
+The rollover re-queues the bonus clear only when the clock was unset before
+the window **and** is plausible after it. "Unset before" alone would let a
+leftover clear drop a restored day's target (pinned by a test).
+
+· **Found:** by the BUG-11 fix review, by reading · **Severity:**
+user-visible. The day's used screen time is given back and the chore acks
+are wiped.
+
+### The defect (as traced by the review; not confirmed on hardware)
+
+1. After a real power-on reset (battery out or flat), the clock reads near
+   1970. The boot restore refuses the snapshot on the date check, so
+   `timer_reset()` runs.
+2. If that wake's NTP attempt fails (no WiFi), `enter_deep_sleep` calls
+   `timer_persist_save()` (`main.c:~133`). That overwrites today's NVS
+   snapshot with the 1970-dated day.
+3. When NTP later lands, the rollover sees a non-empty `last_date`.
+   `timer_persist_try_restore` then returns false, because the stored
+   snapshot is the 1970 one. So the day resets again, and the real
+   today's state is gone.
+
+This is not the `next_ntp_sync` rollover issue queued after BUG-8. The
+likely fix shape: skip the snapshot save while the clock is implausible
+(`time_util_clock_plausible`, added by BUG-11), so today's snapshot
+survives until a synced wake can restore it. Not designed yet.
+
+**Owner triage (2026-09-25): fix it.** Do not save the snapshot while the
+clock is unset. The owner notes that this also closes a workaround: pulling
+power while offline refunds the day.
+
+**Owner decision (2026-09-25, on the first implementation): lock until the
+clock is set.**
+- After a power-on, the device waits for the first NTP sync, which the
+  rollover window already attempts.
+- If that sync fails, leaving the clock implausible, the device shows a
+  lock screen and hands out no screen time until NTP succeeds. "If WiFi is
+  down, most versions of screen time are moot anyway."
+- So the offline stand-in day is never usable, and nothing from it needs to
+  be merged or discarded.
+
+The rest of the first implementation stands:
+- no save on an implausible day;
+- today's snapshot is restored over a 1970 day;
+- no 1970 ack-record write;
+- no 1970 rollover summary;
+- `timer_reset()` keeps its stamp.
+
+**Owner decision (2026-09-25, lock screen UX): the screen tells the child
+that D retries.** "Clear and easy UX is important."
+- The lock gets its own screen, saying there is no sync or clock, to check
+  WiFi, and to press D to retry. It has its own new golden image.
+- The legacy `sync_failed` screen and golden stay as they are. That golden
+  is one of the three 4737 B legacy files whose stray byte must not be
+  "fixed", so it cannot be regenerated.
+- The 30-minute automatic retry stays.
+
+**Owner decisions (2026-09-25, from the round-2 review):**
+- **Q1 (grants while locked): leave them queued.** While the no-clock lock
+  holds, the device consumes no day-scoped commands: `cmd` grants and
+  bonus targets stay retained on the broker, unapplied and unacked. The
+  release window settles the day first (restore, or reset plus a bonus
+  clear when the day was reset), and only then applies them. Settings
+  (config documents) are not day-scoped, so they still apply.
+- **Q2 (running timer across the outage): accept it and fix the docs.** A
+  running timer keeps draining in wall-clock time through the outage and
+  the lock, the same as any power loss. The docs must not promise that the
+  day comes back "as it was at the power cut".
+- **Q3 (WiFi works, NTP blocked): stay locked indefinitely.** The device
+  retries every 30 minutes or when D is pressed.
+
+**Owner decisions (2026-09-25, from the cycle-2 review):**
+- **Q-B (late NTP release): open one extra network window right away.** A
+  release on the late-NTP path (a D-press wake that opens no further window)
+  runs one more window at once. Its queued bonus clear and any held grants
+  then go out before sleep. The clear flag is plain RAM, so it would
+  otherwise be lost, and the old day's retained target re-granted.
+- **Q-A (bonus target set during the lock, release starts a new day): drop
+  it.** Today's rule stands: a new day starts with no bonus. HA shows 0, so
+  the drop is visible. This is documented.
+
+**Orchestrator calls (cycle 2):**
+- **A host-test seam for the BUG-14 logic in `mqtt_ha.c`**, done now:
+  - pure functions for the bonus decision (buffer, hold or drop), for the
+    publish-the-clear decision and for the act state;
+  - `cmd_apply` takes the snapshot, so the `no_clock` pass-through is pinned.
+- **Accepted as latency only:** held commands wait for the restored
+  `next_ntp_sync` after a restore outside the lock window. On the late path
+  the Q-B window removes this.
+- **Known gap, not fixed:** the release wake skips the rollover's
+  update-check arm, so the daily check moves to the next midnight.
+
+**Orchestrator calls (cycle 3):**
+- **The bonus clear is re-queued after a late rollover NTP (MAJOR-1, a
+  regression against HEAD).**
+  - A power-on rollover whose NTP lands after the stats post publishes a
+    `no_clock` snapshot. The clear is then refused and its flag consumed.
+    The day resets with no lock, so no release re-queues the clear.
+  - Fix: `wake_flow_handle_day_rollover` records whether the clock was
+    unset before its window, and on the reset branch calls
+    `mqtt_ha_queue_bonus_clear()` again.
+  - A power-on is always a tick wake, and the reset clears
+    `next_ntp_sync`, so the tick's sync block carries the clear in the
+    same wake. No extra window is needed.
+  - The false invariant in `include/ha_day_cmds.h` ("the release is what
+    re-queues the clear") is corrected.
+- **Keep the extra window on the "set between wakes" release too.** On a
+  tick wake it costs nothing, and on a D-press wake it is the only thing
+  that carries the clear.
+- **Accepted:** if the owed window's NTP fails on the reset branch, the
+  tick runs a second failed window. This is rare and bounded.
+
+## BUG-15 — a same-day power cycle appears to revoke the day's HA bonus
+
+**Status:** OPEN, registered 2026-09-25, not scheduled; for the owner to
+triage · **Found:** by the BUG-14 round-2 review, by reading only · **Severity:**
+user-visible if confirmed.
+
+The rollover at every power-on (`last_date` is empty) queues the clear of
+the retained bonus target to "0". The boot restore then brings back
+`bonus_applied` = X, so the next window's bonus reconcile appears to take X
+back. This is not confirmed on hardware.
+
+A related observation from the same review: a grant that lands in any
+midnight rollover window can be lost the same way as the BUG-14 lock
+window's, because it is applied before the day it belongs to is settled.
+
+The BUG-14 cycle-2 review found a second one, also predating BUG-14: an
+ordinary midnight rollover whose window fails loses the queued bonus
+clear. That flag is plain RAM and deep sleep clears it, so the next window
+applies yesterday's retained target to today. Triage it with this entry.
 
 ## Closed — moved to the archive
 

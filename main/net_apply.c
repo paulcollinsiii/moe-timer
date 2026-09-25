@@ -93,8 +93,10 @@ static net_finish_t reconcile_defs(void) {
         ESP_LOGW(TAG, "slot %d redefined during window: reconcile=%d", slot, (int)rc);
         if (timer_slot_def(slot) == NULL && timer_active_slot() == slot) {
             /* Slot disabled by the edit — same-wake analogue of the snapshot
-               restore guard: never strand the selection on a dead slot. */
-            timer_ensure_active_slot_enabled();
+               restore guard: never strand the selection on a dead slot. The
+               reconcile above already folded and reset the run, so the
+               guard finds the slot IDLE and folds nothing a second time. */
+            timer_ensure_active_slot_enabled(hal_time_now());
         }
         if (slot != active_slot)
             continue; /* background slot: state fixed, seen at swap */
@@ -189,11 +191,23 @@ net_finish_t net_apply_finish(void) {
     return nf;
 }
 
-esp_err_t net_apply_try_window(void) {
+esp_err_t net_apply_try_window_then(void (*after_ntp)(void)) {
     if (!net_apply_open())
         return ESP_FAIL;
     net_window_wait_ntp();
+    /* BETWEEN THE SYNC AND THE STATS POST, and nowhere else will do: the
+       window task holds its MQTT phase until the snapshot arrives
+       (net_window.c), so whatever the hook changes is what that phase
+       reports and what the finish below applies the buffered HA effects
+       to. The no-clock lock settles the real day here (BUG-14). */
+    if (after_ntp != NULL) {
+        after_ntp();
+    }
     s_ops.post_stats();
     net_apply_finish();
     return net_window_ntp_result();
+}
+
+esp_err_t net_apply_try_window(void) {
+    return net_apply_try_window_then(NULL);
 }

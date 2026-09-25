@@ -23,7 +23,9 @@ static const char *TAG = "ota_task";
    cut it on a guess. */
 #define OTA_TASK_STACK 16384
 
-/* Same priority as net_win (net_window.c:127), and for the same reason:
+/* Same priority as net_win — net_window.c's own xTaskCreate passes 3 for
+   it, and this must be read against that call, not against a line number
+   (":127" stood here and had drifted 60 lines) — and for the same reason:
    above the main task (CONFIG_ESP_MAIN_TASK_PRIORITY = 1) so the socket
    work is not scheduled behind it. The main task is blocked on the
    semaphore below for the whole download anyway, so the number only

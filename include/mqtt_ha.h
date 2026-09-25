@@ -12,8 +12,13 @@ extern "C" {
 #endif
 
 /* Queue yesterday's summary for the next window (captured at day rollover
-   BEFORE timer_reset wipes the counters). */
-void mqtt_ha_queue_summary(const char *date, int32_t screen_used_s, const uint16_t completions[TIMER_EXTRA_SLOTS]);
+   BEFORE timer_reset wipes the counters and the chore acks).
+   chores_done/chores: the day's acked chores and the configured count,
+   or chores = STATS_JSON_CHORES_UNKNOWN when the list could not be read
+   (both fields are then left out of the summary); see
+   stats_json_summary(). */
+void mqtt_ha_queue_summary(const char *date, int32_t screen_used_s, const uint16_t completions[TIMER_EXTRA_SLOTS],
+                           uint8_t chores_done, int chores);
 
 /* Connect, publish discovery (when the schema version changed), publish
    the stat snapshot + any queued summary, apply retained config/command,

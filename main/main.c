@@ -36,12 +36,11 @@
    to (.claude/CLAUDE.md) is that it may contain wiring and device calls
    but may not contain a DECISION. Every symbol below with an executable
    statement names the numbered reason that admits it; the rest — the log
-   TAG, the PARENT_TESTING macro and the NET_APPLY_OPS and OTA_FLOW_OPS
-   tables — are pure wiring, admitted by the headline rule rather than by
-   a number, because a construct with nothing to execute has nothing to
-   decide. The numbered reasons, quoted from the rule rather than
-   paraphrased — the rule is not negotiable against the code that has to
-   satisfy it:
+   TAG and the NET_APPLY_OPS and OTA_FLOW_OPS tables — are pure wiring,
+   admitted by the headline rule rather than by a number, because a
+   construct with nothing to execute has nothing to decide. The numbered
+   reasons, quoted from the rule rather than paraphrased — the rule is not
+   negotiable against the code that has to satisfy it:
 
      1. Boot ordering is a hardware contract.
      2. It runs in an ISR or esp_timer context where a module API is not
@@ -85,12 +84,6 @@ static const char *TAG = "main";
 
 /* Timezone default lives in nvs_defaults.h (NVS_DEFAULT_TZ); the active TZ
    comes from NVS at boot so HA can change it (ProductOverview section 1). */
-/* Kconfig bool as a C expression (defined as 1 when =y, absent when =n) */
-#if CONFIG_MAGTAG_PARENT_TESTING
-#define PARENT_TESTING true
-#else
-#define PARENT_TESTING false
-#endif
 
 /* Residency 4. Adapts the wake-scoped quiet-hours cache to neopixel.c's
    bool(void) callback ABI, which has nowhere to take the clock from. One
@@ -230,12 +223,12 @@ void enter_deep_sleep(wake_sleep_mode_t mode) {
    orchestration (pre-window def capture, post-join reconcile/apply) in
    net_apply.c. main.c only supplies the device effects below. */
 
-/* Residency 4. Join poll: Button A stays live while the MQTT tail drains
+/* Residency 4. Join poll: Button B stays live while the MQTT tail drains
    — the screen is already painted and a dropped press would read as
    broken. One line, no branch; which states a press acts on is decided in
    wake_flow. Never passed from the failsafe's esp_timer context. */
-static void poll_button_a_cb(void) {
-    (void)wake_flow_poll_button_a_action();
+static void poll_button_b_cb(void) {
+    (void)wake_flow_poll_button_b_action();
 }
 
 /* The composition root proper: wiring, and the one construct here with no
@@ -248,7 +241,7 @@ static void poll_button_a_cb(void) {
    own suite harder to stub rather than easier. That is the rule's purpose
    pointing the other way. */
 static const net_apply_ops_t NET_APPLY_OPS = {
-    .join_poll = poll_button_a_cb,
+    .join_poll = poll_button_b_cb,
     .on_config_applied = config_cache_invalidate,
     .on_active_reset_chirp = audio_break_over_chime,
     .on_active_expired_alert = wake_flow_fire_expiry_alert,

@@ -75,6 +75,42 @@ esp_err_t nvs_config_set_summer_min(uint16_t val) {
     return hal_nvs_write_u16(NVS_KEY_SUMMER_MIN, val);
 }
 
+/* The four chore_free_* minute keys, the paired sibling of the four
+   allocations above. Nothing seeds these — an absent key reads its
+   compile-time 0 through get_u16_with_default, exactly as
+   schedule_get_chore_free_sec() already relies on. */
+esp_err_t nvs_config_get_chore_free_wd(uint16_t *out) {
+    return get_u16_with_default(NVS_KEY_CHORE_FREE_WD, out, NVS_DEFAULT_CHORE_FREE_WD);
+}
+
+esp_err_t nvs_config_set_chore_free_wd(uint16_t val) {
+    return hal_nvs_write_u16(NVS_KEY_CHORE_FREE_WD, val);
+}
+
+esp_err_t nvs_config_get_chore_free_we(uint16_t *out) {
+    return get_u16_with_default(NVS_KEY_CHORE_FREE_WE, out, NVS_DEFAULT_CHORE_FREE_WE);
+}
+
+esp_err_t nvs_config_set_chore_free_we(uint16_t val) {
+    return hal_nvs_write_u16(NVS_KEY_CHORE_FREE_WE, val);
+}
+
+esp_err_t nvs_config_get_chore_free_hol(uint16_t *out) {
+    return get_u16_with_default(NVS_KEY_CHORE_FREE_HOL, out, NVS_DEFAULT_CHORE_FREE_HOL);
+}
+
+esp_err_t nvs_config_set_chore_free_hol(uint16_t val) {
+    return hal_nvs_write_u16(NVS_KEY_CHORE_FREE_HOL, val);
+}
+
+esp_err_t nvs_config_get_chore_free_sum(uint16_t *out) {
+    return get_u16_with_default(NVS_KEY_CHORE_FREE_SUM, out, NVS_DEFAULT_CHORE_FREE_SUM);
+}
+
+esp_err_t nvs_config_set_chore_free_sum(uint16_t val) {
+    return hal_nvs_write_u16(NVS_KEY_CHORE_FREE_SUM, val);
+}
+
 /* ---- string accessors ---- */
 
 static esp_err_t get_str_empty_default(const char *key, char *buf, size_t len) {

@@ -1,15 +1,19 @@
 /* Display-state and stats-snapshot assembly, moved from main.c so the
-   mapping rules (IDLE full bar, per-slot allocation fallbacks, warn
-   badge, button availability) are host-tested (test_app_state). */
+   mapping rules (IDLE reporting the day's whole effective allocation,
+   per-slot allocation fallbacks, warn badge, button availability) are
+   host-tested (test_app_state). */
 #include "app_state.h"
 
 #include <string.h>
 
 #include "battery.h"
 #include "battery_policy.h"
+#include "chore_store.h"
+#include "chores.h"
 #include "nvs_config.h"
 #include "nvs_defaults.h"
 #include "schedule.h"
+#include "time_util.h"
 #include "timer.h"
 
 static const char *timer_state_str(timer_state_t st) {
@@ -24,19 +28,6 @@ static const char *timer_state_str(timer_state_t st) {
             return "BREAK";
         default:
             return "IDLE";
-    }
-}
-
-static const char *day_type_name(day_type_t dt) {
-    switch (dt) {
-        case DAY_WEEKEND:
-            return "Weekend";
-        case DAY_HOLIDAY:
-            return "Holiday";
-        case DAY_SUMMER:
-            return "Summer";
-        default:
-            return "Weekday";
     }
 }
 
@@ -106,11 +97,17 @@ display_state_t app_state_display(const app_state_in_t *in, int32_t remaining, t
     }
     /* IDLE shows today's whole allocation rather than 0 (ProductOverview),
        and the EFFECTIVE one: an adjustment banked before the day's first
-       start would otherwise show nowhere until someone presses A, which
-       reads exactly like a set that never landed. Note this is no longer
-       the same thing as a full BAR — the bar divides by `base`, so an
-       idle day with -30 on it draws half a bar, which is the point of the
-       split. */
+       start would otherwise show nowhere until someone presses B, which
+       reads exactly like a set that never landed.
+
+       This is no longer the same thing as a full BAR, and on a gated day
+       it is not a proportional one either. The bar divides by `base`, so
+       an idle day with -30 against a 60 min default draws half a bar
+       UNGATED. Gated, display_bar_split clamps the free tranche to the
+       room the locked block leaves, so 30 effective minutes against a
+       20 min tranche saturate and the tranche draws FULL. The bar is a
+       statement about the DAY's split, not about the deduction; the
+       counter and the status row are what carry that. */
     if (timer_get_state() == TIMER_IDLE) {
         remaining = (int32_t)effective;
     }
@@ -128,11 +125,11 @@ display_state_t app_state_display(const app_state_in_t *in, int32_t remaining, t
     const timer_def_t *next_def = timer_slot_def(timer_next_slot());
     /* ...and during a break it must reflect whether a STARTABLE timer
        exists, not merely another enabled slot: offering a swap to a chore
-       that Button A will then refuse is worse than offering nothing. */
+       that Button B will then refuse is worse than offering nothing. */
     if (timer_break_active() && timer_eligible_extra_count() == 0) {
         next_def = NULL;
     }
-    return (display_state_t){
+    display_state_t st = (display_state_t){
         .remaining_sec = remaining,
         .allocation_sec = base,
         .adjust_sec = adjust,
@@ -150,13 +147,65 @@ display_state_t app_state_display(const app_state_in_t *in, int32_t remaining, t
         .completions = timer_completions(),
         .reloadable = (def != NULL) && def->reloadable,
         .swap_available = timer_swap_allowed(),
-        .reload_available = timer_reload_allowed(in->parent_testing),
+        .reload_available = timer_reload_allowed(),
         .start_available = timer_start_allowed(),
         /* Rendered on the battery row. The app descriptor is a device
            read, so it arrives injected — app_state stays host-testable
            and display_screens stays ESP-free. */
         .fw_version = in->fw_version,
     };
+
+    /* ---- the chore checklist block ------------------------------------
+       Filled after the literal rather than inside it because the count has
+       to be read before anything that is bounded by it, and because the
+       names are COPIED into the struct (display.h says why) — there is no
+       initialiser form for that. The designated literal above names none
+       of these fields, so C value-initialises all seven: empty rows and a
+       count of 0, which is exactly the inert C1 default. Every assignment
+       below therefore overwrites a defined value, never stack garbage.
+
+       These are not device reads and so are not injected: chore_store sits
+       on hal_nvs and the rest are RTC accessors, all three host-testable
+       with the mocks this module already runs under. app_state_in_t stays
+       reserved for the ADC, the app descriptor and the reset reason. */
+
+    /* Reads every row on every path — a missing, stale or malformed blob
+       leaves the rows "" and the count 0, which is the inert no-chores
+       default (C1), so the return code carries nothing this layer acts
+       on. */
+    chore_store_load_names(st.chore_names, &st.chore_count);
+
+    /* RAW, exactly as timer.h documents it: bits at or above the
+       configured count are still set in here. Every chores.c call below is
+       handed this byte rather than the masked copy just built, so the
+       bounding stays where chores.c keeps it — a test against app_state
+       then proves that bounding end to end, instead of proving only that
+       app_state masked before asking. (chores_withheld_sec takes the mask
+       and ignores it: it is not a term in the formula. It is passed for
+       consistency, not because the value matters there.) */
+    uint8_t acked_raw = timer_chore_acked();
+    for (uint8_t i = 0; i < CHORE_MAX; i++) {
+        if (chores_is_acked(acked_raw, i, st.chore_count)) {
+            st.chore_acked |= (uint8_t)(1u << i);
+        }
+    }
+    st.chore_outstanding = chores_outstanding(acked_raw, st.chore_count);
+    st.chore_released = timer_chore_released();
+    /* schedule_get_allocation_sec(dt), NOT `base` above — and the two are
+       the same number only while Screen is the selected slot. `base` is
+       the ACTIVE slot's allocation, so with an extra timer selected it is
+       that timer's fixed configured duration; taking the gate from it
+       would subtract the DAY's chore_free tranche from a 15-minute piano
+       practice and report a withholding that belongs to no day at all.
+       The gate is a statement about slot 0's day allocation and nothing
+       else, which is why this reads the schedule a second time rather
+       than reusing the figure already in hand. Both lookups are cached
+       per wake inside schedule.c, so the second ask costs a branch.
+       Seconds in, seconds out: both accessors speak seconds. */
+    st.chore_withheld_sec = chores_withheld_sec(schedule_get_allocation_sec(dt), schedule_get_chore_free_sec(dt),
+                                                acked_raw, st.chore_count, st.chore_released);
+    st.app_mode = timer_mode();
+    return st;
 }
 
 void app_state_stats(const app_state_in_t *in, time_t now, stats_snapshot_t *out) {
@@ -168,7 +217,7 @@ void app_state_stats(const app_state_in_t *in, time_t now, stats_snapshot_t *out
     const timer_def_t *def = timer_active_def();
     out->active_timer = (def != NULL) ? def->name : "Screen";
     day_type_t dt = schedule_get_day_type(now);
-    out->day_type = day_type_name(dt);
+    out->day_type = schedule_day_type_name(dt);
     for (int i = 0; i < TIMER_SLOT_COUNT; i++) {
         const timer_def_t *sd = timer_slot_def(i);
         if (i > 0 && sd == NULL) {
@@ -197,4 +246,72 @@ void app_state_stats(const app_state_in_t *in, time_t now, stats_snapshot_t *out
     out->fw = in->fw_version;
     out->screen_bonus_applied_s = timer_screen_bonus_applied();
     out->reset_reason = in->reset_reason;
+
+    /* ---- the chore checklist, read-only (design 1.4) ------------------
+       The same three reads app_state_display() makes for the panel's chore
+       strip, so HA and the glass cannot disagree about what is done. The
+       ack byte is RAW (timer.h) and is only ever read through chores.c,
+       which ignores bits at or above the configured count — so a stale
+       high bit from a longer list reports neither as a done chore nor as a
+       lit per-chore sensor. No chores configured: all three are 0, the
+       inert C1 reading. */
+    char names[CHORE_MAX][CHORE_NAME_BUF];
+    uint8_t n = 0;
+    chore_store_load_names(names, &n); /* fills n = 0 on any failure; see app_state_display() */
+    const uint8_t acked_raw = timer_chore_acked();
+    for (uint8_t i = 0; i < CHORE_MAX; i++) {
+        if (chores_is_acked(acked_raw, i, n)) {
+            out->chore_acked |= (uint8_t)(1u << i);
+            out->chores_done++;
+        }
+    }
+    out->chores_left = chores_outstanding(acked_raw, n);
+
+    /* M2-D6's config warning. Every day type, not today's: the blocking
+       gate already covers today, and it is the other three that go
+       invisible once the next config document overwrites the ack that
+       named them. The mask is judged on the RAW stored pair — see
+       schedule_chore_free_broken_mask() for why the clamped accessors
+       would report every device healthy. Main task, like every schedule
+       read; stats_json.h says why it can ride the snapshot. */
+    out->chore_free_bad = schedule_chore_free_broken_mask();
+
+    /* NO CLOCK, NO DAY (BUG-14). While the clock is unset, or RAM still
+       holds the stand-in day an unset clock dated, the device is behind
+       the no-clock lock and hands out no screen time — and everything
+       above describes a day nobody can vouch for: a fresh allocation, no
+       runs, no chores. Published as it stands, HA would show a refunded
+       day. So the stat says what the panel says: state NO_CLOCK, nothing
+       remaining and no limit (the stand-in's limit is a fresh day's,
+       which is the refund this lock exists to prevent). The other fields
+       ride along untouched; with the state saying NO_CLOCK none of them
+       reads as a day. This reaches HA only when WiFi and the broker work
+       but NTP does not (a LAN with its internet down), because a window
+       that cannot associate publishes nothing. A new value of an existing
+       field, not a new entity, so the discovery schema is unchanged.
+
+       no_clock is the same verdict for mqtt_ha: it holds the day-scoped
+       commands back (stats_json.h). THE DAY ARM IS LOAD-BEARING: it is
+       what holds them in a window whose NTP set the clock while RAM still
+       holds the stand-in day. Two paths of today's firmware reach that
+       (the cycle-2 review, MINOR-4):
+         - the charge lock's engage window (lock_gate_check_charge), on a
+           device that is also clock-locked, when that window's NTP works:
+           it runs at boot, before any gate can settle the day;
+         - the lock's own retry window, when NTP lands after the
+           after-NTP hook has looked and before the stats are posted.
+       Without the arm both would ack and apply onto the stand-in, and
+       the release would then wipe it. Do not remove it as a belt.
+       The lock's own retry window settles the day BEFORE this snapshot
+       (lock_gate.c, net_apply_try_window_then), so its release window
+       reports the real day and applies what it holds. */
+    const char *const day = timer_current_date();
+    if (!time_util_clock_plausible(now) || (day[0] != '\0' && !time_util_day_plausible(day))) {
+        out->state = "NO_CLOCK";
+        out->no_clock = true;
+        for (int i = 0; i < TIMER_SLOT_COUNT; i++) {
+            out->remaining_s[i] = 0;
+            out->allocation_s[i] = 0;
+        }
+    }
 }

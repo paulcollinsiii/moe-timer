@@ -27,7 +27,32 @@ wake_render_t wake_policy_render(timer_state_t before, timer_state_t after, bool
         /* Buttons ride the partial cadence for snappy feedback, except
            across the break screen: that layout is a full-screen inversion
            of the main one, and a partial diff across it would ghost the
-           whole panel. */
+           whole panel.
+
+           THE EXCEPTION BELOW IS NO LONGER THE WHOLE LIST, and this
+           function cannot hold the rest. It sees only two timer states,
+           so the break boundary is the one full-screen layout change it
+           can detect; the chore checklist is a third layout selected by
+           the mode and the chore count (display_screen_for), and neither
+           is an input here. Three promotions therefore sit ABOVE this
+           answer, in render_action_result() (wake_flow.c), and a caller
+           reading PARTIAL off this function alone is reading half the
+           decision:
+
+             the screen-kind test   display_screen_for(before) against
+                                    display_screen_for(after) — the same
+                                    rule as this one, generalised to every
+                                    pair of layouts.
+             the mode toggle        wake-sticky, because a toggle changes
+                                    the layout while every input this
+                                    function can see stays put.
+             Button D               the user-facing full refresh, minus
+                                    the chore-ack suppression.
+
+           Left here rather than moved up: the boundary below is the only
+           one derivable from this signature, and widening the signature
+           to take a mode and a count would move a paint decision into a
+           module that deliberately has no display dependency. */
         if ((before == TIMER_BREAK) != (after == TIMER_BREAK))
             return WAKE_RENDER_FULL;
         return WAKE_RENDER_PARTIAL;

@@ -715,6 +715,62 @@ void test_defaults_fingerprint_algorithm_pinned(void) {
     TEST_ASSERT_EQUAL_UINT16(expect, nvs_config_defaults_fingerprint());
 }
 
+/* ------------------------------------------------------------------ */
+/* chore_free_* — the chore gate's free slice, one key per day type    */
+/* ------------------------------------------------------------------ */
+
+/* Four keys, four getters, four setters, and the copy-paste hazard is a
+   getter that reads its neighbour's key. Every value here is distinct, so
+   a crossed pair cannot pass. */
+void test_chore_free_keys_round_trip_independently(void) {
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_set_chore_free_wd(10));
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_set_chore_free_we(20));
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_set_chore_free_hol(30));
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_set_chore_free_sum(1440));
+    uint16_t val = 0;
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_chore_free_wd(&val));
+    TEST_ASSERT_EQUAL_UINT16(10, val);
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_chore_free_we(&val));
+    TEST_ASSERT_EQUAL_UINT16(20, val);
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_chore_free_hol(&val));
+    TEST_ASSERT_EQUAL_UINT16(30, val);
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_chore_free_sum(&val));
+    TEST_ASSERT_EQUAL_UINT16(1440, val);
+}
+
+/* Nothing seeds these, so an unwritten key must read back as the
+   fully-gated 0 — the state every device in the field is in (design row
+   C1), and what makes the feature inert until a list is configured. */
+void test_chore_free_keys_unwritten_read_as_zero(void) {
+    uint16_t val = 0xFFFF;
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_chore_free_wd(&val));
+    TEST_ASSERT_EQUAL_UINT16(0, val);
+    val = 0xFFFF;
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_chore_free_we(&val));
+    TEST_ASSERT_EQUAL_UINT16(0, val);
+    val = 0xFFFF;
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_chore_free_hol(&val));
+    TEST_ASSERT_EQUAL_UINT16(0, val);
+    val = 0xFFFF;
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_chore_free_sum(&val));
+    TEST_ASSERT_EQUAL_UINT16(0, val);
+}
+
+/* THE FINGERPRINT GUARD. NVS_SEEDED_U16S feeds the defaults fingerprint,
+   and a row added there reseeds every deployed device — reverting every
+   HA-managed key with it. The chore_free_* keys are deliberately absent,
+   so init_defaults must leave them UNWRITTEN, not merely write 0: a
+   written 0 is indistinguishable from the default when read back, which
+   is exactly why this reads the raw key instead of the accessor. */
+void test_init_defaults_does_not_seed_the_chore_free_keys(void) {
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_init_defaults());
+    uint16_t raw = 0;
+    TEST_ASSERT_EQUAL(ESP_ERR_NVS_NOT_FOUND, hal_nvs_read_u16(NVS_KEY_CHORE_FREE_WD, &raw));
+    TEST_ASSERT_EQUAL(ESP_ERR_NVS_NOT_FOUND, hal_nvs_read_u16(NVS_KEY_CHORE_FREE_WE, &raw));
+    TEST_ASSERT_EQUAL(ESP_ERR_NVS_NOT_FOUND, hal_nvs_read_u16(NVS_KEY_CHORE_FREE_HOL, &raw));
+    TEST_ASSERT_EQUAL(ESP_ERR_NVS_NOT_FOUND, hal_nvs_read_u16(NVS_KEY_CHORE_FREE_SUM, &raw));
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_defaults_fingerprint_algorithm_pinned);
@@ -773,5 +829,8 @@ int main(void) {
     RUN_TEST(test_timer_snapshot_round_trip);
     RUN_TEST(test_timer_snapshot_missing_returns_not_found);
     RUN_TEST(test_timer_snapshot_rejects_wrong_version);
+    RUN_TEST(test_chore_free_keys_round_trip_independently);
+    RUN_TEST(test_chore_free_keys_unwritten_read_as_zero);
+    RUN_TEST(test_init_defaults_does_not_seed_the_chore_free_keys);
     return UNITY_END();
 }

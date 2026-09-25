@@ -34,7 +34,13 @@
 #include "../../main/tones.c"
 #include "../../main/ha_config.c"
 #include "../../main/timer_defs.c"
+#include "../../main/chores.c"
+#include "../../main/chore_store.c"
 // clang-format on
+/* chores.c + chore_store.c: ha_config_discovery_chores() reads the chore
+   list through the real loader over the mock flash, so the mapping the
+   discovery stamp's safety rests on (failed read = -1, rejected blob = 0)
+   is the firmware's and not a restatement of it. */
 /* Header only: the set/<key> transport slot the registry's advertised
    maximums have to fit through. */
 #include "mqtt_rx.h"
@@ -210,24 +216,48 @@ static void fill_escapable(char *dst, size_t cap) {
 
 void test_state_json_worst_case_fits_firmware_buffer(void) {
     char ack[128];
-    /* Every numeric field at its widest rendering. */
-    ha_config_set("weekday_min", "1440", ack, sizeof(ack));
-    ha_config_set("weekend_min", "1440", ack, sizeof(ack));
-    ha_config_set("holiday_min", "1440", ack, sizeof(ack));
-    ha_config_set("summer_min", "1440", ack, sizeof(ack));
-    ha_config_set("break_interval_min", "480", ack, sizeof(ack));
-    ha_config_set("break_duration_min", "120", ack, sizeof(ack));
-    ha_config_set("quiet_start", "2359", ack, sizeof(ack));
-    ha_config_set("quiet_end", "2359", ack, sizeof(ack));
-    ha_config_set("bedtime", "2359", ack, sizeof(ack));
-    ha_config_set("alert_volume", "200", ack, sizeof(ack));
+    /* EVERY u16-rendered field at 65535, which is the widest `%u` can
+       print and NOT the bound the registry advertises. These are plain
+       NVS keys: ha_config_set bounds an EDIT, but the state builder
+       renders whatever the getter returns, and a key written by a
+       firmware with different bounds still has to render — ha_config.c's
+       CFG_BOOL and CFG_ENUM cases reason about exactly that case for
+       their own kinds. Written through the accessors for that reason;
+       routed through ha_config_set instead, each of these would cap at
+       its advertised bound and this guard would sit 17 B under the truth.
+
+       That includes the four chore pairs, which land at 65535/65535 —
+       slice equal to allocation, the legitimate off switch. A pair the
+       gate would REFUSE renders too: design row C11 is about a device
+       that has one stored, and the cfg document has to carry it. Layer 1
+       is not in the way here because these do not go through the set
+       path, so the allocation-before-slice ordering the set path needs
+       does not apply. */
+    nvs_config_set_weekday_min(65535);
+    nvs_config_set_weekend_min(65535);
+    nvs_config_set_holiday_min(65535);
+    nvs_config_set_summer_min(65535);
+    nvs_config_set_chore_free_wd(65535);
+    nvs_config_set_chore_free_we(65535);
+    nvs_config_set_chore_free_hol(65535);
+    nvs_config_set_chore_free_sum(65535);
+    nvs_config_set_break_interval_min(65535);
+    nvs_config_set_break_duration_min(65535);
+    nvs_config_set_quiet_start(65535);
+    nvs_config_set_quiet_end(65535);
+    nvs_config_set_bedtime(65535);
+    nvs_config_set_alert_volume(65535);
     /* Selects render the OPTION STRING, so all three go to the longest
        one — two of the defaults are shorter, which is part of why this
        guard used to read ~190 B under the truth. */
     ha_config_set("tone_expiry", "Marimba arpeggio", ack, sizeof(ack));
     ha_config_set("tone_break", "Marimba arpeggio", ack, sizeof(ack));
     ha_config_set("tone_bed", "Marimba arpeggio", ack, sizeof(ack));
-    ha_config_set("ota_on_sync", "ON", ack, sizeof(ack));
+    /* OFF, not ON: every switch in the registry renders one of the two
+       literals and "OFF" is the longer by a byte. Nine switches — this
+       one plus reload and break_eligible on all four slots — so the ON
+       shape of this fixture read 9 B under the truth. */
+    ha_config_set("ota_on_sync", "OFF", ack, sizeof(ack));
 
     /* Strings: maxed to their declared bound AND made of characters the
        escaper doubles. ha_config_set rejects quote/backslash, but the
@@ -248,9 +278,23 @@ void test_state_json_worst_case_fits_firmware_buffer(void) {
     defs.version = TIMER_DEFS_BLOB_VERSION;
     for (int i = 0; i < TIMER_EXTRA_SLOTS; i++) {
         fill_escapable(defs.defs[i].name, sizeof(defs.defs[i].name));
-        defs.defs[i].min = 1440;
-        defs.defs[i].reload = 1;
-        defs.defs[i].break_eligible = 1;
+        /* 65535, not the CFG_TMIN bound of 1440: same argument as the u16
+           keys above — the state builder prints the stored blob field, and
+           the blob is validated for size and version only.
+
+           ONE AXIS IS DELIBERATELY NOT PUSHED, and it is the reason this
+           number is a ceiling under a stated assumption rather than an
+           absolute one: `min` is int32_t, so a blob holding a negative
+           value would render up to 11 characters and cost another 28 B
+           across the four slots. No in-tree writer can produce it
+           (ha_config_set's CFG_TMIN takes 1..1440, config_apply's
+           apply_timers bounds it too) and the blob version gate limits
+           what a foreign firmware can hand us, so it is out of scope
+           here. If a writer ever admits a wider or signed value, this
+           guard has to move with it. */
+        defs.defs[i].min = 65535;
+        defs.defs[i].reload = 0; /* "OFF" renders a byte wider than "ON" */
+        defs.defs[i].break_eligible = 0;
     }
     nvs_config_set_timer_defs(&defs);
 
@@ -269,7 +313,19 @@ void test_state_json_worst_case_fits_firmware_buffer(void) {
     TEST_ASSERT_EQUAL_INT((int)strlen(buf), ret);
     /* Headroom the firmware buffer actually has, so a future field
        addition trips here rather than silently knocking every editable
-       control offline (a truncated doc is never published). */
+       control offline (a truncated doc is never published).
+
+       THE REACHABLE MAXIMUM IS 1164 / 1536 B — headroom 372. It was 116
+       against the old 1280 ceiling (and 146 by an earlier, wronger shape
+       of this fixture); 1280 was raised because 116 B is less than one
+       more string field. Every axis above is at
+       its widest: 65535 on all fourteen u16/HHMM keys, 65535 on all four
+       timer minutes, "OFF" on all nine switches, the longest option string
+       on all three selects, and every string maxed AND filled with
+       characters the escaper doubles. A fixture that renders the SHORTER
+       option on an axis it controls does not understate the document
+       harmlessly — it inflates the headroom a future field is measured
+       against, which is the number this printf exists to publish. */
     printf("  worst-case cfg state: %d / %d bytes\n", ret, HA_CONFIG_STATE_MAX);
 }
 
@@ -717,6 +773,166 @@ void test_discovery_ota_url_is_text_with_max(void) {
     TEST_ASSERT_NOT_NULL(strstr(buf, "\"cmd_t\":\"magtag/magtag-a1b2c3/set/ota_url\""));
 }
 
+/* ---- BUG-13: blanking a text control ----
+   HA publishes config commands retained, and a retained zero-length
+   message is MQTT's "delete", so a blank never reached the device. Text
+   controls now carry a command template that sends the two characters
+   "" instead, and ha_config_set decodes exactly that back to "". */
+
+/* The template HA must end up with, AFTER JSON decoding. */
+#define BLANK_TEMPLATE "{{ value if value else '\"\"' }}"
+
+/* Decode the JSON string value of `key` in `json` (only \" and \\ escapes,
+   which is all ha_config_discovery emits in a template) into `out`.
+   Returns false if the key is absent or the string is unterminated. This
+   is the escaping check: a template written into the payload without
+   escaping its quotes ends the JSON string early and decodes short. */
+static bool json_string_value(const char *json, const char *key, char *out, size_t cap) {
+    char needle[48];
+    snprintf(needle, sizeof(needle), "\"%s\":\"", key);
+    const char *p = strstr(json, needle);
+    if (p == NULL)
+        return false;
+    p += strlen(needle);
+    size_t o = 0;
+    for (; *p != '\0' && *p != '"'; p++) {
+        if (*p == '\\') {
+            p++;
+            if (*p == '\0')
+                return false;
+        }
+        if (o + 1 >= cap)
+            return false;
+        out[o++] = *p;
+    }
+    out[o] = '\0';
+    return *p == '"';
+}
+
+void test_decode_text_turns_only_the_exact_sentinel_into_empty(void) {
+    TEST_ASSERT_EQUAL_STRING("\"\"", HA_CONFIG_TEXT_BLANK);
+    TEST_ASSERT_EQUAL_STRING("", ha_config_decode_text("\"\""));
+    TEST_ASSERT_EQUAL_STRING("", ha_config_decode_text(""));
+    TEST_ASSERT_EQUAL_STRING("Piano", ha_config_decode_text("Piano"));
+    /* Near misses stay as they are, and then fail the field's "char"
+       rule — none of them may become a silent blank. */
+    TEST_ASSERT_EQUAL_STRING("\"", ha_config_decode_text("\""));
+    TEST_ASSERT_EQUAL_STRING("\"\"\"", ha_config_decode_text("\"\"\""));
+    TEST_ASSERT_EQUAL_STRING("\"\"x", ha_config_decode_text("\"\"x"));
+    TEST_ASSERT_EQUAL_STRING(" \"\"", ha_config_decode_text(" \"\""));
+    TEST_ASSERT_NULL(ha_config_decode_text(NULL));
+}
+
+/* Every text control carries the template, correctly escaped; no other
+   component does. A number/switch/select never has a blank value, and a
+   template there would rewrite its commands for no reason. */
+void test_blank_template_on_every_text_control_and_no_other(void) {
+    char buf[STATS_JSON_PAYLOAD_MAX];
+    char tpl[64];
+    int n = 0, texts = 0;
+    const cfg_field_t *fields = ha_config_fields(&n);
+    for (int i = 0; i < n; i++) {
+        ha_config_discovery(buf, sizeof(buf), "magtag-a1b2c3", "K", "fw", &fields[i]);
+        if (strcmp(fields[i].component, "text") == 0) {
+            texts++;
+            TEST_ASSERT_TRUE_MESSAGE(json_string_value(buf, "cmd_tpl", tpl, sizeof(tpl)), fields[i].key);
+            TEST_ASSERT_EQUAL_STRING_MESSAGE(BLANK_TEMPLATE, tpl, fields[i].key);
+            /* The payload is still well-formed after the template: the
+               field that follows it is intact. */
+            TEST_ASSERT_NOT_NULL_MESSAGE(strstr(buf, "' }}\",\"ent_cat\":\"config\""), fields[i].key);
+        } else {
+            TEST_ASSERT_NULL_MESSAGE(strstr(buf, "cmd_tpl"), fields[i].key);
+        }
+    }
+    /* name, tz, timer1..4_name, ota_url */
+    TEST_ASSERT_EQUAL_INT(7, texts);
+}
+
+/* What a text field holds, read the way the device reads it. */
+static void stored_text(const cfg_field_t *f, char *out, size_t cap) {
+    if (f->kind == CFG_TNAME) {
+        nvs_timer_defs_blob_t b;
+        TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_timer_defs(&b));
+        snprintf(out, cap, "%.*s", (int)sizeof(b.defs[0].name), b.defs[f->slot - 1].name);
+    } else {
+        TEST_ASSERT_EQUAL(ESP_OK, f->get_str(out, cap));
+    }
+}
+
+/* The sentinel clears every text field whose own rule allows a blank,
+   and every one of today's text fields does (name -> device id, tz ->
+   stored empty, timerN_name -> slot disabled, ota_url -> updates off).
+   The stored value is the EMPTY string, never the two quote characters:
+   a literal `""` stored as a name would be an enabled timer called "". */
+void test_blank_sentinel_clears_every_text_control(void) {
+    seed_blob();
+    char ack[128], got[CFG_STR_MAX];
+    int n = 0;
+    const cfg_field_t *fields = ha_config_fields(&n);
+    for (int i = 0; i < n; i++) {
+        const cfg_field_t *f = &fields[i];
+        if (strcmp(f->component, "text") != 0)
+            continue;
+        /* Something non-empty first, so the clear is observable. */
+        const char *val = (strcmp(f->key, "ota_url") == 0) ? "https://example.com/m.json" : "Abc";
+        TEST_ASSERT_EQUAL_MESSAGE(HA_CFG_OK, ha_config_set(f->key, val, ack, sizeof(ack)), f->key);
+        stored_text(f, got, sizeof(got));
+        TEST_ASSERT_EQUAL_STRING_MESSAGE(val, got, f->key);
+
+        TEST_ASSERT_EQUAL_MESSAGE(HA_CFG_OK, ha_config_set(f->key, HA_CONFIG_TEXT_BLANK, ack, sizeof(ack)), f->key);
+        stored_text(f, got, sizeof(got));
+        TEST_ASSERT_EQUAL_STRING_MESSAGE("", got, f->key);
+        TEST_ASSERT_NOT_NULL_MESSAGE(strstr(ack, "\"ok\":true"), f->key);
+    }
+}
+
+/* Anything that is not exactly the sentinel is judged as written, so a
+   near miss is refused by the cleanliness rule rather than stored. */
+void test_blank_sentinel_near_misses_are_refused_not_stored(void) {
+    seed_blob();
+    char ack[128];
+    TEST_ASSERT_EQUAL(HA_CFG_OK, ha_config_set("timer1_name", "Piano", ack, sizeof(ack)));
+    const char *misses[] = {"\"", "\"\"\"", "\"\"x", " \"\""};
+    for (unsigned i = 0; i < sizeof(misses) / sizeof(misses[0]); i++) {
+        TEST_ASSERT_EQUAL_MESSAGE(HA_CFG_REJECTED, ha_config_set("timer1_name", misses[i], ack, sizeof(ack)),
+                                  misses[i]);
+        TEST_ASSERT_NOT_NULL_MESSAGE(strstr(ack, "char"), misses[i]);
+    }
+    nvs_timer_defs_blob_t b;
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_timer_defs(&b));
+    TEST_ASSERT_EQUAL_STRING("Piano", b.defs[0].name);
+}
+
+/* THE GUARD. Both halves of the fix key on component "text"
+   (is_text_control), while the value's meaning keys on kind. They must
+   name the same fields: a string kind registered under another component
+   would get neither the template nor the decode, and BUG-13 would come
+   back for that field with every other test still green; a text control
+   with a numeric kind would advertise a free-text box the device can
+   only refuse. */
+void test_text_component_iff_string_kind(void) {
+    int n = 0;
+    const cfg_field_t *f = ha_config_fields(&n);
+    for (int i = 0; i < n; i++) {
+        const bool text = strcmp(f[i].component, "text") == 0;
+        const bool str = f[i].kind == CFG_STR || f[i].kind == CFG_TNAME;
+        TEST_ASSERT_EQUAL_MESSAGE(str, text, f[i].key);
+    }
+}
+
+/* BEHAVIOURAL DOCUMENTATION, NOT A GUARD. On a number, switch or select
+   the two quote characters are an ordinary bad value and are refused as
+   before. Decoding them there would change nothing observable today:
+   "" and `""` fail parse_int / parse_onoff / the option lookup with the
+   same err, so a decode applied to every kind passes this test too.
+   test_text_component_iff_string_kind is what protects the scoping. */
+void test_blank_sentinel_is_not_decoded_for_other_kinds(void) {
+    char ack[128];
+    TEST_ASSERT_EQUAL(HA_CFG_REJECTED, ha_config_set("weekday_min", HA_CONFIG_TEXT_BLANK, ack, sizeof(ack)));
+    TEST_ASSERT_EQUAL(HA_CFG_REJECTED, ha_config_set("timer1_reload", HA_CONFIG_TEXT_BLANK, ack, sizeof(ack)));
+    TEST_ASSERT_EQUAL(HA_CFG_REJECTED, ha_config_set("tone_expiry", HA_CONFIG_TEXT_BLANK, ack, sizeof(ack)));
+}
+
 /* ---- discovery freshness fingerprint ----
    mqtt_ha.c republishes discovery only when the schema version or this
    fingerprint changed. Discovery carries BOTH dev.name and dev.sw, so
@@ -778,26 +994,27 @@ void test_discovery_stale_on_fingerprint_change_alone(void) {
 
 /* ---- slot names in the discovery fingerprint ----
    mqtt_ha publishes `<Name> remaining` / `<Name> limit` / `<Name> runs`
-   per enabled slot, named from the HA-editable timerN_name. Neither the
+   / `<Name> runs per day` per enabled slot, named from the HA-editable
+   timerN_name. Neither the
    name nor the slot's existence is in DISC_SCHEMA_VER. */
 
 void test_discovery_hash_changes_when_a_slot_is_renamed(void) {
     char ack[128];
     ha_config_set("timer1_name", "Piano", ack, sizeof(ack));
-    uint16_t before = ha_config_discovery_hash("Kitchen", "1.5.0");
+    uint16_t before = ha_config_discovery_hash("Kitchen", "1.5.0", NULL);
     ha_config_set("timer1_name", "Violin", ack, sizeof(ack));
-    TEST_ASSERT_NOT_EQUAL(before, ha_config_discovery_hash("Kitchen", "1.5.0"));
+    TEST_ASSERT_NOT_EQUAL(before, ha_config_discovery_hash("Kitchen", "1.5.0", NULL));
 }
 
 void test_discovery_hash_changes_when_a_slot_is_enabled_or_cleared(void) {
     char ack[128];
-    uint16_t empty = ha_config_discovery_hash("Kitchen", "1.5.0");
+    uint16_t empty = ha_config_discovery_hash("Kitchen", "1.5.0", NULL);
     ha_config_set("timer2_name", "Reading", ack, sizeof(ack));
-    uint16_t enabled = ha_config_discovery_hash("Kitchen", "1.5.0");
+    uint16_t enabled = ha_config_discovery_hash("Kitchen", "1.5.0", NULL);
     TEST_ASSERT_NOT_EQUAL(empty, enabled);
     /* Clearing the name retires those entities — also a discovery change. */
     ha_config_set("timer2_name", "", ack, sizeof(ack));
-    TEST_ASSERT_NOT_EQUAL(enabled, ha_config_discovery_hash("Kitchen", "1.5.0"));
+    TEST_ASSERT_NOT_EQUAL(enabled, ha_config_discovery_hash("Kitchen", "1.5.0", NULL));
 }
 
 /* Slot names are folded with the same separator discipline as the dev
@@ -806,16 +1023,504 @@ void test_discovery_hash_does_not_confuse_slot_boundaries(void) {
     char ack[128];
     ha_config_set("timer1_name", "ab", ack, sizeof(ack));
     ha_config_set("timer2_name", "", ack, sizeof(ack));
-    uint16_t a = ha_config_discovery_hash("Kitchen", "1.5.0");
+    uint16_t a = ha_config_discovery_hash("Kitchen", "1.5.0", NULL);
     ha_config_set("timer1_name", "a", ack, sizeof(ack));
     ha_config_set("timer2_name", "b", ack, sizeof(ack));
-    TEST_ASSERT_NOT_EQUAL(a, ha_config_discovery_hash("Kitchen", "1.5.0"));
+    TEST_ASSERT_NOT_EQUAL(a, ha_config_discovery_hash("Kitchen", "1.5.0", NULL));
 }
 
 void test_discovery_hash_still_tracks_the_device_block(void) {
     /* The dev-block legs must survive being folded together with slots. */
-    TEST_ASSERT_NOT_EQUAL(ha_config_discovery_hash("Kitchen", "1.5.0"), ha_config_discovery_hash("Kitchen", "1.6.0"));
-    TEST_ASSERT_NOT_EQUAL(ha_config_discovery_hash("Kitchen", "1.5.0"), ha_config_discovery_hash("Playroom", "1.5.0"));
+    TEST_ASSERT_NOT_EQUAL(ha_config_discovery_hash("Kitchen", "1.5.0", NULL),
+                          ha_config_discovery_hash("Kitchen", "1.6.0", NULL));
+    TEST_ASSERT_NOT_EQUAL(ha_config_discovery_hash("Kitchen", "1.5.0", NULL),
+                          ha_config_discovery_hash("Playroom", "1.5.0", NULL));
+}
+
+/* ---- the chore list in the discovery fingerprint (M3-T2) ----
+   mqtt_ha publishes binary_sensor chore_1..CHORE_MAX named "<chore> done"
+   and retires every row at or past the configured count
+   (stats_json_chore_discovery). None of that is in DISC_SCHEMA_VER, so the
+   list has to be in the fingerprint or a rename leaves the old entity name
+   standing, and a shrink leaves the dropped rows live, forever.
+
+   Every case compares hashes over the SAME timer table and dev block, so
+   only the chore leg can move them. `n` is the convention
+   stats_json_chore_discovery() takes: -1 = the read failed. */
+
+/* A fixed-shape list: CHORE_MAX rows, unused ones empty, as the loader
+   hands them back. The count is supplied per hash (chore_hash) so one set
+   of rows can be fingerprinted at every n. */
+typedef struct {
+    char rows[CHORE_MAX][CHORE_NAME_BUF];
+} chore_list_t;
+
+static chore_list_t chores3(const char *a, const char *b, const char *c) {
+    chore_list_t l;
+    memset(&l, 0, sizeof(l));
+    snprintf(l.rows[0], CHORE_NAME_BUF, "%s", a);
+    snprintf(l.rows[1], CHORE_NAME_BUF, "%s", b);
+    snprintf(l.rows[2], CHORE_NAME_BUF, "%s", c);
+    return l;
+}
+
+static ha_disc_chores_t as_disc(const chore_list_t *l, int n) {
+    ha_disc_chores_t c;
+    memcpy(c.names, l->rows, sizeof(c.names));
+    c.n = n;
+    return c;
+}
+
+static uint16_t chore_hash_as(const char *dev, const chore_list_t *l, int n) {
+    const ha_disc_chores_t c = as_disc(l, n);
+    return ha_config_discovery_hash(dev, "1.5.0", &c);
+}
+
+static uint16_t chore_hash(const chore_list_t *l, int n) {
+    return chore_hash_as("Kitchen", l, n);
+}
+
+void test_discovery_hash_is_stable_for_an_identical_chore_list(void) {
+    chore_list_t a = chores3("Bed", "Teeth", "Dishes");
+    chore_list_t b = chores3("Bed", "Teeth", "Dishes");
+    TEST_ASSERT_EQUAL_UINT16(chore_hash(&a, 3), chore_hash(&b, 3));
+    TEST_ASSERT_EQUAL_UINT16(chore_hash(&a, 3), chore_hash(&a, 3));
+}
+
+/* THE regression: a rename in the config document left "<old> done" in HA. */
+void test_discovery_hash_changes_when_a_chore_is_renamed(void) {
+    chore_list_t before = chores3("Bed", "Teeth", "Dishes");
+    chore_list_t after = chores3("Bed", "Teeth", "Laundry");
+    TEST_ASSERT_NOT_EQUAL(chore_hash(&before, 3), chore_hash(&after, 3));
+    /* ...in every row, not just the first: a fold that stopped at row 0
+       would pass the case above only by luck of which row was edited. */
+    for (int row = 0; row < CHORE_MAX; row++) {
+        chore_list_t edited = before;
+        edited.rows[row][0] = 'Z';
+        TEST_ASSERT_NOT_EQUAL_MESSAGE(chore_hash(&before, 3), chore_hash(&edited, 3), "row not folded");
+    }
+}
+
+/* The rest of the defect: a device that gets its first list after the
+   v22 republish had no chore entities, and shrinking 3 -> 1 left chore_2/3
+   live under their old names. */
+void test_discovery_hash_changes_when_a_chore_is_added_or_removed(void) {
+    chore_list_t l = chores3("Bed", "Teeth", "Dishes");
+    TEST_ASSERT_NOT_EQUAL(chore_hash(&l, 0), chore_hash(&l, 1));
+    TEST_ASSERT_NOT_EQUAL(chore_hash(&l, 1), chore_hash(&l, 2));
+    TEST_ASSERT_NOT_EQUAL(chore_hash(&l, 2), chore_hash(&l, 3));
+    TEST_ASSERT_NOT_EQUAL(chore_hash(&l, 3), chore_hash(&l, 1));
+}
+
+/* The count is folded on its own, not inferred from the names: an
+   EMPTY-named row below the count is still published (under its default
+   name), so ["A"] and ["A", ""] are different discovery and must hash
+   differently even though they hold the same bytes. */
+void test_discovery_hash_counts_an_empty_named_chore(void) {
+    chore_list_t l = chores3("Bed", "", "");
+    TEST_ASSERT_NOT_EQUAL(chore_hash(&l, 1), chore_hash(&l, 2));
+    TEST_ASSERT_NOT_EQUAL(chore_hash(&l, 2), chore_hash(&l, 3));
+}
+
+/* WHY THE COUNT IS FOLDED when each row's terminator already implies it.
+   Terminators alone make ONE empty-named chore fold as a bare h * 33, and
+   h * 33 == h (mod 2^16) whenever h is a multiple of 2048 — so on such a
+   device (the dev block and timer table decide h) going from no chores to
+   a single EMPTY-named one would not move the fingerprint and chore_1
+   would never appear. config_apply() refuses an empty chore name, so only
+   a hand-built or corrupt blob can hold that list; the count closes the
+   case anyway. With the count folded first the step is (h * 33 + 1) * 33,
+   and 1088 * h == -33 (mod 2^16) has no solution (even vs odd): no device
+   can collide there. Searched, not assumed: find a dev name that puts h on
+   such a multiple, then check. */
+void test_discovery_hash_never_confuses_no_chores_with_one_unnamed_chore(void) {
+    char dev[16] = "";
+    bool found = false;
+    for (int i = 0; i < 200000 && !found; i++) {
+        snprintf(dev, sizeof(dev), "dev%d", i);
+        found = (ha_config_discovery_hash(dev, "1.5.0", NULL) & 0x7FFu) == 0;
+    }
+    TEST_ASSERT_TRUE_MESSAGE(found, "no dev name hit a multiple of 2048; widen the search");
+    chore_list_t unnamed = chores3("", "", "");
+    TEST_ASSERT_NOT_EQUAL(ha_config_discovery_hash(dev, "1.5.0", NULL), chore_hash_as(dev, &unnamed, 1));
+}
+
+void test_discovery_hash_changes_when_chores_are_reordered(void) {
+    chore_list_t a = chores3("Bed", "Teeth", "Dishes");
+    chore_list_t b = chores3("Teeth", "Bed", "Dishes");
+    TEST_ASSERT_NOT_EQUAL(chore_hash(&a, 3), chore_hash(&b, 3));
+    chore_list_t c = chores3("Dishes", "Teeth", "Bed");
+    TEST_ASSERT_NOT_EQUAL(chore_hash(&a, 3), chore_hash(&c, 3));
+}
+
+/* Rows are delimited, so moving bytes across a row boundary cannot cancel
+   out — the chore counterpart of test_discovery_hash_does_not_confuse_slot_boundaries. */
+void test_discovery_hash_does_not_confuse_chore_boundaries(void) {
+    chore_list_t ab = chores3("AB", "", "");
+    chore_list_t a_b = chores3("A", "B", "");
+    TEST_ASSERT_NOT_EQUAL(chore_hash(&ab, 2), chore_hash(&a_b, 2));
+    chore_list_t x = chores3("AB", "C", "");
+    chore_list_t y = chores3("A", "BC", "");
+    TEST_ASSERT_NOT_EQUAL(chore_hash(&x, 2), chore_hash(&y, 2));
+    chore_list_t p = chores3("A", "", "B");
+    chore_list_t q = chores3("", "A", "B");
+    TEST_ASSERT_NOT_EQUAL(chore_hash(&p, 3), chore_hash(&q, 3));
+}
+
+/* Discovery ignores the rows at and past the count (it retires those
+   entities without reading a name), and the loader leaves them empty
+   anyway — but the fingerprint must not depend on them either, or a
+   hand-built buffer and a loaded one fingerprint the same list apart. */
+void test_discovery_hash_ignores_rows_past_the_count(void) {
+    chore_list_t a = chores3("Bed", "", "");
+    chore_list_t b = chores3("Bed", "Teeth", "Dishes");
+    TEST_ASSERT_EQUAL_UINT16(chore_hash(&a, 1), chore_hash(&b, 1));
+    TEST_ASSERT_EQUAL_UINT16(chore_hash(&a, 0), chore_hash(&b, 0));
+}
+
+/* 0 chores, never configured and a REJECTED blob are all n = 0 to the
+   discovery pass (every chore row retires), so they fingerprint the same —
+   and the same as a device from before the chore list existed: n = 0
+   folds nothing, so a device with no list keeps its stored stamp and
+   pays no republish on upgrade. NULL is legal at n = 0. */
+void test_discovery_hash_with_no_chores_is_the_pre_chore_fingerprint(void) {
+    chore_list_t empty = chores3("", "", "");
+    chore_list_t stale_rows = chores3("Bed", "Teeth", "");
+    TEST_ASSERT_EQUAL_UINT16(ha_config_discovery_hash("Kitchen", "1.5.0", NULL), chore_hash(&empty, 0));
+    TEST_ASSERT_EQUAL_UINT16(chore_hash(&empty, 0), chore_hash(&stale_rows, 0));
+    /* "Pre-chore" pinned structurally: the dev block plus the timer slots
+       of setUp()'s empty table, folded as the slot loop folds them. */
+    uint16_t h = ha_config_device_hash("Kitchen", "1.5.0");
+    for (int i = 0; i < TIMER_EXTRA_SLOTS; i++)
+        h = (uint16_t)(h * 33u * 33u * 33u); /* empty name, sep, enabled=0, sep */
+    TEST_ASSERT_EQUAL_UINT16(h, ha_config_discovery_hash("Kitchen", "1.5.0", NULL));
+}
+
+/* An UNKNOWN list (the read failed) folds a marker no readable list can
+   put at that position — above all not the "no chores" stream, which is
+   what the loader's zeroed outputs would say if the count were taken raw.
+   The 16-bit value can still collide with SOME list by chance, which is
+   why the gate withholds the stamp rather than relying on this (see the
+   gate tests below); this pins the fold for the lists at hand. The rows
+   are ignored at n = -1. */
+void test_discovery_hash_separates_an_unknown_chore_list(void) {
+    chore_list_t l = chores3("Bed", "Teeth", "Dishes");
+    chore_list_t empty = chores3("", "", "");
+    const uint16_t unknown = chore_hash(&empty, -1);
+    TEST_ASSERT_EQUAL_UINT16(unknown, chore_hash(&l, -1));
+    for (int n = 0; n <= CHORE_MAX; n++)
+        TEST_ASSERT_NOT_EQUAL_MESSAGE(unknown, chore_hash(&l, n), "unknown list fingerprints as a known one");
+}
+
+/* stats_json_chore_discovery() publishes every row below n and there are
+   only CHORE_MAX rows, so an out-of-range count publishes exactly what
+   CHORE_MAX does. The fingerprint clamps the same way (the loader never
+   returns such a count; this pins that the two agree if one ever does). */
+void test_discovery_hash_clamps_the_chore_count_as_discovery_does(void) {
+    chore_list_t l = chores3("Bed", "Teeth", "Dishes");
+    TEST_ASSERT_EQUAL_UINT16(chore_hash(&l, CHORE_MAX), chore_hash(&l, CHORE_MAX + 1));
+    TEST_ASSERT_EQUAL_UINT16(chore_hash(&l, CHORE_MAX), chore_hash(&l, 255));
+}
+
+/* The published entity name is "%.*s done" with CHORE_NAME_MAX as the
+   bound, so a row that fills all 21 bytes without a NUL publishes its
+   first 20 — and must fingerprint as that 20-byte name, not read on. */
+void test_discovery_hash_bounds_a_chore_name_as_discovery_does(void) {
+    chore_list_t full;
+    memset(&full, 0, sizeof(full));
+    memset(full.rows[0], 'x', CHORE_NAME_BUF); /* no NUL in the row */
+    chore_list_t twenty;
+    memset(&twenty, 0, sizeof(twenty));
+    memset(twenty.rows[0], 'x', CHORE_NAME_MAX);
+    TEST_ASSERT_EQUAL_UINT16(chore_hash(&twenty, 1), chore_hash(&full, 1));
+}
+
+/* The chore leg is appended, not substituted: the dev block and the timer
+   slots must still move a fingerprint that carries a chore list. */
+void test_discovery_hash_keeps_its_other_legs_with_chores(void) {
+    chore_list_t l = chores3("Bed", "Teeth", "Dishes");
+    const ha_disc_chores_t c = as_disc(&l, 3);
+    uint16_t base = ha_config_discovery_hash("Kitchen", "1.5.0", &c);
+    TEST_ASSERT_NOT_EQUAL(base, ha_config_discovery_hash("Kitchen", "1.6.0", &c));
+    TEST_ASSERT_NOT_EQUAL(base, ha_config_discovery_hash("Playroom", "1.5.0", &c));
+    char ack[128];
+    ha_config_set("timer1_name", "Piano", ack, sizeof(ack));
+    TEST_ASSERT_NOT_EQUAL(base, ha_config_discovery_hash("Kitchen", "1.5.0", &c));
+}
+
+/* ---- ha_config_discovery_chores(): the window's one read ----
+   Its `n` is what the fingerprint AND the discovery pass both act on, so
+   it has to say exactly what stats_json_chore_discovery() means by n: the
+   count, 0 for anything authoritative that is not a list, -1 only for a
+   read that failed. */
+
+static ha_disc_chores_t clobbered(void) {
+    ha_disc_chores_t c;
+    memset(&c, '#', sizeof(c)); /* so "fully written" is observable */
+    return c;
+}
+
+static uint16_t disc_hash(const ha_disc_chores_t *c) {
+    return ha_config_discovery_hash("Kitchen", "1.5.0", c);
+}
+
+void test_discovery_chores_returns_the_stored_list(void) {
+    const char src[CHORE_MAX][CHORE_NAME_BUF] = {"Bed", "Teeth", ""};
+    TEST_ASSERT_EQUAL(ESP_OK, chore_store_save_names(src, 2));
+    ha_disc_chores_t got = clobbered();
+    ha_config_discovery_chores(&got);
+    TEST_ASSERT_EQUAL_INT(2, got.n);
+    TEST_ASSERT_EQUAL_STRING("Bed", got.names[0]);
+    TEST_ASSERT_EQUAL_STRING("Teeth", got.names[1]);
+    TEST_ASSERT_EQUAL_STRING("", got.names[2]);
+}
+
+/* Never configured and REJECTED both answer 0 — discovery retires every
+   chore row for both — and so fingerprint exactly as an empty list does,
+   which is also the pre-chore fingerprint. */
+void test_discovery_chores_reads_absent_and_rejected_as_no_chores(void) {
+    ha_disc_chores_t got = clobbered();
+    ha_config_discovery_chores(&got); /* never written */
+    TEST_ASSERT_EQUAL_INT(0, got.n);
+    const uint16_t absent = disc_hash(&got);
+    TEST_ASSERT_EQUAL_STRING("", got.names[0]);
+
+    nvs_chore_names_blob_t b;
+    memset(&b, 0, sizeof(b));
+    b.version = CHORE_NAMES_BLOB_VERSION + 1; /* another firmware's layout */
+    b.n = 2;
+    snprintf(b.names[0], CHORE_NAME_BUF, "Bed");
+    snprintf(b.names[1], CHORE_NAME_BUF, "Teeth");
+    TEST_ASSERT_EQUAL(ESP_OK, hal_nvs_write_blob(NVS_KEY_CHORES, &b, sizeof(b)));
+    got = clobbered();
+    ha_config_discovery_chores(&got);
+    TEST_ASSERT_EQUAL_INT(0, got.n);
+    TEST_ASSERT_EQUAL_STRING("", got.names[0]); /* the rejected names do not leak through */
+    TEST_ASSERT_EQUAL_UINT16(absent, disc_hash(&got));
+
+    const char none[CHORE_MAX][CHORE_NAME_BUF] = {"", "", ""};
+    TEST_ASSERT_EQUAL(ESP_OK, chore_store_save_names(none, 0)); /* configured: zero chores */
+    got = clobbered();
+    ha_config_discovery_chores(&got);
+    TEST_ASSERT_EQUAL_INT(0, got.n);
+    TEST_ASSERT_EQUAL_UINT16(absent, disc_hash(&got));
+    TEST_ASSERT_EQUAL_UINT16(ha_config_discovery_hash("Kitchen", "1.5.0", NULL), absent);
+}
+
+/* THE safety case. A good list is in flash the whole time; only the read
+   fails. The loader's outputs then say "0 chores", and taking that count
+   raw would (a) retire the owner's chore entities and (b) fingerprint as
+   the no-chore device. -1 is what prevents (a) and the common case of
+   (b); the gate's withheld stamp (below) is what makes (b) safe outright. */
+void test_discovery_chores_reports_a_failed_read_as_unknown(void) {
+    const char src[CHORE_MAX][CHORE_NAME_BUF] = {"Bed", "Teeth", "Dishes"};
+    TEST_ASSERT_EQUAL(ESP_OK, chore_store_save_names(src, 3));
+    ha_disc_chores_t good = clobbered();
+    ha_config_discovery_chores(&good);
+    TEST_ASSERT_EQUAL_INT(3, good.n);
+    const uint16_t current = disc_hash(&good);
+
+    mock_nvs_fail_reads(1);
+    ha_disc_chores_t got = clobbered();
+    ha_config_discovery_chores(&got);
+    TEST_ASSERT_EQUAL_INT(-1, got.n);
+    TEST_ASSERT_EQUAL_STRING("", got.names[0]); /* still fully written */
+    const uint16_t unknown = disc_hash(&got);
+    TEST_ASSERT_NOT_EQUAL(current, unknown);
+    TEST_ASSERT_NOT_EQUAL(ha_config_discovery_hash("Kitchen", "1.5.0", NULL), unknown);
+
+    /* ...and the flash recovering is the list again, same fingerprint. */
+    got = clobbered();
+    ha_config_discovery_chores(&got);
+    TEST_ASSERT_EQUAL_INT(3, got.n);
+    TEST_ASSERT_EQUAL_UINT16(current, disc_hash(&got));
+}
+
+/* End to end over the real store: a rename written the way config_apply
+   writes it moves the fingerprint the next window computes. */
+void test_discovery_chores_a_stored_rename_moves_the_fingerprint(void) {
+    const char before[CHORE_MAX][CHORE_NAME_BUF] = {"Bed", "Teeth", ""};
+    const char after[CHORE_MAX][CHORE_NAME_BUF] = {"Bed", "Floss", ""};
+    TEST_ASSERT_EQUAL(ESP_OK, chore_store_save_names(before, 2));
+    ha_disc_chores_t got = clobbered();
+    ha_config_discovery_chores(&got);
+    const uint16_t h1 = disc_hash(&got);
+    TEST_ASSERT_EQUAL(ESP_OK, chore_store_save_names(after, 2));
+    got = clobbered();
+    ha_config_discovery_chores(&got);
+    TEST_ASSERT_NOT_EQUAL(h1, disc_hash(&got));
+    /* and the same list read twice is the same fingerprint: no republish */
+    ha_disc_chores_t again = clobbered();
+    ha_config_discovery_chores(&again);
+    TEST_ASSERT_EQUAL_UINT16(disc_hash(&got), disc_hash(&again));
+}
+
+/* ---- ha_config_discovery_gate(): the whole per-window decision ----
+   mqtt_ha.c forwards this verdict and nothing else: it runs the passes on
+   `stale`, hands `chores` to the discovery pass, and writes the stamp
+   (schema version + `hash`) after the drain iff `stamp`. So every
+   property the stamp's safety rests on is asserted here. GATE_SCHEMA is
+   any schema version: the gate takes it as an argument. */
+
+#define GATE_SCHEMA 22u
+
+typedef struct {
+    uint16_t ver, hash; /* the stored pair, as NVS_KEY_DISC_VER / NVS_KEY_DISC_NAME hold it */
+} disc_stamp_t;
+
+/* One window over `stored`: run the gate and, if it says so, write the
+   stamp the way mqtt_ha_window() does after a successful drain. */
+static ha_disc_verdict_t gate_window(disc_stamp_t *stored, ha_disc_chores_t *chores) {
+    const ha_disc_verdict_t v =
+        ha_config_discovery_gate("Kitchen", "1.5.0", stored->ver, stored->hash, GATE_SCHEMA, chores);
+    if (v.stamp) {
+        stored->ver = GATE_SCHEMA;
+        stored->hash = v.hash;
+    }
+    return v;
+}
+
+static void save_three(void) {
+    const char src[CHORE_MAX][CHORE_NAME_BUF] = {"Bed", "Teeth", "Dishes"};
+    TEST_ASSERT_EQUAL(ESP_OK, chore_store_save_names(src, 3));
+}
+
+/* The verdict's hash IS the fingerprint of the list it hands back — never
+   of a different n or a different read. mqtt_ha.c stamps v.hash after
+   publishing v's chores, so any drift here certifies an unpublished list. */
+void test_discovery_gate_hashes_the_list_it_returns(void) {
+    disc_stamp_t stored = {0, 0};
+    ha_disc_chores_t chores = clobbered();
+    ha_disc_verdict_t v = gate_window(&stored, &chores); /* never configured */
+    TEST_ASSERT_EQUAL_INT(0, chores.n);
+    TEST_ASSERT_EQUAL_UINT16(disc_hash(&chores), v.hash);
+
+    save_three();
+    chores = clobbered();
+    v = gate_window(&stored, &chores);
+    TEST_ASSERT_EQUAL_INT(3, chores.n);
+    TEST_ASSERT_EQUAL_STRING("Dishes", chores.names[2]);
+    TEST_ASSERT_EQUAL_UINT16(disc_hash(&chores), v.hash);
+
+    mock_nvs_fail_reads(1);
+    chores = clobbered();
+    v = gate_window(&stored, &chores);
+    TEST_ASSERT_EQUAL_INT(-1, chores.n); /* the pass will skip every chore row */
+    TEST_ASSERT_EQUAL_UINT16(disc_hash(&chores), v.hash);
+    ha_disc_chores_t as_none = chores;
+    as_none.n = 0;
+    TEST_ASSERT_NOT_EQUAL(disc_hash(&as_none), v.hash); /* not hashed as "no chores" */
+}
+
+/* A known list: first window stale and stampable; once stamped, the same
+   list is current; a rename is stale and stampable again. */
+void test_discovery_gate_known_list_stamps_then_is_current(void) {
+    save_three();
+    disc_stamp_t stored = {0, 0};
+    ha_disc_chores_t chores;
+    ha_disc_verdict_t v = gate_window(&stored, &chores);
+    TEST_ASSERT_TRUE(v.stale);
+    TEST_ASSERT_TRUE(v.stamp);
+
+    v = gate_window(&stored, &chores);
+    TEST_ASSERT_FALSE(v.stale);
+    TEST_ASSERT_FALSE(v.stamp); /* nothing ran, nothing to certify */
+
+    const char renamed[CHORE_MAX][CHORE_NAME_BUF] = {"Bed", "Floss", "Dishes"};
+    TEST_ASSERT_EQUAL(ESP_OK, chore_store_save_names(renamed, 3));
+    const uint16_t before = stored.hash;
+    v = gate_window(&stored, &chores);
+    TEST_ASSERT_TRUE(v.stale);
+    TEST_ASSERT_TRUE(v.stamp);
+    TEST_ASSERT_NOT_EQUAL(before, stored.hash);
+    TEST_ASSERT_FALSE(gate_window(&stored, &chores).stale);
+}
+
+/* The stored HASH is consulted, not just the schema version: a matching
+   version with a different fingerprint is stale. */
+void test_discovery_gate_reads_the_stored_hash(void) {
+    save_three();
+    ha_disc_chores_t chores;
+    disc_stamp_t stored = {0, 0};
+    const ha_disc_verdict_t first = gate_window(&stored, &chores);
+    disc_stamp_t other = {GATE_SCHEMA, (uint16_t)(first.hash ^ 0x5A5Au)};
+    const ha_disc_verdict_t v = gate_window(&other, &chores);
+    TEST_ASSERT_TRUE(v.stale);
+    TEST_ASSERT_TRUE(v.stamp);
+    TEST_ASSERT_EQUAL_UINT16(first.hash, other.hash);
+}
+
+/* A schema bump alone is stale, over an otherwise current stamp. */
+void test_discovery_gate_stale_on_schema_mismatch(void) {
+    save_three();
+    ha_disc_chores_t chores;
+    disc_stamp_t stored = {0, 0};
+    (void)gate_window(&stored, &chores);
+    stored.ver = GATE_SCHEMA - 1;
+    const ha_disc_verdict_t v = gate_window(&stored, &chores);
+    TEST_ASSERT_TRUE(v.stale);
+    TEST_ASSERT_TRUE(v.stamp);
+    TEST_ASSERT_EQUAL_UINT16(GATE_SCHEMA, stored.ver);
+}
+
+/* THE safety case, end to end. The stamp is withheld on a failed read
+   WHATEVER `stale` says — on a fresh device, a schema bump, or a stored
+   stamp for the good list — so a window whose pass skipped the chore rows
+   never records itself as done. Recovery then sees the pre-failure
+   fingerprint and, the stamp having been kept, is current again. */
+void test_discovery_gate_never_stamps_an_unknown_list(void) {
+    save_three();
+    ha_disc_chores_t chores;
+
+    /* fresh device, and a schema bump: stale either way, never stampable */
+    disc_stamp_t fresh = {0, 0};
+    mock_nvs_fail_reads(1);
+    ha_disc_verdict_t v = gate_window(&fresh, &chores);
+    TEST_ASSERT_EQUAL_INT(-1, chores.n);
+    TEST_ASSERT_TRUE(v.stale);
+    TEST_ASSERT_FALSE(v.stamp);
+    TEST_ASSERT_EQUAL_UINT16(0, fresh.ver); /* nothing written */
+
+    /* the good list, stamped */
+    disc_stamp_t stored = {0, 0};
+    v = gate_window(&stored, &chores);
+    TEST_ASSERT_TRUE(v.stamp);
+    const disc_stamp_t good = stored;
+
+    /* a stored stamp that happens to equal the unknown fingerprint (the
+       ~1-in-65536 case the marker cannot rule out): not stale, and still
+       never stampable */
+    mock_nvs_fail_reads(1);
+    disc_stamp_t colliding = {GATE_SCHEMA, 0};
+    colliding.hash = ha_config_discovery_gate("Kitchen", "1.5.0", 0, 0, GATE_SCHEMA, &chores).hash;
+    mock_nvs_fail_reads(1);
+    v = gate_window(&colliding, &chores);
+    TEST_ASSERT_EQUAL_INT(-1, chores.n);
+    TEST_ASSERT_FALSE(v.stale);
+    TEST_ASSERT_FALSE(v.stamp);
+
+    /* the failed read over the good stamp: stale (the pass reruns), not
+       stampable, and the stored pair is left exactly as it was */
+    mock_nvs_fail_reads(1);
+    v = gate_window(&stored, &chores);
+    TEST_ASSERT_TRUE(v.stale);
+    TEST_ASSERT_FALSE(v.stamp);
+    TEST_ASSERT_NOT_EQUAL(good.hash, v.hash);
+    TEST_ASSERT_EQUAL_UINT16(good.ver, stored.ver);
+    TEST_ASSERT_EQUAL_UINT16(good.hash, stored.hash);
+
+    /* a schema bump during the failure: still withheld */
+    disc_stamp_t bumped = {GATE_SCHEMA - 1, good.hash};
+    mock_nvs_fail_reads(1);
+    v = gate_window(&bumped, &chores);
+    TEST_ASSERT_TRUE(v.stale);
+    TEST_ASSERT_FALSE(v.stamp);
+
+    /* recovery: the pre-failure fingerprint, and the kept stamp is current */
+    v = gate_window(&stored, &chores);
+    TEST_ASSERT_EQUAL_INT(3, chores.n);
+    TEST_ASSERT_EQUAL_UINT16(good.hash, v.hash);
+    TEST_ASSERT_FALSE(v.stale);
 }
 
 /* ---- transport ----
@@ -853,11 +1558,11 @@ void test_discovery_hash_changes_when_only_the_duration_enables_a_slot(void) {
     char ack[128];
     /* Window 1: name set, min still 0 -> slot is NOT yet enabled. */
     ha_config_set("timer4_name", "Yoga", ack, sizeof(ack));
-    uint16_t named_but_disabled = ha_config_discovery_hash("Kitchen", "1.5.0");
+    uint16_t named_but_disabled = ha_config_discovery_hash("Kitchen", "1.5.0", NULL);
     /* Window 2: min set -> slot flips to enabled and its three per-slot
        entities should now appear. The name did not change. */
     ha_config_set("timer4_min", "20", ack, sizeof(ack));
-    TEST_ASSERT_NOT_EQUAL(named_but_disabled, ha_config_discovery_hash("Kitchen", "1.5.0"));
+    TEST_ASSERT_NOT_EQUAL(named_but_disabled, ha_config_discovery_hash("Kitchen", "1.5.0", NULL));
 }
 
 /* The reviewer's measured collision: these two hashed identically. */
@@ -869,10 +1574,10 @@ void test_discovery_hash_separates_zero_and_nonzero_duration(void) {
     snprintf(b.defs[0].name, sizeof(b.defs[0].name), "Piano");
     b.defs[0].min = 20;
     nvs_config_set_timer_defs(&b);
-    uint16_t with_duration = ha_config_discovery_hash("Kitchen", "1.5.0");
+    uint16_t with_duration = ha_config_discovery_hash("Kitchen", "1.5.0", NULL);
     b.defs[0].min = 0;
     nvs_config_set_timer_defs(&b);
-    TEST_ASSERT_NOT_EQUAL(with_duration, ha_config_discovery_hash("Kitchen", "1.5.0"));
+    TEST_ASSERT_NOT_EQUAL(with_duration, ha_config_discovery_hash("Kitchen", "1.5.0", NULL));
     (void)ack;
 }
 
@@ -886,10 +1591,10 @@ void test_discovery_hash_ignores_a_duration_change_that_keeps_it_enabled(void) {
     snprintf(b.defs[0].name, sizeof(b.defs[0].name), "Piano");
     b.defs[0].min = 20;
     nvs_config_set_timer_defs(&b);
-    uint16_t at20 = ha_config_discovery_hash("Kitchen", "1.5.0");
+    uint16_t at20 = ha_config_discovery_hash("Kitchen", "1.5.0", NULL);
     b.defs[0].min = 30;
     nvs_config_set_timer_defs(&b);
-    TEST_ASSERT_EQUAL_UINT16(at20, ha_config_discovery_hash("Kitchen", "1.5.0"));
+    TEST_ASSERT_EQUAL_UINT16(at20, ha_config_discovery_hash("Kitchen", "1.5.0", NULL));
 }
 
 /* An unterminated name in the blob must not read into the next slot. */
@@ -900,7 +1605,7 @@ void test_discovery_hash_tolerates_an_unterminated_slot_name(void) {
     memset(b.defs[0].name, 'x', sizeof(b.defs[0].name)); /* no NUL */
     b.defs[0].min = 20;
     nvs_config_set_timer_defs(&b);
-    ha_config_discovery_hash("Kitchen", "1.5.0"); /* ASan catches an overrun */
+    ha_config_discovery_hash("Kitchen", "1.5.0", NULL); /* ASan catches an overrun */
     char buf[HA_CONFIG_STATE_MAX];
     ha_config_state_json(buf, sizeof(buf)); /* same field, via jesc */
 }
@@ -1105,7 +1810,7 @@ void test_state_json_falls_back_to_the_installed_table(void) {
 void test_discovery_hash_falls_back_to_the_installed_table(void) {
     timer_set_defs(INSTALLED, TIMER_SLOT_COUNT);
     store_unreadable_blob();
-    uint16_t from_installed = ha_config_discovery_hash("Kitchen", "1.5.0");
+    uint16_t from_installed = ha_config_discovery_hash("Kitchen", "1.5.0", NULL);
 
     /* The same two slots, but stored: the fallback must reach the same
        fingerprint, or the first window after an erase burns a discovery
@@ -1119,12 +1824,12 @@ void test_discovery_hash_falls_back_to_the_installed_table(void) {
     snprintf(b.defs[1].name, sizeof(b.defs[1].name), "Meditation");
     b.defs[1].min = 10;
     nvs_config_set_timer_defs(&b);
-    TEST_ASSERT_EQUAL_UINT16(ha_config_discovery_hash("Kitchen", "1.5.0"), from_installed);
+    TEST_ASSERT_EQUAL_UINT16(ha_config_discovery_hash("Kitchen", "1.5.0", NULL), from_installed);
 
     /* And it is not the all-empty hash the zeroed fallback produced. */
     mock_nvs_reset();
     timer_set_defs(NULL, 0);
-    TEST_ASSERT_NOT_EQUAL(from_installed, ha_config_discovery_hash("Kitchen", "1.5.0"));
+    TEST_ASSERT_NOT_EQUAL(from_installed, ha_config_discovery_hash("Kitchen", "1.5.0", NULL));
 }
 
 /* A slot that is NAMED but has no minutes yet is the middle of the two-edit
@@ -1149,7 +1854,7 @@ void test_state_json_shows_a_name_only_slot(void) {
 void test_discovery_hash_is_stable_for_a_name_only_slot(void) {
     timer_set_defs(INSTALLED_NAME_ONLY, TIMER_SLOT_COUNT);
     store_unreadable_blob();
-    uint16_t from_installed = ha_config_discovery_hash("Kitchen", "1.5.0");
+    uint16_t from_installed = ha_config_discovery_hash("Kitchen", "1.5.0", NULL);
 
     mock_nvs_reset();
     nvs_timer_defs_blob_t b;
@@ -1161,7 +1866,7 @@ void test_discovery_hash_is_stable_for_a_name_only_slot(void) {
     b.defs[1].min = 10;
     snprintf(b.defs[2].name, sizeof(b.defs[2].name), "Reading"); /* min still 0 */
     nvs_config_set_timer_defs(&b);
-    TEST_ASSERT_EQUAL_UINT16(ha_config_discovery_hash("Kitchen", "1.5.0"), from_installed);
+    TEST_ASSERT_EQUAL_UINT16(ha_config_discovery_hash("Kitchen", "1.5.0", NULL), from_installed);
 }
 
 /* Same rule as the entity table in stats_json.c: every discovery payload
@@ -1258,6 +1963,416 @@ void test_every_config_discovery_payload_carries_def_ent_id_and_fits(void) {
     assert_config_discovery(quoted, fw, "config discovery headroom below 128 B (63 quotes, escaped to 126 B)");
 }
 
+/* ---- the chore gate's cross-field rule (design 5.3, layers 1 and 2) ----
+
+   The pairing is written out BY HAND here rather than read from
+   ha_config.c's own table: this TU #includes ha_config.c, so borrowing its
+   table would make a mispairing (summer clamped against the weekend)
+   agree with itself and pass. An independent list is the only thing that
+   can disagree. */
+typedef struct {
+    const char *free_key;
+    const char *alloc_key;
+    esp_err_t (*get_free)(uint16_t *);
+    esp_err_t (*get_alloc)(uint16_t *);
+} pair_ref_t;
+
+static const pair_ref_t PAIR_REFS[] = {
+    {"chore_free_wd", "weekday_min", nvs_config_get_chore_free_wd, nvs_config_get_weekday_min},
+    {"chore_free_we", "weekend_min", nvs_config_get_chore_free_we, nvs_config_get_weekend_min},
+    {"chore_free_hol", "holiday_min", nvs_config_get_chore_free_hol, nvs_config_get_holiday_min},
+    {"chore_free_sum", "summer_min", nvs_config_get_chore_free_sum, nvs_config_get_summer_min},
+};
+#define PAIR_REF_COUNT (sizeof(PAIR_REFS) / sizeof(PAIR_REFS[0]))
+
+void test_chore_free_fields_accept_the_full_range(void) {
+    char ack[128];
+    for (size_t i = 0; i < PAIR_REF_COUNT; i++) {
+        const pair_ref_t *p = &PAIR_REFS[i];
+        /* 1440 is only a legal slice of a 1440-minute day, so open the
+           allocation first: the cross-field rule is not the range rule,
+           and this case is about the range. */
+        TEST_ASSERT_EQUAL_MESSAGE(HA_CFG_OK, ha_config_set(p->alloc_key, "1440", ack, sizeof(ack)), p->alloc_key);
+        TEST_ASSERT_EQUAL_MESSAGE(HA_CFG_OK, ha_config_set(p->free_key, "1440", ack, sizeof(ack)), p->free_key);
+        uint16_t v = 1;
+        p->get_free(&v);
+        TEST_ASSERT_EQUAL_UINT16_MESSAGE(1440, v, p->free_key);
+        /* 0 = fully gated, the default and the one value every deployed
+           device is running. It must stay settable. */
+        TEST_ASSERT_EQUAL_MESSAGE(HA_CFG_OK, ha_config_set(p->free_key, "0", ack, sizeof(ack)), p->free_key);
+        p->get_free(&v);
+        TEST_ASSERT_EQUAL_UINT16_MESSAGE(0, v, p->free_key);
+        TEST_ASSERT_EQUAL_MESSAGE(HA_CFG_REJECTED, ha_config_set(p->free_key, "1441", ack, sizeof(ack)), p->free_key);
+        TEST_ASSERT_NOT_NULL_MESSAGE(strstr(ack, "\"err\":\"range\""), p->free_key);
+    }
+}
+
+/* Four DISTINCT allocations, one per pair, and the distinctness is the
+   point rather than tidiness: the layer-1 cases below read an allocation
+   through the pairing, so if all four sat at one shared value a setter
+   consulting the WRONG partner would read that same value and every
+   assertion would pass anyway. A mutation run proved this is not
+   theoretical — `chore_free_sum` mispaired against `weekend_min` SURVIVED
+   the shared-60 version of the test below, because both allocations were
+   60. Spread them out and one of the two arithmetic cases always flips. */
+static const struct {
+    const char *text;
+    uint16_t value;
+} SPREAD_ALLOCS[] = {{"100", 100}, {"200", 200}, {"300", 300}, {"400", 400}};
+
+/* LAYER 1. The free slice is the side that gets refused, because a slice
+   bigger than the day it comes out of cannot mean anything. Both
+   arithmetic cases are here on purpose: a mispairing that reads a SMALLER
+   partner refuses the legal `alloc - 1`, and one that reads a LARGER
+   partner accepts the illegal `alloc + 1`, so between them no mispairing
+   in either direction survives. */
+void test_chore_free_above_its_allocation_is_refused_and_nvs_untouched(void) {
+    char ack[128];
+    /* Every allocation first: each pair has to be judged in a tree where
+       the other three allocations are numbers its own is not. */
+    for (size_t i = 0; i < PAIR_REF_COUNT; i++)
+        TEST_ASSERT_EQUAL_MESSAGE(HA_CFG_OK,
+                                  ha_config_set(PAIR_REFS[i].alloc_key, SPREAD_ALLOCS[i].text, ack, sizeof(ack)),
+                                  PAIR_REFS[i].alloc_key);
+    for (size_t i = 0; i < PAIR_REF_COUNT; i++) {
+        const pair_ref_t *p = &PAIR_REFS[i];
+        char want[64], text[8];
+        uint16_t free_min = 0, alloc_min = 0;
+        /* One under its own allocation: accepted and stored. */
+        snprintf(text, sizeof(text), "%u", (unsigned)(SPREAD_ALLOCS[i].value - 1));
+        TEST_ASSERT_EQUAL_MESSAGE(HA_CFG_OK, ha_config_set(p->free_key, text, ack, sizeof(ack)), p->free_key);
+        p->get_free(&free_min);
+        TEST_ASSERT_EQUAL_UINT16_MESSAGE(SPREAD_ALLOCS[i].value - 1, free_min, p->free_key);
+        /* One over: refused. */
+        snprintf(text, sizeof(text), "%u", (unsigned)(SPREAD_ALLOCS[i].value + 1));
+        TEST_ASSERT_EQUAL_MESSAGE(HA_CFG_REJECTED, ha_config_set(p->free_key, text, ack, sizeof(ack)), p->free_key);
+        /* Named in the ack: on this path the ack's own `key` IS the field
+           name, and the refusal carries a reason of its own so "too big a
+           slice" is not confused with "out of range". */
+        snprintf(want, sizeof(want), "\"key\":\"%s\"", p->free_key);
+        TEST_ASSERT_NOT_NULL_MESSAGE(strstr(ack, want), p->free_key);
+        TEST_ASSERT_NOT_NULL_MESSAGE(strstr(ack, "\"ok\":false"), p->free_key);
+        TEST_ASSERT_NOT_NULL_MESSAGE(strstr(ack, "\"err\":\"pair\""), p->free_key);
+        /* A refusal stores NOTHING — neither half moves. */
+        p->get_free(&free_min);
+        p->get_alloc(&alloc_min);
+        TEST_ASSERT_EQUAL_UINT16_MESSAGE(SPREAD_ALLOCS[i].value - 1, free_min, p->free_key);
+        TEST_ASSERT_EQUAL_UINT16_MESSAGE(SPREAD_ALLOCS[i].value, alloc_min, p->alloc_key);
+    }
+}
+
+/* chore_free == allocation is the per-day-type OFF SWITCH (design 3.3) and
+   needs no extra key, so it is VALID. Pinned right beside the `>` case
+   above so the boundary is held from both sides: a setter hand-written
+   with `<` instead of `<=` would refuse the off switch. */
+void test_chore_free_equal_to_its_allocation_is_the_off_switch(void) {
+    char ack[128];
+    /* Spread again, for the reason SPREAD_ALLOCS records: the exact-match
+       case is the one a mispaired setter is most likely to get right by
+       accident, since a shared allocation makes every partner the right
+       partner. */
+    for (size_t i = 0; i < PAIR_REF_COUNT; i++)
+        TEST_ASSERT_EQUAL_MESSAGE(HA_CFG_OK,
+                                  ha_config_set(PAIR_REFS[i].alloc_key, SPREAD_ALLOCS[i].text, ack, sizeof(ack)),
+                                  PAIR_REFS[i].alloc_key);
+    for (size_t i = 0; i < PAIR_REF_COUNT; i++) {
+        const pair_ref_t *p = &PAIR_REFS[i];
+        char text[8];
+        uint16_t v = 0;
+        snprintf(text, sizeof(text), "%u", (unsigned)SPREAD_ALLOCS[i].value);
+        TEST_ASSERT_EQUAL_MESSAGE(HA_CFG_OK, ha_config_set(p->free_key, text, ack, sizeof(ack)), p->free_key);
+        p->get_free(&v);
+        TEST_ASSERT_EQUAL_UINT16_MESSAGE(SPREAD_ALLOCS[i].value, v, p->free_key);
+        snprintf(text, sizeof(text), "%u", (unsigned)(SPREAD_ALLOCS[i].value + 1));
+        TEST_ASSERT_EQUAL_MESSAGE(HA_CFG_REJECTED, ha_config_set(p->free_key, text, ack, sizeof(ack)), p->free_key);
+    }
+}
+
+/* LAYER 2, and the case that matters most. The allocation setter CLAMPS
+   its paired slice down instead of refusing: a parent lowering screen time
+   must not be blocked by a chore setting they are not thinking about.
+   This is also the test that fails if config_is_valid_chore_free_min's
+   arguments are swapped at the allocation site — (30, 120) reads VALID,
+   no clamp fires, and nothing downstream would ever say so, because
+   schedule_get_chore_free_sec() clamps and the stored invalid pair reads
+   back identically to the legitimate off switch. */
+void test_lowering_an_allocation_clamps_the_paired_chore_free(void) {
+    char ack[128];
+    TEST_ASSERT_EQUAL(HA_CFG_OK, ha_config_set("weekday_min", "120", ack, sizeof(ack)));
+    TEST_ASSERT_EQUAL(HA_CFG_OK, ha_config_set("chore_free_wd", "120", ack, sizeof(ack)));
+    TEST_ASSERT_EQUAL(HA_CFG_OK, ha_config_set("weekday_min", "30", ack, sizeof(ack)));
+    uint16_t alloc_min = 0, free_min = 0;
+    nvs_config_get_weekday_min(&alloc_min);
+    nvs_config_get_chore_free_wd(&free_min);
+    TEST_ASSERT_EQUAL_UINT16(30, alloc_min);
+    TEST_ASSERT_EQUAL_UINT16(30, free_min); /* clamped to the new allocation */
+    /* A clamp is not silent: the ack reports which field moved and to
+       what, on top of the success it is reporting. */
+    TEST_ASSERT_NOT_NULL(strstr(ack, "\"ok\":true"));
+    TEST_ASSERT_NOT_NULL(strstr(ack, "\"clamped\":\"chore_free_wd\""));
+    TEST_ASSERT_NOT_NULL(strstr(ack, "\"clamped_to\":30"));
+}
+
+/* The same boundary from the allocation side: landing exactly ON the
+   stored slice is the off switch, not a violation, so nothing is written
+   and the ack stays plain. */
+void test_an_allocation_equal_to_its_chore_free_does_not_clamp(void) {
+    char ack[128];
+    TEST_ASSERT_EQUAL(HA_CFG_OK, ha_config_set("weekday_min", "120", ack, sizeof(ack)));
+    TEST_ASSERT_EQUAL(HA_CFG_OK, ha_config_set("chore_free_wd", "60", ack, sizeof(ack)));
+    TEST_ASSERT_EQUAL(HA_CFG_OK, ha_config_set("weekday_min", "60", ack, sizeof(ack)));
+    uint16_t free_min = 0;
+    nvs_config_get_chore_free_wd(&free_min);
+    TEST_ASSERT_EQUAL_UINT16(60, free_min);
+    TEST_ASSERT_NULL(strstr(ack, "clamped"));
+}
+
+void test_raising_an_allocation_leaves_the_chore_free_alone(void) {
+    char ack[128];
+    TEST_ASSERT_EQUAL(HA_CFG_OK, ha_config_set("weekday_min", "60", ack, sizeof(ack)));
+    TEST_ASSERT_EQUAL(HA_CFG_OK, ha_config_set("chore_free_wd", "30", ack, sizeof(ack)));
+    TEST_ASSERT_EQUAL(HA_CFG_OK, ha_config_set("weekday_min", "1440", ack, sizeof(ack)));
+    uint16_t free_min = 0;
+    nvs_config_get_chore_free_wd(&free_min);
+    TEST_ASSERT_EQUAL_UINT16(30, free_min);
+    TEST_ASSERT_NULL(strstr(ack, "clamped"));
+}
+
+/* One lowering pass over all four pairs: `slice[]` is each pair's
+   pre-clamp free slice, `lower_to[]` what its allocation is then lowered
+   to. Both are per-pair and DISTINCT, for the reason SPREAD_ALLOCS above
+   records and this test learned the hard way in its own right.
+
+   THE FLAT VERSION OF THIS TEST WAS BLIND, and not in a subtle place: it
+   set all four slices to the same 600 before lowering each allocation to
+   a value unique to it. The lower-to values being distinct was not enough,
+   because the CLAMP DECISION reads the slice, not the allocation — with
+   every slice at 600, a setter consulting the wrong partner read 600 too,
+   reached the same decision, and clamped. A mutation run over all twelve
+   single-pointer mispairings of the pairing table this file used to have
+   found two surviving the entire suite, one of which stored
+   `holiday_min: 100` beside `chore_free_hol: 600` under ok:true — the
+   exact state this layer exists to prevent, with every test green.
+
+   WHAT MAKES A SWAP VISIBLE. Each lower_to[i] sits BETWEEN its own pair's
+   slice and the next slice below it, so the clamp DECISION differs between
+   the right partner (fires) and every wrong partner holding a smaller
+   slice (does not fire, the ack carries no "clamped", the assertion
+   fails). A wrong partner holding a LARGER slice still fires, so the
+   decision alone cannot separate it — and cannot be made to, for the
+   lowest-sliced pair no lower_to exists that is below its own slice and
+   above every other. Two things close that half:
+     - the full-vector check after EVERY lowering, which catches a clamp
+       that landed on the wrong slice even when the decision agreed;
+     - the caller running this pass TWICE with the spread reversed, so a
+       partner that was larger in one pass is smaller in the other. The
+       union of the two passes flips the decision for all twelve
+       mispairings; neither pass alone flips more than six. */
+static void clamp_pass(const uint16_t *slice, const uint16_t *lower_to, const char *pass) {
+    char ack[128], text[16], msg[96];
+    uint16_t cur[PAIR_REF_COUNT];
+    /* Open every allocation first. The spread below is a RANGE question,
+       not a pairing question, and a 400-minute slice needs a day that
+       holds it; raising an allocation never clamps. */
+    for (size_t i = 0; i < PAIR_REF_COUNT; i++) {
+        snprintf(msg, sizeof(msg), "%s: %s", pass, PAIR_REFS[i].alloc_key);
+        TEST_ASSERT_EQUAL_MESSAGE(HA_CFG_OK, ha_config_set(PAIR_REFS[i].alloc_key, "1440", ack, sizeof(ack)), msg);
+    }
+    for (size_t i = 0; i < PAIR_REF_COUNT; i++) {
+        snprintf(text, sizeof(text), "%u", (unsigned)slice[i]);
+        snprintf(msg, sizeof(msg), "%s: %s", pass, PAIR_REFS[i].free_key);
+        TEST_ASSERT_EQUAL_MESSAGE(HA_CFG_OK, ha_config_set(PAIR_REFS[i].free_key, text, ack, sizeof(ack)), msg);
+        cur[i] = slice[i];
+    }
+    for (size_t i = 0; i < PAIR_REF_COUNT; i++) {
+        char want[64];
+        snprintf(text, sizeof(text), "%u", (unsigned)lower_to[i]);
+        snprintf(msg, sizeof(msg), "%s: %s", pass, PAIR_REFS[i].alloc_key);
+        TEST_ASSERT_EQUAL_MESSAGE(HA_CFG_OK, ha_config_set(PAIR_REFS[i].alloc_key, text, ack, sizeof(ack)), msg);
+        /* The clamp fired, it named THIS pair's slice, and it landed on
+           the new allocation. */
+        snprintf(want, sizeof(want), "\"clamped\":\"%s\",\"clamped_to\":%u", PAIR_REFS[i].free_key,
+                 (unsigned)lower_to[i]);
+        TEST_ASSERT_NOT_NULL_MESSAGE(strstr(ack, want), msg);
+        cur[i] = lower_to[i];
+        /* And NOTHING ELSE MOVED — all four slices, after every single
+           lowering. Checking only at the end of the loop would let a clamp
+           land on a pair that is lowered later anyway and be overwritten
+           before anyone looked. */
+        for (size_t j = 0; j < PAIR_REF_COUNT; j++) {
+            uint16_t v = 0xFFFF;
+            PAIR_REFS[j].get_free(&v);
+            snprintf(msg, sizeof(msg), "%s: %s after %s", pass, PAIR_REFS[j].free_key, PAIR_REFS[i].alloc_key);
+            TEST_ASSERT_EQUAL_UINT16_MESSAGE(cur[j], v, msg);
+        }
+    }
+}
+
+void test_each_allocation_clamps_only_its_own_partner(void) {
+    /* Ascending, then descending. Each lower_to is its own pair's slice
+       minus 50, which puts it above the next slice down in both shapes. */
+    static const uint16_t ASC_SLICE[] = {100, 200, 300, 400};
+    static const uint16_t ASC_LOWER[] = {50, 150, 250, 350};
+    static const uint16_t DESC_SLICE[] = {400, 300, 200, 100};
+    static const uint16_t DESC_LOWER[] = {350, 250, 150, 50};
+    clamp_pass(ASC_SLICE, ASC_LOWER, "ascending slices");
+    clamp_pass(DESC_SLICE, DESC_LOWER, "descending slices");
+}
+
+/* THE PAIRING, ASSERTED DIRECTLY, not only through arithmetic. Since the
+   pairing became one alloc_key string per chore_free_* row, a mispairing
+   is a wrong string — and a wrong string leaves the allocation it stole
+   the slice from with no slice at all, so the behavioural cases above see
+   it as a clamp that never fired. This test says it in one line instead,
+   and adds the two things arithmetic cannot see: a string that resolves to
+   NOTHING (a rename on either side, which would make both layers silent
+   no-ops on a build that still compiles) and a pairing graph that is not
+   four disjoint pairs. The expected pairing comes from PAIR_REFS, the
+   hand-written list, which is the only thing in this TU that can disagree
+   with ha_config.c's registry. */
+void test_every_chore_free_row_names_its_own_allocation(void) {
+    int n = 0;
+    const cfg_field_t *fields = ha_config_fields(&n);
+    int paired = 0;
+    for (int i = 0; i < n; i++) {
+        if (fields[i].alloc_key == NULL)
+            continue;
+        paired++;
+        const cfg_field_t *alloc = field_by_key(fields[i].alloc_key);
+        TEST_ASSERT_NOT_NULL_MESSAGE(alloc, fields[i].alloc_key);       /* resolves */
+        TEST_ASSERT_EQUAL_MESSAGE(CFG_U16, alloc->kind, fields[i].key); /* to a number */
+        /* An allocation must not itself be somebody's slice, or the graph
+           is a chain and one write can cascade. */
+        TEST_ASSERT_NULL_MESSAGE(alloc->alloc_key, fields[i].key);
+    }
+    TEST_ASSERT_EQUAL_INT(PAIR_REF_COUNT, paired); /* exactly four pairs, no more */
+    for (size_t i = 0; i < PAIR_REF_COUNT; i++) {
+        const cfg_field_t *f = field_by_key(PAIR_REFS[i].free_key);
+        TEST_ASSERT_NOT_NULL_MESSAGE(f, PAIR_REFS[i].free_key);
+        TEST_ASSERT_EQUAL_STRING_MESSAGE(PAIR_REFS[i].alloc_key, f->alloc_key, PAIR_REFS[i].free_key);
+    }
+}
+
+/* The clamp write goes FIRST, before the allocation's own write, so a
+   failing NVS leaves BOTH halves as they were. The other order would
+   commit the new allocation and then fail to clamp — persisting exactly
+   the invalid pair this layer exists to prevent.
+
+   THE OUTCOME DOES NOT PROVE THE ORDER, and this test used to assert only
+   the outcome. mock_nvs_fail_writes(1) refuses whichever write goes
+   first, so "both halves unchanged after one injected failure" holds under
+   EITHER order — a mutation that moved the allocation write ahead of the
+   clamp survived that version of this test. The per-key ATTEMPT counts are
+   what pin it (mock_nvs_write_count counts attempts, injected failures
+   included): the clamp was attempted and refused, and the allocation was
+   never attempted at all. */
+void test_a_failed_clamp_write_leaves_both_halves_alone(void) {
+    char ack[128];
+    TEST_ASSERT_EQUAL(HA_CFG_OK, ha_config_set("weekday_min", "120", ack, sizeof(ack)));
+    TEST_ASSERT_EQUAL(HA_CFG_OK, ha_config_set("chore_free_wd", "120", ack, sizeof(ack)));
+    const int alloc_writes = mock_nvs_write_count(NVS_KEY_WEEKDAY_MIN);
+    const int free_writes = mock_nvs_write_count(NVS_KEY_CHORE_FREE_WD);
+    mock_nvs_fail_writes(1);
+    TEST_ASSERT_EQUAL(HA_CFG_REJECTED, ha_config_set("weekday_min", "30", ack, sizeof(ack)));
+    TEST_ASSERT_NOT_NULL(strstr(ack, "\"err\":\"nvs\""));
+    TEST_ASSERT_EQUAL_INT(free_writes + 1, mock_nvs_write_count(NVS_KEY_CHORE_FREE_WD));
+    TEST_ASSERT_EQUAL_INT(alloc_writes, mock_nvs_write_count(NVS_KEY_WEEKDAY_MIN));
+    uint16_t alloc_min = 0, free_min = 0;
+    nvs_config_get_weekday_min(&alloc_min);
+    nvs_config_get_chore_free_wd(&free_min);
+    TEST_ASSERT_EQUAL_UINT16(120, alloc_min);
+    TEST_ASSERT_EQUAL_UINT16(120, free_min);
+}
+
+void test_chore_free_discovery_advertises_the_gated_bounds(void) {
+    char ack[128];
+    for (size_t i = 0; i < PAIR_REF_COUNT; i++) {
+        const cfg_field_t *f = field_by_key(PAIR_REFS[i].free_key);
+        char buf[700], want[128];
+        TEST_ASSERT_NOT_NULL_MESSAGE(f, PAIR_REFS[i].free_key);
+        TEST_ASSERT_EQUAL_STRING_MESSAGE("number", f->component, PAIR_REFS[i].free_key);
+        ha_config_discovery(buf, sizeof(buf), "magtag-a1b2c3", "Kitchen MagTag", "fw", f);
+        /* min 0, not the allocations' 1: 0 is the default every device is
+           running, and an advertised min of 1 makes it unselectable. */
+        TEST_ASSERT_NOT_NULL_MESSAGE(strstr(buf, "\"min\":0"), PAIR_REFS[i].free_key);
+        /* max EQUAL to the allocation ceiling, or the off switch is
+           unreachable for every allocation above it. */
+        TEST_ASSERT_NOT_NULL_MESSAGE(strstr(buf, "\"max\":1440"), PAIR_REFS[i].free_key);
+        TEST_ASSERT_NOT_NULL_MESSAGE(strstr(buf, "\"step\":1"), PAIR_REFS[i].free_key);
+        TEST_ASSERT_NOT_NULL_MESSAGE(strstr(buf, "\"unit_of_meas\":\"min\""), PAIR_REFS[i].free_key);
+        TEST_ASSERT_NOT_NULL_MESSAGE(strstr(buf, "\"ent_cat\":\"config\""), PAIR_REFS[i].free_key);
+        snprintf(want, sizeof(want), "\"cmd_t\":\"magtag/magtag-a1b2c3/set/%s\"", PAIR_REFS[i].free_key);
+        TEST_ASSERT_NOT_NULL_MESSAGE(strstr(buf, want), PAIR_REFS[i].free_key);
+    }
+    /* And the cfg state document carries all four, or HA renders every
+       one of these controls from a missing value. */
+    TEST_ASSERT_EQUAL(HA_CFG_OK, ha_config_set("weekday_min", "120", ack, sizeof(ack)));
+    TEST_ASSERT_EQUAL(HA_CFG_OK, ha_config_set("chore_free_wd", "45", ack, sizeof(ack)));
+    char state[HA_CONFIG_STATE_MAX];
+    ha_config_state_json(state, sizeof(state));
+    TEST_ASSERT_NOT_NULL(strstr(state, "\"chore_free_wd\":45"));
+    TEST_ASSERT_NOT_NULL(strstr(state, "\"chore_free_we\":0"));
+    TEST_ASSERT_NOT_NULL(strstr(state, "\"chore_free_hol\":0"));
+    TEST_ASSERT_NOT_NULL(strstr(state, "\"chore_free_sum\":0"));
+}
+
+/* HA does not re-read a retained discovery config it has already seen,
+   and ha_config_discovery_stale() is what decides whether mqtt_ha.c sends
+   one again. The schema version is one of its two inputs: it ORs the
+   version against ha_config_discovery_hash(), which folds the firmware
+   version string, so any release that changes `fw` republishes all three
+   discovery documents whether or not anyone bumped. The bump is still
+   required — a same-version reflash moves neither input, and it is the
+   only explicit signal — but "without a bump HA never learns" is too
+   strong, and the four keys are the thing to pin here.
+
+   They arrived in v21; >= rather than == so a later bump for an unrelated
+   entity does not have to edit this line. The joint COUNT+VERSION pin for
+   this registry is the test below, and the one for the stat entity table
+   is in test_stats_json. */
+void test_chore_free_entities_need_the_discovery_schema_bump(void) {
+    for (size_t i = 0; i < PAIR_REF_COUNT; i++)
+        TEST_ASSERT_NOT_NULL_MESSAGE(field_by_key(PAIR_REFS[i].free_key), PAIR_REFS[i].free_key);
+    TEST_ASSERT_TRUE(STATS_JSON_DISC_SCHEMA_VER >= 21);
+}
+
+/* THE CONFIG REGISTRY'S BUMP, pinned to the registry it describes — the
+   joint pin test_stats_json makes for ENTITIES, which the config registry
+   did not have. Without it, the >= assertion above is a one-time pin for
+   four specific keys: field #38 could ship with the version left alone and
+   pass every test in the tree, and on every device that has already
+   published discovery at this firmware version HA would never be told the
+   new control exists. Nothing appears, nothing errors.
+
+   The two numbers are asserted TOGETHER, and that is the whole mechanism:
+   neither can be edited without landing in this test, where the rule is
+   written down. Adding an editable field fails the count; correcting the
+   count puts the version on the next line under the author's eyes. It is a
+   forcing function, not an implication — a determined editor can change
+   both numbers and bump nothing — so: A NEW EDITABLE FIELD MUST BUMP
+   STATS_JSON_DISC_SCHEMA_VER.
+
+   HA_CONFIG_SET_SLOTS is the other number the count feeds (ha_config.c
+   static-asserts count + 2 <= 48, so the headroom is 9 fields). Do NOT
+   raise it to make room: it also sizes mqtt_ha.c's set transport, which
+   lives on the net_win task's window heap. */
+void test_config_registry_count_moves_with_the_discovery_schema(void) {
+    int n = 0;
+    (void)ha_config_fields(&n);
+    TEST_ASSERT_EQUAL_INT(37, n);
+    /* 24 with the registry count unchanged: BUG-13 CHANGED this registry's
+       payloads (cmd_tpl on every text control) without adding a field — a
+       changed discovery payload needs the bump as much as a new control
+       does, or a same-version reflash never tells HA.
+       23 with the registry count unchanged: v22 added stat ENTITIES rows
+       (M3-T1's chore entities and config warning) and v23 changed them
+       (M4-T1's summary sensors, screen_used_day and day_runs_N, M4-T5's
+       day_chores, and the battery's state_class), not editable fields —
+       the mirror of v21, which moved this registry and left ENTITIES
+       alone. test_stats_json's joint pin records that side. */
+    TEST_ASSERT_EQUAL_INT(24, STATS_JSON_DISC_SCHEMA_VER);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_set_timer_name_enables_slot);
@@ -1314,6 +2429,12 @@ int main(void) {
     RUN_TEST(test_state_json_ota_on_sync_nonzero_reads_as_on);
     RUN_TEST(test_discovery_ota_on_sync_is_switch);
     RUN_TEST(test_discovery_ota_url_is_text_with_max);
+    RUN_TEST(test_decode_text_turns_only_the_exact_sentinel_into_empty);
+    RUN_TEST(test_blank_template_on_every_text_control_and_no_other);
+    RUN_TEST(test_blank_sentinel_clears_every_text_control);
+    RUN_TEST(test_blank_sentinel_near_misses_are_refused_not_stored);
+    RUN_TEST(test_text_component_iff_string_kind);
+    RUN_TEST(test_blank_sentinel_is_not_decoded_for_other_kinds);
     RUN_TEST(test_device_hash_is_deterministic);
     RUN_TEST(test_device_hash_changes_when_firmware_version_changes);
     RUN_TEST(test_device_hash_changes_when_name_changes);
@@ -1327,6 +2448,28 @@ int main(void) {
     RUN_TEST(test_discovery_hash_changes_when_a_slot_is_enabled_or_cleared);
     RUN_TEST(test_discovery_hash_does_not_confuse_slot_boundaries);
     RUN_TEST(test_discovery_hash_still_tracks_the_device_block);
+    RUN_TEST(test_discovery_hash_is_stable_for_an_identical_chore_list);
+    RUN_TEST(test_discovery_hash_changes_when_a_chore_is_renamed);
+    RUN_TEST(test_discovery_hash_changes_when_a_chore_is_added_or_removed);
+    RUN_TEST(test_discovery_hash_counts_an_empty_named_chore);
+    RUN_TEST(test_discovery_hash_never_confuses_no_chores_with_one_unnamed_chore);
+    RUN_TEST(test_discovery_hash_changes_when_chores_are_reordered);
+    RUN_TEST(test_discovery_hash_does_not_confuse_chore_boundaries);
+    RUN_TEST(test_discovery_hash_ignores_rows_past_the_count);
+    RUN_TEST(test_discovery_hash_with_no_chores_is_the_pre_chore_fingerprint);
+    RUN_TEST(test_discovery_hash_separates_an_unknown_chore_list);
+    RUN_TEST(test_discovery_hash_clamps_the_chore_count_as_discovery_does);
+    RUN_TEST(test_discovery_hash_bounds_a_chore_name_as_discovery_does);
+    RUN_TEST(test_discovery_hash_keeps_its_other_legs_with_chores);
+    RUN_TEST(test_discovery_chores_returns_the_stored_list);
+    RUN_TEST(test_discovery_chores_reads_absent_and_rejected_as_no_chores);
+    RUN_TEST(test_discovery_chores_reports_a_failed_read_as_unknown);
+    RUN_TEST(test_discovery_chores_a_stored_rename_moves_the_fingerprint);
+    RUN_TEST(test_discovery_gate_hashes_the_list_it_returns);
+    RUN_TEST(test_discovery_gate_known_list_stamps_then_is_current);
+    RUN_TEST(test_discovery_gate_reads_the_stored_hash);
+    RUN_TEST(test_discovery_gate_stale_on_schema_mismatch);
+    RUN_TEST(test_discovery_gate_never_stamps_an_unknown_list);
     RUN_TEST(test_every_string_field_fits_the_set_transport);
     RUN_TEST(test_every_field_key_fits_the_set_transport);
     RUN_TEST(test_discovery_hash_changes_when_only_the_duration_enables_a_slot);
@@ -1342,5 +2485,18 @@ int main(void) {
     RUN_TEST(test_discovery_hash_falls_back_to_the_installed_table);
     RUN_TEST(test_state_json_shows_a_name_only_slot);
     RUN_TEST(test_discovery_hash_is_stable_for_a_name_only_slot);
+    /* the chore gate's cross-field rule (design 5.3, layers 1 and 2) */
+    RUN_TEST(test_chore_free_fields_accept_the_full_range);
+    RUN_TEST(test_chore_free_above_its_allocation_is_refused_and_nvs_untouched);
+    RUN_TEST(test_chore_free_equal_to_its_allocation_is_the_off_switch);
+    RUN_TEST(test_lowering_an_allocation_clamps_the_paired_chore_free);
+    RUN_TEST(test_an_allocation_equal_to_its_chore_free_does_not_clamp);
+    RUN_TEST(test_raising_an_allocation_leaves_the_chore_free_alone);
+    RUN_TEST(test_each_allocation_clamps_only_its_own_partner);
+    RUN_TEST(test_every_chore_free_row_names_its_own_allocation);
+    RUN_TEST(test_a_failed_clamp_write_leaves_both_halves_alone);
+    RUN_TEST(test_chore_free_discovery_advertises_the_gated_bounds);
+    RUN_TEST(test_chore_free_entities_need_the_discovery_schema_bump);
+    RUN_TEST(test_config_registry_count_moves_with_the_discovery_schema);
     return UNITY_END();
 }

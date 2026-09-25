@@ -12,9 +12,20 @@
    mock_hal_nvs counts reads AND writes per key, which turns "one write
    per change, none otherwise" into an assertion about flash traffic
    rather than about the resulting value. */
+/* chores.c and chore_store.c ride along because the C14 restore under
+   test IS a call into chore_store_load_ack(): stubbing it would leave the
+   one rule the restore leans on — "a record stamped with another day is a
+   different day, hash or no hash" — asserted against a restatement of
+   itself. The `TAG` rename is the whole of the cost: chore_store.c and
+   timer_persist.c each define a file-scope `static const char *TAG`, and
+   in a single-TU suite two definitions of one static object collide. */
 // clang-format off
 #include "../../main/timer.c"
 #include "../../main/nvs_config.c"
+#include "../../main/chores.c"
+#define TAG CHORE_STORE_TAG
+#include "../../main/chore_store.c"
+#undef TAG
 #include "../../main/timer_persist.c"
 #include "mock_hal_nvs.c"
 // clang-format on
@@ -698,7 +709,8 @@ void test_restore_depends_on_the_defs_table_being_installed_first(void) {
        timer_ensure_active_slot_enabled(), which reads the defs table to
        decide whether the restored selection still exists. Run it with no
        table and every extra slot reads as disabled, so the selection is
-       dragged to Screen — a quietly wrong device rather than a crash,
+       dragged to Screen and the running Piano is retired as an orphan
+       (BUG-7) — a quietly wrong device rather than a crash,
        which is why the ordering needs a test and not a comment. */
     arm_rich_state(NOON); /* selection on Piano */
     timer_persist_save();
@@ -707,24 +719,39 @@ void test_restore_depends_on_the_defs_table_being_installed_first(void) {
     timer_set_defs(NULL, 0); /* as if timer_defs_install() had not run */
     TEST_ASSERT_TRUE(timer_persist_try_restore(NOON));
     TEST_ASSERT_EQUAL_INT(0, timer_active_slot());
+    TEST_ASSERT_EQUAL(TIMER_IDLE, timer_slot_state(SLOT_PIANO));
 
     wipe_rtc();
     timer_set_defs(TEST_DEFS, TIMER_SLOT_COUNT);
     TEST_ASSERT_TRUE(timer_persist_try_restore(NOON));
     TEST_ASSERT_EQUAL_INT(SLOT_PIANO, timer_active_slot());
+    TEST_ASSERT_EQUAL(TIMER_RUNNING, timer_slot_state(SLOT_PIANO));
 }
 
 void test_restore_of_a_slot_the_firmware_no_longer_defines_lands_on_screen(void) {
-    /* Reflash with a slot removed from menuconfig: the slot's state is
-       still restored, only the selection moves, so nothing is refunded. */
+    /* Reflash with a slot removed from menuconfig: the selection moves,
+       and the other slots' state is still restored, so nothing is
+       refunded. The removed slot is IDLE here, so there is no run to
+       retire; test_timer covers a RUNNING one, and a PAUSED one kept
+       (BUG-7).
+
+       arm_rich_state leaves Piano RUNNING and selected. Moving the
+       selection off it alone would snapshot a RUNNING slot that is not
+       the active slot (I3), a state only a corrupt snapshot holds, so
+       Piano is paused and the segment it armed disarmed first. */
     arm_rich_state(NOON);
+    g_rtc_state.slots[SLOT_PIANO].state = TIMER_PAUSED;
+    g_rtc_state.slots[SLOT_PIANO].remaining_at_pause = 600;
+    g_rtc_state.slots[SLOT_PIANO].expiry_wall_time = 0;
+    g_rtc_state.slots[0].run_started_wall = 0;
     g_rtc_state.active_slot = SLOT_DISABLED;
     timer_persist_save();
     wipe_rtc();
 
     TEST_ASSERT_TRUE(timer_persist_try_restore(NOON));
     TEST_ASSERT_EQUAL_INT(0, timer_active_slot());
-    TEST_ASSERT_EQUAL_INT(TIMER_RUNNING, timer_slot_state(SLOT_PIANO));
+    TEST_ASSERT_EQUAL_INT(TIMER_PAUSED, timer_slot_state(SLOT_PIANO));
+    TEST_ASSERT_EQUAL_INT32(600, timer_slot_remaining(SLOT_PIANO, NOON, 0));
 }
 
 /* ---- the RTC-state guard ------------------------------------------------ */
@@ -793,7 +820,9 @@ void test_a_matching_magic_with_the_wrong_version_is_still_rejected(void) {
 void test_a_stamped_rtc_image_is_left_untouched(void) {
     arm_rich_state(NOON);
     timer_record_date(NOON);
-    TEST_ASSERT_TRUE(timer_rtc_state_guard()); /* stamps it the first time */
+    /* Already stamped: arm_rich_state() starts from timer_reset(), which
+       keeps the identity (BUG-14; pinned on its own below). */
+    TEST_ASSERT_EQUAL_HEX32(RTC_STATE_MAGIC, g_rtc_state.magic);
 
     const rtc_state_t before = g_rtc_state;
     TEST_ASSERT_FALSE_MESSAGE(timer_rtc_state_guard(), "a valid RTC state was thrown away");
@@ -811,6 +840,697 @@ void test_a_zeroed_rtc_image_comes_out_stamped(void) {
     TEST_ASSERT_EQUAL_HEX32(RTC_STATE_MAGIC, g_rtc_state.magic);
     TEST_ASSERT_EQUAL_UINT16(RTC_STATE_VERSION, g_rtc_state.version);
     TEST_ASSERT_FALSE(timer_rtc_state_guard());
+}
+
+/* ---- chore fixture ------------------------------------------------------
+
+   DAY0's local date under the pinned UTC0 zone, written out so the ack
+   record's day stamp is a literal exactly as chore_store's own tests
+   keep it — and cross-checked against timer_record_date() in the first
+   test below rather than trusted, so a drift in either fails loudly. */
+#define TODAY_ISO "2026-01-05"
+#define YESTERDAY_ISO "2026-01-04"
+
+/* The list the stored acks were acked against. Three names, so all three
+   ack bits are meaningful and CHORE_MAX is exercised. */
+static char g_chore_names[CHORE_MAX][CHORE_NAME_BUF] = {"Teeth", "Bed", "Bag"};
+
+static uint16_t chore_hash(void) {
+    return chores_list_hash((const char(*)[CHORE_NAME_BUF])g_chore_names, CHORE_MAX);
+}
+
+/* Write the ack record the way an ack toggle would, through the real
+   store rather than by hand: the layout, the version byte and the day
+   stamp then come from the firmware's own writer. */
+static void store_ack(const char *date, uint8_t mask, bool released) {
+    const chore_ack_t a = {.acked = mask, .released = released};
+    TEST_ASSERT_EQUAL(ESP_OK, chore_store_save_ack(date, chore_hash(), a));
+}
+
+static int ack_writes(void) {
+    return mock_nvs_write_count(NVS_KEY_CHORE_ACK);
+}
+
+/* ---- the RTC layout version (design §5.1) ------------------------------- */
+
+void test_the_rtc_state_version_is_bumped_past_the_pre_chore_layout(void) {
+    /* rtc_state_t grew chore_acked, chore_released and mode, so the
+       version that described the layout without them must not still be
+       the current one. Left as a first-class assertion because the whole
+       protection against an OTA reading new fields out of an old image is
+       this one integer. */
+    TEST_ASSERT_GREATER_THAN_UINT16_MESSAGE(2, RTC_STATE_VERSION,
+                                            "rtc_state_t gained the chore fields: bump RTC_STATE_VERSION past 2");
+}
+
+void test_a_pre_chore_rtc_image_is_rejected_rather_than_read(void) {
+    /* The case the version exists for, and the only one the magic cannot
+       catch: an image written by the previous firmware, whose 352-byte
+       layout has no bytes where the chore fields now sit. Read it and the
+       paint path gets whatever followed the old struct in RTC slow
+       memory; reject it and the tested NVS path takes over. */
+    wipe_rtc();
+    g_rtc_state.magic = RTC_STATE_MAGIC;
+    g_rtc_state.version = 2;
+    g_rtc_state.chore_acked = 0x07;
+    g_rtc_state.chore_released = true;
+    g_rtc_state.mode = (uint8_t)APP_MODE_CHORES;
+    timer_record_date(NOON);
+    TEST_ASSERT_EQUAL_STRING_MESSAGE(TODAY_ISO, timer_current_date(), "fixture drift: TODAY_ISO is not DAY0's date");
+
+    TEST_ASSERT_TRUE_MESSAGE(timer_rtc_state_guard(), "a version-2 RTC image was accepted");
+    TEST_ASSERT_EQUAL_UINT16(RTC_STATE_VERSION, g_rtc_state.version);
+    TEST_ASSERT_EQUAL_UINT8(0, timer_chore_acked());
+    TEST_ASSERT_FALSE(timer_chore_released());
+    TEST_ASSERT_EQUAL_INT(APP_MODE_TIMERS, timer_mode());
+    TEST_ASSERT_EQUAL_STRING("", timer_current_date()); /* routed to the NVS snapshot path */
+}
+
+void test_the_nvs_snapshot_does_not_carry_the_chore_fields(void) {
+    /* Design §5.1 gives the acks their OWN NVS key, so the timer
+       snapshot must not have grown them — and therefore
+       TIMER_SNAPSHOT_VERSION must not have been bumped either. Asserted
+       as flash traffic: if the chore fields reached the snapshot, moving
+       them would make the bytes differ and the write-on-change guard
+       would rewrite the blob on every single ack toggle. */
+    arm_rich_state(NOON);
+    timer_persist_save();
+    const int writes = snap_writes();
+
+    timer_chore_set_acked(0x07);
+    timer_chore_set_released(true);
+    timer_set_mode(APP_MODE_CHORES);
+    timer_persist_save();
+
+    TEST_ASSERT_EQUAL_INT_MESSAGE(writes, snap_writes(),
+                                  "the timer snapshot grew chore fields: §5.1 gives them their own key");
+}
+
+/* ---- C14: acks survive an RTC loss ------------------------------------- */
+
+void test_todays_acks_come_back_from_nvs_after_an_rtc_loss(void) {
+    /* Row C14 end to end, on the event the record exists for. The kid
+       acks two chores; an OTA reboot reloads .rtc.data from the image as
+       zeros; the acks must still be there afterwards. */
+    arm_rich_state(NOON);
+    store_ack(TODAY_ISO, 0x03, false);
+    timer_chore_set_acked(0x03);
+    timer_persist_save();
+
+    wipe_rtc(); /* esp_restart(): every RTC variable is gone */
+    TEST_ASSERT_EQUAL_UINT8(0, timer_chore_acked());
+
+    /* try_restore first because that is the boot order main.c already
+       has, not because this call needs it: the two write disjoint fields
+       and the date below comes from `now`. The no-date-in-RTC test
+       further down runs this same restore with no try_restore at all. */
+    TEST_ASSERT_TRUE(timer_persist_try_restore(NOON));
+    TEST_ASSERT_EQUAL_STRING(TODAY_ISO, timer_current_date());
+
+    TEST_ASSERT_TRUE(timer_persist_restore_chore_acks(NOON, chore_hash()));
+    TEST_ASSERT_EQUAL_UINT8(0x03, timer_chore_acked());
+    TEST_ASSERT_FALSE(timer_chore_released());
+}
+
+void test_a_released_day_stays_released_across_an_rtc_loss(void) {
+    /* The other half of the record, and the one with money attached: the
+       day's withheld remainder was already granted, so a reboot must not
+       re-arm the gate and let it be granted twice. */
+    arm_rich_state(NOON);
+    store_ack(TODAY_ISO, 0x07, true);
+    timer_persist_save();
+    wipe_rtc();
+
+    TEST_ASSERT_TRUE(timer_persist_try_restore(NOON));
+    TEST_ASSERT_TRUE(timer_persist_restore_chore_acks(NOON, chore_hash()));
+    TEST_ASSERT_EQUAL_UINT8(0x07, timer_chore_acked());
+    TEST_ASSERT_TRUE(timer_chore_released());
+}
+
+void test_acks_restore_with_no_date_in_rtc_at_all(void) {
+    /* The C14 trap, and the whole reason the date is derived from `now`
+       rather than passed in as a string. On the wake after an OTA reboot
+       there IS no date in RTC — timer_current_date() is "" until the
+       snapshot restore has run — and a string-taking version had to
+       refuse and defer a wake. Deriving it from the caller's clock means
+       the acks come back on the same wake, with no ordering requirement
+       against try_restore at all. Flash is still only read. */
+    store_ack(TODAY_ISO, 0x07, true);
+    const int writes = ack_writes();
+    wipe_rtc();
+    TEST_ASSERT_EQUAL_STRING_MESSAGE("", timer_current_date(), "the fixture is not an esp_restart wake");
+
+    TEST_ASSERT_TRUE(timer_persist_restore_chore_acks(NOON, chore_hash()));
+    TEST_ASSERT_EQUAL_UINT8(0x07, timer_chore_acked());
+    TEST_ASSERT_TRUE(timer_chore_released());
+    TEST_ASSERT_EQUAL_INT_MESSAGE(writes, ack_writes(), "the restore wrote the ack record");
+    /* Still no date in RTC: this function writes two fields and neither
+       of them is last_date. */
+    TEST_ASSERT_EQUAL_STRING("", timer_current_date());
+}
+
+void test_a_rollover_wake_does_not_resurrect_yesterdays_acks(void) {
+    /* THE case a date read out of RTC gets wrong, and the reason this
+       function takes a time_t. RTC memory is intact (an ordinary
+       deep-sleep wake) and still holds YESTERDAY: try_restore refuses,
+       correctly, and leaves last_date alone, so timer_current_date() is
+       yesterday's date and a rollover is still pending. Feed that string
+       to the loader and yesterday's record matches it — yesterday's acks
+       and, worse, yesterday's `released` latch land in RTC as today's,
+       and C8's withheld remainder can be granted a second time. `now` is
+       today, so the record is correctly read as another day's. */
+    arm_rich_state(YESTERDAY_NOON);
+    timer_chore_set_acked(0x07);
+    timer_chore_set_released(true);
+    store_ack(YESTERDAY_ISO, 0x07, true);
+    timer_persist_save();
+
+    TEST_ASSERT_FALSE_MESSAGE(timer_persist_try_restore(NOON), "RTC was intact: the snapshot must be refused");
+    TEST_ASSERT_EQUAL_STRING_MESSAGE(YESTERDAY_ISO, timer_current_date(), "the fixture is not a rollover wake");
+    TEST_ASSERT_TRUE_MESSAGE(timer_is_new_day(NOON), "the fixture has no rollover pending");
+
+    TEST_ASSERT_TRUE(timer_persist_restore_chore_acks(NOON, chore_hash()));
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(0, timer_chore_acked(), "yesterday's acks were restored as today's");
+    TEST_ASSERT_FALSE_MESSAGE(timer_chore_released(), "yesterday's release latch was resurrected on a new day");
+}
+
+void test_a_second_restore_lands_what_the_first_one_did(void) {
+    /* The header calls repeating it idempotent, so repeating it is
+       asserted rather than assumed — and a second call in one wake is
+       real rather than hypothetical: try_restore is already called twice,
+       at main.c:528 and again inside the rollover handler once the NTP
+       window has corrected the clock (wake_flow.c:692). Idempotent is NOT
+       the same as harmless — the test below is the FIRST call losing a
+       divergence — but the second must add nothing. */
+    store_ack(TODAY_ISO, 0x05, true);
+    wipe_rtc();
+    timer_record_date(NOON);
+
+    TEST_ASSERT_TRUE(timer_persist_restore_chore_acks(NOON, chore_hash()));
+    const uint8_t first_mask = timer_chore_acked();
+    const bool first_released = timer_chore_released();
+    const int writes = ack_writes();
+
+    TEST_ASSERT_TRUE_MESSAGE(timer_persist_restore_chore_acks(NOON, chore_hash()), "the repeat refused");
+    TEST_ASSERT_EQUAL_UINT8(first_mask, timer_chore_acked());
+    TEST_ASSERT_EQUAL_INT(first_released, timer_chore_released());
+    TEST_ASSERT_EQUAL_INT_MESSAGE(writes, ack_writes(), "the repeat wrote the ack record");
+    TEST_ASSERT_EQUAL_UINT8(0x05, timer_chore_acked()); /* and it is the stored value */
+    TEST_ASSERT_TRUE(timer_chore_released());
+}
+
+void test_a_matching_record_overwrites_rtc_acks_that_flash_never_saw(void) {
+    /* THE ONE ASYMMETRY, first half: the destructive case is not confined
+       to a date mismatch. Same day, matching record, and the live RTC
+       copy is AHEAD of flash — the record wins and the divergence is
+       gone. Reachable when a toggle's flash write failed while its RTC
+       write succeeded; an ack that was never durable either way. The
+       second call proves where the loss happens: in the FIRST one. */
+    store_ack(TODAY_ISO, 0x01, false);
+    wipe_rtc();
+    timer_record_date(NOON);
+    timer_chore_set_acked(0x03); /* RTC has an ack flash never got */
+    timer_chore_set_released(true);
+    TEST_ASSERT_FALSE_MESSAGE(timer_is_new_day(NOON), "nothing has rolled over here");
+
+    TEST_ASSERT_TRUE(timer_persist_restore_chore_acks(NOON, chore_hash()));
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(0x01, timer_chore_acked(), "the durable record must win");
+    TEST_ASSERT_FALSE_MESSAGE(timer_chore_released(), "the asymmetry clears `released` too, not just the acks");
+
+    TEST_ASSERT_TRUE(timer_persist_restore_chore_acks(NOON, chore_hash()));
+    TEST_ASSERT_EQUAL_UINT8(0x01, timer_chore_acked());
+    TEST_ASSERT_FALSE(timer_chore_released());
+}
+
+void test_restoring_acks_never_writes_flash(void) {
+    /* This runs on the boot path. A write here would add flash latency to
+       every cold boot and would make the boot path capable of destroying
+       the very record it came to read — the same rule
+       timer_persist_try_restore() already keeps. */
+    store_ack(TODAY_ISO, 0x05, false);
+    const int writes = ack_writes();
+    wipe_rtc();
+    timer_record_date(NOON);
+
+    TEST_ASSERT_TRUE(timer_persist_restore_chore_acks(NOON, chore_hash()));
+    TEST_ASSERT_EQUAL_INT(writes, ack_writes());
+    TEST_ASSERT_EQUAL_UINT8(0x05, timer_chore_acked()); /* and it did read */
+}
+
+void test_a_stale_record_destroys_a_release_the_day_did_earn(void) {
+    /* THE ONE ASYMMETRY, second half, and the distinction the header now
+       draws: clearing on a DATE MISMATCH is only correct when the day
+       actually rolled over. Here it did not — RTC's date, `now` and the
+       wake are all the same day, timer_is_new_day() says so, and it is
+       the RECORD that is a day behind (a toggle whose flash write failed,
+       or a clock correction that crossed midnight). The acks and a
+       `released` latch this day genuinely earned are dropped anyway,
+       because flash is the authority. Asserted as the deliberate trade it
+       is: the rollover test above is the case where the same clearing is
+       row C13 and right. */
+    store_ack(YESTERDAY_ISO, 0x07, true);
+    wipe_rtc();
+    timer_record_date(NOON);
+    /* Seeded so the clearing is something the restore DID rather than
+       something the wipe left behind. */
+    timer_chore_set_acked(0x05);
+    timer_chore_set_released(true);
+    TEST_ASSERT_FALSE_MESSAGE(timer_is_new_day(NOON), "the fixture is a rollover, not a stale record");
+
+    TEST_ASSERT_TRUE(timer_persist_restore_chore_acks(NOON, chore_hash()));
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(0, timer_chore_acked(), "the documented asymmetry changed shape");
+    TEST_ASSERT_FALSE_MESSAGE(timer_chore_released(), "the asymmetry loses `released` too: say so if it stops");
+}
+
+void test_restoring_acks_with_no_record_leaves_the_rtc_alone(void) {
+    /* A device that has never had a chore acked: nothing stored means
+       nothing to say, so the live RTC copy is left exactly as it is
+       rather than cleared. This is the one false path that is NOT a
+       deferral — there is nothing to come back for — and it is why the
+       false return has to be read as "no usable record" rather than as
+       "nothing acked today". */
+    wipe_rtc();
+    timer_record_date(NOON);
+    timer_chore_set_acked(0x02);
+    timer_chore_set_released(true);
+
+    TEST_ASSERT_FALSE(timer_persist_restore_chore_acks(NOON, chore_hash()));
+    TEST_ASSERT_EQUAL_UINT8(0x02, timer_chore_acked());
+    TEST_ASSERT_TRUE(timer_chore_released());
+}
+
+void test_a_restored_mask_from_a_longer_list_never_reads_as_an_ack(void) {
+    /* The high-bit rule, asserted TRANSITIVELY: the RTC field hands back
+       what was stored, and it is chores.c that bounds the bits. Reading
+       the mask raw is what would draw a tick for a chore that is no
+       longer on the list. */
+    store_ack(TODAY_ISO, 0x07, false);
+    wipe_rtc();
+    timer_record_date(NOON);
+
+    TEST_ASSERT_TRUE(timer_persist_restore_chore_acks(NOON, chore_hash()));
+    const uint8_t mask = timer_chore_acked();
+    TEST_ASSERT_EQUAL_UINT8(0x07, mask); /* stored raw, unmasked */
+    TEST_ASSERT_TRUE(chores_is_acked(mask, 1, 2));
+    TEST_ASSERT_FALSE_MESSAGE(chores_is_acked(mask, 2, 2), "bit 2 is not a chore on a two-chore list");
+    TEST_ASSERT_EQUAL_UINT8(0, chores_outstanding(mask, 2));
+}
+
+void test_a_list_edit_clears_restored_acks_but_keeps_the_release(void) {
+    /* Row C10, applied by the loader and not restated by the restore:
+       positional bits stop meaning anything once the list moves, but a
+       list edit must never re-lock a day that has already released. */
+    store_ack(TODAY_ISO, 0x07, true);
+    wipe_rtc();
+    timer_record_date(NOON);
+
+    const uint16_t edited = (uint16_t)(chore_hash() ^ 0xFFFFu);
+    TEST_ASSERT_TRUE(timer_persist_restore_chore_acks(NOON, edited));
+    TEST_ASSERT_EQUAL_UINT8(0, timer_chore_acked());
+    TEST_ASSERT_TRUE_MESSAGE(timer_chore_released(), "a list edit re-locked an already released day");
+}
+
+void test_the_painted_mode_is_not_restored_from_flash(void) {
+    /* Design §5.1 persists the ack record and nothing else, so `mode` has
+       exactly one copy and a restart legitimately comes back painting
+       Timers. Pinned so that changing it has to be a decision: it would
+       need a byte in the ack record and a CHORE_ACK_BLOB_VERSION bump.
+
+       Asserted in BOTH directions, because "it is still Timers" on its
+       own is what a do-nothing stub also produces. The live mode is
+       seeded to CHORES first: a restore that reached for the mode would
+       find a record that has no such byte and land Timers, so surviving
+       as CHORES is the assertion with teeth. */
+    store_ack(TODAY_ISO, 0x07, true);
+    wipe_rtc();
+    timer_record_date(NOON);
+    timer_set_mode(APP_MODE_CHORES);
+
+    TEST_ASSERT_TRUE(timer_persist_restore_chore_acks(NOON, chore_hash()));
+    TEST_ASSERT_EQUAL_INT_MESSAGE(APP_MODE_CHORES, timer_mode(), "the restore moved the painted mode");
+    TEST_ASSERT_EQUAL_UINT8(0x07, timer_chore_acked()); /* and it did restore */
+
+    /* The other direction: after an esp_restart nothing puts chore mode
+       back, which is the §5.1 choice rather than an accident. */
+    wipe_rtc();
+    timer_record_date(NOON);
+    TEST_ASSERT_TRUE(timer_persist_restore_chore_acks(NOON, chore_hash()));
+    TEST_ASSERT_EQUAL_INT_MESSAGE(APP_MODE_TIMERS, timer_mode(), "a restart came back painting chore mode");
+}
+
+/* ---- C14 is WIRED: the day restore brings the acks with it -------------- */
+
+/* The list as the device would actually have it — in flash, under the
+   names key — because the restore now derives its own hash and no test
+   hands it one. Without this the loader reads "no chores configured",
+   hashes the empty list, and the C10 arm clears what came back. */
+static void store_names(void) {
+    TEST_ASSERT_EQUAL(ESP_OK, chore_store_save_names((const char(*)[CHORE_NAME_BUF])g_chore_names, CHORE_MAX));
+}
+
+static int ack_reads(void) {
+    return mock_nvs_read_count(NVS_KEY_CHORE_ACK);
+}
+
+static int names_reads(void) {
+    return mock_nvs_read_count(NVS_KEY_CHORES);
+}
+
+/* THE regression, and it is a money bug rather than a cosmetic one.
+   Pulling the battery on a spent day used to bring the timer day back
+   from the snapshot while leaving `chore_released` false, so the gate
+   re-armed: the kid re-ticks three boxes and the withheld remainder is
+   granted a SECOND time, on top of an allocation that already contains
+   it. 100 minutes on a 60-minute day, repeatable per reset, with the
+   day-line still reading "Weekday · 60 min" and adjust_today_sec 0 —
+   the state timer.h:406 says cannot happen.
+
+   Asserted through timer_persist_try_restore() ALONE, with no direct
+   call to the ack restore, because "is it wired" is the whole question:
+   a restore_chore_acks() that works perfectly and is called from nowhere
+   is exactly what shipped. */
+void test_a_restored_day_cannot_take_the_release_a_second_time(void) {
+    store_names();
+    arm_rich_state(NOON);
+    store_ack(TODAY_ISO, 0x07, true); /* all three done, remainder granted */
+    timer_chore_set_acked(0x07);
+    timer_chore_set_released(true);
+    timer_persist_save();
+
+    wipe_rtc(); /* the battery pull */
+    TEST_ASSERT_EQUAL_STRING("", timer_current_date());
+    TEST_ASSERT_FALSE(timer_chore_released());
+
+    TEST_ASSERT_TRUE_MESSAGE(timer_persist_try_restore(NOON), "the day did not come back");
+    TEST_ASSERT_EQUAL_STRING(TODAY_ISO, timer_current_date());
+
+    TEST_ASSERT_TRUE_MESSAGE(timer_chore_released(), "the gate re-armed: the release can be farmed by a reset");
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(0x07, timer_chore_acked(), "the day came back but the ticks did not");
+    /* The harm itself, stated in the terms the button path uses: with the
+       latch back nothing is owed, so there is no second grant to take and
+       no re-ack can produce one. Both halves, because `released` alone is
+       a flag and this is about seconds. */
+    TEST_ASSERT_FALSE_MESSAGE(chores_release_due(timer_chore_acked(), CHORE_MAX, timer_chore_released()),
+                              "a second release was due on a day that had already released");
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE(
+        0, chores_withheld_sec(3600, 1200, timer_chore_acked(), CHORE_MAX, timer_chore_released()),
+        "the restored day still owes a withheld remainder it already granted");
+}
+
+/* The other half of the same wiring, and the one that protects the flash
+   record rather than the seconds: chore_store.h names "a save built on
+   the RTC's zeros" as the one sequence that destroys a good record. With
+   the acks back in RTC the first ack after a restart is a toggle of the
+   restored mask, not of zero. */
+void test_the_first_ack_after_a_restart_builds_on_the_restored_mask(void) {
+    store_names();
+    arm_rich_state(NOON);
+    store_ack(TODAY_ISO, 0x03, false);
+    timer_chore_set_acked(0x03);
+    timer_persist_save();
+
+    wipe_rtc();
+    TEST_ASSERT_TRUE(timer_persist_try_restore(NOON));
+
+    /* What button_chore_ack_apply() would compute for the third row. */
+    const uint8_t next = chores_toggle_ack(timer_chore_acked(), 2, CHORE_MAX);
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(0x07, next, "the ack was built on a zeroed mask and would erase the record");
+}
+
+/* And the case the wiring must NOT disturb: an ordinary deep-sleep wake.
+   RTC is intact, so try_restore returns at its first guard and neither
+   chore key is touched. Reading them here would cost two flash reads on
+   every wake AND apply the header's flash-wins asymmetry continuously,
+   which would silently drop any ack whose own flash write had failed. */
+void test_an_ordinary_wake_does_not_read_the_chore_keys(void) {
+    store_names();
+    arm_rich_state(NOON);
+    store_ack(TODAY_ISO, 0x07, true);
+    timer_chore_set_acked(0x05); /* deliberately AHEAD of flash */
+    timer_chore_set_released(false);
+    timer_persist_save();
+    const int acks = ack_reads();
+    const int names = names_reads();
+
+    TEST_ASSERT_FALSE_MESSAGE(timer_persist_try_restore(NOON), "RTC was intact: the snapshot must be refused");
+
+    TEST_ASSERT_EQUAL_INT_MESSAGE(acks, ack_reads(), "an ordinary wake read the ack record");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(names, names_reads(), "an ordinary wake read the chore names");
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(0x05, timer_chore_acked(), "the live RTC mask was overwritten from flash");
+    TEST_ASSERT_FALSE(timer_chore_released());
+}
+
+/* A names blob that cannot be read degrades to "re-tick the boxes" and
+   never to "farm a second allocation". The restore hashes the empty list,
+   which mismatches the stored hash and takes chores_reconcile()'s C10
+   arm — acks cleared, `released` PRESERVED. That asymmetry is the reason
+   the names read's return code can be discarded at all. */
+void test_an_unreadable_names_blob_still_keeps_the_release_latched(void) {
+    /* No store_names(): the key is absent, exactly as a wiped or
+       never-configured names blob reads. */
+    arm_rich_state(NOON);
+    store_ack(TODAY_ISO, 0x07, true);
+    timer_chore_set_acked(0x07);
+    timer_chore_set_released(true);
+    timer_persist_save();
+
+    wipe_rtc();
+    TEST_ASSERT_TRUE(timer_persist_try_restore(NOON));
+
+    TEST_ASSERT_TRUE_MESSAGE(timer_chore_released(), "a missing names blob re-armed the gate");
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(0, timer_chore_acked(), "C10: a hash mismatch must clear the acks");
+}
+
+/* ---- BUG-14: a power-on without NTP must not refund the day --------------
+
+   A genuine power-on clears the clock as well as RTC memory, so until NTP
+   lands the device reads the epoch plus its uptime. The rollover then
+   dates the day "1970-01-01". That day is a placeholder: it must never
+   overwrite today's snapshot, and the first wake on a corrected clock
+   must put today back. */
+
+/* Ninety seconds after a power-on, clock never set: 1970-01-01 in UTC0. */
+#define EPOCH_UP ((time_t)90)
+#define EPOCH_ISO "1970-01-01"
+
+/* app_main's timer boot block: the RTC guard, then the boot restore
+   (main.c; timer_defs_install() is setUp's timer_set_defs()). */
+static void model_boot(time_t now) {
+    (void)timer_rtc_state_guard();
+    (void)timer_persist_try_restore(now);
+}
+
+/* The timer half of wake_flow_handle_day_rollover(), in its order: the
+   new-day test on the wake's clock, the window (which may correct the
+   clock to `after_window`), the restore on the corrected clock, and the
+   reset only when that fails. test_wake_flow pins the rest of the
+   rollover (summary, bonus clear, OTA arm) against stubs; this is the
+   real timer and the real snapshot underneath the same four calls.
+   Answers whether a rollover ran. */
+static bool model_rollover(time_t now, time_t after_window) {
+    if (!timer_is_new_day(now)) {
+        return false;
+    }
+    if (!timer_persist_try_restore(after_window)) {
+        timer_reset();
+        timer_record_date(after_window);
+    }
+    return true;
+}
+
+/* lock_gate.c's settle_day(), the no-clock lock's release: with RAM still
+   holding the stand-in day, today's snapshot is restored at the corrected
+   clock, or the day starts fresh. test_lock_gate pins WHEN the gate calls
+   it; this is the real restore underneath. */
+static void model_lock_release(time_t now) {
+    if (time_util_day_plausible(timer_current_date())) {
+        return;
+    }
+    if (!timer_persist_try_restore(now)) {
+        timer_reset();
+        timer_record_date(now);
+    }
+}
+
+/* THE REPRO, end to end, under the no-clock lock (owner decision
+   2026-09-25). A real day with usage and two chores acked; the battery is
+   pulled; the device comes back with no WiFi and locks (nothing can be
+   used), sleeps and re-wakes locked, and then NTP lands in the lock's
+   window. The day's snapshot must come back: its usage, adjust and acks
+   are not refunded. It is not frozen at the power cut: a RUNNING slot
+   keeps its wall-clock expiry and drains through the outage and the lock
+   (owner decision Q2), which this case leaves short of expiring. */
+void test_bug14_a_power_on_without_ntp_does_not_refund_the_day(void) {
+    store_names();
+    arm_rich_state(NOON);
+    store_ack(TODAY_ISO, 0x03, false);
+    timer_chore_set_acked(0x03);
+    timer_persist_save();
+    const int snaps = snap_writes();
+
+    /* Battery out and back: RTC memory AND the clock are gone. The boot
+       restore refuses today's snapshot on the date; the rollover's NTP
+       fails; the day is reset and dated by the unset clock. */
+    wipe_rtc();
+    model_boot(EPOCH_UP);
+    TEST_ASSERT_EQUAL_STRING("", timer_current_date());
+    TEST_ASSERT_TRUE(model_rollover(EPOCH_UP, EPOCH_UP));
+    TEST_ASSERT_EQUAL_STRING(EPOCH_ISO, timer_current_date());
+
+    /* The no-clock lock engages and sleeps: enter_deep_sleep() saves. */
+    timer_persist_save();
+    TEST_ASSERT_EQUAL_INT_MESSAGE(snaps, snap_writes(), "the unset-clock day overwrote today's snapshot");
+
+    /* A locked re-wake, NTP still failing. Deep sleep kept RTC memory, and
+       the stand-in day must survive it: not wiped by the guard, not
+       rolled over — either would add a rollover window to every locked
+       wake on top of the lock's own. */
+    model_boot(EPOCH_UP + 1800);
+    TEST_ASSERT_FALSE_MESSAGE(model_rollover(EPOCH_UP + 1800, EPOCH_UP + 1800), "a locked re-wake rolled the day over");
+    TEST_ASSERT_EQUAL_STRING(EPOCH_ISO, timer_current_date());
+    timer_persist_save();
+    TEST_ASSERT_EQUAL_INT(snaps, snap_writes());
+
+    /* The next locked re-wake: NTP lands in the lock's window. */
+    const time_t synced = NOON + 300;
+    model_boot(EPOCH_UP + 3600);
+    TEST_ASSERT_FALSE(model_rollover(EPOCH_UP + 3600, EPOCH_UP + 3600));
+    model_lock_release(synced);
+    TEST_ASSERT_EQUAL_STRING_MESSAGE(TODAY_ISO, timer_current_date(), "today's snapshot did not come back");
+
+    /* The day as it was saved... */
+    TEST_ASSERT_EQUAL_INT(SLOT_PIANO, timer_active_slot());
+    TEST_ASSERT_EQUAL_INT32(1234, g_rtc_state.slots[0].remaining_at_pause);
+    TEST_ASSERT_EQUAL_INT32(3600, g_rtc_state.slots[0].allocation_sec);
+    TEST_ASSERT_EQUAL_INT32(777, g_rtc_state.slots[0].run_accum_sec);
+    TEST_ASSERT_EQUAL_INT32(-333, g_rtc_state.slots[0].adjust_today_sec);
+    TEST_ASSERT_EQUAL_INT(TIMER_RUNNING, g_rtc_state.slots[SLOT_PIANO].state);
+    /* ...with today's acks from flash. */
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(0x03, timer_chore_acked(), "today's acks were not restored");
+    TEST_ASSERT_FALSE(timer_chore_released());
+
+    /* And the first save on the real day writes it again. */
+    timer_pause(synced + 10);
+    timer_persist_save();
+    TEST_ASSERT_EQUAL_INT(snaps + 1, snap_writes());
+}
+
+/* The same restore at the NEXT wake's boot call, for a clock that became
+   plausible some other way than the lock's window (the boot restore reads
+   the wall clock, which survives deep sleep): the stand-in day does not
+   count as intact, so today comes back before the gate even runs. */
+void test_bug14_the_boot_restore_replaces_a_placeholder_day(void) {
+    arm_rich_state(NOON);
+    timer_persist_save();
+
+    wipe_rtc();
+    model_boot(EPOCH_UP);
+    (void)model_rollover(EPOCH_UP, EPOCH_UP);
+    TEST_ASSERT_EQUAL_STRING(EPOCH_ISO, timer_current_date());
+
+    model_boot(NOON + 60);
+    TEST_ASSERT_EQUAL_STRING_MESSAGE(TODAY_ISO, timer_current_date(), "the boot restore left the stand-in day");
+    TEST_ASSERT_EQUAL_INT(SLOT_PIANO, timer_active_slot());
+}
+
+/* The same restore reached from the ROLLOVER rather than from the boot
+   call: offline long enough for the epoch clock to cross its own
+   midnight, so the rollover fires while the boot restore still saw 1970,
+   and the rollover's window is what corrects the clock. last_date is
+   the placeholder, not empty — the arrangement try_restore used to read
+   as "RTC intact" and refuse. */
+void test_bug14_the_rollover_restores_today_over_a_placeholder_day(void) {
+    arm_rich_state(NOON);
+    timer_persist_save();
+
+    wipe_rtc();
+    model_boot(EPOCH_UP);
+    (void)model_rollover(EPOCH_UP, EPOCH_UP);
+
+    const time_t next_epoch_day = EPOCH_UP + 86400;
+    model_boot(next_epoch_day);
+    TEST_ASSERT_EQUAL_STRING(EPOCH_ISO, timer_current_date()); /* boot restore: wrong day, placeholder kept */
+    TEST_ASSERT_TRUE(model_rollover(next_epoch_day, NOON + 60));
+    TEST_ASSERT_EQUAL_STRING_MESSAGE(TODAY_ISO, timer_current_date(), "the rollover reset instead of restoring");
+    TEST_ASSERT_EQUAL_INT(SLOT_PIANO, timer_active_slot());
+    TEST_ASSERT_EQUAL_INT32(1234, g_rtc_state.slots[0].remaining_at_pause);
+}
+
+/* The placeholder is cleared ONLY when today's snapshot will actually
+   replace it. With nothing restorable (here: yesterday's snapshot, and a
+   locked boot whose clock is still 1970) the restore must leave the
+   stand-in day exactly as it is. Clearing it first would hand every
+   locked re-wake an empty date, so a rollover and its window on top of
+   the lock's own window. The mode byte stands in for "untouched": the
+   one field a clear would visibly reset. */
+void test_bug14_a_placeholder_day_survives_a_restore_that_cannot_land(void) {
+    arm_rich_state(YESTERDAY_NOON);
+    timer_persist_save();
+
+    wipe_rtc();
+    model_boot(EPOCH_UP);
+    (void)model_rollover(EPOCH_UP, EPOCH_UP);
+    timer_set_mode(APP_MODE_CHORES);
+
+    TEST_ASSERT_FALSE(timer_persist_try_restore(EPOCH_UP + 1800)); /* locked boot */
+    TEST_ASSERT_FALSE(timer_persist_try_restore(NOON));            /* set clock, no snapshot for today */
+    TEST_ASSERT_EQUAL_STRING(EPOCH_ISO, timer_current_date());
+    TEST_ASSERT_EQUAL_INT(APP_MODE_CHORES, timer_mode());
+}
+
+/* The save guard itself, both sides. Refused on a day an unset clock
+   dated (both spellings) and on no day at all — neither can ever be
+   restored, so writing them could only destroy the stored day. */
+void test_bug14_the_snapshot_is_not_saved_on_an_unset_clock_day(void) {
+    arm_rich_state(NOON);
+    timer_persist_save();
+    const int snaps = snap_writes();
+
+    static const time_t unset[] = {EPOCH_UP, (time_t)(TIME_UTIL_CLOCK_FLOOR - 86400)};
+    for (size_t i = 0; i < sizeof unset / sizeof unset[0]; i++) {
+        timer_reset();
+        timer_record_date(unset[i]);
+        timer_start(unset[i], 1800);
+        timer_persist_save();
+        TEST_ASSERT_EQUAL_INT(snaps, snap_writes());
+    }
+    setenv("TZ", "EST5", 1); /* the epoch renders as 1969-12-31 here */
+    tzset();
+    timer_reset();
+    timer_record_date(EPOCH_UP);
+    TEST_ASSERT_EQUAL_STRING("1969-12-31", timer_current_date());
+    timer_persist_save();
+    TEST_ASSERT_EQUAL_INT(snaps, snap_writes());
+
+    timer_reset(); /* no day recorded */
+    timer_start(NOON, 1800);
+    timer_persist_save();
+    TEST_ASSERT_EQUAL_INT(snaps, snap_writes());
+
+    timer_snapshot_t stored;
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_load_timer_snapshot(&stored));
+    TEST_ASSERT_EQUAL_STRING(TODAY_ISO, stored.date);
+}
+
+void test_bug14_the_snapshot_is_saved_on_a_set_clock_day(void) {
+    timer_record_date(TIME_UTIL_CLOCK_FLOOR); /* the first plausible day */
+    timer_start(TIME_UTIL_CLOCK_FLOOR, 1800);
+    timer_persist_save();
+    TEST_ASSERT_EQUAL_INT(1, snap_writes());
+    timer_snapshot_t stored;
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_load_timer_snapshot(&stored));
+    TEST_ASSERT_EQUAL_STRING("2026-01-01", stored.date);
+}
+
+/* The day rollover's reset keeps the RTC image's identity. Without it the
+   next deep-sleep wake's guard zeroes the day, and on a placeholder day —
+   never saved — that is a fresh allocation on every offline wake. */
+void test_bug14_a_day_reset_leaves_the_rtc_image_stamped(void) {
+    arm_rich_state(NOON);
+    timer_reset();
+    timer_record_date(EPOCH_UP);
+    TEST_ASSERT_FALSE_MESSAGE(timer_rtc_state_guard(), "the guard threw away a day timer_reset() had just opened");
+    TEST_ASSERT_EQUAL_STRING(EPOCH_ISO, timer_current_date());
 }
 
 int main(void) {
@@ -851,5 +1571,31 @@ int main(void) {
     RUN_TEST(test_a_matching_magic_with_the_wrong_version_is_still_rejected);
     RUN_TEST(test_a_stamped_rtc_image_is_left_untouched);
     RUN_TEST(test_a_zeroed_rtc_image_comes_out_stamped);
+    RUN_TEST(test_the_rtc_state_version_is_bumped_past_the_pre_chore_layout);
+    RUN_TEST(test_a_pre_chore_rtc_image_is_rejected_rather_than_read);
+    RUN_TEST(test_the_nvs_snapshot_does_not_carry_the_chore_fields);
+    RUN_TEST(test_todays_acks_come_back_from_nvs_after_an_rtc_loss);
+    RUN_TEST(test_a_released_day_stays_released_across_an_rtc_loss);
+    RUN_TEST(test_acks_restore_with_no_date_in_rtc_at_all);
+    RUN_TEST(test_a_rollover_wake_does_not_resurrect_yesterdays_acks);
+    RUN_TEST(test_a_second_restore_lands_what_the_first_one_did);
+    RUN_TEST(test_a_matching_record_overwrites_rtc_acks_that_flash_never_saw);
+    RUN_TEST(test_restoring_acks_never_writes_flash);
+    RUN_TEST(test_a_stale_record_destroys_a_release_the_day_did_earn);
+    RUN_TEST(test_restoring_acks_with_no_record_leaves_the_rtc_alone);
+    RUN_TEST(test_a_restored_mask_from_a_longer_list_never_reads_as_an_ack);
+    RUN_TEST(test_a_list_edit_clears_restored_acks_but_keeps_the_release);
+    RUN_TEST(test_the_painted_mode_is_not_restored_from_flash);
+    RUN_TEST(test_a_restored_day_cannot_take_the_release_a_second_time);
+    RUN_TEST(test_the_first_ack_after_a_restart_builds_on_the_restored_mask);
+    RUN_TEST(test_an_ordinary_wake_does_not_read_the_chore_keys);
+    RUN_TEST(test_an_unreadable_names_blob_still_keeps_the_release_latched);
+    RUN_TEST(test_bug14_a_power_on_without_ntp_does_not_refund_the_day);
+    RUN_TEST(test_bug14_the_boot_restore_replaces_a_placeholder_day);
+    RUN_TEST(test_bug14_the_rollover_restores_today_over_a_placeholder_day);
+    RUN_TEST(test_bug14_a_placeholder_day_survives_a_restore_that_cannot_land);
+    RUN_TEST(test_bug14_the_snapshot_is_not_saved_on_an_unset_clock_day);
+    RUN_TEST(test_bug14_the_snapshot_is_saved_on_a_set_clock_day);
+    RUN_TEST(test_bug14_a_day_reset_leaves_the_rtc_image_stamped);
     return UNITY_END();
 }

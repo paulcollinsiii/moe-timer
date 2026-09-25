@@ -7,6 +7,7 @@
 // clang-format off
 #include "mock_hal_time.c"
 #include "mock_hal_nvs.c"
+#include "../../main/config_validate.c" /* the chore_free predicate the broken-pair mask judges with */
 #include "../../main/schedule.c"
 // clang-format on
 
@@ -278,6 +279,352 @@ void test_invalidate_rereads_holiday_blob(void) {
 }
 
 /* ------------------------------------------------------------------ */
+/* schedule_get_chore_free_sec — the chore gate's free slice            */
+/* ------------------------------------------------------------------ */
+
+/* Headroom on every day type, so the belt clamp cannot mask a mis-wired
+   key: with 1440 min allocated everywhere, a wrong answer below is a
+   wrong KEY and not a clamp that happened to land on the right number. */
+static void seed_roomy_allocations(void) {
+    hal_nvs_write_u16("weekday_min", 1440);
+    hal_nvs_write_u16("weekend_min", 1440);
+    hal_nvs_write_u16("holiday_min", 1440);
+    hal_nvs_write_u16("summer_min", 1440);
+}
+
+/* Four DISTINCT values, one per day type. The allocation lookup this
+   function mirrors resolves the day type through a four-arm switch, and a
+   copy-pasted arm that reads the weekday knob for the weekend is the
+   failure mode; distinct values turn that into a wrong number instead of
+   a coincidence. Key names are spelled literally here, as the allocation
+   tests above spell theirs, so the NVS wire names are pinned too — a
+   typo'd NVS_KEY_CHORE_FREE_* macro would read a key nothing wrote. */
+static void seed_distinct_chore_free(void) {
+    hal_nvs_write_u16("chore_free_wd", 10);
+    hal_nvs_write_u16("chore_free_we", 20);
+    hal_nvs_write_u16("chore_free_hol", 30);
+    hal_nvs_write_u16("chore_free_sum", 40);
+}
+
+void test_chore_free_weekday_reads_its_own_key(void) {
+    seed_roomy_allocations();
+    seed_distinct_chore_free();
+    TEST_ASSERT_EQUAL_UINT32(10u * 60u, schedule_get_chore_free_sec(DAY_WEEKDAY));
+}
+
+void test_chore_free_weekend_reads_its_own_key(void) {
+    seed_roomy_allocations();
+    seed_distinct_chore_free();
+    TEST_ASSERT_EQUAL_UINT32(20u * 60u, schedule_get_chore_free_sec(DAY_WEEKEND));
+}
+
+void test_chore_free_holiday_reads_its_own_key(void) {
+    seed_roomy_allocations();
+    seed_distinct_chore_free();
+    TEST_ASSERT_EQUAL_UINT32(30u * 60u, schedule_get_chore_free_sec(DAY_HOLIDAY));
+}
+
+void test_chore_free_summer_reads_its_own_key(void) {
+    seed_roomy_allocations();
+    seed_distinct_chore_free();
+    TEST_ASSERT_EQUAL_UINT32(40u * 60u, schedule_get_chore_free_sec(DAY_SUMMER));
+}
+
+void test_chore_free_converts_minutes_to_seconds(void) {
+    /* The keys are MINUTES like weekday_min; everything downstream
+       (chores_withheld_sec) is seconds. 30 -> 1800, not 30. */
+    seed_roomy_allocations();
+    hal_nvs_write_u16("chore_free_wd", 30);
+    TEST_ASSERT_EQUAL_UINT32(1800u, schedule_get_chore_free_sec(DAY_WEEKDAY));
+}
+
+void test_chore_free_absent_key_is_zero(void) {
+    /* The state of every device in the field: the chore_free_* keys are
+       deliberately not seeded (nvs_defaults.h), so they read as their
+       compile-time default of 0 — fully gated, and inert while no chore
+       is configured (design row C1). */
+    mock_nvs_reset();
+    TEST_ASSERT_EQUAL_UINT32(0u, schedule_get_chore_free_sec(DAY_WEEKDAY));
+    TEST_ASSERT_EQUAL_UINT32(0u, schedule_get_chore_free_sec(DAY_WEEKEND));
+    TEST_ASSERT_EQUAL_UINT32(0u, schedule_get_chore_free_sec(DAY_HOLIDAY));
+    TEST_ASSERT_EQUAL_UINT32(0u, schedule_get_chore_free_sec(DAY_SUMMER));
+}
+
+void test_chore_free_clamped_to_allocation(void) {
+    /* chore_free > allocation is a config error caught elsewhere; the
+       clamp here is the belt that keeps the arithmetic downstream from
+       underflowing into a ~136-year withholding. */
+    hal_nvs_write_u16("weekday_min", 60);
+    hal_nvs_write_u16("chore_free_wd", 90);
+    uint32_t alloc = schedule_get_allocation_sec(DAY_WEEKDAY);
+    uint32_t free_sec = schedule_get_chore_free_sec(DAY_WEEKDAY);
+    TEST_ASSERT_EQUAL_UINT32(60u * 60u, free_sec);
+    TEST_ASSERT_TRUE_MESSAGE(free_sec <= alloc, "clamp must never return more than the allocation");
+    TEST_ASSERT_EQUAL_UINT32(0u, alloc - free_sec);
+}
+
+void test_chore_free_equal_to_allocation_is_the_off_switch(void) {
+    /* One character from the clamp case above, and a different meaning:
+       chore_free == allocation withholds nothing, which is the
+       per-day-type off switch (design 3.3) and needs no extra key. */
+    hal_nvs_write_u16("weekend_min", 120);
+    hal_nvs_write_u16("chore_free_we", 120);
+    TEST_ASSERT_EQUAL_UINT32(120u * 60u, schedule_get_chore_free_sec(DAY_WEEKEND));
+}
+
+void test_chore_free_clamped_when_allocation_is_zero(void) {
+    /* A zero allocation is the worst case for the belt: every positive
+       chore_free is larger than it. */
+    hal_nvs_write_u16("weekday_min", 0);
+    hal_nvs_write_u16("chore_free_wd", 30);
+    TEST_ASSERT_EQUAL_UINT32(0u, schedule_get_chore_free_sec(DAY_WEEKDAY));
+}
+
+void test_chore_free_range_top_is_a_whole_day(void) {
+    /* 1440 min is the top of the configured range; 1440 * 60 = 86400
+       overflows a uint16_t, so the widening must happen before the
+       multiply. */
+    hal_nvs_write_u16("weekday_min", 1440);
+    hal_nvs_write_u16("chore_free_wd", 1440);
+    TEST_ASSERT_EQUAL_UINT32(86400u, schedule_get_chore_free_sec(DAY_WEEKDAY));
+}
+
+void test_chore_free_range_bottom_is_zero(void) {
+    seed_roomy_allocations();
+    hal_nvs_write_u16("chore_free_wd", 0);
+    TEST_ASSERT_EQUAL_UINT32(0u, schedule_get_chore_free_sec(DAY_WEEKDAY));
+}
+
+void test_chore_free_reads_key_once_per_wake(void) {
+    seed_roomy_allocations();
+    seed_distinct_chore_free();
+    for (int i = 0; i < 5; i++) {
+        TEST_ASSERT_EQUAL_UINT32(10u * 60u, schedule_get_chore_free_sec(DAY_WEEKDAY));
+    }
+    TEST_ASSERT_EQUAL_INT(1, mock_nvs_read_count("chore_free_wd"));
+}
+
+/* ---- the raw pair, for the config-error gate (design 5.3) --------------
+
+   The seconds accessor above CLAMPS, which is exactly right for every
+   consumer that does arithmetic with it and exactly wrong for the one
+   caller whose whole job is to notice the fault. A gate built on
+   schedule_get_chore_free_sec() would find every pair valid, for ever,
+   and the blocking screen would never paint — so this accessor exists to
+   hand back what is STORED, in the unit config is stored in. */
+void test_the_raw_pair_is_minutes_and_is_not_clamped(void) {
+    hal_nvs_write_u16("weekday_min", 60);
+    hal_nvs_write_u16("chore_free_wd", 90);
+
+    uint16_t free_min = 0;
+    uint16_t alloc_min = 0;
+    schedule_get_chore_free_pair_min(DAY_WEEKDAY, &free_min, &alloc_min);
+
+    /* MINUTES, not seconds: 90 and 60, never 5400 and 3600. The predicate
+       that judges these (config_is_valid_chore_free_min) takes uint16_t,
+       so a seconds value would truncate silently and invert the answer —
+       config_validate.h works the arithmetic. */
+    TEST_ASSERT_EQUAL_UINT16(90, free_min);
+    TEST_ASSERT_EQUAL_UINT16(60, alloc_min);
+    /* And the clamped view of the same pair, side by side, so the two
+       cannot quietly become the same function. */
+    TEST_ASSERT_EQUAL_UINT32(60u * 60u, schedule_get_chore_free_sec(DAY_WEEKDAY));
+}
+
+void test_the_raw_pair_uses_each_day_types_own_keys(void) {
+    hal_nvs_write_u16("weekday_min", 11);
+    hal_nvs_write_u16("weekend_min", 22);
+    hal_nvs_write_u16("holiday_min", 33);
+    hal_nvs_write_u16("summer_min", 44);
+    hal_nvs_write_u16("chore_free_wd", 1);
+    hal_nvs_write_u16("chore_free_we", 2);
+    hal_nvs_write_u16("chore_free_hol", 3);
+    hal_nvs_write_u16("chore_free_sum", 4);
+
+    const day_type_t days[] = {DAY_WEEKDAY, DAY_WEEKEND, DAY_HOLIDAY, DAY_SUMMER};
+    const uint16_t want_free[] = {1, 2, 3, 4};
+    const uint16_t want_alloc[] = {11, 22, 33, 44};
+    for (size_t i = 0; i < sizeof days / sizeof days[0]; i++) {
+        uint16_t free_min = 0;
+        uint16_t alloc_min = 0;
+        schedule_get_chore_free_pair_min(days[i], &free_min, &alloc_min);
+        TEST_ASSERT_EQUAL_UINT16(want_free[i], free_min);
+        TEST_ASSERT_EQUAL_UINT16(want_alloc[i], alloc_min);
+    }
+}
+
+/* Absent is the NORMAL state for the chore_free_* keys — they are
+   deliberately outside the seeded-defaults registry — so the gate must
+   see the compile-time default rather than garbage, and 0 against any
+   allocation is valid. A gate that read uninitialised stack here would
+   lock devices at random. */
+void test_the_raw_pair_falls_back_to_the_same_defaults(void) {
+    uint16_t free_min = 0xAAAA;
+    uint16_t alloc_min = 0xAAAA;
+    schedule_get_chore_free_pair_min(DAY_WEEKDAY, &free_min, &alloc_min);
+    TEST_ASSERT_EQUAL_UINT16(NVS_DEFAULT_CHORE_FREE_WD, free_min);
+    TEST_ASSERT_EQUAL_UINT16(NVS_DEFAULT_WEEKDAY_MIN, alloc_min);
+}
+
+/* One cache, so the fix an HA edit lands mid-wake is visible to the gate
+   the moment the orchestrator invalidates — and so the gate costs no
+   extra flash reads on the wakes where nothing is wrong. */
+void test_the_raw_pair_shares_the_wake_cache_with_the_seconds_accessors(void) {
+    seed_roomy_allocations();
+    hal_nvs_write_u16("chore_free_wd", 10);
+
+    uint16_t free_min = 0;
+    uint16_t alloc_min = 0;
+    for (int i = 0; i < 5; i++) {
+        schedule_get_chore_free_pair_min(DAY_WEEKDAY, &free_min, &alloc_min);
+    }
+    TEST_ASSERT_EQUAL_UINT16(10, free_min);
+    TEST_ASSERT_EQUAL_INT(1, mock_nvs_read_count("chore_free_wd"));
+
+    hal_nvs_write_u16("chore_free_wd", 20);
+    schedule_get_chore_free_pair_min(DAY_WEEKDAY, &free_min, &alloc_min);
+    TEST_ASSERT_EQUAL_UINT16_MESSAGE(10, free_min, "an NVS edit alone moved a wake-scoped read");
+
+    schedule_cache_invalidate();
+    schedule_get_chore_free_pair_min(DAY_WEEKDAY, &free_min, &alloc_min);
+    TEST_ASSERT_EQUAL_UINT16_MESSAGE(20, free_min, "the gate cannot see a fix that landed in the network window");
+}
+
+void test_chore_free_invalidate_forces_reread(void) {
+    seed_roomy_allocations();
+    hal_nvs_write_u16("chore_free_wd", 10);
+    TEST_ASSERT_EQUAL_UINT32(10u * 60u, schedule_get_chore_free_sec(DAY_WEEKDAY));
+    hal_nvs_write_u16("chore_free_wd", 20);
+    /* Cached for the wake: an NVS edit alone must not move it... */
+    TEST_ASSERT_EQUAL_UINT32(10u * 60u, schedule_get_chore_free_sec(DAY_WEEKDAY));
+    /* ...until the orchestrator invalidates after the network window. A
+       new cache field that schedule_cache_invalidate() forgets to clear
+       is exactly what this catches. */
+    schedule_cache_invalidate();
+    TEST_ASSERT_EQUAL_UINT32(20u * 60u, schedule_get_chore_free_sec(DAY_WEEKDAY));
+    TEST_ASSERT_EQUAL_INT(2, mock_nvs_read_count("chore_free_wd"));
+}
+
+/* ---- the broken-pair mask, for the stat payload's config warning -------
+   (M2-D6). Every day type, judged on the RAW pair with the predicate the
+   config-error lock uses, so a bit is set exactly when that day would
+   lock. */
+
+static const day_type_t ALL_DAYS[] = {DAY_WEEKDAY, DAY_WEEKEND, DAY_HOLIDAY, DAY_SUMMER};
+static const char *const ALL_FREE_KEYS[] = {"chore_free_wd", "chore_free_we", "chore_free_hol", "chore_free_sum"};
+
+/* The state of every device in the field: nothing configured, nothing
+   broken. A warning here would be on every device. */
+void test_broken_mask_is_clear_on_an_unconfigured_device(void) {
+    mock_nvs_reset();
+    TEST_ASSERT_EQUAL_UINT8(0, schedule_chore_free_broken_mask());
+}
+
+void test_broken_mask_is_clear_when_every_pair_is_valid(void) {
+    seed_roomy_allocations();
+    seed_distinct_chore_free();
+    TEST_ASSERT_EQUAL_UINT8(0, schedule_chore_free_broken_mask());
+}
+
+/* Each day type on its own, so a check that skips one — or reads one day
+   type's pair under another's bit — sets the wrong bit or none. */
+void test_broken_mask_names_each_day_type_on_its_own(void) {
+    for (size_t i = 0; i < sizeof(ALL_DAYS) / sizeof(ALL_DAYS[0]); i++) {
+        mock_nvs_reset();
+        schedule_cache_invalidate();
+        seed_roomy_allocations(); /* 1440 everywhere */
+        hal_nvs_write_u16("weekday_min", 100);
+        hal_nvs_write_u16("weekend_min", 100);
+        hal_nvs_write_u16("holiday_min", 100);
+        hal_nvs_write_u16("summer_min", 100);
+        hal_nvs_write_u16(ALL_FREE_KEYS[i], 101);
+        TEST_ASSERT_EQUAL_UINT8_MESSAGE((uint8_t)(1u << ALL_DAYS[i]), schedule_chore_free_broken_mask(),
+                                        ALL_FREE_KEYS[i]);
+    }
+}
+
+void test_broken_mask_names_every_broken_day_type_at_once(void) {
+    hal_nvs_write_u16("weekday_min", 60);
+    hal_nvs_write_u16("weekend_min", 60);
+    hal_nvs_write_u16("holiday_min", 60);
+    hal_nvs_write_u16("summer_min", 60);
+    hal_nvs_write_u16("chore_free_wd", 61);
+    hal_nvs_write_u16("chore_free_sum", 900);
+    TEST_ASSERT_EQUAL_UINT8((1u << DAY_WEEKDAY) | (1u << DAY_SUMMER), schedule_chore_free_broken_mask());
+
+    hal_nvs_write_u16("chore_free_we", 61);
+    hal_nvs_write_u16("chore_free_hol", 61);
+    schedule_cache_invalidate();
+    TEST_ASSERT_EQUAL_UINT8(0x0F, schedule_chore_free_broken_mask());
+}
+
+/* THE reason the mask exists as its own function rather than a loop over
+   the seconds accessor: that accessor clamps, and after the clamp this
+   pair is 60/60 — valid. A check built on it would find every device
+   healthy for ever. */
+void test_broken_mask_reads_the_raw_pair_not_the_clamped_one(void) {
+    hal_nvs_write_u16("weekday_min", 60);
+    hal_nvs_write_u16("chore_free_wd", 90);
+    TEST_ASSERT_EQUAL_UINT32(schedule_get_allocation_sec(DAY_WEEKDAY), schedule_get_chore_free_sec(DAY_WEEKDAY));
+    TEST_ASSERT_EQUAL_UINT8(1u << DAY_WEEKDAY, schedule_chore_free_broken_mask());
+}
+
+/* One character from broken, and valid: chore_free == allocation is the
+   per-day-type off switch. And a zero allocation under any positive free
+   slice is the worst case the clamp hides. */
+void test_broken_mask_equal_is_valid_and_zero_allocation_is_not(void) {
+    hal_nvs_write_u16("weekend_min", 120);
+    hal_nvs_write_u16("chore_free_we", 120);
+    TEST_ASSERT_EQUAL_UINT8(0, schedule_chore_free_broken_mask());
+    hal_nvs_write_u16("holiday_min", 0);
+    hal_nvs_write_u16("chore_free_hol", 1);
+    schedule_cache_invalidate();
+    TEST_ASSERT_EQUAL_UINT8(1u << DAY_HOLIDAY, schedule_chore_free_broken_mask());
+}
+
+/* The mask agrees with the gate's own reader, pair for pair — the claim
+   the header makes, that a bit is set exactly when that day would lock. */
+void test_broken_mask_agrees_with_the_raw_pair_reader(void) {
+    hal_nvs_write_u16("weekday_min", 10);
+    hal_nvs_write_u16("weekend_min", 20);
+    hal_nvs_write_u16("holiday_min", 30);
+    hal_nvs_write_u16("summer_min", 40);
+    hal_nvs_write_u16("chore_free_wd", 10);  /* equal: valid */
+    hal_nvs_write_u16("chore_free_we", 21);  /* broken */
+    hal_nvs_write_u16("chore_free_hol", 0);  /* valid */
+    hal_nvs_write_u16("chore_free_sum", 41); /* broken */
+    const uint8_t mask = schedule_chore_free_broken_mask();
+    for (size_t i = 0; i < sizeof(ALL_DAYS) / sizeof(ALL_DAYS[0]); i++) {
+        uint16_t free_min = 0;
+        uint16_t alloc_min = 0;
+        schedule_get_chore_free_pair_min(ALL_DAYS[i], &free_min, &alloc_min);
+        TEST_ASSERT_EQUAL_MESSAGE(!config_is_valid_chore_free_min(free_min, alloc_min), (mask >> ALL_DAYS[i]) & 1u,
+                                  ALL_FREE_KEYS[i]);
+    }
+    TEST_ASSERT_EQUAL_UINT8((1u << DAY_WEEKEND) | (1u << DAY_SUMMER), mask);
+}
+
+/* Same wake cache as the gate: a fix that lands in the network window is
+   seen the moment the orchestrator invalidates, and not before. */
+void test_broken_mask_clears_when_the_fix_is_seen(void) {
+    hal_nvs_write_u16("summer_min", 60);
+    hal_nvs_write_u16("chore_free_sum", 61);
+    TEST_ASSERT_EQUAL_UINT8(1u << DAY_SUMMER, schedule_chore_free_broken_mask());
+    hal_nvs_write_u16("chore_free_sum", 60);
+    TEST_ASSERT_EQUAL_UINT8(1u << DAY_SUMMER, schedule_chore_free_broken_mask()); /* wake-scoped */
+    schedule_cache_invalidate();
+    TEST_ASSERT_EQUAL_UINT8(0, schedule_chore_free_broken_mask());
+}
+
+void test_day_type_names_are_the_ones_ha_already_shows(void) {
+    TEST_ASSERT_EQUAL_STRING("Weekday", schedule_day_type_name(DAY_WEEKDAY));
+    TEST_ASSERT_EQUAL_STRING("Weekend", schedule_day_type_name(DAY_WEEKEND));
+    TEST_ASSERT_EQUAL_STRING("Holiday", schedule_day_type_name(DAY_HOLIDAY));
+    TEST_ASSERT_EQUAL_STRING("Summer", schedule_day_type_name(DAY_SUMMER));
+    TEST_ASSERT_EQUAL_STRING("Weekday", schedule_day_type_name((day_type_t)99)); /* out of range */
+}
+
+/* ------------------------------------------------------------------ */
 /* Runner                                                               */
 /* ------------------------------------------------------------------ */
 
@@ -316,5 +663,31 @@ int main(void) {
     RUN_TEST(test_allocation_reads_key_once_per_day_type);
     RUN_TEST(test_invalidate_forces_reread);
     RUN_TEST(test_invalidate_rereads_holiday_blob);
+    RUN_TEST(test_chore_free_weekday_reads_its_own_key);
+    RUN_TEST(test_chore_free_weekend_reads_its_own_key);
+    RUN_TEST(test_chore_free_holiday_reads_its_own_key);
+    RUN_TEST(test_chore_free_summer_reads_its_own_key);
+    RUN_TEST(test_chore_free_converts_minutes_to_seconds);
+    RUN_TEST(test_chore_free_absent_key_is_zero);
+    RUN_TEST(test_chore_free_clamped_to_allocation);
+    RUN_TEST(test_chore_free_equal_to_allocation_is_the_off_switch);
+    RUN_TEST(test_chore_free_clamped_when_allocation_is_zero);
+    RUN_TEST(test_chore_free_range_top_is_a_whole_day);
+    RUN_TEST(test_chore_free_range_bottom_is_zero);
+    RUN_TEST(test_chore_free_reads_key_once_per_wake);
+    RUN_TEST(test_chore_free_invalidate_forces_reread);
+    RUN_TEST(test_the_raw_pair_is_minutes_and_is_not_clamped);
+    RUN_TEST(test_the_raw_pair_uses_each_day_types_own_keys);
+    RUN_TEST(test_the_raw_pair_falls_back_to_the_same_defaults);
+    RUN_TEST(test_the_raw_pair_shares_the_wake_cache_with_the_seconds_accessors);
+    RUN_TEST(test_broken_mask_is_clear_on_an_unconfigured_device);
+    RUN_TEST(test_broken_mask_is_clear_when_every_pair_is_valid);
+    RUN_TEST(test_broken_mask_names_each_day_type_on_its_own);
+    RUN_TEST(test_broken_mask_names_every_broken_day_type_at_once);
+    RUN_TEST(test_broken_mask_reads_the_raw_pair_not_the_clamped_one);
+    RUN_TEST(test_broken_mask_equal_is_valid_and_zero_allocation_is_not);
+    RUN_TEST(test_broken_mask_agrees_with_the_raw_pair_reader);
+    RUN_TEST(test_broken_mask_clears_when_the_fix_is_seen);
+    RUN_TEST(test_day_type_names_are_the_ones_ha_already_shows);
     return UNITY_END();
 }

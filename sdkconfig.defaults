@@ -100,10 +100,11 @@ CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
 #
 # Do not generalise that into a rule. Precedence between sdkconfig and
 # sdkconfig.defaults is symbol-dependent, and the mechanism deciding it was
-# not identified. In the same measured run CONFIG_MAGTAG_PARENT_TESTING went
-# the other way twice: sdkconfig won over defaults in both directions, while
-# this symbol had defaults win. Measure the symbol you care about rather than
-# assuming either way, without touching the real config:
+# not identified. In the same measured run CONFIG_MAGTAG_PARENT_TESTING (a
+# project symbol that has since been removed) went the other way twice:
+# sdkconfig won over defaults in both directions, while this symbol had
+# defaults win. Measure the symbol you care about rather than assuming
+# either way, without touching the real config:
 #   cp sdkconfig /tmp/sdkconfig.probe
 #   idf.py -B /tmp/build.probe -D SDKCONFIG=/tmp/sdkconfig.probe reconfigure
 #
@@ -111,17 +112,14 @@ CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
 # this symbol, the newly-visible CONFIG_BOOTLOADER_APP_ANTI_ROLLBACK at n,
 # and the two deprecated aliases CONFIG_APP_ROLLBACK_ENABLE and
 # CONFIG_APP_ANTI_ROLLBACK. Verified by diffing the regenerated file: no MQTT
-# credential, timer name or PARENT_TESTING line changes.
+# credential or timer name line changes (the same diff also covered the
+# then-live PARENT_TESTING line, since removed).
 CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
 
 # MagTag 2025 revision carries 2 MB PSRAM; auto-detect, and keep booting
 # on older PSRAM-less boards instead of aborting.
 CONFIG_SPIRAM=y
 CONFIG_SPIRAM_IGNORE_NOTFOUND=y
-
-# Button B manual reset enabled (parent-testing build). Set =n for a
-# production build where only day rollover refills the allocation.
-CONFIG_MAGTAG_PARENT_TESTING=y
 
 # Daily screen-time allocations (minutes). Seed NVS; changing any of
 # these (menuconfig or here) re-seeds NVS on the next boot automatically

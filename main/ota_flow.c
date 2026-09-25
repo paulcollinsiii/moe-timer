@@ -103,8 +103,12 @@ static bool record(ota_reason_t reason, int http_status) {
 
        note_rollback_if_reverted() runs from ota_flow_init(), well before
        app_main opens the network window. That window then runs
-       ota_flow_check() and publishes, in that order (net_window.c:107,
-       :109) — so without this guard ANY persistable check reason lands on
+       ota_flow_check() and publishes, in that order — net_window_task
+       calls ota_flow_check() and then mqtt_ha_window() two statements
+       later, on consecutive lines of the same wifi_up block. (Named
+       rather than numbered: the ":107, :109" that stood here pointed at
+       net_window.c's own comment block by the time anyone looked.) So
+       without this guard ANY persistable check reason lands on
        top of the rollback in the seconds before the payload is built.
        And the token that proved the revert was consumed at detection, so
        no later wake can say it again: the report is not delayed, it is
@@ -357,9 +361,13 @@ void ota_flow_arm(ota_trigger_t trigger, int batt_pct, bool charge_locked) {
        That is not a corner case. Two network sessions in one wake is the
        ordinary path, not the exotic one — wifi_session.c:95 names "day
        rollover + mandatory start sync" as the routine example, and
-       net_apply_open() has two call sites (wake_flow.c:349, :1068). The
+       net_apply_open() has two call sites in wake_flow.c: Button B's
+       start/resume leg inside the shared dispatch, and the Button D sync
+       leg in the EXT1 decode. (Named rather than numbered — the line
+       numbers that stood here, ":349" and ":1068", were already several
+       hundred lines out and landed in the middle of comment blocks.) The
        rollover window finds 1.6.0 and buffers it, the operator presses
-       Button A, the second window arms with a trigger that does not
+       Button B, the second window arms with a trigger that does not
        check, and the update vanishes silently until tomorrow.
 
        This used to clear unconditionally, justified by keeping a buffer
@@ -689,8 +697,9 @@ void ota_flow_apply(int batt_pct, bool charge_locked) {
        PAINT FIRST, with the radio down. display_ota() carries no
        net_window_active() guard and its flush blocks for a full refresh;
        painting inside an open window is the panel-current-plus-TX-burst
-       combination that browned out the rail in on-device testing
-       (net_window.c:65-79).
+       combination that browned out the rail in on-device testing (the
+       snapshot rendezvous in net_window_task states it; the ":65-79" that
+       stood here now lands in the NTP block above it).
 
        EXTEND SECOND, before the window and after the paint. Before,
        because an extension applied once a download "looks slow" races
@@ -958,6 +967,12 @@ void ota_flow_apply(int batt_pct, bool charge_locked) {
        already run by this point, so the blob carries TODAY'S date. The
        post-OTA boot restores it cleanly and timer_is_new_day() answers
        false — no second rollover, and no lost completions or pause.
+       (The one day it declines to write is a provisional one an unset
+       clock dated — BUG-14. Unreachable today: an update needs a clock
+       NTP set this session, and the no-clock lock ends every provisional
+       wake before this tail. Were it reached, the post-OTA boot would
+       restore the last real snapshot if it is today's, and otherwise
+       roll a fresh day, as the first synced wake would anyway.)
 
        Safe from this task for the same reason .repaint is: the main task
        is blocked in ota_task_run_apply's join and the network window was

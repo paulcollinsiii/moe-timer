@@ -19,27 +19,71 @@ credentials.**
 3. [ ] **55 s tick**: device deep-sleeps, wakes ~55 s later, partial refresh
        (no black/white flash).
 4. [ ] **Anti-ghosting**: every 5th wake does a full refresh (visible flash).
-5. [ ] **Button A (start)**: timer starts immediately (state pixel WHITE ->
+5. [ ] **Button B (start)**: timer starts immediately (state pixel WHITE ->
        GREEN after ~250 ms), then WiFi joins and SNTP syncs (WiFi pixel blue);
        header shows sync time, bar full, state `RUNNING`. With bad WiFi creds:
        timer still starts (fail-open), WiFi pixel blinks red 3x, remaining
        time counts down on the uncorrected clock.
 6. [ ] **Countdown**: remaining decreases ~55 s per wake, shown as
        `HH:MM:SS`.
-7. [ ] **Button A (pause/resume)**: pause shows `PAUSED`, remaining freezes
+7. [ ] **Button B (pause/resume)**: pause shows `PAUSED`, remaining freezes
        across wakes; resume is immediate (AMBER -> GREEN after ~250 ms, sync
        after) and continues from the frozen value.
-8. [ ] **Button B (reset)**: with the timer PAUSED (or expired), returns to
-       IDLE with today's full allocation. While RUNNING, B is dropped from
-       the wake mask — pressing it does nothing (no wake, no refresh).
-9. [ ] **Button D (force sync)**: WiFi cycle + full refresh; sync time updates.
-10. [ ] **Button C**: with no extra timers configured (the default), does
-        nothing at all — not a wake source (kept out of the EXT1 mask so
-        mashing it cannot burn battery or refreshes). With an extra timer
+8. [ ] **Button A (Timers/Chores mode toggle)**: A switches which screen is
+       painted. It is a **conditional** wake source — armed only when the
+       press would be honoured, which needs BOTH no RUNNING timer on the
+       active slot AND a configured chore list. With no chore list (the
+       shipped default, and the state of a device that has never had one
+       pushed from Home Assistant) A does nothing at all: no wake, no
+       refresh, no panel change. Test that **from sleep**, with the timer
+       IDLE, then press B from the same state as a positive control — the
+       device must wake and start the timer. Without that control,
+       "nothing happened" is indistinguishable from a dead switch or an
+       unpopulated pad.
+       With a chore list configured and no timer running, a press from
+       sleep **wakes the device and repaints the panel as the chore
+       checklist** (M2-T4 landed the painter): header `CHORES` top left,
+       `n of N` top right, one row per configured chore, and a bottom
+       button row reading `Timers` under A and `OK 1` / `OK 2` / `OK 3`
+       under B/C/D for as many rows as are configured. A second press
+       goes back to the timer screen. Both transitions are **full**
+       refreshes, so expect the ~3 s flash, not a partial. The log names
+       the mode it selected each time: `button A: painting the chore
+       checklist`, then `button A: back to the timer screen`.
+       Check the glass AND the log — they are independent failures. A log
+       pair that alternates with an unchanged panel is a painter or
+       refresh-policy bug; a panel that changes with no log line means the
+       press took some other path.
+       While a timer is RUNNING, A is dropped from the wake mask entirely
+       — pause with B first. A checklist is never painted over a RUNNING
+       timer even if the stored mode says chores; the timer screen wins
+       (`display_screen_for`), and the stored mode is deliberately not
+       reverted to match.
+       One thing that is **not** a failure: A silences a sounding alarm,
+       because dismissal deliberately takes any button (cases 11, 15, 24),
+       so never test A against TIME'S UP or a break alarm.
+9. [ ] **Button D (force sync)**: WiFi cycle + full refresh; sync time
+       updates. **Timer mode only.** On the chore checklist D is the third
+       checkbox and does no syncing at all — see case 25a — so run this
+       one from the timer screen, which on a device with no chore list is
+       every state there is.
+10. [ ] **Button C**: with no extra timers configured (the default) and
+        **outside chore mode**, does nothing at all — not a wake source
+        (kept out of the EXT1 mask so mashing it cannot burn battery or
+        refreshes). With an extra timer
         configured (`MAGTAG_TIMER1_NAME` etc.), swaps the selected timer.
-        While a timer is RUNNING or in a Screen Break, C is dropped from
-        the wake mask entirely — pressing it does nothing (no wake, no
-        refresh) until the timer is paused.
+        C IS a wake source on the chore checklist even with no extras
+        configured, and that is not a regression of the rule above: in
+        chore mode C is the middle checkbox, and the EXT1 mask ORs the
+        two reasons (`swap_allowed || chore_ack_allowed`) precisely so a
+        device with no extra timers gets a working `OK 2` instead of a
+        dead one. It needs at least **two** configured chores — with one,
+        row 2 does not exist, C is refused, and it is not armed either.
+        While a timer is RUNNING, C is dropped from the wake mask entirely
+        — pressing it does nothing (no wake, no refresh) until the timer is
+        paused. A Screen Break does **not** refuse: `timer_swap_allowed()`
+        gates on RUNNING alone, so C stays a wake source right through a
+        break, which is what makes going and doing Piano possible.
 11. [ ] **Expiry**: temporarily lower `NVS_DEFAULT_WEEKDAY_MIN` to 1-2 min (and
         erase NVS: `idf.py erase-flash`), let it expire: TIME'S UP screen,
         3 beeps x 5 cycles, red NeoPixel pulse; any button stops the alert
@@ -51,11 +95,20 @@ credentials.**
         snapshot exists (`python -m esptool --chip esp32s2 erase-region
         0x9000 0x6000`) or wait past midnight: wake re-syncs and resets to
         IDLE with the new day's allocation.
-13. [ ] **Wake buttons**: A and D always wake the device. B and C wake only
-        when their press would succeed (the EXT1 mask is rebuilt at every
-        sleep entry): B needs a reloadable selected timer or
-        `CONFIG_MAGTAG_PARENT_TESTING=y`, and never wakes mid-run (case 8);
-        C needs extra timers configured and no RUNNING/BREAK (case 10).
+13. [ ] **Wake buttons**: B and D always wake the device. C wakes when
+        **either** of its two reasons holds (the EXT1 mask is rebuilt at
+        every sleep entry, and the two are ORed): a swap would succeed —
+        extra timers configured and no RUNNING, a break does not refuse it
+        (case 10) — **or** it would tick a chore, which means the stored
+        mode is CHORES and at least two chores are configured. Neither
+        implies the other, so test both legs: C on a no-extras device from
+        the checklist (wakes), and C on the timer screen of that same
+        device (does not). **A wakes only when its toggle would be
+        honoured** — no RUNNING timer AND a configured chore list (case 8);
+        on a device with no chore list it never wakes at all. Check A with
+        every other gate open (IDLE, chores configured) so a pass cannot be
+        an accident of some other refusal, and confirm B still wakes from
+        the same state as a control.
 14. [ ] **Panel protection**: mash buttons rapidly — refreshes serialize, log
         shows `refresh rejected` if under 1 s apart, no crash.
 15. [ ] **Held-button dismissal**: dismiss the expiry alert while *holding*
@@ -76,21 +129,47 @@ credentials.**
         or power-cycle. On the next boot (after the boot sync corrects the
         clock, for power-on) the log shows `Timer state restored from NVS
         snapshot` and the countdown continues — the allocation is NOT
-        refunded. Refunding requires Button B (parent mode, case 20) or a
-        genuine day rollover. With WiFi unavailable on a power-on the
-        restore cannot validate (no clock) and the device fails open to
-        IDLE. Note: EN reset mid-run (before expiry) intentionally restores
-        the in-flight countdown — that is crash recovery, not a refund; the
-        run resumes with the remaining time it had.
-20. [ ] **Production reset gate**: with `CONFIG_MAGTAG_PARENT_TESTING=n`,
-        Button B logs `Button B reset disabled` and does not reset; the
-        allocation resets only on day rollover. (Default build: =y, B resets.)
+        refunded. Refunding the Screen allocation requires a genuine day
+        rollover — Button B reloads only a reloadable extra (case 20). With
+        WiFi unavailable on a power-on the restore cannot validate (no
+        clock), so the device locks (BUG-14): the panel shows the No Clock
+        screen (`Time not synced - check WiFi`, `Press D to retry`), the
+        log shows `No-clock lock engaged` and a `config/no-clock lock`
+        sleep, no timer can start, and only Button D wakes it. It retries
+        every 30 min, or at once on a D press, for as long as NTP fails.
+        Bring WiFi back and press D: the log shows `No-clock lock
+        released` and `Timer state restored from NVS snapshot`, and the
+        allocation used before the power cut is still used. The timer that
+        was RUNNING is NOT frozen: it kept counting down in wall-clock time
+        through the outage and the lock, so it shows less time left, or
+        comes back expired if the lock outlasted it (a release on a later
+        day starts fresh). HA shows the `state` sensor as `NO_CLOCK` for
+        any stat published while locked, and gets no daily summary for the
+        1970 stand-in day. A grant sent from HA while locked stays pending
+        (no ack) and lands on the restored day in the releasing window.
+        Note: EN reset mid-run
+        (before expiry) intentionally restores the in-flight countdown —
+        that is crash recovery, not a refund; the run resumes with the
+        remaining time it had.
+20. [ ] **Screen reset gate**: Screen carries no def, so it is never
+        reloadable — Button B can never reset it, and the Screen
+        allocation resets only on a genuine day rollover. To observe the
+        refusal, run the allocation down to zero so Screen is EXPIRED and
+        still selected, then press B: it is an unconditional wake source, so
+        an ordinary press wakes the device and logs
+        `button B unavailable (state 3)` with nothing reset. Swap to a
+        reloadable extra that is EXPIRED and the same press reloads that
+        timer to full instead.
+        Press and release normally — do not hold B down. A button already
+        held emits no negative edge, and `enter_deep_sleep` waits up to 3 s
+        for release before the next wake logs
+        `still held from previous wake - ignoring`.
 21. [ ] **Final-minute countdown**: the pre-expiry wake lands ~70 s out
         (planner); the display then steps through 00:01:00 / 00:00:45 /
         00:00:30 / 00:00:15 as partial refreshes, the last 15 s count down
         on the four pixels in binary (light green, dim; dark during quiet
         hours), and TIME'S UP + red pulse + beeps fire within ~1 s of the
-        expiry wall time. Pressing A anywhere in the final minute pauses
+        expiry wall time. Pressing B anywhere in the final minute pauses
         instead (PAUSED full refresh, no alarm) — presses are ISR-latched,
         so even a quick tap DURING one of the quarter-mark partial
         refreshes registers and pauses as soon as the flush completes;
@@ -110,12 +189,44 @@ credentials.**
         break alarm fires: 2-beep pattern + pulsing cyan NeoPixels (alert-
         class — fires during quiet hours too); any button silences it.
         Break start may lag the interval by up to one 55 s tick.
-25. [ ] **Break is enforced**: during the break, Button A logs
-        `button A ignored during screen break` and nothing resumes. B
-        (parent mode) still resets; D still syncs.
+25. [ ] **Break is enforced**: during the break, Button B logs
+        `button B ignored during screen break` and nothing resumes — B is
+        also unlabelled on the panel for that reason. A resumes nothing
+        either — it only chooses which screen is painted — but a BREAK is
+        not RUNNING, so with a chore list configured A stays live right
+        through the break, which is the point of having it. **The panel
+        really does swap**: the press replaces the inverted SCREEN BREAK
+        screen with the `CHORES` checklist (a full refresh — the screen
+        kind changed), and the next press puts the break screen back. The
+        log reads `button A: painting the chore checklist` then `button A:
+        back to the timer screen`. Check both the glass and the log.
+        With no chore list A is refused and produces no wake.
+        **D does NOT sync here if the mode says chores** — see case 25a.
+        In timer mode during a break, D syncs as usual. (If
+        the break alarm is still sounding, any button silences it, A
+        included — let it finish first.)
+25a. [ ] **The checklist works during a break (design §2.6)**: this is the
+        window the feature exists for, so test it here and not only from
+        IDLE. With 3 chores configured, press A during a break to reach the
+        checklist, then press B, C and D in turn. Each logs `chore ack N
+        applied` (N = 0, 1, 2) and ticks its row — `OK` appears beside the
+        name and the header count advances `0 of 3` → `3 of 3`. Each ack is
+        a **partial** refresh (~1 s), including D: D is checkbox 3 here and
+        must NOT cycle WiFi, must NOT log an OTA check, and must NOT spend
+        a full refresh. A D that flashes the whole panel and syncs is the
+        binding not being applied. The last ack adds `Screen time
+        unlocked`.
+        Press each button **twice** to confirm acks toggle back off, and
+        try a row that is not configured — with only 2 chores, D logs
+        `chore ack 2 refused`, ticks nothing, and still does not sync.
+        Repeat one ack **while the device is already awake** (press during
+        the ~3 s panel flush of the previous one): a press caught by the
+        latch is honoured at the end of the wake, and that includes D.
+        Before M2-T4b, checkboxes 1 and 2 worked from the latch and 3 was
+        silently dropped, so D is the one to press here.
 26. [ ] **Break end**: at the end of the break (within ~1 s), double-beep
         chime, display returns to the normal layout showing PAUSED with the
-        frozen remaining time; Button A resumes and accrual starts fresh
+        frozen remaining time; Button B resumes and accrual starts fresh
         (next break ~interval later).
 27. [ ] **Break persistence**: power-cycle mid-break -> after the boot sync
         the break resumes with the SAME end time (not restarted). Power
@@ -169,7 +280,7 @@ these items cover the on-hardware behaviour.
         confirms the empty-URI skip path.
 37. [ ] **Grant on hardware**: publish a grant to an EXPIRED Screen timer
         (see home_assistant.md); on the next window the panel shows PAUSED
-        holding the granted time and Button A starts it — the TIME'S UP
+        holding the granted time and Button B starts it — the TIME'S UP
         alarm does NOT re-fire. A grant while RUNNING extends the countdown
         in place.
 38. [ ] **Locate alarm**: publish a locate command; on the next window the
@@ -177,8 +288,9 @@ these items cover the on-hardware behaviour.
         (or ~10 min). Confirm it does not trip the awake failsafe early and
         that the normal layout returns after dismissal.
 39. [ ] **Daily summary**: after a day rollover, the log/HA shows a
-        `summary` publish (screen seconds used + per-timer completions) for
-        the finished day; the charge-lock entry (case 23) publishes one
+        `summary` publish (screen seconds used + per-timer completions +
+        `chores_done` of `chores`, the ticks as they stood before
+        midnight) for the finished day; the charge-lock entry (case 23) publishes one
         final stat with `charge_lock` true before the long sleeps.
 
 Record failures with the monitor log snippet and the step number.

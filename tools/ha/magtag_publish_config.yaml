@@ -1,0 +1,239 @@
+# Publishes each MagTag's retained config document: its chore list, from a
+# To-do list of its own, plus the school calendar (holidays and season dates)
+# from calendar.school_schedule. Adapted from the To-do bridge in
+# magtag-espidf's docs/home_assistant.md, which holds the device contract.
+#
+# WHICH LIST FEEDS WHICH DEVICE is read off the entity id: a To-do list whose
+# entity id is todo.magtag_<node>_chores feeds device magtag-<node>. Create a
+# Local To-do list named "MagTag 1a0a5c chores" and HA slugs it to
+# todo.magtag_1a0a5c_chores; rename its display name afterwards as you like
+# (entity settings), the entity id is what counts. Adding a device is creating
+# its list -- nothing here changes. Deleting a list stops publishing to that
+# device but leaves its last document retained on the broker.
+#   magtag-1a0a5c  "Testing Timer"
+#   magtag-1aaa76  "Julia's Timer"
+#
+# This is the ONLY publisher of magtag/<id>/config. The broker keeps one
+# retained document per device and each publish replaces it outright, so a
+# field wanted in the replay copy belongs in the document built here, not in
+# a second automation. Only fields with no HA control go in (holidays, season
+# dates, chores): a controllable field in a republished document would
+# overwrite that control's edits every time.
+#
+# `ver` is derived from the document's content, not the clock. The device
+# applies a document only when its `ver` differs from the last one applied, so
+# publishing on every pass is safe: an unchanged document carries an unchanged
+# `ver` and is skipped, which is why no "last published" helper is needed.
+- alias: "MagTag — publish config"
+  # A burst of edits collapses into one run. A run cut short mid-publish is
+  # completed by the run that cut it short, since every run publishes all.
+  mode: restart
+  triggers:
+    # A To-do edit through its services: add, rename, complete, delete.
+    # todo.get_items is deliberately not listed -- this automation calls it,
+    # and every run would trigger the next.
+    - trigger: event
+      event_type: call_service
+      event_data: {domain: todo, service: add_item}
+      id: edit
+    - trigger: event
+      event_type: call_service
+      event_data: {domain: todo, service: update_item}
+      id: edit
+    - trigger: event
+      event_type: call_service
+      event_data: {domain: todo, service: remove_item}
+      id: edit
+    - trigger: event
+      event_type: call_service
+      event_data: {domain: todo, service: remove_completed_items}
+      id: edit
+    # A reorder is a websocket command, not a service, so no event sees it.
+    # This pass catches it, a list created since the last run, and the
+    # holiday window rolling forward at midnight.
+    - trigger: time_pattern
+      minutes: "/15"
+      id: poll
+    # The once-a-day moment to re-raise a warning someone dismissed. Off the
+    # quarter hour so a poll run never restarts it.
+    - trigger: time
+      at: "09:07:00"
+      id: daily
+    - trigger: homeassistant
+      event: start
+      id: start
+  variables:
+    # Warnings are raised on an edit, at start, and once a day -- not every
+    # 15 minutes, which would bring a dismissed one straight back.
+    nag: "{{ trigger.id in ['edit', 'start', 'daily'] }}"
+    lists: >-
+      {{ states.todo | map(attribute='entity_id')
+         | select('match', 'todo\\.magtag_[0-9a-f]{6}_chores$') | list }}
+  actions:
+    # call_service fires BEFORE the service runs; give the edit time to land
+    # before reading the list back.
+    - if: "{{ trigger.id == 'edit' }}"
+      then:
+        - delay: {seconds: 2}
+    # Two years ahead, not one: the season dates need the start of the summer
+    # AFTER the next one. The holidays themselves are cut to one year below.
+    - action: calendar.get_events
+      continue_on_error: true
+      target:
+        entity_id: calendar.school_schedule
+      data:
+        start_date_time: "{{ today_at() }}"
+        duration: {days: 731}
+      response_variable: cal
+    - variables:
+        # From calendar.school_schedule's "No School..." events:
+        #
+        # holidays: every WEEKDAY of a non-summer "No School" event, from
+        #   today for one year, at most 46 (the device's cap; it would drop
+        #   the rest silently). Weekdays only, because the device checks a
+        #   holiday before a weekend, so a weekend date would switch that
+        #   Saturday to the holiday allocation. Summer is left out because
+        #   the season dates cover it; a summer's weekdays would also
+        #   overflow the cap on their own.
+        # summer_start / school_start: the next summer break not yet over
+        #   (DTEND is exclusive, so its end is the first day of school).
+        # school_end: the day before the summer after that. The device
+        #   treats every date past school_end as summer, and the window
+        #   [summer_start, school_start) as summer, so these three dates
+        #   classify every day from now until that second summer.
+        #
+        # No events at all means the calendar is unavailable, not empty, and
+        # every calendar field is then left OUT of the document: `holidays`
+        # replaces the device's stored list, and publishing [] would wipe it.
+        school: >-
+          {%- set evs = cal['calendar.school_schedule']['events']
+                if cal is defined and 'calendar.school_schedule' in cal
+                else [] -%}
+          {%- set today = now().strftime('%Y-%m-%d') -%}
+          {%- set horizon = (now() + timedelta(days=365)).strftime('%Y-%m-%d') -%}
+          {%- set ns = namespace(hol=[], summers=[]) -%}
+          {%- for ev in evs if ev.summary is match('No School') -%}
+            {%- set d0 = strptime(ev.start[:10], '%Y-%m-%d') -%}
+            {%- set days = (strptime(ev.end[:10], '%Y-%m-%d') - d0).days
+                  if ev.start | length == 10 else 1 -%}
+            {%- if ev.summary is match('No School: Summer') -%}
+              {%- set ns.summers = ns.summers
+                    + [{'start': ev.start[:10], 'end': ev.end[:10]}] -%}
+            {%- else -%}
+              {%- for i in range([days, 1] | max) -%}
+                {%- set d = d0 + timedelta(days=i) -%}
+                {%- set ds = d.strftime('%Y-%m-%d') -%}
+                {%- if d.weekday() < 5 and ds >= today and ds < horizon
+                       and ds not in ns.hol -%}
+                  {%- set ns.hol = ns.hol + [ds] -%}
+                {%- endif -%}
+              {%- endfor -%}
+            {%- endif -%}
+          {%- endfor -%}
+          {%- set upcoming = ns.summers | sort(attribute='start')
+                | selectattr('end', 'gt', today) | list -%}
+          {%- set f = {} if evs | count == 0
+                else {'holidays': (ns.hol | sort)[:46]} -%}
+          {%- if upcoming | count > 0 -%}
+            {%- set f = dict(f, summer_start=upcoming[0].start,
+                                school_start=upcoming[0].end) -%}
+          {%- endif -%}
+          {%- if upcoming | count > 1 -%}
+            {%- set f = dict(f, school_end=(strptime(upcoming[1].start, '%Y-%m-%d')
+                                  - timedelta(days=1)).strftime('%Y-%m-%d')) -%}
+          {%- endif -%}
+          {%- set warn = 'calendar.school_schedule returned no events, so no holidays or season dates were sent.'
+                if evs | count == 0
+                else 'calendar.school_schedule has no summer break after ' ~ today
+                     ~ ', so no season dates were sent.'
+                if upcoming | count == 0
+                else 'calendar.school_schedule has no summer break after the one starting '
+                     ~ upcoming[0].start ~ ', so school_end was not sent. Extend school_calendar.ics.'
+                if upcoming | count == 1
+                else '' -%}
+          {{ {'fields': f, 'warn': warn} }}
+    - if: "{{ school.warn != '' }}"
+      then:
+        - if: "{{ nag }}"
+          then:
+            - action: persistent_notification.create
+              data:
+                notification_id: magtag_school_calendar
+                title: "MagTag: school calendar"
+                message: "{{ school.warn }}"
+      else:
+        - action: persistent_notification.dismiss
+          data:
+            notification_id: magtag_school_calendar
+    - repeat:
+        for_each: "{{ lists }}"
+        sequence:
+          - variables:
+              device: >-
+                {{ repeat.item
+                   | regex_replace('^todo\\.magtag_([0-9a-f]{6})_chores$', 'magtag-\\1') }}
+          # One list failing must not stop the others. `items` from an
+          # earlier pass is keyed by that pass's list, so the check below
+          # can never pick up another device's chores.
+          - action: todo.get_items
+            continue_on_error: true
+            target:
+              entity_id: "{{ repeat.item }}"
+            data:
+              status: needs_action
+            response_variable: items
+          - if: "{{ items is defined and repeat.item in items }}"
+            then:
+              - variables:
+                  # Items the device would refuse (over 20 BYTES, empty, or
+                  # containing " \ or a control character) are set aside
+                  # rather than sent: one of them would get the whole list
+                  # refused. Then the first three that are left, in order.
+                  checked: >-
+                    {%- set ns = namespace(ok=[], bad=[]) -%}
+                    {%- for n in items[repeat.item]['items']
+                                 | map(attribute='summary') -%}
+                      {%- if n | length > 0
+                             and (n.encode('utf-8') | length) <= 20
+                             and not (n is search('[\\x00-\\x1f"\\\\]')) -%}
+                        {%- set ns.ok = ns.ok + [n] -%}
+                      {%- else -%}
+                        {%- set ns.bad = ns.bad + [n] -%}
+                      {%- endif -%}
+                    {%- endfor -%}
+                    {{ {'chores': ns.ok[:3], 'skipped': ns.bad} }}
+                  # A djb2 hash of the document without `ver`, keys sorted
+                  # so the text is stable. The "h" prefix keeps it a string.
+                  ver: >-
+                    {%- set body = dict(school.fields, chores=checked.chores)
+                          | to_json(sort_keys=True) -%}
+                    {%- set ns = namespace(h=5381) -%}
+                    {%- for c in body -%}
+                      {%- set ns.h = (ns.h * 33 + (c | ord)) % 4294967291 -%}
+                    {%- endfor -%}
+                    h{{ ns.h }}
+              - action: mqtt.publish
+                data:
+                  topic: "magtag/{{ device }}/config"
+                  retain: true
+                  payload: >-
+                    {{ dict(school.fields, chores=checked.chores, ver=ver)
+                       | to_json }}
+              - if: "{{ checked.skipped | count > 0 }}"
+                then:
+                  - if: "{{ nag }}"
+                    then:
+                      - action: persistent_notification.create
+                        data:
+                          notification_id: "magtag_chores_skipped_{{ device }}"
+                          title: >-
+                            MagTag: chores not sent to {{ device }}
+                          message: >-
+                            From {{ state_attr(repeat.item, 'friendly_name') }}.
+                            Too long for the device (20 bytes), or containing
+                            a quote, backslash or control character:
+                            {{ checked.skipped | join(', ') }}
+                else:
+                  - action: persistent_notification.dismiss
+                    data:
+                      notification_id: "magtag_chores_skipped_{{ device }}"

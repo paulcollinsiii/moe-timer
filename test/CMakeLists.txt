@@ -56,17 +56,72 @@ add_host_test(test_display)
 add_host_test(test_ssd1680)
 add_host_test(test_battery)
 add_host_test(test_quiet_hours)
+add_host_test(test_chores)
+add_host_test(test_chore_store)
 add_host_test(test_bedtime)
 add_host_test(test_sleep_plan)
 add_host_test(test_lock_gate)
 add_host_test(test_buttons_policy)
 add_host_test(test_button_latch)
 add_host_test(test_wake_policy)
-add_host_test(test_wake_flow)
-# Same cases, built as a ParentTesting=y firmware: that flag is a
-# compile-time Kconfig bool, so the two values need two binaries. See the
-# header comment in test_wake_flow_parent.c.
-add_host_test(test_wake_flow_parent EXTRA_DEFS CONFIG_MAGTAG_PARENT_TESTING=1)
+# Deliberately NOT THE SHIPPING FIGURE, which is 400 as of M2-HW-FIX and is
+# both the Kconfig default and status_led.h's host fallback. Written that way
+# round on purpose: this comment said "NOT 250" at three points and the raise
+# to 400 left all three behind, which is the same one-obligation-many-sites
+# drift the override itself exists to catch. The 170 below is the only figure
+# here that means anything, and it means "neither of the other two".
+#
+# The ack hold is a menuconfig figure (CONFIG_MAGTAG_STATUS_LED_ACK_HOLD_MS)
+# so a board can sweep it, and every case that measures it is written against
+# STATUS_LED_ACK_HOLD_MS rather than a number. Building the suite at a value
+# that is not the default is what makes that real: a literal left at either
+# call site -- Button B's start or the chore ack -- compiles fine and passes
+# every relative assertion while the figures have silently diverged. With
+# this, it fails. The value itself means nothing beyond "not the default,
+# and crosses no second boundary in the mock clock's sub-second carry".
+#
+# IT IS NO LONGER THE COALESCING WINDOW. Until M2-T15 the hold and the
+# chore-ack paint window were one figure; they are now two knobs, and
+# CONFIG_MAGTAG_CHORE_PAINT_QUIET_MS below is the window. The two are built
+# at DIFFERENT values here so that collapsing them back into one fails the
+# suite rather than passing every case written against either macro.
+#
+# 610 FOR THE QUIET WINDOW, chosen on the same rules as the others: not the
+# Kconfig default (1200), not the hold, not a multiple of the 50 ms poll (so
+# the idle-window clamp takes a 10 ms last step and is load bearing), and not
+# a divisor of the 1725 budget (1725 = 2 x 610 + 505), so a burst that spends
+# the budget across several windows ends on a clamped partial window rather
+# than on a window boundary where the two bounds would coincide.
+#
+# NOTE this override is also why status_led.h's #else fallback reaches no host
+# binary: defining the CONFIG symbol here takes the #ifdef arm. That is what
+# made the header's old "MUST AGREE" claim vacuous, and why the agreement is
+# now held by scripts/check-ack-hold-default.py instead of by a sentence.
+#
+# CONFIG_MAGTAG_CHORE_ACK_BURST_MS is here for the same reason and NOT the
+# Kconfig default either: wake_flow.c reads it with no #ifndef fallback (see
+# the alerts.c note below for why that is the safer way round), so this is the
+# only place the host build gets a value.
+#
+# 1725 IS CHOSEN TO BE INDIVISIBLE BY THE 50 ms POLL QUANTUM, and that is the
+# whole of why it is not a round number. The coalescing loop clamps its final
+# step so the burst stops exactly ON the budget rather than one poll past it,
+# and at any budget the poll divides, that clamp is a branch NO case can fail
+# -- review deleted it and the entire suite still passed. 1725 makes the last
+# step a 25 ms one, so the clamp is load bearing and its deletion shows up as
+# a 25 ms overshoot in the bound case's delay total. Neither is it a multiple
+# of the 610 above, for the same reason one step up: the idle window's own
+# clamp is pinned by the 610 not dividing by 50.
+#
+# CONFIG_MAGTAG_MAX_AWAKE_SEC is here only because wake_flow.c's worst-case
+# gesture _Static_assert reads it (M2-T15 fix pass), with no #ifndef fallback
+# for the same reason as the burst budget. 180 is the Kconfig default and
+# nothing in the suite measures against it; the assert just has to compile.
+add_host_test(test_wake_flow
+    EXTRA_DEFS CONFIG_MAGTAG_STATUS_LED_ACK_HOLD_MS=170
+               CONFIG_MAGTAG_CHORE_PAINT_QUIET_MS=610
+               CONFIG_MAGTAG_CHORE_ACK_BURST_MS=1725
+               CONFIG_MAGTAG_MAX_AWAKE_SEC=180)
 add_host_test(test_status_led)
 # alerts.c reads two alarm-length Kconfig ints straight out of sdkconfig.h,
 # which the host build has no equivalent of. Supplied here rather than as
@@ -86,6 +141,10 @@ add_host_test(test_mock_hal_time)
 add_host_test(test_net_apply)
 add_host_test(test_app_state)
 add_host_test(test_stats_json)
+# BUG-14: the day-scoped decisions of an HA window, lifted out of
+# mqtt_ha.c (which needs esp-mqtt) so they carry tests; compiled beside
+# the real act payload builder.
+add_host_test(test_ha_day_cmds)
 # The panic breadcrumb. Only the PURE half of panic_diag.c compiles under
 # NATIVE (the RTC/NVS/FreeRTOS half is behind the fence), which is the
 # half that carries every rule: the phase table, the slot map, the label,
@@ -170,3 +229,50 @@ add_test(NAME test_check_slot_size
 add_test(NAME test_check_log_args
          COMMAND ${Python3_EXECUTABLE}
                  ${CMAKE_CURRENT_SOURCE_DIR}/test_check_log_args/test_check_log_args.py)
+
+# scripts/check-status-led-wrapper.py is the chore-gate gate: exactly one raw
+# status_led_show_timer_state() call in wake_flow.c, because that function
+# writes the pixel the chore checklist puts its gate on and the file funnels
+# all twelve of its status paints through one wrapper to keep them apart.
+# Python and registered here for the same two reasons as the two above. It
+# exists because review reverted each of those twelve sites in turn and TEN
+# survived the entire host suite -- so the thing this file is really testing
+# is a gate that was added after a near miss, which is exactly the kind that
+# needs its own tests.
+add_test(NAME test_check_status_led_wrapper
+         COMMAND ${Python3_EXECUTABLE}
+                 ${CMAKE_CURRENT_SOURCE_DIR}/test_check_status_led_wrapper/test_check_status_led_wrapper.py)
+
+# scripts/check-ack-hold-default.py holds STATUS_LED_ACK_HOLD_MS's Kconfig
+# default equal to the host fallback in status_led.h's #else arm. Python and
+# registered here for the same two reasons as the three above. It exists
+# because status_led.h asserted that agreement as a MUST while nothing held
+# it -- and review showed the assertion was worse than unenforced: the only
+# host suite that expands the macro is test_wake_flow, built with the CONFIG
+# symbol defined (see the =170 override above), so the #else literal reaches
+# NO host binary and mutating it to 250 or 0 failed nothing. The two gates
+# before this one each shipped with a hole review had to find, so this one's
+# suite spends most of its cases on the ways it could pass while blind.
+add_test(NAME test_check_ack_hold_default
+         COMMAND ${Python3_EXECUTABLE}
+                 ${CMAKE_CURRENT_SOURCE_DIR}/test_check_ack_hold_default/test_check_ack_hold_default.py)
+
+# tools/gen_ha_dashboard.py prints the HA dashboard, its automation and the
+# setup steps. Unlike the tools above it needs libraries (pyyaml; paho-mqtt
+# for --mqtt), declared in its PEP 723 header and supplied by uv, never
+# hand-rolled -- so its suite runs under uv as well. A missing uv FAILS the
+# test instead of dropping it: the suite's coverage check is what stops a
+# new firmware entity from going missing on the dashboard, and a skipped
+# check is one nobody notices is gone.
+# A cold uv cache needs the network once, to fetch the script's dependencies.
+find_program(UV_EXECUTABLE uv HINTS $ENV{HOME}/.local/bin)
+if(UV_EXECUTABLE)
+  add_test(NAME test_gen_ha_dashboard
+           COMMAND ${UV_EXECUTABLE} run --no-project --with pyyaml python3
+                   ${CMAKE_CURRENT_SOURCE_DIR}/test_gen_ha_dashboard/test_gen_ha_dashboard.py)
+  set_tests_properties(test_gen_ha_dashboard PROPERTIES ENVIRONMENT "UV=${UV_EXECUTABLE}")
+else()
+  message(WARNING "uv not found: test_gen_ha_dashboard will FAIL. Install uv (~/.local/bin/uv).")
+  add_test(NAME test_gen_ha_dashboard
+           COMMAND sh -c "echo 'test_gen_ha_dashboard: uv not found; install uv (https://docs.astral.sh/uv/) and re-run cmake' >&2; exit 1")
+endif()

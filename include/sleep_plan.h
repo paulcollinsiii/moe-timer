@@ -130,10 +130,62 @@ sleep_plan_in_t sleep_plan_from_timer(const sleep_plan_timer_in_t *in);
 #define BEDTIME_SLEEP_SEC 7200
 #endif
 
+/* The config-error lock (design 5.3), and the odd one out in this group
+   in two ways, both deliberate.
+
+   IT ARMS BUTTON D, on the sleeps this mode is the one selected for. The
+   other two go dark, and can: a charge lock ends when the pack charges, a
+   bed-time lock when the clock says morning, and neither needs a human.
+   This one ends only when somebody edits config, so a device whose
+   network fix path is also down — the WiFi password was what got broken,
+   say — would have no exit at all and would need a serial cable. That is
+   the failure this whole gate is scored against, so D stays live and the
+   fix is one press away.
+
+   WITH ONE EXCEPTION, and it is not a small one, so it is named here
+   rather than left to be re-derived from the precedence rule below. A
+   device that is config-locked AND charge- or bed-time-locked does not
+   select this mode at all: the precedence below hands back
+   WAKE_SLEEP_CHARGE_LOCK or WAKE_SLEEP_BEDTIME, whose outcome is
+   enable_buttons = false. So on those wakes D is dead like everything
+   else, and on a charge re-wake there is no network window either — the
+   charge gate opens one only as it engages (lock_gate.c) — which leaves
+   that device with neither exit until the battery recovers or the
+   interval expires. That is the intended trade (a pack below the lock
+   band cannot pay for a refresh, and nobody edits config at bed time),
+   but "D stays live" above is true of this MODE, not of every
+   config-locked device.
+
+   IT SITS BETWEEN THE OTHER TWO INTERVALS, and the reasoning is the
+   network window rather than the panel. Like the bed-time lock, and
+   UNLIKE the charge lock (which opens no window on a re-wake at all — see
+   panic_soak.h), this one runs a full window on EVERY wake, so it is the
+   expensive kind: at 600 s a device left broken over a holiday would
+   spend ~1000 full boots and windows on it. 7200 s is the other error —
+   the fault is the kind that gets fixed within minutes of somebody
+   noticing, and two hours is a long time to hold a device the parent has
+   already corrected. D covers the attended case, so this interval only
+   has to serve the unattended one.
+
+   NOT SHORTENED BY MAGTAG_PANIC_SOAK_FAST_LOCKS. That knob exists to
+   reproduce the bedtime-locked re-wake's panic cluster, and it names one
+   population; widening it to a second, rarer one would change what a soak
+   run is evidence about.
+
+   ALSO THE NO-CLOCK LOCK'S SLEEP (BUG-14). lock_gate_sleep_mode() folds
+   that flag into `config_locked`, because its shape is the same: it ends
+   only when something outside the device is fixed (the WiFi), every wake
+   runs one window (the NTP retry), and D is the attended shortcut. So
+   the 30-minute figure is also its retry cadence, and the sleep log's
+   reason reads "config/no-clock lock, " for either; lock_gate.c logs
+   which lock it is. */
+#define CONFIG_ERR_SLEEP_SEC 1800
+
 typedef enum {
     WAKE_SLEEP_NORMAL = 0,
     WAKE_SLEEP_CHARGE_LOCK,
     WAKE_SLEEP_BEDTIME,
+    WAKE_SLEEP_CONFIG_ERR,
 } wake_sleep_mode_t;
 
 /* Precedence between the locks. Both can be engaged at once, by a
@@ -145,8 +197,18 @@ typedef enum {
    (The 10-15% hysteresis band
    only HOLDS an engaged lock; engaging needs <= BATT_LOCK_PCT.) Charge
    lock wins: a battery that cannot afford a refresh cannot afford the 2 h
-   cadence either. Pure — host-tested. */
-wake_sleep_mode_t wake_sleep_mode_select(bool charge_locked, bool bedtime_locked);
+   cadence either.
+
+   The config-error lock is LAST, below both, and the reason is the same
+   sentence read twice. Below the charge band a press cannot be afforded,
+   so arming D there would spend the battery this device has left on a
+   refresh it cannot complete; and at bed time the panel is already saying
+   "not in service" and nobody is editing config. It outranks NORMAL and
+   nothing else. It also holds across both of those — its flag is RTC
+   memory like theirs — so the morning a bed-time lock lets go, the config
+   lock is still standing and picks the panel back up (lock_gate.c).
+   Pure — host-tested. */
+wake_sleep_mode_t wake_sleep_mode_select(bool charge_locked, bool bedtime_locked, bool config_locked);
 
 /* Everything the deep-sleep call needs, so main.c can act on the mode
    without a branch of its own. `reason` is a log PREFIX — empty on the

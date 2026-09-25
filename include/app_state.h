@@ -16,7 +16,6 @@ typedef struct {
     int batt_mv;              /* battery_read_mv() */
     int light_mv;             /* stats only; display never reads light */
     bool charge_locked;       /* stats only */
-    bool parent_testing;      /* Button B reload gate (Kconfig) */
     const char *fw_version;   /* stats AND the main screen's battery row */
     const char *reset_reason; /* stats only */
 } app_state_in_t;
@@ -25,9 +24,12 @@ typedef struct {
 extern "C" {
 #endif
 
-/* Build the render state. IDLE shows today's full allocation (full bar),
-   not 0 (ProductOverview); extra timers use their fixed configured
-   duration while Screen (slot 0) follows the day schedule. */
+/* Build the render state. IDLE shows today's full EFFECTIVE allocation,
+   not 0 (ProductOverview) — a full bar only when nothing is adjusted or
+   withheld, since the bar's denominator is the day's default and the
+   chore gate clamps the free tranche (see remaining_sec in display.h);
+   extra timers use their fixed configured duration while Screen (slot 0)
+   follows the day schedule. */
 display_state_t app_state_display(const app_state_in_t *in, int32_t remaining, time_t now);
 
 /* Side-effect-free stat snapshot for the HA session (never ticks the

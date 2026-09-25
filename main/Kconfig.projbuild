@@ -30,15 +30,6 @@ menu "MagTag Timer"
         default ""
         depends on MAGTAG_MQTT_URI != ""
 
-    config MAGTAG_PARENT_TESTING
-        bool "Button B manually resets the timer"
-        default y
-        help
-            Testing convenience: Button B resets the timer to IDLE with the
-            full daily allocation. Disable for production builds so the
-            allocation only resets on day rollover — otherwise the timer's
-            user could refund their own screen time.
-
     config MAGTAG_WEEKDAY_MIN
         int "Weekday screen-time allocation (minutes)"
         default 60
@@ -86,7 +77,7 @@ menu "MagTag Timer"
         range 1 120
         help
             Length of the enforced Screen Break. When it ends the device
-            chimes and waits in PAUSED for a manual resume (Button A).
+            chimes and waits in PAUSED for a manual resume (Button B).
 
     comment "Extra timers (Button C swaps; empty name disables a slot)"
 
@@ -113,9 +104,9 @@ menu "MagTag Timer"
         default n
         depends on MAGTAG_TIMER1_NAME != ""
         help
-            Button B resets this timer to full (same day, no ParentTesting
-            needed) whenever it is not RUNNING. The mode line then shows how
-            often it ran to completion today, e.g. "Piano (x2) - 15 min".
+            Button B resets this timer to full (same day) whenever it is not
+            RUNNING. The mode line then shows how often it ran to completion
+            today, e.g. "Piano (x2) - 15 min".
 
     config MAGTAG_TIMER1_BREAK_ELIGIBLE
         bool "Extra timer 1 is break-eligible"
@@ -257,6 +248,144 @@ menu "MagTag Timer"
             Percent scale applied to status pixels (state colour, WiFi sync
             feedback, final-countdown binary display). Alert pulses (expiry
             red, break cyan) are NOT scaled — they accompany alarms.
+
+    config MAGTAG_STATUS_LED_ACK_HOLD_MS
+        int "NeoPixel ack hold (ms)"
+        default 400
+        range 0 3000
+        help
+            The PRE-PRESS HOLD: how long the old colour stays up before
+            the pixel that acknowledges a press changes. The
+            acknowledgement is the transition, so there has to be a frame
+            of the old state for the new one to be a change from. Shared
+            by Button B's start/resume and the chore ack, which are the
+            same gesture read by the same person. Wants to be SHORT: it is
+            dead time in front of the first ack.
+
+            THIS USED TO BE ONE FIGURE WITH TWO JOBS, and M2-T15 split it.
+            It was also the chore-ack coalescing window — how long the
+            panel waits for the next press before it paints — and the two
+            pull in opposite directions: the hold wants to be short, the
+            window long. Tied together, a natural pause between two
+            presses outlasted the window, the panel started painting
+            mid-gesture, and the press that landed during that paint cost
+            a second refresh. The window is now
+            MAGTAG_CHORE_PAINT_QUIET_MS, below.
+
+            400 IS NOT A SWEPT VALUE — NOBODY HAS SWEPT THIS YET. What a
+            board established on 2026-09-22 is a LOWER BOUND for the
+            WINDOW, not for the hold: at the 250 this shipped with, a
+            person could not get the second chore pressed before the
+            refresh began. 400 was adopted then because design §2.5 had
+            already estimated ~400 in prose. Now that the window has its
+            own knob, that finding no longer says anything about this
+            figure in either direction; it stays at 400 because nothing
+            has been measured that would move it. See design §8 Q-C.
+
+    config MAGTAG_CHORE_PAINT_QUIET_MS
+        int "Chore-ack paint quiet window (ms)"
+        default 1200
+        range 100 10000
+        help
+            How long the panel waits, after the last chore ack that
+            applied, before it paints. SLIDING: every ack that APPLIES
+            grants another full window (a press the ack refuses, Button D
+            on a two-row list, does not), so a gesture of several presses
+            paints once, this long after its last press — as long as no
+            gap between presses outlasts this window and the burst budget
+            below has not run out; a gesture that spends the whole budget
+            is painted as the budget allows, not once.
+
+            THE NEOPIXELS ARE THE FAST CHANNEL AND THE PANEL IS THE SLOW
+            ONE, which is why this can be long. Every press already gets
+            an instant pixel flip, so nobody waits on the panel to learn
+            their press registered; the panel does not need to be quick,
+            it needs to be settled. The cost is honest and is paid on
+            every checklist wake: a lone press reaches the glass this much
+            later, and the device stays awake this much longer before it
+            sleeps.
+
+            1200 IS NOT A SWEPT VALUE. It is chosen to sit above a natural
+            press-pause-press rhythm (the 400 this replaced was too short
+            for one on the board, 2026-09-23) while keeping a lone press's
+            paint about 2.4 s after the press at the defaults (400 ms
+            hold + 1200 ms window + a ghost-cleaned partial ESTIMATED at
+            ~0.8 s, not measured), plus the boot. Raise it if a board still
+            sees a paint land mid-gesture; lower it if the lone-press
+            latency reads as sluggish.
+
+            THE MINIMUM IS NOT ZERO, on purpose: the coalescer's tail loop
+            (wake_flow.c) repaints after a press made during a paint only
+            once this window has closed, and each such window is what
+            spends the burst budget below. A window of zero would let a pad
+            that fires during every paint repaint without spending any.
+
+            NOT EVERY COMBINATION WITH THE BUDGET BUILDS, and that is
+            deliberate: the number of repaints grows as budget / window,
+            which no range can express. wake_flow.c _Static_asserts that
+            the worst case the two allow (hold + budget + every repaint
+            they permit, each charged as a full refresh plus the driver's
+            1 s minimum interval) stays under half of
+            MAGTAG_MAX_AWAKE_SEC, so a short window with a long budget is
+            refused at build time rather than forcing a failsafe sleep in
+            the middle of a refresh.
+
+    config MAGTAG_CHORE_ACK_BURST_MS
+        int "Chore-ack burst budget (ms)"
+        default 8000
+        range 0 30000
+        help
+            The HARD BOUND on one gesture, in milliseconds the coalescer
+            spends WAITING for presses after the first chore ack, summed
+            over every quiet window of the wake. The window above is
+            sliding, so something has to stop a pad that keeps producing
+            edges, or a child leaning on a button, from holding a battery
+            device awake indefinitely.
+
+            PANEL TIME IS NOT COUNTED. The firmware has no millisecond
+            clock to measure a refresh with, and does not need one: a
+            repaint after a press made during a paint happens only after a
+            full quiet window closes, and that window is spent from this
+            budget, so repaints are bounded by the budget too. A pad that
+            fires exactly once per paint and never otherwise — the worst
+            case — gets max(2, ceil(budget / quiet window)) paints, and a
+            Button A press that ends the gesture can add one more, once.
+            At the defaults that is 8 s of waiting and at most 7 paints
+            (8 with A). Each is an estimated ~0.8 s ghost-cleaned partial
+            unless something makes it full (~3 s): the every-5th cadence
+            WILL land on at least one of 7, and a break end or a mode
+            toggle makes its paint full too. The build refuses any budget
+            and window whose worst case would crowd
+            CONFIG_MAGTAG_MAX_AWAKE_SEC (see the window's help above).
+
+            IT REPLACED A COUNT OF WINDOWS, which was CHORE_MAX (3). The
+            count looked like generosity — one window per row there is to
+            tick — and was the opposite: a person ticking all three rows
+            had spent the whole budget, so CORRECTING one of those presses
+            was impossible and read in the field as "toggling a checkmark
+            multiple times doesn't work". A budget does not shrink as the
+            list gets longer, and it bounds the thing that actually costs
+            power (awake milliseconds) instead of a proxy for it.
+
+            8000, RAISED FROM 4000 WITH THE QUIET WINDOW, and it is sized
+            against that window rather than against a guess at pace. A
+            gesture paints once only if no gap between its presses
+            outlasts the quiet window (the first gap may also run the
+            pre-press hold, which the budget does not count), so the
+            longest single-paint gesture of N presses spends at most N
+            windows: one after each press. That is 4.8 s for three ticks
+            and a correction at 1200, and 7.2 s for three ticks and three
+            corrections. 4000 would cut the first of those off and paint
+            mid-gesture — the very defect the window was raised to cure —
+            and 8000 is the smallest round figure that holds the second.
+            At a steady one press a second the four-press session spends
+            3.8 s. It is NOT A SWEPT VALUE
+            and must stay finite whatever a board says about comfort: its
+            job is the flaky-pad bound.
+
+            0 disables coalescing outright: the first ack still flips and
+            still paints, and a press made during that paint still gets
+            the one repaint the tail owes it — nothing after that.
 
     config MAGTAG_QUIET_START_HHMM
         int "NeoPixel quiet hours start (HHMM, 24h)"
