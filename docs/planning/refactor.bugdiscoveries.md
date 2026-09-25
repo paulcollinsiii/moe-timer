@@ -661,6 +661,41 @@ Add the missing test: snapshot a RUNNING extra, install a defs table without it,
 restore, assert `assert_state_legal()` passes and the balance did not gain the
 powered-off gap.
 
+### Settled in the 2026-09-25 fix review
+
+**Owner decisions:**
+
+- **Fold at the restore's `now`, and accept a bounded sweep.** There are
+  two restore sites. The boot restore needs a clock that survived.
+  The rollover restore (`wake_flow.c:~1928`) can run after a real power-off,
+  once NTP has corrected the clock. On that path the dark time counts as
+  exposure, but only up to the run's own expiry: an orphan that expired in
+  the dark is folded at its expiry. That is the same amount a still-defined
+  timer's wall-clock countdown uses up. The owner accepted it, because it
+  errs toward more eye rest, as the 2026-08-07 decision did. The comments
+  say this, and a test pins the bound.
+- **Retire only RUNNING orphans.** `timer_defs_install` falls back to the
+  menuconfig table on any read failure or a blob-version change. On such a
+  boot, an HA-defined slot that menuconfig leaves empty looks undefined.
+  Resetting PAUSED slots there would destroy a paused timer, which survived
+  before this fix. A PAUSED orphan breaks no invariant, so only the
+  selection moves off it. A RUNNING orphan is still reset on a fallback
+  boot. That needs a running extra, lost RTC memory and a fallback table
+  all at once. It is accepted as the simple way to restore I3.
+
+**Orchestrator calls:**
+
+- `test_timer_persist`'s `arm_rich_state` fixture (RUNNING Piano with
+  another slot selected) violates I3. It is made legal. No
+  `snapshot_valid` change, because that state only arises from a corrupt
+  snapshot.
+- The `run_segment_slot == i` fold guard gets a test.
+- The invariant numbers follow `test_timer.c`: I3 is "a RUNNING slot is
+  the active slot", and I2 is "at most one RUNNING".
+- A reflash that **renames** a running slot is still not reset at
+  restore, unlike a mid-window rename. It is out of scope and not
+  scheduled.
+
 ---
 
 ## BUG-10 — recurring PANIC resets on an idle device
