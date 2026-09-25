@@ -1206,6 +1206,12 @@ the slot is `{}`.
 5. **Docs.** `docs/home_assistant.md`: clearing a name, or `ota_url`, now
    works, after an OTA to this firmware.
 
+**Owner decision (2026-09-25, from the review): a blank `tz` is allowed and
+means UTC.** The docs warn about it: bed time, quiet hours and the day
+rollover shift by the UTC offset from the next boot. A bulk `"tz": ""` has
+always done the same. To go back to local time, type the zone string in
+again.
+
 ## Closed — moved to the archive
 
 Full detail, and the reasoning behind each, is in
