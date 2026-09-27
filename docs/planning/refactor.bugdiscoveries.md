@@ -1,64 +1,230 @@
-# Open defects and hazards — the working list
+# Defect register — open work, and what is waiting on hardware
 
-This began as the register of defects found while executing
-`docs/planning/implemented/20260729.refactormain.plan.md` and deliberately
-**not** fixed during it. That
-refactor has landed and merged (`5d837a6` on `integration`), so the register is
-now simply **the task list for the next phase**.
+The working list of firmware defects. It began as the register of things found
+while executing `docs/planning/implemented/20260729.refactormain.plan.md` and
+deliberately **not** fixed during it. That refactor landed and merged (`5d837a6`
+on `integration`), so the register became the task list for the phase after it.
 
-The original deferral rule no longer binds. It existed because the refactor's
-whole value was the claim that behaviour did not change, proven by differential
-sweeps against a baseline commit; fixing a bug mid-move would have made an
-intended fix indistinguishable from an accidental regression. That proof is
-banked. Each firmware defect below is still pinned by a test asserting the
-CURRENT, WRONG behaviour, and **each fix must flip its pinning test
-deliberately, not silently** — a fix that leaves its pin passing has not been
-demonstrated.
+**Cut back on 2026-08-18.** The closed and implemented entries, and the
+reasoning that produced them, moved to
+`docs/planning/implemented/20260818.bugregister.closed.md`. Two things are left
+here:
 
-Entries are **deleted from this file when they land**, not marked done. A closed
-item keeps a one-line tombstone only where source comments name it, so those
-references still resolve. Durable lessons do not live here at all — see
-**Standing rules** at the foot, which exist to be promoted out of this file
-before it is consumed.
+1. **Implemented — awaiting hardware smoke test.** Fixes that are merged and
+   host-verified but have never run on the device. A fix in this state is not
+   finished. It is a well-evidenced claim, and the evidence stops at the host
+   toolchain.
+2. **Open defects.** Not fixed.
+
+A row leaves section 1 when someone confirms it on hardware; the entry then
+moves to the archive carrying the result. A row that fails its smoke test comes
+back as an open defect rather than being amended in place, so the failure is
+visible in the history.
+
+The standing rules are at the top because they are the part worth reading before
+touching anything below, and because everything else on this page is meant to
+leave it.
+
+Each open firmware defect below is still pinned by a test asserting the CURRENT,
+WRONG behaviour, and **each fix must flip its pinning test deliberately, not
+silently** — a fix that leaves its pin passing has not been demonstrated.
 
 | Status | Meaning |
 |---|---|
+| SMOKE | Fixed and merged; host-verified only, never run on hardware |
 | OPEN | Reproduced, not yet fixed |
 | HYPOTHESIS | Observed on hardware, root cause not yet confirmed in code |
+| PARKED | Real, but settling it needs hardware time rather than engineering time |
 | CONDITIONAL | Not a bug today; becomes one if a named change lands |
 | HAZARD | Not wrong today (verified); a named future change makes it wrong |
 
-Two entries were defects in the verification harness rather than the firmware —
-**BUG-4** and **HAZ-2**. They were filed here rather than as chores because the
-sweeps are what every "deliberately preserved" claim in this file rests on. Both
-are now closed; the sweeps run from any checkout and cycle09 reports trace
-overflow, so the rest of this list can be verified by anyone.
+---
+
+## Standing rules
+
+These are the durable lessons, kept at the top because **everything below them
+is meant to leave this file as it lands, and these are not.** Promote them into
+`docs/home_assistant.md` (R1, R2) and the project conventions (R3, R4) before
+this file is consumed.
+
+**R1 — new timer config is durable config, and durable config lives in HA.**
+When adding a field to timers 1–4, ask *"is this durable config that should be
+in HA?"* The answer is almost always yes. If it is, the field must be:
+1. expressible in the bulk `config` document,
+2. documented in `docs/home_assistant.md`,
+3. published in the state JSON so HA's UI reflects the device's actual belief.
+
+Missing (1) is what caused the break-eligible reverts; missing (2) is what made
+it invisible for so long.
+
+**R2 — anything settable from an HA entity must be expressible in the bulk
+document.** `apply_sets()` deletes the retained `set/` command once applied
+(`main/mqtt_ha.c:312-323`), so an entity-only field has **no durable store
+anywhere** and will be destroyed by the next application of the bulk document.
+R2 is the mechanical reason R1 is not merely tidiness.
+
+*Known asymmetry, accepted deliberately:* the two config channels are still
+asymmetric — a per-field set is one-shot by design. That is sound for the timer
+fields today, because the document can now express all of them and no longer
+overrides by omission. R2 is what keeps it sound for the next field.
+
+**R3 — no function call at all in a log-statement argument.** Log arguments
+are evaluated conditionally at compile time on device as well as host, so a
+side effect placed there is a Kconfig value away from disappearing. The rule is
+deliberately stronger than "no *side-effecting* call": purity is a judgement,
+and a judgement made once per call site is the thing that failed here. It is
+enforced by `scripts/check-log-args.py` from pre-commit, which also carries the
+allowlist of pure formatters and the argument for each entry. See HAZ-1 in the
+closed archive.
+
+**R4 — a `TIMER_DEFS_BLOB_VERSION` bump must ship its migration in the same
+firmware image.** This is not a style preference; it is what makes a migration
+reachable at all. The first network window after a bump **destroys** the old
+bytes: the table reads as unreadable, `config_apply`'s rebuild branch fires,
+menuconfig answers every slot, and the result is written over the old data. A
+migration's entire premise is reading those bytes and carrying the values
+across, so bump first and migrate later and there is nothing left to migrate by
+the time the migration ships — the fix for the data loss would arrive after the
+data loss, on every device that took a network window in between. Shipping the
+bump and the migration together is the only ordering in which the migration
+does anything.
+
+R4 is latent today; nothing in flight bumps the version. It is written down
+because the branch that makes it true was added as a *fix* — recovering a
+device whose per-timer controls were permanently dead — and does not look like
+a hazard from the call site.
 
 ---
 
-## Order of work
+## Implemented — awaiting hardware smoke test
 
-Ordered by dependency first, then by cost. The two genuine sequencing
-constraints are called out; everything else is independent and can be reordered
-freely.
+Merged and host-verified. **Never run on the device.** Until each row below is
+confirmed on hardware it is a claim, not a result.
+
+| # | What | Landed | Host evidence | What hardware has to settle |
+|---|---|---|---|---|
+| **S1** | BUG-8 — losing the timer-defs blob no longer cements a Kconfig `break_eligible`, and the per-timer controls stop refusing forever. Carries BUG-5 items 1–4. | `ad62dff` `858d41e` `de21436` `10745de` | 40/40 suites; firmware links at 1,496,784 B (81.6 % of the app slot); the padding-reuse premise replayed against the pre-fix boot sequence at `-O2` | Checks S1.1–S1.6 below |
+| **S2** | The OTA update chain | `677f667` and the series under it | Suites green; size guard armed at 85 % | The 16-item list under **Hardware smoke test** in `docs/planning/ota.plan.md` — not duplicated here |
+
+S1 and S2 are coupled in practice: S1 is intended to reach the device *as* the
+first real OTA payload, so a failure is ambiguous until S2's item 4 has passed
+at least once. Flash the base image over USB and confirm a plain OTA works
+before reading anything into S1's results.
+
+**Field status 2026-08-19 — the coupling is discharged.** The BUG-8 fix was
+delivered to the device *by OTA* and is running correctly so far. That single
+event settles the ambiguity above: the OTA chain carried a real payload
+end-to-end, so S1's results can now be read at face value. It is not a pass for
+either row yet — S2 still owes the rest of its 16-item list, and S1's decisive
+check has not happened. **What is outstanding is the day rollover**, which is
+when an HA-configured table either stays set or reverts; that is S1.1 and S1.3
+observed in the field rather than provoked on a bench. Until that rollover is
+seen, "working correctly" means nothing has gone visibly wrong, which is the
+expected reading of a device that has not yet crossed the boundary the defect
+lived on.
+
+### S1 — the checks, most dangerous first
+
+**Field result 2026-08-19 — S1.1 answered, in the affirmative.** The device
+crossed genuine day rollovers at 01:28:46 EDT on 08-18 and 01:29:18 EDT on
+08-19 (`active timer -> Screen` is `timer_reset()`), carrying an HA-configured
+table written by an older image, and the timer names, minutes and
+break-eligible switches were unchanged across both. HA logs state *changes*,
+so the flags' absence from the activity stream across those boundaries is the
+evidence: the padding reuse read correctly on a blob it did not write. The
+rollover was the check this row existed for, and it passed twice.
+
+S1.3 is **still owed** — see BUG-10 for the retraction of a first reading that
+mistook an HA automation for a device-side revert. Nothing has yet provoked a
+real blob loss on this device. S1.2, S1.4, S1.5 and S1.6 are also still owed.
+
+**S1.1 — an existing blob still reads.** This is the one that would be
+catastrophic and silent, so do it first and on a device that already has an
+HA-configured table. Boot the new image once and confirm the timer names,
+minutes and break-eligible switches are **unchanged**. The `defined` byte was
+placed in bytes that were previously implicit padding specifically so that
+`sizeof` and every offset stay put; that was proven at the host and against the
+original boot-write path, but only a device carrying a blob written by an older
+image proves it end to end. A wrong answer here looks like every timer
+reverting to menuconfig at once.
+
+**S1.2 — boot writes nothing.** Lose the blob (erase NVS, or reflash with a
+deliberate layout change) and boot. The log must carry
+`no timer-defs blob stored; running on the compile-time table (not persisted)`
+from `timer_defs.c`, the timers must run for that wake, and **a second boot must
+log the same line again** — if the second boot is silent, something persisted
+the table and the fix did not take.
+
+**S1.3 — the canary.** The reported symptom. Set `break_eligible` OFF on two
+timers from HA, then provoke a loss (a panic, or an NVS erase). Confirm the
+switches do **not** silently come back ON. With a retained `timers` document
+they should return to OFF; without one they should read as never-set rather
+than as a Kconfig `n` presented as an operator choice.
+
+**S1.4 — the controls stop refusing.** On a device with **no** blob at all —
+one driven only from the HA per-timer controls, which is the operator profile
+BUG-8 was reported from — move one control. Before the fix this was rejected
+with `nodefs` permanently and invisibly, because nothing publishes the
+`ha_config_set` ack. Confirm the value takes and survives a sleep/wake.
+
+**S1.5 — the two warnings are distinguishable.** Provoke each and confirm they
+differ: no blob at all (`no timer-defs blob stored`) versus a blob that fails
+the version/size check (`timer-defs blob present but UNREADABLE (<esp_err>)`).
+Both `timer_defs.c:167,170` and `ha_config.c:379,382` carry their own pair;
+seeing only one pair is the expected result for a given wake, seeing neither is
+not.
+
+**S1.6 — the accepted edge, so it is not later reported as a regression.**
+After S1.4's single control edit, change a menuconfig name or duration for a
+**different** slot and reflash. The change should **not** take. The write-path
+seed fills a name for every slot menuconfig names, so the first control edit
+provisions the whole table and those bystanders read as already-defined
+afterwards. Only a slot menuconfig leaves unnamed still falls through to the
+compile-time rung. This is documented, not fixed — closing it needs a
+blob-level "provenance is meaningful" flag in the one remaining reserve byte,
+which is a second semantic byte and a design change nobody has asked for.
+
+**Not settled by any of the above, and worth a number while the device is on
+the bench:** NVS headroom. The `nvs` partition is `0x6000` — six 4 KB pages —
+shared with the WiFi stack, and `timer_persist_save()` rewrites a blob from
+four call sites on a device that wakes many times a day. The fix makes blob
+loss *survivable*; it does nothing to make it rarer, and the loss rate has
+never been measured. `nvs_get_stats()` would settle it.
+
+---
+
+## Open defects
+
+### Order of work
+
+Ordered by dependency first, then by cost. Only one genuine sequencing
+constraint remains; everything else is independent and can be reordered freely.
 
 | # | Item | Why here | Blocked by |
 |---|---|---|---|
-| ~~1~~ | ~~**BUG-4** + **HAZ-2**~~ | **Done** — see Closed. The sweeps now derive the repository from their own location and are pinned to `difftest-base/*` tags, so everything below can be re-verified from any checkout. | — |
-| 1 | **HAZ-1** — calls inside log-statement arguments | Mechanical, closes a whole class, touches nothing else | — |
-| 2 | **BUG-5** — timer-defs blob drift discards the user's table | User-data policy; independent of the button work | — |
-| 3 | **BUG-7** — a RUNNING slot outliving its own definition | State-machine change to an uncovered path; independent | — |
-| 4 | **BUG-2**, then **BUG-3** | Same latch/mask surface — fix together so each is checked against the other. Both need a re-baselined sweep to show the fix changed *only* the intended cases. | — (was blocked on BUG-4) |
-| — | **BUG-1** | **Parked 2026-08-07.** Settling its fork needs an instrumented build run on hardware, which is reporter time rather than engineering time. Revisit after item 5: BUG-2's fix touches the same latch surface and may move the ground under it. | — |
+| 0 | **S1 + S2 smoke tests** | The only item that needs the device. Two merged fixes stay unconfirmed until it happens, and everything below is engineering time that can proceed in parallel | a USB flash, then an OTA |
+| — | **BUG-10** — recurring PANIC resets on an idle device | **RESOLVED** (owner, 2026-09-25); see the entry. | — |
+| **Owner triage, 2026-09-25** | **BUG-13, then BUG-7, then BUG-11.** | The owner rates BUG-5 and BUG-12 theoretical, and they stay open but unscheduled. BUG-1 and BUG-2 stay parked: the button remap has probably moved the ground under them, so revisit them only if lost presses are seen. | — |
+| 0.9 | **BUG-13** — blanking a text control in HA never reaches the device | **FIXED 2026-09-25 (v24)** and confirmed on hardware | — |
+| 4.5 | **BUG-14** — a power-on without NTP refunds the day | **FIXED 2026-09-25**: no save on an unset day, a no-clock lock until NTP, and a restore on release. The owner assumes it fixed (no hardware run) | — |
+| — | **BUG-15** — a same-day power cycle appears to revoke the HA bonus | Registered 2026-09-25 by the BUG-14 review. Waiting for owner triage | — |
+| 1 | **BUG-7** — a RUNNING slot outliving its own definition | **FIXED 2026-09-25**: a RUNNING orphan is folded as non-eligible and reset; a PAUSED one is kept | — |
+| 2 | **BUG-2** | **BUG-3 is RESOLVED** (2026-09-16, M2-T4a/T4b) and is no longer part of this item — its condition fired when Button D gained a chore-ack arm, and the decision it was waiting for was made there with cases at both call sites. BUG-2 stands alone now, and still needs a re-baselined sweep to show the fix changed *only* the intended cases. | — |
+| 3 | **BUG-5** — the v1→v2 migration | Only bites on a version bump, and **R4** means it has to be written *before* one rather than after. Nothing in flight bumps the version, which is why it sits last. | — |
+| 4 | **BUG-11** — bed time is evaluated against an unvalidated clock | **FIXED 2026-09-25.** It is guarded by `time_util_clock_plausible`, and the break planner is guarded too. The difftest cycles 09/10/11 copy the body of `wake_flow_maybe_start_break` and do not have the new guard. difftest is outside every gate and off-limits to agents, so the owner decides. Earlier history: **No longer blocked, and no longer 0.6.** Both were derived from a mechanism review refuted on 2026-08-21: a panic does *not* clear the wall clock, so this is not downstream of BUG-10. The real trigger is a power-on reset alone, which is rare, and the fix needs a design decision rather than a patch. Settle the OPEN QUESTION in the entry before touching the code — it lives on the same path | — |
+| 5 | **BUG-12** — a network window that ends before MQTT leaves the net phase slot stale | Found reviewing the BOOT subdivision. Cheap, but it sequences the window the panic measurement is being read from, so it wants its own pass rather than a ride-along | — |
+| — | **BUG-1** | **Parked 2026-08-07.** Settling its fork needs an instrumented build run on hardware, which is reporter time rather than engineering time. Revisit after item 2: BUG-2's fix touches the same latch surface and may move the ground under it. | — |
 
-**Constraint 1 — BUG-4 before BUG-2/BUG-3. Discharged 2026-08-10.** Fixing a
-pinned bug makes the sweep's control diverge by design, which is only
-informative if the sweep can be re-baselined and re-run from an arbitrary
-checkout. BUG-4 prevented that; it is now fixed, so BUG-2/BUG-3 are unblocked.
+*The constraint "BUG-2 and BUG-3 together" was discharged on 2026-09-16. BUG-3
+was resolved on its own, by M2-T4b, and the check it asked for was made in the
+direction that mattered: the latch pick is now a single shared helper
+(`wake_flow_pick_latched_press`), so a later BUG-2 fix cannot move one mask
+without moving the other. BUG-2 remains open and no longer waits on anything.*
 
-**Constraint 2 — BUG-2 and BUG-3 together.** They share a root shape and both
-touch button-latch masks; a fix for either must be checked against the other
-rather than applied in isolation.
+*The earlier constraint "BUG-4 before BUG-2/BUG-3" was discharged on 2026-08-10
+and is gone. The sweeps now derive the repository from their own location and
+are pinned to `difftest-base/*` tags, so a pinned bug's fix can be re-baselined
+and re-verified from any checkout.*
 
 ---
 
@@ -183,7 +349,7 @@ The press is taken from the latch and then discarded, because pause is only
 meaningful while RUNNING — so the user's press does nothing and is gone.
 
 Confirmed and deliberately preserved through cycle 10. Pinned by
-`test_row6_a_press_while_not_running_is_eaten_KNOWN_BUG` in
+`test_row6_b_press_while_not_running_is_eaten_KNOWN_BUG` in
 `test/test_wake_flow/test_wake_flow.c`, named to make clear it documents a
 defect rather than blessing it; that test must fail loudly when the bug is
 fixed, and the fixing commit must rewrite it deliberately rather than delete
@@ -216,7 +382,9 @@ other rather than applied in isolation.
 
 ## BUG-3 — Break-tail pick mask excludes BTN_D without a test
 
-**Status:** CONDITIONAL · **Severity:** none today
+**Status:** RESOLVED 2026-09-16 (M2-T4a/T4b) · **Severity:** none today, and the
+condition below fired exactly as written — see the closing note at the end of
+this entry before reading the rest of it as current.
 
 The break-tail button pick uses an explicit mask:
 
@@ -242,43 +410,63 @@ residual difference on device is one extra side-effect-free `timer_get_state()`
 read. Both call sites need a deliberate decision and a test when D gains an arm.
 Recorded on `test_a_latched_d_press_is_never_dispatched_by_the_tick_drain`.
 
+**Closed (2026-09-16, M2-T4a/T4b).** The condition fired: M2-T4a bound BTN_D to
+checkbox 3 of the chore checklist. The decision this entry asked for was made
+deliberately and is **admit D to both picks, and only while the mode byte says
+`APP_MODE_CHORES`** — `wake_flow_pick_latched_press()` is the single place both
+call sites now get their mask from, so the two can no longer drift apart. The
+shipped defect in between is the one this entry predicted: for the length of
+M2-T4a, ✓1 and ✓2 were honoured from both drains and ✓3 was silently dropped,
+including through `wake_flow_watch_break_end`'s ~250 ms tail poll — the break,
+which is the window design §2.6 most wants the checklist live in.
+
+One prediction did **not** hold, and it is worth recording because it was the
+whole reason the entry stayed open: *"both masks become load-bearing"*. They did
+not. D's TIMER action still lives only in the EXT1 decode and the shared
+dispatch still has no `BTN_D` arm, so a D that leaks into the candidates in
+Timers mode routes to `button_chore_ack_apply()`, whose first line refuses on
+the same mode byte — inert, exactly as the dispatch's default arm was. What the
+masks now decide is whether ✓3 *works*, not whether anything unsafe happens.
+
+Cases, both call sites, per the entry's "a test either way":
+`test_c4b_a_latched_d_press_in_the_break_tail_acks_row_3`,
+`test_c4b_a_latched_d_press_in_chore_mode_acks_row_3`,
+`test_c4b_a_latched_d_press_outside_chore_mode_is_still_dropped`,
+`test_c4b_a_latched_b_press_outranks_a_latched_d_in_the_break_tail`, and the
+renamed timer-leg case
+`test_a_latched_d_press_in_timers_mode_is_never_dispatched_by_the_tick_drain`
+(the old name asserted more than it tested once D gained an arm). Mutants
+W17–W22 cover the mask, the mode gate, the routing, the row mapping and the
+priority; all six are killed by the case named above as their killer.
+
 ---
 
-## BUG-5 — a timer-defs blob version bump silently discards the user's table
+## BUG-5 — a timer-defs blob version bump still discards the user's table
 
-**Status:** OPEN · **Found:** 2026-08-07, hardware, build `59c3afa`
+**Status:** OPEN, narrowed · **Found:** 2026-08-07, hardware, build `59c3afa`
 **Severity:** user-visible data loss, **one-shot per version bump** — an
-HA-configured timer table reverts to compile-time defaults with no log line and
-no indication anything happened.
+HA-configured timer table reverts to compile-time defaults.
 
-> **Rescoped 2026-08-07.** This entry was originally titled *"a stale timer-defs
-> blob silently resets every HA timer edit"* and was written as the explanation
-> for the reported break-eligible reverts. It is not that. The recurring cause
-> was the bulk config document (the entry formerly numbered BUG-6, fixed in
-> `733e86e`); the ON, ON, OFF, OFF pattern the reporter saw followed from that,
-> not from this. What remains here is a real but **narrower** defect: a blob
-> version bump discards user configuration once, silently. The diagnostic
-> scaffolding that existed to tell the two apart has been dropped as spent.
+Three of the four pieces landed and are archived in
+`docs/planning/implemented/20260818.bugregister.closed.md`: the boot overwrite
+is gone, the silence is gone, and the layout is now pinned by `_Static_assert`s
+that leave no implicit padding for a new field to land in. The sequencing
+constraint this entry used to carry was promoted to **R4**, because it binds
+anyone who bumps the version whether or not they have read this entry.
 
-### The defect
+What is left is the migration, and the two things a fix for it has to respect:
+where the durable copies actually live, and the reporter's stated policy — which
+is stated over a *different* version axis than the one this defect is on.
 
-`nvs_config_get_timer_defs()` (`main/nvs_config.c:248`) returns
-`ESP_ERR_INVALID_VERSION` on **any** size or version drift.
-`timer_defs_install()` (`main/timer_defs.c:76`) does not distinguish that from
-"never configured" — both take the same branch, whose comment reads *"No
-HA-managed blob yet"*, and it re-seeds from the Kconfig table and writes the
-result back over the user's table.
-
-There is **no migration and no log line at all** on that path. A user's entire
-timer configuration can be discarded without a trace.
-
-`TIMER_DEFS_BLOB_VERSION` went to 2 in `6fab99d feat(timer)!: add
-break_eligible to the timer definition`. Any device carrying a pre-`6fab99d`
-blob — or one whose NVS was erased — hits this on first boot of a newer build.
-The `!` marks the break, but a breaking schema change that silently eats
-configuration is still a defect: v1's fields are a strict prefix of v2's, so a
-real migration is available and would preserve names, minutes and reload while
-defaulting only the new field.
+**Still open:** the v1→v2 migration decided on 2026-08-07 (read a v1 blob, copy
+the common prefix, default `break_eligible` from the Kconfig value, write back
+as v2). Until it exists, a version bump still makes the stored table
+unreachable — loud and recoverable-from-HA rather than silent and permanent,
+but the values are not carried across. Note the word dropped from an earlier
+revision of this sentence: the bump is **not** "non-destructive". See the
+archive's *What landed* item 1 for why: the rebuild that makes a stranded
+device recoverable does so by writing **over** the unreadable bytes, which is
+what R4 exists to stop.
 
 ### Who is canonical — corrected
 
@@ -323,100 +511,6 @@ that move for different reasons, and today nothing ties them together. A blob
 bump with no accompanying document change currently means "device defaults win"
 by accident rather than by decision.
 
-### Measured: the size check cannot replace the version field
-
-Relevant because dropping `TIMER_DEFS_BLOB_VERSION` and leaning on the existing
-`len != sizeof(*out)` test is the obvious simplification, and it does not work.
-`nvs_timer_def_t` is `char name[16]; int32_t min; uint8_t reload; uint8_t
-break_eligible;` — 22 bytes of content in a 24-byte struct, so it carries **two
-spare padding bytes**. Compiling the v1 (pre-`6fab99d`), v2 (current) and a
-hypothetical v3 layout with one more `uint8_t` flag:
-
-| Layout | `sizeof(def)` | `sizeof(blob)` | size check catches drift? |
-|---|---|---|---|
-| v1 — no `break_eligible` | 24 | 100 | — |
-| v2 — current | 24 | 100 | **no** |
-| v3 — one more `uint8_t` flag | 24 | 100 | **no** |
-
-All three are byte-identical in size. The size test would not have caught the
-v1→v2 bump that created this defect, and will not catch the next flag either,
-because the next two `uint8_t` fields land in existing padding for free. **The
-version field is the only thing that has ever detected drift here.**
-
-Both writers `memset` before filling, so a v1 blob misread as v2 would today
-yield `break_eligible = 0` everywhere rather than garbage — silently wrong, not
-random. The sharper hazard is any future change that *reuses* a padding byte or
-*reorders* fields: same size, different meaning, old bytes read as valid new
-values.
-
-### Measured: a layout digest cannot replace the padding it hides in
-
-A compile-time checksum over the struct layout was proposed as a stronger guard
-than a bare `sizeof` assert — one constant catching reorders, additions and
-renames at once. Measured against the case that actually produced this defect,
-it does not:
-
-| Guard | Field reordered | Field added into trailing padding | Field renamed |
-|---|---|---|---|
-| `sizeof` assert | no | **no** | no |
-| `offsetof` asserts per field | yes | **no** | no |
-| Layout digest over enumerated fields | yes | **no** | no |
-| Designated-initializer canary | — | **no** (see below) | no |
-
-Both the digest and the per-field asserts are built from the *enumerated*
-fields, so a field nobody enumerated is invisible to both. Adding a `uint8_t`
-into the two trailing padding bytes leaves `sizeof` at 24 and every existing
-offset unchanged — the digest comes out **identical** (verified: 24574019 either
-way). That is exactly the shape of the v1→v2 `break_eligible` addition.
-
-The designated-initializer canary — a `static const` naming every field, relying
-on `-Wmissing-field-initializers` to flag a new one — was also tested and **does
-not warn**: GCC does not apply that diagnostic to designated initializers, with
-either `-Wextra` or the flag named explicitly.
-
-**Field names are invisible to the compiler**, so no compile-time mechanism can
-catch a rename. That is acceptable: a rename that keeps type and position does
-not change the stored bytes. It only matters if it signals a *semantic* change,
-which no layout guard can see.
-
-### The guard that does work: remove the hiding place
-
-Make the implicit padding an explicit field, then assert that no implicit
-padding remains. A new field then has nowhere to land silently — it must either
-grow the struct (caught) or visibly consume the named reserve, which is an edit
-sitting directly beneath the version constant.
-
-```c
-typedef struct {
-    char    name[16];       /* "" = slot disabled */
-    int32_t min;
-    uint8_t reload;
-    uint8_t break_eligible;
-    uint8_t rsvd[2];        /* was implicit padding; named so nothing can hide */
-} nvs_timer_def_t;
-
-_Static_assert(sizeof(nvs_timer_def_t) == 24, "layout grew: migrate or bump BLOB_VERSION");
-_Static_assert(offsetof(nvs_timer_def_t, min) == 16, "fields reordered");
-_Static_assert(offsetof(nvs_timer_def_t, reload) == 20, "fields reordered");
-_Static_assert(offsetof(nvs_timer_def_t, break_eligible) == 21, "fields reordered");
-_Static_assert(offsetof(nvs_timer_def_t, rsvd) == 22, "fields reordered");
-_Static_assert(16 + 4 + 1 + 1 + 2 == sizeof(nvs_timer_def_t),
-               "implicit padding reappeared: a new field could hide in it");
-_Static_assert(sizeof(nvs_timer_defs_blob_t) == 100, "blob layout changed");
-```
-
-The blob header needs the same treatment — `uint8_t version` followed by a
-4-byte-aligned array carries 3 implicit padding bytes, so it becomes
-`uint8_t version; uint8_t rsvd[3];`.
-
-**This change is free to deploy.** Verified: naming the padding leaves
-`sizeof(def) == 24`, `sizeof(blob) == 100` and `offsetof(blob, defs) == 4`
-exactly as they are today, so it is byte-identical to blobs already on devices
-and needs no migration of its own. Both writers already `memset` before
-filling, so the reserve stays zeroed and is usable by a future field.
-
-Prefer the individual asserts over a single digest: identical detection power,
-but a digest reports one opaque number where these name the field that moved.
 
 ### Fix constraints
 
@@ -425,18 +519,22 @@ but a digest reports one opaque number where these name the field that moved.
   for that slot, write back as v2. This is what makes the stated policy's
   second clause ("bug fixes land without changing the HA set config") actually
   hold.
-* **Consequence of that decision, flagged deliberately:** the silent re-seed is
-  currently the *only* mechanism by which device defaults ever beat the HA
-  document. `config_apply` has no such branch — it skips when `cfg_ver` matches
-  and applies when it does not (`main/config_apply.c:233`), and never prefers
-  its own defaults. So migrating does not merely fix a bug, it **removes the
-  only implementation of "device defaults win"** that exists. If that clause of
-  the stated policy is wanted for real, it is new work and must be built
+* **Consequence of that decision, flagged deliberately — now obsolete:** the
+  silent re-seed used to be the *only* mechanism by which device defaults ever
+  beat the HA document. It was removed by `ad62dff` (BUG-8), so migrating no
+  longer removes anything. `config_apply` skips when `cfg_ver` matches and
+  applies when it does not (`main/config_apply.c`, the `strcmp(stored,
+  ver_str)` branch — which since this entry's fix also rebuilds an unreadable
+  timer table on a match), and never prefers its own defaults. "Device defaults
+  win" therefore has **no** implementation at all today; menuconfig is a
+  default consulted in place, never a stored value. If that clause of the
+  stated policy is wanted for real, it is new work and must be built
   deliberately.
-* **Whatever the policy, log it.** "Stale blob, config reset" and "no blob yet,
-  seeding" are different events and must not share a silent code path. This
-  constraint is unconditional and is arguably worth landing on its own even if
-  the migration is deferred.
+* **Whatever the policy, log it. DONE.** "Stale blob, config reset" and "no
+  blob yet, seeding" are different events and must not share a silent code
+  path. This constraint was unconditional and worth landing on its own even
+  with the migration deferred, and that is exactly how it landed — see *What
+  landed* (2).
 * **Keep `TIMER_DEFS_BLOB_VERSION`, independent of `DISC_SCHEMA_VER`, and
   guard the layout mechanically. Decided 2026-08-07.** Two alternatives were
   rejected with reasons:
@@ -463,7 +561,9 @@ but a digest reports one opaque number where these name the field that moved.
 
 ## BUG-7 — a RUNNING slot outlives its own definition
 
-**Status:** OPEN · **Found:** during `feature/break-eligible` review · **Severity:**
+**Status:** FIXED 2026-09-25. See "Settled in the 2026-09-25 fix review"
+at the end of this entry. The line references and the quoted snippet below
+predate the fix. · **Found:** during `feature/break-eligible` review · **Severity:**
 user-visible; corrupts the screen-exposure balance and breaks two documented
 state invariants
 
@@ -565,192 +665,790 @@ Add the missing test: snapshot a RUNNING extra, install a defs table without it,
 restore, assert `assert_state_legal()` passes and the balance did not gain the
 powered-off gap.
 
+### Settled in the 2026-09-25 fix review
+
+**Owner decisions:**
+
+- **Fold at the restore's `now`, and accept a bounded sweep.** There are
+  two restore sites. The boot restore needs a clock that survived.
+  The rollover restore (`wake_flow.c:~1928`) can run after a real power-off,
+  once NTP has corrected the clock. On that path the dark time counts as
+  exposure, but only up to the run's own expiry: an orphan that expired in
+  the dark is folded at its expiry. That is the same amount a still-defined
+  timer's wall-clock countdown uses up. The owner accepted it, because it
+  errs toward more eye rest, as the 2026-08-07 decision did. The comments
+  say this, and a test pins the bound.
+- **Retire only RUNNING orphans.** `timer_defs_install` falls back to the
+  menuconfig table on any read failure or a blob-version change. On such a
+  boot, an HA-defined slot that menuconfig leaves empty looks undefined.
+  Resetting PAUSED slots there would destroy a paused timer, which survived
+  before this fix. A PAUSED orphan breaks no invariant, so only the
+  selection moves off it. A RUNNING orphan is still reset on a fallback
+  boot. That needs a running extra, lost RTC memory and a fallback table
+  all at once. It is accepted as the simple way to restore I3.
+
+**Orchestrator calls:**
+
+- `test_timer_persist`'s `arm_rich_state` fixture (RUNNING Piano with
+  another slot selected) violates I3. It is made legal. No
+  `snapshot_valid` change, because that state only arises from a corrupt
+  snapshot.
+- The `run_segment_slot == i` fold guard gets a test.
+- The invariant numbers follow `test_timer.c`: I3 is "a RUNNING slot is
+  the active slot", and I2 is "at most one RUNNING".
+- A reflash that **renames** a running slot is still not reset at
+  restore, unlike a mid-window rename. It is out of scope and not
+  scheduled.
+
 ---
 
-## HAZ-1 — function calls inside log-statement arguments
+## BUG-10 — recurring PANIC resets on an idle device
 
-**Status:** HAZARD — no defect today (all call sites verified pure) · **Found:**
-2026-08-07 · **Rescoped 2026-08-07** after the device-side behaviour was checked
+> **RESOLVED (owner, 2026-09-25).** `panic_count` has not moved since the
+> last debugging run on this bug. The owner recalls the cause as a
+> logging-related sdkconfig option: the USB-CDC `ETS_PRINTF` path taken
+> during sleep. The exact symbol was not re-derived, and the owner asked
+> for no further digging. The entry below is kept as history.
 
-Originally filed as a host-build artifact: the host log stub discards its
-varargs, so a call inside a log argument is not evaluated on host. That framing
-was too narrow and let the risk read as a testing quirk. It is not.
+**Reported 2026-08-19 from the testing device, with an HA activity-stream
+export.** The device panics on its own, unattended, several times a day.
 
-### The actual rule: log arguments are conditionally evaluated *on device too*
+| Panic (EDT) | Gap from previous |
+|---|---|
+| 08-18 01:49:04 | — |
+| 08-18 22:47:54 | 20 h 58 m 49 s |
+| 08-19 06:46:05 | 7 h 58 m 11 s |
 
-`ESP_LOGx` expands through `ESP_LOG_LEVEL_LOCAL`, which wraps the entire call —
-**arguments included** — in a compile-time conditional:
+Reset reason is `ESP_RST_PANIC` — an abort or a CPU exception. Not a watchdog
+and not a brownout: `wake_flow.c:250-268` gives `ESP_RST_TASK_WDT`,
+`ESP_RST_INT_WDT` and `ESP_RST_BROWNOUT` their own strings, and
+`CONFIG_ESP_TASK_WDT_PANIC` is off.
+
+**Not the OTA.** The OTA landed 08-18 16:02 UTC (`last_reset` -> `SW`,
+`update_target` 1.5.1). The 08-18 05:49 UTC panic predates it, so the panics
+are not something the new image introduced.
+
+**Not deterministic on the rollover either.** The 08-18 panic followed that
+day's 01:28:46 rollover by 20 minutes, but the 08-19 rollover at 01:29:18 was
+followed by five clean hours. Three points is not a period; the gaps are 21 h
+and 8 h, and the second device's stream may or may not agree.
+
+### Retracted: the "silent NVS self-erase" reading of 2026-08-19
+
+The first version of this entry concluded that the device had erased its own
+NVS at 05:12 EDT via `main.c:410`, on the strength of four settings reverting
+at once across two unrelated storage mechanisms. **That was wrong, and the
+activity-stream CSV disproves it.** Recorded rather than deleted, because the
+reasoning was sound given what it had and someone will otherwise re-derive it.
+
+The four rows carry `context_event_type=call_service`,
+`context_domain=homeassistant`, `context_service=turn_off`. Every state the
+*device* publishes in the same export has empty context columns. A Home
+Assistant automation or scene turned those switches off; the firmware never
+published them. The same call recurs 24 h earlier at 08-18 09:10:51 UTC
+against `ota_check_on_sync` alone — the only one of the four that was on at the
+time — which makes it a daily ~05:11 EDT HA action, not a device event.
+
+**The lesson worth keeping is a method one:** an HA activity stream carries
+provenance, and it was available for the asking. The whole erase chain was
+built on the unexamined premise that a state change in HA meant the device had
+published it. Check the context columns before reasoning from a state change.
+
+*Nothing in the retraction touches the two real findings the trace turned up,
+which stand on their own reading of the source and are kept below.*
+
+### Standing findings from the same trace
+
+**F1 — consecutive panics are invisible.** `last_reset` is a state, so HA
+collapses PANIC -> PANIC into one row and only a PANIC -> DEEPSLEEP -> PANIC
+sequence is countable. The cadence above is therefore a lower bound. A
+monotonic persisted panic counter would make the real rate visible; it is also
+the cheapest thing on this list.
+
+**F2 — a transient NVS read permanently rewrites the table.**
+`config_apply.c:206` sets `have_prev = (nvs_config_get_timer_defs(&prev) ==
+ESP_OK)`, so *any* failure — transient included — makes `existed` false for
+every slot, drops `break`/`reload` to the compile-time answer, and line 355
+then writes that back to flash. A read error and a genuinely-absent blob are
+different events and must not share a branch; `ESP_ERR_NVS_NOT_FOUND` is the
+only one that means "never configured". This is BUG-5's unconditional
+constraint applied to the writer rather than the logger. Not implicated in
+anything observed so far — found by reading, not by failing.
+
+**F3 — the erase at `main.c:410` is silent.** Whether or not it has ever
+fired, the most destructive act the firmware can perform logs nothing,
+publishes nothing and leaves no counter, and the reseed then restores WiFi and
+MQTT from compiled-in defaults so the device reconnects looking healthy. It
+should not be possible for this to happen without saying so. `nvs_get_stats()`
+would also settle the headroom question the S1 tail raised and never measured.
+
+### What is being built
+
+HA-visible diagnostics, approved 2026-08-19. The device has to say what it was
+doing when it died, because inference from an activity stream has already
+produced one wrong answer. See the implementor brief for scope.
+
+**Landed.** `main/panic_diag.c` + `include/panic_diag.h`, host-tested in
+`test/test_panic_diag`. Eleven new HA entities (discovery schema v19), +3,696 B
+of image — 1,496,784 → 1,500,480 B, 81.8 % of the app slot.
+
+* **How often.** `panic_cnt`, a monotonic `u32` in NVS bumped once per
+  `ESP_RST_PANIC` boot and published as **Panic count**. `last_reset` is a
+  *state*, so HA collapses PANIC → PANIC into one row and the rate was
+  unknowable; a counter is differenceable between any two publishes.
+* **Doing what.** A 24-byte `RTC_NOINIT_ATTR` breadcrumb carrying two phase
+  slots (main task / network side), uptime, free heap and both task stack
+  floors, re-sealed with a magic + FNV-1a checksum on every phase change. It
+  is latched on the boot after a panic and copied to NVS, because RTC memory
+  reaches the next boot only and this firmware does not open a network window
+  on every wake. `RTC_DATA_ATTR` was not a candidate: it is zeroed by a panic
+  reset. The guard is what makes `RTC_NOINIT_ATTR` safe here and is the whole
+  difference from the timer-state case the project note rejected.
+* **Phases:** BOOT / AWAKE / RENDER / SLEEP on the main slot, NET / OTA_CHECK /
+  MQTT / OTA_DL on the network slot, published joined ("RENDER+OTA_CHECK").
+  Two slots rather than one byte because a single byte would be written by
+  whichever task moved last and would routinely report a network panic as a
+  render.
+* **F3's headroom question is now measured**, though F3 itself is untouched as
+  briefed: `nvs_get_stats()` free entries is published every window as **NVS
+  free entries**. Free only — total is a constant of a frozen partition table
+  and used is total − free. The erase at `main.c:410` is still silent.
+
+**Reviewed, and four defects in it fixed before it shipped.** Image is now
+1,500,848 B, 81.8 %, 58,908 B under the guard; 32 host cases in
+`test_panic_diag`, up from 24.
+
+* **The breadcrumb could lie on the one path it was built for.**
+  `panic_diag_exit()` restored the saved outer phase *unconditionally*, and
+  enter/exit is a read-modify-write spanning the whole phase body — the
+  spinlock makes each end atomic but cannot stop a third task moving the slot
+  in between. The awake failsafe does exactly that: it fires on the esp_timer
+  task and marks SLEEP while a `render()` started on `ota_dl` is still inside
+  a 2–4 s e-ink refresh, and that refresh's exit then put AWAKE back over it.
+  A panic in the sleep funnel would have published `AWAKE+OTA_DL`. Now a
+  compare-and-restore (`panic_diag_rec_exit`): the slot is only rewound if it
+  still holds the phase being left, and a refused exit touches nothing at all.
+* **`stack_main` could carry another task's floor.** `render()` runs from
+  `ota_dl` (16 KB stack) as well as the main task (7 KB), so a panic during a
+  download published a high-water mark the main task cannot physically produce
+  under the label "stack free (main)" — a number that sends the reader after a
+  stack bug that is not there. A sample now declares whether the marking task
+  owns the slot (`panic_sample_t::stack_foreign`); the phase still moves, only
+  the stack figure is withheld.
+* **A `_Static_assert` claimed a guarantee it does not provide.** It compares
+  two hardcoded literals, not the phase table, so adding a longer phase name
+  would have silently truncated the label to something that still reads like a
+  valid phase in HA (`panic_diag_fill_stat` discards the `snprintf` return).
+  The comment in `panic_diag.c` and the matching claim in `stats_json.h:79`
+  both said otherwise. Both corrected, and the property is now pinned by
+  `test_every_phase_pair_fits_the_published_field`, which walks the whole
+  `PANIC_PHASE__COUNT²` cross-product through the real table.
+* **Two publish paths dropped an oversized payload without a word.** The
+  entity-table loop at `mqtt_ha.c:241` is where all eleven diagnostic entities
+  land, and the stat publish has 86 B of headroom left at the measured 938 B
+  worst case. Both now log the skip, as the action-discovery path beside them
+  already did.
+* **The stored phase numbers are now pinned by a test.** They reach a newer
+  image off flash, so renumbering the enum decodes old records as the wrong
+  phase — silently, and only on the devices that actually panicked. Every
+  other test in the file survives a renumbering, which is the point.
+
+**Follow-on, 2026-08-20: BOOT was too coarse to be a finding.** Every panic
+observed so far reports `BOOT` with the net slot idle, and that phase spans
+NVS init, the OTA rollback detector, `buttons_init`, `battery_init`, the LVGL
+framebuffer, a heap check and `lock_gate_check_charge()` — which itself can run
+a full e-ink refresh AND an entire network window without leaving BOOT. The
+main slot now carries five appended sub-phases (`BOOT_NVS`, `BOOT_OTA`,
+`BOOT_DISP`, `BOOT_BATT`, `BOOT_LOCK`, values 9-13) so the breadcrumb names the
+init call rather than the window. Appended after `OTA_DL` rather than inserted
+next to `BOOT`, because the values are stored in RTC memory and in an NVS blob
+and reach a newer image off flash. A hand-flipped reset-loop soak harness
+(`include/panic_soak.h`, `MAGTAG_PANIC_SOAK`, ships at 0) restarts at the end
+of the BOOT window so the span can be exercised in minutes with a console
+attached instead of once a night; it deliberately adds no Kconfig symbol,
+because a reconfigure would rewrite this project's hand-maintained `sdkconfig`.
+Image **1,501,408 B, 81.8 %** of the `ota_0` slot, 58,348 B under the 85 %
+guard — the subdivision plus the review fixes below cost 928 B over the
+1,500,480 B this entry measured for the feature itself. `test_panic_diag` is
+36 host cases.
+
+**Reviewed again, and three things fixed in it.** The review could not break
+mark ordering, enter/exit pairing, the label width budget, cross-version record
+decode or the slot map, and those stand. What it did find:
+
+* **A genuine uninitialised read, introduced by the stack-ownership fix
+  itself (`dc74ac6`), not by the subdivision.** `panic_diag_enter()` and `panic_diag_exit()` declare
+  `panic_sample_t s;` as a bare local; `sample_now()` filled three of its four
+  fields and `note_stack_ownership()` returns early — writing nothing — for
+  every net-slot phase. `panic_diag_rec_mark()` reads `stack_foreign` on both
+  sides, so whether `stack_net` was recorded at all was decided by whatever
+  was on the stack. Fixed at the root: `panic_diag_sample_reset()` (pure,
+  host-tested) zeroes the sample and `sample_now()` calls it first, so a field
+  added later is covered by the same line. The host suite never saw it because
+  every case passes an explicit sample; it now has one that walks the
+  sampler's own build sequence over 0xFF-filled memory.
+* **The 2 s panic-quiet window was described as "small".** It is
+  allocation-light and 2,000 ms of blocking delay, on precisely the post-panic
+  boots this feature measures, and it sits before the first new mark. It stays
+  unmarked — its whole body is a `vTaskDelay`, so no panic can originate in it
+  from the task a mark would describe — but `panic_diag.h` now says so, and
+  says that a post-panic `panic_uptime_s` of 2 is that delay rather than time
+  spent in NVS.
+* **Three load-bearing comments were factually wrong.** `ota_flow_init()` does
+  not read partition state and does not write NVS on an ordinary boot; the
+  LVGL draw buffer is a 4,744 B `.bss` static rather than "the largest single
+  allocation on the device" (the heap work in `display_init()` is `lv_init()`'s
+  pool and `lv_display_create()`); and `panic_soak.h` claimed no render runs
+  before AWAKE while `lock_gate_check_charge()` paints Charge Me! with a full
+  refresh inside the same window. That last one carries an operational
+  consequence the header now spells out: below `BATT_LOCK_PCT` the locked path
+  never returns, so the `#if MAGTAG_PANIC_SOAK` block at the end of `app_main`
+  is never reached and the soak silently becomes a 10-minute deep-sleep cycle.
+  Run it on USB power with a charged battery.
+
+One review claim was **rejected**: that the harness's own `esp_restart()`
+re-arms the Charge Me! repaint guard every iteration because `s_charge_locked`
+is `RTC_DATA_ATTR`. It does zero the flag, but every path that reaches the
+restart left it `false` anyway — `lock_gate_check_charge()` deep-sleeps
+without returning whenever the lock is engaged — so the paint is a one-off and
+the stall is the whole of the hazard.
+
+**Still unexplained by the breadcrumb: the sample is taken at the MARK, not at
+the fault.** `panic_diag.c` fills uptime/heap/stack when a phase is entered and
+nothing re-samples inside a phase, so the published figures describe the start
+of the phase the device died in. Combined with `panic_uptime_s` being published
+in whole seconds (`last->uptime_ms / 1000u`), a BOOT panic still publishes an
+uptime of 0. The subdivision narrows WHERE; it does not improve WHEN. Left as
+found — it is a real limitation of the design, not a defect in the
+implementation, and the phase reading is the evidence being collected first.
+
+**Deferred, deliberately: NVS write amplification in a panic loop.** Before
+this feature a panic boot-loop cost zero NVS writes; each iteration now costs
+a counter write plus a blob write, both committed. Minimum loop period is
+~4.5–5 s, so a sustained loop is ~68k entries/day into six pages shared with
+the WiFi stack. Raw endurance survives it (~3 years of *continuous* looping),
+but the churn raises the odds of `ESP_ERR_NVS_NO_FREE_PAGES` — whose handler
+is the silent erase of F3. The fix is cheap (skip the blob write when nothing
+was latched; only rewrite when the record differs) and is **not** being made
+yet, because the number that decides whether it matters does not exist: read
+**NVS free entries** on the first window after this image lands, then decide.
+
+## BUG-11 — bed time is evaluated against a clock nothing has validated
+
+**Status:** FIXED 2026-09-25. The bed-time gate and the break planner skip
+on an implausible clock. The OPEN QUESTION below stays open, waiting for
+the owner's observation. See "Fix review, 2026-09-25". The line
+references below predate the fix ·
+**Found:** 2026-08-20, by reading, while subdividing the BOOT panic phase ·
+**Rewritten 2026-08-21**, after review refuted the mechanism the first version
+claimed and with it the severity, the trigger set and the priority
+**Severity:** one bed-time evaluation taken against an unvalidated clock, on a
+**power-on reset only** — battery removal, full depletion, first power-up
+
+### The defect
+
+`lock_gate_check_bedtime()` (`main/lock_gate.c:107`) opens with
 
 ```c
-#define ESP_LOG_LEVEL_LOCAL(configs, tag, format, ...) \
-    do { if (ESP_LOG_ENABLED(configs)) { ESP_LOG_LEVEL(...); } } while(0)
-/* esp_log.h:157 */
-
-#define ESP_LOG_ENABLED(configs) (LOG_LOCAL_LEVEL >= ESP_LOG_GET_LEVEL(configs))
-/* esp_log_level.h:73 — a compile-time constant */
+if (!bedtime_active(time_util_minutes_of_day(now), config_cache_bedtime_minutes())) {
 ```
 
-When the level is disabled the guard is `if (0)` and **the argument expressions
-are never evaluated on the device**. A call placed there is not "a call that
-might get optimised out one day" — it is a call whose execution is a function of
-a Kconfig value.
+and `now` is `hal_time_now()`, handed in by the caller. Nothing anywhere on
+that path asks whether the clock has ever been set. It is called from
+`wake_flow_handle_timer_tick()` at `main/wake_flow.c:1051` — whose own comment
+says it runs *before* the sync block — and again from
+`wake_flow_handle_button_wake()` at `main/wake_flow.c:1205`.
 
-### This is already active, not hypothetical
-
-`sdkconfig` sets `CONFIG_LOG_MAXIMUM_LEVEL=3` (INFO), so `ESP_LOGD` and
-`ESP_LOGV` are compiled out **today**. `main/wake_flow.c:164` is an `ESP_LOGD`
-whose argument list calls `battery_percent_from_mv(mv)` — **that call does not
-happen on the device as shipped.** It is pure, so nothing is currently wrong;
-but the mechanism is live, not waiting for anyone to change a flag.
-
-Lowering `CONFIG_LOG_MAXIMUM_LEVEL` to WARN — an entirely routine size/power
-change on a battery device — silently extends the same treatment to all five
-`ESP_LOGI` sites below. Lowering it to ERROR takes the four `ESP_LOGW` sites too.
-
-### Why nothing would catch it
-
-The host stubs are of the form
+**The OTA path has exactly the guard this one is missing.**
+`ota_policy_check_gate()` refuses to act on an unvalidated clock:
 
 ```c
-#define ESP_LOGI(tag, ...) ((void)(tag))
+if (!in->time_valid)
+    return OTA_REASON_NO_TIME;
 ```
 
-which discards the varargs, so host and device happen to **agree** — by
-accident, and only while the level is disabled. Worse, the differential sweep
-cannot see the difference either, because both sides of the comparison are host
-builds. A side-effecting call in a log argument is a divergence with **no
-detector anywhere in the project**.
+`main/ota_policy.c:165`, against `ota_gate_in_t::time_valid`, documented at
+`include/ota_policy.h:163` as *"NTP has set the clock this session"*. So the
+firmware already holds the position that a decision taken against an unset
+clock is not a decision. `lock_gate` has no equivalent, and it is making a
+comparison — minutes-of-day against a configured window — that is *more*
+sensitive to a wrong clock than the OTA gate is, not less.
 
-### Census — verified mechanically
+### CORRECTION — the mechanism this entry was first built on is false
 
-Re-counted with comments and string literals stripped, so format-string words
-like `"...unavailable("` do not register as calls.
+The first version claimed the IDF wall-clock offset "is cleared by any
+non-deep-sleep reset", and from that derived a severity of *"one bed-time wake
+lost after every panic — and after every OTA reboot, brownout and serial
+reset"*. **It is not cleared by any of those.** Verified against this
+checkout's toolchain, 2026-08-21:
 
-Stubs are defined in **five** files: `main/wake_flow.c:85-87`,
-`main/alerts.c:41-42`, `main/net_apply.c:18-19`, `main/timer_persist.c:16`,
-`main/lock_gate.c:21`. (`alerts.c` and `net_apply.c` carry stubs but no
-calls-in-arguments, so they are exposure-free today.)
+* `sdkconfig` carries `CONFIG_ESP_TIME_FUNCS_USE_RTC_TIMER=y`.
+* Under that symbol the epoch offset is written to RTC retention
+  **registers**, not to `.rtc.bss`: `esp_time_impl_set_boot_time()` does
+  `REG_WRITE(RTC_BOOT_TIME_LOW_REG, …)` / `REG_WRITE(RTC_BOOT_TIME_HIGH_REG, …)`
+  — `components/esp_libc/src/port/esp_time_impl.c:72-73`.
+* The startup zeroing is exactly one `memset`, over `_rtc_bss_start` ..
+  `_rtc_bss_end`, and only when the reset reason is not a deep-sleep wake —
+  `components/esp_system/port/cpu_start.c:468-469`. Retention registers are
+  not in that range.
 
-**Ten** call sites, **six** distinct callees, all verified pure reads:
+So the wall clock **survives** a panic reset, `esp_restart()`, a brownout and
+a serial DTR/RTS reset. Only a genuine power-on reset — battery removed, cell
+fully depleted, first power-up — loses it.
 
-| Site | Level | Call | Evaluated on device today? |
-|---|---|---|---|
-| `main/wake_flow.c:164` | D | `battery_percent_from_mv(mv)` | **no — already compiled out** |
-| `main/wake_flow.c:267` | I | `timer_active_slot()` | yes |
-| `main/wake_flow.c:378` | I | `timer_active_slot()` | yes |
-| `main/wake_flow.c:431` | I | `timer_get_state()` | yes |
-| `main/wake_flow.c:497` | I | `timer_run_accum(now)` | yes |
-| `main/wake_flow.c:543` | W | `timer_current_date()` | yes |
-| `main/wake_flow.c:766` | I | `timer_get_state()` | yes |
-| `main/timer_persist.c:33` | W | `esp_err_to_name(ret)` | yes |
-| `main/timer_persist.c:45` | W | `timer_get_state()` | yes |
-| `main/lock_gate.c:87` | W | `timer_get_state()` | yes |
+The same paragraph named `g_rtc_state.next_ntp_sync` as one of "two
+independent pieces of state" that make `hal_time_now()` bogus. It is not one
+of them at all. `hal_time_now()` is `return time(NULL);`
+(`main/hal_time.c:8-10`) and never reads `g_rtc_state`. `next_ntp_sync` feeds
+only `timer_needs_ntp_sync()` and `timer_last_ntp_sync()`
+(`main/timer.c:723-739`), which are consumed at `wake_flow.c:1062` — *after*
+the bed-time call at `:1051`. Losing it changes WHEN a sync is scheduled,
+never WHAT the clock reads.
 
-`wake_flow.c` carries a maintained census comment for exactly this reason and it
-is accurate. `timer_persist.c` and `lock_gate.c` carry **none** — and that is the
-real finding here. The discipline protecting against this exists in one of the
-three files that need it, which means it is not a discipline, it is a habit that
-did not propagate.
+### What survives the correction, and it is still a defect
 
-### Recommended fix — a bright line, not a better census
+On a power-on reset the offset genuinely is gone, and the boot that follows
+reads near-epoch until NTP lands. The bed-time check at `wake_flow.c:1051`
+runs **before** the sync block on that same wake — its own call-site comment
+says so — so exactly one bed-time evaluation is made against a clock nothing
+has validated. `bedtime_active()` answers no, the lock does not engage, and
+the wake takes an ordinary short sleep instead of `BEDTIME_SLEEP_SEC` (7200,
+`include/sleep_plan.h:96`). It is a lost wake, not a permanent failure: the
+next tick, with a synced clock, engages the lock normally.
 
-**Rule: no function call in a log-statement argument list, except an
-allowlisted pure formatter (`esp_err_to_name` and friends).** Hoist the rest to
-a local computed before the log statement.
+Rare, and real. A device whose battery is pulled or run flat during the
+evening comes back inside the bed-time window and skips it once. The missing
+guard is the defect whether or not the trigger is common — the OTA gate holds
+the opposite position ten files away.
 
-Enforce it with a checked-in scanner run from pre-commit — the
-comment-and-string-stripping scanner used for the census above is most of it
-already. Cost is roughly nine mechanical edits and one hook.
+### Priority, re-derived — said out loud rather than re-ranked silently
 
-The alternative — keep the calls, extend `wake_flow.c`'s census comment to the
-other two files, and require a purity judgement per addition — is cheaper now
-and is what the code does today. It is not recommended: it has already been
-tried implicitly and failed to reach two of three files, and it asks every
-future contributor to reason about compile-time argument evaluation correctly.
-A bright line asks nobody to reason about anything.
+The old `0.6` slot and its **blocked by BUG-10** rationale were derived
+entirely from the refuted linkage: *"a panic is precisely what invalidates the
+clock, so the two are the same night's story."* With the linkage gone, that
+rationale goes with it. A panic does not invalidate the clock, so fixing this
+cannot confound the panic measurement through the mechanism the freeze was
+protecting.
 
-**Wrinkle the fix must handle:** hoisting a value consumed only by a
-compiled-out log makes it set-but-unused, which `-Wall` will flag —
-`main/wake_flow.c:164`'s `ESP_LOGD` is exactly this case. Pair each hoist with a
-`(void)` or scope it to levels that are not compiled out; do not discover this
-halfway through and quietly revert the rule.
+It is therefore **unblocked**, and it moves down the list on cost/benefit
+rather than on dependency: a power-on reset landing inside the bed-time window
+is far rarer than a panic, and the fix needs a design decision (below) rather
+than a patch. The order-of-work table now carries it at **4**, with no
+blocker.
 
----
+One reason for care remains, and it is not the old one: the open question
+below is unexplained, it lives on this same code path, and changing what
+`lock_gate_check_bedtime()` does would destroy the evidence needed to settle
+it. Settle the question first.
 
-## Standing rules
+### OPEN QUESTION — bed time did not engage on the panic boots, and nothing here explains why
 
-These are the durable lessons, kept separate because **everything above is meant
-to be deleted as it lands and these are not.** Promote them into
-`docs/home_assistant.md` (R1, R2) and the project conventions (R3) before this
-file is consumed.
+**Unresolved. Recorded as a question, not as evidence.** The first version of
+this entry attributed two nights of 1-7 minute wake gaps to this defect. That
+attribution does not follow and has been deleted: the clock survives a panic,
+so those post-panic boots were not evaluating bed time against a bogus clock.
 
-**R1 — new timer config is durable config, and durable config lives in HA.**
-When adding a field to timers 1–4, ask *"is this durable config that should be
-in HA?"* The answer is almost always yes. If it is, the field must be:
-1. expressible in the bulk `config` document,
-2. documented in `docs/home_assistant.md`,
-3. published in the state JSON so HA's UI reflects the device's actual belief.
+What is left is an observation with no explanation:
 
-Missing (1) is what caused the break-eligible reverts; missing (2) is what made
-it invisible for so long.
+* The wall clock survives a panic (above), and TZ is applied **inside** the
+  BOOT window — `setenv("TZ", …)` / `tzset()` at `main/main.c:487-488`, before
+  the AWAKE mark — so a post-panic boot knows the local time.
+* `s_bedtime_locked` is `RTC_DATA_ATTR` (`main/lock_gate.c:38`), so a panic
+  zeroes it. `lock_gate.c:33-37` states the design intent for exactly this
+  case: the gate recomputes from wall-clock time on every boot, so *"a hard
+  reset cannot unlock the night — it merely replays the engage once."*
+* At 23:21 local with bed time configured at 22:00, `bedtime_active(1401,
+  1320)` is true. A post-panic boot there should have engaged: paint, alert,
+  and `BEDTIME_SLEEP_SEC` (7200 s).
+* On 2026-08-21 the device published at 03:21:48Z, panicked, and published
+  again **82 seconds later**. That is impossible if it had engaged.
 
-**R2 — anything settable from an HA entity must be expressible in the bulk
-document.** `apply_sets()` deletes the retained `set/` command once applied
-(`main/mqtt_ha.c:312-323`), so an entity-only field has **no durable store
-anywhere** and will be destroyed by the next application of the bulk document.
-R2 is the mechanical reason R1 is not merely tidiness.
+"The panicking boots never reach the check" does **not** close it: the boots
+that published reached AWAKE, and a boot that reaches AWAKE has already run
+`wake_flow_handle_timer_tick()` and therefore already evaluated bed time.
 
-*Known asymmetry, accepted deliberately:* the two config channels are still
-asymmetric — a per-field set is one-shot by design. That is sound for the timer
-fields today, because the document can now express all of them and no longer
-overrides by omission. R2 is what keeps it sound for the next field.
+The leading remaining candidate is that **the stored bed-time value is not
+what the operator believes it is.** `config_cache_bedtime_minutes()`
+(`main/config_cache.c:44`) folds the raw HHMM and answers -1 for "disabled"
+only when the stored value is a literal `0`; any *other* value that fails
+validation falls back to `NVS_DEFAULT_BEDTIME` rather than disabling. Either
+branch — a stored 0, or a bad edit folding to a default nobody expects —
+produces a device that never locks at the hour the operator has in mind.
 
-**R3 — no side-effecting call in a log-statement argument.** Log arguments are
-evaluated conditionally at compile time on device as well as host (see HAZ-1),
-so a side effect placed there is a Kconfig value away from disappearing.
+**The discriminator is cheap and needs no firmware change.** Read the bed-time
+entity back out of Home Assistant and compare it against what is expected, and
+watch whether the Bed Time screen appears at all on any night. A screen that
+never appears while the read-back looks correct points somewhere else entirely
+and this question stays open; a screen at the wrong hour, or a read-back that
+disagrees with the operator, closes it as configuration.
 
----
+### Settled 2026-09-25 (owner triage, orchestrator)
 
-## Closed
+**Scheduled after BUG-13 and BUG-7.** The guard asks whether the clock is
+plausible: `now` earlier than the firmware's build time means "never set".
+It does **not** use the OTA gate's "NTP set it this session". NTP runs
+hourly, so that question is false on most wakes, and copying it would skip
+bed time nearly every night.
 
-Kept as one-liners only because source comments name them; delete these once the
-comments are reworded.
+On an implausible clock, skip the bed-time evaluation (today's outcome,
+now deliberate). The next wake, after NTP, engages normally. Skipping also
+closes a worse case: in a time zone where the near-epoch clock falls
+**inside** the bed-time window, the device today locks wrongly for
+`BEDTIME_SLEEP_SEC`.
 
-* **BUG-4 — the checked-in sweeps tested a hardcoded path, not the caller's
-  tree.** The three cycle generators pinned `REPO` to this branch's worktree, so
-  a sweep run from anywhere else silently swept that tree and reported a green
-  control about code the reader was not looking at — and would have become
-  permanently unrunnable the day the worktree was deleted. Fixed by deriving
-  `REPO` from each generator's own location, the way `run.sh` already did, plus
-  a `preflight()` that refuses to run when the derived path is not the root of a
-  git working tree. Verified two-sided: all three sweeps still pass with
-  unchanged case counts (29592 / 15032 / 121504), and a generator copied outside
-  a repository now exits 1 with `is not a git working tree` where the old code
-  would have swept the hardcoded path regardless. `BASE` is pinned to the
-  annotated tags `difftest-base/cycle09|10|11` rather than bare short SHAs, so
-  the baselines survive a branch deletion or a history rewrite; `preflight()`
-  prints the exact `git tag -a` restore command if one goes missing.
-* **HAZ-2 — cycle09 could not report trace truncation.** Closed in the same
-  commit: cycle09 now carries the `g_overflow` counter cycles 10 and 11 have and
-  prints `overflow=` in its result line, so `run.sh` no longer annotates every
-  cycle09 line with `[overflow not reported]`. `TRACE_MAX` stays at 256 — the
-  measured high-water mark over all 29592 cases is 18 events — and now carries a
-  comment recording that the number is measured, and that the trace lives inline
-  in `run_t` rather than being malloc'd, which is why it is smaller than the
-  other two cycles' 8192.
-* **BUG-6 — the bulk config document destroyed `break_eligible` on every
-  apply.** Fixed in `733e86e`: `apply_timers()` starts from the stored table, so
-  an absent optional key leaves an existing slot unchanged and means false only
-  for a slot being defined for the first time; `docs/home_assistant.md`
-  documents `break` and the optional-key rule. Named by `main/config_apply.c:192`
-  and `test/test_config_apply/test_config_apply.c:334`. The durable lesson is
-  **R2**.
-* **Build hardening — `-Werror=unused-function` disarmed by IDF.** Closed in
-  `1865a3f`, re-armed per-target on `main` and `components/ssd1680` so IDF's own
-  components and managed dependencies are unaffected. Verified two-sided: the
-  build passes as-is and fails when the `alerts_set_extend_awake()` install is
-  deleted. Caveat: the backstop holds only while `extend_awake_failsafe` has
-  exactly one reference.
+The OPEN QUESTION below is left as it stands. BUG-10 is resolved, and the
+owner will say whether bed time engages on schedule now.
+
+**Fix review, 2026-09-25 (orchestrator):**
+- **Fixed floor, not the build time.** The threshold is a fixed floor,
+  `TIME_UTIL_CLOCK_FLOOR` = 2026-01-01 UTC, which predates the repo. A
+  build-time bound would break reproducible builds and make host tests
+  depend on the build date. An unset clock reads near 1970, decades below
+  either bound.
+- **Corrected trigger.** On a power-on boot the rollover window normally
+  syncs NTP **before** the gate runs. So the skip fires only when that
+  first NTP attempt fails, and then on every wake until NTP works. The
+  "runs before the sync" wording in this entry was wrong.
+- **The break planner is guarded too** (`wake_flow_maybe_start_break`,
+  `bedtime_break_would_cross`). It can raise `s_bedtime_locked`, and
+  `check_bedtime` is the only code that clears it. Left unguarded, the
+  planner plus the skip could hold the lock with no release for as long
+  as NTP fails.
+- **The skip stays neutral** (it holds the flag). With the planner
+  guarded, an unset clock cannot raise it.
+- **Documented behaviour:** a device that loses power and has no WiFi does
+  not enter bed time until it syncs.
+- The other pre-NTP clock readers are follow-ups, not part of this fix:
+  - the day type in `check_config_error` (low harm, self-heals);
+  - quiet hours (cosmetic);
+  - the day refund, which is **BUG-14**.
+
+### Fix shape, for whoever picks this up later
+
+Not prescriptive, and recorded because the reasoning is cheap to lose:
+
+* the input is the same one the OTA gate already computes; the question is
+  whether `lock_gate` should take a `time_valid` argument or whether the two
+  callers in `wake_flow.c` should hold the guard,
+* *"has NTP ever set this clock"* and *"has NTP set it this session"* are
+  different questions, and the OTA gate deliberately asks the second one. On a
+  power-on reset the two coincide, which is a reason to be explicit about
+  which is being asked rather than a reason it does not matter,
+* and there is a real decision underneath about what bed time should DO when
+  it cannot tell the time: skipping the lock (today's behaviour, by accident)
+  and holding the previous lock state (which RTC memory cannot supply on the
+  one reset that triggers this) are both defensible, which is a reason for the
+  fix to be designed rather than patched.
+
+**No pinning test yet, and that is a known gap.** The register's own rule is
+that an open defect is pinned by a test asserting the current, wrong
+behaviour. Write the pin with the fix, and flip it deliberately.
+
+## BUG-12 — a network window that ends before MQTT leaves the net phase slot stale
+
+**Status:** OPEN — found by review 2026-08-21, **not fixed in that pass** ·
+**Severity:** a later main-task panic publishes a network phase that was over
+before it happened — the breadcrumb misleading in exactly the direction the
+two-slot design exists to prevent
+
+### The defect
+
+`net_window_task()` (`main/net_window.c`) marks the net slot three times and
+clears it once:
+
+* `panic_diag_enter(PANIC_PHASE_NET)` at `:52`, unconditionally,
+* `panic_diag_enter(PANIC_PHASE_OTA_CHECK)` at `:124` and
+  `panic_diag_enter(PANIC_PHASE_MQTT)` at `:126`, both inside
+  `if (wifi_up) { … if (xQueueReceive(…)) { … } }`,
+* and one exit at `:137` — `panic_diag_exit(PANIC_PHASE_MQTT, PANIC_PHASE_NONE)`.
+
+`panic_diag_rec_exit()` is a **compare-and-restore**, deliberately and for
+good reason: it is the fix that stopped the awake failsafe's SLEEP mark being
+overwritten by a late render exit. It rewinds a slot only if that slot still
+holds the phase being left. So the single exit clears the net slot only on the
+path that actually reached MQTT. **When the window ends before MQTT the slot
+is never cleared** and reads `NET` for the rest of the boot.
+
+The reachable case is a failed association: `wifi_session_begin()` returns
+non-`ESP_OK`, `wifi_up` is false, neither inner mark runs, and the exit at
+`:137` compares `MQTT` against a slot holding `NET` and refuses. The comment
+directly above that line names this exact case and claims the opposite —
+
+> *"Placed after `wifi_session_end()` so the radio teardown is still covered,
+> and outside the `wifi_up` branch so the no-wifi path clears it too."*
+
+— and the no-wifi path is the one path it does not clear.
+
+### Failure mode
+
+The main task carries on and eventually marks `SLEEP`. A panic in the sleep
+funnel then publishes **`SLEEP+NET`**: a network phase that ended, unentered,
+minutes earlier, sitting beside a main-slot phase that is genuinely current.
+`panic_diag.h`'s whole argument for two slots is that a reader must be able to
+ask *"was it in the network path?"* from the label alone; a stale net slot
+answers yes when the answer is no. On a device whose open question is
+precisely *"is the OTA/TLS path implicated?"*, that is a false positive on the
+hypothesis under test.
+
+`OTA_CHECK` is **not** reachable as a stale value through ordinary control
+flow — `panic_diag_enter(PANIC_PHASE_MQTT)` is the next statement after
+`ota_flow_check()` returns. `NET` is the value that actually sticks.
+
+### Why it was not fixed where it was found
+
+Found while reviewing the BOOT subdivision (`9dfb2f9`), which is a diagnostics
+change to a different file. The fix touches window sequencing on the path the
+panic measurement is currently being read from, and it is not a one-liner: the
+shape is either an exit paired with each enter, or one unconditional
+"the window is over" clear that does not compare, and choosing between them is
+a decision about what the net slot should mean when no window task is alive.
+Registered rather than patched in a review-fix pass.
+
+**No pinning test yet.** The pure layer is host-tested and behaves correctly;
+what is missing is a test of `net_window_task`'s sequence, which has no host
+harness today.
+
+## BUG-13 — blanking a text control in HA never reaches the device
+
+**Status:** FIXED 2026-09-25 (schema v24). **Confirmed on hardware by the
+owner, 2026-09-25**: blanking a timer name in HA disabled the slot. · **Found:** 2026-09-11, hardware
+(the Testing Timer), by the owner · **Severity:** user-visible. The documented
+way to disable an extra timer does not work, and HA offers no other control
+that can disable one.
+
+### Observed (owner, 2026-09-11)
+
+On the Testing Timer, blanking the names of timers 1 and 2 in HA did not
+disable those timers, even after several manual syncs. Expected: a blank name
+disables that extra timer.
+
+### Root cause (diagnosed 2026-09-25, by reading)
+
+Two independent causes. Either one alone loses the blank:
+
+1. **HA publishes the command retained.** Every config control's discovery
+   has `"retain":true` on `magtag/<id>/set/<key>` (`main/ha_config.c:~1001`).
+   HA therefore publishes a blank text value as a **retained zero-length
+   message**, which MQTT defines as "delete this topic's retained message".
+   The device is asleep, so it never receives anything.
+2. **The device ignores empty payloads.** `main/mqtt_rx.c:43-50` drops any
+   message with `total_len <= 0`, on purpose. The device clears its own
+   retained sets the same way, so it must ignore them.
+
+The device side would accept the blank if it arrived. The `CFG_TNAME` set
+(`ha_config.c:~843`) takes `""`, and `timer.c` disables a slot that has no
+name. A blank arriving mid-sync on a RUNNING slot is already handled:
+`net_apply.c` `reconcile_defs()` calls `timer_reconcile_def()`, which folds
+the run and resets the slot. That is not BUG-7, which is only the
+snapshot-restore path after a reflash.
+
+**The same bug affects every text control.** `ota_url` documents `""` as
+"disable updates" (`docs/home_assistant.md:~904`), so it almost certainly
+fails the same way. That one has not been reproduced. `timerN_min` accepts
+1-1440, so HA's controls have no working way to disable a slot at all.
+
+**Workaround until fixed:** a bulk config document whose `timers` entry for
+the slot is `{}`.
+
+### Fix (approved by the owner 2026-09-25)
+
+1. **Discovery.** Every `text` config control gets a command template
+   `{{ value if value else '""' }}`, correctly JSON-escaped inside the
+   payload. For a blank value HA then publishes the two characters `""`,
+   which the broker keeps retained.
+2. **Device.** A set payload that is exactly `""` decodes to the empty
+   string before the field's own checks run. Each field's existing rules
+   still decide whether a blank is allowed. The sentinel is unambiguous:
+   `config_is_clean_str()` (`config_validate.c:75`) already rejects `"` in
+   every text value.
+3. **Schema.** `STATS_JSON_DISC_SCHEMA_VER` goes 23 → 24, so a device
+   republishes its discovery. The Testing Timer already runs 23. Every site
+   that states the version moves with it.
+4. **Tests (host).**
+   - The decode.
+   - The template, present on every text control and on no other kind.
+   - End to end: a blank `timerN_name` set disables the slot.
+   - A literal `""` never becomes a stored name.
+   - The pinned `mqtt_rx` empty-drop still holds.
+5. **Docs.** `docs/home_assistant.md`: clearing a name, or `ota_url`, now
+   works, after an OTA to this firmware.
+
+**Owner decision (2026-09-25, from the review): a blank `tz` is allowed and
+means UTC.** The docs warn about it: bed time, quiet hours and the day
+rollover shift by the UTC offset from the next boot. A bulk `"tz": ""` has
+always done the same. To go back to local time, type the zone string in
+again.
+
+## BUG-14 — a power-on without NTP refunds the day
+
+**Status:** FIXED 2026-09-25, after three review cycles. **The owner
+assumes it fixed without a hardware run (2026-09-25).** Turning WiFi off is
+disruptive, so the entry is re-opened if the problem is ever seen. The
+check, if wanted:
+1. Turn WiFi off and pull the battery. Expect "No Clock … Press D to
+   retry", with only D waking the device.
+2. Turn WiFi back on and press D. Expect the lock to release, today's day
+   to be restored, and no 1970 summary in HA.
+
+The rollover re-queues the bonus clear only when the clock was unset before
+the window **and** is plausible after it. "Unset before" alone would let a
+leftover clear drop a restored day's target (pinned by a test).
+
+· **Found:** by the BUG-11 fix review, by reading · **Severity:**
+user-visible. The day's used screen time is given back and the chore acks
+are wiped.
+
+### The defect (as traced by the review; not confirmed on hardware)
+
+1. After a real power-on reset (battery out or flat), the clock reads near
+   1970. The boot restore refuses the snapshot on the date check, so
+   `timer_reset()` runs.
+2. If that wake's NTP attempt fails (no WiFi), `enter_deep_sleep` calls
+   `timer_persist_save()` (`main.c:~133`). That overwrites today's NVS
+   snapshot with the 1970-dated day.
+3. When NTP later lands, the rollover sees a non-empty `last_date`.
+   `timer_persist_try_restore` then returns false, because the stored
+   snapshot is the 1970 one. So the day resets again, and the real
+   today's state is gone.
+
+This is not the `next_ntp_sync` rollover issue queued after BUG-8. The
+likely fix shape: skip the snapshot save while the clock is implausible
+(`time_util_clock_plausible`, added by BUG-11), so today's snapshot
+survives until a synced wake can restore it. Not designed yet.
+
+**Owner triage (2026-09-25): fix it.** Do not save the snapshot while the
+clock is unset. The owner notes that this also closes a workaround: pulling
+power while offline refunds the day.
+
+**Owner decision (2026-09-25, on the first implementation): lock until the
+clock is set.**
+- After a power-on, the device waits for the first NTP sync, which the
+  rollover window already attempts.
+- If that sync fails, leaving the clock implausible, the device shows a
+  lock screen and hands out no screen time until NTP succeeds. "If WiFi is
+  down, most versions of screen time are moot anyway."
+- So the offline stand-in day is never usable, and nothing from it needs to
+  be merged or discarded.
+
+The rest of the first implementation stands:
+- no save on an implausible day;
+- today's snapshot is restored over a 1970 day;
+- no 1970 ack-record write;
+- no 1970 rollover summary;
+- `timer_reset()` keeps its stamp.
+
+**Owner decision (2026-09-25, lock screen UX): the screen tells the child
+that D retries.** "Clear and easy UX is important."
+- The lock gets its own screen, saying there is no sync or clock, to check
+  WiFi, and to press D to retry. It has its own new golden image.
+- The legacy `sync_failed` screen and golden stay as they are. That golden
+  is one of the three 4737 B legacy files whose stray byte must not be
+  "fixed", so it cannot be regenerated.
+- The 30-minute automatic retry stays.
+
+**Owner decisions (2026-09-25, from the round-2 review):**
+- **Q1 (grants while locked): leave them queued.** While the no-clock lock
+  holds, the device consumes no day-scoped commands: `cmd` grants and
+  bonus targets stay retained on the broker, unapplied and unacked. The
+  release window settles the day first (restore, or reset plus a bonus
+  clear when the day was reset), and only then applies them. Settings
+  (config documents) are not day-scoped, so they still apply.
+- **Q2 (running timer across the outage): accept it and fix the docs.** A
+  running timer keeps draining in wall-clock time through the outage and
+  the lock, the same as any power loss. The docs must not promise that the
+  day comes back "as it was at the power cut".
+- **Q3 (WiFi works, NTP blocked): stay locked indefinitely.** The device
+  retries every 30 minutes or when D is pressed.
+
+**Owner decisions (2026-09-25, from the cycle-2 review):**
+- **Q-B (late NTP release): open one extra network window right away.** A
+  release on the late-NTP path (a D-press wake that opens no further window)
+  runs one more window at once. Its queued bonus clear and any held grants
+  then go out before sleep. The clear flag is plain RAM, so it would
+  otherwise be lost, and the old day's retained target re-granted.
+- **Q-A (bonus target set during the lock, release starts a new day): drop
+  it.** Today's rule stands: a new day starts with no bonus. HA shows 0, so
+  the drop is visible. This is documented.
+
+**Orchestrator calls (cycle 2):**
+- **A host-test seam for the BUG-14 logic in `mqtt_ha.c`**, done now:
+  - pure functions for the bonus decision (buffer, hold or drop), for the
+    publish-the-clear decision and for the act state;
+  - `cmd_apply` takes the snapshot, so the `no_clock` pass-through is pinned.
+- **Accepted as latency only:** held commands wait for the restored
+  `next_ntp_sync` after a restore outside the lock window. On the late path
+  the Q-B window removes this.
+- **Known gap, not fixed:** the release wake skips the rollover's
+  update-check arm, so the daily check moves to the next midnight.
+
+**Orchestrator calls (cycle 3):**
+- **The bonus clear is re-queued after a late rollover NTP (MAJOR-1, a
+  regression against HEAD).**
+  - A power-on rollover whose NTP lands after the stats post publishes a
+    `no_clock` snapshot. The clear is then refused and its flag consumed.
+    The day resets with no lock, so no release re-queues the clear.
+  - Fix: `wake_flow_handle_day_rollover` records whether the clock was
+    unset before its window, and on the reset branch calls
+    `mqtt_ha_queue_bonus_clear()` again.
+  - A power-on is always a tick wake, and the reset clears
+    `next_ntp_sync`, so the tick's sync block carries the clear in the
+    same wake. No extra window is needed.
+  - The false invariant in `include/ha_day_cmds.h` ("the release is what
+    re-queues the clear") is corrected.
+- **Keep the extra window on the "set between wakes" release too.** On a
+  tick wake it costs nothing, and on a D-press wake it is the only thing
+  that carries the clear.
+- **Accepted:** if the owed window's NTP fails on the reset branch, the
+  tick runs a second failed window. This is rare and bounded.
+
+## BUG-15 — a same-day power cycle appears to revoke the day's HA bonus
+
+**Status:** OPEN, registered 2026-09-25, not scheduled; for the owner to
+triage · **Found:** by the BUG-14 round-2 review, by reading only · **Severity:**
+user-visible if confirmed.
+
+The rollover at every power-on (`last_date` is empty) queues the clear of
+the retained bonus target to "0". The boot restore then brings back
+`bonus_applied` = X, so the next window's bonus reconcile appears to take X
+back. This is not confirmed on hardware.
+
+A related observation from the same review: a grant that lands in any
+midnight rollover window can be lost the same way as the BUG-14 lock
+window's, because it is applied before the day it belongs to is settled.
+
+The BUG-14 cycle-2 review found a second one, also predating BUG-14: an
+ordinary midnight rollover whose window fails loses the queued bonus
+clear. That flag is plain RAM and deep sleep clears it, so the next window
+applies yesterday's retained target to today. Triage it with this entry.
+
+## Closed — moved to the archive
+
+Full detail, and the reasoning behind each, is in
+`docs/planning/implemented/20260818.bugregister.closed.md`. These one-liners
+stay here only because source comments still name the numbers; delete a line
+once its comments are reworded.
+
+* **BUG-4** — the checked-in sweeps derive the repository from their own
+  location instead of a hardcoded path, and are pinned to `difftest-base/*`
+  tags. `c9e62c8`. Named by `docs/planning/20260807.propertychecker.plan.md:117`.
+* **HAZ-2** — cycle09 reports trace overflow. `c9e62c8`.
+* **BUG-6** — an omitted optional timer flag no longer clears an HA-set value.
+  `733e86e`. Named by `main/config_apply.c:477` and
+  `test/test_config_apply/test_config_apply.c:334`. The durable lesson is **R2**.
+* **Build hardening** — `-Werror=unused-function` re-armed per-target on `main`
+  and `components/ssd1680`. `1865a3f`.
+* **HAZ-1** — a function call in an `ESP_LOGx` argument list is now refused by
+  `scripts/check-log-args.py` at pre-commit, and the sixteen that existed were
+  hoisted to locals. `68121a8`. Named by the anchor comments on the three
+  allowlisted formatters (`main/ota_policy.c`, `main/ota_url.c`,
+  `main/wake_flow.c`) and by the hoist comments in seven files. The durable
+  lesson is **R3**. **No hardware row on purpose** — the archive entry argues
+  why, and records that this image must reach the device by OTA rather than a
+  USB reflash, which would reseed NVS and destroy S1's in-flight observation.
+* **BUG-8** — losing the timer-defs blob no longer cements a Kconfig
+  `break_eligible`. `ad62dff` `858d41e` `de21436` `10745de`. Named by
+  `main/main.c:309` and `docs/planning/ota.plan.md:2070`. **Not finished:
+  awaiting its hardware smoke test — see S1 above.**
 
 ---
 

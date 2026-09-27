@@ -23,6 +23,35 @@ esp_err_t nvs_config_set_holiday_min(uint16_t val);
 esp_err_t nvs_config_get_summer_min(uint16_t *out);
 esp_err_t nvs_config_set_summer_min(uint16_t val);
 
+/* The chore gate's free slice of each day's allocation, in MINUTES, one
+   key per day type and paired one-for-one with the four allocations
+   above. MINUTES is the contract: config_is_valid_chore_free_min() takes
+   minutes, and schedule_get_chore_free_sec() is the seconds accessor —
+   handing seconds to the validator compiles and silently answers a
+   different question (see config_validate.h).
+
+   Two things these are NOT, and both are load-bearing:
+
+   NOT SEEDED, and deliberately absent from the defaults fingerprint (see
+   the NVS_DEFAULT_CHORE_FREE_* comment in nvs_defaults.h). An unwritten
+   key reads back as its compile-time default of 0 — fully gated, and
+   inert anyway while no chore is configured (design row C1) — which is
+   the state every device in the field is in today. A row in
+   NVS_SEEDED_U16S would change the fingerprint, reseed every deployed
+   device and revert every HA-managed key with it.
+
+   NOT the value the gate should be BUILT on without its allocation
+   beside it: `chore_free > allocation` is a config error, so these are
+   only ever meaningful as the pair config_apply.c resolves them in. */
+esp_err_t nvs_config_get_chore_free_wd(uint16_t *out);
+esp_err_t nvs_config_set_chore_free_wd(uint16_t val);
+esp_err_t nvs_config_get_chore_free_we(uint16_t *out);
+esp_err_t nvs_config_set_chore_free_we(uint16_t val);
+esp_err_t nvs_config_get_chore_free_hol(uint16_t *out);
+esp_err_t nvs_config_set_chore_free_hol(uint16_t val);
+esp_err_t nvs_config_get_chore_free_sum(uint16_t *out);
+esp_err_t nvs_config_set_chore_free_sum(uint16_t val);
+
 /* MQTT broker (HA integration). Empty URI = MQTT disabled. */
 esp_err_t nvs_config_get_mqtt_uri(char *buf, size_t len);
 esp_err_t nvs_config_set_mqtt_uri(const char *uri);
@@ -79,19 +108,112 @@ esp_err_t nvs_config_set_cfg_ver(const char *ver);
 esp_err_t nvs_config_get_cmd_id(char *buf, size_t len);
 esp_err_t nvs_config_set_cmd_id(const char *id);
 
+/* ---- OTA ------------------------------------------------------------
+   None of these are seeded by nvs_config_init_defaults and none are in
+   the defaults fingerprint (see nvs_defaults.h) — a menuconfig change
+   must not revert an HA-set endpoint. */
+/* READER BUFFER SIZES ARE A CONTRACT, not a suggestion. hal_nvs_read_str
+   wraps nvs_get_str, which returns ESP_ERR_INVALID_LENGTH on a buffer too
+   small and writes NOTHING into it; get_str_*_default maps only
+   NOT_FOUND to a default, so a reader that guesses low is left holding an
+   UNINITIALISED buffer. Give each getter at least the bound named below.
+   The setters reject over-long values rather than truncating, so a
+   too-long write fails loudly instead of storing a corrupted value. */
+
+/* Manifest endpoint; "" = OTA disabled. Buffer >= CFG_BOUND_OTA_URL_MAX. */
+esp_err_t nvs_config_get_ota_url(char *buf, size_t len);
+esp_err_t nvs_config_set_ota_url(const char *url);
+/* Also check for an update on every Button D full sync (0/1). */
+esp_err_t nvs_config_get_ota_on_sync(uint16_t *out);
+esp_err_t nvs_config_set_ota_on_sync(uint16_t on);
+/* Device-owned state (no bulk-document key): last attempt's reason code,
+   the version the retry budget is counting against, the consecutive-
+   failure count for that target, the last download's wall time, and which
+   committed image is still awaiting certification. The first
+   four feed the stat payload (ota_flow_stat reads them at PUBLISH time);
+   a different target resets the count.
+
+   Buffer >= CFG_BOUND_OTA_RESULT_MAX. */
+esp_err_t nvs_config_get_ota_result(char *buf, size_t len);
+esp_err_t nvs_config_set_ota_result(const char *reason);
+/* Buffer >= CFG_BOUND_OTA_TARGET_MAX. Reading this one short is not
+   cosmetic: the retry-budget comparison would never match its stored
+   target, so the device would retry a doomed version forever. */
+esp_err_t nvs_config_get_ota_target(char *buf, size_t len);
+esp_err_t nvs_config_set_ota_target(const char *ver);
+esp_err_t nvs_config_get_ota_fails(uint16_t *out);
+esp_err_t nvs_config_set_ota_fails(uint16_t fails);
+/* Milliseconds, so u32: a u16 saturates at 65.5 s and the download budget
+   is CONFIG_MAGTAG_OTA_MAX_SEC. 0 = no download has ever completed a
+   timing. */
+esp_err_t nvs_config_get_ota_dl_ms(uint32_t *out);
+esp_err_t nvs_config_set_ota_dl_ms(uint32_t ms);
+/* The version an OTA reboot committed and that has not been certified yet;
+   "" = nothing outstanding. The ONLY durable trace an OTA reboot leaves
+   behind, and the signal a rollback is detected from — see ota_flow.c.
+   Deliberately NOT ota_target: that key is the retry budget's, and it is
+   re-pointed before every attempt. Not published; the reason string it
+   produces is.
+
+   Buffer >= CFG_BOUND_OTA_TARGET_MAX, and for the same reason ota_target
+   needs one: a short read reports no match, which here would forge a
+   rollback rather than merely miss one.  */
+esp_err_t nvs_config_get_ota_pend_ver(char *buf, size_t len);
+esp_err_t nvs_config_set_ota_pend_ver(const char *ver);
+
 /* Extra-timer definitions from HA (timer_defs_install falls back to the
-   Kconfig table when absent). Version/size drift reads as stale. */
-#define TIMER_DEFS_BLOB_VERSION 2 /* v2: + break_eligible */
+   Kconfig table when absent). Version/size drift reads as stale.
+
+   `defined` was added WITHOUT a version bump, on purpose. It lands in two
+   bytes that were already implicit padding, so sizeof() and every offset
+   are unchanged (asserted below) and a blob written by an older build is
+   byte-identical to one this build would write. A bump would have made
+   nvs_config_get_timer_defs() reject every blob in the field, discarding
+   the very table this field exists to protect. That is safe only because
+   every writer memsets the whole struct before filling it — config_apply.c
+   apply_timers(), ha_config.c load_defs(), and the pre-ad62dff boot write
+   that created the blobs now on devices (357d2f6 main/timer_defs.c) — so
+   the byte reads 0 on an existing blob, which is exactly the "provenance
+   unknown, fall back to the name test" answer apply_timers() wants. Any
+   new writer MUST memset too, or this reserve stops being trustworthy. */
+#define TIMER_DEFS_BLOB_VERSION 2 /* v2: + break_eligible, + defined (padding) */
 typedef struct {
     char name[16]; /* "" = slot disabled */
     int32_t min;
     uint8_t reload;
     uint8_t break_eligible; /* 1 = a genuine break activity (timer_def_t) */
+    /* 1 = an authority (an HA `timers` document, or an HA per-timer
+       control) set this slot. NOT the same question as "is the name
+       non-empty": a slot whose reload/break switch was flipped before it
+       was ever named is defined with an empty name, and apply_timers()
+       must keep that flag rather than fall back to menuconfig. 0 on every
+       blob written before this field existed — see the note above. */
+    uint8_t defined;
+    uint8_t rsvd; /* was implicit padding; named so nothing can hide */
 } nvs_timer_def_t;
 typedef struct {
     uint8_t version;
+    uint8_t rsvd[3]; /* was implicit padding; named so nothing can hide */
     nvs_timer_def_t defs[TIMER_EXTRA_SLOTS];
 } nvs_timer_defs_blob_t;
+/* Measured on this toolchain, not assumed: naming the padding leaves every
+   number identical to the v2 layout already on devices. The point of the
+   asserts is the NEXT field — with no implicit padding left, it must
+   either grow the struct (caught here) or visibly consume `rsvd`, which is
+   an edit sitting directly under TIMER_DEFS_BLOB_VERSION. A sizeof assert
+   alone would not do it: two more uint8_t used to fit for free. */
+_Static_assert(sizeof(nvs_timer_def_t) == 24, "layout grew: migrate or bump TIMER_DEFS_BLOB_VERSION");
+_Static_assert(offsetof(nvs_timer_def_t, min) == 16, "fields reordered");
+_Static_assert(offsetof(nvs_timer_def_t, reload) == 20, "fields reordered");
+_Static_assert(offsetof(nvs_timer_def_t, break_eligible) == 21, "fields reordered");
+_Static_assert(offsetof(nvs_timer_def_t, defined) == 22, "fields reordered");
+_Static_assert(offsetof(nvs_timer_def_t, rsvd) == 23, "fields reordered");
+_Static_assert(16 + 4 + 1 + 1 + 1 + 1 == sizeof(nvs_timer_def_t),
+               "implicit padding reappeared: a new field could hide in it");
+_Static_assert(sizeof(nvs_timer_defs_blob_t) == 100, "blob layout changed");
+_Static_assert(offsetof(nvs_timer_defs_blob_t, defs) == 4, "blob header layout changed");
+_Static_assert(1 + 3 + TIMER_EXTRA_SLOTS * sizeof(nvs_timer_def_t) == sizeof(nvs_timer_defs_blob_t),
+               "implicit padding reappeared in the blob header");
 esp_err_t nvs_config_get_timer_defs(nvs_timer_defs_blob_t *out);
 esp_err_t nvs_config_set_timer_defs(const nvs_timer_defs_blob_t *defs);
 

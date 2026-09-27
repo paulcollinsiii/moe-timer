@@ -419,6 +419,226 @@ void test_reseed_clears_cfg_ver(void) {
 }
 
 /* ------------------------------------------------------------------ */
+/* OTA keys                                                            */
+/* ------------------------------------------------------------------ */
+
+void test_ota_url_defaults_and_round_trip(void) {
+    char buf[160] = "junk";
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_ota_url(buf, sizeof(buf)));
+    TEST_ASSERT_EQUAL_STRING(NVS_DEFAULT_OTA_URL, buf);
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_set_ota_url("https://example.com/ota.json"));
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_ota_url(buf, sizeof(buf)));
+    TEST_ASSERT_EQUAL_STRING("https://example.com/ota.json", buf);
+    /* Empty is a real stored value (OTA off), not "unset" — it must not
+       fall back to the compile-time default. */
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_set_ota_url(""));
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_ota_url(buf, sizeof(buf)));
+    TEST_ASSERT_EQUAL_STRING("", buf);
+}
+
+void test_ota_on_sync_defaults_and_round_trip(void) {
+    uint16_t v = 0xFFFF;
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_ota_on_sync(&v));
+    TEST_ASSERT_EQUAL_UINT16(NVS_DEFAULT_OTA_ON_SYNC, v);
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_set_ota_on_sync(1));
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_ota_on_sync(&v));
+    TEST_ASSERT_EQUAL_UINT16(1, v);
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_set_ota_on_sync(0));
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_ota_on_sync(&v));
+    TEST_ASSERT_EQUAL_UINT16(0, v);
+}
+
+/* Device-owned state: written by the firmware, read by the stat payload.
+   No HA entity, no bulk-document key — just accessors. */
+void test_ota_state_keys_default_empty_and_round_trip(void) {
+    char buf[40] = "junk";
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_ota_result(buf, sizeof(buf)));
+    TEST_ASSERT_EQUAL_STRING("", buf);
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_ota_target(buf, sizeof(buf)));
+    TEST_ASSERT_EQUAL_STRING("", buf);
+    uint16_t fails = 0xFFFF;
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_ota_fails(&fails));
+    TEST_ASSERT_EQUAL_UINT16(0, fails);
+
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_set_ota_result("tls_cert"));
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_set_ota_target("1.6.0"));
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_set_ota_fails(2));
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_ota_result(buf, sizeof(buf)));
+    TEST_ASSERT_EQUAL_STRING("tls_cert", buf);
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_ota_target(buf, sizeof(buf)));
+    TEST_ASSERT_EQUAL_STRING("1.6.0", buf);
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_ota_fails(&fails));
+    TEST_ASSERT_EQUAL_UINT16(2, fails);
+}
+
+/* The download duration is a u32 and that is the point of it: the
+   download budget is CONFIG_MAGTAG_OTA_MAX_SEC (300 s in the shipped
+   Kconfig), and a u16 stops counting at 65.5 s — it would saturate on
+   exactly the slow transfers the field exists to expose. */
+void test_ota_dl_ms_defaults_to_zero_and_holds_a_full_download(void) {
+    uint32_t ms = 0xDEADBEEF;
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_ota_dl_ms(&ms));
+    TEST_ASSERT_EQUAL_UINT32(0, ms);
+
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_set_ota_dl_ms(298000));
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_ota_dl_ms(&ms));
+    TEST_ASSERT_EQUAL_UINT32(298000, ms);
+
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_set_ota_dl_ms(4294967295u));
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_ota_dl_ms(&ms));
+    TEST_ASSERT_EQUAL_UINT32(4294967295u, ms);
+}
+
+/* The certification token, which is the committed VERSION and not a flag
+   beside it — one key, so "armed" and "which image" cannot disagree.
+   Absent means "no image is awaiting certification", the state of every
+   device that has never run an OTA, so it must read as "" and ESP_OK
+   rather than an error or every virgin boot would take the unreadable
+   branch. Cleared by writing "", which is how both consumers retire it. */
+void test_ota_pend_ver_defaults_to_empty_and_round_trips(void) {
+    char buf[CFG_BOUND_OTA_TARGET_MAX];
+    memset(buf, 'x', sizeof(buf));
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_ota_pend_ver(buf, sizeof(buf)));
+    TEST_ASSERT_EQUAL_STRING("", buf);
+
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_set_ota_pend_ver("1.6.0"));
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_ota_pend_ver(buf, sizeof(buf)));
+    TEST_ASSERT_EQUAL_STRING("1.6.0", buf);
+
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_set_ota_pend_ver(""));
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_ota_pend_ver(buf, sizeof(buf)));
+    TEST_ASSERT_EQUAL_STRING("", buf);
+}
+
+/* Same bound as ota_target, and for a sharper reason: the detector
+   compares this against the running version, so a value it cannot store
+   whole would either miss a revert or invent one. Rejected, never
+   truncated. */
+void test_ota_pend_ver_rejects_a_version_it_could_not_compare(void) {
+    char big[CFG_BOUND_OTA_TARGET_MAX + 1];
+    memset(big, 'v', sizeof(big) - 1);
+    big[sizeof(big) - 1] = '\0';
+    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_SIZE, nvs_config_set_ota_pend_ver(big));
+}
+
+/* The OTA keys are deliberately NOT in the seeded-defaults registry, so
+   init_defaults never materializes them; the getters supply the
+   compile-time default lazily instead. */
+void test_init_defaults_does_not_seed_ota_keys(void) {
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_init_defaults());
+    char buf[160];
+    size_t len = sizeof(buf);
+    TEST_ASSERT_EQUAL(ESP_ERR_NVS_NOT_FOUND, hal_nvs_read_str("ota_url", buf, &len));
+    uint16_t v;
+    TEST_ASSERT_EQUAL(ESP_ERR_NVS_NOT_FOUND, hal_nvs_read_u16("ota_on_sync", &v));
+}
+
+/* THE regression this exclusion exists for: a menuconfig edit anywhere in
+   the allocation defaults changes the fingerprint and reseeds NVS. If the
+   OTA keys were fingerprinted (or seeded), that reseed would silently
+   revert an HA-set endpoint and check-on-sync flag on the next boot —
+   the opposite of what a runtime override is for. */
+void test_reseed_does_not_revert_ha_set_ota_values(void) {
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_init_defaults());
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_set_ota_url("https://ha.example/ota.json"));
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_set_ota_on_sync(1));
+    /* Force a reseed the way a changed Kconfig default would */
+    hal_nvs_write_u16("defaults_ver", 0x5555);
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_init_defaults());
+
+    char buf[160];
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_ota_url(buf, sizeof(buf)));
+    TEST_ASSERT_EQUAL_STRING("https://ha.example/ota.json", buf);
+    uint16_t v;
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_ota_on_sync(&v));
+    TEST_ASSERT_EQUAL_UINT16(1, v);
+}
+
+/* Guards the "no HA-managed key in the fold" rule from the other side: if
+   someone adds an OTA row to NVS_SEEDED_*, the fingerprint changes and
+   this pin fails alongside test_defaults_fingerprint_algorithm_pinned. */
+void test_fingerprint_ignores_ota_values(void) {
+    uint16_t before = nvs_config_defaults_fingerprint();
+    nvs_config_set_ota_url("https://elsewhere.example/ota.json");
+    nvs_config_set_ota_on_sync(1);
+    TEST_ASSERT_EQUAL_UINT16(before, nvs_config_defaults_fingerprint());
+}
+
+/* An undersized read buffer is an ERROR that writes nothing — it is not a
+   truncating read. get_str_empty_default maps only NOT_FOUND to "", so a
+   caller that guesses low keeps whatever junk it started with. This is
+   what the declared CFG_BOUND_OTA_* minimums on the getters are for, and
+   it is why ota_target must be read at full width: a short read leaves the
+   retry-budget comparison matching nothing, so a doomed version is retried
+   forever. */
+void test_short_read_buffer_errors_and_leaves_the_buffer_untouched(void) {
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_set_ota_target("1.6.0-a-fairly-long-version"));
+    char small[8];
+    memset(small, 'Z', sizeof(small));
+    TEST_ASSERT_EQUAL(ESP_ERR_NVS_INVALID_LENGTH, nvs_config_get_ota_target(small, sizeof(small)));
+    TEST_ASSERT_EQUAL_CHAR('Z', small[0]); /* untouched, not truncated */
+}
+
+void test_declared_buffer_size_reads_the_whole_value(void) {
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_set_ota_target("1.6.0-a-fairly-long-version"));
+    char buf[CFG_BOUND_OTA_TARGET_MAX];
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_ota_target(buf, sizeof(buf)));
+    TEST_ASSERT_EQUAL_STRING("1.6.0-a-fairly-long-version", buf);
+}
+
+/* Setters reject rather than truncate: ota_flow.c will be a third writer
+   that is not on either validating path. */
+void test_ota_string_setters_reject_overlong_values(void) {
+    char big[CFG_BOUND_OTA_URL_MAX + 16];
+    memset(big, 'u', sizeof(big) - 1);
+    memcpy(big, "https://", 8);
+    big[sizeof(big) - 1] = '\0';
+    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_SIZE, nvs_config_set_ota_url(big));
+    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_SIZE, nvs_config_set_ota_target(big));
+    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_SIZE, nvs_config_set_ota_result(big));
+    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_SIZE, nvs_config_set_ota_url(NULL));
+    /* A rejected write must not have stored a partial value */
+    char buf[CFG_BOUND_OTA_URL_MAX];
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_ota_url(buf, sizeof(buf)));
+    TEST_ASSERT_EQUAL_STRING(NVS_DEFAULT_OTA_URL, buf);
+}
+
+void test_ota_string_setters_accept_the_declared_maximum(void) {
+    char url[CFG_BOUND_OTA_URL_MAX];
+    memset(url, 'u', sizeof(url) - 1);
+    memcpy(url, "https://", 8);
+    url[sizeof(url) - 1] = '\0';
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_set_ota_url(url));
+    char buf[CFG_BOUND_OTA_URL_MAX];
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_ota_url(buf, sizeof(buf)));
+    TEST_ASSERT_EQUAL_STRING(url, buf);
+}
+
+/* cmd_apply.c reads the stored id into a 40-byte buffer and does not check
+   the return. A longer id would store fine but never read back, so the
+   apply-once compare would fail every window and a retained `grant` would
+   re-apply forever. Bound the write instead. */
+void test_cmd_id_is_bounded_to_the_dedup_buffer(void) {
+    char big[CFG_BOUND_CMD_ID_MAX + 8];
+    memset(big, 'i', sizeof(big) - 1);
+    big[sizeof(big) - 1] = '\0';
+    TEST_ASSERT_EQUAL(ESP_ERR_INVALID_SIZE, nvs_config_set_cmd_id(big));
+    char buf[CFG_BOUND_CMD_ID_MAX];
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_cmd_id(buf, sizeof(buf)));
+    TEST_ASSERT_EQUAL_STRING("", buf); /* nothing stored */
+}
+
+void test_cmd_id_at_the_bound_round_trips(void) {
+    char id[CFG_BOUND_CMD_ID_MAX];
+    memset(id, 'i', sizeof(id) - 1);
+    id[sizeof(id) - 1] = '\0';
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_set_cmd_id(id));
+    char buf[CFG_BOUND_CMD_ID_MAX];
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_cmd_id(buf, sizeof(buf)));
+    TEST_ASSERT_EQUAL_STRING(id, buf);
+}
+
+/* ------------------------------------------------------------------ */
 /* timer snapshot (crash/reset recovery)                               */
 /* ------------------------------------------------------------------ */
 
@@ -495,6 +715,62 @@ void test_defaults_fingerprint_algorithm_pinned(void) {
     TEST_ASSERT_EQUAL_UINT16(expect, nvs_config_defaults_fingerprint());
 }
 
+/* ------------------------------------------------------------------ */
+/* chore_free_* — the chore gate's free slice, one key per day type    */
+/* ------------------------------------------------------------------ */
+
+/* Four keys, four getters, four setters, and the copy-paste hazard is a
+   getter that reads its neighbour's key. Every value here is distinct, so
+   a crossed pair cannot pass. */
+void test_chore_free_keys_round_trip_independently(void) {
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_set_chore_free_wd(10));
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_set_chore_free_we(20));
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_set_chore_free_hol(30));
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_set_chore_free_sum(1440));
+    uint16_t val = 0;
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_chore_free_wd(&val));
+    TEST_ASSERT_EQUAL_UINT16(10, val);
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_chore_free_we(&val));
+    TEST_ASSERT_EQUAL_UINT16(20, val);
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_chore_free_hol(&val));
+    TEST_ASSERT_EQUAL_UINT16(30, val);
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_chore_free_sum(&val));
+    TEST_ASSERT_EQUAL_UINT16(1440, val);
+}
+
+/* Nothing seeds these, so an unwritten key must read back as the
+   fully-gated 0 — the state every device in the field is in (design row
+   C1), and what makes the feature inert until a list is configured. */
+void test_chore_free_keys_unwritten_read_as_zero(void) {
+    uint16_t val = 0xFFFF;
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_chore_free_wd(&val));
+    TEST_ASSERT_EQUAL_UINT16(0, val);
+    val = 0xFFFF;
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_chore_free_we(&val));
+    TEST_ASSERT_EQUAL_UINT16(0, val);
+    val = 0xFFFF;
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_chore_free_hol(&val));
+    TEST_ASSERT_EQUAL_UINT16(0, val);
+    val = 0xFFFF;
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_chore_free_sum(&val));
+    TEST_ASSERT_EQUAL_UINT16(0, val);
+}
+
+/* THE FINGERPRINT GUARD. NVS_SEEDED_U16S feeds the defaults fingerprint,
+   and a row added there reseeds every deployed device — reverting every
+   HA-managed key with it. The chore_free_* keys are deliberately absent,
+   so init_defaults must leave them UNWRITTEN, not merely write 0: a
+   written 0 is indistinguishable from the default when read back, which
+   is exactly why this reads the raw key instead of the accessor. */
+void test_init_defaults_does_not_seed_the_chore_free_keys(void) {
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_init_defaults());
+    uint16_t raw = 0;
+    TEST_ASSERT_EQUAL(ESP_ERR_NVS_NOT_FOUND, hal_nvs_read_u16(NVS_KEY_CHORE_FREE_WD, &raw));
+    TEST_ASSERT_EQUAL(ESP_ERR_NVS_NOT_FOUND, hal_nvs_read_u16(NVS_KEY_CHORE_FREE_WE, &raw));
+    TEST_ASSERT_EQUAL(ESP_ERR_NVS_NOT_FOUND, hal_nvs_read_u16(NVS_KEY_CHORE_FREE_HOL, &raw));
+    TEST_ASSERT_EQUAL(ESP_ERR_NVS_NOT_FOUND, hal_nvs_read_u16(NVS_KEY_CHORE_FREE_SUM, &raw));
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_defaults_fingerprint_algorithm_pinned);
@@ -533,10 +809,28 @@ int main(void) {
     RUN_TEST(test_mqtt_settings_round_trip);
     RUN_TEST(test_mqtt_settings_missing_read_as_empty);
     RUN_TEST(test_init_defaults_seeds_mqtt_keys);
+    RUN_TEST(test_ota_url_defaults_and_round_trip);
+    RUN_TEST(test_ota_on_sync_defaults_and_round_trip);
+    RUN_TEST(test_ota_state_keys_default_empty_and_round_trip);
+    RUN_TEST(test_ota_dl_ms_defaults_to_zero_and_holds_a_full_download);
+    RUN_TEST(test_ota_pend_ver_defaults_to_empty_and_round_trips);
+    RUN_TEST(test_ota_pend_ver_rejects_a_version_it_could_not_compare);
+    RUN_TEST(test_init_defaults_does_not_seed_ota_keys);
+    RUN_TEST(test_reseed_does_not_revert_ha_set_ota_values);
+    RUN_TEST(test_fingerprint_ignores_ota_values);
+    RUN_TEST(test_short_read_buffer_errors_and_leaves_the_buffer_untouched);
+    RUN_TEST(test_declared_buffer_size_reads_the_whole_value);
+    RUN_TEST(test_ota_string_setters_reject_overlong_values);
+    RUN_TEST(test_ota_string_setters_accept_the_declared_maximum);
+    RUN_TEST(test_cmd_id_is_bounded_to_the_dedup_buffer);
+    RUN_TEST(test_cmd_id_at_the_bound_round_trips);
     RUN_TEST(test_timer_snapshot_save_propagates_write_failure);
     RUN_TEST(test_set_weekday_min_propagates_write_failure);
     RUN_TEST(test_timer_snapshot_round_trip);
     RUN_TEST(test_timer_snapshot_missing_returns_not_found);
     RUN_TEST(test_timer_snapshot_rejects_wrong_version);
+    RUN_TEST(test_chore_free_keys_round_trip_independently);
+    RUN_TEST(test_chore_free_keys_unwritten_read_as_zero);
+    RUN_TEST(test_init_defaults_does_not_seed_the_chore_free_keys);
     return UNITY_END();
 }

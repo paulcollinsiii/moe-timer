@@ -7,10 +7,14 @@ void mock_nvs_reset(void);
 /* Failure injection: the next `count` writes return ESP_FAIL without
    touching the store (-1 = all writes fail until reset). */
 void mock_nvs_fail_writes(int count);
-/* Number of read calls (u16/str/blob, hit or miss) for `key` since the
+/* Same, for reads (u16/u32/str/blob): the next `count` reads return
+   ESP_FAIL without looking at the store — a failed READ, as distinct from
+   a missing key (ESP_ERR_NVS_NOT_FOUND). -1 = every read until reset. */
+void mock_nvs_fail_reads(int count);
+/* Number of read calls (u16/u32/str/blob, hit or miss) for `key` since the
    last mock_nvs_reset() — lets tests assert caching behavior. */
 int mock_nvs_read_count(const char *key);
-/* Number of write calls (u16/str/blob) for `key` since the last
+/* Number of write calls (u16/u32/str/blob) for `key` since the last
    mock_nvs_reset(). Counts attempts, including ones turned into ESP_FAIL
    by mock_nvs_fail_writes() and ones that store a byte-identical value:
    the quantity being asserted is flash traffic, which is what wears the

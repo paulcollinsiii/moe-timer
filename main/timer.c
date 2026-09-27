@@ -14,6 +14,23 @@ rtc_state_t RTC_DATA_ATTR g_rtc_state;
 rtc_state_t g_rtc_state;
 #endif
 
+/* The whole of the guard: two fields compared, and on any disagreement
+   the struct is zeroed rather than repaired. Repair is not on the table —
+   there is nothing to repair TO. A mismatch means these bytes were
+   written by a different build (or by nothing at all), so every field
+   behind them is suspect, and the firmware already has a tested,
+   validated recovery for "the RTC state is gone": the NVS snapshot, with
+   its own version, checksum and range checks. Zeroing routes the fault
+   there instead of inventing a second recovery path. */
+bool timer_rtc_state_guard(void) {
+    if (g_rtc_state.magic == RTC_STATE_MAGIC && g_rtc_state.version == RTC_STATE_VERSION)
+        return false;
+    memset(&g_rtc_state, 0, sizeof(g_rtc_state));
+    g_rtc_state.magic = RTC_STATE_MAGIC;
+    g_rtc_state.version = RTC_STATE_VERSION;
+    return true;
+}
+
 /* Slot definitions live in rodata, not RTC memory — re-injected every boot
    (timer_defs.c on firmware, the test table on host). */
 static const timer_def_t *s_defs;
@@ -54,7 +71,46 @@ int timer_active_slot(void) {
     return g_rtc_state.active_slot;
 }
 
-void timer_ensure_active_slot_enabled(void) {
+static void fold_run_segment_signed(time_t now, bool eligible);
+
+/* BUG-7: a run must not outlive its own definition. Moving only the
+   selection left an orphan RUNNING behind it (I2/I3), and its live
+   segment then kept accruing until some later fold swept the whole gap
+   into the balance. So every RUNNING extra whose definition is gone is
+   retired first: reset like timer_reload (completions stay, the old
+   timer's grants go), as timer_reconcile_def resets a mid-window disable.
+
+   Only RUNNING (decided 2026-09-25). A PAUSED orphan breaks no invariant,
+   and on a restore "no definition" may be a lie: timer_defs_install falls
+   back to the menuconfig table on any read failure or blob-version
+   change, and an HA-defined slot menuconfig leaves empty then reads as
+   disabled for that one boot. Resetting it would destroy a paused timer
+   that comes back intact on the next boot. So a PAUSED orphan keeps its
+   state and only the selection moves off it; IDLE and EXPIRED hold no
+   run. A RUNNING orphan is still reset on such a boot — that needs a
+   running extra, lost RTC memory and a fallback table at once, and
+   resetting is the simple way to restore I3.
+
+   The segment folds at `now` and NON-eligible (decided 2026-08-07, see
+   include/timer.h) — never at the slot's own sign, which went with the
+   definition. It folds when the orphan armed it, or when the slot that
+   armed it is not RUNNING (only a corrupt snapshot names one): the orphan
+   was then the only run feeding it, and resetting the orphan without
+   the fold would leave the balance moving with nothing RUNNING (I8). A
+   segment another RUNNING slot armed is that slot's, and stays armed. */
+void timer_ensure_active_slot_enabled(time_t now) {
+    for (int i = 1; i < TIMER_SLOT_COUNT; i++) {
+        timer_slot_state_t *sl = &g_rtc_state.slots[i];
+        if (slot_enabled(i) || sl->state != TIMER_RUNNING)
+            continue;
+        uint8_t owner = g_rtc_state.run_segment_slot;
+        if (owner == (uint8_t)i || g_rtc_state.slots[owner].state != TIMER_RUNNING)
+            fold_run_segment_signed(now, false);
+        uint16_t completions = sl->completions;
+        memset(sl, 0, sizeof(*sl));
+        sl->state = TIMER_IDLE;
+        sl->completions = completions;
+    }
     if (!slot_enabled(g_rtc_state.active_slot))
         g_rtc_state.active_slot = 0;
 }
@@ -72,6 +128,15 @@ int timer_slot_by_name(const char *name) {
 const timer_def_t *timer_slot_def(int slot) {
     if (slot <= 0 || !slot_enabled(slot))
         return NULL; /* Screen (0), disabled, or out of range */
+    return &s_defs[slot];
+}
+
+/* Same table, without the enablement filter: a slot that has a name but no
+   duration is a definition that exists and is not yet runnable, and the
+   callers that mirror the stored table need to see it. See timer.h. */
+const timer_def_t *timer_slot_def_raw(int slot) {
+    if (slot <= 0 || slot >= s_defs_count)
+        return NULL; /* Screen (0) or out of range; s_defs_count is 0 when unset */
     return &s_defs[slot];
 }
 
@@ -176,13 +241,11 @@ bool timer_any_extra_running(void) {
     return false;
 }
 
-bool timer_reload_allowed(bool parent_testing) {
+bool timer_reload_allowed(void) {
     if (active()->state == TIMER_RUNNING)
         return false; /* can't reset a running timer — pause first */
     const timer_def_t *def = timer_active_def();
-    if (def != NULL && def->reloadable)
-        return true;
-    return parent_testing; /* incl. the parent escape from a Screen Break */
+    return def != NULL && def->reloadable; /* Screen has no def: never */
 }
 
 bool timer_reload(void) {
@@ -267,13 +330,71 @@ int32_t timer_screen_bonus_applied(void) {
     return g_rtc_state.slots[0].bonus_applied;
 }
 
+int32_t timer_slot_banked_bonus(int slot) {
+    if (slot < 0 || slot >= TIMER_SLOT_COUNT)
+        return 0;
+    return g_rtc_state.slots[slot].bonus_sec;
+}
+
+int32_t timer_slot_adjust_today(int slot) {
+    if (slot < 0 || slot >= TIMER_SLOT_COUNT)
+        return 0;
+    return g_rtc_state.slots[slot].adjust_today_sec;
+}
+
 const char *timer_current_date(void) {
     return g_rtc_state.last_date; /* "" until timer_record_date / restore */
 }
 
+/* ---- chore checklist state (see timer.h) -------------------------------- */
+
+uint8_t timer_chore_acked(void) {
+    return g_rtc_state.chore_acked;
+}
+
+/* Stored exactly as handed over, bits above the configured count and all.
+   See timer.h: chore_store_load_ack() makes the same choice for the same
+   value, and chores.c is what bounds every bit that is read. */
+void timer_chore_set_acked(uint8_t mask) {
+    g_rtc_state.chore_acked = mask;
+}
+
+bool timer_chore_released(void) {
+    return g_rtc_state.chore_released;
+}
+
+void timer_chore_set_released(bool released) {
+    g_rtc_state.chore_released = released;
+}
+
+app_mode_t timer_mode(void) {
+    return (app_mode_t)g_rtc_state.mode;
+}
+
+/* Stored as the caller's byte, unclamped, like the ack mask above: see
+   app_mode_t in timer.h for why the RTC field is not the place to bound
+   it. test_timer pins the round trip. */
+void timer_set_mode(app_mode_t mode) {
+    g_rtc_state.mode = (uint8_t)mode;
+}
+
 void timer_reset(void) {
     memset(&g_rtc_state, 0, sizeof(g_rtc_state));
-    /* all slots IDLE (=0), active_slot 0 (Screen), counters cleared */
+    /* The memset clears the day, not the struct's identity. Left at zero,
+       the next deep-sleep wake's timer_rtc_state_guard() read the reset
+       day as a foreign image, zeroed it and sent the boot to the NVS
+       snapshot. That was harmless while every sleep saved one; since
+       BUG-14 a day an unset clock opened is never saved, and a wiped
+       magic would then empty it on every wake, and each wake's rollover
+       would hand out a fresh allocation. */
+    g_rtc_state.magic = RTC_STATE_MAGIC;
+    g_rtc_state.version = RTC_STATE_VERSION;
+    /* all slots IDLE (=0), active_slot 0 (Screen), counters cleared.
+       Row C13 rides on this one memset and deliberately adds nothing:
+       chore_acked and chore_released go to 0/false, and `mode` goes to
+       APP_MODE_TIMERS because that enumerator IS 0 (see app_mode_t). An
+       explicit re-clear here would be a second site to keep in step with
+       a struct that already grew fields once. */
     s_break_ended_latched = false; /* never chime yesterday's break */
     s_break_ended_wall = 0;
 }
@@ -304,9 +425,9 @@ static void fold_run_segment_signed(time_t now, bool eligible) {
 
 /* Fold at the sign of the slot that ARMED the segment. Never the active
    slot: the segment lives on slot 0 and the selection can move
-   underneath it (timer_ensure_active_slot_enabled runs unconditionally on
-   a snapshot restore and does not check RUNNING), which would turn a
-   drain into an accrual. The sign is a property of the run. */
+   underneath it (a snapshot restore moves it off a slot whose definition
+   is gone), which would turn a drain into an accrual. The sign is a
+   property of the run. */
 static void fold_run_segment(time_t now) {
     fold_run_segment_signed(now, timer_slot_break_eligible(g_rtc_state.run_segment_slot));
 }
@@ -327,7 +448,7 @@ void timer_start(time_t now, int32_t allocation_sec) {
     sl->allocation_sec = allocation_sec;
     sl->expiry_wall_time = (int64_t)now + allocation_sec;
     /* G1: a start must NOT reset the balance. It once did, which under a
-       shared balance means folding laundry for 29 minutes and pressing A
+       shared balance means folding laundry for 29 minutes and pressing B
        on Piano puts the eye-rest clock back to zero. Only a break start
        and the day rollover reset it (I9); here we merely fold whatever
        was running and re-arm. */
@@ -338,11 +459,38 @@ void timer_start(time_t now, int32_t allocation_sec) {
 static void mark_expired(timer_slot_state_t *sl);
 static void expire_slot(int slot, time_t now);
 
-void timer_adjust(int slot, int32_t sec) {
+/* The adjustment state machine, shared by the two bookkeeping policies
+   below. `record` is their ONLY difference and it gates exactly one line
+   (the adjust_today_sec site after the switch). Split rather than
+   duplicated deliberately: a second copy of these arms would drift, and
+   the EXPIRED and BREAK contracts here are subtle enough that the drift
+   would be silent. */
+static bool adjust_core(int slot, int32_t sec, bool record) {
     if (slot < 0 || slot >= TIMER_SLOT_COUNT || sec == 0)
-        return;
+        return false;
     timer_slot_state_t *sl = &g_rtc_state.slots[slot];
-    switch (sl->state) {
+    /* A BREAK is slot 0 PARKED, and I7 says it comes back holding the
+       state it ENTERED with. So when that state is EXPIRED the arms below
+       have to run the EXPIRED contract and write through break_prev_state
+       — the frozen BREAK one is the wrong answer and loses the seconds
+       outright. Taking the PAUSED/BREAK arm there puts the grant in
+       remaining_at_pause; timer_break_tick() then overwrites sl->state
+       back to EXPIRED, and timer_slot_remaining() reports 0 for EXPIRED.
+       The seconds land in a field nobody reads, and `released` is latched
+       by then, so the grant can never be offered a second time.
+
+       Reachable straight off design §2.6 rather than by contrivance: the
+       free tranche runs out, Screen EXPIRES, the kid runs an extra timer,
+       earns an eye-rest break, and does the chores DURING it.
+
+       Only EXPIRED is redirected, not the whole arm. A break over an IDLE
+       screen must keep taking the BREAK arm: timer_release_gated()'s IDLE
+       refusal is a precondition on the WRAPPER (it tests slots[0].state,
+       which reads BREAK here), so routing the break case to the shared
+       IDLE arm would bank the release into bonus_sec — precisely the
+       second copy of the remainder that refusal exists to prevent. */
+    const bool parked_expired = (sl->state == TIMER_BREAK && g_rtc_state.break_prev_state == (uint8_t)TIMER_EXPIRED);
+    switch (parked_expired ? (int)TIMER_EXPIRED : (int)sl->state) {
         case TIMER_RUNNING:
             /* A deduction past zero expires on the next tick — the normal
                expiry path, alert included. */
@@ -363,7 +511,7 @@ void timer_adjust(int slot, int32_t sec) {
                    timer_reconcile_def). A BREAK stays intact and keeps its
                    frozen zero: it leaves the break in the state it entered
                    with (I7), so an emptied one comes back PAUSED holding
-                   nothing — pressing A then expires it by the normal path.
+                   nothing — pressing B then expires it by the normal path.
                    PAUSED has no live segment, so no fold is owed. */
                 if (sl->state == TIMER_PAUSED)
                     mark_expired(sl);
@@ -371,11 +519,23 @@ void timer_adjust(int slot, int32_t sec) {
             break;
         case TIMER_EXPIRED:
             if (sec < 0)
-                break; /* nothing left to reclaim */
+                return false; /* nothing left to reclaim */
             /* Chores-done grant after time ran out: hold it PAUSED so the
-               kid presses A to start — never auto-run, and the expiry
-               alert (already heard) must not re-fire. */
-            sl->state = TIMER_PAUSED;
+               kid presses B to start — never auto-run, and the expiry
+               alert (already heard) must not re-fire.
+
+               Written through break_prev_state while the slot is parked
+               in a break: the break itself must still run to its end
+               (rule 7 does not let a chore ack cut it short), and
+               break_prev_state is the state it will restore when it does.
+               remaining_at_pause is set either way, so the grant is
+               visible as screen time DURING the break too — mark_expired
+               left it at 0, so this is the only writer. */
+            if (parked_expired) {
+                g_rtc_state.break_prev_state = (uint8_t)TIMER_PAUSED;
+            } else {
+                sl->state = TIMER_PAUSED;
+            }
             sl->remaining_at_pause = sec;
             sl->allocation_sec += sec;
             break;
@@ -383,17 +543,66 @@ void timer_adjust(int slot, int32_t sec) {
             sl->bonus_sec += sec;
             break;
     }
+    /* One site, after the switch, so every branch that returns true is
+       counted and the two that return false (zero/bad slot, a deduction
+       against an EXPIRED slot) are not. Deliberately the REQUESTED delta,
+       not the clamped one: this is the record of what the parent did, and
+       the panel does its own clamping against the day's default.
+
+       `record` gates THIS LINE ONLY. A chore-gate release runs every arm
+       above and writes nothing here: that field means "what a parent
+       asked for" and drives the panel's "(-30 min today)", so a gate
+       writing into it would manufacture an adjustment nobody made. */
+    if (record)
+        sl->adjust_today_sec += sec;
+    return true;
 }
 
-void timer_bonus_reconcile(int slot, int32_t target_sec) {
+bool timer_adjust(int slot, int32_t sec) {
+    return adjust_core(slot, sec, true);
+}
+
+bool timer_release_gated(int32_t sec) {
+    /* Slot 0 always: the gate withholds screen time, and a break lives on
+       slot 0 whichever slot is selected. record = false is the whole
+       difference — see the header for why the release must not simply be
+       timer_adjust(0, +withheld).
+
+       IDLE is refused before the state machine ever runs: a gate release
+       owes an IDLE timer nothing, because C5's allocation is read live at
+       the next start and the gate's own `released` latch already makes it
+       full. Banking it there — which is what the shared IDLE arm would do
+       — hands timer_start a second copy of the same remainder, an
+       RTC-persisted 90 min against a 60 min day that no adjust_today_sec
+       explains and that display.h says cannot exist.
+
+       A PRECONDITION ON THIS WRAPPER, deliberately, rather than a fourth
+       arm inside adjust_core: timer_adjust must still bank while IDLE
+       (that is the parent-adjustment contract), and the justification
+       above belongs to the gate alone — it holds whatever that shared arm
+       later becomes.
+
+       It returns TRUE all the same. Nothing moved in the timer, but the
+       PANEL moved: the locked block goes and the bar fills, with no state
+       change for a diff to catch — the same case, and the same answer, as
+       timer_adjust's IDLE bank. sec == 0 stays with adjust_core's own
+       refusal even here: a day whose gate was off never drew a locked
+       block, so it has no repaint to ask for. */
+    if (sec != 0 && g_rtc_state.slots[0].state == TIMER_IDLE)
+        return true;
+    return adjust_core(0, sec, false);
+}
+
+bool timer_bonus_reconcile(int slot, int32_t target_sec) {
     if (slot < 0 || slot >= TIMER_SLOT_COUNT)
-        return;
+        return false;
     timer_slot_state_t *sl = &g_rtc_state.slots[slot];
     int32_t delta = target_sec - sl->bonus_applied;
     if (delta == 0)
-        return; /* target met — idempotent across wakes and replays */
-    timer_adjust(slot, delta);
+        return false; /* target met — idempotent across wakes and replays */
+    bool moved = timer_adjust(slot, delta);
     sl->bonus_applied = target_sec;
+    return moved;
 }
 
 /* Mark a slot's run as reaching 00:00 (shared by tick and reconcile).
@@ -749,6 +958,7 @@ void timer_make_snapshot(timer_snapshot_t *out) {
         os->completions = sl->completions;
         os->bonus_sec = sl->bonus_sec;
         os->bonus_applied = sl->bonus_applied;
+        os->adjust_today_sec = sl->adjust_today_sec;
     }
     memcpy(out->date, g_rtc_state.last_date, sizeof(out->date));
     out->checksum = timer_snapshot_checksum(out);
@@ -787,6 +997,12 @@ static bool snapshot_valid(const timer_snapshot_t *snap, time_t now) {
         /* Signed since the adjust feature: a banked deduction is negative */
         if (sl->bonus_sec < -SNAPSHOT_MAX_HORIZON_SEC || sl->bonus_sec > SNAPSHOT_MAX_HORIZON_SEC)
             return false;
+        /* Same bound, same reason. A running total of repeatable grants
+           has no natural ceiling of its own, so it borrows the horizon:
+           anything past a week of adjustment in one day is corruption,
+           not a parent. */
+        if (sl->adjust_today_sec < -SNAPSHOT_MAX_HORIZON_SEC || sl->adjust_today_sec > SNAPSHOT_MAX_HORIZON_SEC)
+            return false;
         if (sl->state == TIMER_RUNNING) {
             int64_t delta = sl->expiry_wall_time - (int64_t)now;
             if (delta > SNAPSHOT_MAX_HORIZON_SEC || delta < -SNAPSHOT_MAX_HORIZON_SEC)
@@ -801,7 +1017,7 @@ static bool snapshot_valid(const timer_snapshot_t *snap, time_t now) {
     return true;
 }
 
-bool timer_restore_snapshot(const timer_snapshot_t *snap, time_t now) {
+bool timer_snapshot_restorable(const timer_snapshot_t *snap, time_t now) {
     if (!snapshot_valid(snap, now))
         return false;
     /* Stale day: never restore yesterday's timer (rollover will reset) */
@@ -809,7 +1025,11 @@ bool timer_restore_snapshot(const timer_snapshot_t *snap, time_t now) {
     localtime_r(&now, &tm_now);
     char today[11];
     date_fmt_iso(today, sizeof(today), &tm_now);
-    if (strcmp(today, snap->date) != 0)
+    return strcmp(today, snap->date) == 0;
+}
+
+bool timer_restore_snapshot(const timer_snapshot_t *snap, time_t now) {
+    if (!timer_snapshot_restorable(snap, now))
         return false;
 
     g_rtc_state.active_slot = snap->active_slot;
@@ -830,6 +1050,7 @@ bool timer_restore_snapshot(const timer_snapshot_t *snap, time_t now) {
         sl->completions = ss->completions;
         sl->bonus_sec = ss->bonus_sec;
         sl->bonus_applied = ss->bonus_applied;
+        sl->adjust_today_sec = ss->adjust_today_sec;
         /* Expiry passed while powered off (snapshot saved before the EXPIRED
            transition landed): restore directly as EXPIRED so the next tick
            does not re-transition and re-fire the already-heard alert. The
@@ -863,7 +1084,26 @@ bool timer_restore_snapshot(const timer_snapshot_t *snap, time_t now) {
     memcpy(g_rtc_state.last_date, snap->date, sizeof(g_rtc_state.last_date));
     /* The firmware may have been reflashed with this slot removed from
        menuconfig — never strand the device on a slot the buttons can no
-       longer reach (its state stays restored; only the selection moves). */
-    timer_ensure_active_slot_enabled();
+       longer reach, and never let its run survive the definition (BUG-7).
+
+       The orphan's segment folds at `now`, the restore time. The snapshot
+       carries no save timestamp, and a timestamp would not help: a
+       RUNNING slot's snapshot bytes do not change from wake to wake, so
+       timer_persist_save skips the write and the blob's age is that of the
+       last state change, not of the last wake. Nothing later than `now`
+       can be swept in, which is what the defect was.
+
+       The time up to `now` CAN include a power-off. There are two restore
+       sites: the boot restore (main.c), which needs a clock that survived,
+       and the rollover restore (wake_flow_handle_day_rollover), which runs
+       after a genuine power-off once NTP has corrected the clock. On that
+       path the dark time folds as exposure — but bounded by the run's own
+       remaining time: the restore loop above has already made an orphan
+       that expired in the dark EXPIRED and folded it at its expiry, and
+       this call leaves it alone. That is the same span a still-defined
+       timer's wall-clock countdown uses up across the same power-off.
+       Accepted (2026-09-25): it errs toward more eye rest, as the
+       2026-08-07 sign decision does. */
+    timer_ensure_active_slot_enabled(now);
     return true;
 }

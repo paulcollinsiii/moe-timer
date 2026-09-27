@@ -10,12 +10,53 @@ CONFIG_IDF_TARGET="esp32s2"
 # Console over the ESP32-S2 native USB (the MagTag has no UART bridge chip).
 # Without this, logs go to UART0 pins and /dev/ttyACM0 carries no output.
 CONFIG_ESP_CONSOLE_USB_CDC=y
-# Route the ROM ets_printf path (panic backtraces, early-boot output) to
-# USB CDC too — without this a crash reboots silently and the monitor
-# shows nothing, making boot loops undiagnosable on this board.
-CONFIG_ESP_CONSOLE_USB_CDC_SUPPORT_ETS_PRINTF=y
-# Hold ~3 s after a panic so the backtrace flushes over USB CDC (which
-# re-enumerates on reboot and would otherwise drop it) before restarting.
+# Do NOT route the ROM ets_printf path (panic backtraces, ESP_EARLY_LOG)
+# to USB CDC. This was =y, and it was the direct cause of a nightly panic.
+#
+# usb_console.c:85 lets this symbol pick the console ISR's alloc flags:
+# with it set, the ISR is registered ESP_INTR_FLAG_IRAM, so
+# esp_intr_noniram_disable() does NOT mask it while the cache is off for a
+# flash operation. IDF's own comment at the esp_intr_alloc() call admits
+# the flag is claimed for the polling path, "not because we actually need
+# the interrupt to work with cache disabled". But that ISR calls
+# esp_usb_console_available_for_read() and esp_usb_console_write_available(),
+# and the component's linker.lf lists neither, so both sit in .flash.text.
+# A USB interrupt landing inside any cache-off window therefore fetches
+# garbage: IllegalInstructionCause with pc in .flash.text. Read off a flash
+# coredump — victim frame esp_flash_read() under the NVS read in
+# timer_persist_save(), i.e. the deep-sleep path, so the window opened on
+# EVERY sleep entry and fired ~3x a night whenever host USB traffic hit it.
+# Still unfixed upstream: v6.0.2 and master ship the same linker.lf.
+#
+# n is also the stock IDF default (esp_stdio/Kconfig: "default n") and saves
+# ~1 kB RAM. Ordinary ESP_LOGx over USB CDC is NOT affected — that goes
+# through the vfs_cdcacm driver rather than ets_printf, so the monitor still
+# shows normal logs. What is given up is the ROM panic backtrace and
+# early-boot output, which on this board now go nowhere (the UART console is
+# CONFIG_ESP_CONSOLE_UART_NUM=-1). Panic evidence comes from panic_diag's
+# counter and phase breadcrumb over MQTT instead, plus — wherever
+# CONFIG_ESP_COREDUMP_ENABLE_TO_FLASH is turned on, which is deliberately
+# NOT set here; see partitions.csv — a full backtrace from the coredump
+# partition, which is strictly better than the console text ever was.
+#
+# PRECEDENCE, measured for THIS symbol rather than assumed — and it goes the
+# opposite way to CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE below, which is why
+# the note there says not to generalise. Two isolated reconfigures:
+#   - with no sdkconfig present, this line governs and the symbol comes out
+#     "is not set". That is the case this line exists for.
+#   - with a sdkconfig that already declares =y, THE EXISTING FILE WINS: the
+#     regenerated config still read =y and the diff was empty.
+# So this line protects a regenerated or freshly-cloned tree; it does NOT
+# retrofit a checkout whose gitignored sdkconfig already carries =y. Such a
+# tree has to drop the line from sdkconfig (or delete the file and let it
+# regenerate) before the fix takes. To re-enable for a bench session, the
+# same asymmetry applies — and expect the panic back while USB-attached.
+CONFIG_ESP_CONSOLE_USB_CDC_SUPPORT_ETS_PRINTF=n
+# Hold ~3 s after a panic before restarting. This used to be here so the ROM
+# backtrace could flush over USB CDC (which re-enumerates on reboot and
+# would otherwise drop it); with ets_printf off there is no ROM output left
+# to flush, so it now only buys time for the panic-adjacent ESP_LOGx lines
+# already queued on the CDC driver to drain.
 CONFIG_ESP_SYSTEM_PANIC_REBOOT_DELAY_SECONDS=3
 
 # Main task runs the network window (WiFi + SNTP + the MQTT/HA session +
@@ -24,23 +65,61 @@ CONFIG_ESP_SYSTEM_PANIC_REBOOT_DELAY_SECONDS=3
 # in mqtt_ha.c, not on this stack.)
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=7168
 
-# 4 MB flash; custom table: two 1.5 MB OTA app slots (OTA plumbing is
-# future work — empty otadata boots ota_0, which sits at the old factory
-# offset) + a raw 952 KB "assets" partition for the alert WAV. nvs/phy
-# offsets match the previous SINGLE_APP_LARGE layout so reflashing keeps
-# device config.
+# 4 MB flash; custom table: two 1.75 MB (0x1C0000) OTA app slots + a raw
+# 440 KB "assets" partition for the alert WAV. Grown from this project's
+# previous custom table (0x180000 slots, otadata at 0x310000); nvs/phy/ota_0
+# keep their offsets from it so reflashing keeps device config, and an empty
+# otadata still boots ota_0 at the old factory offset. The
+# slot size is frozen — OTA cannot rewrite the partition table. Growing the
+# slots moved ota_1/otadata/assets, so a flashed WAV needs re-writing with
+# tools/flash_assets.sh. See partitions.csv.
 CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
 CONFIG_PARTITION_TABLE_CUSTOM=y
 CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
+
+# OTA rollback-on-failure. A freshly written slot boots as PENDING_VERIFY;
+# unless the app calls esp_ota_mark_app_valid_cancel_rollback() during that
+# boot, the bootloader marks it ABORTED and boots the previous slot. Without
+# this symbol a bad update is permanent and the device is a brick on a shelf
+# with no UART bridge chip to recover it. main.c's enter_deep_sleep() makes
+# the call via ota_mark_valid_if_pending(); CONFIG_BOOTLOADER_SKIP_VALIDATE_
+# IN_DEEP_SLEEP stays off, so a deep-sleep wake re-runs the bootloader and is
+# therefore a rollback opportunity — the device gets exactly one wake to mark
+# the image good. Costs 80 B of bootloader (22,640 -> 22,720 of 28,672, so
+# 5,952 B still free) and 384 B of app; measured at HEAD against a genuine
+# rollback-off control, see docs/planning/ota.plan.md task 13. Deliberately
+# NOT paired with CONFIG_BOOTLOADER_APP_ANTI_ROLLBACK, which this symbol
+# merely makes visible: that one is downgrade prevention, burns efuses, and
+# is irreversible — out of scope for this feature.
+#
+# This line IS picked up on a tree that already has a gitignored sdkconfig —
+# measured, not assumed: an isolated reconfigure against a copy of the real
+# sdkconfig (which had the symbol "not set") came back =y, and the same run
+# with an empty defaults file left it "not set". No hand-editing of sdkconfig
+# is needed for this symbol.
+#
+# Do not generalise that into a rule. Precedence between sdkconfig and
+# sdkconfig.defaults is symbol-dependent, and the mechanism deciding it was
+# not identified. In the same measured run CONFIG_MAGTAG_PARENT_TESTING (a
+# project symbol that has since been removed) went the other way twice:
+# sdkconfig won over defaults in both directions, while this symbol had
+# defaults win. Measure the symbol you care about rather than assuming
+# either way, without touching the real config:
+#   cp sdkconfig /tmp/sdkconfig.probe
+#   idf.py -B /tmp/build.probe -D SDKCONFIG=/tmp/sdkconfig.probe reconfigure
+#
+# The next real build rewrites sdkconfig in place, changing exactly 4 lines:
+# this symbol, the newly-visible CONFIG_BOOTLOADER_APP_ANTI_ROLLBACK at n,
+# and the two deprecated aliases CONFIG_APP_ROLLBACK_ENABLE and
+# CONFIG_APP_ANTI_ROLLBACK. Verified by diffing the regenerated file: no MQTT
+# credential or timer name line changes (the same diff also covered the
+# then-live PARENT_TESTING line, since removed).
+CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
 
 # MagTag 2025 revision carries 2 MB PSRAM; auto-detect, and keep booting
 # on older PSRAM-less boards instead of aborting.
 CONFIG_SPIRAM=y
 CONFIG_SPIRAM_IGNORE_NOTFOUND=y
-
-# Button B manual reset enabled (parent-testing build). Set =n for a
-# production build where only day rollover refills the allocation.
-CONFIG_MAGTAG_PARENT_TESTING=y
 
 # Daily screen-time allocations (minutes). Seed NVS; changing any of
 # these (menuconfig or here) re-seeds NVS on the next boot automatically

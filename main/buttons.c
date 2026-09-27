@@ -1,5 +1,6 @@
 #include "buttons.h"
 
+#include "button_actions.h"
 #include "button_latch.h"
 #include "buttons_policy.h"
 #include "driver/gpio.h"
@@ -9,6 +10,7 @@
 #include "esp_sleep.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
+#include "lock_gate.h"
 #include "sdkconfig.h"
 #include "timer.h"
 
@@ -36,8 +38,36 @@ static void IRAM_ATTR button_isr(void *arg) {
     portEXIT_CRITICAL_ISR(&s_latch_mux);
 }
 
+/* Feed the latch a level sample, which is how the release gate learns a
+   button came back up (button_latch.h). Task context only — the scan reads
+   the GPIO driver, and the whole point of sampling here rather than in the
+   ISR is to keep that call out of an IRAM handler.
+
+   The scan is OUTSIDE the critical section and the note INSIDE it: the
+   sample is a fact about a moment, so holding the lock across the four pad
+   reads would buy nothing and lengthen a section an ISR spins on. */
+static void buttons_note_levels(void) {
+    const uint8_t held = buttons_scan_held();
+    const int64_t t_us = esp_timer_get_time();
+    portENTER_CRITICAL(&s_latch_mux);
+    button_latch_note_levels(held, t_us);
+    portEXIT_CRITICAL(&s_latch_mux);
+}
+
 /* Latch presses while awake. No false latch for the wake button: it is
-   already low at boot, so no falling edge fires. */
+   already low at boot, so no falling edge fires — and the seeding sample
+   below is what stops the falling-edge bounce of its RELEASE from reading as
+   a second press of the button that caused the wake. That sample has to
+   happen before the handlers go on, or an edge could be recorded against an
+   unseeded gate.
+
+   WHICH OF THE TWO WAYS IT DOES THAT DEPENDS ON THE PRESS, and writing only
+   the first was a false unconditional: a wake press long enough to outlast
+   boot reads HELD, which closes the release gate outright, while a quick tap
+   is over before we get here and reads UP — and then it is the settle anchor
+   on that observation (button_latch.h) doing the rejecting. Both are
+   covered; only one of them is the common case, and it is not knowable from
+   here which. */
 static void buttons_watch_begin(void) {
     esp_err_t ret = gpio_install_isr_service(0);
     if (ret != ESP_OK && ret != ESP_ERR_INVALID_STATE) { /* INVALID_STATE = already installed */
@@ -47,6 +77,7 @@ static void buttons_watch_begin(void) {
     portENTER_CRITICAL(&s_latch_mux);
     button_latch_reset();
     portEXIT_CRITICAL(&s_latch_mux);
+    buttons_note_levels();
     for (int i = 0; i < 4; i++) {
         gpio_set_intr_type(BTN_GPIOS[i], GPIO_INTR_NEGEDGE);
         gpio_isr_handler_add(BTN_GPIOS[i], button_isr, (void *)(intptr_t)i);
@@ -60,7 +91,12 @@ static void buttons_watch_end(void) {
     }
 }
 
+/* EVERY take samples the levels first, so the release gate is fed by the
+   act of consuming presses and no consumer can forget to do it. The gate's
+   resolution is therefore exactly how often somebody takes: the chore-ack
+   coalescer polls at the debounce window for that reason. */
 uint8_t buttons_take_pressed(void) {
+    buttons_note_levels();
     portENTER_CRITICAL(&s_latch_mux);
     uint8_t mask = button_latch_take();
     portEXIT_CRITICAL(&s_latch_mux);
@@ -68,6 +104,7 @@ uint8_t buttons_take_pressed(void) {
 }
 
 uint8_t buttons_take_pressed_mask(uint8_t mask) {
+    buttons_note_levels();
     portENTER_CRITICAL(&s_latch_mux);
     uint8_t taken = button_latch_take_masked(mask);
     portEXIT_CRITICAL(&s_latch_mux);
@@ -101,25 +138,152 @@ void buttons_init(void) {
 
 /* Which buttons earn a wake is policy and lives in buttons_policy.c; what
    stays here is the RTC/EXT1 plumbing. That plumbing is not host-tested —
-   nothing compiles this TU without ESP-IDF — so three seams below rest on
+   nothing compiles this TU without ESP-IDF — so four seams below rest on
    review alone: that the pad loop indexes BTN_GPIOS with the same bit the
-   policy set, that the timer gates are wired into the right policy
-   fields, and that the early return stays AHEAD of buttons_watch_end().
-   Closing them needs a host suite for this file (stubbed gpio/rtc_io/
-   esp_sleep/FreeRTOS), which is a bigger move than the policy carve. */
+   policy set, that timer_swap_allowed() and button_a_toggle_allowed() are
+   wired into the right policy fields, that the early return stays AHEAD
+   of buttons_watch_end(), and that buttons_get_wakeup_button()'s fallback
+   level scan blames only a pad the policy could have armed AND resolves a
+   multi-pad hold through button_latch_pick rather than by index. The last
+   seam is the thinnest it has been: the bound and the tie-break are both
+   pure host-tested calls now (buttons_policy.c, button_latch.c), so what
+   rests on review is the wiring, not the decision. Closing the rest needs
+   a host suite for this file (stubbed gpio/rtc_io/esp_sleep/FreeRTOS),
+   which is a bigger move than the policy carve.
+
+   A FIFTH SEAM LIVES ABOVE, added by M2-T12 and the same shape: that every
+   take feeds buttons_note_levels() and that the seeding sample in
+   buttons_watch_begin() happens before gpio_isr_handler_add(). The DECISION
+   those two feed — what a level sample means for the release gate — is
+   host-tested in button_latch.c, so again what rests on review is only
+   whether the samples are taken. test_wake_flow's take stubs mirror both
+   calls, which puts the gate itself under the coalescer; what they cannot
+   mirror is this file forgetting one. */
 void buttons_configure_wakeup_if(bool enable) {
     /* A locked sleep arms nothing: leave the RTC domain exactly as the
        last sleep left it, on a battery that cannot spare the work. */
     if (!enable)
         return;
+    /* THE NVS READS ON THIS PATH, and they are worth naming because of
+       where they land. Two gates below reach the names blob and BOTH
+       short-circuit before they do — button_a_toggle_allowed() on the
+       timer state, button_chore_ack_allowed() on the RTC mode byte. The
+       cost per sleep, stated as the three cases rather than as a bound,
+       because the worst of them is not the one a reader guesses:
+
+         Timers mode, no timer running   ONE read. A's gate goes to flash;
+                                         C's short-circuits on the mode.
+         Timers mode, a timer running    NONE. A's gate short-circuits on
+                                         TIMER_RUNNING first.
+         CHORE mode                      TWO FULL READS, every sleep. Both
+                                         gates pass their cheap half, and
+                                         each loads the whole names blob
+                                         into its own 64-byte stack buffer
+                                         (button_actions.c) to ask a
+                                         different question of it.
+
+       Two is the real chore-screen cost and there is no caching layer
+       under it; it is accepted rather than unnoticed. The chore screen is
+       also the state a device sits in for seconds at a time, not hours,
+       so the reads are bounded by presses and not by the clock.
+
+       "A sleep while a timer runs reaches flash not at all" is the ONE
+       claim here that is not local to this function. It needs BOTH gates
+       to stay away from flash, and only A's is gated on the timer state:
+       C's is gated on the mode alone, so a RUNNING timer with the mode
+       byte saying CHORES would read the blob. That combination cannot
+       occur, and the reason is emergent rather than enforced —
+       button_a_apply() is the only writer of APP_MODE_CHORES and it
+       refuses while RUNNING, timer_start() has exactly one caller
+       (button_b_apply, button_actions.c) and B is rebound to an ack in
+       chore mode, the awake join poll refuses to start from the chore
+       screen (wake_flow.c), and no MQTT command starts a timer. CHORES
+       therefore implies not RUNNING. Nothing asserts it; if a later task
+       gives anything else a way to start a timer, this claim is the first
+       thing it breaks and the breakage is silent — a second flash read
+       per sleep, on the path that runs on every sleep.
+
+       button_a_toggle_allowed() asks the chore names blob
+       whether a list is configured — the count exists nowhere else, the
+       RTC block holding only the acks, the release and the mode (timer.h)
+       — and main.c has already called hal_nvs_close() by the time it gets
+       here. hal_nvs's open is lazy, so this REOPENS the wake-scoped
+       handle that was just released; deep sleep then drops it a few lines
+       later instead of that close doing so. The close's own claim ("the
+       last NVS WRITE is behind us") stays true — this is a read.
+       The alternative was an approximation: arm A unconditionally and let
+       the press be refused on arrival. That is the wrong trade here
+       because it is the COMMON case — no device in the field has a chore
+       list yet, so every mispress of A would buy a wake and a full panel
+       refresh for nothing.
+       The gate short-circuits on timer_get_state() first, so a sleep
+       entered while a timer runs never reaches flash at all.
+       STACK, because one caller is not the main task: the awake failsafe
+       reaches here as awake_failsafe_cb -> enter_deep_sleep ->
+       buttons_configure_wakeup_if, i.e. on the esp_timer task
+       (CONFIG_ESP_TIMER_TASK_STACK_SIZE=3584). The gate's names buffer
+       adds ~64 B there (button_actions.c). Running NVS from esp_timer on
+       this path is pre-existing, not something this gate introduced. */
+    /* THE LOCK IS REPORTED HERE AND APPLIED IN EXACTLY ONE PLACE, which
+       is buttons_policy.c's early return. Each of the three gates below
+       used to be written `!config_locked && ...` as well, on the grounds
+       that a config-locked sleep arms D alone (buttons_policy.h) so their
+       answers cannot change the mask, and two of them go to flash to
+       produce one.
+
+       THAT SPELT THE NARROWING TWICE, and the second copy was the one
+       nothing could see: this file is in no host suite, and a mutant
+       severing its half of the rule produced a test binary bit-identical
+       to pristine — it never compiled. The two copies also fail
+       differently, which is what settles it. Delete the policy's early
+       return with these short-circuits present and A and C go dark with
+       no rule anywhere saying they should be: the "primary control dead
+       to the press" failure this module's policy exists to avoid, arrived
+       at by accident and with no test to notice. Delete it with the
+       narrowing spelt once and the mask merely widens back to what it was
+       before the lock existed — a stray press and a wasted refresh.
+
+       WHAT THAT GIVES UP, measured rather than asserted: the two flash
+       reads the header above tabulates, a few ms of NVS, on a wake that
+       has already spent up to NET_JOIN_TIMEOUT_MS (90 s) of radio — the
+       config gate runs a window on EVERY wake where this flag is true,
+       engage and locked re-wake alike (lock_gate.c). Three to five orders
+       of magnitude apart on any plausible figure for a blob read. And the
+       saving was never consistent in the first place: the same reads
+       already happen unconditionally on the charge- and bed-time-locked
+       sleeps, where `enable` is false and the entire mask is discarded a
+       line later. */
+    /* The no-clock lock (BUG-14) sleeps the config lock's sleep and wants
+       the same mask: D alone, and a D press is its retry. Folded into the
+       one field rather than given a second, because "D is the only exit"
+       is one rule and buttons_policy.c applies it in one place. The fold
+       itself is lock_gate_wake_d_only(), so test_lock_gate pins it; this
+       file is in no host suite. */
+    const bool config_locked = lock_gate_wake_d_only();
     buttons_policy_in_t pol = {
         .enable = enable,
+        .config_locked = config_locked,
         .swap_allowed = timer_swap_allowed(),
-#if CONFIG_MAGTAG_PARENT_TESTING
-        .reload_allowed = timer_reload_allowed(true),
-#else
-        .reload_allowed = timer_reload_allowed(false),
-#endif
+        .mode_toggle_allowed = button_a_toggle_allowed(),
+        /* C's chore binding (design 2.4): the middle checkbox. A SECOND
+           reader of the names blob on this path. It short-circuits on the
+           RTC mode byte, so off the checklist it costs one comparison and
+           on it costs a full blob read — the second of the two the header
+           above tabulates.
+
+           NOT "the only time the gate above can have said yes", which is
+           what stood here and is false in the direction that matters. The
+           implication runs one way only. C's gate passing DOES imply A's
+           passed: it needs a second configured row, so n >= 2 > 0, and it
+           needs the mode byte to say CHORES, which by the invariant in
+           the header means not RUNNING — both of A's conditions. The
+           converse is what is false: A's gate says yes in TIMERS mode
+           too, and it must, or A could never be armed to ENTER chore
+           mode, which is the whole of M2-T3. So the two reads are not
+           alternatives. In chore mode they both happen, and that is what
+           bounds this path — the tabulated pair above, not an
+           exclusion. */
+        .chore_ack_allowed = button_chore_ack_allowed(BUTTON_CHORE_IDX_C),
     };
     uint8_t wake = buttons_policy_wake_mask(&pol);
     buttons_watch_end();
@@ -157,12 +321,74 @@ button_id_t buttons_get_wakeup_button(void) {
         }
     }
 
-    /* Fallback: latch was empty — debounce then scan levels */
+    /* Fallback: latch was empty — debounce then scan levels, but only
+       across pads that COULD have been armed. The maximal mask (every
+       gate open) is the set of buttons the policy will arm under some
+       condition; a button outside it cannot have caused this EXT1 wake
+       whatever the user happens to be holding. Derived from the policy
+       rather than hardcoded so that buttons_policy.c stays the single
+       source of truth, and so a button that becomes conditionally armed
+       keeps being scanned — a conditional button is still in the maximal
+       mask. Nothing is retained across the sleep: the armed mask was
+       computed before it and RAM is gone by now, so recomputing the bound
+       is the only option anyway. NB: designated initializer — a gate
+       field added to buttons_policy_in_t defaults to false here and would
+       narrow this below maximal; any new gate must be set true.
+       The primary path above needs no such filter: an unarmed pad can
+       never appear in the EXT1 status latch.
+
+       WHAT THE FILTER STOPPED BUYING when A gained a binding, and why
+       there is a second line below it now: the mask used to exclude A
+       outright, so a wake genuinely caused by B, C or D while A was also
+       held could not be misreported as BTN_A. That was never the mask's
+       purpose — it fell out of A having no gate — and admitting A to the
+       maximal mask spent it.
+
+       Index order alone is NOT an acceptable tie-break here, and calling
+       the returned ambiguity "genuine" would be wrong. The maximal mask
+       is COUNTERFACTUAL: it asks "could any gate arm this pad?", whereas
+       the mask that actually armed this sleep was the real one. A's gate
+       (button_a_toggle_allowed) is false on every device with no chore
+       list configured — which buttons_policy.c notes is the whole fleet
+       as it ships. On such a device a held A provably could not have
+       caused this wake, yet A is index 0 and would win a first-match
+       scan; the toggle would then be refused by its own gate, the tail
+       would repaint, and the real B press would be gone with no feedback
+       at all. That is the "primary control dead to the press" failure
+       this module's policy is otherwise built to avoid, and button_latch.c
+       already records having fixed exactly this bug in the latch pick.
+
+       So resolve through button_latch_pick, which IS that policy: pure,
+       host-tested, B > C > D > A, and already the tie-break both latch
+       drains use. Reusing it is not a second policy to keep in step — it
+       is the one policy, called from a third place. Where the ambiguity
+       IS genuine (a chore list configured, A really armable, two pads
+       held), yielding to the time-sensitive press is the same answer the
+       drains give, which is the point. The scan stays best-effort by
+       construction: it runs only when the EXT1 status latch came back
+       empty, and with two pads held no information survives to say which
+       one fired. */
+    const buttons_policy_in_t maximal = {
+        .enable = true,
+        .swap_allowed = true,
+        .mode_toggle_allowed = true,
+        /* Set for the rule above, not because it widens anything: C is
+           already in the mask through swap_allowed, so the ack gate adds
+           no pad. It is here so the literal stays MAXIMAL by
+           construction — the next gate to arrive may be the one that
+           does. */
+        .chore_ack_allowed = true,
+        /* config_locked is left out, and FALSE is the maximal value for
+           it — it is the one field that NARROWS. Setting it true here
+           would cut the fallback level scan down to button D and lose
+           every other press this path exists to recover. The literal is
+           maximal by VALUE, not by mentioning every field. */
+    };
+    const uint8_t armable = buttons_policy_wake_mask(&maximal);
     esp_rom_delay_us(DEBOUNCE_US);
-    for (int i = 0; i < 4; i++) {
-        if (gpio_get_level(BTN_GPIOS[i]) == 0) {
-            return (button_id_t)i;
-        }
+    const int pick = button_latch_pick(buttons_scan_held(), armable);
+    if (pick >= 0) {
+        return (button_id_t)pick;
     }
     ESP_LOGW(TAG, "EXT1 wakeup but no button identified");
     return BTN_NONE;

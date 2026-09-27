@@ -15,7 +15,7 @@ static const char *TAG = "neopixel";
 
 #define NEOPIXEL_DATA_GPIO GPIO_NUM_1
 #define NEOPIXEL_POWER_GPIO GPIO_NUM_21
-#define NEOPIXEL_COUNT 4
+/* NEOPIXEL_COUNT lives in neopixel.h: it bounds the public API's idx. */
 #define RMT_RESOLUTION_HZ 10000000
 
 /* ---------- Embedded WS2812B RMT encoder ---------- */
@@ -274,15 +274,30 @@ static void led_task_apply(const np_msg_t *m, pulse_state_t *pulse) {
             s_pixels[m->idx * 3 + 2] = scale_status(m->b);
             break;
         case NP_MSG_PIXEL_HI:
-            s_pixels[m->idx * 3 + 0] = m->g; /* GRB byte order */
-            s_pixels[m->idx * 3 + 1] = m->r;
-            s_pixels[m->idx * 3 + 2] = m->b;
+            /* No status_muted() test — that is the whole difference between
+               this class and the one above.
+               STILL SCALED, THOUGH, and that is not an oversight either way
+               round: HIGHPRI means "quiet hours do not apply", which is what
+               neopixel.h promises and all it promises. The brightness
+               percent is the user's dimmer and applies to every non-pulse
+               paint; the Kconfig help exempts alert PULSES, which are
+               NP_MSG_PULSE and scale themselves. Live as of M2-T8's fix
+               pass, when chores_led_show() became the first caller of this
+               class: without the scale a device dimmed to 20 % would blaze
+               its chore strip at full while everything else stayed dim. */
+            s_pixels[m->idx * 3 + 0] = scale_status(m->g); /* GRB byte order */
+            s_pixels[m->idx * 3 + 1] = scale_status(m->r);
+            s_pixels[m->idx * 3 + 2] = scale_status(m->b);
             break;
         case NP_MSG_BINARY4:
             if (status_muted())
                 return;
             for (int i = 0; i < NEOPIXEL_COUNT; i++) {
-                /* pixel 0 (over button A) = bit3 ... pixel 3 = bit0 */
+                /* pixel 0 = bit3 (MSB) ... pixel 3 = bit0. Pixel 0 is over
+                   button D, the RIGHTMOST button, so the MSB shows on the
+                   right and the countdown reads right-to-left on the glass.
+                   That is CORRECT — confirmed on hardware 2026-09-22; see
+                   neopixel.h's note before changing the shift. */
                 bool lit = (m->idx >> (3 - i)) & 1;
                 s_pixels[i * 3 + 0] = lit ? scale_status(m->g) : 0;
                 s_pixels[i * 3 + 1] = lit ? scale_status(m->r) : 0;

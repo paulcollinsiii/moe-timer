@@ -9,8 +9,15 @@ managed_components/
 dependencies.lock
 test/build/
 
+# Bytecode from tools/check_slot_size.py, imported by its host test suite
+__pycache__/
+
 # Local secrets (WiFi credentials etc.) — never committed
 *.local.h
+
+# The owner's device list for tools/gen_ha_dashboard.py (see
+# tools/ha_devices.example.yaml)
+tools/ha_devices.yaml
 
 # Differential-sweep build artifacts (generators are the source of truth)
 test/difftest/cycles/harness_*.c

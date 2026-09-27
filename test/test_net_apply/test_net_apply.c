@@ -30,7 +30,10 @@ bool net_window_spawn(void) {
     return true;
 }
 
+static int mock_nw_wait_calls;
+
 bool net_window_wait_ntp(void) {
+    mock_nw_wait_calls++;
     return mock_nw_active && mock_nw_wait_ntp_ok;
 }
 
@@ -163,6 +166,7 @@ void setUp(void) {
     mock_nw_ntp_result = ESP_OK;
     mock_nw_clock_step = 0;
     mock_nw_spawn_calls = mock_nw_post_calls = mock_nw_join_polls = 0;
+    mock_nw_wait_calls = 0;
 
     mock_ha_bonus_pending = false;
     mock_ha_grant_pending = false;
@@ -182,6 +186,12 @@ void setUp(void) {
 }
 
 void tearDown(void) {}
+
+static void select_slot(int slot) {
+    while (timer_active_slot() != slot) {
+        TEST_ASSERT_TRUE(timer_select_next());
+    }
+}
 
 /* ---- no-window / failure paths ----------------------------------------- */
 
@@ -234,6 +244,47 @@ void test_try_window_reports_sync_failure_but_still_finishes(void) {
     TEST_ASSERT_FALSE(net_window_active());
 }
 
+/* ---- the after-NTP hook (BUG-14) -----------------------------------------
+
+   The no-clock lock settles the real day in this hook, and the whole fix
+   rests on WHERE it runs: after the sync (so the clock it reads is the
+   synced one), before the stats post (so the MQTT phase, which waits for
+   that post, reports the settled day and acts on nothing before it), and
+   before the finish applies the buffered grant (so the grant lands on the
+   settled day, not on the stand-in the hook replaces). */
+static int hook_calls;
+static int hook_saw_wait_calls;
+static int hook_saw_post_stats;
+static bool hook_saw_grant_pending;
+
+static void hook_after_ntp(void) {
+    hook_calls++;
+    hook_saw_wait_calls = mock_nw_wait_calls;
+    hook_saw_post_stats = n_post_stats;
+    hook_saw_grant_pending = mock_ha_grant_pending;
+}
+
+void test_try_window_then_runs_the_hook_after_ntp_and_before_stats_and_apply(void) {
+    hook_calls = 0;
+    mock_ha_grant_pending = true;
+    mock_ha_grant_slot = 0;
+    mock_ha_grant_sec = 300;
+    TEST_ASSERT_EQUAL(ESP_OK, net_apply_try_window_then(hook_after_ntp));
+    TEST_ASSERT_EQUAL_INT(1, hook_calls);
+    TEST_ASSERT_EQUAL_INT(1, hook_saw_wait_calls); /* after the sync settled */
+    TEST_ASSERT_EQUAL_INT(0, hook_saw_post_stats); /* before the snapshot */
+    TEST_ASSERT_TRUE(hook_saw_grant_pending);      /* before the apply */
+    TEST_ASSERT_EQUAL_INT(1, n_post_stats);
+    TEST_ASSERT_FALSE(mock_ha_grant_pending); /* and the apply still ran */
+}
+
+void test_try_window_then_skips_the_hook_when_no_window_opens(void) {
+    hook_calls = 0;
+    mock_nw_spawn_ok = false;
+    TEST_ASSERT_EQUAL(ESP_FAIL, net_apply_try_window_then(hook_after_ntp));
+    TEST_ASSERT_EQUAL_INT(0, hook_calls);
+}
+
 void test_finish_runs_join_poll_and_config_invalidate(void) {
     TEST_ASSERT_TRUE(net_apply_open());
     TEST_ASSERT_EQUAL(NET_FINISH_IDLE, net_apply_finish());
@@ -264,6 +315,141 @@ void test_bonus_target_reconciled_against_applied(void) {
     TEST_ASSERT_EQUAL_INT32(4200, timer_tick(T0));
 }
 
+/* The repaint verdict has to cover the bonus, not just the def
+   reconcile. On a Button D sync the panel is painted BEFORE the window
+   joins, so an adjustment that reports nothing leaves the old figure on
+   screen until some later wake — the user presses sync, sees no change,
+   and the number only appears when the timer starts. An IDLE adjustment
+   never moves timer_get_state(), so the state diff cannot catch it. */
+void test_bonus_applied_while_idle_reports_changed_for_the_repaint(void) {
+    TEST_ASSERT_TRUE(net_apply_open());
+    mock_ha_bonus_pending = true;
+    mock_ha_bonus_target = -2700;
+    TEST_ASSERT_EQUAL(NET_FINISH_CHANGED, net_apply_finish());
+    TEST_ASSERT_EQUAL(TIMER_IDLE, timer_get_state()); /* state never moved */
+}
+
+void test_bonus_replay_that_changes_nothing_stays_idle(void) {
+    /* Every window redelivers the retained target; only the one that
+       moves something earns a full refresh. */
+    timer_bonus_reconcile(0, -2700);
+    TEST_ASSERT_TRUE(net_apply_open());
+    mock_ha_bonus_pending = true;
+    mock_ha_bonus_target = -2700;
+    TEST_ASSERT_EQUAL(NET_FINISH_IDLE, net_apply_finish());
+}
+
+void test_grant_applied_while_idle_reports_changed(void) {
+    TEST_ASSERT_TRUE(net_apply_open());
+    mock_ha_grant_pending = true;
+    mock_ha_grant_slot = 0;
+    mock_ha_grant_sec = 600;
+    TEST_ASSERT_EQUAL(NET_FINISH_CHANGED, net_apply_finish());
+}
+
+/* ...but only when the adjusted slot is what the panel is about to
+   draw. The bonus always targets slot 0 while the panel renders
+   timer_active_slot(), so adjusting Screen with Piano selected repainted
+   a screen on which nothing had changed — a visible e-ink flash and a
+   full refresh of battery for no information. */
+void test_screen_bonus_while_an_extra_is_selected_does_not_repaint(void) {
+    select_slot(1); /* Piano is what the panel draws */
+    TEST_ASSERT_TRUE(net_apply_open());
+    mock_ha_bonus_pending = true;
+    mock_ha_bonus_target = -2700;
+    TEST_ASSERT_EQUAL(NET_FINISH_IDLE, net_apply_finish());
+    /* Applied all the same — this is about the repaint, not the apply. */
+    TEST_ASSERT_EQUAL_INT32(-2700, timer_screen_bonus_applied());
+    TEST_ASSERT_EQUAL_INT32(-2700, timer_slot_banked_bonus(0));
+}
+
+void test_grant_to_a_background_slot_does_not_repaint(void) {
+    select_slot(1);
+    TEST_ASSERT_TRUE(net_apply_open());
+    mock_ha_grant_pending = true;
+    mock_ha_grant_slot = 3; /* Meditation: enabled, but not selected */
+    mock_ha_grant_sec = 600;
+    TEST_ASSERT_EQUAL(NET_FINISH_IDLE, net_apply_finish());
+    TEST_ASSERT_EQUAL_INT32(600, timer_slot_banked_bonus(3));
+}
+
+void test_grant_to_the_selected_extra_still_repaints(void) {
+    select_slot(1);
+    TEST_ASSERT_TRUE(net_apply_open());
+    mock_ha_grant_pending = true;
+    mock_ha_grant_slot = 1;
+    mock_ha_grant_sec = 600;
+    TEST_ASSERT_EQUAL(NET_FINISH_CHANGED, net_apply_finish());
+}
+
+/* Two adjustments in one window, only one of them on screen: the visible
+   one must still carry the repaint. A gate that took the LAST answer
+   rather than the union would lose it. */
+void test_invisible_screen_bonus_never_masks_a_visible_grant(void) {
+    select_slot(1);
+    TEST_ASSERT_TRUE(net_apply_open());
+    mock_ha_bonus_pending = true;
+    mock_ha_bonus_target = -2700; /* slot 0: off-screen */
+    mock_ha_grant_pending = true;
+    mock_ha_grant_slot = 1; /* Piano: on-screen */
+    mock_ha_grant_sec = 600;
+    TEST_ASSERT_EQUAL(NET_FINISH_CHANGED, net_apply_finish());
+}
+
+/* The mirror ordering, and the one the union actually needs: the visible
+   adjustment is applied FIRST and the invisible one second. Without it
+   the case above passes under a plain `=` too — the grant happens to be
+   the last write and happens to be the visible slot, so last-write-wins
+   lands on the right bit by luck. Here the bonus (slot 0, selected) must
+   survive a later grant to slot 3, which only a union does. */
+void test_invisible_grant_never_masks_a_visible_screen_bonus(void) {
+    TEST_ASSERT_EQUAL_INT(0, timer_active_slot()); /* Screen is on screen */
+    TEST_ASSERT_TRUE(net_apply_open());
+    mock_ha_bonus_pending = true;
+    mock_ha_bonus_target = -2700; /* slot 0: ON-screen, applied first */
+    mock_ha_grant_pending = true;
+    mock_ha_grant_slot = 3; /* Meditation: off-screen, applied second */
+    mock_ha_grant_sec = 600;
+    TEST_ASSERT_EQUAL(NET_FINISH_CHANGED, net_apply_finish());
+    TEST_ASSERT_EQUAL_INT32(-2700, timer_slot_banked_bonus(0));
+    TEST_ASSERT_EQUAL_INT32(600, timer_slot_banked_bonus(3));
+}
+
+/* The two slot-0 states that could in principle leak onto a panel drawn
+   for another slot, pinned so the narrow gate stays honest.
+
+   1. A BREAK behind a selected extra draws the header's BREAK chip, and
+      the chip counts break_expiry_wall — which timer_adjust never
+      touches (it moves remaining_at_pause and allocation_sec). */
+void test_screen_adjust_behind_a_break_leaves_the_chip_alone(void) {
+    timer_start_break(T0, 900);
+    TEST_ASSERT_TRUE(timer_select_next()); /* -> Piano; the chip is drawn */
+    int32_t chip_before = timer_break_remaining(T0 + 60);
+    TEST_ASSERT_TRUE(net_apply_open());
+    mock_ha_bonus_pending = true;
+    mock_ha_bonus_target = 600;
+    TEST_ASSERT_EQUAL(NET_FINISH_IDLE, net_apply_finish());
+    TEST_ASSERT_EQUAL_INT32(chip_before, timer_break_remaining(T0 + 60));
+    TEST_ASSERT_EQUAL(TIMER_BREAK, timer_slot_state(0)); /* still a break: the chip stays */
+    TEST_ASSERT_EQUAL_INT32(600, g_rtc_state.slots[0].remaining_at_pause);
+}
+
+/* 2. A grant against an EXPIRED slot 0 flips it to PAUSED. That state is
+      read by nothing the panel draws while another slot is selected —
+      break_banner asks for BREAK, and every other field is the active
+      slot's. */
+void test_screen_grant_that_unexpires_slot_zero_is_still_invisible(void) {
+    timer_start(T0, 600);
+    timer_tick(T0 + 700);
+    TEST_ASSERT_EQUAL(TIMER_EXPIRED, timer_slot_state(0));
+    select_slot(1);
+    TEST_ASSERT_TRUE(net_apply_open());
+    mock_ha_bonus_pending = true;
+    mock_ha_bonus_target = 900;
+    TEST_ASSERT_EQUAL(NET_FINISH_IDLE, net_apply_finish());
+    TEST_ASSERT_EQUAL(TIMER_PAUSED, timer_slot_state(0)); /* flipped, off-screen */
+}
+
 void test_locate_pending_fires_locate_after_apply(void) {
     TEST_ASSERT_TRUE(net_apply_open());
     mock_ha_locate = true;
@@ -278,12 +464,6 @@ void test_no_locate_when_not_pending(void) {
 }
 
 /* ---- def reconcile fan-out ---------------------------------------------- */
-
-static void select_slot(int slot) {
-    while (timer_active_slot() != slot) {
-        TEST_ASSERT_TRUE(timer_select_next());
-    }
-}
 
 void test_unchanged_defs_reconcile_to_idle(void) {
     select_slot(1);
@@ -358,6 +538,24 @@ void test_active_slot_shrunk_below_elapsed_expires_with_alert(void) {
     TEST_ASSERT_EQUAL(NET_FINISH_ALERTED, net_apply_finish());
     TEST_ASSERT_EQUAL_INT(1, n_expiry_alert);
     TEST_ASSERT_EQUAL(TIMER_EXPIRED, timer_get_state());
+}
+
+void test_bonus_must_not_downgrade_an_alerted_reconcile(void) {
+    /* ALERTED means the alert path already owns the display; a bonus
+       landing in the same window must not turn that into an ordinary
+       repaint and swallow the TIME'S UP screen. */
+    select_slot(1);
+    timer_start(T0, 900);
+    mock_time_set(T0 + 300);
+    TEST_ASSERT_TRUE(net_apply_open());
+    mock_ha_bonus_pending = true;
+    mock_ha_bonus_target = 600;
+    timer_def_t edited[TIMER_SLOT_COUNT];
+    memcpy(edited, PRE_DEFS, sizeof(edited));
+    edited[1].duration_sec = 120; /* shrunk under the elapsed 300 s */
+    install_table(edited);
+    TEST_ASSERT_EQUAL(NET_FINISH_ALERTED, net_apply_finish());
+    TEST_ASSERT_EQUAL_INT(1, n_expiry_alert);
 }
 
 void test_active_slot_grown_updates_without_chirp(void) {
@@ -476,9 +674,22 @@ int main(void) {
     RUN_TEST(test_try_window_spawn_failure_returns_fail_without_stats);
     RUN_TEST(test_try_window_posts_stats_once_and_returns_ntp_result);
     RUN_TEST(test_try_window_reports_sync_failure_but_still_finishes);
+    RUN_TEST(test_try_window_then_runs_the_hook_after_ntp_and_before_stats_and_apply);
+    RUN_TEST(test_try_window_then_skips_the_hook_when_no_window_opens);
     RUN_TEST(test_finish_runs_join_poll_and_config_invalidate);
     RUN_TEST(test_grant_applied_to_running_screen_extends_remaining);
     RUN_TEST(test_bonus_target_reconciled_against_applied);
+    RUN_TEST(test_bonus_applied_while_idle_reports_changed_for_the_repaint);
+    RUN_TEST(test_bonus_replay_that_changes_nothing_stays_idle);
+    RUN_TEST(test_grant_applied_while_idle_reports_changed);
+    RUN_TEST(test_screen_bonus_while_an_extra_is_selected_does_not_repaint);
+    RUN_TEST(test_grant_to_a_background_slot_does_not_repaint);
+    RUN_TEST(test_grant_to_the_selected_extra_still_repaints);
+    RUN_TEST(test_invisible_screen_bonus_never_masks_a_visible_grant);
+    RUN_TEST(test_invisible_grant_never_masks_a_visible_screen_bonus);
+    RUN_TEST(test_screen_adjust_behind_a_break_leaves_the_chip_alone);
+    RUN_TEST(test_screen_grant_that_unexpires_slot_zero_is_still_invisible);
+    RUN_TEST(test_bonus_must_not_downgrade_an_alerted_reconcile);
     RUN_TEST(test_locate_pending_fires_locate_after_apply);
     RUN_TEST(test_no_locate_when_not_pending);
     RUN_TEST(test_unchanged_defs_reconcile_to_idle);

@@ -19,7 +19,7 @@ typedef enum {
 } net_finish_t;
 
 typedef struct {
-    void (*join_poll)(void);               /* nullable; keeps Button A live during the join */
+    void (*join_poll)(void);               /* nullable; keeps Button B live during the join */
     void (*on_config_applied)(void);       /* drop wake-scoped config caches */
     void (*on_active_reset_chirp)(void);   /* active slot redefined mid-run */
     void (*on_active_expired_alert)(void); /* owns the display: TIME'S UP + repaint */
@@ -53,6 +53,13 @@ net_finish_t net_apply_finish(void);
    reflects the SNTP result only — MQTT is best-effort and can never fail
    the sync that opened the window. */
 esp_err_t net_apply_try_window(void);
+
+/* The same window with a hook run on this task after the sync settles
+   and BEFORE the stats snapshot is posted. The MQTT phase waits for that
+   snapshot, so the hook runs before any HA message is acted on, and the
+   finish applies the buffered grant and bonus to whatever day the hook
+   left in RAM. Not called when no window opens. NULL = try_window. */
+esp_err_t net_apply_try_window_then(void (*after_ntp)(void));
 
 #ifdef __cplusplus
 }

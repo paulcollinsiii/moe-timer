@@ -17,6 +17,7 @@ typedef struct {
 
 static Entry s_store[MAX_ENTRIES];
 static int s_fail_writes;
+static int s_fail_reads;
 
 /* Per-key call accounting, kept separate from the store so misses count
    too — a read of an absent key is still a flash access. */
@@ -77,10 +78,25 @@ void mock_nvs_reset(void) {
     memset(s_read_counts, 0, sizeof(s_read_counts));
     memset(s_write_counts, 0, sizeof(s_write_counts));
     s_fail_writes = 0;
+    s_fail_reads = 0;
 }
 
 void mock_nvs_fail_writes(int count) {
     s_fail_writes = count;
+}
+
+void mock_nvs_fail_reads(int count) {
+    s_fail_reads = count;
+}
+
+/* Consume one injected read failure; true = this read must return
+   ESP_FAIL. Taken after count_read(): a failed read is still a read. */
+static int take_read_failure(void) {
+    if (s_fail_reads == 0)
+        return 0;
+    if (s_fail_reads > 0)
+        s_fail_reads--;
+    return 1;
 }
 
 /* Consume one injected failure; true = this write must return ESP_FAIL. */
@@ -120,6 +136,8 @@ static Entry *alloc_entry(const char *key) {
 
 esp_err_t hal_nvs_read_u16(const char *key, uint16_t *out) {
     count_read(key);
+    if (take_read_failure())
+        return ESP_FAIL;
     const Entry *e = find_entry(key);
     if (!e || e->len != sizeof(uint16_t))
         return ESP_ERR_NVS_NOT_FOUND;
@@ -139,8 +157,37 @@ esp_err_t hal_nvs_write_u16(const char *key, uint16_t val) {
     return ESP_OK;
 }
 
+/* Width-checked exactly like the u16 pair: a key written as one type and
+   read as the other must MISS, because ESP-IDF's nvs_get_u32 does the
+   same. Sharing a key between widths would otherwise pass here and fail
+   on the device. */
+esp_err_t hal_nvs_read_u32(const char *key, uint32_t *out) {
+    count_read(key);
+    if (take_read_failure())
+        return ESP_FAIL;
+    const Entry *e = find_entry(key);
+    if (!e || e->len != sizeof(uint32_t))
+        return ESP_ERR_NVS_NOT_FOUND;
+    memcpy(out, e->data, sizeof(uint32_t));
+    return ESP_OK;
+}
+
+esp_err_t hal_nvs_write_u32(const char *key, uint32_t val) {
+    count_write(key);
+    if (take_write_failure())
+        return ESP_FAIL;
+    Entry *e = alloc_entry(key);
+    if (!e)
+        return ESP_FAIL;
+    memcpy(e->data, &val, sizeof(uint32_t));
+    e->len = sizeof(uint32_t);
+    return ESP_OK;
+}
+
 esp_err_t hal_nvs_read_str(const char *key, char *buf, size_t *len) {
     count_read(key);
+    if (take_read_failure())
+        return ESP_FAIL;
     const Entry *e = find_entry(key);
     if (!e)
         return ESP_ERR_NVS_NOT_FOUND;
@@ -148,10 +195,20 @@ esp_err_t hal_nvs_read_str(const char *key, char *buf, size_t *len) {
         *len = e->len + 1; /* report required size including NUL */
         return ESP_OK;
     }
-    size_t copy = (e->len < *len) ? e->len : *len - 1;
-    memcpy(buf, e->data, copy);
-    buf[copy] = '\0';
-    *len = copy + 1; /* match ESP-IDF: *len includes NUL byte */
+    /* Match nvs_get_str: a buffer too small to hold the value plus its NUL
+       is an ERROR, and the buffer is left UNTOUCHED. The mock used to
+       truncate instead, which is a materially different failure — a short
+       reader saw a shortened string here but would see an uninitialised
+       buffer on device, and a caller that only maps NOT_FOUND to "" (which
+       is all get_str_empty_default does) never notices either way. That
+       divergence hid the real consequence of an undersized read buffer. */
+    if (e->len + 1 > *len) {
+        *len = e->len + 1; /* required size, as ESP-IDF reports it */
+        return ESP_ERR_NVS_INVALID_LENGTH;
+    }
+    memcpy(buf, e->data, e->len);
+    buf[e->len] = '\0';
+    *len = e->len + 1; /* match ESP-IDF: *len includes NUL byte */
     return ESP_OK;
 }
 
@@ -172,12 +229,18 @@ esp_err_t hal_nvs_write_str(const char *key, const char *val) {
 
 esp_err_t hal_nvs_read_blob(const char *key, void *buf, size_t *len) {
     count_read(key);
+    if (take_read_failure())
+        return ESP_FAIL;
     const Entry *e = find_entry(key);
     if (!e)
         return ESP_ERR_NVS_NOT_FOUND;
+    /* nvs_get_blob's code for a value that does not fit, as read_str
+       above does. It used to be ESP_FAIL, which a caller that tells a
+       rejected record from a failed read (chore_store_load_names) would
+       have misfiled as the latter. */
     if (*len < e->len) {
         *len = e->len;
-        return ESP_FAIL;
+        return ESP_ERR_NVS_INVALID_LENGTH;
     }
     memcpy(buf, e->data, e->len);
     *len = e->len;

@@ -40,7 +40,8 @@ RUN curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.5/install.sh | P
     && echo node > /home/vscode/.nvmrc \
     && . "${NVM_DIR}/nvm.sh" \
     && cd /home/vscode \
-    && nvm install
+    && nvm install \
+    && curl -LsSf https://astral.sh/uv/install.sh | sh
 
 RUN mkdir -p /home/vscode/esp \
     && git clone --branch v6.0.1 --depth 1 --recursive --shallow-submodules \

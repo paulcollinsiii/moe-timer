@@ -104,6 +104,44 @@ void test_duplicate_id_skipped(void) {
     TEST_ASSERT_EQUAL(CMD_GRANT, cmd_apply("{\"id\":\"def\",\"grant\":{\"min\":15}}", &a, ack, sizeof(ack)));
 }
 
+/* ---- held while the day is unsettled (BUG-14, owner decision Q1) ----
+
+   Behind the no-clock lock a grant has no day to land on, so it stays
+   retained and unacked. The id must NOT be recorded: dedup would then
+   answer CMD_DUP to the very window that can apply it, and the grant
+   would be lost with no ack at all. */
+void test_held_grant_is_not_recorded_and_applies_once_the_hold_lifts(void) {
+    cmd_action_t a;
+    char ack[128];
+    TEST_ASSERT_EQUAL(CMD_HELD, cmd_apply_hold("{\"id\":\"g1\",\"grant\":{\"min\":15}}", &a, ack, sizeof(ack), true));
+    TEST_ASSERT_EQUAL(CMD_HELD, cmd_apply_hold("{\"id\":\"g1\",\"grant\":{\"min\":15}}", &a, ack, sizeof(ack), true));
+    TEST_ASSERT_EQUAL(CMD_GRANT, cmd_apply_hold("{\"id\":\"g1\",\"grant\":{\"min\":15}}", &a, ack, sizeof(ack), false));
+    TEST_ASSERT_EQUAL_INT32(900, a.sec);
+    TEST_ASSERT_EQUAL(CMD_DUP, cmd_apply_hold("{\"id\":\"g1\",\"grant\":{\"min\":15}}", &a, ack, sizeof(ack), false));
+}
+
+/* A locate is not day-scoped: the hold leaves it alone. */
+void test_hold_does_not_hold_a_locate(void) {
+    cmd_action_t a;
+    char ack[128];
+    TEST_ASSERT_EQUAL(CMD_LOCATE, cmd_apply_hold("{\"id\":\"l1\",\"locate\":true}", &a, ack, sizeof(ack), true));
+}
+
+/* What mqtt_ha actually calls: the hold follows the snapshot's no_clock,
+   and nothing else in it (cycle-2 review, MINOR-3). */
+void test_the_snapshot_entry_holds_exactly_when_the_snapshot_says_no_clock(void) {
+    cmd_action_t a;
+    char ack[128];
+    stats_snapshot_t snap = {0};
+    snap.no_clock = true;
+    TEST_ASSERT_EQUAL(CMD_HELD,
+                      cmd_apply_for_snapshot("{\"id\":\"s1\",\"grant\":{\"min\":10}}", &a, ack, sizeof(ack), &snap));
+    snap.no_clock = false;
+    TEST_ASSERT_EQUAL(CMD_GRANT,
+                      cmd_apply_for_snapshot("{\"id\":\"s1\",\"grant\":{\"min\":10}}", &a, ack, sizeof(ack), &snap));
+    TEST_ASSERT_EQUAL_INT32(600, a.sec);
+}
+
 /* ---- malformed ---- */
 
 void test_missing_id_invalid(void) {
@@ -138,6 +176,9 @@ int main(void) {
     RUN_TEST(test_grant_wins_when_both_present);
     RUN_TEST(test_locate);
     RUN_TEST(test_duplicate_id_skipped);
+    RUN_TEST(test_held_grant_is_not_recorded_and_applies_once_the_hold_lifts);
+    RUN_TEST(test_hold_does_not_hold_a_locate);
+    RUN_TEST(test_the_snapshot_entry_holds_exactly_when_the_snapshot_says_no_clock);
     RUN_TEST(test_missing_id_invalid);
     RUN_TEST(test_malformed_json_invalid);
     RUN_TEST(test_empty_retained_payload_is_noop);

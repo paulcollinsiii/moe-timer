@@ -71,6 +71,43 @@ idf.py fullclean        # wipe the build directory
 
 `sdkconfig` is generated from `sdkconfig.defaults` (committed) and is gitignored — delete `sdkconfig` and rebuild to pick up changed defaults.
 
+### Build-size guard
+
+Every build runs `tools/check_slot_size.py` (hung off the `app` target from the
+project-root `CMakeLists.txt`) and **fails the build** — it does not warn — once
+the app image passes `MAGTAG_MAX_SLOT_PCT` percent of the `0x1C0000` app slot.
+The threshold is currently **85**. A passing build prints the live figure
+(`Build-size guard: image N B is X.X % of the … slot; M B left under the 85 %
+guard`). A failing one prints image, guard limit and slot size instead of the
+headroom, plus how far over you are — and it has **two** branches: over the
+guard but still inside the slot, or over the slot itself, which says the image
+*does not fit* and that raising the guard cannot help (the tool refuses a
+`--max-pct` above 100, and 100 % is the slot).
+
+It fails rather than warns on purpose. This repo has no CI, so a printed warning
+has exactly one reader — whoever happens to be watching that build — and the
+headroom it protects is **one-way**: an OTA writes an app slot and cannot
+rewrite the partition table, so the slot size shipped with the first OTA-capable
+firmware is the size those devices keep, short of a serial cable per device.
+ESP-IDF's own check only speaks up at 5 % free, which is after the decision that
+mattered.
+
+`-D MAGTAG_MAX_SLOT_PCT=…` on the command line is deliberately **refused** with
+a `FATAL_ERROR`. The threshold is a plain (non-cache) variable that shadows any
+cache entry, so the flag would otherwise be silently ignored and the build would
+fail at the same number with no hint why. Raising the guard is legitimate while
+the image still fits the slot — it accepts a new floor — but it costs an edit
+to `set(MAGTAG_MAX_SLOT_PCT …)` in `CMakeLists.txt`, in its own commit whose
+message says what the bytes bought.
+Nothing to clean up after a refusal **under `idf.py`**: it deletes
+`CMakeCache.txt` whenever a configure fails, so just re-run without the flag.
+Driving `cmake` directly the entry *does* persist — clear it with
+`cmake -U MAGTAG_MAX_SLOT_PCT -B <build dir>`.
+
+The arithmetic is covered from both sides by `test/test_check_slot_size/`, which
+can drive the failure branch with synthetic sizes — something no real build can
+do without first growing the image by tens of KB.
+
 ---
 
 ## Flashing & Monitoring
@@ -104,9 +141,10 @@ See [hardware_smoke_test.md](hardware_smoke_test.md) for the on-device validatio
 
 ### Custom alert WAV (assets partition)
 
-The partition table reserves a raw 952 KB `assets` partition for an optional
+The partition table reserves a raw 440 KB `assets` partition for an optional
 alert sound, selectable in Home Assistant as the "Custom WAV" tone. The file
-must be 16-bit mono PCM WAV at 8–22.05 kHz (952 KB ≈ 30 s at 16 kHz):
+must be 16-bit mono PCM WAV at 8–22.05 kHz (440 KB ≈ 14 s at 16 kHz, ≈ 28 s
+at 8 kHz):
 
 ```bash
 source ~/esp/esp-idf/export.sh
@@ -116,6 +154,14 @@ tools/flash_assets.sh -p /dev/ttyACM0 --erase            # wipe (falls back to c
 
 An empty or invalid partition is harmless — the firmware plays the Gentle
 chime instead.
+
+**Re-partitioning invalidates a flashed WAV.** `assets` is addressed by name,
+but its *offset* changed when the OTA app slots grew to 0x1C0000, and any
+future table change can move it again. Flashing a new partition table leaves
+whatever bytes were there at the old offset, so the partition reads as
+empty/invalid and the tone silently falls back to the chime. Re-run
+`tools/flash_assets.sh` on every device that has a custom alert tone after
+reflashing the table.
 
 ---
 

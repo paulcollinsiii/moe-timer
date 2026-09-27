@@ -1,18 +1,32 @@
+#include <stdio.h>
 #include <string.h>
 #include <unity.h>
 
 /* Single-TU: cJSON + the config applier over the mock NVS + real
    nvs_config accessors (so validation and persistence are exercised
-   end-to-end without hardware). */
+   end-to-end without hardware).
+
+   timer_defs.c (and timer.c under it) are here because apply_timers()
+   resolves the bottom rung of its optional-key ladder from the compile-time
+   table, via timer_defs_compiled(). This TU defines no CONFIG_MAGTAG_TIMER*
+   symbols, so that table is empty and the rung yields 0 — which is exactly
+   the pre-existing behaviour every case below was written against. The
+   suite that pins the rung itself needs a non-empty compile-time table and
+   lives in test_timer_defs. */
 // clang-format off
 #include "cJSON.h"
 #include "mock_hal_nvs.c"
+#include "mock_hal_time.c"
+#include "../../main/timer.c"
 #include "../../main/nvs_config.c"
+#include "../../main/chores.c"
+#include "../../main/chore_store.c"
 #include "../../main/quiet_hours.c"
 #include "../../main/bedtime.c"
 #include "../../main/config_validate.c"
 #include "../../main/tones.c"
 #include "../../main/config_apply.c"
+#include "../../main/timer_defs.c"
 // clang-format on
 
 void setUp(void) {
@@ -325,8 +339,10 @@ void test_timers_array_maps_to_blob(void) {
     TEST_ASSERT_EQUAL_STRING("Meditation", defs.defs[2].name);
     TEST_ASSERT_EQUAL_UINT8(1, defs.defs[2].reload);         /* reload: true */
     TEST_ASSERT_EQUAL_UINT8(1, defs.defs[0].break_eligible); /* break: true */
-    TEST_ASSERT_EQUAL_UINT8(0, defs.defs[2].break_eligible); /* absent on a NEW slot = false */
-    TEST_ASSERT_EQUAL_STRING("", defs.defs[3].name);         /* {} = disabled */
+    /* Absent on a NEW slot falls to the compile-time value for that slot,
+       which is 0 here: this TU defines no CONFIG_MAGTAG_TIMER* symbols. */
+    TEST_ASSERT_EQUAL_UINT8(0, defs.defs[2].break_eligible);
+    TEST_ASSERT_EQUAL_STRING("", defs.defs[3].name); /* {} = disabled */
 }
 
 /* ---- optional keys: absent means UNCHANGED for an existing slot --------
@@ -448,6 +464,898 @@ void test_timers_bad_min_names_the_offending_entry(void) {
     TEST_ASSERT_NOT_NULL(strstr(ack, "timers[1]"));
 }
 
+/* ---- OTA fields (the "three places" rule) ----------------------------
+   Both HA-settable OTA fields must be parsed from the bulk retained
+   document as well as the per-entity set path. `break_eligible` shipped
+   with an entity and no bulk-document key, and every application of the
+   retained document silently cleared it (BUG-6). These pin the same
+   shape for ota_url / ota_on_sync so it cannot happen again. */
+
+void test_ota_fields_apply_from_bulk_document(void) {
+    char ack[256];
+    const char *doc = "{\"ver\":\"1\",\"ota_url\":\"https://example.com/ota.json\",\"ota_on_sync\":true}";
+    TEST_ASSERT_EQUAL(CONFIG_APPLIED, apply(doc, ack, sizeof(ack)));
+    char s[CFG_BOUND_OTA_URL_MAX];
+    nvs_config_get_ota_url(s, sizeof(s));
+    TEST_ASSERT_EQUAL_STRING("https://example.com/ota.json", s);
+    uint16_t v;
+    nvs_config_get_ota_on_sync(&v);
+    TEST_ASSERT_EQUAL_UINT16(1, v);
+    TEST_ASSERT_NOT_NULL(strstr(ack, "\"ok\":true"));
+}
+
+void test_ota_on_sync_false_applies(void) {
+    char ack[256];
+    nvs_config_set_ota_on_sync(1);
+    TEST_ASSERT_EQUAL(CONFIG_APPLIED, apply("{\"ver\":\"1\",\"ota_on_sync\":false}", ack, sizeof(ack)));
+    uint16_t v;
+    nvs_config_get_ota_on_sync(&v);
+    TEST_ASSERT_EQUAL_UINT16(0, v);
+}
+
+/* The BUG-6 shape: a document that says nothing about the OTA fields must
+   leave an HA-set value alone, not clear it. */
+void test_document_omitting_ota_fields_leaves_them_alone(void) {
+    char ack[256];
+    nvs_config_set_ota_url("https://ha.example/ota.json");
+    nvs_config_set_ota_on_sync(1);
+    TEST_ASSERT_EQUAL(CONFIG_APPLIED, apply("{\"ver\":\"1\",\"weekday_min\":45}", ack, sizeof(ack)));
+    char s[CFG_BOUND_OTA_URL_MAX];
+    nvs_config_get_ota_url(s, sizeof(s));
+    TEST_ASSERT_EQUAL_STRING("https://ha.example/ota.json", s);
+    uint16_t v;
+    nvs_config_get_ota_on_sync(&v);
+    TEST_ASSERT_EQUAL_UINT16(1, v);
+}
+
+void test_bulk_ota_url_rejects_non_https(void) {
+    char ack[256];
+    nvs_config_set_ota_url("https://good.example/ota.json");
+    TEST_ASSERT_EQUAL(CONFIG_APPLIED,
+                      apply("{\"ver\":\"1\",\"ota_url\":\"http://evil.example/ota.json\"}", ack, sizeof(ack)));
+    TEST_ASSERT_NOT_NULL(strstr(ack, "\"ota_url\""));
+    TEST_ASSERT_NOT_NULL(strstr(ack, "\"ok\":false"));
+    char s[CFG_BOUND_OTA_URL_MAX];
+    nvs_config_get_ota_url(s, sizeof(s));
+    TEST_ASSERT_EQUAL_STRING("https://good.example/ota.json", s); /* unchanged */
+}
+
+void test_bulk_ota_url_empty_disables_and_is_valid(void) {
+    char ack[256];
+    nvs_config_set_ota_url("https://good.example/ota.json");
+    TEST_ASSERT_EQUAL(CONFIG_APPLIED, apply("{\"ver\":\"1\",\"ota_url\":\"\"}", ack, sizeof(ack)));
+    TEST_ASSERT_NOT_NULL(strstr(ack, "\"ok\":true"));
+    char s[CFG_BOUND_OTA_URL_MAX];
+    nvs_config_get_ota_url(s, sizeof(s));
+    TEST_ASSERT_EQUAL_STRING("", s);
+}
+
+void test_bulk_ota_url_overlong_rejected(void) {
+    char ack[256];
+    char doc[CFG_BOUND_OTA_URL_MAX + 64];
+    char url[CFG_BOUND_OTA_URL_MAX + 8];
+    memset(url, 'u', sizeof(url) - 1);
+    memcpy(url, "https://", 8);
+    url[sizeof(url) - 1] = '\0';
+    snprintf(doc, sizeof(doc), "{\"ver\":\"1\",\"ota_url\":\"%s\"}", url);
+    apply(doc, ack, sizeof(ack));
+    TEST_ASSERT_NOT_NULL(strstr(ack, "\"ota_url\""));
+    char s[CFG_BOUND_OTA_URL_MAX];
+    nvs_config_get_ota_url(s, sizeof(s));
+    TEST_ASSERT_EQUAL_STRING(NVS_DEFAULT_OTA_URL, s); /* never written */
+}
+
+void test_bulk_ota_fields_reject_wrong_types(void) {
+    char ack[256];
+    apply("{\"ver\":\"1\",\"ota_on_sync\":1,\"ota_url\":42}", ack, sizeof(ack));
+    TEST_ASSERT_NOT_NULL(strstr(ack, "\"ota_on_sync\""));
+    TEST_ASSERT_NOT_NULL(strstr(ack, "\"ota_url\""));
+    uint16_t v;
+    nvs_config_get_ota_on_sync(&v);
+    TEST_ASSERT_EQUAL_UINT16(NVS_DEFAULT_OTA_ON_SYNC, v);
+}
+
+/* ---- ack integrity under a fully-invalid document ----
+   err_add used to let snprintf truncate mid-field-name, leaving an
+   unterminated JSON string. HA cannot parse that, so EVERY error in the
+   ack is lost — not just the one that overflowed. The OTA fields sort
+   last and so were the first to be dropped. */
+
+/* Every field present and wrong-typed: the worst case for the error list.
+   THE CHORE FIELDS BELONG IN HERE. ERR_LIST_CAP (160 B) was sized against
+   the 22 fields this document used to carry; the chore checklist adds five
+   more nameable ones and the list is the resource they compete for, so a
+   document that omits them stopped being the worst case the moment they
+   landed. With 27 wrong fields the ack still surfaces 12 entries — the
+   four 13-14 byte chore_free_* names sort early (right after the
+   allocations) and consume ~68 of the 160 bytes, so 15 fields are now
+   dropped rather than 10.
+
+   ONE CONSEQUENCE WORTH KNOWING BEFORE IT SURPRISES SOMEONE: "chores"
+   itself is applied near the end of the pass and is therefore among the
+   displaced — the flagship field of the feature is INVISIBLE in a
+   maximally-wrong ack. That is not a correctness break (the four tests
+   below pin what actually matters: the ack is valid JSON, flagged
+   errors_truncated, terminated cleanly with no partial name, and inside
+   CONFIG_ACK_MIN), and per-field tests cover "chores" on its own. It is
+   recorded here because the alternative — discovering it from a support
+   thread — is worse. Widening ERR_LIST_CAP is a size/ack-budget decision
+   above this task. */
+static const char *const ALL_WRONG =
+    "{\"ver\":\"1\",\"name\":1,\"tz\":2,\"weekday_min\":\"x\",\"weekend_min\":\"x\","
+    "\"holiday_min\":\"x\",\"summer_min\":\"x\","
+    "\"chore_free_wd\":\"x\",\"chore_free_we\":\"x\",\"chore_free_hol\":\"x\","
+    "\"chore_free_sum\":\"x\",\"quiet_start\":\"x\",\"quiet_end\":\"x\","
+    "\"bedtime\":\"x\",\"break_interval_min\":\"x\",\"break_duration_min\":\"x\","
+    "\"tone_expiry\":1,\"tone_break\":1,\"tone_bed\":1,\"alert_volume\":\"x\","
+    "\"summer_start\":1,\"school_start\":1,\"school_end\":1,"
+    "\"ota_url\":42,\"ota_on_sync\":1,\"holidays\":5,\"chores\":5,\"timers\":5}";
+
+void test_worst_case_ack_is_parseable_json(void) {
+    char ack[CONFIG_ACK_MIN];
+    apply(ALL_WRONG, ack, sizeof(ack));
+    cJSON *root = cJSON_Parse(ack);
+    TEST_ASSERT_NOT_NULL_MESSAGE(root, ack); /* the whole point */
+    TEST_ASSERT_TRUE(cJSON_IsFalse(cJSON_GetObjectItemCaseSensitive(root, "ok")));
+    TEST_ASSERT_TRUE(cJSON_IsArray(cJSON_GetObjectItemCaseSensitive(root, "errors")));
+    cJSON_Delete(root);
+}
+
+void test_worst_case_ack_flags_truncation(void) {
+    char ack[CONFIG_ACK_MIN];
+    apply(ALL_WRONG, ack, sizeof(ack));
+    cJSON *root = cJSON_Parse(ack);
+    TEST_ASSERT_NOT_NULL(root);
+    /* Without the flag a dropped entry is indistinguishable from a field
+       that applied cleanly. */
+    TEST_ASSERT_TRUE(cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(root, "errors_truncated")));
+    cJSON_Delete(root);
+}
+
+void test_worst_case_ack_fits_the_declared_minimum(void) {
+    char ack[CONFIG_ACK_MIN];
+    memset(ack, 0x7F, sizeof(ack));
+    apply(ALL_WRONG, ack, sizeof(ack));
+    /* Fits WHOLE, with the NUL inside the buffer — not merely "snprintf
+       didn't crash". */
+    TEST_ASSERT_TRUE(strlen(ack) < sizeof(ack));
+    /* The headroom, stated rather than implied: 216 of CONFIG_ACK_MIN's 256
+       bytes with the chore fields in the document (12 entries surfaced of
+       27 wrong fields). Asserted as a bound, not an equality — the exact
+       figure moves with any field rename — but a change that eats the
+       remaining 40 bytes should have to come here and say so, because the
+       byte after the cap is where err_add's clean-termination guarantee is
+       the only thing standing between HA and an unparseable ack. */
+    TEST_ASSERT_TRUE_MESSAGE(strlen(ack) <= 232, ack);
+}
+
+/* Every named error must be a complete field name, never a fragment. */
+void test_truncated_error_list_contains_no_partial_names(void) {
+    char ack[CONFIG_ACK_MIN];
+    apply(ALL_WRONG, ack, sizeof(ack));
+    cJSON *root = cJSON_Parse(ack);
+    TEST_ASSERT_NOT_NULL(root);
+    const cJSON *errors = cJSON_GetObjectItemCaseSensitive(root, "errors");
+    const cJSON *item;
+    cJSON_ArrayForEach(item, errors) {
+        TEST_ASSERT_TRUE(cJSON_IsString(item));
+        /* Every real field name appears verbatim in the document. */
+        TEST_ASSERT_NOT_NULL_MESSAGE(strstr(ALL_WRONG, item->valuestring), item->valuestring);
+    }
+    cJSON_Delete(root);
+}
+
+/* A handful of errors must NOT claim truncation. */
+void test_small_error_list_is_not_flagged_truncated(void) {
+    char ack[CONFIG_ACK_MIN];
+    apply("{\"ver\":\"1\",\"weekday_min\":\"x\",\"ota_url\":\"http://nope\"}", ack, sizeof(ack));
+    cJSON *root = cJSON_Parse(ack);
+    TEST_ASSERT_NOT_NULL(root);
+    TEST_ASSERT_NULL(cJSON_GetObjectItemCaseSensitive(root, "errors_truncated"));
+    TEST_ASSERT_NOT_NULL(strstr(ack, "\"ota_url\""));
+    cJSON_Delete(root);
+}
+
+/* ---- ver is interpolated into all three ack emissions ----
+   A quote in ver produced {"ver":"a"b","ok":true}, which does not parse —
+   defeating the errors[] work, and reachable with one mistyped ver. */
+
+void test_ver_with_a_quote_is_rejected_and_ack_parses(void) {
+    char ack[CONFIG_ACK_MIN];
+    TEST_ASSERT_EQUAL(CONFIG_INVALID, apply("{\"ver\":\"a\\\"b\",\"weekday_min\":45}", ack, sizeof(ack)));
+    cJSON *root = cJSON_Parse(ack);
+    TEST_ASSERT_NOT_NULL_MESSAGE(root, ack);
+    TEST_ASSERT_TRUE(cJSON_IsFalse(cJSON_GetObjectItemCaseSensitive(root, "ok")));
+    TEST_ASSERT_EQUAL_STRING("ver", cJSON_GetObjectItemCaseSensitive(root, "err")->valuestring);
+    cJSON_Delete(root);
+    /* nothing applied, and cfg_ver untouched */
+    uint16_t v;
+    nvs_config_get_weekday_min(&v);
+    TEST_ASSERT_EQUAL_UINT16(NVS_DEFAULT_WEEKDAY_MIN, v);
+}
+
+void test_ver_with_a_backslash_is_rejected(void) {
+    char ack[CONFIG_ACK_MIN];
+    TEST_ASSERT_EQUAL(CONFIG_INVALID, apply("{\"ver\":\"a\\\\b\"}", ack, sizeof(ack)));
+    cJSON *root = cJSON_Parse(ack);
+    TEST_ASSERT_NOT_NULL_MESSAGE(root, ack);
+    cJSON_Delete(root);
+}
+
+void test_ver_with_a_control_character_is_rejected(void) {
+    char ack[CONFIG_ACK_MIN];
+    TEST_ASSERT_EQUAL(CONFIG_INVALID, apply("{\"ver\":\"a\\nb\"}", ack, sizeof(ack)));
+    cJSON *root = cJSON_Parse(ack);
+    TEST_ASSERT_NOT_NULL_MESSAGE(root, ack);
+    cJSON_Delete(root);
+}
+
+/* The SKIPPED emission interpolates ver too — it is only reachable with a
+   clean ver now, but pin that its ack parses. */
+void test_skipped_ack_parses(void) {
+    char ack[CONFIG_ACK_MIN];
+    apply("{\"ver\":\"20260811\",\"weekday_min\":45}", ack, sizeof(ack));
+    TEST_ASSERT_EQUAL(CONFIG_SKIPPED, apply("{\"ver\":\"20260811\"}", ack, sizeof(ack)));
+    cJSON *root = cJSON_Parse(ack);
+    TEST_ASSERT_NOT_NULL_MESSAGE(root, ack);
+    TEST_ASSERT_TRUE(cJSON_IsTrue(cJSON_GetObjectItemCaseSensitive(root, "skipped")));
+    cJSON_Delete(root);
+}
+
+/* A clean ver at full width still round-trips (the check rejects
+   characters, not length). */
+void test_clean_ver_still_applies(void) {
+    char ack[CONFIG_ACK_MIN];
+    TEST_ASSERT_EQUAL(CONFIG_APPLIED, apply("{\"ver\":\"2026-08-11T00:00:01Z\"}", ack, sizeof(ack)));
+    char stored[24];
+    nvs_config_get_cfg_ver(stored, sizeof(stored));
+    TEST_ASSERT_EQUAL_STRING("2026-08-11T00:00:01Z", stored);
+}
+
+/* ---- a failed NVS write must reach the ack ----
+   Rejecting instead of truncating only pays off if someone hears it. */
+
+void test_nvs_write_failure_is_reported_not_swallowed(void) {
+    char ack[CONFIG_ACK_MIN];
+    mock_nvs_fail_writes(1); /* first write of the document fails */
+    apply("{\"ver\":\"1\",\"weekday_min\":45}", ack, sizeof(ack));
+    cJSON *root = cJSON_Parse(ack);
+    TEST_ASSERT_NOT_NULL_MESSAGE(root, ack);
+    TEST_ASSERT_TRUE_MESSAGE(cJSON_IsFalse(cJSON_GetObjectItemCaseSensitive(root, "ok")), ack);
+    TEST_ASSERT_NOT_NULL(strstr(ack, "weekday_min"));
+    cJSON_Delete(root);
+}
+
+void test_ota_url_nvs_write_failure_is_reported(void) {
+    char ack[CONFIG_ACK_MIN];
+    mock_nvs_fail_writes(1);
+    apply("{\"ver\":\"1\",\"ota_url\":\"https://example.com/ota.json\"}", ack, sizeof(ack));
+    TEST_ASSERT_NOT_NULL_MESSAGE(strstr(ack, "ota_url"), ack);
+}
+
+/* ---- the chore checklist: the list, the free slice, the cross-field rule ----
+   Design 1.2 (cap 3, name cap 20 BYTES, enforced with a named error in the
+   config_ack and NEVER by truncation) and rows C1/C10/C11/C12. */
+
+static uint8_t stored_chores(char names[CHORE_MAX][CHORE_NAME_BUF]) {
+    uint8_t n = 0xFF;
+    chore_store_load_names(names, &n);
+    return n;
+}
+
+/* The errors list holds WHOLE quoted names, so match the quotes: a bare
+   substring test would let "chore_free_wd" answer for a longer key and
+   would also hit the ack's own object keys. */
+static bool ack_names(const char *ack, const char *field) {
+    char quoted[40];
+    snprintf(quoted, sizeof(quoted), "\"%s\"", field);
+    return strstr(ack, quoted) != NULL;
+}
+
+void test_chores_three_applied_and_readable_back(void) {
+    char ack[CONFIG_ACK_MIN];
+    TEST_ASSERT_EQUAL(CONFIG_APPLIED, apply("{\"ver\":\"1\",\"chores\":[\"Dishes away\",\"Trash out\",\"Homework\"]}",
+                                            ack, sizeof(ack)));
+    TEST_ASSERT_NOT_NULL_MESSAGE(strstr(ack, "\"ok\":true"), ack);
+    char names[CHORE_MAX][CHORE_NAME_BUF];
+    TEST_ASSERT_EQUAL_UINT8(3, stored_chores(names));
+    TEST_ASSERT_EQUAL_STRING("Dishes away", names[0]);
+    TEST_ASSERT_EQUAL_STRING("Trash out", names[1]);
+    TEST_ASSERT_EQUAL_STRING("Homework", names[2]);
+}
+
+/* The plan row's central requirement: a fourth chore is an ERROR, not a
+   silently dropped entry, and nothing partial reaches NVS. */
+void test_chores_a_fourth_entry_is_an_error_and_writes_nothing(void) {
+    char ack[CONFIG_ACK_MIN];
+    apply("{\"ver\":\"1\",\"chores\":[\"Dishes\",\"Trash\"]}", ack, sizeof(ack));
+    apply("{\"ver\":\"2\",\"chores\":[\"Dishes\",\"Trash\",\"Homework\",\"Laundry\"]}", ack, sizeof(ack));
+    TEST_ASSERT_TRUE_MESSAGE(ack_names(ack, "chores"), ack);
+    TEST_ASSERT_NOT_NULL_MESSAGE(strstr(ack, "\"ok\":false"), ack);
+    char names[CHORE_MAX][CHORE_NAME_BUF];
+    TEST_ASSERT_EQUAL_UINT8(2, stored_chores(names)); /* not 3, and not the first three */
+    TEST_ASSERT_EQUAL_STRING("Dishes", names[0]);
+    TEST_ASSERT_EQUAL_STRING("Trash", names[1]);
+    TEST_ASSERT_EQUAL_STRING("", names[2]);
+}
+
+/* 21 bytes is one past CHORE_NAME_MAX: an error, never a 20-byte stump. */
+void test_chores_overlong_name_is_an_error_not_a_truncation(void) {
+    char ack[CONFIG_ACK_MIN];
+    apply("{\"ver\":\"1\",\"chores\":[\"123456789012345678901\"]}", ack, sizeof(ack));
+    TEST_ASSERT_TRUE_MESSAGE(ack_names(ack, "chores"), ack);
+    char names[CHORE_MAX][CHORE_NAME_BUF];
+    TEST_ASSERT_EQUAL_UINT8(0, stored_chores(names));
+    TEST_ASSERT_EQUAL_STRING("", names[0]);
+}
+
+void test_chores_name_at_the_cap_is_accepted_whole(void) {
+    char ack[CONFIG_ACK_MIN];
+    apply("{\"ver\":\"1\",\"chores\":[\"12345678901234567890\"]}", ack, sizeof(ack)); /* exactly 20 */
+    TEST_ASSERT_NOT_NULL_MESSAGE(strstr(ack, "\"ok\":true"), ack);
+    char names[CHORE_MAX][CHORE_NAME_BUF];
+    TEST_ASSERT_EQUAL_UINT8(1, stored_chores(names));
+    TEST_ASSERT_EQUAL_STRING("12345678901234567890", names[0]);
+}
+
+void test_chores_non_string_entry_is_an_error_and_writes_nothing(void) {
+    char ack[CONFIG_ACK_MIN];
+    apply("{\"ver\":\"1\",\"chores\":[\"Dishes\",7]}", ack, sizeof(ack));
+    TEST_ASSERT_TRUE_MESSAGE(ack_names(ack, "chores"), ack);
+    char names[CHORE_MAX][CHORE_NAME_BUF];
+    TEST_ASSERT_EQUAL_UINT8(0, stored_chores(names));
+}
+
+void test_chores_empty_name_is_an_error(void) {
+    char ack[CONFIG_ACK_MIN];
+    apply("{\"ver\":\"1\",\"chores\":[\"\",\"Trash\"]}", ack, sizeof(ack));
+    TEST_ASSERT_TRUE_MESSAGE(ack_names(ack, "chores"), ack);
+    char names[CHORE_MAX][CHORE_NAME_BUF];
+    TEST_ASSERT_EQUAL_UINT8(0, stored_chores(names));
+}
+
+/* A name reaches the hand-built JSON of the HA layer, so it is held to the
+   same rule `ver` is: config_is_clean_str. */
+void test_chores_name_with_a_quote_is_rejected(void) {
+    char ack[CONFIG_ACK_MIN];
+    apply("{\"ver\":\"1\",\"chores\":[\"Say \\\"hi\\\"\"]}", ack, sizeof(ack));
+    TEST_ASSERT_TRUE_MESSAGE(ack_names(ack, "chores"), ack);
+    char names[CHORE_MAX][CHORE_NAME_BUF];
+    TEST_ASSERT_EQUAL_UINT8(0, stored_chores(names));
+    cJSON *root = cJSON_Parse(ack); /* and the ack itself still parses */
+    TEST_ASSERT_NOT_NULL_MESSAGE(root, ack);
+    cJSON_Delete(root);
+}
+
+void test_chores_non_array_is_an_error(void) {
+    char ack[CONFIG_ACK_MIN];
+    apply("{\"ver\":\"1\",\"chores\":\"Dishes\"}", ack, sizeof(ack));
+    TEST_ASSERT_TRUE_MESSAGE(ack_names(ack, "chores"), ack);
+    char names[CHORE_MAX][CHORE_NAME_BUF];
+    TEST_ASSERT_EQUAL_UINT8(0, stored_chores(names));
+}
+
+/* Absent is a no-op, like every other field: a document that says nothing
+   about the list must not clear it. */
+void test_chores_absent_leaves_an_existing_list_alone(void) {
+    char ack[CONFIG_ACK_MIN];
+    apply("{\"ver\":\"1\",\"chores\":[\"Dishes\",\"Trash\"]}", ack, sizeof(ack));
+    apply("{\"ver\":\"2\",\"weekday_min\":45}", ack, sizeof(ack));
+    TEST_ASSERT_NOT_NULL_MESSAGE(strstr(ack, "\"ok\":true"), ack);
+    char names[CHORE_MAX][CHORE_NAME_BUF];
+    TEST_ASSERT_EQUAL_UINT8(2, stored_chores(names));
+    TEST_ASSERT_EQUAL_STRING("Dishes", names[0]);
+}
+
+/* An EXPLICIT empty array is the documented way to turn the feature off
+   (row C1), and it is not the same statement as saying nothing. */
+void test_chores_explicit_empty_array_clears_the_list(void) {
+    char ack[CONFIG_ACK_MIN];
+    apply("{\"ver\":\"1\",\"chores\":[\"Dishes\",\"Trash\"]}", ack, sizeof(ack));
+    apply("{\"ver\":\"2\",\"chores\":[]}", ack, sizeof(ack));
+    TEST_ASSERT_NOT_NULL_MESSAGE(strstr(ack, "\"ok\":true"), ack);
+    char names[CHORE_MAX][CHORE_NAME_BUF];
+    TEST_ASSERT_EQUAL_UINT8(0, stored_chores(names));
+    TEST_ASSERT_EQUAL_STRING("", names[0]);
+}
+
+void test_chores_nvs_write_failure_is_reported_and_keeps_the_live_acks(void) {
+    char ack[CONFIG_ACK_MIN];
+    timer_chore_set_acked(0x1);
+    timer_chore_set_released(false);
+    mock_nvs_fail_writes(1);
+    apply("{\"ver\":\"1\",\"chores\":[\"Dishes\"]}", ack, sizeof(ack));
+    TEST_ASSERT_TRUE_MESSAGE(ack_names(ack, "chores"), ack);
+    /* The list on flash did not move, so the positional acks still mean
+       what they meant. */
+    TEST_ASSERT_EQUAL_UINT8(0x1, timer_chore_acked());
+}
+
+/* Judgement call (b): the live RTC acks are POSITIONAL and this apply runs
+   mid-wake, so a list edit has to reconcile them here — row C10's rule,
+   acks cleared and `released` PRESERVED. chore_store_load_ack() applies the
+   same rule on the next boot; nothing but this applies it to RTC. */
+void test_a_chore_list_edit_clears_the_live_acks_and_keeps_the_release(void) {
+    char ack[CONFIG_ACK_MIN];
+    apply("{\"ver\":\"1\",\"chores\":[\"Dishes\",\"Trash\"]}", ack, sizeof(ack));
+    timer_chore_set_acked(0x3);
+    timer_chore_set_released(true);
+    apply("{\"ver\":\"2\",\"chores\":[\"Dishes\",\"Homework\"]}", ack, sizeof(ack));
+    TEST_ASSERT_EQUAL_UINT8(0, timer_chore_acked());
+    TEST_ASSERT_TRUE(timer_chore_released());
+}
+
+void test_re_applying_the_same_chore_list_leaves_the_live_acks_alone(void) {
+    char ack[CONFIG_ACK_MIN];
+    apply("{\"ver\":\"1\",\"chores\":[\"Dishes\",\"Trash\"]}", ack, sizeof(ack));
+    timer_chore_set_acked(0x2);
+    timer_chore_set_released(false);
+    apply("{\"ver\":\"2\",\"chores\":[\"Dishes\",\"Trash\"]}", ack, sizeof(ack));
+    TEST_ASSERT_EQUAL_UINT8(0x2, timer_chore_acked());
+    TEST_ASSERT_FALSE(timer_chore_released());
+}
+
+/* A number (7) was the only non-string entry covered. These are the other
+   four JSON types a hand-written document or a HA template can produce,
+   and each must be refused WHOLE rather than coerced or skipped. The
+   nested array is the realistic one: a template with one extra level of
+   brackets. The last case puts a good entry first, so "reject the array"
+   is distinguished from "reject from the bad entry onward". */
+void test_chores_structured_entries_are_errors_and_write_nothing(void) {
+    static const char *const docs[] = {
+        "{\"ver\":\"1\",\"chores\":[[\"Dishes\"]]}",
+        "{\"ver\":\"1\",\"chores\":[{\"name\":\"Dishes\"}]}",
+        "{\"ver\":\"1\",\"chores\":[null]}",
+        "{\"ver\":\"1\",\"chores\":[true]}",
+        "{\"ver\":\"1\",\"chores\":[\"Dishes\",null]}",
+    };
+    for (size_t i = 0; i < sizeof(docs) / sizeof(docs[0]); i++) {
+        mock_nvs_reset();
+        char ack[CONFIG_ACK_MIN];
+        apply(docs[i], ack, sizeof(ack));
+        TEST_ASSERT_TRUE_MESSAGE(ack_names(ack, "chores"), docs[i]);
+        char names[CHORE_MAX][CHORE_NAME_BUF];
+        TEST_ASSERT_EQUAL_UINT8_MESSAGE(0, stored_chores(names), docs[i]);
+    }
+}
+
+/* CHORE_MAX is 3 and names[] has exactly three rows, so the count test has
+   to come FIRST in the per-entry contract — five entries is the case that
+   writes names[3] and names[4] if it does not, and the suite runs under
+   ASan, so that is a failure rather than silent corruption. */
+void test_chores_five_entries_are_rejected_and_store_nothing(void) {
+    char ack[CONFIG_ACK_MIN];
+    apply("{\"ver\":\"1\",\"chores\":[\"A\",\"B\",\"C\",\"D\",\"E\"]}", ack, sizeof(ack));
+    TEST_ASSERT_TRUE_MESSAGE(ack_names(ack, "chores"), ack);
+    char names[CHORE_MAX][CHORE_NAME_BUF];
+    TEST_ASSERT_EQUAL_UINT8(0, stored_chores(names));
+}
+
+/* The quote is tested above; these are the other two classes
+   config_is_clean_str() refuses (backslash, and any byte below 0x20). */
+void test_chores_name_with_a_backslash_or_control_byte_is_rejected(void) {
+    char ack[CONFIG_ACK_MIN];
+    char names[CHORE_MAX][CHORE_NAME_BUF];
+    apply("{\"ver\":\"1\",\"chores\":[\"C:\\\\Dishes\"]}", ack, sizeof(ack));
+    TEST_ASSERT_TRUE_MESSAGE(ack_names(ack, "chores"), ack);
+    TEST_ASSERT_EQUAL_UINT8(0, stored_chores(names));
+    mock_nvs_reset();
+    apply("{\"ver\":\"1\",\"chores\":[\"Dish\\tes\"]}", ack, sizeof(ack));
+    TEST_ASSERT_TRUE_MESSAGE(ack_names(ack, "chores"), ack);
+    TEST_ASSERT_EQUAL_UINT8(0, stored_chores(names));
+}
+
+/* CHORE_NAME_MAX IS A BYTE COUNT, which apply_chores() asserts in a comment
+   and nothing pinned. Seven U+6D17 are seven CHARACTERS and twenty-one
+   BYTES, so the name is over the cap and refused whole. The failure this
+   guards against is not the rejection but the alternative: keeping twenty
+   bytes of it, which splits the seventh codepoint and stores a name no
+   renderer can draw. Written as \u escapes so the assertion does not
+   depend on this file's source encoding. */
+void test_chores_a_21_byte_utf8_name_is_rejected_whole(void) {
+    char ack[CONFIG_ACK_MIN];
+    apply("{\"ver\":\"1\",\"chores\":[\"\\u6d17\\u6d17\\u6d17\\u6d17\\u6d17\\u6d17\\u6d17\"]}", ack, sizeof(ack));
+    TEST_ASSERT_TRUE_MESSAGE(ack_names(ack, "chores"), ack);
+    char names[CHORE_MAX][CHORE_NAME_BUF];
+    TEST_ASSERT_EQUAL_UINT8(0, stored_chores(names));
+    TEST_ASSERT_EQUAL_STRING("", names[0]); /* no 20-byte prefix left behind */
+}
+
+/* Per-field independence: a rejected `chores` must not take the rest of the
+   document down with it, and must not damage the list already stored. This
+   is the shape that makes the ack actionable — fix the one named field and
+   re-send. */
+void test_a_rejected_chores_array_leaves_the_other_fields_applied(void) {
+    char ack[CONFIG_ACK_MIN];
+    apply("{\"ver\":\"1\",\"chores\":[\"Dishes\",\"Trash\"]}", ack, sizeof(ack));
+    apply("{\"ver\":\"2\",\"chores\":[\"A\",\"B\",\"C\",\"D\"],\"weekday_min\":120,\"chore_free_wd\":45}", ack,
+          sizeof(ack));
+    TEST_ASSERT_TRUE_MESSAGE(ack_names(ack, "chores"), ack);
+    TEST_ASSERT_FALSE_MESSAGE(ack_names(ack, "chore_free_wd"), ack);
+    uint16_t v = 0;
+    nvs_config_get_chore_free_wd(&v);
+    TEST_ASSERT_EQUAL_UINT16(45, v);
+    nvs_config_get_weekday_min(&v);
+    TEST_ASSERT_EQUAL_UINT16(120, v);
+    char names[CHORE_MAX][CHORE_NAME_BUF];
+    TEST_ASSERT_EQUAL_UINT8(2, stored_chores(names));
+    TEST_ASSERT_EQUAL_STRING("Dishes", names[0]);
+    TEST_ASSERT_EQUAL_STRING("Trash", names[1]);
+}
+
+/* The write-failure test above pins the live ACKS. THE OLD LIST SURVIVING
+   is the other half, and it was unpinned: "nothing partial reaches NVS"
+   has to mean the previous list is still readable, not merely that the new
+   one is absent. That is also what makes the preserved acks correct — they
+   are positional against this list. */
+void test_a_failed_chore_save_leaves_the_previous_list_readable(void) {
+    char ack[CONFIG_ACK_MIN];
+    apply("{\"ver\":\"1\",\"chores\":[\"Dishes\",\"Trash\"]}", ack, sizeof(ack));
+    mock_nvs_fail_writes(1); /* the chores blob is this document's first write */
+    apply("{\"ver\":\"2\",\"chores\":[\"Homework\"]}", ack, sizeof(ack));
+    TEST_ASSERT_TRUE_MESSAGE(ack_names(ack, "chores"), ack);
+    char names[CHORE_MAX][CHORE_NAME_BUF];
+    TEST_ASSERT_EQUAL_UINT8(2, stored_chores(names));
+    TEST_ASSERT_EQUAL_STRING("Dishes", names[0]);
+    TEST_ASSERT_EQUAL_STRING("Trash", names[1]);
+}
+
+/* DUPLICATES ARE ACCEPTED. This test exists so that is a decision on
+   record rather than an accident: nothing anywhere rejects them — there is
+   no duplicate-name guard in chores.c, chore_store.c or config_apply.c —
+   and three identical names store as three rows with an ok:true ack.
+   NOT a correctness break: the ack bits are POSITIONAL, so each row ticks
+   independently, and chores_list_hash() is well defined over duplicates.
+   IT IS AN UNRESOLVED USABILITY HOLE: three identical rows on the panel
+   with no way for a kid to tell which one they just ticked. Rejecting is a
+   policy choice design 1.2 does not make, and the chore screen belongs to
+   M2 — so M2 owns the decision (dedupe on entry, dedupe in the UI, or
+   leave it). If the answer becomes "reject", invert this test. */
+void test_duplicate_chore_names_are_accepted_as_distinct_rows(void) {
+    char ack[CONFIG_ACK_MIN];
+    TEST_ASSERT_EQUAL(CONFIG_APPLIED,
+                      apply("{\"ver\":\"1\",\"chores\":[\"Dishes\",\"Dishes\",\"Dishes\"]}", ack, sizeof(ack)));
+    TEST_ASSERT_NOT_NULL_MESSAGE(strstr(ack, "\"ok\":true"), ack);
+    char names[CHORE_MAX][CHORE_NAME_BUF];
+    TEST_ASSERT_EQUAL_UINT8(3, stored_chores(names));
+    TEST_ASSERT_EQUAL_STRING("Dishes", names[0]);
+    TEST_ASSERT_EQUAL_STRING("Dishes", names[1]);
+    TEST_ASSERT_EQUAL_STRING("Dishes", names[2]);
+}
+
+/* ---- the four chore_free_* minute keys ---- */
+
+void test_chore_free_applies_at_both_bounds(void) {
+    char ack[CONFIG_ACK_MIN];
+    apply(
+        "{\"ver\":\"1\",\"weekday_min\":1440,\"weekend_min\":1440,\"holiday_min\":1440,\"summer_min\":1440,"
+        "\"chore_free_wd\":0,\"chore_free_we\":1440,\"chore_free_hol\":15,\"chore_free_sum\":1440}",
+        ack, sizeof(ack));
+    TEST_ASSERT_NOT_NULL_MESSAGE(strstr(ack, "\"ok\":true"), ack);
+    uint16_t v = 0xFFFF;
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_chore_free_wd(&v));
+    TEST_ASSERT_EQUAL_UINT16(0, v);
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_chore_free_we(&v));
+    TEST_ASSERT_EQUAL_UINT16(1440, v);
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_chore_free_hol(&v));
+    TEST_ASSERT_EQUAL_UINT16(15, v);
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_chore_free_sum(&v));
+    TEST_ASSERT_EQUAL_UINT16(1440, v);
+}
+
+void test_chore_free_above_the_ceiling_is_named_and_not_stored(void) {
+    char ack[CONFIG_ACK_MIN];
+    apply(
+        "{\"ver\":\"1\",\"chore_free_wd\":1441,\"chore_free_we\":1441,"
+        "\"chore_free_hol\":1441,\"chore_free_sum\":1441}",
+        ack, sizeof(ack));
+    TEST_ASSERT_TRUE_MESSAGE(ack_names(ack, "chore_free_wd"), ack);
+    TEST_ASSERT_TRUE_MESSAGE(ack_names(ack, "chore_free_we"), ack);
+    TEST_ASSERT_TRUE_MESSAGE(ack_names(ack, "chore_free_hol"), ack);
+    TEST_ASSERT_TRUE_MESSAGE(ack_names(ack, "chore_free_sum"), ack);
+    uint16_t v = 0xFFFF;
+    nvs_config_get_chore_free_wd(&v);
+    TEST_ASSERT_EQUAL_UINT16(0, v);
+    nvs_config_get_chore_free_sum(&v);
+    TEST_ASSERT_EQUAL_UINT16(0, v);
+}
+
+void test_chore_free_wrong_type_is_named(void) {
+    char ack[CONFIG_ACK_MIN];
+    apply("{\"ver\":\"1\",\"chore_free_wd\":\"30\"}", ack, sizeof(ack));
+    TEST_ASSERT_TRUE_MESSAGE(ack_names(ack, "chore_free_wd"), ack);
+}
+
+/* ---- the cross-field rule (C11 / C12) ---- */
+
+/* C11's pair, weekday being the day type a school-term Monday resolves to.
+   config_apply names it; whether the device BLOCKS on it is the M2 gate's
+   question, which is why the broken pair is left standing in NVS for that
+   gate to find. */
+void test_chore_free_over_its_allocation_is_named(void) {
+    char ack[CONFIG_ACK_MIN];
+    apply("{\"ver\":\"1\",\"weekday_min\":60,\"chore_free_wd\":90}", ack, sizeof(ack));
+    TEST_ASSERT_TRUE_MESSAGE(ack_names(ack, "chore_free_wd"), ack);
+    TEST_ASSERT_NOT_NULL_MESSAGE(strstr(ack, "\"ok\":false"), ack);
+    uint16_t v = 0;
+    nvs_config_get_chore_free_wd(&v);
+    TEST_ASSERT_EQUAL_UINT16(90, v); /* dormant, durable, and visible to the gate */
+    nvs_config_get_weekday_min(&v);
+    TEST_ASSERT_EQUAL_UINT16(60, v);
+}
+
+/* C12: "the device does not block in December over a broken summer
+   setting" — but it is still NAMED. So every pair is validated regardless
+   of which day type is today's, and only the summer one is named here. */
+void test_a_broken_non_today_pair_is_named_too(void) {
+    char ack[CONFIG_ACK_MIN];
+    apply(
+        "{\"ver\":\"1\",\"weekday_min\":120,\"chore_free_wd\":30,"
+        "\"summer_min\":60,\"chore_free_sum\":90}",
+        ack, sizeof(ack));
+    TEST_ASSERT_TRUE_MESSAGE(ack_names(ack, "chore_free_sum"), ack);
+    TEST_ASSERT_FALSE_MESSAGE(ack_names(ack, "chore_free_wd"), ack);
+}
+
+/* `chore_free == allocation` is the per-day-type off switch (design 3.3),
+   so `==` must be VALID — a hand-written `<` would reject it. */
+void test_chore_free_equal_to_its_allocation_is_valid(void) {
+    char ack[CONFIG_ACK_MIN];
+    apply("{\"ver\":\"1\",\"weekend_min\":60,\"chore_free_we\":60}", ack, sizeof(ack));
+    TEST_ASSERT_NOT_NULL_MESSAGE(strstr(ack, "\"ok\":true"), ack);
+}
+
+/* Judgement call (a). cJSON preserves key order, so a cross-field check
+   performed AS the field is applied compares against whichever allocation
+   happens to be in NVS at that instant — and the same document then gives
+   two different answers. Both orders, both directions, one test. */
+void test_the_cross_field_result_is_independent_of_key_order(void) {
+    char valid_a[CONFIG_ACK_MIN], valid_b[CONFIG_ACK_MIN];
+    char broken_a[CONFIG_ACK_MIN], broken_b[CONFIG_ACK_MIN];
+    uint16_t fa = 0, fb = 0, aa = 0, ab = 0;
+
+    /* VALID pair. 1000 exceeds the unwritten weekday_min default (60), so
+       validating the free slice before the allocation lands answers
+       "invalid" — the regression this pins. */
+    apply("{\"ver\":\"1\",\"weekday_min\":1440,\"chore_free_wd\":1000}", valid_a, sizeof(valid_a));
+    nvs_config_get_chore_free_wd(&fa);
+    nvs_config_get_weekday_min(&aa);
+    mock_nvs_reset();
+    apply("{\"ver\":\"1\",\"chore_free_wd\":1000,\"weekday_min\":1440}", valid_b, sizeof(valid_b));
+    nvs_config_get_chore_free_wd(&fb);
+    nvs_config_get_weekday_min(&ab);
+    TEST_ASSERT_EQUAL_STRING(valid_a, valid_b);
+    TEST_ASSERT_NOT_NULL_MESSAGE(strstr(valid_a, "\"ok\":true"), valid_a);
+    TEST_ASSERT_EQUAL_UINT16(fa, fb);
+    TEST_ASSERT_EQUAL_UINT16(aa, ab);
+    TEST_ASSERT_EQUAL_UINT16(1000, fa);
+    TEST_ASSERT_EQUAL_UINT16(1440, aa);
+
+    /* BROKEN pair, same treatment: named in both orders. */
+    mock_nvs_reset();
+    apply("{\"ver\":\"1\",\"weekday_min\":30,\"chore_free_wd\":1000}", broken_a, sizeof(broken_a));
+    mock_nvs_reset();
+    apply("{\"ver\":\"1\",\"chore_free_wd\":1000,\"weekday_min\":30}", broken_b, sizeof(broken_b));
+    TEST_ASSERT_EQUAL_STRING(broken_a, broken_b);
+    TEST_ASSERT_TRUE_MESSAGE(ack_names(broken_a, "chore_free_wd"), broken_a);
+}
+
+/* The other direction of the same pair: the document moves the ALLOCATION
+   and says nothing about the free slice. Naming the chore_free_* key is
+   deliberate — it is the actionable half. */
+void test_lowering_an_allocation_names_the_stale_chore_free(void) {
+    char ack[CONFIG_ACK_MIN];
+    apply("{\"ver\":\"1\",\"weekday_min\":120,\"chore_free_wd\":120}", ack, sizeof(ack));
+    TEST_ASSERT_NOT_NULL_MESSAGE(strstr(ack, "\"ok\":true"), ack);
+    apply("{\"ver\":\"2\",\"weekday_min\":30}", ack, sizeof(ack));
+    TEST_ASSERT_TRUE_MESSAGE(ack_names(ack, "chore_free_wd"), ack);
+}
+
+/* Nothing re-validates a value sitting in NVS (config_validate.h says so
+   in as many words), so errors[] stays a statement about THIS document: a
+   pair the document does not speak to is not re-reported every window. */
+void test_a_pair_the_document_does_not_touch_is_not_revalidated(void) {
+    char ack[CONFIG_ACK_MIN];
+    apply("{\"ver\":\"1\",\"weekday_min\":120,\"chore_free_wd\":120}", ack, sizeof(ack));
+    apply("{\"ver\":\"2\",\"weekday_min\":30}", ack, sizeof(ack)); /* leaves 30/120 stored */
+    apply("{\"ver\":\"3\",\"bedtime\":1900}", ack, sizeof(ack));
+    TEST_ASSERT_NOT_NULL_MESSAGE(strstr(ack, "\"ok\":true"), ack);
+    TEST_ASSERT_FALSE_MESSAGE(ack_names(ack, "chore_free_wd"), ack);
+}
+
+/* One field, one entry. The range check and the cross-field check can both
+   fire on the same key (the value is refused, so the STORED one is what
+   the pair is judged on), and a duplicate entry wastes the 160-byte error
+   list and reads as two separate faults. */
+void test_a_field_that_fails_both_checks_is_named_once(void) {
+    char ack[CONFIG_ACK_MIN];
+    apply("{\"ver\":\"1\",\"weekday_min\":120,\"chore_free_wd\":120}", ack, sizeof(ack));
+    apply("{\"ver\":\"2\",\"weekday_min\":30,\"chore_free_wd\":1441}", ack, sizeof(ack));
+    const char *first = strstr(ack, "chore_free_wd");
+    TEST_ASSERT_NOT_NULL_MESSAGE(first, ack);
+    TEST_ASSERT_NULL_MESSAGE(strstr(first + 1, "chore_free_wd"), ack);
+}
+
+/* The whole feature in one document. NOT the CONFIG_BUF_MAX headroom case
+   — that is test_the_worst_case_document_fits_the_receive_buffer below,
+   which carries every field, not only the chore ones. The `<` matches the
+   receive gate in mqtt_rx.c (`total_len < config_cap`). */
+void test_a_full_chore_document_applies_whole(void) {
+    char ack[CONFIG_ACK_MIN];
+    const char *doc =
+        "{\"ver\":\"20260909\","
+        "\"chores\":[\"12345678901234567890\",\"12345678901234567890\",\"12345678901234567890\"],"
+        "\"weekday_min\":1440,\"weekend_min\":1440,\"holiday_min\":1440,\"summer_min\":1440,"
+        "\"chore_free_wd\":1440,\"chore_free_we\":1440,\"chore_free_hol\":1440,"
+        "\"chore_free_sum\":1440}";
+    TEST_ASSERT_TRUE_MESSAGE(strlen(doc) < CONFIG_BUF_MAX, doc);
+    TEST_ASSERT_EQUAL(CONFIG_APPLIED, apply(doc, ack, sizeof(ack)));
+    TEST_ASSERT_NOT_NULL_MESSAGE(strstr(ack, "\"ok\":true"), ack);
+    char names[CHORE_MAX][CHORE_NAME_BUF];
+    TEST_ASSERT_EQUAL_UINT8(3, stored_chores(names));
+    TEST_ASSERT_EQUAL_STRING("12345678901234567890", names[2]);
+}
+
+/* ---- the receive-buffer ceiling (CONFIG_BUF_MAX) ---- */
+
+static size_t wc_pos;
+static char wc_doc[4096]; /* twice the cap: an overgrown builder fails the assert, not the stack */
+
+static void wc_cat(const char *s) {
+    size_t n = strlen(s);
+    TEST_ASSERT_TRUE_MESSAGE(wc_pos + n < sizeof(wc_doc), "worst-case builder outgrew its scratch buffer");
+    memcpy(wc_doc + wc_pos, s, n + 1);
+    wc_pos += n;
+}
+
+/* `"key":"<fill x len>"` */
+static void wc_str(const char *key, char fill, size_t len) {
+    char val[256];
+    TEST_ASSERT_TRUE(len < sizeof(val));
+    memset(val, fill, len);
+    val[len] = '\0';
+    char kv[320];
+    snprintf(kv, sizeof(kv), "\"%s\":\"%s\",", key, val);
+    wc_cat(kv);
+}
+
+static void wc_num(const char *key, int v) {
+    char kv[64];
+    snprintf(kv, sizeof(kv), "\"%s\":%d,", key, v);
+    wc_cat(kv);
+}
+
+/* The longest document config_apply() will HONOUR, in the encoding Home
+   Assistant's to_json emits: compact (no whitespace), no \u escapes. Every
+   field config_apply() parses is here, each at the longest value it
+   accepts, and every length is derived from the constant that bounds it —
+   so widening a bound widens this document. It must also stay VALID
+   (asserted below): a field refused for being too long is not the worst
+   case, it is a different test.
+
+   Deliberately excluded, because they are not a size the device honours:
+   extra holidays past the 46 the blob keeps (dropped), a `ver` past 23
+   characters (truncated — ver_str[24] in config_apply()), timer entries
+   past TIMER_EXTRA_SLOTS (ignored), whitespace and escapes (any JSON can
+   be padded without limit). A pretty-printed document CAN pass the cap;
+   that is what the too_long refusal is for.
+
+   ADD A FIELD TO config_apply() AND ADD IT HERE, or this stops being the
+   worst case. */
+static size_t build_worst_case_document(void) {
+    wc_pos = 0;
+    wc_doc[0] = '\0';
+    wc_cat("{");
+    wc_str("ver", 'v', 23);
+    wc_str("name", 'N', CFG_BOUND_NAME_MAX - 1);
+    wc_str("tz", 'T', CFG_BOUND_TZ_MAX - 1);
+    wc_num("weekday_min", CFG_BOUND_ALLOC_HI);
+    wc_num("weekend_min", CFG_BOUND_ALLOC_HI);
+    wc_num("holiday_min", CFG_BOUND_ALLOC_HI);
+    wc_num("summer_min", CFG_BOUND_ALLOC_HI);
+    /* At the allocation, so every pair stays valid (chore_free <= allocation). */
+    wc_num("chore_free_wd", CFG_BOUND_CHORE_FREE_HI);
+    wc_num("chore_free_we", CFG_BOUND_CHORE_FREE_HI);
+    wc_num("chore_free_hol", CFG_BOUND_CHORE_FREE_HI);
+    wc_num("chore_free_sum", CFG_BOUND_CHORE_FREE_HI);
+    wc_num("quiet_start", 2359);
+    wc_num("quiet_end", 2359);
+    wc_num("bedtime", 2359);
+    wc_num("break_interval_min", CFG_BOUND_BREAK_INT_HI);
+    wc_num("break_duration_min", CFG_BOUND_BREAK_DUR_HI);
+    const char *tone = tones_names[0];
+    for (int i = 1; i < TONE_COUNT; i++) {
+        if (strlen(tones_names[i]) > strlen(tone))
+            tone = tones_names[i];
+    }
+    char kv[128];
+    static const char *const tone_keys[] = {"tone_expiry", "tone_break", "tone_bed"};
+    for (size_t i = 0; i < sizeof(tone_keys) / sizeof(tone_keys[0]); i++) {
+        snprintf(kv, sizeof(kv), "\"%s\":\"%s\",", tone_keys[i], tone);
+        wc_cat(kv);
+    }
+    wc_num("alert_volume", TONES_VOLUME_MAX);
+    wc_cat("\"summer_start\":\"2026-05-29\",\"school_start\":\"2026-08-20\",\"school_end\":\"2027-05-28\",");
+    /* "https://" plus fill, CFG_BOUND_OTA_URL_MAX - 1 in all */
+    char url[CFG_BOUND_OTA_URL_MAX];
+    memset(url, 'u', sizeof(url) - 1);
+    memcpy(url, "https://", 8);
+    url[sizeof(url) - 1] = '\0';
+    wc_cat("\"ota_url\":\"");
+    wc_cat(url);
+    wc_cat("\",\"ota_on_sync\":false,"); /* false is the longer boolean */
+    wc_cat("\"holidays\":[");
+    for (int i = 0; i < HOLIDAY_BLOB_CAP / 11; i++)
+        wc_cat(i ? ",\"2026-12-25\"" : "\"2026-12-25\"");
+    wc_cat("],\"chores\":[");
+    for (int i = 0; i < CHORE_MAX; i++) {
+        char nm[CHORE_NAME_MAX + 4];
+        memset(nm, 'C', CHORE_NAME_MAX);
+        nm[CHORE_NAME_MAX] = '\0';
+        snprintf(kv, sizeof(kv), "%s\"%s\"", i ? "," : "", nm);
+        wc_cat(kv);
+    }
+    wc_cat("],\"timers\":[");
+    const size_t tname_len = sizeof(((nvs_timer_def_t *)0)->name) - 1;
+    for (int i = 0; i < TIMER_EXTRA_SLOTS; i++) {
+        char nm[sizeof(((nvs_timer_def_t *)0)->name)];
+        memset(nm, 'X', tname_len);
+        nm[tname_len] = '\0';
+        snprintf(kv, sizeof(kv), "%s{\"name\":\"%s\",\"min\":%d,\"reload\":false,\"break\":false}", i ? "," : "", nm,
+                 CFG_BOUND_TIMER_MIN_HI);
+        wc_cat(kv);
+    }
+    wc_cat("]}");
+    return wc_pos;
+}
+
+void test_the_worst_case_document_fits_the_receive_buffer(void) {
+    size_t n = build_worst_case_document();
+    printf("config worst case %d of %d B accepted, headroom %d B\n", (int)n, CONFIG_BUF_MAX - 1,
+           (int)(CONFIG_BUF_MAX - 1 - n));
+    /* The receive gate in mqtt_rx.c, verbatim: total_len < config_cap. */
+    TEST_ASSERT_TRUE_MESSAGE(n < CONFIG_BUF_MAX, "worst-case config document no longer fits CONFIG_BUF_MAX");
+
+    /* And it is a document the device takes WHOLE — otherwise it is not
+       the worst case of anything the device honours. */
+    char ack[CONFIG_ACK_MIN];
+    TEST_ASSERT_EQUAL(CONFIG_APPLIED, apply(wc_doc, ack, sizeof(ack)));
+    TEST_ASSERT_NOT_NULL_MESSAGE(strstr(ack, "\"ok\":true"), ack);
+    TEST_ASSERT_NULL_MESSAGE(strstr(ack, "errors"), ack);
+    char hol[HOLIDAY_BLOB_CAP];
+    size_t hol_len = sizeof(hol);
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_holidays(hol, &hol_len));
+    TEST_ASSERT_EQUAL_size_t((HOLIDAY_BLOB_CAP / 11) * 11, hol_len); /* all 46 kept */
+    char url[CFG_BOUND_OTA_URL_MAX];
+    nvs_config_get_ota_url(url, sizeof(url));
+    TEST_ASSERT_EQUAL_size_t(CFG_BOUND_OTA_URL_MAX - 1, strlen(url));
+    char names[CHORE_MAX][CHORE_NAME_BUF];
+    TEST_ASSERT_EQUAL_UINT8(CHORE_MAX, stored_chores(names));
+}
+
+/* The refusal ack lives here rather than in mqtt_ha.c because mqtt_ha.c
+   has no host suite, and these exact bytes are what an operator — and any
+   HA template sensor built on config_ack — reads. Shape follows the parse
+   failure above it: no "ver", because a document that never fit the
+   receive buffer was never parsed and has no version to echo. */
+void test_the_too_long_ack_states_the_size_and_the_ceiling(void) {
+    char ack[CONFIG_ACK_MIN];
+    int n = config_ack_too_long(ack, sizeof(ack), 2500, 2047);
+    TEST_ASSERT_EQUAL_STRING("{\"ok\":false,\"err\":\"too_long\",\"len\":2500,\"max\":2047}", ack);
+    TEST_ASSERT_EQUAL_INT((int)strlen(ack), n);
+}
+
+/* The ack must fit CONFIG_ACK_MIN WHOLE — config_apply.h says a truncated
+   ack is unparseable JSON and HA loses the whole message. Nothing bounds
+   the length an MQTT broker may declare, so the numbers are pinned at the
+   widest an int can print rather than at a plausible payload size. */
+void test_the_too_long_ack_fits_the_minimum_ack_buffer(void) {
+    char ack[CONFIG_ACK_MIN];
+    int n = config_ack_too_long(ack, sizeof(ack), 2147483647, -2147483647 - 1);
+    TEST_ASSERT_TRUE_MESSAGE(n < CONFIG_ACK_MIN, ack);
+    TEST_ASSERT_EQUAL_INT((int)strlen(ack), n);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_full_document_applies_and_stores_ver);
@@ -482,5 +1390,58 @@ int main(void) {
     RUN_TEST(test_timers_overlong_name_rejected);
     RUN_TEST(test_timers_error_names_the_offending_entry);
     RUN_TEST(test_timers_bad_min_names_the_offending_entry);
+    RUN_TEST(test_ota_fields_apply_from_bulk_document);
+    RUN_TEST(test_ota_on_sync_false_applies);
+    RUN_TEST(test_document_omitting_ota_fields_leaves_them_alone);
+    RUN_TEST(test_bulk_ota_url_rejects_non_https);
+    RUN_TEST(test_bulk_ota_url_empty_disables_and_is_valid);
+    RUN_TEST(test_bulk_ota_url_overlong_rejected);
+    RUN_TEST(test_bulk_ota_fields_reject_wrong_types);
+    RUN_TEST(test_worst_case_ack_is_parseable_json);
+    RUN_TEST(test_worst_case_ack_flags_truncation);
+    RUN_TEST(test_worst_case_ack_fits_the_declared_minimum);
+    RUN_TEST(test_truncated_error_list_contains_no_partial_names);
+    RUN_TEST(test_small_error_list_is_not_flagged_truncated);
+    RUN_TEST(test_ver_with_a_quote_is_rejected_and_ack_parses);
+    RUN_TEST(test_ver_with_a_backslash_is_rejected);
+    RUN_TEST(test_ver_with_a_control_character_is_rejected);
+    RUN_TEST(test_skipped_ack_parses);
+    RUN_TEST(test_clean_ver_still_applies);
+    RUN_TEST(test_nvs_write_failure_is_reported_not_swallowed);
+    RUN_TEST(test_ota_url_nvs_write_failure_is_reported);
+    RUN_TEST(test_chores_three_applied_and_readable_back);
+    RUN_TEST(test_chores_a_fourth_entry_is_an_error_and_writes_nothing);
+    RUN_TEST(test_chores_overlong_name_is_an_error_not_a_truncation);
+    RUN_TEST(test_chores_name_at_the_cap_is_accepted_whole);
+    RUN_TEST(test_chores_non_string_entry_is_an_error_and_writes_nothing);
+    RUN_TEST(test_chores_empty_name_is_an_error);
+    RUN_TEST(test_chores_name_with_a_quote_is_rejected);
+    RUN_TEST(test_chores_non_array_is_an_error);
+    RUN_TEST(test_chores_absent_leaves_an_existing_list_alone);
+    RUN_TEST(test_chores_explicit_empty_array_clears_the_list);
+    RUN_TEST(test_chores_nvs_write_failure_is_reported_and_keeps_the_live_acks);
+    RUN_TEST(test_a_chore_list_edit_clears_the_live_acks_and_keeps_the_release);
+    RUN_TEST(test_re_applying_the_same_chore_list_leaves_the_live_acks_alone);
+    RUN_TEST(test_chores_structured_entries_are_errors_and_write_nothing);
+    RUN_TEST(test_chores_five_entries_are_rejected_and_store_nothing);
+    RUN_TEST(test_chores_name_with_a_backslash_or_control_byte_is_rejected);
+    RUN_TEST(test_chores_a_21_byte_utf8_name_is_rejected_whole);
+    RUN_TEST(test_a_rejected_chores_array_leaves_the_other_fields_applied);
+    RUN_TEST(test_a_failed_chore_save_leaves_the_previous_list_readable);
+    RUN_TEST(test_duplicate_chore_names_are_accepted_as_distinct_rows);
+    RUN_TEST(test_chore_free_applies_at_both_bounds);
+    RUN_TEST(test_chore_free_above_the_ceiling_is_named_and_not_stored);
+    RUN_TEST(test_chore_free_wrong_type_is_named);
+    RUN_TEST(test_chore_free_over_its_allocation_is_named);
+    RUN_TEST(test_a_broken_non_today_pair_is_named_too);
+    RUN_TEST(test_chore_free_equal_to_its_allocation_is_valid);
+    RUN_TEST(test_the_cross_field_result_is_independent_of_key_order);
+    RUN_TEST(test_lowering_an_allocation_names_the_stale_chore_free);
+    RUN_TEST(test_a_pair_the_document_does_not_touch_is_not_revalidated);
+    RUN_TEST(test_a_field_that_fails_both_checks_is_named_once);
+    RUN_TEST(test_a_full_chore_document_applies_whole);
+    RUN_TEST(test_the_worst_case_document_fits_the_receive_buffer);
+    RUN_TEST(test_the_too_long_ack_states_the_size_and_the_ceiling);
+    RUN_TEST(test_the_too_long_ack_fits_the_minimum_ack_buffer);
     return UNITY_END();
 }

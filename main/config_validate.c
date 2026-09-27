@@ -1,6 +1,7 @@
 /* Shared config validators — pure, host-tested. */
 #include "config_validate.h"
 
+#include <ctype.h>
 #include <string.h>
 #include <time.h>
 
@@ -31,4 +32,80 @@ bool config_is_iso_date(const char *s) {
     if (mktime(&tm) == (time_t)-1)
         return false;
     return tm.tm_year == year - 1900 && tm.tm_mon == month - 1 && tm.tm_mday == day;
+}
+
+bool config_is_https_url(const char *s) {
+    static const char scheme[] = "https://";
+    if (s == NULL)
+        return false;
+    /* Scheme compare is case-insensitive: "HTTPS://host" is a legal URL
+       that works in a browser, so refusing it here would read as a bug.
+       The loop stops at the first mismatch, so a short string (including
+       "") fails on its NUL rather than running off the end -- '\0' equals
+       no scheme character. cppcheck models the loop as always running to
+       completion and so reads a short literal at a call site as an overrun;
+       an explicit NUL test does not convince it either, so per schedule.c
+       this is suppressed rather than contorted. */
+    for (size_t i = 0; i < sizeof(scheme) - 1; i++)
+        // cppcheck-suppress arrayIndexOutOfBounds
+        if (tolower((unsigned char)s[i]) != scheme[i])
+            return false;
+    const char *rest = s + sizeof(scheme) - 1;
+    if (*rest == '\0')
+        return false; /* scheme but no host */
+    /* No spaces or control chars (not legal in a URL, and they are what
+       would corrupt the request line), and no quote/backslash (they would
+       corrupt the cfg-state JSON this value is republished in). */
+    for (const char *p = rest; *p != '\0'; p++)
+        if ((unsigned char)*p <= ' ' || *p == '"' || *p == '\\')
+            return false;
+    return true;
+}
+
+bool config_is_ota_url(const char *s) {
+    if (s == NULL)
+        return false;
+    return (*s == '\0') || config_is_https_url(s);
+}
+
+bool config_is_clean_str(const char *s) {
+    if (s == NULL)
+        return false;
+    for (; *s != '\0'; s++)
+        if (*s == '"' || *s == '\\' || (unsigned char)*s < 0x20)
+            return false;
+    return true;
+}
+
+bool config_is_valid_chore_free_min(uint16_t chore_free_min, uint16_t alloc_min) {
+    /* MINUTES on both sides. The seconds pair (schedule_get_chore_free_sec
+       / schedule_get_allocation_sec) answers a different question in a
+       different unit; this one is for the config domain, where both values
+       are minutes on their way into NVS.
+
+       `<=`, not `<`, and the difference is the whole feature: equal means
+       the day's whole allocation is handed over free, which is the
+       per-day-type off switch (design 3.3). Tightening this to `<` would
+       turn every operator who typed the same number twice into a config
+       error and leave no way to disable the gate for one day type without
+       inventing another key.
+
+       False does NOT mean "reject" on its own — the two setters that share
+       this rule do deliberately different things with it (the chore_free
+       setter rejects; the allocation setter clamps the paired chore_free
+       down to alloc_min). See the header before wiring a caller, because
+       making both reject would block a parent lowering screen time on
+       account of a chore setting they never touched.
+
+       No bounds check here, on purpose. CFG_BOUND_CHORE_FREE_* is the
+       field's own range and is enforced by whatever parses the field
+       (config_apply.c's apply_u16, ha_config.c's number entity); this
+       function answers only the cross-field question, so a caller that
+       already range-checked does not get a second opinion on the range,
+       and the M2 config-error gate can ask about a pair already sitting in
+       NVS without a bound it never passed through mattering. Pinned by
+       test_chore_free_predicate_does_not_range_check, which fails if a
+       "helpful" ceiling check is added here — the (0, 0) case pins the
+       same invariant on the alloc side. */
+    return chore_free_min <= alloc_min;
 }

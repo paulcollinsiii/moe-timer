@@ -46,6 +46,58 @@ repos:
         files: \.(c|h)$
         exclude: ^(build/|\.pio/)
 
+  # ── Log-argument hazard (HAZ-1) ───────────────────────────────────────────────
+  # ESP_LOGx wraps its ARGUMENTS in a compile-time level guard, so a call left
+  # inside one stops executing entirely once the level is compiled out — on the
+  # device, not only on host. Nothing else here can see that: the host log stubs
+  # discard their varargs too, and the differential sweep compares two host
+  # builds. The scanner carries the allowlist and the reasoning.
+  - repo: local
+    hooks:
+      - id: no-calls-in-log-args
+        name: no function calls in ESP_LOGx arguments
+        language: script
+        entry: scripts/check-log-args.py
+        files: \.(c|h)$
+        exclude: ^(build/|\.pio/)
+
+  # ── The chore row / timer pixel collision ─────────────────────────────────────
+  # status_led_show_timer_state() writes NP_STATE_PIXEL — pixel 0, which is also
+  # chore slot 2's row (button D's) on the checklist, so the two painters
+  # collide. It was the GATE's pixel until M2-HW2 inverted the strip; the mapping
+  # is a permutation, so pixel 0 always belongs to some slot either way.
+  # wake_flow.c funnels all
+  # twelve of its status paints through one wrapper and keeps exactly one raw
+  # call (inside that wrapper). Review reverted each site in turn and TEN of the
+  # twelve survived the whole host suite, two of them the last LED paint before
+  # sleep on a chore-reachable path. The scanner carries the reasoning.
+  - repo: local
+    hooks:
+      - id: status-led-wrapper
+        name: one status_led_show_timer_state() call in wake_flow.c
+        language: script
+        entry: scripts/check-status-led-wrapper.py
+        files: ^main/wake_flow\.c$
+        pass_filenames: false
+
+  # ── The ack hold's two homes ──────────────────────────────────────────────────
+  # STATUS_LED_ACK_HOLD_MS is one figure the firmware reads from sdkconfig.h and
+  # the host build reads from a literal in status_led.h's #else arm. That header
+  # asserted the two "MUST AGREE" as though something enforced it; review proved
+  # nothing did, and that the stated consequence could not even occur — the only
+  # host suite expanding the macro is built with the CONFIG symbol defined, so
+  # mutating the fallback to 250 or 0 changed no host binary and failed no test.
+  # The hazard is the NEXT suite to measure the figure without an override. The
+  # scanner carries the reasoning and both files' parse rules.
+  - repo: local
+    hooks:
+      - id: ack-hold-default
+        name: ack hold Kconfig default == status_led.h host fallback
+        language: script
+        entry: scripts/check-ack-hold-default.py
+        files: ^(main/Kconfig\.projbuild|include/status_led\.h)$
+        pass_filenames: false
+
   # ── Commit message format ─────────────────────────────────────────────────────
   - repo: local
     hooks:

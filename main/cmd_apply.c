@@ -6,12 +6,22 @@
 
 #include "cJSON.h"
 #include "nvs_config.h"
+#include "stats_json.h"
 #include "timer.h"
 
 #define GRANT_MIN_MINUTES 1
 #define GRANT_MAX_MINUTES 240
 
 cmd_result_t cmd_apply(const char *json, cmd_action_t *out, char *ack, size_t ack_len) {
+    return cmd_apply_hold(json, out, ack, ack_len, false);
+}
+
+cmd_result_t cmd_apply_for_snapshot(const char *json, cmd_action_t *out, char *ack, size_t ack_len,
+                                    const stats_snapshot_t *snap) {
+    return cmd_apply_hold(json, out, ack, ack_len, snap->no_clock);
+}
+
+cmd_result_t cmd_apply_hold(const char *json, cmd_action_t *out, char *ack, size_t ack_len, bool hold_grants) {
     memset(out, 0, sizeof(*out));
     cJSON *root = cJSON_Parse(json);
     if (root == NULL) {
@@ -35,8 +45,13 @@ cmd_result_t cmd_apply(const char *json, cmd_action_t *out, char *ack, size_t ac
         return CMD_INVALID;
     }
 
-    /* Apply-once: the retained command is re-delivered every window */
-    char last[40];
+    /* Apply-once: the retained command is re-delivered every window.
+       Zero-initialised: a stored id longer than this buffer makes the read
+       fail and write nothing, and the return is not checked — uninitialised
+       stack into strcmp would make the dedup compare garbage, so a retained
+       `grant` could re-apply every window. nvs_config_set_cmd_id now bounds
+       the write, so a too-long id cannot be stored in the first place. */
+    char last[40] = {0};
     nvs_config_get_cmd_id(last, sizeof(last));
     if (strcmp(last, id->valuestring) == 0) {
         cJSON_Delete(root);
@@ -61,6 +76,13 @@ cmd_result_t cmd_apply(const char *json, cmd_action_t *out, char *ack, size_t ac
         out->slot = slot;
         out->sec = min->valueint * 60;
         snprintf(ack, ack_len, "{\"id\":\"%s\",\"ok\":true,\"grant\":%d}", id->valuestring, min->valueint);
+        if (hold_grants) {
+            /* BUG-14: no settled day to put it on. The id is NOT recorded,
+               so the retained command is a fresh one to the first window
+               that has a day, and that window applies and acks it. */
+            cJSON_Delete(root);
+            return CMD_HELD;
+        }
         result = CMD_GRANT;
     } else if (cJSON_IsTrue(locate)) {
         snprintf(ack, ack_len, "{\"id\":\"%s\",\"ok\":true,\"locate\":true}", id->valuestring);

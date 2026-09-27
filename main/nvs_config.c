@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "config_validate.h" /* CFG_BOUND_OTA_* — setter length caps */
 #include "hal_nvs.h"
 #ifndef NATIVE
 #include "nvs.h"
@@ -14,6 +15,16 @@
 static esp_err_t get_u16_with_default(const char *key, uint16_t *out, uint16_t default_val) {
     *out = default_val; /* safe value on any error path */
     esp_err_t ret = hal_nvs_read_u16(key, out);
+    if (ret == ESP_ERR_NVS_NOT_FOUND) {
+        *out = default_val;
+        return ESP_OK;
+    }
+    return ret;
+}
+
+static esp_err_t get_u32_with_default(const char *key, uint32_t *out, uint32_t default_val) {
+    *out = default_val; /* safe value on any error path */
+    esp_err_t ret = hal_nvs_read_u32(key, out);
     if (ret == ESP_ERR_NVS_NOT_FOUND) {
         *out = default_val;
         return ESP_OK;
@@ -64,6 +75,42 @@ esp_err_t nvs_config_set_summer_min(uint16_t val) {
     return hal_nvs_write_u16(NVS_KEY_SUMMER_MIN, val);
 }
 
+/* The four chore_free_* minute keys, the paired sibling of the four
+   allocations above. Nothing seeds these — an absent key reads its
+   compile-time 0 through get_u16_with_default, exactly as
+   schedule_get_chore_free_sec() already relies on. */
+esp_err_t nvs_config_get_chore_free_wd(uint16_t *out) {
+    return get_u16_with_default(NVS_KEY_CHORE_FREE_WD, out, NVS_DEFAULT_CHORE_FREE_WD);
+}
+
+esp_err_t nvs_config_set_chore_free_wd(uint16_t val) {
+    return hal_nvs_write_u16(NVS_KEY_CHORE_FREE_WD, val);
+}
+
+esp_err_t nvs_config_get_chore_free_we(uint16_t *out) {
+    return get_u16_with_default(NVS_KEY_CHORE_FREE_WE, out, NVS_DEFAULT_CHORE_FREE_WE);
+}
+
+esp_err_t nvs_config_set_chore_free_we(uint16_t val) {
+    return hal_nvs_write_u16(NVS_KEY_CHORE_FREE_WE, val);
+}
+
+esp_err_t nvs_config_get_chore_free_hol(uint16_t *out) {
+    return get_u16_with_default(NVS_KEY_CHORE_FREE_HOL, out, NVS_DEFAULT_CHORE_FREE_HOL);
+}
+
+esp_err_t nvs_config_set_chore_free_hol(uint16_t val) {
+    return hal_nvs_write_u16(NVS_KEY_CHORE_FREE_HOL, val);
+}
+
+esp_err_t nvs_config_get_chore_free_sum(uint16_t *out) {
+    return get_u16_with_default(NVS_KEY_CHORE_FREE_SUM, out, NVS_DEFAULT_CHORE_FREE_SUM);
+}
+
+esp_err_t nvs_config_set_chore_free_sum(uint16_t val) {
+    return hal_nvs_write_u16(NVS_KEY_CHORE_FREE_SUM, val);
+}
+
 /* ---- string accessors ---- */
 
 static esp_err_t get_str_empty_default(const char *key, char *buf, size_t len) {
@@ -83,6 +130,18 @@ static esp_err_t get_str_with_default(const char *key, char *buf, size_t len, co
         return ESP_OK;
     }
     return ret;
+}
+
+/* Reject rather than truncate. Both current callers validate length first
+   (ha_config_set against the field's `hi`, config_apply against the same
+   bound), but ota_flow.c will be the third writer of the state keys and
+   is not on that path — and a silently truncated URL or target version is
+   worse than a failed write: a half-written ota_target never matches, so
+   the retry budget would never converge. */
+static esp_err_t write_str_bounded(const char *key, const char *val, size_t cap) {
+    if (val == NULL || strlen(val) >= cap)
+        return ESP_ERR_INVALID_SIZE;
+    return hal_nvs_write_str(key, val);
 }
 
 esp_err_t nvs_config_get_mqtt_uri(char *buf, size_t len) {
@@ -242,7 +301,58 @@ esp_err_t nvs_config_get_cmd_id(char *buf, size_t len) {
     return get_str_empty_default(NVS_KEY_CMD_ID, buf, len);
 }
 esp_err_t nvs_config_set_cmd_id(const char *id) {
-    return hal_nvs_write_str(NVS_KEY_CMD_ID, id);
+    /* Bounded to cmd_apply.c's dedup buffer. An id longer than that stores
+       fine but can never be read back, so the apply-once compare fails
+       every window and a retained `grant` re-applies forever. */
+    return write_str_bounded(NVS_KEY_CMD_ID, id, CFG_BOUND_CMD_ID_MAX);
+}
+
+/* ---- OTA ----
+   Lazy defaults, no registry row: these must survive a defaults reseed
+   (see the NVS_DEFAULT_OTA_URL comment in nvs_defaults.h). */
+
+esp_err_t nvs_config_get_ota_url(char *buf, size_t len) {
+    return get_str_with_default(NVS_KEY_OTA_URL, buf, len, NVS_DEFAULT_OTA_URL);
+}
+esp_err_t nvs_config_set_ota_url(const char *url) {
+    return write_str_bounded(NVS_KEY_OTA_URL, url, CFG_BOUND_OTA_URL_MAX);
+}
+esp_err_t nvs_config_get_ota_on_sync(uint16_t *out) {
+    return get_u16_with_default(NVS_KEY_OTA_ON_SYNC, out, NVS_DEFAULT_OTA_ON_SYNC);
+}
+esp_err_t nvs_config_set_ota_on_sync(uint16_t on) {
+    return hal_nvs_write_u16(NVS_KEY_OTA_ON_SYNC, on ? 1 : 0);
+}
+
+esp_err_t nvs_config_get_ota_result(char *buf, size_t len) {
+    return get_str_empty_default(NVS_KEY_OTA_RESULT, buf, len);
+}
+esp_err_t nvs_config_set_ota_result(const char *reason) {
+    return write_str_bounded(NVS_KEY_OTA_RESULT, reason, CFG_BOUND_OTA_RESULT_MAX);
+}
+esp_err_t nvs_config_get_ota_target(char *buf, size_t len) {
+    return get_str_empty_default(NVS_KEY_OTA_TARGET, buf, len);
+}
+esp_err_t nvs_config_set_ota_target(const char *ver) {
+    return write_str_bounded(NVS_KEY_OTA_TARGET, ver, CFG_BOUND_OTA_TARGET_MAX);
+}
+esp_err_t nvs_config_get_ota_fails(uint16_t *out) {
+    return get_u16_with_default(NVS_KEY_OTA_FAILS, out, 0);
+}
+esp_err_t nvs_config_set_ota_fails(uint16_t fails) {
+    return hal_nvs_write_u16(NVS_KEY_OTA_FAILS, fails);
+}
+esp_err_t nvs_config_get_ota_dl_ms(uint32_t *out) {
+    return get_u32_with_default(NVS_KEY_OTA_DL_MS, out, 0);
+}
+esp_err_t nvs_config_set_ota_dl_ms(uint32_t ms) {
+    return hal_nvs_write_u32(NVS_KEY_OTA_DL_MS, ms);
+}
+esp_err_t nvs_config_get_ota_pend_ver(char *buf, size_t len) {
+    return get_str_empty_default(NVS_KEY_OTA_PEND_VER, buf, len);
+}
+esp_err_t nvs_config_set_ota_pend_ver(const char *ver) {
+    return write_str_bounded(NVS_KEY_OTA_PEND_VER, ver, CFG_BOUND_OTA_TARGET_MAX);
 }
 
 esp_err_t nvs_config_get_timer_defs(nvs_timer_defs_blob_t *out) {
