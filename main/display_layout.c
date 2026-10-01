@@ -47,7 +47,7 @@ uint16_t display_bar_fill_px(int32_t remaining_sec, uint32_t allocation_sec) {
    The fill SATURATES at the divider rather than drawing over the block,
    and that is what makes a gated IDLE day honest. app_state.c reports the
    day's whole effective allocation as `remaining` while it is idle
-   (ProductOverview: an idle day shows what it has), so the unsplit fill
+   (docs/behavior/timers_and_schedule.md, "Timer states": an idle day shows what it has), so the unsplit fill
    would be the full 280 px and would claim the locked part is available
    to spend now. Saturated, the panel reads "40 min locked behind the
    chores, 20 min free and full", which is the point of carrying the split

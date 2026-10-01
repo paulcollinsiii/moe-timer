@@ -44,17 +44,19 @@ typedef enum {
        timer starts/pauses/expires normally behind the break.
 
    Every break helper therefore reads slot 0 explicitly, never the active
-   slot. Callers that need the break-end EDGE (chime, snap back to Screen)
-   must call timer_break_tick() BEFORE timer_tick(): timer_tick() also
-   ends an elapsed break, but silently, so no path can strand one.
+   slot. timer_tick() also ends an elapsed break, so no path can strand
+   one. The break-end EDGE (chime, snap back to Screen) is latched, not
+   returned: a tick never consumes it, and callers drain it with
+   timer_break_take_ended() after whichever tick ended the break (see
+   timer_break_tick).
 
    To add capacity: bump TIMER_EXTRA_SLOTS, add the matching Kconfig block
    and X-macro line in main/timer_defs.c. */
 #define TIMER_EXTRA_SLOTS 4
 #define TIMER_SLOT_COUNT (1 + TIMER_EXTRA_SLOTS)
 
-/* Compile-time definition of one extra timer (from menuconfig; host tests
-   inject their own table via timer_set_defs). */
+/* Definition of one extra timer (from the NVS timer table, or menuconfig as
+   the fallback; host tests inject their own table via timer_set_defs). */
 typedef struct {
     const char *name; /* NULL or "" = slot disabled */
     int32_t duration_sec;
@@ -279,9 +281,10 @@ typedef struct {
 } timer_snapshot_t;
 
 /* Slot management. timer_set_defs must run before any other call each boot
-   (defs live in flash/rodata, not RTC memory); defs[0] (Screen) is ignored. */
+   (defs are not in RTC memory); defs[0] (Screen) is ignored. */
 void timer_set_defs(const timer_def_t *defs, int count);
-/* Firmware glue (main/timer_defs.c): installs the menuconfig-built table. */
+/* Firmware glue (main/timer_defs.c): installs the NVS timer table, or the
+   menuconfig-built table when no readable one is stored (BUG-8). */
 void timer_defs_install(void);
 int timer_active_slot(void);
 /* Definition of the active slot; NULL for slot 0 (Screen uses schedule.c). */

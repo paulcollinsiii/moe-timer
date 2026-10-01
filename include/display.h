@@ -13,8 +13,9 @@
 
 typedef struct {
     /* Today's EFFECTIVE remaining, adjustment included. IDLE reports the
-       whole effective allocation (ProductOverview: an idle day shows what
-       it has, not 0), which is what lets it exceed allocation_sec below.
+       whole effective allocation (docs/behavior/timers_and_schedule.md, "Timer
+       states": an idle day shows what it has, not 0), which is what lets it
+       exceed allocation_sec below.
        What that draws depends on whether the chore gate is holding part
        of the day, so there is no single answer any more:
          UNGATED, the bar's denominator is allocation_sec, the day's

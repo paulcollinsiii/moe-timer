@@ -682,7 +682,7 @@ static int publish_states(esp_mqtt_client_handle_t client, const stats_snapshot_
        above the mqtt_ha_window() that reaches here. (Named rather than
        numbered: the ":107" that stood here pointed into that file's own
        comment block.) See ota_flow.h's ota_flow_stat() and
-       task 12 of docs/planning/ota.plan.md. */
+       task 12 of docs/planning/implemented/ota.plan.md. */
     ota_stat_t ota;
     ota_flow_stat(&ota);
     /* Same line of reasoning, one file further. The panic breadcrumb has
@@ -761,8 +761,9 @@ static int apply_incoming(esp_mqtt_client_handle_t client, const stats_snapshot_
        who reverts an over-size document back to the exact content the
        device already applied gets no ack at all, and the refusal stands
        against a document that is now fine. Bumping `ver` is what clears
-       it — docs/home_assistant.md tells the operator to, and that is the
-       whole mechanism. Deliberate: the alternative is publishing an ack
+       it — docs/home_assistant/troubleshooting.md ("A document did not
+       take") tells the operator to, and that is the whole mechanism.
+       Deliberate: the alternative is publishing an ack
        for every skipped document on every wake.
 
        Command refusal goes to event UNRETAINED, the same slot a normal

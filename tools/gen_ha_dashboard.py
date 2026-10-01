@@ -113,7 +113,7 @@ NODE_RE = re.compile(r"^[0-9a-f]{6}$")
 # separator "_". The only such character here is the '-' of the device id,
 # so the registered entity id is "sensor.magtag_1a0a5c_battery". Keys are
 # already [a-z0-9_] (the parser below asserts it), so nothing else moves.
-# docs/home_assistant.md ("Entity IDs are stable") documents the same rule.
+# docs/home_assistant/reference.md ("Entity IDs") documents the same rule.
 
 
 def entity_id(component: str, node: str, key: str) -> str:
@@ -529,7 +529,8 @@ STATUS_FALLBACK = ("battery", "day_type")  # (key, the Status row it follows)
 #
 # The runs graph reads the daily summary (day_runs_N), which the device
 # sends at its first check-in after midnight, so HA files each day's runs
-# under the FOLLOWING day. docs/home_assistant.md explains it; the owner
+# under the FOLLOWING day. docs/home_assistant/dashboard.md ("Graphs and
+# statistics") explains it; the owner
 # took the on-tab note away. `period: day` + `change`: the owner's file had
 # `week` + `state`, and `state` shows only the last day of each period.
 HISTORY_KEYS = ["screen_remaining"] + [f"remaining_{n}" for n in SLOTS]

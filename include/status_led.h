@@ -243,7 +243,7 @@ chores_led_t chores_led_for(uint8_t mask, uint8_t n, bool released);
 
    1. BUTTON WAKES ONLY (design §2.5, "Power discipline"). An unattended
       tick or NTP wake that happens to paint the chore screen must leave
-      the pixels dark, or chore mode lights four LEDs every 55 s for
+      the pixels dark, or chore mode lights four LEDs on every minute wake for
       nobody. This function paints whenever it is called; the wake cause
       is the caller's to check.
       HONOURED BY wake_flow.c's s_chore_strip_lit, which is set in exactly

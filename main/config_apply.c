@@ -535,7 +535,8 @@ static void apply_timers(const cJSON *root, err_acc_t *e) {
        migration, and a migration is what BUG-5 defers. The operator-side
        mitigation is the same one BUG-6 has: state `"break": false` in the
        document, which is durable across any blob loss. Recorded in
-       docs/home_assistant.md so it is not folklore. */
+       docs/home_assistant/configuring.md ("The bulk config document") so
+       it is not folklore. */
     nvs_timer_defs_blob_t prev;
     bool have_prev = (nvs_config_get_timer_defs(&prev) == ESP_OK);
 
@@ -594,7 +595,7 @@ static void apply_timers(const cJSON *root, err_acc_t *e) {
            have restored it is consumed on apply (mqtt_ha.c), so nothing
            healed it. (When BUG-6 was written `break` was missing from the
            documented `timers` schema, which is why documentation-shaped
-           documents omitted it. docs/home_assistant.md documents both keys
+           documents omitted it. docs/home_assistant/configuring.md documents both keys
            now, so an operator who states `break` explicitly gets durable
            intent — it survives an NVS erase and tier 3 never applies to
            that slot. Tier 3 is the answer for slots the document does not
@@ -814,7 +815,7 @@ config_result_t config_apply(const char *json, char *ack, size_t ack_len) {
        bulk-document key is silently cleared by every application of the
        retained document. That is exactly how break_eligible was lost
        (BUG-6 in docs/planning/refactor.bugdiscoveries.md); the third
-       place is docs/home_assistant.md. Absent = unchanged, so a document
+       place is docs/home_assistant/configuring.md. Absent = unchanged, so a document
        that predates OTA leaves an HA-set endpoint alone.
        config_is_ota_url is the shared rule: empty (OTA off) or https —
        plain http would make the update channel unauthenticated. */

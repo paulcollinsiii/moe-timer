@@ -83,8 +83,12 @@ static RTC_DATA_ATTR uint8_t s_partial_count;
    down here. */
 static RTC_DATA_ATTR bool s_takeover_on_panel;
 
-/* Bring-up knobs: if the image is rotated 180 deg or mirrored on hardware,
-   flip these (see docs/hardware_smoke_test.md step 2). */
+/* Bring-up knobs, for a first paint that looks wrong on the glass (the
+   "First paint" check in docs/hardware_checklist.md). Rotated 180 deg or
+   mirrored: flip these. All black or inverted: flip the `!bit` test in
+   flush_cb. Shifted 8 px along the short axis: SSD1680_XRAM_OFFSET in
+   ssd1680.h. Weak or faded full refresh: the custom-LUT fallback described
+   at the top of components/ssd1680/ssd1680.c. */
 #define ROT_FLIP_X 0
 #define ROT_FLIP_Y 1
 

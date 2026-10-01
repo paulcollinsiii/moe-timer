@@ -59,14 +59,16 @@ CONFIG_ESP_CONSOLE_USB_CDC_SUPPORT_ETS_PRINTF=n
 # already queued on the CDC driver to drain.
 CONFIG_ESP_SYSTEM_PANIC_REBOOT_DELAY_SECONDS=3
 
-# Main task runs the network window (WiFi + SNTP + the MQTT/HA session +
-# cJSON) directly. The default 3584 B overflows once MQTT is added on top
-# of WiFi; give it headroom. (The window's large buffers are also static
-# in mqtt_ha.c, not on this stack.)
+# Raised from the default 3584 B when the network window ran on the main
+# task and overflowed it. The window has since moved to net_window.c's own
+# 10240 B net_win task; this value was kept, not re-sized for what the main
+# task runs now. Its high-water mark is published as the HA sensor "Main
+# task stack free" (stk_main): read that before shrinking it.
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=7168
 
 # 4 MB flash; custom table: two 1.75 MB (0x1C0000) OTA app slots + a raw
-# 440 KB "assets" partition for the alert WAV. Grown from this project's
+# 376 KB "assets" partition for the alert WAV, then a 64 KB coredump
+# partition. Grown from this project's
 # previous custom table (0x180000 slots, otadata at 0x310000); nvs/phy/ota_0
 # keep their offsets from it so reflashing keeps device config, and an empty
 # otadata still boots ota_0 at the old factory offset. The
@@ -87,7 +89,7 @@ CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
 # therefore a rollback opportunity — the device gets exactly one wake to mark
 # the image good. Costs 80 B of bootloader (22,640 -> 22,720 of 28,672, so
 # 5,952 B still free) and 384 B of app; measured at HEAD against a genuine
-# rollback-off control, see docs/planning/ota.plan.md task 13. Deliberately
+# rollback-off control, see docs/planning/implemented/ota.plan.md task 13. Deliberately
 # NOT paired with CONFIG_BOOTLOADER_APP_ANTI_ROLLBACK, which this symbol
 # merely makes visible: that one is downgrade prevention, burns efuses, and
 # is irreversible — out of scope for this feature.
@@ -129,8 +131,9 @@ CONFIG_MAGTAG_WEEKEND_MIN=120
 CONFIG_MAGTAG_HOLIDAY_MIN=120
 CONFIG_MAGTAG_SUMMER_MIN=120
 
-# Eye-rest: enforced Screen Break every 30 min of running time, 15 min
-# long. Interval 0 disables breaks.
+# Eye-rest: enforced Screen Break when 30 min of screen exposure has built
+# up (see MAGTAG_BREAK_INTERVAL_MIN), 15 min long. Interval 0 disables
+# breaks.
 CONFIG_MAGTAG_BREAK_INTERVAL_MIN=30
 CONFIG_MAGTAG_BREAK_DURATION_MIN=15
 

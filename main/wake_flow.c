@@ -431,7 +431,7 @@ static bool wake_flow_chore_acked_this_wake(void) {
 
    ONE PLACE IS THE WHOLE OF ROW C17. §2.5's power discipline paragraph
    says the pixels light on a BUTTON wake and on no other, because chore
-   mode otherwise lights four LEDs every 55 seconds for nobody, on
+   mode otherwise lights four LEDs on every minute wake for nobody, on
    battery — and that failure is invisible: the screen looks identical
    either way and only a current meter or a flat cell ever says so. Keyed
    on the wake CAUSE and not on the mode, so a tick wake that paints the
@@ -1489,8 +1489,11 @@ bool wake_flow_dispatch_button_action(button_id_t btn, time_t *now, timer_state_
                        replaced logged its refusal, and because the
                        refusal is otherwise completely silent: Screen
                        expiring at the end of the day is the common case,
-                       and hardware_smoke_test.md case 20 reads this
-                       exact line off the monitor. */
+                       and this line is its only trace on the monitor. The
+                       refusal itself is pinned on the host by
+                       test_button_actions:test_expired_screen_never_reloads
+                       and test_wake_flow:
+                       test_button_b_on_a_non_reloadable_expired_slot_is_refused_by_the_map. */
                     ESP_LOGI(TAG, "button B unavailable (state %d)", (int)before);
                     return false;
             }
@@ -2755,7 +2758,8 @@ void wake_flow_handle_button_wake(void) {
     time_t now = hal_time_now();
     wake_flow_handle_day_rollover(&now);
     /* IDLE overnight: the threshold crossing may first be observed on a
-       button press (idle wakes are up to an hour apart). The press is
+       button press (one that lands before that minute's tick wake; idle
+       wakes are a minute apart, idle syncs are hourly by default). The press is
        swallowed and the transition is silent per the alert rules. */
     if (lock_gate_check_bedtime(now)) { /* may not return */
         /* A LOCK LET GO THIS WAKE, AND THE PRESS WAS THE LOCK'S. On a

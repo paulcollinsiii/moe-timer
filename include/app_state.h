@@ -25,7 +25,7 @@ extern "C" {
 #endif
 
 /* Build the render state. IDLE shows today's full EFFECTIVE allocation,
-   not 0 (ProductOverview) — a full bar only when nothing is adjusted or
+   not 0 (docs/behavior/timers_and_schedule.md, "Timer states") — a full bar only when nothing is adjusted or
    withheld, since the bar's denominator is the day's default and the
    chore gate clamps the free tranche (see remaining_sec in display.h);
    extra timers use their fixed configured duration while Screen (slot 0)

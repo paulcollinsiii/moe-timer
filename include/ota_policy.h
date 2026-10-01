@@ -85,7 +85,7 @@ _Static_assert(OTA_VERSION_MAX <= CFG_BOUND_OTA_TARGET_MAX,
                "ota_target storage is narrower than the longest manifest version");
 
 /* Why nothing happened — or, after an attempt, what went wrong. The
-   failure-table codes (docs/planning/ota.plan.md) plus the "we decided
+   failure-table codes (docs/planning/implemented/ota.plan.md) plus the "we decided
    not to" codes, which are equally worth publishing: "pinned" and
    "up_to_date" are the difference between a device that is behaving and
    a device that is silently broken.

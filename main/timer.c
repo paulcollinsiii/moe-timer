@@ -31,8 +31,9 @@ bool timer_rtc_state_guard(void) {
     return true;
 }
 
-/* Slot definitions live in rodata, not RTC memory — re-injected every boot
-   (timer_defs.c on firmware, the test table on host). */
+/* Slot definitions are not in RTC memory — re-injected every boot
+   (timer_defs.c on firmware, from the NVS timer table with the Kconfig
+   table as fallback; the test table on host). */
 static const timer_def_t *s_defs;
 static int s_defs_count;
 
@@ -663,7 +664,13 @@ timer_reconcile_t timer_reconcile_def(int slot, const timer_def_t *old_def, cons
        point (I10): the segment so far must land at the old sign before
        the new def takes effect, or the whole in-flight run is
        retroactively re-signed. net_apply reinstalls the defs table before
-       reconciling, so old_def is the only place the old sign survives. */
+       reconciling, so old_def is the only place the old sign survives.
+
+       I6 holds at break ENTRY only: a slot flipped to non-eligible while
+       it runs behind a BREAK keeps running. Accepted by decision: the
+       flip is a parent's edit, and no exposure goes uncounted — the
+       re-arm below accrues the rest of the run at the new sign, which
+       brings the next break forward. */
     if (running && old_def->break_eligible != new_def->break_eligible) {
         fold_run_segment_signed(now, old_def->break_eligible);
         arm_run_segment(slot, now);
@@ -701,8 +708,9 @@ timer_reconcile_t timer_reconcile_def(int slot, const timer_def_t *old_def, cons
 int32_t timer_tick(time_t now) {
     /* A break runs on slot 0 whichever slot is selected, so end it here
        too — no path (a tick while Piano is active, a wake that skipped the
-       edge handler) may strand one. Silent by design: callers that need
-       the edge call timer_break_tick() first. */
+       edge handler) may strand one. The edge is latched, not lost: a tick
+       never consumes it, and callers drain it with
+       timer_break_take_ended() after whichever tick ended the break. */
     timer_break_tick(now);
 
     timer_slot_state_t *sl = active();

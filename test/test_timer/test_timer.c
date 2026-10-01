@@ -60,7 +60,7 @@ void setUp(void) {
 }
 
 /* Structural invariants I1-I5 of the non-blocking-break state model
-   (docs/planning/20260727.breaktime.plan.md):
+   (docs/planning/implemented/20260727.breaktime.plan.md):
 
      I1  BREAK only ever appears on slot 0
      I2  at most one slot is RUNNING at any time
@@ -341,7 +341,7 @@ void test_shift_expiry_noop_when_idle(void) {
 /* ---- the screen-exposure balance (break_eligible) ----
 
    Rows below are the plan's behaviour table
-   (docs/planning/20260728.breakeligible.plan.md); the numbers in the test
+   (docs/planning/implemented/20260728.breakeligible.plan.md); the numbers in the test
    names are that table's row numbers, so a failure points straight at the
    contract it broke. */
 

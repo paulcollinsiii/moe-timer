@@ -95,7 +95,7 @@ display_state_t app_state_display(const app_state_in_t *in, int32_t remaining, t
     if ((int64_t)base + adjust < 0) {
         adjust = -(int32_t)base;
     }
-    /* IDLE shows today's whole allocation rather than 0 (ProductOverview),
+    /* IDLE shows today's whole allocation rather than 0 (docs/behavior/timers_and_schedule.md, "Timer states"),
        and the EFFECTIVE one: an adjustment banked before the day's first
        start would otherwise show nowhere until someone presses B, which
        reads exactly like a set that never landed.
