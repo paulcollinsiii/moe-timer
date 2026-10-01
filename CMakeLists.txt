@@ -13,7 +13,7 @@ project(magtag_timer)
 # the decision that mattered: at 5 % free there is nothing left to give back.
 #
 # This FAILS the build rather than warning, deliberately, and the plan text
-# at docs/planning/ota.plan.md:157 says "warn". A printed warning has one
+# at docs/planning/implemented/ota.plan.md:157 says "warn". A printed warning has one
 # reader -- whoever happens to be watching that build -- and this repo has no
 # CI to catch what they miss. A threshold you must raise in a commit, with a
 # reason, converts silent erosion into a reviewed decision. 85 % reserves the

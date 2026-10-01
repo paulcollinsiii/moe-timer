@@ -83,7 +83,7 @@
 static const char *TAG = "main";
 
 /* Timezone default lives in nvs_defaults.h (NVS_DEFAULT_TZ); the active TZ
-   comes from NVS at boot so HA can change it (ProductOverview section 1). */
+   comes from NVS at boot so HA can change it (docs/home_assistant/configuring.md, "The controls"). */
 
 /* Residency 4. Adapts the wake-scoped quiet-hours cache to neopixel.c's
    bool(void) callback ABI, which has nowhere to take the clock from. One
@@ -519,8 +519,8 @@ void app_main(void) {
        actually defending against is written out above rtc_state_t. */
     (void)timer_rtc_state_guard();
 
-    /* Slot definitions live in rodata, not RTC memory — install them
-       before the first timer_* call on every boot/wake. */
+    /* Slot definitions come from the NVS timer table (Kconfig fallback), not RTC
+       memory — install them before the first timer_* call on every boot/wake. */
     timer_defs_install();
 
     /* Must run after TZ is set (date comparison) and before the wake

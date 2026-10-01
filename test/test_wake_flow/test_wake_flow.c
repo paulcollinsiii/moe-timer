@@ -1326,7 +1326,7 @@ display_state_t app_state_display(const app_state_in_t *in, int32_t remaining, t
    modelled it as free — which made an entire class of defect invisible
    here. A refresh holds the CPU with nothing polling: a partial with
    display.c's ghost-clean pass is two partial waveforms back to back, ~0.8 s
-   at ProductOverview's ~0.4 s each (an estimate, not a board measurement),
+   at ~0.4 s each (an estimate, not a board measurement),
    and a full refresh is ~3 s. Design §2.5's "~1.9 s" predates c321ffc,
    which removed a fixed 1.1 s wait between the two passes.
    A press made in that stretch goes into the button latch, and whether
@@ -6463,7 +6463,8 @@ void test_a_tick_wake_always_ends_in_deep_sleep_under_the_gates_mode(void) {
 
    120569f: EXT1 ANY_LOW is level-triggered, so a button still held when
    the 3 s release-wait times out re-wakes the chip instantly and replayed
-   its action (smoke test case 15, holding A+D).
+   its action (found holding A+D; the "Held-button dismissal" check in
+   docs/hardware_checklist.md).
 
    The guard is three ANDed operands, and every case below flips exactly
    one of them while proving the wake really was decoded — the "nothing

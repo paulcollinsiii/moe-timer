@@ -1,16 +1,24 @@
 # MOE Timer
 The Massively Over Engineered Timer for kids.
 
-A MagTag(link needed) timer to help track screen time for kids. Some of the major features:
-* Configurable screen times that can differ based on Weekday, Weekend, Holiday, Summer Break
+A [MagTag](https://www.adafruit.com/product/4800) timer to help track screen
+time for kids. Some of the major features:
+* Configurable screen time that can differ by day type: weekday, weekend,
+  holiday or summer break
 * Configurable screen breaks
-* Support for Bonus or Loss of screen time that resets daily
-* Up to 4 additional timers that can be used (or not) during Screen Breaks. Examples:
-  * Piano practice can be done during a screen break, reload this timer to get high scores per week
-  * Folding Laundry cannot be done during a screen break since for us the TV can be on in the background and isn't counted against normal screen time
-* Up to 3 chores that have to be done to unlock the remaining (or all) screen time for the day. Configurable per screen time type (weekday / weekend / holiday / summer break)
-* Configuration, Tracking & Reporting through Home Assistant
-* Approx 1 week of battery life with a 420mAh LiPo battery pack.
+* Bonus or lost screen time that resets daily
+* Up to 4 additional timers, each of which can be used (or not) during screen
+  breaks. Examples:
+  * Piano practice can be done during a screen break. Reload this timer to get
+    high scores per week.
+  * Folding laundry cannot be done during a screen break, since for us the TV
+    can be on in the background, and that isn't counted against normal screen
+    time.
+* Up to 3 chores that have to be done to unlock the remaining (or all) screen
+  time for the day. The screen time allowed before the chores are done is
+  configurable per day type.
+* Configuration, tracking and reporting through Home Assistant
+* About 1 week of battery life with a 420 mAh LiPo battery pack
 
 ## Screenshots
 (todo, get some from HA and from the timer itself)
@@ -19,43 +27,99 @@ A MagTag(link needed) timer to help track screen time for kids. Some of the majo
 
 ### Home Assistant
 * HA 2025.11+
-* MQTT server connected to HA
+* An MQTT broker connected to HA
 
-[!WARNING]
-There are several options for running MQTT with HA but locally on a trusted network is strongly recommended. While communications from HA <--> MQTT are easily secured with TLS, the MOE Timer communicates *in cleartext* for performance and battery reasons.
+> [!WARNING]
+> There are several options for running MQTT with HA, but running it locally
+> on a trusted network is strongly recommended. While communications between
+> HA and MQTT are easily secured with TLS, the MOE Timer communicates *in
+> cleartext* for performance and battery reasons.
 
-### ESP-IDF for local flashing (included in DevContainer)
+### ESP-IDF for local flashing (included in the dev container)
 
-* The dev container included here for VSCode pre-installs the tooling needed. It assumes you're on an Ubuntu machine as it mounts /dev/bus/usb and /dev into the container. If you're running from a different host you'll need to adjust .devcontainer/devcontainer.json
-* In a vs code terminal window inside the devcontainer
+* The dev container included here for VS Code pre-installs the tooling needed.
+  It assumes a Linux host such as Ubuntu, since it mounts /dev/bus/usb and /dev
+  into the container. If you're running from a different host, you'll need to
+  adjust `.devcontainer/devcontainer.json`.
+* In a VS Code terminal window inside the dev container:
+  * Copy `include/credentials.local.h.example` to `include/credentials.local.h`.
+    In it, set your WiFi credentials, then uncomment and set your MQTT broker
+    URI, user and password (the OTA URL is optional; read [OTA
+    Setup](./docs/ota_manifest.md) before setting it). This gitignored file is
+    the one place for every secret and URL. Do this before you build: an image
+    built without it ships empty credentials. If that happens, fill in the
+    file, run `idf.py fullclean` and flash again. Never erase NVS to fix it.
   * `source ~/esp/esp-idf/export.sh`
-  * `idf.py menuconfig`
-  * In the MagTag Timer settings, set your MQTT server credentials. Feel free to pre-configure other settings here but they're defaults in the absence of HA
-  * In `include/credentials.local.h` (copy the .example file) set your WiFi credentials
-  * Put your MagTag in firmware download mode (hold the boot button, press reset, then let go of the boot button) and then you can `idf.py flash`
+  * Optionally, run `idf.py menuconfig` and pre-configure other settings in the
+    MagTag Timer menu. They're only defaults, used in the absence of HA.
+  * Put your MagTag in firmware download mode (hold the Boot button, press
+    Reset, then let go of the Boot button), and then run `idf.py flash`.
+    If the device doesn't start once flashing finishes, press Reset. It can
+    take a few presses.
+* After flashing, the device boots and runs its first network window right
+  away, and that's when it appears in HA as `magtag-xxxxxx`. If it doesn't
+  show up, press D (force sync) to run another window.
 
-## Home Assitant Configuration
-Once your device is auto-discovered in HA
+## Home Assistant Configuration
+The full runbook, step by step, is
+[Home Assistant setup](./docs/home_assistant/setup.md). In short, once your
+device is auto-discovered in HA:
 
-* Create a Calendar called `School Schedule` and use AI to generate and ics for `No School: REASON` days based on your school
-* Run `uv run ./tools/gen_ha_dashboard.py --mqtt > ha_setup.txt` to generate the Dashboard and Automation config for your MOE Timer
-* Create the ToDo lists with the `MagTag XXXXXX chores` name initially. You can change the Label afterwards.
+* Create a calendar called `School Schedule` and use AI to generate an .ics
+  file of `No School: REASON` days based on your school district. Make each
+  summer break one all-day `No School: Summer` event spanning the break, and
+  include next summer as well as this one: the automation needs both to date
+  the school year.
+* Install the config-publishing automation,
+  `tools/ha/magtag_publish_config.yaml` (step 4 of the
+  [runbook](./docs/home_assistant/setup.md)).
+* Create the To-do lists with the `MagTag XXXXXX chores` name initially. You
+  can change the name afterwards. Check the entity IDs before the next step
+  (step 5 of the runbook).
+* Run
+  `uv run ./tools/gen_ha_dashboard.py --mqtt --sdkconfig ~/magtag-mqtt.cfg > ha_setup.txt`
+  to generate the dashboard and automation config for your MOE Timer(s).
+  * For now, the generator can't read `credentials.local.h`, so it takes the
+    broker from a small file kept outside the repo, with three lines:
+    `CONFIG_MAGTAG_MQTT_URI="mqtt://..."`, `CONFIG_MAGTAG_MQTT_USER="..."` and
+    `CONFIG_MAGTAG_MQTT_PASS="..."`.
+* Paste the dashboard from `ha_setup.txt` (step 7 of the runbook).
 
-Once you have the dashboard setup some recommendations
-* Configure the volume around 150% so it's loud enough to hear but not so loud the entire alert is clipping while playing.
-* Set your timezone, e.g. `EST5EDT,M3.2.0,M11.1.0` for Eastern US time. Example values [from esp-idf documentation](https://docs.rainmaker.espressif.com/docs/dev/firmware/fw_usage_guides/time-service-usage/)
+Once you have the dashboard set up, here are some recommendations:
+* Set the alert volume to around 150%, so it's loud enough to hear but not so
+  loud that the entire alert clips while playing.
+* Set your timezone, e.g. `EST5EDT,M3.2.0,M11.1.0` for US Eastern time. Example
+  values are in the [ESP RainMaker
+  documentation](https://docs.rainmaker.espressif.com/docs/dev/firmware/fw_usage_guides/time-service-usage/).
 
 
 ## Deep Dive docs
-* [Architecture Overview](./docs/architecture.md)
+* [Product Overview](./docs/product_overview.md) - what the timer does, with
+  one [behavior doc](./docs/behavior) per feature.
+* [Architecture Overview](./docs/architecture.md) - how the firmware is built,
+  with one [page per subsystem](./docs/architecture).
 * [Developer Setup](./docs/developer_setup.md)
-* [OTA Setup](./docs/ota_manifest.md) - pushing custom firmwares to multiple MOE Timers is much easier this way.
-* [Product Overview](./docs/ProductOverview.md)
-* [Vibe Coding AI planning docs](./docs/planning) - Folder with various plans
+* [Home Assistant](./docs/home_assistant/setup.md) - setup, then the
+  [dashboard](./docs/home_assistant/dashboard.md),
+  [configuring](./docs/home_assistant/configuring.md) the timer from HA, the
+  [reference](./docs/home_assistant/reference.md) and
+  [troubleshooting](./docs/home_assistant/troubleshooting.md).
+* [OTA Setup](./docs/ota_manifest.md) - pushing custom firmware to multiple
+  MOE Timers is much easier this way.
+* [Hardware Checklist](./docs/hardware_checklist.md) - the checks only a real
+  MagTag can answer.
+* [Agent Notes](./docs/agent_notes/README.md) - for AI agents editing the code.
+* [Vibe Coding AI planning docs](./docs/planning) - folder with various plans
 
 ## Other Notes
-Early versions of this were written in Circuit Python, but migrated purely with Claude to C for performance on the device. The code is 100% AI generated, and many of the [docs](./docs/) are as well. Expect many "load bearing" invariants and unnecessary verbosity.
+Early versions of this were written in CircuitPython, but were migrated purely
+with Claude to C for performance on the device. The code is 100% AI generated,
+and many of the [docs](./docs/) are as well. Expect many "load bearing"
+invariants and unnecessary verbosity.
 
-References to `kaffi.internal` are my home kubernetes server that hosts HA, MQTT and a small HTTP server for OTA firmware updates.
+References to `kaffi.internal` are to my home Kubernetes server, which hosts
+HA, MQTT and a small HTTPS server for OTA firmware updates.
 
-The real device is actually used by a real kiddo daily, so beyond all the automated tests it has survived extensive field testing. I'll continue cleaning this project up as my claude pro account rate limit resets 🍻
+The real device is actually used by a real kiddo daily, so beyond all the
+automated tests, it has survived extensive field testing. I'll continue
+cleaning this project up as my Claude Pro account rate limit resets 🍻

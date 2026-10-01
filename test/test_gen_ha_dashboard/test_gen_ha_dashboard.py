@@ -984,12 +984,6 @@ class TestDashboard(unittest.TestCase):
             self.assertEqual([c["period"] for c in walk(view) if c.get("type") == "statistics-graph"], ["day", "hour"])
             self.assertIn(f"sensor.magtag_{n}_chores_done", entity_refs(card_under(view, "Status")))
 
-    def test_the_docs_keep_the_day_shift_explanation(self):
-        # The tab lost its markdown note; the day shift still holds for the
-        # runs graph (and for a summary graph added by hand).
-        doc = " ".join(read("docs/home_assistant.md").split())
-        self.assertIn("files each day's figures under the **following** day", doc)
-
     def test_timer_rows_say_timer_n_once(self):
         # The firmware's own names ("Timer 1 minutes") carry the slot, so
         # no "Timer N" section label repeats it; dividers group the slots.
@@ -1103,15 +1097,24 @@ class TestParts(unittest.TestCase):
         # ver: the device skips it and never republishes.
         self.assertIn("rename the chore back -- not sooner: renamed back before the device's next window", flat)
         self.assertIn("the device skips it, and nothing republishes", flat)
-        # On the chore checklist D is the chore 3 tick (docs/ProductOverview.md
-        # "Buttons -- the mode"): the step says to leave it with A first.
+        # On the chore checklist D is the chore 3 tick: the step says to
+        # leave it with A first.
         pos = [flat.index(s) for s in ("If its chore checklist is showing, D is the chore 3 tick there, not a sync",
                                        "press Button A first to get back to the timer screen",
                                        "rename the chore back")]
         self.assertEqual(pos, sorted(pos))
-        overview = " ".join(read("docs/ProductOverview.md").split())
-        self.assertIn("B, C and D tick chores 1, 2 and 3", overview)
-        self.assertIn("press A to get back to the timer screen", overview)
+        # Both halves of that step rest on the firmware, not on any doc:
+        # wake_flow.c's ack table maps D to row index 2 (chore 3), and
+        # button_a_apply() toggles the mode, so A leaves the checklist.
+        wf = read("main/wake_flow.c")
+        acks = wf[wf.index("k_chore_ack_buttons[] = {"):]
+        acks = acks[:acks.index("};")]
+        self.assertIn("{BTN_D, BUTTON_CHORE_IDX_D}", acks)
+        self.assertRegex(read("include/button_actions.h"), r"#define BUTTON_CHORE_IDX_D 2u\b")
+        ba = read("main/button_actions.c")
+        a_apply = ba[ba.index("btn_a_action_t button_a_apply(void) {"):]
+        a_apply = a_apply[:a_apply.index("\n}\n")]
+        self.assertIn("(timer_mode() == APP_MODE_CHORES) ? APP_MODE_TIMERS : APP_MODE_CHORES", a_apply)
         self.assertNotIn("restart HA", flat)
         self.assertNotIn("publishes at its next network window", flat)
 

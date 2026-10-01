@@ -274,8 +274,8 @@ typedef struct {
    to this firmware, delete the device in HA, rename a chore to force a
    republish, and rename it back once the device reappears. The steps,
    and what the delete probably keeps (unconfirmed, read from HA
-   source), are in docs/home_assistant.md, "One-time step on a device HA
-   already knows".
+   source), are in docs/home_assistant/setup.md, "Re-registering a device
+   on old entity IDs".
 
    ON MAC COLLISIONS: device_id() is the last three MAC bytes, so two
    colliding devices already collided on uniq_id and this changes nothing

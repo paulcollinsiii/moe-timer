@@ -138,7 +138,7 @@ static void net_window_task(void *arg) {
                download) runs after MQTT has closed and cannot publish
                its own outcome; ota_result has to be in NVS before the
                payload is built or it waits a whole day. See the note in
-               task 12 of docs/planning/ota.plan.md: this ordering is
+               task 12 of docs/planning/implemented/ota.plan.md: this ordering is
                NECESSARY for a check result to reach the same window, but
                it is not on its own SUFFICIENT — `snap` was filled on the
                main task before the post above, so the publisher has to

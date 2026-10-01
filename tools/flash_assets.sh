@@ -2,8 +2,8 @@
 # Flash (or erase) the raw "assets" partition holding the custom alert WAV.
 #
 # The firmware accepts 16-bit mono PCM WAV, 8000-22050 Hz, up to the
-# partition size -- currently 440 KB = 450,560 B ~= 14 s at 16 kHz, ~28 s at
-# 8 kHz, ~10 s at 22.05 kHz. partitions.csv is the source of truth for that
+# partition size -- currently 376 KB = 385,024 B ~= 12 s at 16 kHz, ~24 s at
+# 8 kHz, ~8.7 s at 22.05 kHz. partitions.csv is the source of truth for that
 # size; this figure is a convenience copy, so re-check it there if the table
 # changes (the flash itself is by name and needs no size). An empty/invalid partition makes the "Custom WAV"
 # tone fall back to the built-in chime.

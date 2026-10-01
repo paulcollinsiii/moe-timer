@@ -52,7 +52,7 @@
    (sdkconfig.defaults), which does not fit; net_window.c already spawns
    a dedicated 10240 B task for a strictly smaller job. Overflowing here
    presents on the bench as an unexplained reboot, because USB CDC eats
-   the panic output. See docs/planning/ota.plan.md, "Task and stack
+   the panic output. See docs/planning/implemented/ota.plan.md, "Task and stack
    sizing", and task 12, which owns the call site. */
 
 #ifdef __cplusplus

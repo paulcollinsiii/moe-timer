@@ -217,8 +217,8 @@ static const ha_entity_t ENTITIES[] = {
 
        DAY SHIFT: the summary lands after midnight, so HA files the value
        under the day AFTER the one it describes. Nothing here can move it —
-       HA stamps a state with its arrival time — so docs/home_assistant.md
-       says so.
+       HA stamps a state with its arrival time — so
+       docs/home_assistant/dashboard.md ("Graphs and statistics") says so.
 
        The key is NOT "screen_used": mqtt_ha.c's RETIRED[] publishes an
        empty discovery for that one on every pass, which would delete this
@@ -316,7 +316,7 @@ static const ha_entity_t ENTITIES[] = {
 
        ota_result is the one PRIMARY entity of the four. "Did my update
        work?" is the operator's question and this is the answer to it —
-       the whole point of the entry in docs/planning/ota.plan.md is that
+       the whole point of the entry in docs/planning/implemented/ota.plan.md is that
        a rollback was invisible. The other three are the supporting
        detail consulted after that answer, so they sit in the Diagnostic
        group. Keys are clear of the per-slot prefixes

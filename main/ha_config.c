@@ -167,6 +167,15 @@ _Static_assert(STATE_JSON_SCRATCH <= 1024, "state_json scratch must stay a small
    (which a fifth string field would have passed while overrunning raw[]).
    Slot count is asserted against the window's set buffer below. */
 
+/* THE DURABILITY RULE for every row added here: a field settable from an
+   HA entity must also be expressible in the retained bulk config document
+   (config_apply.c). The two channels are asymmetric. The document is kept
+   by the broker and reapplied whenever its `ver` moves, including after a
+   defaults reseed clears cfg_ver; a set/<key> command is cleared once
+   applied (apply_sets() in mqtt_ha.c). An entity-only field therefore has
+   no copy off the device, and whatever rebuilds NVS from the document
+   loses it. The rule runs one way: `holidays` and `chores` are
+   document-only and have no row here. */
 static const cfg_field_t FIELDS[] = {
     /* step=1: HA validates entries against min+k*step, so a step of 5 with
        a min of 1 rejects round values (30, 45, 60). Keep it 1. */
@@ -229,8 +238,9 @@ static const cfg_field_t FIELDS[] = {
     /* OTA. Empty URL = updates disabled, which is why config_is_ota_url
        accepts "" — it is the only off switch HA has for the endpoint.
        Both fields are also parsed from the bulk config document
-       (config_apply.c) and documented in docs/home_assistant.md; all
-       three are required or an applied document silently clears them. */
+       (config_apply.c) and documented in docs/home_assistant/configuring.md
+       ("The bulk config document"); all three are required or an applied
+       document silently clears them. */
     TEXT_V("ota_url", "OTA manifest URL", CFG_BOUND_OTA_URL_MAX, nvs_config_set_ota_url, nvs_config_get_ota_url,
            config_is_ota_url),
     BOOL_SWITCH("ota_on_sync", "OTA check on sync", nvs_config_set_ota_on_sync, nvs_config_get_ota_on_sync),
