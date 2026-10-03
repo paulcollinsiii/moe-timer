@@ -1785,10 +1785,11 @@ class TestSdkconfig(unittest.TestCase):
                 self.assertNotIn(SENTINEL, str(cm.exception))
 
     def test_empty_uri_names_the_sdkconfig_option(self):
-        # The firmware no longer carries build-time MQTT credentials at all
-        # (WiFi and MQTT are entered on-device), so an empty URI here is the
-        # normal case, not a precedence quirk: the error says how to hand
-        # the tool the three lines directly.
+        # CONFIG_MAGTAG_MQTT_URI no longer exists in Kconfig at all (WiFi and
+        # MQTT are entered on-device), so a real sdkconfig never has an
+        # empty value for it -- it's simply absent, the "missing key" case
+        # above. An empty URI here only comes from a hand-made --sdkconfig
+        # file; the error says how to fix it.
         text = f'CONFIG_MAGTAG_MQTT_URI=""\nCONFIG_MAGTAG_MQTT_USER="u"\nCONFIG_MAGTAG_MQTT_PASS="{SENTINEL}"\n'
         with self.assertRaises(g.UsageError) as cm:
             g.parse_sdkconfig(text, "/x/sdkconfig")
@@ -1898,7 +1899,10 @@ class TestMqttFetch(unittest.TestCase):
                         "cannot connect to mqtt://broker.test:1883: ConnectionRefusedError"),
             "auth": ({"connack": Rc(True, "Not authorized")},
                      "refused the connection: Not authorized (check CONFIG_MAGTAG_MQTT_USER / CONFIG_MAGTAG_MQTT_PASS"),
-            "bad password": ({"connack": Rc(True, "Bad user name or password")}, "CONFIG_MAGTAG_MQTT_PASS in sdkconfig"),
+            "bad password": (
+                {"connack": Rc(True, "Bad user name or password")},
+                "CONFIG_MAGTAG_MQTT_PASS in the --sdkconfig broker file",
+            ),
             "no connack": ({"answer": False}, "no answer from mqtt://broker.test:1883 within 10 s"),
             "suback refused": ({"suback": Rc(True, "Not authorized")}, "refused the subscription"),
             "lost": ({"loop_rc": 7}, "lost the connection to mqtt://broker.test:1883"),
@@ -2058,6 +2062,17 @@ class TestMqttMain(unittest.TestCase):
                 with self.assertRaises(SystemExit) as cm:
                     g.main(["--devices", EXAMPLE, *args])
                 self.assertEqual(cm.exception.code, 2)
+
+    def test_mqtt_without_sdkconfig_is_an_error(self):
+        # The Kconfig symbols are gone, so there is no default sdkconfig
+        # that could ever have the broker keys any more: --mqtt must name
+        # its own broker file explicitly.
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err):
+            with self.assertRaises(SystemExit) as cm:
+                g.main(["--mqtt"])
+        self.assertEqual(cm.exception.code, 2)
+        self.assertIn("--sdkconfig", err.getvalue())
 
 
 if __name__ == "__main__":

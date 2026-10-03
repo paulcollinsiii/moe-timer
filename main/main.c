@@ -431,13 +431,11 @@ void app_main(void) {
        the published `panic_uptime_s`. */
     wake_flow_boot_quiet_after_panic();
 
-    /* Boot sub-phase 1 of 6. panic_diag.h argues why BOOT was subdivided
-       at all; what belongs here is why THIS span is one phase. Everything
-       between this mark and its exit is flash work on the NVS partition
-       — the documented re-init idiom below (whose erase branch is the
-       most destructive act the firmware can perform), the defaults seed,
-       and panic_diag_commit(), which files the previous boot's
-       breadcrumb. If panics are landing in flash, this is the label that
+    /* Boot sub-phase 1 of 6. panic_diag.h argues why BOOT was subdivided at all; what belongs here
+       is why THIS span is one phase. Everything between this mark and its exit is flash work on
+       the NVS partition — the documented re-init idiom below (whose erase branch is the most
+       destructive act the firmware can perform), the defaults seed, and panic_diag_commit(), which
+       files the previous boot's breadcrumb. If panics are landing in flash, this is the label that
        says so.
 
        ENTER/EXIT rather than a bare mark, and the exit restores what the
@@ -452,10 +450,12 @@ void app_main(void) {
        whole content of a phase mark is WHERE it sits, so it cannot live
        anywhere but here. */
     const panic_phase_t boot_prev_nvs = panic_diag_enter(PANIC_PHASE_BOOT_NVS);
-    /* The one surviving branch. ESP-IDF's documented NVS init idiom: a
-       flash image whose NVS partition is full or was written by a newer
-       version cannot be opened until it is erased, and there is nowhere
-       to put this but in front of the first nvs call. */
+    /* The one surviving branch. ESP-IDF's documented NVS init idiom: a flash image whose NVS
+       partition is full or was written by a newer version cannot be opened until it is erased, and
+       there is nowhere to put this but in front of the first nvs call. The erase takes the owner's
+       WiFi and MQTT credentials with it, same as every other stored setting; nothing reseeds them
+       from a build-time default any more (nvs_defaults.h). The device comes back up with no SSID,
+       which is exactly what sends it into setup mode to get them re-entered. */
     esp_err_t ret = nvs_flash_init();
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
         ESP_ERROR_CHECK(nvs_flash_erase());

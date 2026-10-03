@@ -10,7 +10,7 @@
 
     uv run tools/gen_ha_dashboard.py [--devices tools/ha_devices.yaml]
                                      [--part {setup,automation,dashboard,all}]
-    uv run tools/gen_ha_dashboard.py --mqtt [--sdkconfig sdkconfig] [--wait 10]
+    uv run tools/gen_ha_dashboard.py --mqtt --sdkconfig PATH [--wait 10]
                                      [--devices FILE] [--part ...]
 
 Prints three parts, in order:
@@ -35,8 +35,11 @@ slot (1-4) and every chore's done flag (1-3): a device with a disabled slot
 shows "entity not available" rows for it, its Activity Log names the flags
 of chores it does not have, and part 1 and the dashboard header say so.
 
---mqtt reads the broker settings (CONFIG_MAGTAG_MQTT_URI/USER/PASS) from the
-gitignored sdkconfig, collects the retained discovery documents
+--mqtt reads the broker settings from a broker file containing
+CONFIG_MAGTAG_MQTT_URI / _USER / _PASS lines (sdkconfig syntax), named with
+the required --sdkconfig PATH -- the firmware build carries no MQTT
+credentials any more, so there is no default file to fall back to. It
+collects the retained discovery documents
 (homeassistant/<component>/magtag-<node>_<key>/config) and builds the device
 list and each device's exact entity set from them: an empty (retired)
 payload is skipped, so a disabled slot or an unused chore gets no row.
@@ -803,13 +806,13 @@ def parse_devices(doc, where: str = "devices file") -> list[dict]:
 #                       {topic: payload} until the broker goes quiet;
 #   collect_discovery() pure: those messages -> devices, entity sets, warnings.
 #
-# THE PASSWORD. It is read from sdkconfig into Broker.password (repr=False)
-# and handed to paho, and goes nowhere else: no message built here names it,
-# and main_mqtt() prints everything -- errors, warnings, the parts -- through
-# _emit(), which scrubs it, in case a library or the broker data ever
-# carries it.
+# THE PASSWORD. It is read from the --sdkconfig broker file -- a file
+# containing CONFIG_MAGTAG_MQTT_URI / _USER / _PASS lines (sdkconfig syntax)
+# -- into Broker.password (repr=False) and handed to paho, and goes nowhere
+# else: no message built here names it, and main_mqtt() prints everything
+# -- errors, warnings, the parts -- through _emit(), which scrubs it, in
+# case a library or the broker data ever carries it.
 
-DEFAULT_SDKCONFIG = "sdkconfig"
 SDK_URI, SDK_USER, SDK_PASS = "CONFIG_MAGTAG_MQTT_URI", "CONFIG_MAGTAG_MQTT_USER", "CONFIG_MAGTAG_MQTT_PASS"
 
 # MQTT wildcards match whole levels only, so "magtag-*" cannot be filtered
@@ -981,7 +984,7 @@ def fetch_retained(
             rc = client.loop(timeout=0.1)
             if st["conn"] is False:
                 auth = any(s in st["why"].lower() for s in ("author", "password", "user name"))
-                hint = f" (check {SDK_USER} / {SDK_PASS} in sdkconfig)" if auth else ""
+                hint = f" (check {SDK_USER} / {SDK_PASS} in the --sdkconfig broker file)" if auth else ""
                 raise MqttError(f"{where} refused the connection: {st['why']}{hint}")
             if st["sub"] is False:
                 raise MqttError(f"{where} refused the subscription to {DISCOVERY_FILTER}")
@@ -1352,7 +1355,7 @@ def main_mqtt(args, client_factory=None, clock=None) -> int:
     """--mqtt. Returns the exit status; 2 = bad input, 1 = broker/scan failure.
     Every line it prints once the password is read goes through _emit()
     with the password as the secret."""
-    sdk = args.sdkconfig or os.path.join(REPO, DEFAULT_SDKCONFIG)
+    sdk = args.sdkconfig
     try:
         broker = load_broker(sdk)
     except UsageError as e:
@@ -1406,7 +1409,9 @@ def main(argv=None, client_factory=None, clock=None) -> int:
         "--mqtt", action="store_true", help="find the devices and their exact entity sets on the MQTT broker"
     )
     ap.add_argument(
-        "--sdkconfig", help=f"with --mqtt: where the broker settings are (default {DEFAULT_SDKCONFIG} at the repo root)"
+        "--sdkconfig",
+        help="required with --mqtt: a broker file containing CONFIG_MAGTAG_MQTT_URI / _USER / _PASS "
+        "lines (sdkconfig syntax); the firmware build itself no longer carries these",
     )
     ap.add_argument(
         "--wait",
@@ -1419,6 +1424,8 @@ def main(argv=None, client_factory=None, clock=None) -> int:
     args = ap.parse_args(argv)
     if not args.mqtt and (args.sdkconfig or args.wait != DEFAULT_WAIT_S):
         ap.error("--sdkconfig and --wait need --mqtt")
+    if args.mqtt and not args.sdkconfig:
+        ap.error("--mqtt requires --sdkconfig PATH (the firmware build carries no MQTT credentials any more)")
     if not math.isfinite(args.wait) or args.wait <= 0:  # nan passes `<= 0` and would disable the cap
         ap.error("--wait must be a positive number of seconds")
     if args.mqtt:

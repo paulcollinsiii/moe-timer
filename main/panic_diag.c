@@ -537,8 +537,11 @@ void panic_diag_stat(diag_stat_t *out) {
 
     /* NVS headroom, measured rather than assumed — main.c's
        nvs_flash_erase() on ESP_ERR_NVS_NO_FREE_PAGES silently wipes every
-       stored setting, and nothing has ever reported how close this device
-       is to that. free_entries is the whole answer: total is a constant
+       stored setting, the owner's WiFi and MQTT credentials included, and
+       nothing has ever reported how close this device is to that. Only
+       setup mode (entered because the device wakes with no SSID) gets
+       credentials back in; everything else restores from the normal reseed.
+       free_entries is the whole answer: total is a constant
        of a partition table that is frozen for OTA'd devices, and used is
        total - free, so publishing either would be publishing the same
        fact twice. A failed call leaves 0, which reads as "no headroom"

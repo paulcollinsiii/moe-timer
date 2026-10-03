@@ -10,6 +10,24 @@
 #endif
 #include "nvs_defaults.h"
 
+/* An owner whose credentials.local.h still defines one of the old
+   WiFi/MQTT fallbacks gets a build-time nudge: these macros are no longer
+   read by anything (nvs_defaults.h no longer seeds them). Plain #warning
+   becomes a hard error under this build's -Werror (GCC promotes #warning
+   via -Werror=cpp), so this uses #pragma message instead, which -Werror
+   does not elevate. This check lives here as plain C, not in
+   nvs_defaults.h as part of the header: that header is included by every
+   TU that touches a default, so a #pragma in it fires once per including
+   TU. Putting the check in this .c file instead means it fires once per
+   build, this being the one TU nvs_defaults.h's own include of
+   credentials.local.h is guaranteed to have already run in, by the time
+   the preprocessor reaches this line. */
+#if defined(NVS_DEFAULT_WIFI_SSID) || defined(NVS_DEFAULT_WIFI_PASS) || defined(NVS_DEFAULT_MQTT_URI) || \
+    defined(NVS_DEFAULT_MQTT_USER) || defined(NVS_DEFAULT_MQTT_PASS)
+#pragma message \
+    "credentials.local.h still defines a WiFi/MQTT NVS_DEFAULT_* macro; it is no longer read. Enter WiFi and MQTT on the device in setup mode instead."
+#endif
+
 /* ---- u16 helpers ---- */
 
 static esp_err_t get_u16_with_default(const char *key, uint16_t *out, uint16_t default_val) {

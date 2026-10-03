@@ -12,16 +12,12 @@
 #endif
 #endif
 
-/* An owner whose credentials.local.h still defines one of the old
-   WiFi/MQTT fallbacks gets a build-time nudge: these macros are no longer
-   read by anything (see above). Plain #warning becomes a hard error under
-   this build's -Werror (GCC promotes #warning via -Werror=cpp), so this
-   uses #pragma message instead, which -Werror does not elevate. */
-#if defined(NVS_DEFAULT_WIFI_SSID) || defined(NVS_DEFAULT_WIFI_PASS) || defined(NVS_DEFAULT_MQTT_URI) || \
-    defined(NVS_DEFAULT_MQTT_USER) || defined(NVS_DEFAULT_MQTT_PASS)
-#pragma message \
-    "credentials.local.h still defines a WiFi/MQTT NVS_DEFAULT_* macro; it is no longer read. Enter WiFi and MQTT on the device in setup mode instead."
-#endif
+/* The build-time nudge for an owner whose credentials.local.h still
+   defines one of the old WiFi/MQTT fallbacks lives in nvs_config.c, not
+   here: this header is pulled into every TU that touches a default, and
+   a #pragma message in it would print once per TU instead of once per
+   build. nvs_config.c is the one file guaranteed to include this header
+   (and, through it, credentials.local.h), so the check sits there. */
 
 /* Base salt for the defaults stamp. The stored stamp is a FINGERPRINT of
    this version plus the allocation values below (see
