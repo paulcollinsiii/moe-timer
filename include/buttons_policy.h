@@ -56,7 +56,40 @@ typedef struct {
        edits config, and D forces the network window that carries the fix
        rather than waiting out CONFIG_ERR_SLEEP_SEC. */
     bool config_locked;
+    /* gpio_get_level(GPIO_NUM_0) == 0 at sleep entry, sampled raw by the
+       driver like the other fields here — NOT consumed by
+       buttons_policy_wake_mask() above (BOOT is not a button_id_t and
+       never sets a bit in that mask); it feeds
+       buttons_policy_boot_wake_allowed() below only. EXT1 is
+       level-triggered: arming GPIO0 while it already reads low would
+       wake the device the instant it reached deep sleep and again on
+       every re-wake for as long as the press lasted, with no button
+       resolved to stop it (the continuation guard in wake_flow.c tracks
+       only A-D). Refusing to arm BOOT while it is already down is what
+       closes that loop. */
+    bool boot_currently_down;
 } buttons_policy_in_t;
+
+/* Whether BOOT (GPIO0) may be armed as an EXT1 wake source for the sleep
+   being entered. Kept separate from buttons_policy_wake_mask() above
+   rather than a fifth bit in its return value, for the same reason BOOT
+   is not a button_id_t (buttons.h): that mask's bits are read by index
+   against BTN_GPIOS, and a fifth one would need a GPIO table entry and a
+   BTN_NONE-sized widening everywhere that loops `i < BTN_NONE` over it.
+
+   Armed only on an UNLOCKED sleep: `enable` true and `config_locked`
+   false. That is S21 extended to BOOT rather than relaxed for it — the
+   config-error (and, since BUG-14, no-clock) lock still narrows the mask
+   to Button D alone, exactly as docs/architecture.md's S21 and
+   lock_gate.h say, because BOOT's own recovery path (a cold boot or any
+   button wake with no SSID, setup_trigger.h) does not need a second
+   wake source layered on top of D's. The charge and Bed Time locks arm
+   nothing at all, same as every other button; `enable` false covers both
+   without a separate check.
+
+   And never armed while `boot_currently_down` is true: see that field's
+   comment for why (the level-triggered re-wake loop). Pure — host-tested. */
+bool buttons_policy_boot_wake_allowed(const buttons_policy_in_t *in);
 
 /* Which buttons may wake the device from the sleep being entered. Bit n =
    button n, matching buttons_scan_held(). Zero means arm NOTHING: a

@@ -173,19 +173,24 @@ uint8_t button_latch_take_masked(uint8_t mask);
    about this order — do not change it without reading both of them. */
 int button_latch_pick(uint8_t mask, uint8_t allowed_mask);
 
-/* BOOT's place in the tie-break above: LAST — B > C > D > A > BOOT. It is
-   not a fifth bit in `mask`/`allowed_mask` above: BOOT carries no latched
-   EDGE of its own (buttons.c samples it as a plain LEVEL — the hold
-   gesture needs a measured duration, not a debounced press — so nothing
-   ever sets a bit for it in the mask this file latches), and the return
-   value already uses 0..3 for a real pick, so a fifth slot would either
-   collide with -1/"none" or need a value outside that range for every
-   caller of button_latch_pick to special-case. One line is the whole of
-   BOOT's rank instead: `picked` is button_latch_pick's return value for
-   THE SAME wake, and BOOT explains the wake only when nothing else
-   already does — a simultaneous A-D press never loses its action to the
-   setup gesture, because that press keeps winning the tie-break it
-   already wins today. */
+/* BOOT's place relative to an already-resolved A-D button: LAST, full
+   stop — whichever button the caller already picked for this wake
+   outranks BOOT, and this file's own B > C > D > A order above is only
+   one of the two ways that pick can have been made (buttons.c's other
+   path, the EXT1 status scan, resolves by pin order instead; either way
+   the result is a button_id_t or BTN_NONE, which is all this predicate
+   reads). It is not a fifth bit in `mask`/`allowed_mask` above: BOOT
+   carries no latched EDGE of its own (buttons.c samples it as a plain
+   LEVEL — the hold gesture needs a measured duration, not a debounced
+   press — so nothing ever sets a bit for it in the mask this file
+   latches), and the return value already uses 0..3 for a real pick, so a
+   fifth slot would either collide with -1/"none" or need a value outside
+   that range for every caller of button_latch_pick to special-case. One
+   line is the whole of BOOT's rank instead: `picked` is the already-
+   resolved button for THE SAME wake (-1 for none), and BOOT explains the
+   wake only when nothing else already does — a simultaneous A-D press
+   never loses its action to the setup gesture, because that press keeps
+   winning whichever tie-break resolved it. */
 bool button_latch_boot_wins(int picked);
 
 #ifdef __cplusplus

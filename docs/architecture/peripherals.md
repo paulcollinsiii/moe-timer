@@ -22,6 +22,33 @@ a tie between held pads with the same pick order as the awake latch.
 `esp_sleep_enable_gpio_wakeup()` is not an alternative: on the ESP32-S2 it
 works only for light sleep.
 
+**BOOT (GPIO0), behind `MAGTAG_BOOT_WAKES`.** A fifth EXT1 pad, folded into
+the same mask but kept out of `button_id_t` — it has no A-D action, only
+the hold-for-setup gesture (`setup_trigger.h`). Arming is a second pure
+decision, `buttons_policy_boot_wake_allowed()`: armed only on an unlocked
+sleep (not charge-, Bed-Time-, config-error- or no-clock-locked — S21
+extended to BOOT, not relaxed for it, so the config-error sleep's one
+exit stays Button D alone) and only when GPIO0 does not already read low
+at sleep entry. That second condition is BOOT's own: EXT1 is
+level-triggered, so arming a pad that is already held would wake the
+device the instant it reached deep sleep and again on every re-wake for
+as long as the press lasted, with no held-button guard to stop it (the
+continuation guard that covers A-D tracks only those four pads).
+Decoding a BOOT wake never falls back to a level read the way the A-D
+scan above does: `buttons_woke_by_boot()` requires the EXT1 cause AND
+GPIO0's bit in the status latch, and only once no A-D button already
+explained the wake (`button_latch_boot_wins()`) — an empty or absent
+status settles as "not BOOT" rather than guessing, because unlike the
+A-D scan there is no second button here to disambiguate against. A
+BOOT-only wake decodes through `buttons_get_wakeup_button()` as
+`BTN_NONE` without running the A-D fallback scan at all: a non-empty
+status latch that names no A-D pad is conclusive on its own, so a merely
+held A-D pad is never blamed for a wake it could not have caused.
+`MAGTAG_BOOT_WAKES` ships off by default: nothing decodes a BOOT wake
+into setup mode yet (the wiring is a later task), and GPIO0 is also a
+strapping pin whose behaviour across a deep-sleep wake is an open bench
+check (the provisioning plan's task 7).
+
 **Awake: the press latch.** EXT1 is only a wake source, so without help the
 device would be deaf while awake: during a sync, the render-grid wait or an
 e-ink flush. `buttons_init()` installs a falling-edge ISR that records each

@@ -51,11 +51,16 @@ bool buttons_is_boot_pressed(void);
 
 /* Whether GPIO0 was itself a cause of THIS wake. `wakeup_button` is
    buttons_get_wakeup_button()'s own result for the same wake — pass it
-   in rather than letting this re-derive it, so the tie-break (B > C > D
-   > A > BOOT, button_latch_boot_wins()) is read once and the fallback
-   debounce+scan buttons_get_wakeup_button() may already have paid for is
-   never run a second time. Always false when MAGTAG_BOOT_WAKES=n, since
-   GPIO0 is then never armed and cannot have caused a wake. */
+   in rather than letting this re-derive it, so BOOT's rank — last,
+   behind whichever A-D button already resolved (button_latch_boot_wins())
+   — is read once and the fallback debounce+scan
+   buttons_get_wakeup_button() may already have paid for is never run a
+   second time. Requires the EXT1 cause AND GPIO0's bit in the EXT1
+   status; unlike that fallback scan, there is no level-read fallback of
+   its own here — one candidate pin has nothing to disambiguate against,
+   so an empty or absent status settles as "not BOOT" rather than
+   guessing. Always false when MAGTAG_BOOT_WAKES=n, since GPIO0 is then
+   never armed and cannot have caused a wake. */
 bool buttons_woke_by_boot(button_id_t wakeup_button);
 
 #ifdef __cplusplus

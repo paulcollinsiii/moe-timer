@@ -43,17 +43,20 @@ typedef struct {
 
 /* {normal, setup} from (has SSID, wake cause, BOOT hold). Pure — host-tested.
 
-   No SSID: setup on a cold boot or any button wake (this is also the
-   recovery path after an nvs_flash_erase() wipe, which leaves the device
-   with no SSID too) — but NOT on a plain timer wake, so timers keep
-   running offline and the no-SSID network path keeps failing cleanly
-   (wifi_session.c:75 returns ESP_ERR_INVALID_STATE).
+   A completed BOOT hold (boot_hold_completed) wins outright, before
+   either rule below runs and regardless of SSID state or wake cause: the
+   plan's hold row is unconditional, so the explicit gesture can never be
+   weaker than the automatic rule it sits above.
 
-   SSID present: setup only once the BOOT hold tracker has reached
-   ENTER_SETUP for THIS wake (a completed >= SETUP_TRIGGER_BOOT_HOLD_MS
-   hold, released). An empty MQTT URI and repeated WiFi join failures are
-   deliberately not inputs here — see setup_trigger_wifi_failing_hint()
-   below for the latter. */
+   No SSID, no completed hold: setup on a cold boot or any button wake
+   (this is also the recovery path after an nvs_flash_erase() wipe, which
+   leaves the device with no SSID too) — but NOT on a plain timer wake,
+   so timers keep running offline and the no-SSID network path keeps
+   failing cleanly (wifi_session.c:75 returns ESP_ERR_INVALID_STATE).
+
+   SSID present, no completed hold: normal, always. An empty MQTT URI and
+   repeated WiFi join failures are deliberately not inputs here — see
+   setup_trigger_wifi_failing_hint() below for the latter. */
 setup_trigger_mode_t setup_trigger_decide(const setup_trigger_in_t *in);
 
 /* ---- BOOT hold tracker --------------------------------------------------- */
@@ -94,9 +97,14 @@ void setup_trigger_boot_hold_reset(setup_trigger_boot_hold_t *t);
 
 /* Feed one (timestamp, BOOT down?) sample. `now_ms` is a free-running
    millisecond clock (esp_timer_get_time() / 1000, or xTaskGetTickCount()'s
-   tick-to-ms); elapsed time is computed with unsigned subtraction, so a
-   wraparound past UINT32_MAX ms (~49.7 days of uptime) self-corrects
-   rather than reporting a huge or negative hold.
+   tick-to-ms) that callers must keep monotonic. Elapsed time is computed
+   with unsigned subtraction, so a genuine wraparound past UINT32_MAX ms
+   (~49.7 days of uptime) self-corrects rather than reporting a huge
+   hold; a signed clamp on top of that treats a `now` that is earlier
+   than the hold's start for any OTHER reason (two clocks mixed, a
+   non-monotonic source) as zero elapsed rather than an instant arm —
+   see the clamp's comment in setup_trigger.c for why a real wrap and an
+   implausible backward jump can be told apart at all.
 
    No debounce inside the tracker: any single `down == false` sample while
    HOLDING or ARMED ends the hold (HOLDING -> CANCELLED, ARMED ->

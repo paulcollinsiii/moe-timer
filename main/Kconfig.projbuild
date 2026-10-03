@@ -409,19 +409,26 @@ menu "MagTag Timer"
 
     config MAGTAG_BOOT_WAKES
         bool "Let the BOOT button (GPIO0) wake the device from deep sleep"
-        default y
+        default n
         help
             Adds GPIO0 to the EXT1 wake mask so holding BOOT can wake the
             device, the first half of the "hold BOOT 5 s to enter setup"
-            gesture. GPIO0 is also a strapping pin: it is sampled at boot
-            to pick the ROM's boot mode, and the expectation is that this
+            gesture. Off (n) by default: nothing in wake_flow routes a
+            BOOT wake into setup mode yet (that is task 6 of the WiFi
+            provisioning plan), so turning this on today just wakes the
+            device, and spends a panel refresh, for a press that goes
+            nowhere. Flip it to y only once that routing has landed AND
+            the bench check below has passed — both, not either.
+
+            GPIO0 is also a strapping pin: it is sampled at boot to pick
+            the ROM's boot mode, and the expectation is that this
             sampling happens only on a chip/system reset, not on a
-            deep-sleep wake — but that has not been confirmed on a bench.
-            If holding GPIO0 low across a deep-sleep wake turns out to
-            enter download mode instead, disable this (n) without a
-            firmware change: the gesture still works while the device is
-            already awake for some other reason (any A-D press wakes it
-            first), just not as a wake source of its own.
+            deep-sleep wake — but that has not been confirmed on a bench
+            (the plan's task 7, "C8" check — still open). Changing this
+            symbol needs a rebuild and a reflash like any other Kconfig
+            option, not a runtime toggle: there is no way to back out of
+            a wrong answer in the field, so a board whose C8 result is
+            unconfirmed should stay at the default.
 
     config MAGTAG_BOOT_HOLD_MS
         int "BOOT hold duration to enter setup mode (ms)"

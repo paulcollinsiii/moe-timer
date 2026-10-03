@@ -240,6 +240,78 @@ void test_bit_positions_match_the_button_ids(void) {
     TEST_ASSERT_EQUAL_UINT8(0x00, wake_mask_for(false, true, true));  /* locked: nothing */
 }
 
+/* ---- BOOT (GPIO0) wake arming -----------------------------------------
+
+   buttons_policy_boot_wake_allowed() is a separate decision from the mask
+   above: BOOT is not a button_id_t and never occupies a bit in it
+   (buttons.h). It reads only two fields -- config_locked (shared with the
+   mask's D-only narrowing) and boot_currently_down (BOOT's own gate, which
+   stops a level-triggered re-wake loop while BOOT is held) -- and the sweep at the end of this
+   section is what proves the other three gates cannot move it. */
+static buttons_policy_in_t boot_in(bool enable, bool config_locked, bool boot_currently_down) {
+    buttons_policy_in_t in = {
+        .enable = enable,
+        .config_locked = config_locked,
+        .boot_currently_down = boot_currently_down,
+    };
+    return in;
+}
+
+void test_boot_armed_on_an_unlocked_sleep_not_currently_down(void) {
+    buttons_policy_in_t in = boot_in(true, false, false);
+    TEST_ASSERT_TRUE(buttons_policy_boot_wake_allowed(&in));
+}
+
+/* Finding 1: EXT1 is level-triggered, so arming BOOT while it already
+   reads low would wake the device the instant it reached deep sleep --
+   and keep doing so for as long as the press lasted, since nothing
+   resolves a BOOT-only wake into a button the continuation guard
+   recognizes (that guard, wake_flow.c, tracks only A-D). Refusing to arm
+   it while held is the fix: it never gets back into the mask to repeat. */
+void test_boot_not_armed_while_currently_down(void) {
+    buttons_policy_in_t in = boot_in(true, false, true);
+    TEST_ASSERT_FALSE(buttons_policy_boot_wake_allowed(&in));
+}
+
+/* Finding 3 / S21: the config-error (and, since BUG-14, no-clock) lock's
+   one exit stays D alone. BOOT does not get a second escape hatch
+   stacked on top of it, whatever GPIO0 happens to read. */
+void test_boot_not_armed_on_a_config_locked_sleep(void) {
+    buttons_policy_in_t in = boot_in(true, true, false);
+    TEST_ASSERT_FALSE(buttons_policy_boot_wake_allowed(&in));
+}
+
+/* The charge and Bed Time locks arm nothing at all -- BOOT included,
+   same as every button in buttons_policy_wake_mask() above. */
+void test_boot_not_armed_when_the_sleep_is_disabled(void) {
+    buttons_policy_in_t in = boot_in(false, false, false);
+    TEST_ASSERT_FALSE(buttons_policy_boot_wake_allowed(&in));
+    buttons_policy_in_t locked_too = boot_in(false, true, true);
+    TEST_ASSERT_FALSE(buttons_policy_boot_wake_allowed(&locked_too));
+}
+
+/* BOOT's arm decision must not move with the three per-button gates: it
+   has no action of its own for swap_allowed, mode_toggle_allowed or
+   chore_ack_allowed to gate. */
+void test_boot_arm_decision_ignores_the_per_button_gates(void) {
+    for (int swap = 0; swap <= 1; swap++) {
+        for (int mode = 0; mode <= 1; mode++) {
+            for (int ack = 0; ack <= 1; ack++) {
+                buttons_policy_in_t in = {
+                    .enable = true,
+                    .swap_allowed = swap,
+                    .mode_toggle_allowed = mode,
+                    .chore_ack_allowed = ack,
+                    .config_locked = false,
+                    .boot_currently_down = false,
+                };
+                TEST_ASSERT_TRUE_MESSAGE(buttons_policy_boot_wake_allowed(&in),
+                                         "a per-button gate moved BOOT's own arm decision");
+            }
+        }
+    }
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_disabled_arms_nothing);
@@ -257,5 +329,10 @@ int main(void) {
     RUN_TEST(test_an_ack_does_not_wake_on_a_locked_sleep);
     RUN_TEST(test_mask_is_exactly_the_qualifying_buttons);
     RUN_TEST(test_bit_positions_match_the_button_ids);
+    RUN_TEST(test_boot_armed_on_an_unlocked_sleep_not_currently_down);
+    RUN_TEST(test_boot_not_armed_while_currently_down);
+    RUN_TEST(test_boot_not_armed_on_a_config_locked_sleep);
+    RUN_TEST(test_boot_not_armed_when_the_sleep_is_disabled);
+    RUN_TEST(test_boot_arm_decision_ignores_the_per_button_gates);
     return UNITY_END();
 }

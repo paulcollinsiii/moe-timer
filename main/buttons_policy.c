@@ -114,3 +114,14 @@ uint8_t buttons_policy_wake_mask(const buttons_policy_in_t *in) {
     }
     return mask;
 }
+
+bool buttons_policy_boot_wake_allowed(const buttons_policy_in_t *in) {
+    /* Same "arm nothing" early exit as wake_source()'s D-only narrowing,
+       plus the narrowing itself: a config-locked (or no-clock-locked)
+       sleep's one exit is D, not a second escape hatch stacked on it. */
+    if (!in->enable || in->config_locked)
+        return false;
+    /* Refuse to arm while already held — see boot_currently_down's
+       comment in buttons_policy.h for the re-wake loop this closes. */
+    return !in->boot_currently_down;
+}
