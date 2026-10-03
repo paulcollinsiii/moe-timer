@@ -1,12 +1,26 @@
 #pragma once
 
-/* Real WiFi credentials live in credentials.local.h (gitignored via
-   *.local.h — safe from accidental commits). Copy credentials.local.h.example
-   to include/credentials.local.h and fill it in. */
+/* The OTA manifest URL fallback lives in credentials.local.h (gitignored
+   via *.local.h — safe from accidental commits). Copy
+   credentials.local.h.example to include/credentials.local.h and fill it
+   in. WiFi and the MQTT broker are NOT set here any more: the device is
+   provisioned on-device (SoftAP setup mode), and the owner enters both
+   there. */
 #if defined(__has_include)
 #if __has_include("credentials.local.h")
 #include "credentials.local.h"
 #endif
+#endif
+
+/* An owner whose credentials.local.h still defines one of the old
+   WiFi/MQTT fallbacks gets a build-time nudge: these macros are no longer
+   read by anything (see above). Plain #warning becomes a hard error under
+   this build's -Werror (GCC promotes #warning via -Werror=cpp), so this
+   uses #pragma message instead, which -Werror does not elevate. */
+#if defined(NVS_DEFAULT_WIFI_SSID) || defined(NVS_DEFAULT_WIFI_PASS) || defined(NVS_DEFAULT_MQTT_URI) || \
+    defined(NVS_DEFAULT_MQTT_USER) || defined(NVS_DEFAULT_MQTT_PASS)
+#pragma message \
+    "credentials.local.h still defines a WiFi/MQTT NVS_DEFAULT_* macro; it is no longer read. Enter WiFi and MQTT on the device in setup mode instead."
 #endif
 
 /* Base salt for the defaults stamp. The stored stamp is a FINGERPRINT of
@@ -56,41 +70,9 @@
 #define NVS_DEFAULT_CHORE_FREE_HOL 0
 #define NVS_DEFAULT_CHORE_FREE_SUM 0
 
-#ifndef NVS_DEFAULT_WIFI_SSID
-#define NVS_DEFAULT_WIFI_SSID ""
-#endif
-#ifndef NVS_DEFAULT_WIFI_PASS
-#define NVS_DEFAULT_WIFI_PASS ""
-#endif
-
-/* MQTT broker for the Home Assistant integration. Set in
-   credentials.local.h (preferred — gitignored, like WiFi) or via
-   menuconfig; empty URI disables MQTT entirely. */
-#ifndef NVS_DEFAULT_MQTT_URI
-#ifdef CONFIG_MAGTAG_MQTT_URI
-#define NVS_DEFAULT_MQTT_URI CONFIG_MAGTAG_MQTT_URI
-#else
-#define NVS_DEFAULT_MQTT_URI ""
-#endif
-#endif
-#ifndef NVS_DEFAULT_MQTT_USER
-#ifdef CONFIG_MAGTAG_MQTT_USER
-#define NVS_DEFAULT_MQTT_USER CONFIG_MAGTAG_MQTT_USER
-#else
-#define NVS_DEFAULT_MQTT_USER ""
-#endif
-#endif
-#ifndef NVS_DEFAULT_MQTT_PASS
-#ifdef CONFIG_MAGTAG_MQTT_PASS
-#define NVS_DEFAULT_MQTT_PASS CONFIG_MAGTAG_MQTT_PASS
-#else
-#define NVS_DEFAULT_MQTT_PASS ""
-#endif
-#endif
-
 /* OTA manifest endpoint and the check-on-sync flag. Set the URL in
-   credentials.local.h (preferred — gitignored, like WiFi/MQTT) or via
-   menuconfig; empty disables OTA entirely.
+   credentials.local.h (preferred — gitignored) or via menuconfig; empty
+   disables OTA entirely.
 
    DELIBERATELY NOT IN THE SEEDED-DEFAULTS REGISTRY BELOW. Both keys are
    HA-editable at runtime, and the registry drives the defaults
@@ -175,12 +157,14 @@
     X(NVS_KEY_HOLIDAY_MIN, NVS_DEFAULT_HOLIDAY_MIN) \
     X(NVS_KEY_SUMMER_MIN, NVS_DEFAULT_SUMMER_MIN)
 
-#define NVS_SEEDED_STRS(X)                      \
-    X(NVS_KEY_WIFI_SSID, NVS_DEFAULT_WIFI_SSID) \
-    X(NVS_KEY_WIFI_PASS, NVS_DEFAULT_WIFI_PASS) \
-    X(NVS_KEY_MQTT_URI, NVS_DEFAULT_MQTT_URI)   \
-    X(NVS_KEY_MQTT_USER, NVS_DEFAULT_MQTT_USER) \
-    X(NVS_KEY_MQTT_PASS, NVS_DEFAULT_MQTT_PASS)
+/* No NVS_SEEDED_STRS any more: wifi_ssid/wifi_pass/mqtt_uri/mqtt_user/
+   mqtt_pass were its only rows, and build-time credentials are gone (see
+   the on-device setup mode). The getters' own empty-default fallback
+   (nvs_config.c:get_str_empty_default) already reads an unwritten key as
+   "" — the unprovisioned signal — with no registry row needed. If a future
+   string default needs seeding, copy the NVS_SEEDED_U16S/FOLD_U16/SEED_U16/
+   INIT_U16 pattern in nvs_config.c rather than resurrecting an empty
+   macro. */
 
 /* Weekday no-school days during the 2026-27 school year (weekends are
    their own category; summer break is the summer category). Newline-

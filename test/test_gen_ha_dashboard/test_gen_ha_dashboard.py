@@ -1784,16 +1784,16 @@ class TestSdkconfig(unittest.TestCase):
                 self.assertIn("/x/sdkconfig", str(cm.exception))
                 self.assertNotIn(SENTINEL, str(cm.exception))
 
-    def test_empty_uri_points_a_credentials_local_h_owner_at_sdkconfig_file(self):
-        # The preferred broker setting (include/credentials.local.h) overrides
-        # Kconfig in the firmware and never reaches sdkconfig, whose URI is
-        # then empty: the error says how to hand the tool the three lines.
+    def test_empty_uri_names_the_sdkconfig_option(self):
+        # The firmware no longer carries build-time MQTT credentials at all
+        # (WiFi and MQTT are entered on-device), so an empty URI here is the
+        # normal case, not a precedence quirk: the error says how to hand
+        # the tool the three lines directly.
         text = f'CONFIG_MAGTAG_MQTT_URI=""\nCONFIG_MAGTAG_MQTT_USER="u"\nCONFIG_MAGTAG_MQTT_PASS="{SENTINEL}"\n'
         with self.assertRaises(g.UsageError) as cm:
             g.parse_sdkconfig(text, "/x/sdkconfig")
         msg = str(cm.exception)
-        self.assertIn("include/credentials.local.h is not in sdkconfig", msg)
-        self.assertIn("pass --sdkconfig FILE, a file holding the three CONFIG_MAGTAG_MQTT_ lines", msg)
+        self.assertIn("pass --sdkconfig FILE naming a file with the three CONFIG_MAGTAG_MQTT_ lines", msg)
         self.assertNotIn(SENTINEL, msg)
 
     def test_missing_file(self):

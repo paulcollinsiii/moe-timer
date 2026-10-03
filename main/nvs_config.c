@@ -387,17 +387,11 @@ esp_err_t nvs_config_load_timer_snapshot(timer_snapshot_t *out) {
 
 /* ---- init defaults ---- */
 
-static uint32_t fold_str(uint32_t fp, const char *s) {
-    for (; s != NULL && *s != '\0'; s++)
-        fp = fp * 31u + (unsigned char)*s;
-    return fp;
-}
-
-/* Every seeded default is mixed in — the credential strings too, or
-   setting a WiFi/MQTT default after the first seed silently never takes
-   (the key already exists as "" and init-if-missing skips it). Fold order
-   = registry row order (see nvs_defaults.h — order is load-bearing).
-   Never returns 0 (would collide with blank NVS). */
+/* Only the u16 allocations are folded now — wifi_ssid/wifi_pass/mqtt_uri/
+   mqtt_user/mqtt_pass were the only string rows, and build-time
+   credentials are gone (see the on-device setup mode). Fold order =
+   registry row order (see nvs_defaults.h — order is load-bearing). Never
+   returns 0 (would collide with blank NVS). */
 uint16_t nvs_config_defaults_fingerprint(void) {
     uint32_t fp = NVS_DEFAULTS_VERSION;
 #define FOLD_U16(key, def) fp = fp * 31u + (def);
@@ -405,11 +399,6 @@ uint16_t nvs_config_defaults_fingerprint(void) {
     // cppcheck-suppress unknownMacro
     NVS_SEEDED_U16S(FOLD_U16)
 #undef FOLD_U16
-#define FOLD_STR(key, def) fp = fold_str(fp, (def));
-    /* registry macro from nvs_defaults.h — cppcheck runs without -I */
-    // cppcheck-suppress unknownMacro
-    NVS_SEEDED_STRS(FOLD_STR)
-#undef FOLD_STR
     uint16_t out = (uint16_t)(fp ^ (fp >> 16));
     return (out == 0) ? 1 : out;
 }
@@ -424,13 +413,6 @@ static esp_err_t reseed_all_defaults(void) {
     // cppcheck-suppress unknownMacro
     NVS_SEEDED_U16S(SEED_U16)
 #undef SEED_U16
-#define SEED_STR(key, def)                               \
-    if ((ret = hal_nvs_write_str(key, (def))) != ESP_OK) \
-        return ret;
-    /* registry macro from nvs_defaults.h — cppcheck runs without -I */
-    // cppcheck-suppress unknownMacro
-    NVS_SEEDED_STRS(SEED_STR)
-#undef SEED_STR
     ret = hal_nvs_write_blob(NVS_KEY_HOLIDAYS, NVS_DEFAULT_HOLIDAYS, strlen(NVS_DEFAULT_HOLIDAYS));
     if (ret != ESP_OK)
         return ret;
@@ -461,8 +443,6 @@ esp_err_t nvs_config_init_defaults(void) {
     /* Stamp current: fill in only missing keys (repairs partial state
        without touching runtime-set values). Same registry as the reseed. */
     esp_err_t ret;
-    char tmp[64];
-    size_t tmp_len;
 
 #define INIT_U16(key, def)                                 \
     if ((ret = init_u16_if_missing(key, (def))) != ESP_OK) \
@@ -471,16 +451,6 @@ esp_err_t nvs_config_init_defaults(void) {
     // cppcheck-suppress unknownMacro
     NVS_SEEDED_U16S(INIT_U16)
 #undef INIT_U16
-#define INIT_STR(key, def)                                               \
-    tmp_len = sizeof(tmp);                                               \
-    if (hal_nvs_read_str(key, tmp, &tmp_len) == ESP_ERR_NVS_NOT_FOUND) { \
-        if ((ret = hal_nvs_write_str(key, (def))) != ESP_OK)             \
-            return ret;                                                  \
-    }
-    /* registry macro from nvs_defaults.h — cppcheck runs without -I */
-    // cppcheck-suppress unknownMacro
-    NVS_SEEDED_STRS(INIT_STR)
-#undef INIT_STR
 
     /* Holiday blob: write only if missing */
     {

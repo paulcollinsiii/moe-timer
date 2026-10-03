@@ -869,14 +869,15 @@ def parse_sdkconfig(text: str, where: str = "sdkconfig") -> dict[str, str]:
     missing = [k for k in (SDK_URI, SDK_USER, SDK_PASS) if k not in out]
     if missing:
         raise UsageError(
-            f"{where}: {', '.join(missing)} not found. Is this the firmware's sdkconfig? "
-            f"Run `idf.py reconfigure` once, or pass --sdkconfig PATH."
+            f"{where}: {', '.join(missing)} not found. The firmware build no longer carries MQTT "
+            f"broker credentials (WiFi and MQTT are entered on-device instead), so a real firmware "
+            f"sdkconfig will never have these. Pass --sdkconfig PATH naming a small file with the "
+            f"three CONFIG_MAGTAG_MQTT_ lines set."
         )
     if not out[SDK_URI].strip():
         raise UsageError(
-            f"{where}: {SDK_URI} is empty; set the broker URI (idf.py menuconfig) or pass --sdkconfig. "
-            f"A broker set in include/credentials.local.h is not in sdkconfig: pass --sdkconfig FILE, "
-            f"a file holding the three CONFIG_MAGTAG_MQTT_ lines."
+            f"{where}: {SDK_URI} is empty; pass --sdkconfig FILE naming a file with the three "
+            f"CONFIG_MAGTAG_MQTT_ lines set."
         )
     return out
 

@@ -9,27 +9,6 @@ menu "MagTag Timer"
             during bring-up/debugging; disable for production builds
             (CONFIG_MAGTAG_SYNC_LED_FEEDBACK=n in sdkconfig.defaults).
 
-    config MAGTAG_MQTT_URI
-        string "MQTT broker URI for Home Assistant (empty = disabled)"
-        default ""
-        help
-            e.g. mqtt://homeassistant.local:1883 — the device publishes
-            stats/discovery and reads retained config during its periodic
-            network windows. Prefer setting NVS_DEFAULT_MQTT_URI in
-            include/credentials.local.h (gitignored) so broker credentials
-            never land in a committed sdkconfig.defaults. Empty disables
-            the MQTT session entirely.
-
-    config MAGTAG_MQTT_USER
-        string "MQTT username"
-        default ""
-        depends on MAGTAG_MQTT_URI != ""
-
-    config MAGTAG_MQTT_PASS
-        string "MQTT password"
-        default ""
-        depends on MAGTAG_MQTT_URI != ""
-
     config MAGTAG_WEEKDAY_MIN
         int "Weekday screen-time allocation (minutes)"
         default 60
@@ -440,8 +419,7 @@ menu "MagTag Timer"
 
             Prefer setting NVS_DEFAULT_OTA_URL in
             include/credentials.local.h (gitignored) so a hosting
-            endpoint never lands in a committed sdkconfig.defaults —
-            the same treatment MAGTAG_MQTT_URI gets.
+            endpoint never lands in a committed sdkconfig.defaults.
 
             This is only the fallback the device uses while NVS holds no
             endpoint of its own. It is deliberately NOT part of the

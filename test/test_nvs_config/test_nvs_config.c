@@ -205,42 +205,23 @@ void test_defaults_fingerprint_is_nonzero_and_stable(void) {
 /* Reference re-implementation of the fingerprint fold, used for property
    tests with arbitrary inputs. The pinned characterization test below
    proves the production registry-driven fold matches this algorithm on
-   the real compile-time defaults. */
-static uint16_t ref_fingerprint(uint32_t version, uint16_t wd, uint16_t we, uint16_t ho, uint16_t su, const char *ssid,
-                                const char *pass, const char *uri, const char *user, const char *mpass) {
+   the real compile-time defaults. No string rows any more: wifi_ssid/
+   wifi_pass/mqtt_uri/mqtt_user/mqtt_pass were the only ones, and build-time
+   credentials are gone (see the on-device setup mode). */
+static uint16_t ref_fingerprint(uint32_t version, uint16_t wd, uint16_t we, uint16_t ho, uint16_t su) {
     uint32_t fp = version;
     fp = fp * 31u + wd;
     fp = fp * 31u + we;
     fp = fp * 31u + ho;
     fp = fp * 31u + su;
-    const char *strs[] = {ssid, pass, uri, user, mpass};
-    for (size_t i = 0; i < sizeof(strs) / sizeof(strs[0]); i++) {
-        for (const char *s = strs[i]; s != NULL && *s != '\0'; s++) {
-            fp = fp * 31u + (unsigned char)*s;
-        }
-    }
     uint16_t out = (uint16_t)(fp ^ (fp >> 16));
     return (out == 0) ? 1 : out;
-}
-
-void test_fingerprint_folds_in_credentials(void) {
-    /* Regression: a changed WiFi/MQTT default must change the fingerprint,
-       so setting NVS_DEFAULT_MQTT_URI after the first seed actually reseeds
-       (the key already exists as "" and init-if-missing would skip it). */
-    uint16_t base = ref_fingerprint(3, 60, 120, 120, 120, "ssid", "pass", "", "", "");
-    uint16_t with_uri = ref_fingerprint(3, 60, 120, 120, 120, "ssid", "pass", "mqtt://ha:1883", "", "");
-    uint16_t other_ssid = ref_fingerprint(3, 60, 120, 120, 120, "other", "pass", "", "", "");
-    TEST_ASSERT_NOT_EQUAL(base, with_uri);
-    TEST_ASSERT_NOT_EQUAL(base, other_ssid);
-    /* deterministic */
-    TEST_ASSERT_EQUAL_UINT16(with_uri, ref_fingerprint(3, 60, 120, 120, 120, "ssid", "pass", "mqtt://ha:1883", "", ""));
 }
 
 void test_init_defaults_reseeds_on_fingerprint_change(void) {
     TEST_ASSERT_EQUAL(ESP_OK, nvs_config_init_defaults());
     /* Simulate values seeded by a build with different compile-time defaults */
     TEST_ASSERT_EQUAL(ESP_OK, nvs_config_set_weekday_min(99));
-    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_set_wifi_ssid("old-ssid"));
     TEST_ASSERT_EQUAL(ESP_OK, hal_nvs_write_u16("defaults_ver", (uint16_t)(nvs_config_defaults_fingerprint() - 1)));
 
     TEST_ASSERT_EQUAL(ESP_OK, nvs_config_init_defaults());
@@ -248,9 +229,6 @@ void test_init_defaults_reseeds_on_fingerprint_change(void) {
     uint16_t val = 0;
     TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_weekday_min(&val));
     TEST_ASSERT_EQUAL_UINT16(NVS_DEFAULT_WEEKDAY_MIN, val);
-    char ssid[64];
-    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_wifi_ssid(ssid, sizeof(ssid)));
-    TEST_ASSERT_EQUAL_STRING(NVS_DEFAULT_WIFI_SSID, ssid);
     uint16_t ver = 0;
     TEST_ASSERT_EQUAL(ESP_OK, hal_nvs_read_u16("defaults_ver", &ver));
     TEST_ASSERT_EQUAL_UINT16(nvs_config_defaults_fingerprint(), ver);
@@ -299,12 +277,79 @@ void test_mqtt_settings_missing_read_as_empty(void) {
     TEST_ASSERT_EQUAL_STRING("", buf); /* empty = MQTT disabled */
 }
 
-void test_init_defaults_seeds_mqtt_keys(void) {
+/* Build-time WiFi/MQTT credentials are gone (the device is provisioned
+   on-device instead): none of the five keys is a registry row any more, so
+   a blank-NVS init_defaults must leave all five UNWRITTEN — reading the
+   raw key, not the accessor, the same way test_init_defaults_does_not_seed_
+   the_chore_free_keys does — and every getter must read back as "", the
+   signal the rest of the firmware (and setup mode) uses for "unprovisioned".
+*/
+void test_init_defaults_does_not_seed_credential_keys(void) {
     TEST_ASSERT_EQUAL(ESP_OK, nvs_config_init_defaults());
-    char buf[96];
-    size_t len = sizeof(buf);
-    /* Key exists after seeding (value = compile-time default) */
-    TEST_ASSERT_EQUAL(ESP_OK, hal_nvs_read_str("mqtt_uri", buf, &len));
+    char raw[64];
+    size_t raw_len = sizeof(raw);
+    TEST_ASSERT_EQUAL(ESP_ERR_NVS_NOT_FOUND, hal_nvs_read_str(NVS_KEY_WIFI_SSID, raw, &raw_len));
+    raw_len = sizeof(raw);
+    TEST_ASSERT_EQUAL(ESP_ERR_NVS_NOT_FOUND, hal_nvs_read_str(NVS_KEY_WIFI_PASS, raw, &raw_len));
+    raw_len = sizeof(raw);
+    TEST_ASSERT_EQUAL(ESP_ERR_NVS_NOT_FOUND, hal_nvs_read_str(NVS_KEY_MQTT_URI, raw, &raw_len));
+    raw_len = sizeof(raw);
+    TEST_ASSERT_EQUAL(ESP_ERR_NVS_NOT_FOUND, hal_nvs_read_str(NVS_KEY_MQTT_USER, raw, &raw_len));
+    raw_len = sizeof(raw);
+    TEST_ASSERT_EQUAL(ESP_ERR_NVS_NOT_FOUND, hal_nvs_read_str(NVS_KEY_MQTT_PASS, raw, &raw_len));
+
+    char buf[64];
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_wifi_ssid(buf, sizeof(buf)));
+    TEST_ASSERT_EQUAL_STRING("", buf);
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_wifi_pass(buf, sizeof(buf)));
+    TEST_ASSERT_EQUAL_STRING("", buf);
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_mqtt_uri(buf, sizeof(buf)));
+    TEST_ASSERT_EQUAL_STRING("", buf);
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_mqtt_user(buf, sizeof(buf)));
+    TEST_ASSERT_EQUAL_STRING("", buf);
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_mqtt_pass(buf, sizeof(buf)));
+    TEST_ASSERT_EQUAL_STRING("", buf);
+}
+
+/* THE migration guarantee (plan C1 / "Removing build-time credentials"): a
+   reseed — triggered here the way a changed Kconfig default would trigger
+   it in the field — must not touch credentials an owner already entered.
+   Mirrors test_reseed_does_not_revert_ha_set_ota_values: these keys are
+   simply never in the registry any more, so reseed_all_defaults() cannot
+   write them. */
+void test_reseed_does_not_revert_credential_values(void) {
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_init_defaults());
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_set_wifi_ssid("MyHomeNetwork"));
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_set_wifi_pass("hunter2"));
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_set_mqtt_uri("mqtt://ha.local:1883"));
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_set_mqtt_user("magtag"));
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_set_mqtt_pass("brokerpass"));
+    /* Force a reseed the way a changed Kconfig default (or a missing
+       stamp) would in the field */
+    TEST_ASSERT_EQUAL(ESP_OK, hal_nvs_write_u16("defaults_ver", 0x5555));
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_init_defaults());
+
+    char buf[64];
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_wifi_ssid(buf, sizeof(buf)));
+    TEST_ASSERT_EQUAL_STRING("MyHomeNetwork", buf);
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_wifi_pass(buf, sizeof(buf)));
+    TEST_ASSERT_EQUAL_STRING("hunter2", buf);
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_mqtt_uri(buf, sizeof(buf)));
+    TEST_ASSERT_EQUAL_STRING("mqtt://ha.local:1883", buf);
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_mqtt_user(buf, sizeof(buf)));
+    TEST_ASSERT_EQUAL_STRING("magtag", buf);
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_mqtt_pass(buf, sizeof(buf)));
+    TEST_ASSERT_EQUAL_STRING("brokerpass", buf);
+}
+
+/* Also covers a missing stamp (field devices seeded before the stamp
+   existed, or before this migration) taking the same reseed path. */
+void test_init_defaults_missing_version_key_preserves_credentials(void) {
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_set_wifi_ssid("old-ssid"));
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_init_defaults());
+    char buf[64];
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_wifi_ssid(buf, sizeof(buf)));
+    TEST_ASSERT_EQUAL_STRING("old-ssid", buf);
 }
 
 /* ------------------------------------------------------------------ */
@@ -708,10 +753,8 @@ void test_timer_snapshot_rejects_wrong_version(void) {
    historical fold inline; any registry refactor must keep producing an
    identical value. (Holidays are deliberately NOT folded.) */
 void test_defaults_fingerprint_algorithm_pinned(void) {
-    uint16_t expect =
-        ref_fingerprint(NVS_DEFAULTS_VERSION, NVS_DEFAULT_WEEKDAY_MIN, NVS_DEFAULT_WEEKEND_MIN, NVS_DEFAULT_HOLIDAY_MIN,
-                        NVS_DEFAULT_SUMMER_MIN, NVS_DEFAULT_WIFI_SSID, NVS_DEFAULT_WIFI_PASS, NVS_DEFAULT_MQTT_URI,
-                        NVS_DEFAULT_MQTT_USER, NVS_DEFAULT_MQTT_PASS);
+    uint16_t expect = ref_fingerprint(NVS_DEFAULTS_VERSION, NVS_DEFAULT_WEEKDAY_MIN, NVS_DEFAULT_WEEKEND_MIN,
+                                      NVS_DEFAULT_HOLIDAY_MIN, NVS_DEFAULT_SUMMER_MIN);
     TEST_ASSERT_EQUAL_UINT16(expect, nvs_config_defaults_fingerprint());
 }
 
@@ -793,7 +836,6 @@ int main(void) {
     RUN_TEST(test_alert_volume_missing_returns_default_and_roundtrip);
     RUN_TEST(test_init_defaults_writes_fingerprint_stamp);
     RUN_TEST(test_defaults_fingerprint_is_nonzero_and_stable);
-    RUN_TEST(test_fingerprint_folds_in_credentials);
     RUN_TEST(test_init_defaults_reseeds_on_fingerprint_change);
     RUN_TEST(test_init_defaults_missing_version_key_reseeds);
     RUN_TEST(test_init_defaults_same_version_preserves_values);
@@ -808,7 +850,9 @@ int main(void) {
     RUN_TEST(test_reseed_clears_cfg_ver);
     RUN_TEST(test_mqtt_settings_round_trip);
     RUN_TEST(test_mqtt_settings_missing_read_as_empty);
-    RUN_TEST(test_init_defaults_seeds_mqtt_keys);
+    RUN_TEST(test_init_defaults_does_not_seed_credential_keys);
+    RUN_TEST(test_reseed_does_not_revert_credential_values);
+    RUN_TEST(test_init_defaults_missing_version_key_preserves_credentials);
     RUN_TEST(test_ota_url_defaults_and_round_trip);
     RUN_TEST(test_ota_on_sync_defaults_and_round_trip);
     RUN_TEST(test_ota_state_keys_default_empty_and_round_trip);
