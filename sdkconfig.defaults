@@ -171,15 +171,17 @@ CONFIG_LV_FONT_DEFAULT_MONTSERRAT_12=y
 # layout, no shadow/transform. Every other widget, layout engine and the
 # observer/examples/demos code is dead weight; LVGL is the single largest
 # archive in the image (415 KB) so trimming it is the main lever against the
-# 85 % slot guard. LV_DRAW_SW_COMPLEX stays enabled: the UI uses `radius`.
+# 85 % slot guard. LV_DRAW_SW_COMPLEX stays enabled, unmeasured: the only
+# `radius` calls in the UI (display_screens.c:129, :134, in style_bar) set it
+# to 0, overriding the mono theme's radius of 2, which suggests COMPLEX may
+# be removable — but that needs an actual build plus byte-identical goldens
+# to confirm, not assumed here.
 # CONFIG_LV_USE_ANIMIMG is not set
 # CONFIG_LV_USE_ARC is not set
 # CONFIG_LV_USE_ARCLABEL is not set
 # CONFIG_LV_USE_BUTTON is not set
 # CONFIG_LV_USE_BUTTONMATRIX is not set
 # CONFIG_LV_USE_CALENDAR is not set
-# CONFIG_LV_USE_CALENDAR_HEADER_ARROW is not set
-# CONFIG_LV_USE_CALENDAR_HEADER_DROPDOWN is not set
 # CONFIG_LV_USE_CANVAS is not set
 # CONFIG_LV_USE_CHART is not set
 # CONFIG_LV_USE_CHECKBOX is not set
@@ -210,9 +212,16 @@ CONFIG_LV_FONT_DEFAULT_MONTSERRAT_12=y
 # CONFIG_LV_BUILD_EXAMPLES is not set
 # CONFIG_LV_BUILD_DEMOS is not set
 
-# LVGL size trim, part 2: the panel is 1-bit (I1); no other pixel format is
-# ever composed on this target, so every other CONFIG_LV_DRAW_SW_SUPPORT_*
-# software-draw conversion path is dead weight. I1 is the only one kept.
+# LVGL size trim, part 2: the panel is 1-bit (I1), and every other
+# CONFIG_LV_DRAW_SW_SUPPORT_* software-draw conversion path is dead weight
+# for the plain label/bar fills this UI draws — I1 is the only one kept.
+# Trap: this does not mean no other format is ever composed. Any indexed or
+# canvas image (lv_qrcode's LV_USE_CANVAS/LV_USE_IMAGE backing included) is
+# decoded to ARGB8888 before it reaches the blend stage, and any render
+# layer (from opa_layered, a transform or clip_corner) is also composed as
+# ARGB8888 — with LV_USE_LOG off, both now draw silently nothing instead of
+# failing loudly. Re-enable CONFIG_LV_DRAW_SW_SUPPORT_ARGB8888 before adding
+# any of those.
 # CONFIG_LV_DRAW_SW_SUPPORT_RGB565 is not set
 # CONFIG_LV_DRAW_SW_SUPPORT_RGB565_SWAPPED is not set
 # CONFIG_LV_DRAW_SW_SUPPORT_RGB565A8 is not set
