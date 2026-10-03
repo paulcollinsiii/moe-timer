@@ -34,32 +34,63 @@ bool config_is_iso_date(const char *s) {
     return tm.tm_year == year - 1900 && tm.tm_mon == month - 1 && tm.tm_mday == day;
 }
 
-bool config_is_https_url(const char *s) {
-    static const char scheme[] = "https://";
-    if (s == NULL)
-        return false;
-    /* Scheme compare is case-insensitive: "HTTPS://host" is a legal URL
-       that works in a browser, so refusing it here would read as a bug.
-       The loop stops at the first mismatch, so a short string (including
-       "") fails on its NUL rather than running off the end -- '\0' equals
-       no scheme character. cppcheck models the loop as always running to
-       completion and so reads a short literal at a call site as an overrun;
-       an explicit NUL test does not convince it either, so per schedule.c
-       this is suppressed rather than contorted. */
-    for (size_t i = 0; i < sizeof(scheme) - 1; i++)
+/* Case-insensitive compare of s[0..len) against scheme[0..len), shared by
+   every URL-scheme check below so this shape exists once. Scheme compare
+   is case-insensitive: "HTTPS://host" is a legal URL that works in a
+   browser, so refusing it here would read as a bug. The loop stops at
+   the first mismatch, so a short s (including "") fails on its NUL
+   rather than running off the end -- '\0' equals no scheme character.
+   cppcheck models the loop as always running to completion and so reads
+   a short literal at a call site as an overrun; an explicit NUL test
+   does not convince it either, so per schedule.c this is suppressed
+   rather than contorted. */
+static bool scheme_prefix_eq(const char *s, const char *scheme, size_t len) {
+    for (size_t i = 0; i < len; i++)
         // cppcheck-suppress arrayIndexOutOfBounds
         if (tolower((unsigned char)s[i]) != scheme[i])
             return false;
-    const char *rest = s + sizeof(scheme) - 1;
-    if (*rest == '\0')
-        return false; /* scheme but no host */
-    /* No spaces or control chars (not legal in a URL, and they are what
-       would corrupt the request line), and no quote/backslash (they would
-       corrupt the cfg-state JSON this value is republished in). */
+    return true;
+}
+
+/* The character rule every URL check below shares for what follows the
+   scheme: no spaces or control chars (not legal in a URL, and they are
+   what would corrupt the request line), and no quote/backslash (they
+   would corrupt a hand-built JSON document the value might be
+   republished in). */
+static bool url_rest_is_clean(const char *rest) {
     for (const char *p = rest; *p != '\0'; p++)
         if ((unsigned char)*p <= ' ' || *p == '"' || *p == '\\')
             return false;
     return true;
+}
+
+bool config_is_https_url(const char *s) {
+    static const char scheme[] = "https://";
+    if (s == NULL)
+        return false;
+    if (!scheme_prefix_eq(s, scheme, sizeof(scheme) - 1))
+        return false;
+    const char *rest = s + sizeof(scheme) - 1;
+    if (*rest == '\0')
+        return false; /* scheme but no host */
+    return url_rest_is_clean(rest);
+}
+
+bool config_is_mqtt_uri(const char *s) {
+    static const char scheme_mqtts[] = "mqtts://";
+    static const char scheme_mqtt[] = "mqtt://";
+    if (s == NULL)
+        return false;
+    const char *rest;
+    if (scheme_prefix_eq(s, scheme_mqtts, sizeof(scheme_mqtts) - 1))
+        rest = s + sizeof(scheme_mqtts) - 1;
+    else if (scheme_prefix_eq(s, scheme_mqtt, sizeof(scheme_mqtt) - 1))
+        rest = s + sizeof(scheme_mqtt) - 1;
+    else
+        return false; /* neither scheme */
+    if (*rest == '\0')
+        return false; /* scheme but no host */
+    return url_rest_is_clean(rest);
 }
 
 bool config_is_ota_url(const char *s) {

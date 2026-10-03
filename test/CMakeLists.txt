@@ -159,6 +159,12 @@ add_host_test(test_config_validate)
 # Location header may be followed. It compiles config_validate.c beside
 # ota_url.c so the https rule under test is the real one, not a restatement.
 add_host_test(test_ota_url)
+# Carries cJSON for the JSON parse entry point; config_validate.c for the
+# real config_is_mqtt_uri rather than a restatement (same reason as
+# test_ota_url, above).
+add_host_test(test_mqtt_form
+    EXTRA_SRCS ${CMAKE_CURRENT_SOURCE_DIR}/../lib/cJSON/cJSON.c
+    EXTRA_INCLUDES ${CMAKE_CURRENT_SOURCE_DIR}/../lib/cJSON)
 add_host_test(test_ha_config EXTRA_LIBS m) # m: tones.c sine LUT
 add_host_test(test_tones EXTRA_LIBS m)
 add_host_test(test_wav_header)

@@ -72,6 +72,42 @@ void test_https_url_rejects_unsafe_characters(void) {
     TEST_ASSERT_FALSE(config_is_https_url("https://example.com/\\x"));
 }
 
+/* ---- MQTT broker URI (the setup form's scheme check) ---- */
+
+void test_mqtt_uri_accepts_both_schemes(void) {
+    TEST_ASSERT_TRUE(config_is_mqtt_uri("mqtt://broker.local"));
+    TEST_ASSERT_TRUE(config_is_mqtt_uri("mqtts://broker.local:8883"));
+    TEST_ASSERT_TRUE(config_is_mqtt_uri("mqtt://10.0.0.5:1883"));
+    /* Case-insensitive, same as config_is_https_url. */
+    TEST_ASSERT_TRUE(config_is_mqtt_uri("MQTT://broker.local"));
+    TEST_ASSERT_TRUE(config_is_mqtt_uri("MqTtS://broker.local"));
+}
+
+void test_mqtt_uri_rejects_other_schemes(void) {
+    TEST_ASSERT_FALSE(config_is_mqtt_uri("http://broker.local"));
+    TEST_ASSERT_FALSE(config_is_mqtt_uri("https://broker.local"));
+    TEST_ASSERT_FALSE(config_is_mqtt_uri("broker.local"));
+    TEST_ASSERT_FALSE(config_is_mqtt_uri("ftp://broker.local"));
+    /* "mqtt" and "mqtts" do not falsely prefix-match each other. */
+    TEST_ASSERT_FALSE(config_is_mqtt_uri("mqttx://broker.local"));
+}
+
+void test_mqtt_uri_rejects_empty_null_and_hostless(void) {
+    TEST_ASSERT_FALSE(config_is_mqtt_uri(NULL));
+    TEST_ASSERT_FALSE(config_is_mqtt_uri("")); /* "MQTT off" is mqtt_form.c's rule, not this one's */
+    TEST_ASSERT_FALSE(config_is_mqtt_uri("mqtt://"));
+    TEST_ASSERT_FALSE(config_is_mqtt_uri("mqtts://"));
+    TEST_ASSERT_FALSE(config_is_mqtt_uri("mqtt:/"));
+    TEST_ASSERT_FALSE(config_is_mqtt_uri("mqtt"));
+}
+
+void test_mqtt_uri_rejects_unsafe_characters(void) {
+    TEST_ASSERT_FALSE(config_is_mqtt_uri("mqtt://broker.local/a b"));
+    TEST_ASSERT_FALSE(config_is_mqtt_uri("mqtt://broker.local/a\nb"));
+    TEST_ASSERT_FALSE(config_is_mqtt_uri("mqtt://broker.local/\"x\""));
+    TEST_ASSERT_FALSE(config_is_mqtt_uri("mqtt://broker.local/\\x"));
+}
+
 /* ---- OTA URL field rule (the one both apply paths share) ---- */
 
 void test_ota_url_allows_empty_as_the_off_switch(void) {
@@ -201,6 +237,10 @@ int main(void) {
     RUN_TEST(test_https_url_rejects_other_schemes);
     RUN_TEST(test_https_url_rejects_empty_and_hostless);
     RUN_TEST(test_https_url_rejects_unsafe_characters);
+    RUN_TEST(test_mqtt_uri_accepts_both_schemes);
+    RUN_TEST(test_mqtt_uri_rejects_other_schemes);
+    RUN_TEST(test_mqtt_uri_rejects_empty_null_and_hostless);
+    RUN_TEST(test_mqtt_uri_rejects_unsafe_characters);
     RUN_TEST(test_ota_url_allows_empty_as_the_off_switch);
     RUN_TEST(test_ota_url_otherwise_matches_the_https_rule);
     RUN_TEST(test_clean_str_accepts_ordinary_values);

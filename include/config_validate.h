@@ -32,6 +32,24 @@ bool config_is_iso_date(const char *s);
    about URL legality and it stays correct for both. */
 bool config_is_https_url(const char *s);
 
+/* True when s is a valid MQTT broker URI: the scheme (case-insensitive)
+   "mqtt://" or "mqtts://" plus a non-empty host, and the same character
+   rule as config_is_https_url (no spaces, control chars, quotes or
+   backslashes). Empty is NOT accepted here, on purpose, the same split
+   config_is_ota_url makes for the https case: "empty means MQTT off" is
+   mqtt_form.c's rule about the FORM FIELD, not a fact about what a
+   syntactically valid URI looks like, so it lives at that caller and not
+   here. NULL is not accepted either.
+
+   Plain mqtt:// (no TLS) is accepted, unlike config_is_https_url's
+   plaintext refusal: this URI is never fetched by the device the way an
+   OTA manifest URL is (no response body is parsed as a firmware image
+   or a JSON manifest), it is read only on the SoftAP's own WPA2-
+   protected setup session (plan doc, Security risk), and an MQTT broker
+   on a home LAN without TLS is a normal, common deployment this firmware
+   should not refuse to talk to. */
+bool config_is_mqtt_uri(const char *s);
+
 /* The rule both OTA-URL apply paths share (ha_config.c's set/<key> and
    config_apply.c's bulk document): empty (= OTA disabled, the only way to
    turn it off from HA) or a valid https URL. One definition so the two

@@ -37,6 +37,7 @@ idf_component_register(
         "device_id.c"
         "light.c"
         "nvs_config.c"
+        "mqtt_form.c"
         "../lib/cJSON/cJSON.c"
         "schedule.c"
         "buttons.c"
