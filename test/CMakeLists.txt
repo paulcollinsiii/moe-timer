@@ -64,6 +64,7 @@ add_host_test(test_lock_gate)
 add_host_test(test_buttons_policy)
 add_host_test(test_button_latch)
 add_host_test(test_wake_policy)
+add_host_test(test_setup_trigger)
 # Deliberately NOT THE SHIPPING FIGURE, which is 400 as of M2-HW-FIX and is
 # both the Kconfig default and status_led.h's host fallback. Written that way
 # round on purpose: this comment said "NOT 250" at three points and the raise

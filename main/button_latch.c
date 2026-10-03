@@ -121,3 +121,7 @@ int button_latch_pick(uint8_t mask, uint8_t allowed_mask) {
     }
     return -1;
 }
+
+bool button_latch_boot_wins(int picked) {
+    return picked < 0;
+}

@@ -363,6 +363,23 @@ void test_pick_respects_allowed_mask(void) {
     TEST_ASSERT_EQUAL_INT(-1, button_latch_pick(1u << 0, (1u << 1) | (1u << 2)));
 }
 
+/* BOOT's rank: LAST. button_latch_boot_wins() takes button_latch_pick's OWN
+   return value for the same wake, so every one of B, C, D and A — in that
+   priority order, exactly as the picks above resolve them — already
+   outranks BOOT the moment any of them is the pick. */
+void test_boot_loses_to_any_resolved_pick(void) {
+    TEST_ASSERT_FALSE(button_latch_boot_wins(button_latch_pick(0x0F, 0x0F)));                              /* B */
+    TEST_ASSERT_FALSE(button_latch_boot_wins(button_latch_pick((1u << 2) | (1u << 3) | (1u << 0), 0x0F))); /* C */
+    TEST_ASSERT_FALSE(button_latch_boot_wins(button_latch_pick((1u << 3) | (1u << 0), 0x0F)));             /* D */
+    TEST_ASSERT_FALSE(button_latch_boot_wins(button_latch_pick(1u << 0, 0x0F)));                           /* A */
+}
+
+void test_boot_wins_only_when_nothing_else_is_picked(void) {
+    TEST_ASSERT_TRUE(button_latch_boot_wins(button_latch_pick(0, 0x0F)));       /* nothing latched */
+    TEST_ASSERT_TRUE(button_latch_boot_wins(button_latch_pick(1u << 3, 0x00))); /* latched but disallowed */
+    TEST_ASSERT_TRUE(button_latch_boot_wins(-1));                               /* the raw sentinel too */
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_take_returns_zero_when_nothing_latched);
@@ -399,5 +416,7 @@ int main(void) {
     RUN_TEST(test_pick_priority_d_over_a);
     RUN_TEST(test_pick_returns_a_when_it_is_the_only_button_latched);
     RUN_TEST(test_pick_respects_allowed_mask);
+    RUN_TEST(test_boot_loses_to_any_resolved_pick);
+    RUN_TEST(test_boot_wins_only_when_nothing_else_is_picked);
     return UNITY_END();
 }

@@ -32,6 +32,32 @@ uint8_t buttons_take_pressed(void);
    for a later checkpoint (e.g. the tick-wake drain). */
 uint8_t buttons_take_pressed_mask(uint8_t mask);
 
+/* ---- BOOT (GPIO0) — deliberately NOT a fifth button_id_t ----------------
+
+   A BTN_E would silently gain every A-D action binding at the many sites
+   that loop `i < BTN_NONE` or guard `btn >= 4` (button_actions.c,
+   button_latch.c, buttons_policy.c, wake_flow.c and their tests). BOOT
+   has no action of its own — only the hold gesture in setup_trigger.h —
+   so it stays out of that enum and gets its own queries instead. */
+
+/* Plain level sample ("is BOOT down right now"), for the BOOT hold
+   tracker (setup_trigger.h) to be fed from while awake. Unlike
+   buttons_is_pressed() this is never gated by MAGTAG_BOOT_WAKES: the pad
+   is always configured as a digital input in buttons_init(), so the hold
+   gesture keeps working purely as an "already awake" gesture even on a
+   board where BOOT is disabled as a wake SOURCE (see that Kconfig's help
+   text). */
+bool buttons_is_boot_pressed(void);
+
+/* Whether GPIO0 was itself a cause of THIS wake. `wakeup_button` is
+   buttons_get_wakeup_button()'s own result for the same wake — pass it
+   in rather than letting this re-derive it, so the tie-break (B > C > D
+   > A > BOOT, button_latch_boot_wins()) is read once and the fallback
+   debounce+scan buttons_get_wakeup_button() may already have paid for is
+   never run a second time. Always false when MAGTAG_BOOT_WAKES=n, since
+   GPIO0 is then never armed and cannot have caused a wake. */
+bool buttons_woke_by_boot(button_id_t wakeup_button);
+
 #ifdef __cplusplus
 }
 #endif

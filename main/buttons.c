@@ -133,6 +133,27 @@ void buttons_init(void) {
             ESP_LOGE(TAG, "gpio_config failed for GPIO %d: %s", BTN_GPIOS[i], esp_err_to_name(ret));
         }
     }
+    /* GPIO0 (BOOT): configured UNCONDITIONALLY, not gated by
+       CONFIG_MAGTAG_BOOT_WAKES — that symbol decides whether GPIO0 may
+       WAKE the device (buttons_configure_wakeup_if below), not whether
+       the level sampler works. buttons_is_boot_pressed() has to answer
+       correctly even on a board that disabled the wake source, since the
+       hold gesture then falls back to "only while already awake". Same
+       release-from-RTC-domain reasoning as the loop above: a previous
+       sleep may have moved this pad to the RTC mux. */
+    rtc_gpio_hold_dis(GPIO_NUM_0);
+    rtc_gpio_deinit(GPIO_NUM_0);
+    gpio_config_t boot_cfg = {
+        .pin_bit_mask = (1ULL << GPIO_NUM_0),
+        .mode = GPIO_MODE_INPUT,
+        .pull_up_en = GPIO_PULLUP_ENABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE,
+    };
+    esp_err_t boot_ret = gpio_config(&boot_cfg);
+    if (boot_ret != ESP_OK) {
+        ESP_LOGE(TAG, "gpio_config failed for BOOT (GPIO0): %s", esp_err_to_name(boot_ret));
+    }
     buttons_watch_begin();
 }
 
@@ -298,9 +319,29 @@ void buttons_configure_wakeup_if(bool enable) {
         rtc_gpio_pulldown_dis(pin);
         mask |= 1ULL << pin;
     }
+#if CONFIG_MAGTAG_BOOT_WAKES
+    /* BOOT (GPIO0) is not a button_id_t and so never appears in `wake`
+       above (buttons_policy.c knows nothing about it); OR it in directly.
+       Unaffected by `config_locked`'s A/B/C narrowing on purpose: that
+       narrowing exists because every OTHER button's action would be
+       refused while config is broken, but BOOT's "action" is re-entering
+       setup, which is itself a way out of a bad WiFi config — so it stays
+       armed whenever this function got past the `enable` check above,
+       config-locked or not. It is NOT armed on a charge- or
+       bedtime-locked sleep (the early return above runs first, same as
+       every other button): extending BOOT past that early return too is
+       a bigger change than "join the mask", and is left open rather than
+       decided here — whoever wires up the setup session should weigh it
+       against the no-SSID recovery case before changing it. */
+    rtc_gpio_init(GPIO_NUM_0);
+    rtc_gpio_set_direction(GPIO_NUM_0, RTC_GPIO_MODE_INPUT_ONLY);
+    rtc_gpio_pullup_en(GPIO_NUM_0); /* active-low, like the other four */
+    rtc_gpio_pulldown_dis(GPIO_NUM_0);
+    mask |= 1ULL << GPIO_NUM_0;
+#endif
     /* GPIO wakeup (esp_sleep_enable_gpio_wakeup) is light-sleep-only on
        ESP32-S2 — deep sleep requires EXT1 on RTC-capable pins
-       (11/12/14/15 all are). */
+       (0/11/12/14/15 all are). */
     esp_err_t ret = esp_sleep_enable_ext1_wakeup_io(mask, ESP_EXT1_WAKEUP_ANY_LOW);
     if (ret != ESP_OK) {
         ESP_LOGE(TAG, "ext1 wakeup config failed: %s", esp_err_to_name(ret));
@@ -407,4 +448,32 @@ uint8_t buttons_scan_held(void) {
             mask |= (uint8_t)(1u << b);
     }
     return mask;
+}
+
+bool buttons_is_boot_pressed(void) {
+    return gpio_get_level(GPIO_NUM_0) == 0; /* active-low, like the other four */
+}
+
+bool buttons_woke_by_boot(button_id_t wakeup_button) {
+#if CONFIG_MAGTAG_BOOT_WAKES
+    /* B > C > D > A > BOOT: an A-D button already resolved for this wake
+       outranks BOOT outright, so this never even looks at GPIO0. See
+       button_latch_boot_wins() for why that one line is the whole rule. */
+    if (!button_latch_boot_wins(wakeup_button == BTN_NONE ? -1 : (int)wakeup_button))
+        return false;
+    if (esp_sleep_get_wakeup_causes() & BIT(ESP_SLEEP_WAKEUP_EXT1)) {
+        uint64_t status = esp_sleep_get_ext1_wakeup_status();
+        if (status != 0) {
+            return (status & (1ULL << GPIO_NUM_0)) != 0;
+        }
+    }
+    /* Status latch empty: the same rare race buttons_get_wakeup_button()
+       falls back for. BOOT already won the tie-break above (no A-D pick
+       resolved either), so trust a direct, debounced level read. */
+    esp_rom_delay_us(DEBOUNCE_US);
+    return gpio_get_level(GPIO_NUM_0) == 0;
+#else
+    (void)wakeup_button;
+    return false; /* GPIO0 is never armed, so it cannot have caused a wake */
+#endif
 }

@@ -1,4 +1,5 @@
 #pragma once
+#include <stdbool.h>
 #include <stdint.h>
 
 /* ISR-fed press latch: GPIO negative-edge interrupts record presses that
@@ -171,6 +172,21 @@ uint8_t button_latch_take_masked(uint8_t mask);
    only reader who could have been misled is a future one. Callers reason
    about this order — do not change it without reading both of them. */
 int button_latch_pick(uint8_t mask, uint8_t allowed_mask);
+
+/* BOOT's place in the tie-break above: LAST — B > C > D > A > BOOT. It is
+   not a fifth bit in `mask`/`allowed_mask` above: BOOT carries no latched
+   EDGE of its own (buttons.c samples it as a plain LEVEL — the hold
+   gesture needs a measured duration, not a debounced press — so nothing
+   ever sets a bit for it in the mask this file latches), and the return
+   value already uses 0..3 for a real pick, so a fifth slot would either
+   collide with -1/"none" or need a value outside that range for every
+   caller of button_latch_pick to special-case. One line is the whole of
+   BOOT's rank instead: `picked` is button_latch_pick's return value for
+   THE SAME wake, and BOOT explains the wake only when nothing else
+   already does — a simultaneous A-D press never loses its action to the
+   setup gesture, because that press keeps winning the tie-break it
+   already wins today. */
+bool button_latch_boot_wins(int picked);
 
 #ifdef __cplusplus
 }
