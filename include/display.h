@@ -217,6 +217,21 @@ void display_config_error(day_type_t day_type, uint16_t chore_free_min, uint16_t
    ("1.5.0"); the screen adds the "v". */
 void display_ota(const char *from_version, const char *to_version);
 
+/* ---- WiFi + MQTT provisioning plan: the setup screens, all full refresh -
+
+   Plain strings rather than setup_session_screen_info_t: display.c must
+   not depend on setup_session.h, the same reason display_ota() above
+   takes bare version strings instead of an ota_flow struct. main/
+   setup_screens.c is the thin adapter that unpacks the session's struct
+   into these. */
+void display_setup(const char *ap_ssid, const char *ap_password, const char *qr_payload, const char *form_url);
+/* The BOOT hold is armed; releasing now enters setup. */
+void display_setup_release(void);
+/* WiFi provisioned and verified. */
+void display_setup_complete(void);
+/* The setup budget expired with nothing provisioned. */
+void display_setup_timeout(void);
+
 /* Button B label: the action a press will take in the given state.
    display_screens.c maps these to LV_SYMBOL_PLAY/PAUSE and the "Reload"
    text (layout code stays LVGL-free). */

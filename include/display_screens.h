@@ -38,6 +38,30 @@ void display_screens_build_config_error(day_type_t day_type, uint16_t chore_free
    display budget is truncated. */
 void display_screens_build_ota(const char *from_version, const char *to_version);
 
+/* ---- WiFi + MQTT provisioning plan: the setup screens ------------------- */
+
+/* The QR at the left (see main/qr_render.c for the version/scale/quiet-zone
+   arithmetic), and on the right: a short instruction, the AP name, the AP
+   password at the largest size that fits, and the form URL. `qr_payload`
+   is handed straight to qr_render_encode(); if it does not fit
+   QR_RENDER_MAX_VERSION at ECC LOW, no QR is drawn and the four text lines
+   render unchanged — the "falls back to text" path the plan asks for. A
+   32-byte ap_ssid (the input buffer's width, including the NUL this
+   function never assumes was hit) is clipped rather than overflowing the
+   column. */
+void display_screens_build_setup(const char *ap_ssid, const char *ap_password, const char *qr_payload,
+                                 const char *form_url);
+/* Shown while the BOOT hold is armed (SETUP_TRIGGER_BOOT_HOLD_IDLE's
+   threshold reached) — releasing now enters setup. */
+void display_screens_build_setup_release(void);
+/* WiFi provisioned and verified; the first real network window (NTP, HA)
+   runs after this wake, not during it. */
+void display_screens_build_setup_complete(void);
+/* The setup budget expired with nothing provisioned. The retry hold
+   duration is read from SETUP_TRIGGER_BOOT_HOLD_MS (setup_trigger.h)
+   rather than restated, so the two can never disagree. */
+void display_screens_build_setup_timeout(void);
+
 #ifdef __cplusplus
 }
 #endif

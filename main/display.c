@@ -422,3 +422,40 @@ void display_ota(const char *from_version, const char *to_version) {
     s_partial_count = 0;
     render(SSD1680_REFRESH_FULL, false);
 }
+
+/* WiFi + MQTT provisioning plan: the setup screens. Each is a one-shot
+   takeover, same shape as display_ota() minus s_takeover_on_panel — a
+   setup session owns the whole wake (plan, "The setup session" item 4:
+   no MQTT, NTP, OTA or tick runs alongside it), so there is no later
+   paint in the same wake for a stale cadence count to reach. */
+void display_setup(const char *ap_ssid, const char *ap_password, const char *qr_payload, const char *form_url) {
+    if (!s_initialized)
+        display_init();
+    display_screens_build_setup(ap_ssid, ap_password, qr_payload, form_url);
+    s_partial_count = 0;
+    render(SSD1680_REFRESH_FULL, false);
+}
+
+void display_setup_release(void) {
+    if (!s_initialized)
+        display_init();
+    display_screens_build_setup_release();
+    s_partial_count = 0;
+    render(SSD1680_REFRESH_FULL, false);
+}
+
+void display_setup_complete(void) {
+    if (!s_initialized)
+        display_init();
+    display_screens_build_setup_complete();
+    s_partial_count = 0;
+    render(SSD1680_REFRESH_FULL, false);
+}
+
+void display_setup_timeout(void) {
+    if (!s_initialized)
+        display_init();
+    display_screens_build_setup_timeout();
+    s_partial_count = 0;
+    render(SSD1680_REFRESH_FULL, false);
+}

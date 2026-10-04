@@ -1,10 +1,13 @@
 /* LVGL screen builders (host-renderable; see display_screens.h). */
 #include "display_screens.h"
 
+#include <stdint.h>
 #include <stdio.h>
 #include <time.h>
 
 #include "lvgl.h"
+#include "qr_render.h"
+#include "setup_trigger.h" /* SETUP_TRIGGER_BOOT_HOLD_MS: the timeout screen's retry hint */
 
 /* Bottom edge: labels centred over the physical buttons. Calibrated on
    hardware (2026-07): button D's centre lands at screen x=239 and the
@@ -980,4 +983,150 @@ void display_screens_build_ota(const char *from_version, const char *to_version)
        inactive slot and the boot partition only flips after the image
        verifies — but a yanked cable still wastes the download. */
     make_label(scr, "Do not remove power", &lv_font_montserrat_12, LV_ALIGN_TOP_MID, 0, 98);
+}
+
+/* ---- WiFi + MQTT provisioning plan: the setup screens --------------------
+
+   QR arithmetic (also in main/qr_render.c, which owns the version/capacity
+   half of it): QR_RENDER_MAX_MODULES (45, version 7) at 2 px/module is a
+   90x90 px code; a 4-module quiet zone (the spec's own minimum) adds 8 px
+   a side, for a 106x106 px block. The panel is 128 px tall, so the block
+   is centred with 11 px to spare top and bottom, and sits at a 4 px left
+   margin like every other screen's left-aligned content. The block's
+   SIZE is fixed at the worst case so the text column's x never moves
+   between sessions; an actual code smaller than version 7 (every real
+   session's is — see below) just leaves extra quiet white space at the
+   block's own right and bottom edges, which is indistinguishable from
+   quiet zone because it is quiet zone. */
+#define QR_SCALE_PX 2
+#define QR_QUIET_MODULES 4
+#define QR_BLOCK_PX ((QR_RENDER_MAX_MODULES + 2 * QR_QUIET_MODULES) * QR_SCALE_PX)
+#define QR_LEFT_MARGIN 4
+#define QR_TOP_MARGIN ((DISP_VER - QR_BLOCK_PX) / 2)
+#define SETUP_TEXT_X (QR_LEFT_MARGIN + QR_BLOCK_PX + 4)
+#define SETUP_TEXT_MAX_W (DISP_HOR - SETUP_TEXT_X - 4)
+
+/* LV_EVENT_DRAW_MAIN handler for the QR block created below. Draws one
+   lv_draw_rect() per horizontal run of dark modules rather than one per
+   module (cheaper, and the module count can reach 2025 at version 7) —
+   the same draw call style_bar()'s indicator already issues, so this adds
+   no new draw path on the I1 side. The module count is threaded through
+   as the event's user_data because qr_render.c's result is otherwise only
+   reachable by size, not by the lv_obj that is about to draw it. */
+static void qr_draw_cb(lv_event_t *e) {
+    lv_layer_t *layer = lv_event_get_layer(e);
+    lv_obj_t *obj = lv_event_get_current_target(e);
+    int size = (int)(intptr_t)lv_event_get_user_data(e);
+
+    lv_area_t coords;
+    lv_obj_get_coords(obj, &coords);
+    int32_t ox = coords.x1 + QR_QUIET_MODULES * QR_SCALE_PX;
+    int32_t oy = coords.y1 + QR_QUIET_MODULES * QR_SCALE_PX;
+
+    lv_draw_rect_dsc_t dsc;
+    lv_draw_rect_dsc_init(&dsc);
+    dsc.bg_color = lv_color_black();
+    dsc.border_width = 0;
+
+    for (int y = 0; y < size; y++) {
+        int x = 0;
+        while (x < size) {
+            if (!qr_render_module(x, y)) {
+                x++;
+                continue;
+            }
+            int run_start = x;
+            while (x < size && qr_render_module(x, y))
+                x++;
+            lv_area_t a = {.x1 = ox + run_start * QR_SCALE_PX,
+                           .y1 = oy + y * QR_SCALE_PX,
+                           .x2 = ox + x * QR_SCALE_PX - 1,
+                           .y2 = oy + y * QR_SCALE_PX + QR_SCALE_PX - 1};
+            lv_draw_rect(layer, &dsc, &a);
+        }
+    }
+}
+
+/* A plain lv_obj rather than LV_USE_QRCODE: that widget draws through an
+   indexed-image canvas that blends through ARGB8888 before reaching this
+   panel's I1 format, and sdkconfig.defaults turns ARGB8888 support off
+   (the plan's "QR rendering trap"). `qr_payload` is encoded here, once;
+   qr_draw_cb() above reads qr_render_module() straight out of
+   qr_render.c's own result for the paint that follows. */
+static void build_setup_qr(lv_obj_t *scr, const char *qr_payload) {
+    int size = 0;
+    if (!qr_render_encode(qr_payload, &size))
+        return; /* falls back to the text column alone — no blank box drawn */
+
+    lv_obj_t *qr = lv_obj_create(scr);
+    lv_obj_set_size(qr, QR_BLOCK_PX, QR_BLOCK_PX);
+    lv_obj_align(qr, LV_ALIGN_TOP_LEFT, QR_LEFT_MARGIN, QR_TOP_MARGIN);
+    lv_obj_clear_flag(qr, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_pad_all(qr, 0, 0);
+    lv_obj_set_style_radius(qr, 0, 0);
+    lv_obj_set_style_border_width(qr, 0, 0);
+    lv_obj_set_style_bg_color(qr, lv_color_white(), 0);
+    lv_obj_set_style_bg_opa(qr, LV_OPA_COVER, 0);
+    lv_obj_add_event_cb(qr, qr_draw_cb, LV_EVENT_DRAW_MAIN, (void *)(intptr_t)size);
+}
+
+void display_screens_build_setup(const char *ap_ssid, const char *ap_password, const char *qr_payload,
+                                 const char *form_url) {
+    lv_obj_t *scr = fresh_screen(false);
+    char buf[48];
+
+    build_setup_qr(scr, qr_payload);
+
+    make_label(scr, "Scan with ESP SoftAP Prov", &lv_font_montserrat_12, LV_ALIGN_TOP_LEFT, SETUP_TEXT_X, 4);
+
+    snprintf(buf, sizeof(buf), "AP: %s", ap_ssid);
+    cap_width(make_label(scr, buf, &lv_font_montserrat_12, LV_ALIGN_TOP_LEFT, SETUP_TEXT_X, 24), SETUP_TEXT_MAX_W);
+
+    /* The largest compiled size that fits the column for a typical draw —
+       measured, not assumed (test5-impl.notes.md): 28 pt already clips
+       the task's own example password (201 px natural against a 178 px
+       column), so 18 pt is the ceiling, at 129 px for that same string.
+       AP_PASS_ALPHABET (setup_session.c) includes 'W'/'w'/'M'/'m', so a
+       cap_width() backstop stays on this label the same as every other
+       variable-content line in this tree — ten of the alphabet's widest
+       glyph in a row is the only draw this could ever clip, which is the
+       sort of input a geometric cap exists for, not a case to design the
+       font size around (see the OTA screen's own all-'W' case for the
+       same trade-off). */
+    cap_width(make_label(scr, ap_password, &lv_font_montserrat_18, LV_ALIGN_TOP_LEFT, SETUP_TEXT_X, 44),
+              SETUP_TEXT_MAX_W);
+
+    cap_width(make_label(scr, form_url, &lv_font_montserrat_12, LV_ALIGN_TOP_LEFT, SETUP_TEXT_X, 76), SETUP_TEXT_MAX_W);
+}
+
+/* Shown while the BOOT hold is armed; releasing now enters setup
+   (setup_trigger.h's SETUP_TRIGGER_BOOT_HOLD_ARMED). Full refresh, same as
+   every screen below — a hold that reaches this point is already the
+   least frequent paint on the panel, so the cadence has no say over it. */
+void display_screens_build_setup_release(void) {
+    lv_obj_t *scr = fresh_screen(false);
+    make_label(scr, "Release to", &lv_font_montserrat_28, LV_ALIGN_TOP_MID, 0, 24);
+    make_label(scr, "enter setup", &lv_font_montserrat_28, LV_ALIGN_TOP_MID, 0, 64);
+}
+
+/* WiFi provisioned and verified. The first real network window (NTP sync,
+   HA discovery) is the NEXT wake, not this one (D4) — "connecting" is
+   therefore accurate, not aspirational. */
+void display_screens_build_setup_complete(void) {
+    lv_obj_t *scr = fresh_screen(false);
+    make_label(scr, "WiFi saved", &lv_font_montserrat_28, LV_ALIGN_TOP_MID, 0, 30);
+    make_label(scr, "Connecting...", &lv_font_montserrat_18, LV_ALIGN_TOP_MID, 0, 72);
+}
+
+/* The setup budget expired with nothing provisioned. The retry duration is
+   DERIVED from SETUP_TRIGGER_BOOT_HOLD_MS rather than restated as a
+   literal "5", so a Kconfig change to the hold threshold cannot leave this
+   screen quoting the old number. */
+void display_screens_build_setup_timeout(void) {
+    lv_obj_t *scr = fresh_screen(false);
+    char buf[40];
+
+    make_label(scr, "Setup timed out", &lv_font_montserrat_28, LV_ALIGN_TOP_MID, 0, 20);
+    snprintf(buf, sizeof(buf), "Hold BOOT %d s to retry", SETUP_TRIGGER_BOOT_HOLD_MS / 1000);
+    make_label(scr, buf, &lv_font_montserrat_18, LV_ALIGN_BOTTOM_MID, 0, -20);
 }

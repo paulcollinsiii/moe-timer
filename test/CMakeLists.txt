@@ -44,8 +44,14 @@ target_include_directories(lvgl_host PUBLIC
 target_compile_definitions(lvgl_host PUBLIC
     LV_CONF_PATH="${CMAKE_CURRENT_SOURCE_DIR}/mocks/lv_conf_host.h")
 
+# Carries qr_render.c (the setup screen's QR module matrix) and the vendored
+# qrcodegen it wraps: display_screens.c's QR drawing calls straight into it,
+# the same way it calls display_layout.c's pure helpers.
 add_host_test(test_display_render
     EXTRA_DEFS GOLDEN_DIR="${CMAKE_CURRENT_SOURCE_DIR}/test_display_render/golden"
+    EXTRA_SRCS ${CMAKE_CURRENT_SOURCE_DIR}/../main/qr_render.c
+               ${CMAKE_CURRENT_SOURCE_DIR}/../lib/qrcodegen/qrcodegen.c
+    EXTRA_INCLUDES ${CMAKE_CURRENT_SOURCE_DIR}/../lib/qrcodegen
     EXTRA_LIBS lvgl_host m)
 
 add_host_test(test_timer)
@@ -65,6 +71,12 @@ add_host_test(test_buttons_policy)
 add_host_test(test_button_latch)
 add_host_test(test_wake_policy)
 add_host_test(test_setup_trigger)
+# WiFi + MQTT provisioning plan: the QR module matrix behind the setup
+# screen. Carries the vendored qrcodegen as a separate TU (EXTRA_SRCS,
+# same convention as cJSON) since it is linked rather than inlined.
+add_host_test(test_qr_render
+    EXTRA_SRCS ${CMAKE_CURRENT_SOURCE_DIR}/../lib/qrcodegen/qrcodegen.c
+    EXTRA_INCLUDES ${CMAKE_CURRENT_SOURCE_DIR}/../lib/qrcodegen)
 # Deliberately NOT THE SHIPPING FIGURE, which is 400 as of M2-HW-FIX and is
 # both the Kconfig default and status_led.h's host fallback. Written that way
 # round on purpose: this comment said "NOT 250" at three points and the raise

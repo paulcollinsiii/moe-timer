@@ -40,7 +40,10 @@ idf_component_register(
         "mqtt_form.c"
         "setup_session.c"
         "setup_session_idf.c"
+        "setup_screens.c"
+        "qr_render.c"
         "../lib/cJSON/cJSON.c"
+        "../lib/qrcodegen/qrcodegen.c"
         "schedule.c"
         "buttons.c"
         "button_actions.c"
@@ -64,6 +67,7 @@ idf_component_register(
         "."
         "../include"
         "../lib/cJSON"
+        "../lib/qrcodegen"
     REQUIRES
         nvs_flash
         esp_wifi

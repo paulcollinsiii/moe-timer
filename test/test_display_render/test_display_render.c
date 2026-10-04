@@ -1417,6 +1417,110 @@ void test_the_config_error_screen_renders_the_pair_it_is_given(void) {
     TEST_ASSERT_TRUE_MESSAGE(memcmp(first, s_captured, FB_BYTES) != 0, "the day type does not reach the panel");
 }
 
+/* ---- WiFi + MQTT provisioning plan: the setup screens -------------------
+
+   Deterministic inputs for every test below: a fixed SSID, AP password,
+   QR payload and form URL, so the goldens never depend on a real device
+   id or a freshly drawn random password. */
+#define SETUP_TEST_SSID "MagTag-a1b2c3"
+#define SETUP_TEST_PASSWORD "ABCDEFGHJK"
+#define SETUP_TEST_URL "http://192.168.4.1/mqtt"
+#define SETUP_TEST_PAYLOAD                                                                       \
+    "{\"ver\":\"v1\",\"name\":\"MagTag-a1b2c3\",\"username\":\"magtag\",\"pop\":\"ABCDEFGHJK\"," \
+    "\"password\":\"ABCDEFGHJK\",\"transport\":\"softap\",\"security\":2}"
+
+void test_setup_screen(void) {
+    display_screens_build_setup(SETUP_TEST_SSID, SETUP_TEST_PASSWORD, SETUP_TEST_PAYLOAD, SETUP_TEST_URL);
+    assert_matches_golden("setup");
+}
+
+static bool fb_pixel_is_black(int x, int y) {
+    return ((s_captured[y * (HOR / 8) + x / 8] >> (7 - (x & 7))) & 1) == 0; /* LVGL I1: 1 = white */
+}
+
+/* The plan's own worry: a golden of a blank QR would pass a byte
+   comparison. This samples the rendered framebuffer at every module's
+   CENTRE and checks it against qr_render_module() for the same payload —
+   proving the drawing matches the encoding, not merely that some ink
+   exists somewhere in the block. QR_LEFT_MARGIN/QR_TOP_MARGIN/
+   QR_QUIET_MODULES/QR_SCALE_PX are display_screens.c's own macros,
+   visible here because this file #includes it as one translation unit. */
+void test_setup_screen_qr_matches_the_encoding(void) {
+    display_screens_build_setup(SETUP_TEST_SSID, SETUP_TEST_PASSWORD, SETUP_TEST_PAYLOAD, SETUP_TEST_URL);
+    lv_refr_now(s_disp);
+
+    int size = 0;
+    TEST_ASSERT_TRUE(qr_render_encode(SETUP_TEST_PAYLOAD, &size));
+    TEST_ASSERT_TRUE(size > 0);
+
+    int sampled_dark = 0;
+    for (int y = 0; y < size; y++) {
+        for (int x = 0; x < size; x++) {
+            int px = QR_LEFT_MARGIN + QR_QUIET_MODULES * QR_SCALE_PX + x * QR_SCALE_PX + QR_SCALE_PX / 2;
+            int py = QR_TOP_MARGIN + QR_QUIET_MODULES * QR_SCALE_PX + y * QR_SCALE_PX + QR_SCALE_PX / 2;
+            bool expect_dark = qr_render_module(x, y);
+            bool got_dark = fb_pixel_is_black(px, py);
+            if (expect_dark)
+                sampled_dark++;
+            TEST_ASSERT_EQUAL_MESSAGE(expect_dark, got_dark, "a module's centre disagrees with the encoding");
+        }
+    }
+    TEST_ASSERT_TRUE_MESSAGE(sampled_dark > 0, "no dark module sampled - the blank-QR trap the plan calls out");
+}
+
+/* setup_session.h's ap_ssid buffer is 32 bytes including the NUL, so 31
+   characters is the longest possible SSID. The AP line must stay inside
+   its column (cap_width()'s LONG_CLIP), never overflow into the QR block
+   to its left or off the panel's right edge. */
+void test_the_setup_screen_handles_a_32_byte_ssid(void) {
+    char ssid31[32];
+    memset(ssid31, 'X', 31);
+    ssid31[31] = '\0';
+
+    display_screens_build_setup(ssid31, SETUP_TEST_PASSWORD, SETUP_TEST_PAYLOAD, SETUP_TEST_URL);
+    lv_obj_t *scr = lv_screen_active();
+    lv_obj_update_layout(scr);
+
+    /* Children in build order: the QR block, then the four labels — the
+       AP line is index 2. */
+    lv_obj_t *ap_line = lv_obj_get_child(scr, 2);
+    char msg[96];
+    snprintf(msg, sizeof(msg), "AP line is %d px wide, column budget is %d", (int)lv_obj_get_width(ap_line),
+             SETUP_TEXT_MAX_W);
+    TEST_ASSERT_TRUE_MESSAGE(lv_obj_get_width(ap_line) <= SETUP_TEXT_MAX_W, msg);
+}
+
+/* qr_render.h's own ceiling: version 7 at ECC LOW holds at most 154 byte-
+   mode bytes. 155 forces a failure qr_render_encode() cannot recover
+   from — the screen must still render the other three lines, just with
+   no QR block. */
+void test_the_setup_screen_falls_back_to_text_when_the_payload_is_too_long(void) {
+    char too_long[156];
+    for (int i = 0; i < 155; i++)
+        too_long[i] = (char)('a' + (i % 26));
+    too_long[155] = '\0';
+
+    display_screens_build_setup(SETUP_TEST_SSID, SETUP_TEST_PASSWORD, too_long, SETUP_TEST_URL);
+    lv_obj_t *scr = lv_screen_active();
+    lv_obj_update_layout(scr);
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE(4, lv_obj_get_child_count(scr), "a failed encode must still draw no QR object");
+}
+
+void test_setup_release_screen(void) {
+    display_screens_build_setup_release();
+    assert_matches_golden("setup_release");
+}
+
+void test_setup_complete_screen(void) {
+    display_screens_build_setup_complete();
+    assert_matches_golden("setup_complete");
+}
+
+void test_setup_timeout_screen(void) {
+    display_screens_build_setup_timeout();
+    assert_matches_golden("setup_timeout");
+}
+
 void test_ota_screen(void) {
     /* Firmware update, full refresh: both versions, direction-neutral verb
        (the policy deliberately supports downgrades). */
@@ -2344,6 +2448,13 @@ int main(void) {
     RUN_TEST(test_config_error_screen);
     RUN_TEST(test_the_config_error_screen_fits_the_panel_at_its_widest);
     RUN_TEST(test_the_config_error_screen_renders_the_pair_it_is_given);
+    RUN_TEST(test_setup_screen);
+    RUN_TEST(test_setup_screen_qr_matches_the_encoding);
+    RUN_TEST(test_the_setup_screen_handles_a_32_byte_ssid);
+    RUN_TEST(test_the_setup_screen_falls_back_to_text_when_the_payload_is_too_long);
+    RUN_TEST(test_setup_release_screen);
+    RUN_TEST(test_setup_complete_screen);
+    RUN_TEST(test_setup_timeout_screen);
     RUN_TEST(test_ota_screen);
     RUN_TEST(test_ota_screen_lines_fit_the_panel);
     RUN_TEST(test_charge_me_screen);
