@@ -1,16 +1,20 @@
 default_stages: [pre-commit]
 
-# Vendored third-party code (Unity test framework, cJSON) keeps upstream
-# formatting and is exempt from our static analysis.
-exclude: ^(test/unity/|lib/cJSON/)
+# Vendored third-party code (Unity test framework, cJSON, qrcodegen) keeps
+# upstream formatting and is exempt from our static analysis.
+exclude: ^(test/unity/|lib/cJSON/|lib/qrcodegen/)
 
 repos:
   # ── Housekeeping & branch protection ─────────────────────────────────────────
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v5.0.0
     hooks:
+      # Display goldens are raw framebuffers that `identify` can classify as
+      # text; a "fixed" final byte breaks the byte-compare they exist for.
       - id: trailing-whitespace
+        exclude: \.bin$
       - id: end-of-file-fixer
+        exclude: \.bin$
       - id: check-yaml
       - id: check-json
       - id: check-merge-conflict
