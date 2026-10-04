@@ -1,9 +1,9 @@
 /* The setup session — lifted out as its own module so the ordering that
-   matters (extend the failsafe before anything else runs; tear down on
-   every path out, whichever one it is) carries a test instead of a
-   convention. See setup_session.h for the full flow and the ops table's
-   contract; what lives here is the flow itself plus the pure helpers the
-   plan asks to be tested in isolation. */
+   matters (extend the failsafe before anything else runs; render before
+   the radio comes up; tear down on every path out, whichever one it is)
+   carries a test instead of a convention. See setup_session.h for the
+   full flow and the ops table's contract; what lives here is the flow
+   itself plus the pure helpers worth testing in isolation. */
 #include "setup_session.h"
 
 #include <stdio.h>
@@ -40,11 +40,17 @@ static uint32_t earlier_deadline(uint32_t a, uint32_t b) {
 
 /* ---- AP password: rejection sampling over the unambiguous alphabet ------ */
 
-/* No 0/O/1/l/I. 57 characters, so a plain `% 57` would favour the
-   alphabet's first 256 % 57 == 28 characters over the rest — avoided by
-   rejecting any byte at or past the largest multiple of 57 that fits in a
-   byte (floor(256/57)*57 == 228) and drawing again. */
-static const char AP_PASS_ALPHABET[] = "23456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+/* No 0/O/1/l/I, and no S/5, Z/2, B/8 or g/9 either — all eight are
+   confusable pairs at 18 pt on this panel's font, the same standard the
+   original five were cut for, not a new one. 49 characters, so a plain
+   `% 49` would favour the alphabet's first 256 % 49 == 11 characters over
+   the rest — avoided by rejecting any byte at or past the largest
+   multiple of 49 that fits in a byte (floor(256/49)*49 == 245) and
+   drawing again. 10 characters from a 49-character alphabet is
+   log2(49^10) =~ 56.1 bits of entropy (was =~58.3 for the 57-character
+   set) — the trade this module makes so a password is never misread
+   typing it in by hand. */
+static const char AP_PASS_ALPHABET[] = "3467ACDEFGHJKLMNPQRTUVWXYabcdefhijkmnopqrstuvwxyz";
 
 void setup_session_make_ap_password(setup_session_rand_byte_fn rand_byte, char out[SETUP_SESSION_AP_PASS_BUF]) {
     const size_t n = sizeof(AP_PASS_ALPHABET) - 1;
@@ -204,7 +210,7 @@ static void linger_after_wifi_success(const setup_session_ops_t *ops, uint32_t o
 }
 
 static setup_session_outcome_t run_loop(const setup_session_ops_t *ops, const setup_session_cfg_t *cfg,
-                                        uint32_t deadline, bool *wifi_store_failed) {
+                                        uint32_t deadline) {
     for (;;) {
         uint32_t now = ops->now_ms();
         if (deadline_passed(now, deadline))
@@ -221,8 +227,8 @@ static setup_session_outcome_t run_loop(const setup_session_ops_t *ops, const se
         switch (ev) {
             case SETUP_SESSION_EVENT_NONE:
             case SETUP_SESSION_EVENT_WIFI_FAIL:
-                /* A bad password is the manager's to report to the phone
-                   app (plan, "Components"); nothing to store here, and the
+                /* A bad password is the provisioning manager's own job to
+                   report to the phone app; nothing to store here, and the
                    session keeps waiting for a real attempt (the device
                    layer resets the manager's own state machine so a retry
                    is possible — this layer never needed to know that
@@ -237,8 +243,9 @@ static setup_session_outcome_t run_loop(const setup_session_ops_t *ops, const se
                        left — must not be cleared. ERROR, not
                        WIFI_OK: the join really did happen, but this
                        session cannot tell the rest of the device about
-                       it, so it must not claim success. */
-                    *wifi_store_failed = true;
+                       it, so it must not claim success. setup_session_run()
+                       still renders the FAILED screen for this, because the
+                       setup screen already painted. */
                     return SETUP_SESSION_OUTCOME_ERROR;
                 }
                 ops->clear_wifi_driver_store();
@@ -266,13 +273,13 @@ static setup_session_outcome_t run_loop(const setup_session_ops_t *ops, const se
 
 setup_session_result_t setup_session_run(const setup_session_ops_t *ops, const setup_session_cfg_t *cfg) {
     setup_session_outcome_t outcome;
-    bool wifi_store_failed = false;
+    bool screen_painted = false;
     uint32_t deadline;
 
     /* Step 1: the budget, before anything else runs — a session nothing
        can end must not start (same reasoning as ota_flow_apply's refusal
        when extend_awake has nothing to arm: the SoftAP + httpd is the
-       single most expensive thing this device ever runs, plan's Risks).
+       single most expensive thing this device ever runs).
        SETUP_SESSION_TAIL_SEC covers everything that still has to run
        after the loop below returns — there is no second extend_awake
        call after this one. */
@@ -282,10 +289,19 @@ setup_session_result_t setup_session_run(const setup_session_ops_t *ops, const s
     }
     deadline = ops->now_ms() + (uint32_t)cfg->budget_sec * 1000u;
 
-    /* Step 2: the pure generators. Cannot fail — snprintf truncates safely
-       in the pathological case of an oversized device_id(), and the QR
-       buffer is sized generously enough that this never happens on this
-       device (SETUP_SESSION_QR_MAX's own comment). */
+    /* Step 2+3: the pure generators (cannot fail — snprintf truncates
+       safely in the pathological case of an oversized device_id(), and
+       the QR buffer is sized generously enough that this never happens
+       on this device; SETUP_SESSION_QR_MAX's own comment), then the
+       setup screen — BEFORE start() below, deliberately. Every value
+       this screen needs is already in hand, and painting first means
+       the full refresh this screen costs happens with the SoftAP still
+       down, not beaconing at full TX power throughout it: net_window.c's
+       own rendezvous comment (~line 120) documents a panel refresh
+       coinciding with a WiFi TX burst browning out the rail on this
+       board, and a brownout reset on a no-SSID device cold-boots
+       straight back into setup and repaints — exactly the loop this
+       ordering avoids. */
     {
         setup_session_screen_info_t info;
         memset(&info, 0, sizeof(info));
@@ -294,47 +310,60 @@ setup_session_result_t setup_session_run(const setup_session_ops_t *ops, const s
         (void)setup_session_make_qr_payload(info.ap_ssid, info.ap_password, info.qr_payload, sizeof(info.qr_payload));
         info.form_url = "http://192.168.4.1/mqtt";
 
-        /* Step 3: bring the SoftAP, httpd, manager and endpoints up. */
-        if (!ops->start(info.ap_ssid, info.ap_password)) {
-            secure_zero(&info, sizeof(info));
+        ops->render_setup_screen(&info);
+        screen_painted = true;
+
+        /* Step 4: bring the SoftAP, httpd, manager and endpoints up. A
+           failure here is ERROR, and — because the setup screen is
+           already on the glass — still renders the FAILED screen below,
+           not none. */
+        bool started = ops->start(info.ap_ssid, info.ap_password);
+        secure_zero(&info, sizeof(info)); /* ap_password (and its copy inside qr_payload) done being needed */
+        if (!started) {
             outcome = SETUP_SESSION_OUTCOME_ERROR;
             goto teardown;
         }
-
-        /* Step 4: the setup screen, now that there is something to show. */
-        ops->render_setup_screen(&info);
-        secure_zero(&info, sizeof(info)); /* ap_password (and its copy inside qr_payload) done being needed */
     }
 
     /* Step 5: loop until an outcome. */
-    outcome = run_loop(ops, cfg, deadline, &wifi_store_failed);
+    outcome = run_loop(ops, cfg, deadline);
 
 teardown:
     /* Step 6: unconditional, on every path above — this is what makes
        "teardown always runs" a property of the control flow rather than
        of how carefully each branch remembered to call it. Safe even when
-       nothing was ever started (the device layer's contract). */
+       nothing was ever started (the device layer's contract). The radio
+       is down by the time render_end_screen below runs, on every path:
+       this call always precedes it. */
     ops->stop();
 
-    /* Step 7: the outcome's screen (plan names only "complete" and "timed
-       out" for a clean exit; a start/hard-error ERROR gets none of its
-       own, the same as every other early-exit path in this tree — except
-       the ERROR that follows a verified-but-unstored WIFI_SUCCESS, where
-       the panel is already showing the now-torn-down AP's name,
-       password and QR and there is no dedicated error screen to show
-       instead, so this reuses the timeout one). */
-    switch (outcome) {
-        case SETUP_SESSION_OUTCOME_WIFI_OK:
-        case SETUP_SESSION_OUTCOME_MQTT_ONLY:
-            ops->render_complete_screen();
-            break;
-        case SETUP_SESSION_OUTCOME_TIMEOUT:
-            ops->render_timeout_screen();
-            break;
-        case SETUP_SESSION_OUTCOME_ERROR:
-            if (wifi_store_failed)
-                ops->render_timeout_screen();
-            break;
+    /* Step 7: the end-of-session screen. Every outcome gets one except
+       the extend_awake refusal above (screen_painted stays false there —
+       nothing has painted yet, so there is nothing to correct). Every
+       ERROR that follows the setup screen — a start failure, the
+       WIFI_SUCCESS-store-failure in run_loop above, or a hard error
+       mid-session — gets FAILED: by the time any of those is possible
+       the panel is already showing the AP's name, password and QR for a
+       session that is about to stop existing, and this is the only
+       screen that says so. */
+    if (screen_painted) {
+        setup_session_end_kind_t kind;
+        switch (outcome) {
+            case SETUP_SESSION_OUTCOME_WIFI_OK:
+                kind = SETUP_SESSION_END_WIFI_SAVED;
+                break;
+            case SETUP_SESSION_OUTCOME_MQTT_ONLY:
+                kind = SETUP_SESSION_END_MQTT_SAVED;
+                break;
+            case SETUP_SESSION_OUTCOME_TIMEOUT:
+                kind = SETUP_SESSION_END_TIMED_OUT;
+                break;
+            case SETUP_SESSION_OUTCOME_ERROR:
+            default:
+                kind = SETUP_SESSION_END_FAILED;
+                break;
+        }
+        ops->render_end_screen(kind, cfg->has_wifi_ssid);
     }
 
     setup_session_result_t result;

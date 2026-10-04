@@ -9,7 +9,7 @@
    Composition is main.c's: it assembles a setup_session_ops_t from the
    eight exported functions below plus its own extend_awake_failsafe
    (already injected into ota_flow_ops_t the same way) and the setup
-   screens' three render functions. This file is added to main/CMakeLists.txt
+   screens' two render functions. This file is added to main/CMakeLists.txt
    SRCS so it compiles against the real network_provisioning headers, but
    nothing calls into it yet — gc-sections strips it out of the image
    until the wake flow wires it in. */

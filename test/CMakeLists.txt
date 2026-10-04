@@ -177,13 +177,20 @@ add_host_test(test_ota_url)
 add_host_test(test_mqtt_form
     EXTRA_SRCS ${CMAKE_CURRENT_SOURCE_DIR}/../lib/cJSON/cJSON.c
     EXTRA_INCLUDES ${CMAKE_CURRENT_SOURCE_DIR}/../lib/cJSON)
-# WiFi + MQTT provisioning plan, task 4: the setup session. Carries cJSON and
+# WiFi + MQTT provisioning plan: the setup session. Carries cJSON and
 # config_validate.c for the same reason test_mqtt_form does — mqtt_form.c
 # composes with both, and this suite drives the real mqtt_form_error_str() /
-# mqtt_form_html_escape() rather than a restatement of either.
+# mqtt_form_html_escape() rather than a restatement of either. Also carries
+# qr_render.c and the vendored qrcodegen (same EXTRA_SRCS as
+# test_display_render) so this suite can assert the real device payload
+# (device_id()'s fixed-width SSID) actually encodes, not merely that the
+# pure payload builder produces a string of the right shape.
 add_host_test(test_setup_session
     EXTRA_SRCS ${CMAKE_CURRENT_SOURCE_DIR}/../lib/cJSON/cJSON.c
-    EXTRA_INCLUDES ${CMAKE_CURRENT_SOURCE_DIR}/../lib/cJSON)
+               ${CMAKE_CURRENT_SOURCE_DIR}/../main/qr_render.c
+               ${CMAKE_CURRENT_SOURCE_DIR}/../lib/qrcodegen/qrcodegen.c
+    EXTRA_INCLUDES ${CMAKE_CURRENT_SOURCE_DIR}/../lib/cJSON
+                   ${CMAKE_CURRENT_SOURCE_DIR}/../lib/qrcodegen)
 add_host_test(test_ha_config EXTRA_LIBS m) # m: tones.c sine LUT
 add_host_test(test_tones EXTRA_LIBS m)
 add_host_test(test_wav_header)

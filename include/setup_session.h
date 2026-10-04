@@ -20,8 +20,8 @@
    One call for the whole session (start..teardown), not an init-then-poll
    module like ota_flow.c: a setup session has no second phase to resume
    across — it runs once, to completion, inside a single wake that does
-   nothing else (plan, "The setup session" item 4). So there is no internal
-   state to leak between host tests either. */
+   nothing else. So there is no internal state to leak between host tests
+   either. */
 
 #ifdef __cplusplus
 extern "C" {
@@ -89,7 +89,7 @@ extern "C" {
    strict minimum (ota_timing.h). */
 #define SETUP_SESSION_TAIL_SEC 60
 
-/* ---- outcomes and the sleep the caller owes (D4) ------------------------- */
+/* ---- outcomes and the sleep the caller owes ------------------------------ */
 
 typedef enum {
     SETUP_SESSION_OUTCOME_WIFI_OK = 0, /* WiFi provisioned, verified STA join; MQTT too if submitted this session */
@@ -99,10 +99,10 @@ typedef enum {
 } setup_session_outcome_t;
 
 /* What the caller (the wake flow) must sleep into. THE SESSION NEVER
-   DEEP-SLEEPS OR RESTARTS ITSELF (C6) — it only reports which of these the
+   DEEP-SLEEPS OR RESTARTS ITSELF — it only reports which of these the
    caller owes:
-     - NET_WINDOW : a 1 s timer wake into a normal network window (D4) —
-       the first real join, NTP sync and HA discovery happen there, not here.
+     - NET_WINDOW : a 1 s timer wake into a normal network window — the
+       first real join, NTP sync and HA discovery happen there, not here.
      - BUTTON_ONLY: no SSID even after this session — sleep buttons-only, so
        an unprovisioned device in a drawer does not cycle the radio.
      - NORMAL     : an SSID was already present before this session (a
@@ -119,6 +119,31 @@ typedef struct {
     setup_session_sleep_t sleep;
 } setup_session_result_t;
 
+/* ---- the end-of-session screen's headline, independent of HOW it got
+   there -----------------------------------------------------------------
+
+   The render layer (setup_screens.c/display_screens.c) owns the actual
+   wording; this only says which case it is.
+
+   WIFI_SAVED and MQTT_SAVED both come from a clean exit — the split
+   exists so a device that already had an SSID and only submitted the
+   MQTT form is never told "WiFi saved" for a join that never happened.
+
+   TIMED_OUT and FAILED share a retry hint and differ only in headline.
+   FAILED covers every ERROR that happens AFTER the setup screen has
+   already painted — a start failure, a verified join whose credential
+   store failed, or a hard error mid-session — so the panel never keeps
+   showing a QR and password for a session that no longer exists. An
+   ERROR that happens before anything painted (extend_awake refusing)
+   gets no screen at all, the one case setup_session_run() still does not
+   call render_end_screen for. */
+typedef enum {
+    SETUP_SESSION_END_WIFI_SAVED,
+    SETUP_SESSION_END_MQTT_SAVED,
+    SETUP_SESSION_END_TIMED_OUT,
+    SETUP_SESSION_END_FAILED,
+} setup_session_end_kind_t;
+
 /* ---- what the session is told, once, at the top -------------------------- */
 
 typedef struct {
@@ -130,10 +155,12 @@ typedef struct {
 
 /* 8-12 chars, WPA2-valid (minimum 8); fixed at 10 so every session's panel
    layout and every host-test expectation is the same length. Alphabet
-   excludes 0/O/1/l/I (unambiguous on an e-paper panel, per the plan) — 57
-   characters, so a byte is mapped by REJECTION SAMPLING rather than `% 57`:
-   a plain modulo would favour the alphabet's first 256%57=28 characters
-   over the rest. See setup_session.c for the exact threshold. */
+   excludes 0/O/1/l/I and, for the same reason — confusable at 18 pt on an
+   e-paper panel, not a stylistic choice — S/5, Z/2, B/8 and g/9: 49
+   characters, ~56.1 bits of entropy for a 10-character password. A byte
+   is mapped by REJECTION SAMPLING rather than `% 49`: a plain modulo
+   would favour the alphabet's first 256%49=11 characters over the rest.
+   See setup_session.c for the exact threshold. */
 #define SETUP_SESSION_AP_PASS_LEN 10
 #define SETUP_SESSION_AP_PASS_BUF (SETUP_SESSION_AP_PASS_LEN + 1)
 
@@ -196,10 +223,21 @@ void setup_session_make_ap_ssid(char out[SETUP_SESSION_AP_SSID_MAX]);
    required to see even that). */
 #define SETUP_SESSION_QR_USERNAME "magtag"
 #define SETUP_SESSION_QR_TRANSPORT "softap"
-/* The skeleton below with every variable field at its maximum: a 31-byte
-   ap_ssid (SETUP_SESSION_AP_SSID_MAX-1) and the fixed-length ap_password
-   used twice (pop and password) comes to exactly 150 bytes; this adds a
-   NUL and slack for a future field without needing to revisit callers. */
+/* device_id() (device_id.c) always returns "magtag-" plus exactly 6 hex
+   nibbles — never more, never fewer — so the AP SSID this module builds
+   is always exactly 13 bytes and the real payload is always exactly 132
+   bytes, encoding at QR version 6 with 2 bytes to spare under
+   qr_render.h's version-6 ceiling. The 31-byte ap_ssid
+   (SETUP_SESSION_AP_SSID_MAX-1) this buffer's 160 bytes could instead
+   hold is slack for a future field, not a size this device has sent or
+   ever will: that hypothetical skeleton, with the fixed-length
+   ap_password used twice (pop and password), comes to 150 bytes — still
+   inside qr_render.h's documented 154-byte/version-7 ceiling, with 10
+   bytes of this buffer's own 160 left over on top of that. A payload
+   between 155 and 159 bytes would fit in THIS buffer but fail
+   qr_render_encode() — the text fallback the setup screen already has
+   for exactly that case — and is unreachable today because nothing in
+   this module ever produces a payload anywhere near that large. */
 #define SETUP_SESSION_QR_MAX 160
 
 bool setup_session_make_qr_payload(const char *ap_ssid, const char *ap_password, char *out, size_t out_cap);
@@ -237,9 +275,9 @@ typedef struct {
     const char *status_msg;
 } setup_session_mqtt_page_in_t;
 
-/* Never prefills the password field (plan's security note: "credentials
-   are never echoed back"), carries no JS and no external resources (plan's
-   "keep the page tiny"). Returns false the moment `sink` does (see the
+/* Never prefills the password field — credentials are never echoed back
+   — and carries no JS and no external resources, keeping the page tiny.
+   Returns false the moment `sink` does (see the
    sink's own doc comment); true once the whole page has been handed over. */
 bool setup_session_render_mqtt_page(const setup_session_mqtt_page_in_t *in, setup_session_chunk_sink_fn sink,
                                     void *ctx);
@@ -286,15 +324,14 @@ typedef struct {
    Every device effect the session needs, injected once per call — the
    same seam ota_flow_ops_t and wake_flow's render tails use. */
 typedef struct {
-    /* C5: push the awake failsafe out to the session's own budget plus
+    /* Push the awake failsafe out to the session's own budget plus
        SETUP_SESSION_TAIL_SEC. Same signature as main.c's real
        extend_awake_failsafe(int seconds); the wake flow threads that op
        straight through. Absolute-from-now, like every other caller of this op
        (ota_flow_ops_t's extend_awake says why). False means there is no
        failsafe to arm — same reasoning as ota_flow_apply's refusal: a
        session nothing can end must not start, because the SoftAP + httpd
-       is the single most expensive thing this device ever runs (plan,
-       Risks). */
+       is the single most expensive thing this device ever runs. */
     bool (*extend_awake)(int seconds);
 
     /* Wall-clock milliseconds, real on device (esp_timer_get_time()/1000)
@@ -318,7 +355,9 @@ typedef struct {
        httpd instance, the provisioning manager (security 2, service_name =
        ap_ssid, service_key = ap_password), the /mqtt GET+POST handlers and
        the "mqtt-config" protocomm endpoint. False on any failure — nothing
-       was reachable, so ERROR with no screen shown. */
+       was reachable, so ERROR. render_setup_screen has already run by the
+       time this is called (setup_session_run's own flow comment says why),
+       so this ERROR still renders the FAILED screen, not none. */
     bool (*start)(const char *ap_ssid, const char *ap_password);
 
     /* Tear down everything `start` brought up: stop the provisioning
@@ -338,19 +377,23 @@ typedef struct {
        which store the credential themselves before posting. */
     setup_session_event_t (*poll)(uint32_t timeout_ms, setup_session_poll_out_t *out);
 
-    /* The setup screens' renders. */
+    /* The setup screens' renders. render_setup_screen runs before `start`
+       above (setup_session_run's own flow comment says why); render_end_screen
+       runs once, after `stop`, for every outcome except an extend_awake
+       refusal (nothing painted yet there) — kind says which headline,
+       has_wifi_ssid (the device's SSID state going INTO this session,
+       threaded straight from setup_session_cfg_t) says which retry hint. */
     void (*render_setup_screen)(const setup_session_screen_info_t *info);
-    void (*render_complete_screen)(void);
-    void (*render_timeout_screen)(void);
+    void (*render_end_screen)(setup_session_end_kind_t kind, bool has_wifi_ssid);
 
-    /* D3: the app's own NVS keys are the source of truth.
+    /* The app's own NVS keys are the source of truth.
        nvs_config_set_wifi_ssid/_pass. A failure here must not be
        swallowed — see run_loop's WIFI_SUCCESS case in setup_session.c:
        the driver's store is the only verified copy left if this fails,
        so it must not be cleared either. */
     bool (*set_wifi_creds)(const char *ssid, const char *password);
 
-    /* D3: clear the esp_wifi driver's OWN persisted copy once the app's
+    /* Clear the esp_wifi driver's OWN persisted copy once the app's
        keys hold the verified credentials, so the two stores cannot
        disagree — network_prov_mgr_reset_wifi_provisioning() (confirmed by
        reading network_provisioning 1.3.1's manager.c: that call is a thin
@@ -388,12 +431,22 @@ bool setup_session_apply_mqtt(const setup_session_ops_t *ops, const mqtt_form_re
    restarts (see setup_session_sleep_t above) — the wake flow does
    that with the result this returns.
 
-   Flow (plan, "The setup session"):
+   Flow:
      1. extend_awake(cfg->budget_sec + SETUP_SESSION_TAIL_SEC); refuse
-        (ERROR) if it cannot.
+        (ERROR, no screen — nothing has painted yet) if it cannot.
      2. generate the AP password and SSID (pure) and the QR payload (pure).
-     3. start(ap_ssid, ap_password); refuse (ERROR) if it cannot.
-     4. render_setup_screen(&info).
+     3. render_setup_screen(&info) — BEFORE start() below, deliberately:
+        every value this screen needs is already in hand, and painting
+        first means the full-refresh this screen costs happens with the
+        SoftAP still down rather than beaconing at full TX power for the
+        whole of it (net_window.c's own rendezvous comment documents a
+        panel refresh coinciding with a WiFi TX burst browning out the
+        rail on this board; a brownout reset on a no-SSID device cold-boots
+        straight back into setup and repaints, which is exactly the loop
+        this ordering avoids).
+     4. start(ap_ssid, ap_password); a failure here is ERROR, and —
+        because the setup screen is already on the glass — still renders
+        the FAILED screen (step 7), not none.
      5. poll in a loop until WIFI_SUCCESS (then linger up to
         SETUP_SESSION_SUCCESS_LINGER_MS before returning WIFI_OK), a
         budget-exhausting run of NONEs (TIMEOUT), an MQTT_STORED that
@@ -402,13 +455,14 @@ bool setup_session_apply_mqtt(const setup_session_ops_t *ops, const mqtt_form_re
         not WIFI_OK, and does not clear the driver's store.
      6. stop() — unconditionally, on every path, including the two early
         refusals above.
-     7. render the outcome's screen (complete/timed out; a start/hard-
-        error ERROR gets no screen of its own, the same as every other
-        early-exit in this tree, but the WIFI_SUCCESS-store-failure ERROR
-        above renders the timeout screen, because by that point the
-        panel is already showing the now-torn-down AP's name, password
-        and QR and the wake flow has no screen of its own for this case)
-        and return the outcome + the sleep it implies. */
+     7. render_end_screen(kind, cfg->has_wifi_ssid) for every outcome
+        except the extend_awake refusal in step 1 — nothing was ever
+        shown there, so there is nothing to correct. Every other ERROR
+        (a start failure, the WIFI_SUCCESS-store-failure above, or a hard
+        error mid-session) gets FAILED, because by the time any of those
+        is possible the panel is already showing the AP's name, password
+        and QR for a session that is about to stop existing.
+     Returns the outcome plus the sleep it implies. */
 setup_session_result_t setup_session_run(const setup_session_ops_t *ops, const setup_session_cfg_t *cfg);
 
 #ifdef __cplusplus

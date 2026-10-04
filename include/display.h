@@ -224,13 +224,26 @@ void display_ota(const char *from_version, const char *to_version);
    takes bare version strings instead of an ota_flow struct. main/
    setup_screens.c is the thin adapter that unpacks the session's struct
    into these. */
-void display_setup(const char *ap_ssid, const char *ap_password, const char *qr_payload, const char *form_url);
+void display_setup(const char *ap_ssid, const char *ap_password, const char *qr_payload, const char *username,
+                   const char *form_url);
 /* The BOOT hold is armed; releasing now enters setup. */
 void display_setup_release(void);
-/* WiFi provisioned and verified. */
-void display_setup_complete(void);
-/* The setup budget expired with nothing provisioned. */
-void display_setup_timeout(void);
+
+/* The end of a session, whichever way it ended. display_setup_end_t
+   mirrors setup_session_end_kind_t (setup_session.h) one for one; it is
+   redeclared here, rather than shared, for the same decoupling reason as
+   display_setup()'s plain strings above — main/setup_screens.c, which
+   already depends on both headers, is where the two enums are kept in
+   step. has_wifi_ssid is the device's SSID state going INTO the session
+   (unaffected by TIMED_OUT or FAILED, since neither one stores anything):
+   it picks the retry hint's wording, not the headline. */
+typedef enum {
+    DISPLAY_SETUP_END_WIFI_SAVED,
+    DISPLAY_SETUP_END_MQTT_SAVED,
+    DISPLAY_SETUP_END_TIMED_OUT,
+    DISPLAY_SETUP_END_FAILED,
+} display_setup_end_t;
+void display_setup_end(display_setup_end_t kind, bool has_wifi_ssid);
 
 /* Button B label: the action a press will take in the given state.
    display_screens.c maps these to LV_SYMBOL_PLAY/PAUSE and the "Reload"

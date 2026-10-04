@@ -11,6 +11,7 @@
 #include "../../main/config_validate.c"
 #include "../../main/mqtt_form.c"
 #include "cJSON.h"
+#include "qr_render.h"
 
 /* device_id() is declared in device_id.h and called directly by
    setup_session.c (not threaded through setup_session_cfg_t) — the same
@@ -84,7 +85,7 @@ static uint32_t fake_now_ms(void) {
 static int m_rand_idx;
 
 static uint8_t fake_rand_byte(void) {
-    /* Always in-range for the 57-char alphabet (limit 228): deterministic,
+    /* Always in-range for the 49-char alphabet (limit 245): deterministic,
        never rejected, so session-level tests need no knowledge of the
        password generator's internals. The dedicated password tests below
        script the sequence explicitly instead of using this fake. */
@@ -134,8 +135,9 @@ static setup_session_event_t fake_poll(uint32_t timeout_ms, setup_session_poll_o
 }
 
 static int m_render_setup_calls;
-static int m_render_complete_calls;
-static int m_render_timeout_calls;
+static int m_render_end_calls;
+static setup_session_end_kind_t m_render_end_kind;
+static bool m_render_end_has_ssid;
 static setup_session_screen_info_t m_render_setup_info;
 
 static void fake_render_setup(const setup_session_screen_info_t *info) {
@@ -144,14 +146,11 @@ static void fake_render_setup(const setup_session_screen_info_t *info) {
     note("render_setup");
 }
 
-static void fake_render_complete(void) {
-    m_render_complete_calls++;
-    note("render_complete");
-}
-
-static void fake_render_timeout(void) {
-    m_render_timeout_calls++;
-    note("render_timeout");
+static void fake_render_end(setup_session_end_kind_t kind, bool has_wifi_ssid) {
+    m_render_end_calls++;
+    m_render_end_kind = kind;
+    m_render_end_has_ssid = has_wifi_ssid;
+    note("render_end");
 }
 
 static int m_set_wifi_calls;
@@ -201,8 +200,7 @@ static setup_session_ops_t make_ops(void) {
     ops.stop = fake_stop;
     ops.poll = fake_poll;
     ops.render_setup_screen = fake_render_setup;
-    ops.render_complete_screen = fake_render_complete;
-    ops.render_timeout_screen = fake_render_timeout;
+    ops.render_end_screen = fake_render_end;
     ops.set_wifi_creds = fake_set_wifi;
     ops.clear_wifi_driver_store = fake_clear_driver;
     ops.set_mqtt_creds = fake_set_mqtt;
@@ -262,8 +260,9 @@ void setUp(void) {
     m_script_pos = 0;
     m_poll_calls = 0;
     m_render_setup_calls = 0;
-    m_render_complete_calls = 0;
-    m_render_timeout_calls = 0;
+    m_render_end_calls = 0;
+    m_render_end_kind = SETUP_SESSION_END_WIFI_SAVED;
+    m_render_end_has_ssid = false;
     memset(&m_render_setup_info, 0, sizeof(m_render_setup_info));
     m_set_wifi_calls = 0;
     m_set_wifi_ok = true;
@@ -278,7 +277,14 @@ void setUp(void) {
     m_set_mqtt_keep_pass = false;
 }
 
-void tearDown(void) {}
+void tearDown(void) {
+    /* qr_render_encode() heap-allocates (main/qr_render.c); only one test
+       in this file calls it, but releasing unconditionally here — a
+       documented no-op otherwise — means a future test that encodes and
+       forgets to clean up fails with its own assertion, not with an
+       end-of-process ASan leak report pointing at an unrelated test. */
+    qr_render_release();
+}
 
 /* ===== pure helper: AP password =========================================== */
 
@@ -286,7 +292,7 @@ void test_ap_password_default_fake_is_full_length_and_in_alphabet(void) {
     char out[SETUP_SESSION_AP_PASS_BUF];
     setup_session_make_ap_password(fake_rand_byte, out);
     TEST_ASSERT_EQUAL_INT(SETUP_SESSION_AP_PASS_LEN, (int)strlen(out));
-    static const char alphabet[] = "23456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+    static const char alphabet[] = "3467ACDEFGHJKLMNPQRTUVWXYabcdefhijkmnopqrstuvwxyz";
     for (int i = 0; i < SETUP_SESSION_AP_PASS_LEN; i++) {
         TEST_ASSERT_NOT_NULL_MESSAGE(strchr(alphabet, out[i]), "password character outside the unambiguous alphabet");
     }
@@ -299,7 +305,7 @@ void test_ap_password_length_is_wpa2_valid(void) {
 }
 
 void test_ap_password_excludes_ambiguous_characters(void) {
-    /* fake_rand_byte never emits a rejected byte (always < 200 < 228), so
+    /* fake_rand_byte never emits a rejected byte (always < 200 < 245), so
        this confirms the mapped output directly against the exclusion
        list rather than merely restating "is it in the alphabet". */
     char out[SETUP_SESSION_AP_PASS_BUF];
@@ -310,6 +316,16 @@ void test_ap_password_excludes_ambiguous_characters(void) {
         TEST_ASSERT_NOT_EQUAL('1', out[i]);
         TEST_ASSERT_NOT_EQUAL('l', out[i]);
         TEST_ASSERT_NOT_EQUAL('I', out[i]);
+        /* Confusable at 18 pt (the setup screen's password font), cut for
+           the same reason as the five above. */
+        TEST_ASSERT_NOT_EQUAL('S', out[i]);
+        TEST_ASSERT_NOT_EQUAL('5', out[i]);
+        TEST_ASSERT_NOT_EQUAL('Z', out[i]);
+        TEST_ASSERT_NOT_EQUAL('2', out[i]);
+        TEST_ASSERT_NOT_EQUAL('B', out[i]);
+        TEST_ASSERT_NOT_EQUAL('8', out[i]);
+        TEST_ASSERT_NOT_EQUAL('g', out[i]);
+        TEST_ASSERT_NOT_EQUAL('9', out[i]);
     }
 }
 
@@ -327,13 +343,13 @@ static uint8_t scripted_rand_byte(void) {
 }
 
 void test_ap_password_rejects_out_of_range_bytes_without_modulo_bias(void) {
-    /* limit = floor(256/57)*57 == 228, so every byte >= 228 must be
-       SKIPPED rather than folded in by `% 57`. 230 is out of range, and
-       230 % 57 == 2 -- so a buggy implementation that mapped instead of
-       rejecting would produce alphabet[2] here. The byte that follows, 5,
+    /* limit = floor(256/49)*49 == 245, so every byte >= 245 must be
+       SKIPPED rather than folded in by `% 49`. 246 is out of range, and
+       246 % 49 == 1 -- so a buggy implementation that mapped instead of
+       rejecting would produce alphabet[1] here. The byte that follows, 5,
        is in range and maps to alphabet[5], a value nothing else in this
        two-byte sequence could produce by coincidence. */
-    static const uint8_t seq[] = {230, 5};
+    static const uint8_t seq[] = {246, 5};
     m_script_rand_bytes = seq;
     m_script_rand_len = (int)(sizeof(seq) / sizeof(seq[0]));
     m_script_rand_pos = 0;
@@ -342,9 +358,9 @@ void test_ap_password_rejects_out_of_range_bytes_without_modulo_bias(void) {
     char out[SETUP_SESSION_AP_PASS_BUF];
     setup_session_make_ap_password(scripted_rand_byte, out);
 
-    static const char alphabet[] = "23456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+    static const char alphabet[] = "3467ACDEFGHJKLMNPQRTUVWXYabcdefhijkmnopqrstuvwxyz";
     TEST_ASSERT_EQUAL_INT(alphabet[5], out[0]);
-    /* The first character cost 2 calls (230 rejected, then 5 accepted);
+    /* The first character cost 2 calls (246 rejected, then 5 accepted);
        every character after it costs exactly 1 (the sequence's own last
        entry, 5, repeating and always accepted). 2 + 9 == 11 for a
        10-character password -- one more than a naive per-character mapping
@@ -352,15 +368,15 @@ void test_ap_password_rejects_out_of_range_bytes_without_modulo_bias(void) {
     TEST_ASSERT_EQUAL_INT(SETUP_SESSION_AP_PASS_LEN + 1, m_script_rand_calls);
 }
 
-void test_ap_password_rejection_boundary_228_vs_227(void) {
-    /* limit == 228 exactly: 228 must be REJECTED (>= limit) and cost a
-       second draw; 227 is the largest byte that must be ACCEPTED. Once
-       227 is drawn, scripted_rand_byte keeps returning it (it is the
+void test_ap_password_rejection_boundary_245_vs_244(void) {
+    /* limit == 245 exactly: 245 must be REJECTED (>= limit) and cost a
+       second draw; 244 is the largest byte that must be ACCEPTED. Once
+       244 is drawn, scripted_rand_byte keeps returning it (it is the
        sequence's last entry), so every remaining character costs
-       exactly 1 call — the same "+1 total calls" signature as the 230
+       exactly 1 call — the same "+1 total calls" signature as the 246
        case above, but anchored at the boundary itself rather than deep
        in the rejected range. */
-    static const uint8_t seq[] = {228, 227};
+    static const uint8_t seq[] = {245, 244};
     m_script_rand_bytes = seq;
     m_script_rand_len = (int)(sizeof(seq) / sizeof(seq[0]));
     m_script_rand_pos = 0;
@@ -369,8 +385,8 @@ void test_ap_password_rejection_boundary_228_vs_227(void) {
     char out[SETUP_SESSION_AP_PASS_BUF];
     setup_session_make_ap_password(scripted_rand_byte, out);
 
-    static const char alphabet[] = "23456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
-    TEST_ASSERT_EQUAL_INT(alphabet[227 % 57], out[0]);
+    static const char alphabet[] = "3467ACDEFGHJKLMNPQRTUVWXYabcdefhijkmnopqrstuvwxyz";
+    TEST_ASSERT_EQUAL_INT(alphabet[244 % 49], out[0]);
     TEST_ASSERT_EQUAL_INT(SETUP_SESSION_AP_PASS_LEN + 1, m_script_rand_calls);
 }
 
@@ -417,6 +433,35 @@ void test_qr_payload_too_small_buffer_fails_and_empties(void) {
     bool ok = setup_session_make_qr_payload("MagTag-a1b2c3", "Xk3mQ9Lp7R", out, sizeof(out));
     TEST_ASSERT_FALSE(ok);
     TEST_ASSERT_EQUAL_STRING("", out);
+}
+
+/* The REAL worst case, as opposed to the hypothetical 31-byte-SSID one
+   qr_render.h's own ceiling is sized against: device_id() (device_id.c)
+   always returns "magtag-" plus exactly 6 hex nibbles, so
+   setup_session_make_ap_ssid() always produces a 13-byte SSID — never
+   more, never fewer — and the real payload this device ever sends is
+   therefore always exactly 132 bytes. This builds that real payload
+   through the real pure helpers (not a hand copy) and asserts it
+   actually encodes, at the version qr_render.c's own measurement says it
+   should: a skeleton change in any of make_ap_ssid/make_ap_password/
+   make_qr_payload that grew the real payload would be caught here, not
+   only by a comment. */
+void test_the_real_worst_case_payload_encodes_at_version_6(void) {
+    s_dev_id = "magtag-a1b2c3"; /* any 6 hex nibbles; device_id() never varies the length */
+    char ssid[SETUP_SESSION_AP_SSID_MAX];
+    setup_session_make_ap_ssid(ssid);
+    TEST_ASSERT_EQUAL_INT(13, (int)strlen(ssid));
+
+    char pw[SETUP_SESSION_AP_PASS_BUF];
+    setup_session_make_ap_password(fake_rand_byte, pw);
+
+    char payload[SETUP_SESSION_QR_MAX];
+    TEST_ASSERT_TRUE(setup_session_make_qr_payload(ssid, pw, payload, sizeof(payload)));
+    TEST_ASSERT_EQUAL_INT(132, (int)strlen(payload));
+
+    int size = -1;
+    TEST_ASSERT_TRUE(qr_render_encode(payload, &size));
+    TEST_ASSERT_EQUAL_INT(41, size); /* version 6 — qr_render.c's own measured figure */
 }
 
 /* ===== pure helper: MQTT status line ======================================= */
@@ -578,20 +623,23 @@ void test_success_with_wifi_only(void) {
     TEST_ASSERT_EQUAL_INT(1, m_clear_driver_calls);
     TEST_ASSERT_EQUAL_INT(0, m_set_mqtt_calls);
     TEST_ASSERT_EQUAL_INT(1, m_render_setup_calls);
-    TEST_ASSERT_EQUAL_INT(1, m_render_complete_calls);
-    TEST_ASSERT_EQUAL_INT(0, m_render_timeout_calls);
+    TEST_ASSERT_EQUAL_INT(1, m_render_end_calls);
+    TEST_ASSERT_EQUAL(SETUP_SESSION_END_WIFI_SAVED, m_render_end_kind);
     /* start() and render_setup_screen() must agree on the AP credentials. */
     TEST_ASSERT_EQUAL_STRING(m_start_ssid, m_render_setup_info.ap_ssid);
     TEST_ASSERT_EQUAL_STRING(m_start_pass, m_render_setup_info.ap_password);
     TEST_ASSERT_TRUE(strncmp(m_render_setup_info.ap_ssid, "MagTag-", 7) == 0);
     assert_teardown_ran();
 
-    /* Ordering, not just "did it happen". */
-    assert_before(g_log, "extend", "start");
-    assert_before(g_log, "start", "render_setup");
+    /* Ordering, not just "did it happen". render_setup runs before start
+       — deliberately, so the setup screen is already painted before the
+       SoftAP's radio comes up (setup_session_run's own flow comment says
+       why). */
+    assert_before(g_log, "extend", "render_setup");
+    assert_before(g_log, "render_setup", "start");
     assert_before(g_log, "set_wifi", "clear_driver");
     assert_before(g_log, "clear_driver", "stop");
-    assert_before(g_log, "stop", "render_complete");
+    assert_before(g_log, "stop", "render_end");
 }
 
 /* WIFI_SUCCESS does not return immediately -- it lingers so a
@@ -668,14 +716,15 @@ void test_hard_error_during_the_linger_ends_it_early_but_outcome_stays_ok(void) 
 
     TEST_ASSERT_EQUAL(SETUP_SESSION_OUTCOME_WIFI_OK, r.outcome);
     TEST_ASSERT_EQUAL_INT(2, m_poll_calls); /* WIFI_SUCCESS, then the HARD_ERROR that cuts the linger short */
-    TEST_ASSERT_EQUAL_INT(1, m_render_complete_calls);
+    TEST_ASSERT_EQUAL_INT(1, m_render_end_calls);
+    TEST_ASSERT_EQUAL(SETUP_SESSION_END_WIFI_SAVED, m_render_end_kind);
     assert_teardown_ran();
 }
 
 /* A WIFI_SUCCESS whose credential store fails must not claim
    success, and must not clear the only verified copy that is left
    (the driver's own store). */
-void test_wifi_store_failure_is_an_error_with_the_timeout_screen(void) {
+void test_wifi_store_failure_is_an_error_with_the_failed_screen(void) {
     script_wifi_success("HomeNet", "homepass1");
     m_set_wifi_ok = false;
     setup_session_ops_t ops = make_ops();
@@ -687,18 +736,18 @@ void test_wifi_store_failure_is_an_error_with_the_timeout_screen(void) {
     TEST_ASSERT_EQUAL(SETUP_SESSION_SLEEP_BUTTON_ONLY, r.sleep);
     TEST_ASSERT_EQUAL_INT(1, m_set_wifi_calls);
     TEST_ASSERT_EQUAL_INT(0, m_clear_driver_calls);
-    TEST_ASSERT_EQUAL_INT(0, m_render_complete_calls);
-    /* Unlike every other ERROR path in this suite, this one DOES render
-       a screen: by the time this is decided the panel is already
-       showing the (about to be torn down) AP's name, password and QR,
-       and there is no dedicated error screen, so this reuses the
-       timeout one. */
-    TEST_ASSERT_EQUAL_INT(1, m_render_timeout_calls);
+    /* By the time this is decided the panel is already showing the
+       (about to be torn down) AP's name, password and QR, so this ERROR
+       — like every ERROR that happens after the setup screen painted —
+       renders FAILED. */
+    TEST_ASSERT_EQUAL_INT(1, m_render_end_calls);
+    TEST_ASSERT_EQUAL(SETUP_SESSION_END_FAILED, m_render_end_kind);
+    TEST_ASSERT_FALSE(m_render_end_has_ssid);
     TEST_ASSERT_EQUAL_INT(1, m_poll_calls); /* no linger on this path */
     assert_teardown_ran();
 
     assert_before(g_log, "set_wifi", "stop");
-    assert_before(g_log, "stop", "render_timeout");
+    assert_before(g_log, "stop", "render_end");
 }
 
 void test_wifi_store_failure_with_an_ssid_present_sleeps_the_normal_schedule(void) {
@@ -711,7 +760,9 @@ void test_wifi_store_failure_with_an_ssid_present_sleeps_the_normal_schedule(voi
 
     TEST_ASSERT_EQUAL(SETUP_SESSION_OUTCOME_ERROR, r.outcome);
     TEST_ASSERT_EQUAL(SETUP_SESSION_SLEEP_NORMAL, r.sleep);
-    TEST_ASSERT_EQUAL_INT(1, m_render_timeout_calls);
+    TEST_ASSERT_EQUAL_INT(1, m_render_end_calls);
+    TEST_ASSERT_EQUAL(SETUP_SESSION_END_FAILED, m_render_end_kind);
+    TEST_ASSERT_TRUE(m_render_end_has_ssid);
     assert_teardown_ran();
 }
 
@@ -750,7 +801,8 @@ void test_mqtt_only_with_an_ssid_already_present(void) {
     TEST_ASSERT_EQUAL_INT(0, m_set_wifi_calls);
     TEST_ASSERT_EQUAL_INT(0, m_clear_driver_calls);
     TEST_ASSERT_EQUAL_INT(0, m_set_mqtt_calls); /* already stored before this event was posted */
-    TEST_ASSERT_EQUAL_INT(1, m_render_complete_calls);
+    TEST_ASSERT_EQUAL_INT(1, m_render_end_calls);
+    TEST_ASSERT_EQUAL(SETUP_SESSION_END_MQTT_SAVED, m_render_end_kind);
     assert_teardown_ran();
 }
 
@@ -764,8 +816,9 @@ void test_mqtt_stored_on_a_no_ssid_device_then_times_out(void) {
     TEST_ASSERT_EQUAL(SETUP_SESSION_OUTCOME_TIMEOUT, r.outcome);
     TEST_ASSERT_EQUAL(SETUP_SESSION_SLEEP_BUTTON_ONLY, r.sleep);
     TEST_ASSERT_EQUAL_INT(0, m_set_wifi_calls);
-    TEST_ASSERT_EQUAL_INT(0, m_render_complete_calls);
-    TEST_ASSERT_EQUAL_INT(1, m_render_timeout_calls);
+    TEST_ASSERT_EQUAL_INT(1, m_render_end_calls);
+    TEST_ASSERT_EQUAL(SETUP_SESSION_END_TIMED_OUT, m_render_end_kind);
+    TEST_ASSERT_FALSE(m_render_end_has_ssid);
     TEST_ASSERT_EQUAL_INT((cfg.budget_sec * 1000) / (int)SETUP_SESSION_POLL_QUANTUM_MS, m_poll_calls);
     assert_teardown_ran();
 }
@@ -795,7 +848,9 @@ void test_timeout_with_no_ssid_sleeps_buttons_only(void) {
 
     TEST_ASSERT_EQUAL(SETUP_SESSION_OUTCOME_TIMEOUT, r.outcome);
     TEST_ASSERT_EQUAL(SETUP_SESSION_SLEEP_BUTTON_ONLY, r.sleep);
-    TEST_ASSERT_EQUAL_INT(1, m_render_timeout_calls);
+    TEST_ASSERT_EQUAL_INT(1, m_render_end_calls);
+    TEST_ASSERT_EQUAL(SETUP_SESSION_END_TIMED_OUT, m_render_end_kind);
+    TEST_ASSERT_FALSE(m_render_end_has_ssid);
     assert_teardown_ran();
 }
 
@@ -807,10 +862,16 @@ void test_timeout_with_an_ssid_present_sleeps_the_normal_schedule(void) {
 
     TEST_ASSERT_EQUAL(SETUP_SESSION_OUTCOME_TIMEOUT, r.outcome);
     TEST_ASSERT_EQUAL(SETUP_SESSION_SLEEP_NORMAL, r.sleep);
+    TEST_ASSERT_EQUAL(SETUP_SESSION_END_TIMED_OUT, m_render_end_kind);
+    TEST_ASSERT_TRUE(m_render_end_has_ssid);
     assert_teardown_ran();
 }
 
-void test_start_failure_is_a_hard_error_with_no_setup_screen(void) {
+/* render_setup_screen runs BEFORE start() (setup_session_run's own flow
+   comment says why), so a start() failure happens with the setup screen
+   already on the glass — unlike the extend_awake refusal below, this one
+   still renders FAILED, not nothing. */
+void test_start_failure_is_a_hard_error_after_the_setup_screen_already_painted(void) {
     m_start_ok = false;
     setup_session_ops_t ops = make_ops();
     setup_session_cfg_t cfg = {.has_wifi_ssid = false, .budget_sec = 600};
@@ -819,11 +880,14 @@ void test_start_failure_is_a_hard_error_with_no_setup_screen(void) {
 
     TEST_ASSERT_EQUAL(SETUP_SESSION_OUTCOME_ERROR, r.outcome);
     TEST_ASSERT_EQUAL(SETUP_SESSION_SLEEP_BUTTON_ONLY, r.sleep);
-    TEST_ASSERT_EQUAL_INT(0, m_render_setup_calls);
-    TEST_ASSERT_EQUAL_INT(0, m_render_complete_calls);
-    TEST_ASSERT_EQUAL_INT(0, m_render_timeout_calls);
-    TEST_ASSERT_EQUAL_INT(0, m_poll_calls);
+    TEST_ASSERT_EQUAL_INT(1, m_render_setup_calls);
+    TEST_ASSERT_EQUAL_INT(1, m_render_end_calls);
+    TEST_ASSERT_EQUAL(SETUP_SESSION_END_FAILED, m_render_end_kind);
+    TEST_ASSERT_FALSE(m_render_end_has_ssid);
+    TEST_ASSERT_EQUAL_INT(0, m_poll_calls); /* the loop never starts */
     assert_teardown_ran();
+
+    assert_before(g_log, "render_setup", "start");
 }
 
 void test_start_failure_with_an_ssid_present_sleeps_the_normal_schedule(void) {
@@ -835,12 +899,16 @@ void test_start_failure_with_an_ssid_present_sleeps_the_normal_schedule(void) {
 
     TEST_ASSERT_EQUAL(SETUP_SESSION_OUTCOME_ERROR, r.outcome);
     TEST_ASSERT_EQUAL(SETUP_SESSION_SLEEP_NORMAL, r.sleep);
+    TEST_ASSERT_EQUAL(SETUP_SESSION_END_FAILED, m_render_end_kind);
+    TEST_ASSERT_TRUE(m_render_end_has_ssid);
     assert_teardown_ran();
 }
 
 /* The earliest possible exit: nothing after step 1 ever ran, and teardown
    still has to be the thing that runs. This is the path that makes "always"
-   true rather than "true for every path this suite happened to try". */
+   true rather than "true for every path this suite happened to try" — and
+   the ONLY path where nothing ever painted, so it is also the only ERROR
+   that renders no screen at all. */
 void test_extend_awake_failure_is_a_hard_error_and_still_tears_down(void) {
     m_extend_ok = false;
     setup_session_ops_t ops = make_ops();
@@ -854,12 +922,19 @@ void test_extend_awake_failure_is_a_hard_error_and_still_tears_down(void) {
        is the one call that arms the failsafe for the whole session, so
        it has to cover everything that runs after the loop too. */
     TEST_ASSERT_EQUAL_INT(600 + SETUP_SESSION_TAIL_SEC, m_extend_arg);
+    TEST_ASSERT_EQUAL_INT(0, m_render_setup_calls);
+    TEST_ASSERT_EQUAL_INT(0, m_render_end_calls);
     TEST_ASSERT_EQUAL_INT(0, m_start_calls);
     TEST_ASSERT_EQUAL_INT(0, m_poll_calls);
     assert_teardown_ran();
 }
 
-void test_a_hard_error_mid_session_ends_the_session(void) {
+/* The defect this directly guards: a hard error mid-session used to leave
+   the panel showing a dead QR and password with no corrective screen.
+   screen_painted is true by this point (render_setup_screen already ran),
+   so this ERROR renders FAILED like every other one that happens after
+   the setup screen painted. */
+void test_a_hard_error_mid_session_ends_the_session_with_the_failed_screen(void) {
     script_hard_error();
     setup_session_ops_t ops = make_ops();
     setup_session_cfg_t cfg = {.has_wifi_ssid = false, .budget_sec = 600};
@@ -867,8 +942,8 @@ void test_a_hard_error_mid_session_ends_the_session(void) {
     setup_session_result_t r = setup_session_run(&ops, &cfg);
 
     TEST_ASSERT_EQUAL(SETUP_SESSION_OUTCOME_ERROR, r.outcome);
-    TEST_ASSERT_EQUAL_INT(0, m_render_complete_calls);
-    TEST_ASSERT_EQUAL_INT(0, m_render_timeout_calls);
+    TEST_ASSERT_EQUAL_INT(1, m_render_end_calls);
+    TEST_ASSERT_EQUAL(SETUP_SESSION_END_FAILED, m_render_end_kind);
     assert_teardown_ran();
 }
 
@@ -878,7 +953,7 @@ int main(void) {
     RUN_TEST(test_ap_password_length_is_wpa2_valid);
     RUN_TEST(test_ap_password_excludes_ambiguous_characters);
     RUN_TEST(test_ap_password_rejects_out_of_range_bytes_without_modulo_bias);
-    RUN_TEST(test_ap_password_rejection_boundary_228_vs_227);
+    RUN_TEST(test_ap_password_rejection_boundary_245_vs_244);
 
     RUN_TEST(test_ap_ssid_strips_the_devices_own_magtag_prefix);
     RUN_TEST(test_ap_ssid_without_the_prefix_falls_back_to_the_whole_id);
@@ -886,6 +961,7 @@ int main(void) {
 
     RUN_TEST(test_qr_payload_matches_the_espressif_sec2_softap_format);
     RUN_TEST(test_qr_payload_too_small_buffer_fails_and_empties);
+    RUN_TEST(test_the_real_worst_case_payload_encodes_at_version_6);
 
     RUN_TEST(test_format_mqtt_status_ok_says_saved);
     RUN_TEST(test_format_mqtt_status_names_the_field_when_there_is_one);
@@ -906,7 +982,7 @@ int main(void) {
     RUN_TEST(test_wifi_success_linger_is_capped_by_the_overall_budget);
     RUN_TEST(test_mqtt_stored_during_the_linger_does_not_end_it_early);
     RUN_TEST(test_hard_error_during_the_linger_ends_it_early_but_outcome_stays_ok);
-    RUN_TEST(test_wifi_store_failure_is_an_error_with_the_timeout_screen);
+    RUN_TEST(test_wifi_store_failure_is_an_error_with_the_failed_screen);
     RUN_TEST(test_wifi_store_failure_with_an_ssid_present_sleeps_the_normal_schedule);
     RUN_TEST(test_mqtt_stored_before_wifi_still_waits_for_wifi);
     RUN_TEST(test_mqtt_only_with_an_ssid_already_present);
@@ -914,9 +990,9 @@ int main(void) {
     RUN_TEST(test_a_wrong_wifi_password_is_not_stored_and_the_session_continues);
     RUN_TEST(test_timeout_with_no_ssid_sleeps_buttons_only);
     RUN_TEST(test_timeout_with_an_ssid_present_sleeps_the_normal_schedule);
-    RUN_TEST(test_start_failure_is_a_hard_error_with_no_setup_screen);
+    RUN_TEST(test_start_failure_is_a_hard_error_after_the_setup_screen_already_painted);
     RUN_TEST(test_start_failure_with_an_ssid_present_sleeps_the_normal_schedule);
     RUN_TEST(test_extend_awake_failure_is_a_hard_error_and_still_tears_down);
-    RUN_TEST(test_a_hard_error_mid_session_ends_the_session);
+    RUN_TEST(test_a_hard_error_mid_session_ends_the_session_with_the_failed_screen);
     return UNITY_END();
 }

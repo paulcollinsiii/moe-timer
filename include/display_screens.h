@@ -40,27 +40,29 @@ void display_screens_build_ota(const char *from_version, const char *to_version)
 
 /* ---- WiFi + MQTT provisioning plan: the setup screens ------------------- */
 
-/* The QR at the left (see main/qr_render.c for the version/scale/quiet-zone
-   arithmetic), and on the right: a short instruction, the AP name, the AP
-   password at the largest size that fits, and the form URL. `qr_payload`
-   is handed straight to qr_render_encode(); if it does not fit
-   QR_RENDER_MAX_VERSION at ECC LOW, no QR is drawn and the four text lines
-   render unchanged — the "falls back to text" path the plan asks for. A
-   32-byte ap_ssid (the input buffer's width, including the NUL this
-   function never assumes was hit) is clipped rather than overflowing the
-   column. */
+/* The QR at the left (display_screens.c owns the pixel-scale/quiet-zone
+   arithmetic that fits it on this panel; qr_render.h owns the version
+   this module asks qrcodegen for), and on the right: a short instruction,
+   the AP name, the manual-entry username, the AP password (labelled as
+   also being the PoP the stock app's own field asks for), and the MQTT
+   setup page's URL. `qr_payload` is handed straight to qr_render_encode();
+   if it does not fit QR_RENDER_MAX_VERSION at ECC LOW, no QR is drawn and
+   the text lines render unchanged — they are the complete manual-entry
+   path, not merely a note that one exists. ap_ssid longer than the column
+   budget (up to SETUP_SESSION_AP_SSID_MAX-1, the input buffer's own
+   width) is clipped rather than overflowing into the QR block or off the
+   panel's right edge. */
 void display_screens_build_setup(const char *ap_ssid, const char *ap_password, const char *qr_payload,
-                                 const char *form_url);
+                                 const char *username, const char *form_url);
 /* Shown while the BOOT hold is armed (SETUP_TRIGGER_BOOT_HOLD_IDLE's
    threshold reached) — releasing now enters setup. */
 void display_screens_build_setup_release(void);
-/* WiFi provisioned and verified; the first real network window (NTP, HA)
-   runs after this wake, not during it. */
-void display_screens_build_setup_complete(void);
-/* The setup budget expired with nothing provisioned. The retry hold
-   duration is read from SETUP_TRIGGER_BOOT_HOLD_MS (setup_trigger.h)
-   rather than restated, so the two can never disagree. */
-void display_screens_build_setup_timeout(void);
+/* The end of a session, whichever way it ended — WiFi/MQTT saved, timed
+   out, or failed. The retry hint on the latter two is read from
+   SETUP_TRIGGER_BOOT_HOLD_MS and CONFIG_MAGTAG_BOOT_WAKES (setup_trigger.h
+   and this file's own boot_wakes_enabled()) rather than restated, so a
+   Kconfig change cannot leave this screen quoting a stale promise. */
+void display_screens_build_setup_end(display_setup_end_t kind, bool has_wifi_ssid);
 
 #ifdef __cplusplus
 }

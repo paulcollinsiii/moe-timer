@@ -1010,13 +1010,17 @@ void display_screens_build_ota(const char *from_version, const char *to_version)
    lv_draw_rect() per horizontal run of dark modules rather than one per
    module (cheaper, and the module count can reach 2025 at version 7) —
    the same draw call style_bar()'s indicator already issues, so this adds
-   no new draw path on the I1 side. The module count is threaded through
-   as the event's user_data because qr_render.c's result is otherwise only
-   reachable by size, not by the lv_obj that is about to draw it. */
+   no new draw path on the I1 side. The module count comes from
+   qr_render_last_size() rather than a value captured when the lv_obj was
+   built: both it and qr_render_module() below then answer from the SAME
+   encode, so a second qr_render_encode() landing between build time and
+   this draw (not reachable today — this project renders one screen
+   synchronously, start to finish, on a single task) cannot leave this
+   walking a stale size against a fresh matrix. */
 static void qr_draw_cb(lv_event_t *e) {
     lv_layer_t *layer = lv_event_get_layer(e);
     lv_obj_t *obj = lv_event_get_current_target(e);
-    int size = (int)(intptr_t)lv_event_get_user_data(e);
+    int size = qr_render_last_size();
 
     lv_area_t coords;
     lv_obj_get_coords(obj, &coords);
@@ -1067,11 +1071,11 @@ static void build_setup_qr(lv_obj_t *scr, const char *qr_payload) {
     lv_obj_set_style_border_width(qr, 0, 0);
     lv_obj_set_style_bg_color(qr, lv_color_white(), 0);
     lv_obj_set_style_bg_opa(qr, LV_OPA_COVER, 0);
-    lv_obj_add_event_cb(qr, qr_draw_cb, LV_EVENT_DRAW_MAIN, (void *)(intptr_t)size);
+    lv_obj_add_event_cb(qr, qr_draw_cb, LV_EVENT_DRAW_MAIN, NULL);
 }
 
 void display_screens_build_setup(const char *ap_ssid, const char *ap_password, const char *qr_payload,
-                                 const char *form_url) {
+                                 const char *username, const char *form_url) {
     lv_obj_t *scr = fresh_screen(false);
     char buf[48];
 
@@ -1080,23 +1084,41 @@ void display_screens_build_setup(const char *ap_ssid, const char *ap_password, c
     make_label(scr, "Scan with ESP SoftAP Prov", &lv_font_montserrat_12, LV_ALIGN_TOP_LEFT, SETUP_TEXT_X, 4);
 
     snprintf(buf, sizeof(buf), "AP: %s", ap_ssid);
-    cap_width(make_label(scr, buf, &lv_font_montserrat_12, LV_ALIGN_TOP_LEFT, SETUP_TEXT_X, 24), SETUP_TEXT_MAX_W);
+    cap_width(make_label(scr, buf, &lv_font_montserrat_12, LV_ALIGN_TOP_LEFT, SETUP_TEXT_X, 22), SETUP_TEXT_MAX_W);
+
+    /* The stock app's own manual-entry fields are "Username" and "PoP"
+       (setup_session.h's QR-payload comment names both); a scan never
+       needs this line, but a phone that will not scan has to be told what
+       to type. `username` is caller-supplied (setup_screens.c forwards
+       SETUP_SESSION_QR_USERNAME, a fixed "magtag" today) rather than a
+       literal here, so it gets the same cap_width() backstop as every
+       other caller-supplied line in this tree. */
+    snprintf(buf, sizeof(buf), "User: %s", username);
+    cap_width(make_label(scr, buf, &lv_font_montserrat_12, LV_ALIGN_TOP_LEFT, SETUP_TEXT_X, 40), SETUP_TEXT_MAX_W);
+
+    /* "(PoP)" rather than a separate line: this password IS the Proof of
+       Possession the stock app's manual-entry form asks for under that
+       name, not a second secret — labelling it here is cheaper than a
+       whole extra line for the same fact. */
+    make_label(scr, "Password (PoP):", &lv_font_montserrat_12, LV_ALIGN_TOP_LEFT, SETUP_TEXT_X, 58);
 
     /* The largest compiled size that fits the column for a typical draw —
-       measured, not assumed (test5-impl.notes.md): 28 pt already clips
-       the task's own example password (201 px natural against a 178 px
-       column), so 18 pt is the ceiling, at 129 px for that same string.
-       AP_PASS_ALPHABET (setup_session.c) includes 'W'/'w'/'M'/'m', so a
-       cap_width() backstop stays on this label the same as every other
-       variable-content line in this tree — ten of the alphabet's widest
-       glyph in a row is the only draw this could ever clip, which is the
-       sort of input a geometric cap exists for, not a case to design the
-       font size around (see the OTA screen's own all-'W' case for the
-       same trade-off). */
-    cap_width(make_label(scr, ap_password, &lv_font_montserrat_18, LV_ALIGN_TOP_LEFT, SETUP_TEXT_X, 44),
+       measured, not assumed: 28 pt already clips a sample password (201 px
+       natural against a 178 px column), so 18 pt is the ceiling, at 129 px
+       for that same string. AP_PASS_ALPHABET (setup_session.c) still
+       includes 'W'/'w'/'M'/'m', so a cap_width() backstop stays on this
+       label the same as every other variable-content line in this tree —
+       NOT because ten of the alphabet's widest glyph in a row is the only
+       input that could ever clip (any draw over the 178 px budget does,
+       the same as on every other capped label here), but because 2,000,000
+       sampled passwords measured zero clips, which is the sort of margin a
+       geometric cap exists to hold rather than a font size to chase (see
+       the OTA screen's own all-'W' case for the same trade-off). */
+    cap_width(make_label(scr, ap_password, &lv_font_montserrat_18, LV_ALIGN_TOP_LEFT, SETUP_TEXT_X, 76),
               SETUP_TEXT_MAX_W);
 
-    cap_width(make_label(scr, form_url, &lv_font_montserrat_12, LV_ALIGN_TOP_LEFT, SETUP_TEXT_X, 76), SETUP_TEXT_MAX_W);
+    snprintf(buf, sizeof(buf), "MQTT: %s", form_url);
+    cap_width(make_label(scr, buf, &lv_font_montserrat_12, LV_ALIGN_TOP_LEFT, SETUP_TEXT_X, 104), SETUP_TEXT_MAX_W);
 }
 
 /* Shown while the BOOT hold is armed; releasing now enters setup
@@ -1109,24 +1131,123 @@ void display_screens_build_setup_release(void) {
     make_label(scr, "enter setup", &lv_font_montserrat_28, LV_ALIGN_TOP_MID, 0, 64);
 }
 
-/* WiFi provisioned and verified. The first real network window (NTP sync,
-   HA discovery) is the NEXT wake, not this one (D4) — "connecting" is
-   therefore accurate, not aspirational. */
-void display_screens_build_setup_complete(void) {
-    lv_obj_t *scr = fresh_screen(false);
-    make_label(scr, "WiFi saved", &lv_font_montserrat_28, LV_ALIGN_TOP_MID, 0, 30);
-    make_label(scr, "Connecting...", &lv_font_montserrat_18, LV_ALIGN_TOP_MID, 0, 72);
+/* ---- the end-of-session screens: what will actually retry setup -------- */
+
+/* The one spot this screen reads CONFIG_MAGTAG_BOOT_WAKES — a tiny shim
+   rather than an #if inside format_setup_retry_line() below, so a host
+   build (no sdkconfig.h here; the symbol is simply undefined, which an
+   #if reads as 0) always exercises the off branch while that function's
+   on branch stays reachable from the very same host build, by calling it
+   directly with boot_wakes=true. */
+static bool boot_wakes_enabled(void) {
+#if CONFIG_MAGTAG_BOOT_WAKES
+    return true;
+#else
+    return false;
+#endif
 }
 
-/* The setup budget expired with nothing provisioned. The retry duration is
-   DERIVED from SETUP_TRIGGER_BOOT_HOLD_MS rather than restated as a
-   literal "5", so a Kconfig change to the hold threshold cannot leave this
-   screen quoting the old number. */
-void display_screens_build_setup_timeout(void) {
-    lv_obj_t *scr = fresh_screen(false);
-    char buf[40];
+/* SETUP_TRIGGER_BOOT_HOLD_MS as seconds, without truncating a non-whole
+   value down to the second below it — truncating a 2500 ms threshold
+   used to render "2 s", which a 2.0 s hold then satisfies and does
+   nothing with, since the real threshold is 2.5 s. Whole seconds render
+   as a bare integer; anything else gets exactly one decimal digit
+   (floored, not rounded — simple, and the Kconfig default is round
+   anyway, so the rounding direction is untested ground this module has
+   no reason to walk into). */
+static void format_hold_seconds(uint32_t hold_ms, char *out, size_t out_cap) {
+    unsigned whole = hold_ms / 1000u;
+    unsigned tenths = (hold_ms % 1000u) / 100u;
+    if (tenths == 0)
+        snprintf(out, out_cap, "%u", whole);
+    else
+        snprintf(out, out_cap, "%u.%u", whole, tenths);
+}
 
-    make_label(scr, "Setup timed out", &lv_font_montserrat_28, LV_ALIGN_TOP_MID, 0, 20);
-    snprintf(buf, sizeof(buf), "Hold BOOT %d s to retry", SETUP_TRIGGER_BOOT_HOLD_MS / 1000);
-    make_label(scr, buf, &lv_font_montserrat_18, LV_ALIGN_BOTTOM_MID, 0, -20);
+/* The timeout/failed screens' second line — what will actually retry
+   setup on THIS build, in THIS state, never a bare "hold BOOT" promise
+   that does nothing on the (default) build where BOOT cannot wake the
+   device from deep sleep:
+     no SSID      -> any A-D press re-enters setup on its own
+                     (setup_trigger_decide's no-SSID rule) — a button
+                     press is the whole gesture, so holding BOOT first
+                     would only be true if it also woke the device, which
+                     an unprovisioned device's sleep policy never arms.
+     SSID present -> a button press only wakes the device; the hold still
+                     has to follow it, UNLESS BOOT itself can wake it
+                     (CONFIG_MAGTAG_BOOT_WAKES), in which case the hold
+                     alone is the whole gesture, same as while awake.
+   has_wifi_ssid and boot_wakes are parameters rather than a global/#if
+   read here so a host test can drive every combination directly. */
+static void format_setup_retry_line(bool has_wifi_ssid, bool boot_wakes, char *out, size_t out_cap) {
+    char secs[16];
+    format_hold_seconds(SETUP_TRIGGER_BOOT_HOLD_MS, secs, sizeof(secs));
+    if (!has_wifi_ssid)
+        snprintf(out, out_cap, "Press any button to retry");
+    else if (boot_wakes)
+        snprintf(out, out_cap, "Hold BOOT %s s to retry", secs);
+    else
+        snprintf(out, out_cap, "Press a button, then hold BOOT %s s", secs);
+}
+
+/* The retry line is too long at 18 pt to survive a single-line clip — the
+   "press a button, then hold BOOT" phrasing measured well past the panel
+   width — so this wraps it across up to two lines inside a fixed-width,
+   centred box anchored to the bottom edge, rather than cap_width()'s
+   single-line LONG_CLIP (fine for the shorter caller-supplied lines
+   elsewhere on this screen, wrong here: a clipped retry instruction can
+   silently drop the number or the word "retry" itself). The shortest of
+   the three phrasings still fits on one line; WRAP leaves a one-line
+   label exactly as centred as it already was. */
+static void make_retry_line(lv_obj_t *scr, const char *text) {
+    lv_obj_t *lbl = make_label(scr, text, &lv_font_montserrat_18, LV_ALIGN_BOTTOM_MID, 0, -8);
+    lv_obj_set_width(lbl, OTA_LINE_MAX_W);
+    lv_label_set_long_mode(lbl, LV_LABEL_LONG_WRAP);
+    lv_obj_set_style_text_align(lbl, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_align(lbl, LV_ALIGN_BOTTOM_MID, 0, -8); /* re-align: the width change above moves the auto-fit box */
+}
+
+/* The end of a session, whichever way it ended:
+     WIFI_SAVED  : WiFi provisioned and verified. The first real network
+                   window (NTP sync, HA discovery) is the next wake, not
+                   this one, so "connecting" is accurate, not aspirational.
+     MQTT_SAVED  : the device already had an SSID and only the MQTT form
+                   was submitted this session — WiFi was never touched, so
+                   this says so instead of claiming a WiFi join that did
+                   not happen.
+     TIMED_OUT   : the budget expired with nothing provisioned (or, on a
+                   device that already had an SSID, nothing NEW this
+                   session).
+     FAILED      : a start failure, a verified join whose credential store
+                   failed, or a hard error mid-session — see
+                   setup_session_run()'s own doc comment for why all three
+                   share this screen: by the time any of them is possible
+                   the panel already showed an AP name, password and QR
+                   for a session that no longer exists, so it must not be
+                   left showing them. */
+void display_screens_build_setup_end(display_setup_end_t kind, bool has_wifi_ssid) {
+    lv_obj_t *scr = fresh_screen(false);
+    char line[48];
+
+    switch (kind) {
+        case DISPLAY_SETUP_END_WIFI_SAVED:
+            make_label(scr, "Setup complete", &lv_font_montserrat_28, LV_ALIGN_TOP_MID, 0, 30);
+            make_label(scr, "Connecting to WiFi...", &lv_font_montserrat_18, LV_ALIGN_TOP_MID, 0, 72);
+            break;
+        case DISPLAY_SETUP_END_MQTT_SAVED:
+            make_label(scr, "Setup complete", &lv_font_montserrat_28, LV_ALIGN_TOP_MID, 0, 30);
+            make_label(scr, "MQTT broker saved", &lv_font_montserrat_18, LV_ALIGN_TOP_MID, 0, 72);
+            break;
+        case DISPLAY_SETUP_END_TIMED_OUT:
+            make_label(scr, "Setup timed out", &lv_font_montserrat_28, LV_ALIGN_TOP_MID, 0, 20);
+            format_setup_retry_line(has_wifi_ssid, boot_wakes_enabled(), line, sizeof(line));
+            make_retry_line(scr, line);
+            break;
+        case DISPLAY_SETUP_END_FAILED:
+        default:
+            make_label(scr, "Setup failed", &lv_font_montserrat_28, LV_ALIGN_TOP_MID, 0, 20);
+            format_setup_retry_line(has_wifi_ssid, boot_wakes_enabled(), line, sizeof(line));
+            make_retry_line(scr, line);
+            break;
+    }
 }

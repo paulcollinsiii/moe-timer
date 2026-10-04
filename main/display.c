@@ -11,6 +11,7 @@
 #include "freertos/task.h"
 #include "lvgl.h"
 #include "panic_diag.h"
+#include "qr_render.h"
 #include "sdkconfig.h"
 #include "ssd1680.h"
 
@@ -424,16 +425,28 @@ void display_ota(const char *from_version, const char *to_version) {
 }
 
 /* WiFi + MQTT provisioning plan: the setup screens. Each is a one-shot
-   takeover, same shape as display_ota() minus s_takeover_on_panel — a
-   setup session owns the whole wake (plan, "The setup session" item 4:
-   no MQTT, NTP, OTA or tick runs alongside it), so there is no later
-   paint in the same wake for a stale cadence count to reach. */
-void display_setup(const char *ap_ssid, const char *ap_password, const char *qr_payload, const char *form_url) {
+   takeover, same shape as display_timesup()/display_charge_me() above —
+   NOT display_ota(): s_takeover_on_panel stays untouched here, on
+   purpose, the same way it does for every full-refresh takeover except
+   OTA's. The paint that follows (the next wake's first display_update(),
+   whether that is seconds or days later) falls through to the ordinary
+   cadence and may be a partial; that is fine for these screens for the
+   same reason it is fine after TIME'S UP or Charge Me — see
+   s_takeover_on_panel's own comment for which screen actually needs the
+   flag, and why. */
+void display_setup(const char *ap_ssid, const char *ap_password, const char *qr_payload, const char *username,
+                   const char *form_url) {
     if (!s_initialized)
         display_init();
-    display_screens_build_setup(ap_ssid, ap_password, qr_payload, form_url);
+    display_screens_build_setup(ap_ssid, ap_password, qr_payload, username, form_url);
     s_partial_count = 0;
     render(SSD1680_REFRESH_FULL, false);
+    /* The draw callback (display_screens.c's qr_draw_cb) reads the QR
+       buffer synchronously inside render() above — lv_refr_now() runs the
+       whole layout-and-draw pass before returning, and nothing else
+       touches the buffer — so freeing it here cannot race the one read
+       that matters. */
+    qr_render_release();
 }
 
 void display_setup_release(void) {
@@ -444,18 +457,10 @@ void display_setup_release(void) {
     render(SSD1680_REFRESH_FULL, false);
 }
 
-void display_setup_complete(void) {
+void display_setup_end(display_setup_end_t kind, bool has_wifi_ssid) {
     if (!s_initialized)
         display_init();
-    display_screens_build_setup_complete();
-    s_partial_count = 0;
-    render(SSD1680_REFRESH_FULL, false);
-}
-
-void display_setup_timeout(void) {
-    if (!s_initialized)
-        display_init();
-    display_screens_build_setup_timeout();
+    display_screens_build_setup_end(kind, has_wifi_ssid);
     s_partial_count = 0;
     render(SSD1680_REFRESH_FULL, false);
 }

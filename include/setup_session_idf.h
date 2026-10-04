@@ -12,7 +12,7 @@
    `extend_awake`, already injected elsewhere (main.c's
    extend_awake_failsafe) and reused here rather than duplicated.
 
-   Everything else the ops table needs — the three render functions —
+   Everything else the ops table needs — the two render functions —
    belongs to the setup screens, declared beside the screens they paint,
    not here. */
 

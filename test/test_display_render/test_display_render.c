@@ -11,6 +11,13 @@
 
 #include "lvgl.h"
 
+/* Header only, test-only — ties this suite's SETUP_TEST_USERNAME to the
+   real device's SETUP_SESSION_QR_USERNAME (see
+   test_setup_screens_own_test_username_matches_the_real_qr_username
+   below). display_screens.c itself never includes this: display.c must
+   not depend on setup_session.h, and display_screens.c follows it. */
+#include "setup_session.h"
+
 /* Single-TU compilation of the layout math + screen builders */
 // clang-format off
 #include "../../main/display_layout.c"
@@ -42,7 +49,17 @@ void setUp(void) {
     tzset();
 }
 
-void tearDown(void) {}
+void tearDown(void) {
+    /* qr_render_encode() heap-allocates its result (main/qr_render.c);
+       on-device, display.c's setup wrapper frees it right after render()
+       returns, but this suite never links display.c, so nothing else
+       ever would. Unconditional and a documented no-op when a test never
+       touched the QR path — ASan's leak check runs once, at process
+       exit, so whatever the LAST QR-touching test here left allocated
+       would otherwise be reported as a leak regardless of which test it
+       was. */
+    qr_render_release();
+}
 
 /* Monday 2026-01-05 15:04:05 UTC — fixed header date/time */
 #define WALL ((time_t)1767625445)
@@ -1420,18 +1437,32 @@ void test_the_config_error_screen_renders_the_pair_it_is_given(void) {
 /* ---- WiFi + MQTT provisioning plan: the setup screens -------------------
 
    Deterministic inputs for every test below: a fixed SSID, AP password,
-   QR payload and form URL, so the goldens never depend on a real device
-   id or a freshly drawn random password. */
+   QR payload, username and form URL, so the goldens never depend on a
+   real device id or a freshly drawn random password. */
 #define SETUP_TEST_SSID "MagTag-a1b2c3"
 #define SETUP_TEST_PASSWORD "ABCDEFGHJK"
+#define SETUP_TEST_USERNAME "magtag"
 #define SETUP_TEST_URL "http://192.168.4.1/mqtt"
 #define SETUP_TEST_PAYLOAD                                                                       \
     "{\"ver\":\"v1\",\"name\":\"MagTag-a1b2c3\",\"username\":\"magtag\",\"pop\":\"ABCDEFGHJK\"," \
     "\"password\":\"ABCDEFGHJK\",\"transport\":\"softap\",\"security\":2}"
 
 void test_setup_screen(void) {
-    display_screens_build_setup(SETUP_TEST_SSID, SETUP_TEST_PASSWORD, SETUP_TEST_PAYLOAD, SETUP_TEST_URL);
+    display_screens_build_setup(SETUP_TEST_SSID, SETUP_TEST_PASSWORD, SETUP_TEST_PAYLOAD, SETUP_TEST_USERNAME,
+                                SETUP_TEST_URL);
     assert_matches_golden("setup");
+}
+
+/* setup_session.h's QR-payload comment names the literal username this
+   device's QR always carries (SETUP_SESSION_QR_USERNAME); display.c must
+   not depend on that header (same reason display_setup() takes plain
+   strings instead of a setup_session_screen_info_t), so this file
+   includes it ITSELF, test-only, to tie the two together instead of
+   leaving that to a comment alone — the same shape as
+   test_the_break_chore_tick_matches_the_checklist_glyph's own check
+   against LV_SYMBOL_OK. */
+void test_setup_screens_own_test_username_matches_the_real_qr_username(void) {
+    TEST_ASSERT_EQUAL_STRING(SETUP_SESSION_QR_USERNAME, SETUP_TEST_USERNAME);
 }
 
 static bool fb_pixel_is_black(int x, int y) {
@@ -1439,14 +1470,19 @@ static bool fb_pixel_is_black(int x, int y) {
 }
 
 /* The plan's own worry: a golden of a blank QR would pass a byte
-   comparison. This samples the rendered framebuffer at every module's
-   CENTRE and checks it against qr_render_module() for the same payload —
-   proving the drawing matches the encoding, not merely that some ink
-   exists somewhere in the block. QR_LEFT_MARGIN/QR_TOP_MARGIN/
-   QR_QUIET_MODULES/QR_SCALE_PX are display_screens.c's own macros,
-   visible here because this file #includes it as one translation unit. */
+   comparison. This checks EVERY pixel of the whole QR_BLOCK_PX square —
+   both pixels of every 2x2 module (not just each module's centre, which
+   is blind to the whole block having shifted by one pixel), the quiet
+   zone, and any padding past the real code's own smaller size up to
+   QR_RENDER_MAX_MODULES — against qr_render_module() for the same
+   payload, proving the drawing matches the encoding at every pixel it
+   draws rather than merely that some ink exists somewhere in the block.
+   QR_LEFT_MARGIN/QR_TOP_MARGIN/QR_QUIET_MODULES/QR_SCALE_PX/QR_BLOCK_PX
+   are display_screens.c's own macros, visible here because this file
+   #includes it as one translation unit. */
 void test_setup_screen_qr_matches_the_encoding(void) {
-    display_screens_build_setup(SETUP_TEST_SSID, SETUP_TEST_PASSWORD, SETUP_TEST_PAYLOAD, SETUP_TEST_URL);
+    display_screens_build_setup(SETUP_TEST_SSID, SETUP_TEST_PASSWORD, SETUP_TEST_PAYLOAD, SETUP_TEST_USERNAME,
+                                SETUP_TEST_URL);
     lv_refr_now(s_disp);
 
     int size = 0;
@@ -1454,56 +1490,95 @@ void test_setup_screen_qr_matches_the_encoding(void) {
     TEST_ASSERT_TRUE(size > 0);
 
     int sampled_dark = 0;
-    for (int y = 0; y < size; y++) {
-        for (int x = 0; x < size; x++) {
-            int px = QR_LEFT_MARGIN + QR_QUIET_MODULES * QR_SCALE_PX + x * QR_SCALE_PX + QR_SCALE_PX / 2;
-            int py = QR_TOP_MARGIN + QR_QUIET_MODULES * QR_SCALE_PX + y * QR_SCALE_PX + QR_SCALE_PX / 2;
-            bool expect_dark = qr_render_module(x, y);
-            bool got_dark = fb_pixel_is_black(px, py);
+    int mismatches = 0;
+    for (int py = 0; py < QR_BLOCK_PX; py++) {
+        for (int px = 0; px < QR_BLOCK_PX; px++) {
+            int mx = px - QR_QUIET_MODULES * QR_SCALE_PX;
+            int my = py - QR_QUIET_MODULES * QR_SCALE_PX;
+            bool in_code = mx >= 0 && my >= 0 && (mx / QR_SCALE_PX) < size && (my / QR_SCALE_PX) < size;
+            bool expect_dark = in_code && qr_render_module(mx / QR_SCALE_PX, my / QR_SCALE_PX);
+            bool got_dark = fb_pixel_is_black(QR_LEFT_MARGIN + px, QR_TOP_MARGIN + py);
+            if (expect_dark != got_dark)
+                mismatches++;
             if (expect_dark)
                 sampled_dark++;
-            TEST_ASSERT_EQUAL_MESSAGE(expect_dark, got_dark, "a module's centre disagrees with the encoding");
         }
     }
+    TEST_ASSERT_EQUAL_INT_MESSAGE(0, mismatches,
+                                  "a pixel (module interior, quiet zone, or padding) disagrees with the encoding");
     TEST_ASSERT_TRUE_MESSAGE(sampled_dark > 0, "no dark module sampled - the blank-QR trap the plan calls out");
 }
 
 /* setup_session.h's ap_ssid buffer is 32 bytes including the NUL, so 31
    characters is the longest possible SSID. The AP line must stay inside
    its column (cap_width()'s LONG_CLIP), never overflow into the QR block
-   to its left or off the panel's right edge. */
-void test_the_setup_screen_handles_a_32_byte_ssid(void) {
+   to its left or off the panel's right edge. Found by its y coordinate
+   (24, the same one display_screens_build_setup() aligns it at) rather
+   than a hardcoded child index, so adding or reordering a label on this
+   screen cannot silently point this at the wrong widget. */
+void test_the_setup_screen_clips_a_31_byte_ssid_without_overflowing_its_column(void) {
     char ssid31[32];
     memset(ssid31, 'X', 31);
     ssid31[31] = '\0';
 
-    display_screens_build_setup(ssid31, SETUP_TEST_PASSWORD, SETUP_TEST_PAYLOAD, SETUP_TEST_URL);
+    display_screens_build_setup(ssid31, SETUP_TEST_PASSWORD, SETUP_TEST_PAYLOAD, SETUP_TEST_USERNAME, SETUP_TEST_URL);
     lv_obj_t *scr = lv_screen_active();
     lv_obj_update_layout(scr);
 
-    /* Children in build order: the QR block, then the four labels — the
-       AP line is index 2. */
-    lv_obj_t *ap_line = lv_obj_get_child(scr, 2);
+    lv_obj_t *ap_line = NULL;
+    uint32_t n = lv_obj_get_child_count(scr);
+    for (uint32_t i = 0; i < n; i++) {
+        lv_obj_t *o = lv_obj_get_child(scr, i);
+        if (lv_obj_check_type(o, &lv_label_class) && lv_obj_get_y(o) == 22)
+            ap_line = o;
+    }
+    TEST_ASSERT_NOT_NULL_MESSAGE(ap_line, "AP line (y=22) not found");
+
     char msg[96];
     snprintf(msg, sizeof(msg), "AP line is %d px wide, column budget is %d", (int)lv_obj_get_width(ap_line),
              SETUP_TEXT_MAX_W);
     TEST_ASSERT_TRUE_MESSAGE(lv_obj_get_width(ap_line) <= SETUP_TEXT_MAX_W, msg);
+
+    /* Meaningful, not a tautology: cap_width()'s LONG_CLIP guarantees
+       width <= max on its own, so the property worth pinning is that the
+       UNCAPPED line really would have overflowed — i.e. the cap is doing
+       something on this input, not merely present. A fresh, uncapped
+       label with the same text and font measures that directly, rather
+       than mutating the already-asserted widget and hoping its style
+       reverts cleanly. */
+    char buf[48];
+    snprintf(buf, sizeof(buf), "AP: %s", ssid31);
+    lv_obj_t *uncapped = lv_label_create(scr);
+    lv_label_set_text(uncapped, buf);
+    lv_obj_set_style_text_font(uncapped, &lv_font_montserrat_12, 0);
+    lv_obj_update_layout(scr);
+    int32_t natural_w = lv_obj_get_width(uncapped);
+    TEST_ASSERT_TRUE_MESSAGE(natural_w > SETUP_TEXT_MAX_W,
+                             "a 31-byte SSID's natural width never exceeded the column "
+                             "budget - this test would pass even with no clip at all");
 }
 
 /* qr_render.h's own ceiling: version 7 at ECC LOW holds at most 154 byte-
    mode bytes. 155 forces a failure qr_render_encode() cannot recover
-   from — the screen must still render the other three lines, just with
-   no QR block. */
+   from — the screen must still render every text line, just with no QR
+   block, and those lines are the complete manual-entry path (SSID,
+   username, password/PoP, MQTT URL), not merely a note that one exists. */
 void test_the_setup_screen_falls_back_to_text_when_the_payload_is_too_long(void) {
     char too_long[156];
     for (int i = 0; i < 155; i++)
         too_long[i] = (char)('a' + (i % 26));
     too_long[155] = '\0';
 
-    display_screens_build_setup(SETUP_TEST_SSID, SETUP_TEST_PASSWORD, too_long, SETUP_TEST_URL);
+    display_screens_build_setup(SETUP_TEST_SSID, SETUP_TEST_PASSWORD, too_long, SETUP_TEST_USERNAME, SETUP_TEST_URL);
     lv_obj_t *scr = lv_screen_active();
     lv_obj_update_layout(scr);
-    TEST_ASSERT_EQUAL_UINT32_MESSAGE(4, lv_obj_get_child_count(scr), "a failed encode must still draw no QR object");
+
+    uint32_t n = lv_obj_get_child_count(scr);
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE(6, n, "a failed encode must still draw every text line, just no QR object");
+    for (uint32_t i = 0; i < n; i++) {
+        TEST_ASSERT_TRUE_MESSAGE(lv_obj_check_type(lv_obj_get_child(scr, i), &lv_label_class),
+                                 "every child is a label when no QR was drawn");
+    }
 }
 
 void test_setup_release_screen(void) {
@@ -1511,14 +1586,84 @@ void test_setup_release_screen(void) {
     assert_matches_golden("setup_release");
 }
 
-void test_setup_complete_screen(void) {
-    display_screens_build_setup_complete();
-    assert_matches_golden("setup_complete");
+void test_setup_end_wifi_saved_screen(void) {
+    display_screens_build_setup_end(DISPLAY_SETUP_END_WIFI_SAVED, false);
+    assert_matches_golden("setup_end_wifi_saved");
 }
 
-void test_setup_timeout_screen(void) {
-    display_screens_build_setup_timeout();
-    assert_matches_golden("setup_timeout");
+void test_setup_end_mqtt_saved_screen(void) {
+    display_screens_build_setup_end(DISPLAY_SETUP_END_MQTT_SAVED, true);
+    assert_matches_golden("setup_end_mqtt_saved");
+}
+
+void test_setup_end_timed_out_no_ssid_screen(void) {
+    display_screens_build_setup_end(DISPLAY_SETUP_END_TIMED_OUT, false);
+    assert_matches_golden("setup_end_timed_out_no_ssid");
+}
+
+void test_setup_end_timed_out_with_ssid_screen(void) {
+    display_screens_build_setup_end(DISPLAY_SETUP_END_TIMED_OUT, true);
+    assert_matches_golden("setup_end_timed_out_with_ssid");
+}
+
+void test_setup_end_failed_no_ssid_screen(void) {
+    display_screens_build_setup_end(DISPLAY_SETUP_END_FAILED, false);
+    assert_matches_golden("setup_end_failed_no_ssid");
+}
+
+void test_setup_end_failed_with_ssid_screen(void) {
+    display_screens_build_setup_end(DISPLAY_SETUP_END_FAILED, true);
+    assert_matches_golden("setup_end_failed_with_ssid");
+}
+
+/* The retry line's wording, independent of any golden — pins the three
+   distinct messages directly, including the CONFIG_MAGTAG_BOOT_WAKES=on
+   branch a host build's own sdkconfig-less compile never takes on its
+   own (boot_wakes_enabled() always answers false here; this calls the
+   pure formatter directly with true instead, per its own doc comment). */
+void test_setup_retry_line_no_ssid_says_press_any_button(void) {
+    char out[48];
+    format_setup_retry_line(false, false, out, sizeof(out));
+    TEST_ASSERT_EQUAL_STRING("Press any button to retry", out);
+    format_setup_retry_line(false, true, out, sizeof(out));
+    TEST_ASSERT_EQUAL_STRING("Press any button to retry", out);
+}
+
+void test_setup_retry_line_with_ssid_and_boot_wakes_says_hold_boot(void) {
+    char out[48];
+    format_setup_retry_line(true, true, out, sizeof(out));
+    char expect[48];
+    char secs[16];
+    format_hold_seconds(SETUP_TRIGGER_BOOT_HOLD_MS, secs, sizeof(secs));
+    snprintf(expect, sizeof(expect), "Hold BOOT %s s to retry", secs);
+    TEST_ASSERT_EQUAL_STRING(expect, out);
+}
+
+void test_setup_retry_line_with_ssid_and_no_boot_wakes_says_press_then_hold(void) {
+    char out[64];
+    format_setup_retry_line(true, false, out, sizeof(out));
+    char expect[64];
+    char secs[16];
+    format_hold_seconds(SETUP_TRIGGER_BOOT_HOLD_MS, secs, sizeof(secs));
+    snprintf(expect, sizeof(expect), "Press a button, then hold BOOT %s s", secs);
+    TEST_ASSERT_EQUAL_STRING(expect, out);
+}
+
+/* format_hold_seconds() itself: whole seconds render bare; a non-whole
+   value gets exactly one decimal digit rather than truncating down to
+   the whole second below it (the defect this replaces: a 2500 ms
+   threshold used to render "2 s", which a 2.0 s hold then satisfied and
+   did nothing with). */
+void test_format_hold_seconds_whole_and_fractional(void) {
+    char out[16];
+    format_hold_seconds(5000, out, sizeof(out));
+    TEST_ASSERT_EQUAL_STRING("5", out);
+    format_hold_seconds(1000, out, sizeof(out));
+    TEST_ASSERT_EQUAL_STRING("1", out);
+    format_hold_seconds(15000, out, sizeof(out));
+    TEST_ASSERT_EQUAL_STRING("15", out);
+    format_hold_seconds(2500, out, sizeof(out));
+    TEST_ASSERT_EQUAL_STRING("2.5", out);
 }
 
 void test_ota_screen(void) {
@@ -2449,12 +2594,21 @@ int main(void) {
     RUN_TEST(test_the_config_error_screen_fits_the_panel_at_its_widest);
     RUN_TEST(test_the_config_error_screen_renders_the_pair_it_is_given);
     RUN_TEST(test_setup_screen);
+    RUN_TEST(test_setup_screens_own_test_username_matches_the_real_qr_username);
     RUN_TEST(test_setup_screen_qr_matches_the_encoding);
-    RUN_TEST(test_the_setup_screen_handles_a_32_byte_ssid);
+    RUN_TEST(test_the_setup_screen_clips_a_31_byte_ssid_without_overflowing_its_column);
     RUN_TEST(test_the_setup_screen_falls_back_to_text_when_the_payload_is_too_long);
     RUN_TEST(test_setup_release_screen);
-    RUN_TEST(test_setup_complete_screen);
-    RUN_TEST(test_setup_timeout_screen);
+    RUN_TEST(test_setup_end_wifi_saved_screen);
+    RUN_TEST(test_setup_end_mqtt_saved_screen);
+    RUN_TEST(test_setup_end_timed_out_no_ssid_screen);
+    RUN_TEST(test_setup_end_timed_out_with_ssid_screen);
+    RUN_TEST(test_setup_end_failed_no_ssid_screen);
+    RUN_TEST(test_setup_end_failed_with_ssid_screen);
+    RUN_TEST(test_setup_retry_line_no_ssid_says_press_any_button);
+    RUN_TEST(test_setup_retry_line_with_ssid_and_boot_wakes_says_hold_boot);
+    RUN_TEST(test_setup_retry_line_with_ssid_and_no_boot_wakes_says_press_then_hold);
+    RUN_TEST(test_format_hold_seconds_whole_and_fractional);
     RUN_TEST(test_ota_screen);
     RUN_TEST(test_ota_screen_lines_fit_the_panel);
     RUN_TEST(test_charge_me_screen);

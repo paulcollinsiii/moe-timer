@@ -29,10 +29,13 @@ void test_the_tasks_example_payload_encodes(void) {
     TEST_ASSERT_EQUAL_INT(41, size); /* version 6 */
 }
 
-/* The worst-case skeleton from setup_session.h's own comment: a 31-byte
-   SSID (SETUP_SESSION_AP_SSID_MAX - 1) and the 10-char AP password used
-   twice (pop and password), 150 bytes total. This is the payload
-   QR_RENDER_MAX_VERSION is sized against. */
+/* The HYPOTHETICAL worst-case skeleton from setup_session.h's own
+   comment: a 31-byte SSID (SETUP_SESSION_AP_SSID_MAX - 1) and the
+   10-char AP password used twice (pop and password), 150 bytes total.
+   This is what QR_RENDER_MAX_VERSION is sized against — not what this
+   device ever actually sends, which is a fixed 132 bytes every time
+   (device_id()'s SSID is always exactly 13 characters; see
+   test_setup_session.c for a test against the real payload builder). */
 void test_the_worst_case_150_byte_payload_still_fits_version_7(void) {
     const char *worst =
         "{\"ver\":\"v1\",\"name\":\"1234567890123456789012345678901\",\"username\":\"magtag\","
@@ -162,6 +165,81 @@ void test_every_module_matches_an_independent_qrcodegen_encode(void) {
     TEST_ASSERT_EQUAL_INT_MESSAGE(0, mismatches, "qr_render_module disagrees with a fresh qrcodegen encode");
 }
 
+/* ---- qr_render_last_size: the draw callback's own source of truth ----- */
+
+void test_last_size_matches_a_successful_encodes_size_out(void) {
+    int size = -1;
+    TEST_ASSERT_TRUE(qr_render_encode("hello", &size));
+    TEST_ASSERT_EQUAL_INT(size, qr_render_last_size());
+}
+
+void test_last_size_is_zero_before_any_encode_and_after_a_failure(void) {
+    /* This test file's own process never called qr_render_encode() before
+       this point in a fresh run, but ordering across Unity test functions
+       in one binary is not guaranteed independent of global state, so
+       this pins the POST-FAILURE case, which is the one the draw callback
+       actually depends on, rather than relying on being run first. */
+    char buf[156];
+    for (int i = 0; i < 155; i++)
+        buf[i] = (char)('a' + (i % 26));
+    buf[155] = '\0';
+    TEST_ASSERT_FALSE(qr_render_encode(buf, &(int){0}));
+    TEST_ASSERT_EQUAL_INT(0, qr_render_last_size());
+}
+
+/* ---- qr_render_release: the heap buffer's explicit lifetime ----------- */
+
+/* display.c's setup wrapper calls this right after render() returns, so
+   the draw callback must be safe to have already read everything it
+   needed before this runs — proven here under ASan (test/CMakeLists.txt
+   builds every host suite with -fsanitize=address): if qr_render_module()
+   below touched the freed buffer instead of just answering false, this
+   test would abort the whole binary, not merely fail an assertion. */
+void test_release_blanks_every_module_without_touching_the_freed_buffer(void) {
+    int size = -1;
+    TEST_ASSERT_TRUE(qr_render_encode("hello", &size));
+    TEST_ASSERT_TRUE(size > 0);
+
+    qr_render_release();
+
+    TEST_ASSERT_EQUAL_INT(0, qr_render_last_size());
+    for (int y = 0; y < QR_RENDER_MAX_MODULES; y++)
+        for (int x = 0; x < QR_RENDER_MAX_MODULES; x++)
+            TEST_ASSERT_FALSE(qr_render_module(x, y));
+}
+
+/* Release with nothing held, and release twice in a row: both are
+   documented no-ops and must not crash (free(NULL) is well-defined, but
+   this pins it as this module's own contract rather than relying on
+   knowing that about free()). */
+void test_release_is_safe_with_no_code_held_and_safe_to_call_twice(void) {
+    qr_render_release();
+    qr_render_release();
+    TEST_ASSERT_EQUAL_INT(0, qr_render_last_size());
+    TEST_ASSERT_FALSE(qr_render_module(0, 0));
+}
+
+/* A successful encode followed by a failed one must blank every module
+   from the FIRST encode too — qr_render_encode() releases the previous
+   buffer unconditionally, before it even attempts the new one, so a
+   failure can never leave the previous success still readable. */
+void test_a_failed_encode_after_a_success_blanks_every_module(void) {
+    int size = -1;
+    TEST_ASSERT_TRUE(qr_render_encode("hello", &size));
+    TEST_ASSERT_TRUE(size > 0);
+
+    char buf[156];
+    for (int i = 0; i < 155; i++)
+        buf[i] = (char)('a' + (i % 26));
+    buf[155] = '\0';
+    TEST_ASSERT_FALSE(qr_render_encode(buf, &size));
+
+    TEST_ASSERT_EQUAL_INT(0, qr_render_last_size());
+    for (int y = 0; y < QR_RENDER_MAX_MODULES; y++)
+        for (int x = 0; x < QR_RENDER_MAX_MODULES; x++)
+            TEST_ASSERT_FALSE(qr_render_module(x, y));
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_a_short_payload_encodes_at_the_smallest_version);
@@ -173,5 +251,10 @@ int main(void) {
     RUN_TEST(test_a_failed_encode_does_not_corrupt_a_later_success);
     RUN_TEST(test_a_second_encode_replaces_the_first);
     RUN_TEST(test_every_module_matches_an_independent_qrcodegen_encode);
+    RUN_TEST(test_last_size_matches_a_successful_encodes_size_out);
+    RUN_TEST(test_last_size_is_zero_before_any_encode_and_after_a_failure);
+    RUN_TEST(test_release_blanks_every_module_without_touching_the_freed_buffer);
+    RUN_TEST(test_release_is_safe_with_no_code_held_and_safe_to_call_twice);
+    RUN_TEST(test_a_failed_encode_after_a_success_blanks_every_module);
     return UNITY_END();
 }
