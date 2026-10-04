@@ -66,9 +66,22 @@ static void cleanup_events(void) {
     }
 }
 
+/* Returns the boot-global default STA netif, creating it on first call.
+   See wifi_session.h's own doc comment: this is now the ONE place that
+   calls esp_netif_create_default_wifi_sta(), shared with
+   setup_session_idf.c, so the two can no longer race to create a second
+   netif behind the same "WIFI_STA_DEF" if_key. */
+esp_netif_t *wifi_session_sta_netif(void) {
+    static esp_netif_t *s_sta_netif;
+    if (!s_sta_netif) {
+        s_sta_netif = esp_netif_create_default_wifi_sta();
+    }
+    return s_sta_netif;
+}
+
 esp_err_t wifi_session_begin(void) {
-    char ssid[64] = {0};
-    char pass[64] = {0};
+    char ssid[NVS_CONFIG_WIFI_SSID_BUF] = {0};
+    char pass[NVS_CONFIG_WIFI_PASS_BUF] = {0};
     nvs_config_get_wifi_ssid(ssid, sizeof(ssid));
     nvs_config_get_wifi_pass(pass, sizeof(pass));
 
@@ -91,13 +104,11 @@ esp_err_t wifi_session_begin(void) {
         return ret;
     }
 
-    /* Create the default STA netif once per boot — creating it per session
-       leaks a netif + duplicate default handlers (two sessions per wake is
-       a routine path: day rollover + mandatory start sync). */
-    static esp_netif_t *s_sta_netif;
-    if (!s_sta_netif) {
-        s_sta_netif = esp_netif_create_default_wifi_sta();
-    }
+    /* Shared with setup_session_idf.c (wifi_session.h) — created once per
+       boot, never twice. Creating it per session leaks a netif +
+       duplicate default handlers (two sessions per wake is a routine
+       path: day rollover + mandatory start sync). */
+    (void)wifi_session_sta_netif();
 
     s_wifi_event_group = xEventGroupCreate();
     if (!s_wifi_event_group) {
@@ -119,14 +130,41 @@ esp_err_t wifi_session_begin(void) {
         goto fail_events;
     }
 
+    /* RAM, not the driver's default flash-backed store: this app's own
+       NVS keys (above) are the one copy of these credentials that
+       persists, and esp_wifi_set_config below must not write a second,
+       independent copy that a future join could read instead and
+       silently disagree with. This is also what makes setup_session's
+       D3 clear (network_prov_mgr_reset_wifi_provisioning, run once after
+       a provisioning success) mean something: without this, the very
+       next normal window's esp_wifi_set_config would repopulate the
+       driver's flash store from these same NVS keys anyway, so the
+       clear would be erasing a copy that was about to be overwritten
+       for free. */
+    ret = esp_wifi_set_storage(WIFI_STORAGE_RAM);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "esp_wifi_set_storage: %s", esp_err_to_name(ret));
+        goto fail_wifi;
+    }
+
     ret = esp_wifi_set_mode(WIFI_MODE_STA);
     if (ret != ESP_OK)
         goto fail_wifi;
 
     wifi_config_t wifi_cfg = {0};
-    strncpy((char *)wifi_cfg.sta.ssid, ssid, sizeof(wifi_cfg.sta.ssid) - 1);
-    strncpy((char *)wifi_cfg.sta.password, pass, sizeof(wifi_cfg.sta.password) - 1);
-    wifi_cfg.sta.threshold.authmode = WIFI_AUTH_WPA2_PSK;
+    /* memcpy, not strncpy: wifi_config_t's ssid[32]/password[64] are not
+       NUL-terminated strings by contract, and a full-width SSID or a
+       64-character hex PSK has no room left for strncpy's own NUL (it
+       would silently drop the last byte of either). wifi_cfg is already
+       zeroed above, so bytes past each strnlen() stay zero either way. */
+    size_t ssid_len = strnlen(ssid, sizeof(wifi_cfg.sta.ssid));
+    size_t pass_len = strnlen(pass, sizeof(wifi_cfg.sta.password));
+    memcpy(wifi_cfg.sta.ssid, ssid, ssid_len);
+    memcpy(wifi_cfg.sta.password, pass, pass_len);
+    /* An open network has no password to threshold against; WPA2_PSK
+       would refuse to join one that provisioned and verified fine
+       moments earlier. */
+    wifi_cfg.sta.threshold.authmode = (pass_len == 0) ? WIFI_AUTH_OPEN : WIFI_AUTH_WPA2_PSK;
 
     ret = esp_wifi_set_config(WIFI_IF_STA, &wifi_cfg);
     if (ret != ESP_OK)

@@ -11,6 +11,33 @@
 
 #include "device_id.h"
 
+/* Non-elidable wipe for a buffer that held a password: a plain memset on
+   a local about to go out of scope can be (and in practice sometimes is)
+   optimized away once the compiler sees the write is never read back.
+   The device layer (setup_session_idf.c) uses mbedtls_platform_zeroize
+   for the same purpose; this file stays free of ESP-IDF/mbedtls so it
+   can be host-tested, hence the hand-rolled volatile loop instead. */
+static void secure_zero(void *buf, size_t len) {
+    volatile unsigned char *p = (volatile unsigned char *)buf;
+    while (len--)
+        *p++ = 0;
+}
+
+/* Wrap-safe "has `now` reached or passed `deadline`": comparing the
+   SIGNED difference, not `now >= deadline` directly, is what stays
+   correct across a uint32_t wrap of the underlying clock, as long as the
+   true gap between the two readings is under ~24.8 days (2^31 ms) — true
+   for any budget this module's Kconfig range allows (1800 s max) plus
+   the linger on top of it. */
+static bool deadline_passed(uint32_t now, uint32_t deadline) {
+    return (int32_t)(now - deadline) >= 0;
+}
+
+/* The earlier of two absolute deadlines, same wrap-safe comparison. */
+static uint32_t earlier_deadline(uint32_t a, uint32_t b) {
+    return deadline_passed(a, b) ? b : a;
+}
+
 /* ---- AP password: rejection sampling over the unambiguous alphabet ------ */
 
 /* No 0/O/1/l/I. 57 characters, so a plain `% 57` would favour the
@@ -46,8 +73,9 @@ void setup_session_make_ap_ssid(char out[SETUP_SESSION_AP_SSID_MAX]) {
 
 bool setup_session_make_qr_payload(const char *ap_ssid, const char *ap_password, char *out, size_t out_cap) {
     int n = snprintf(out, out_cap,
-                     "{\"ver\":\"v1\",\"name\":\"%s\",\"username\":\"%s\",\"pop\":\"%s\",\"transport\":\"%s\"}",
-                     ap_ssid, SETUP_SESSION_QR_USERNAME, ap_password, SETUP_SESSION_QR_TRANSPORT);
+                     "{\"ver\":\"v1\",\"name\":\"%s\",\"username\":\"%s\",\"pop\":\"%s\",\"password\":\"%s\","
+                     "\"transport\":\"%s\",\"security\":2}",
+                     ap_ssid, SETUP_SESSION_QR_USERNAME, ap_password, ap_password, SETUP_SESSION_QR_TRANSPORT);
     if (n < 0 || (size_t)n >= out_cap) {
         if (out_cap > 0)
             out[0] = '\0';
@@ -85,6 +113,12 @@ void setup_session_format_mqtt_status(bool ok, mqtt_form_status_t status, char *
     } else {
         snprintf(out, out_cap, "%s", mqtt_form_error_str(status.err));
     }
+}
+
+/* ---- the one place an MQTT form result becomes a stored credential ------ */
+
+bool setup_session_apply_mqtt(const setup_session_ops_t *ops, const mqtt_form_result_t *result) {
+    return ops->set_mqtt_creds(result->uri, result->user, result->pass, result->keep_pass);
 }
 
 /* ---- the /mqtt form page: chunked, no stack buffer ------------------------ */
@@ -137,37 +171,89 @@ bool setup_session_render_mqtt_page(const setup_session_mqtt_page_in_t *in, setu
 
 /* ---- the session itself ---------------------------------------------------- */
 
-static setup_session_outcome_t run_loop(const setup_session_ops_t *ops, const setup_session_cfg_t *cfg,
-                                        bool *mqtt_stored) {
-    uint32_t ticks = ((uint32_t)cfg->budget_sec * 1000u) / SETUP_SESSION_POLL_QUANTUM_MS;
-    if (ticks == 0)
-        ticks = 1; /* a budget shorter than one quantum still gets one poll */
+/* Runs after a WIFI_SUCCESS whose credentials are already verified and
+   stored: keeps polling so the phone app's own "are you connected now?"
+   query still gets an answer, until SETUP_SESSION_SUCCESS_LINGER_MS
+   elapses, the session's own overall deadline arrives first (whichever
+   is sooner), or HARD_ERROR cuts it short. The outcome is already
+   WIFI_OK by the time this runs; nothing in here can change it back —
+   the credentials are safely in NVS regardless of how the SoftAP/manager
+   spend the time that is left. */
+static void linger_after_wifi_success(const setup_session_ops_t *ops, uint32_t overall_deadline) {
+    uint32_t stop_at = earlier_deadline(ops->now_ms() + SETUP_SESSION_SUCCESS_LINGER_MS, overall_deadline);
 
-    for (; ticks > 0; ticks--) {
+    for (;;) {
+        uint32_t now = ops->now_ms();
+        if (deadline_passed(now, stop_at))
+            return;
+        uint32_t remaining = stop_at - now;
+        uint32_t wait = (remaining < SETUP_SESSION_POLL_QUANTUM_MS) ? remaining : SETUP_SESSION_POLL_QUANTUM_MS;
+        if (wait == 0)
+            wait = 1;
+
         setup_session_poll_out_t out;
         memset(&out, 0, sizeof(out));
-        setup_session_event_t ev = ops->poll(SETUP_SESSION_POLL_QUANTUM_MS, &out);
+        setup_session_event_t ev = ops->poll(wait, &out);
+        if (ev == SETUP_SESSION_EVENT_HARD_ERROR)
+            return;
+        /* NONE, a stray WIFI_FAIL/WIFI_SUCCESS (the manager fires
+           CRED_SUCCESS once; defensive only) and MQTT_STORED all just
+           keep lingering — an MQTT submit during the linger is still
+           accepted and stored, it just does not end the session early. */
+    }
+}
+
+static setup_session_outcome_t run_loop(const setup_session_ops_t *ops, const setup_session_cfg_t *cfg,
+                                        uint32_t deadline, bool *wifi_store_failed) {
+    for (;;) {
+        uint32_t now = ops->now_ms();
+        if (deadline_passed(now, deadline))
+            return SETUP_SESSION_OUTCOME_TIMEOUT;
+        uint32_t remaining = deadline - now;
+        uint32_t wait = (remaining < SETUP_SESSION_POLL_QUANTUM_MS) ? remaining : SETUP_SESSION_POLL_QUANTUM_MS;
+        if (wait == 0)
+            wait = 1; /* a 0 ms poll would not block at all */
+
+        setup_session_poll_out_t out;
+        memset(&out, 0, sizeof(out));
+        setup_session_event_t ev = ops->poll(wait, &out);
 
         switch (ev) {
             case SETUP_SESSION_EVENT_NONE:
             case SETUP_SESSION_EVENT_WIFI_FAIL:
                 /* A bad password is the manager's to report to the phone
                    app (plan, "Components"); nothing to store here, and the
-                   session keeps waiting for a real attempt. */
+                   session keeps waiting for a real attempt (the device
+                   layer resets the manager's own state machine so a retry
+                   is possible — this layer never needed to know that
+                   happened). */
                 continue;
 
-            case SETUP_SESSION_EVENT_WIFI_SUCCESS:
-                ops->set_wifi_creds(out.wifi_ssid, out.wifi_password);
+            case SETUP_SESSION_EVENT_WIFI_SUCCESS: {
+                bool stored = ops->set_wifi_creds(out.wifi_ssid, out.wifi_password);
+                secure_zero(out.wifi_password, sizeof(out.wifi_password));
+                if (!stored) {
+                    /* The driver's own copy is the only verified copy
+                       left — must not be cleared. ERROR, not
+                       WIFI_OK: the join really did happen, but this
+                       session cannot tell the rest of the device about
+                       it, so it must not claim success. */
+                    *wifi_store_failed = true;
+                    return SETUP_SESSION_OUTCOME_ERROR;
+                }
                 ops->clear_wifi_driver_store();
+                linger_after_wifi_success(ops, deadline);
                 return SETUP_SESSION_OUTCOME_WIFI_OK;
+            }
 
-            case SETUP_SESSION_EVENT_MQTT_SUBMIT:
-                ops->set_mqtt_creds(out.mqtt_uri, out.mqtt_user, out.mqtt_pass, out.mqtt_keep_pass);
-                *mqtt_stored = true;
-                /* cfg->has_wifi_ssid is still the value this call started
-                   with: the only event that could make it stale is
-                   WIFI_SUCCESS above, and that one always returns before
-                   this case can run again. */
+            case SETUP_SESSION_EVENT_MQTT_STORED:
+                /* Already stored, synchronously, by the handler that
+                   posted this (setup_session_apply_mqtt) — nothing left
+                   to do here but decide whether it also ends the
+                   session. cfg->has_wifi_ssid is still the value this
+                   call started with: the only event that could make it
+                   stale is WIFI_SUCCESS above, and that one always
+                   returns before this case can run again. */
                 if (cfg->has_wifi_ssid)
                     return SETUP_SESSION_OUTCOME_MQTT_ONLY;
                 continue; /* no SSID yet: keep waiting for WiFi */
@@ -176,21 +262,25 @@ static setup_session_outcome_t run_loop(const setup_session_ops_t *ops, const se
                 return SETUP_SESSION_OUTCOME_ERROR;
         }
     }
-    return SETUP_SESSION_OUTCOME_TIMEOUT;
 }
 
 setup_session_result_t setup_session_run(const setup_session_ops_t *ops, const setup_session_cfg_t *cfg) {
     setup_session_outcome_t outcome;
-    bool mqtt_stored = false;
+    bool wifi_store_failed = false;
+    uint32_t deadline;
 
     /* Step 1: the budget, before anything else runs — a session nothing
        can end must not start (same reasoning as ota_flow_apply's refusal
        when extend_awake has nothing to arm: the SoftAP + httpd is the
-       single most expensive thing this device ever runs, plan's Risks). */
-    if (!ops->extend_awake(cfg->budget_sec)) {
+       single most expensive thing this device ever runs, plan's Risks).
+       SETUP_SESSION_TAIL_SEC covers everything that still has to run
+       after the loop below returns — there is no second extend_awake
+       call after this one. */
+    if (!ops->extend_awake(cfg->budget_sec + SETUP_SESSION_TAIL_SEC)) {
         outcome = SETUP_SESSION_OUTCOME_ERROR;
         goto teardown;
     }
+    deadline = ops->now_ms() + (uint32_t)cfg->budget_sec * 1000u;
 
     /* Step 2: the pure generators. Cannot fail — snprintf truncates safely
        in the pathological case of an oversized device_id(), and the QR
@@ -206,16 +296,18 @@ setup_session_result_t setup_session_run(const setup_session_ops_t *ops, const s
 
         /* Step 3: bring the SoftAP, httpd, manager and endpoints up. */
         if (!ops->start(info.ap_ssid, info.ap_password)) {
+            secure_zero(&info, sizeof(info));
             outcome = SETUP_SESSION_OUTCOME_ERROR;
             goto teardown;
         }
 
         /* Step 4: the setup screen, now that there is something to show. */
         ops->render_setup_screen(&info);
+        secure_zero(&info, sizeof(info)); /* ap_password (and its copy inside qr_payload) done being needed */
     }
 
     /* Step 5: loop until an outcome. */
-    outcome = run_loop(ops, cfg, &mqtt_stored);
+    outcome = run_loop(ops, cfg, deadline, &wifi_store_failed);
 
 teardown:
     /* Step 6: unconditional, on every path above — this is what makes
@@ -225,8 +317,12 @@ teardown:
     ops->stop();
 
     /* Step 7: the outcome's screen (plan names only "complete" and "timed
-       out" — an ERROR gets none of its own; task 6's own repaint covers
-       it, the same as every other early-exit path in this tree). */
+       out" for a clean exit; a start/hard-error ERROR gets none of its
+       own, the same as every other early-exit path in this tree — except
+       the ERROR that follows a verified-but-unstored WIFI_SUCCESS, where
+       the panel is already showing the now-torn-down AP's name,
+       password and QR and there is no dedicated error screen to show
+       instead, so this reuses the timeout one). */
     switch (outcome) {
         case SETUP_SESSION_OUTCOME_WIFI_OK:
         case SETUP_SESSION_OUTCOME_MQTT_ONLY:
@@ -236,6 +332,8 @@ teardown:
             ops->render_timeout_screen();
             break;
         case SETUP_SESSION_OUTCOME_ERROR:
+            if (wifi_store_failed)
+                ops->render_timeout_screen();
             break;
     }
 
@@ -252,7 +350,5 @@ teardown:
             result.sleep = cfg->has_wifi_ssid ? SETUP_SESSION_SLEEP_NORMAL : SETUP_SESSION_SLEEP_BUTTON_ONLY;
             break;
     }
-    (void)mqtt_stored; /* not read by the outcome/sleep decision; kept for a future caller and for symmetry with the
-                          tests */
     return result;
 }

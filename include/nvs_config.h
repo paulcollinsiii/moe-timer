@@ -60,6 +60,17 @@ esp_err_t nvs_config_set_mqtt_user(const char *user);
 esp_err_t nvs_config_get_mqtt_pass(char *buf, size_t len);
 esp_err_t nvs_config_set_mqtt_pass(const char *pass);
 
+/* wifi_sta_config_t's own widths (ssid[32], password[64], esp_wifi_types.h)
+   plus the NUL every caller's buffer needs — not NVS's own string limit,
+   which is far larger. A legal WPA2 SSID can use all 32 bytes and a raw
+   hex PSK all 64, so every buffer that reads or writes one of the two
+   keys below must be sized from these, not a round number: rounding down
+   even one byte silently truncates a value that was accepted and joined
+   once (at provisioning time, against the full wifi_config_t) and then
+   never joins again from the stored copy. */
+#define NVS_CONFIG_WIFI_SSID_BUF 33
+#define NVS_CONFIG_WIFI_PASS_BUF 65
+
 esp_err_t nvs_config_get_wifi_ssid(char *buf, size_t len);
 esp_err_t nvs_config_set_wifi_ssid(const char *ssid);
 esp_err_t nvs_config_get_wifi_pass(char *buf, size_t len);

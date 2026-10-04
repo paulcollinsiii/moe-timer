@@ -25,7 +25,12 @@ const char *device_id(void) {
 
 /* ---- the call log, same shape as test_ota_flow.c's ---------------------- */
 
-static char g_log[512];
+/* Sized for the heaviest single test: the full-length success linger
+   (SETUP_SESSION_SUCCESS_LINGER_MS / SETUP_SESSION_POLL_QUANTUM_MS == 60
+   "poll:none" tokens, ~600 bytes) plus every other landmark call a
+   session makes. Reset in setUp(), so this only ever has to hold ONE
+   test's worth of log, not the whole suite's. */
+static char g_log[2048];
 
 static void note(const char *tag) {
     size_t used = strlen(g_log);
@@ -34,6 +39,22 @@ static void note(const char *tag) {
         g_log[used] = '\0';
     }
     snprintf(g_log + used, sizeof(g_log) - used, "%s", tag);
+}
+
+/* Asserts `first` happened before `second` in the call log, by
+   position rather than an exact full-log string match — a full-string
+   match would also have to hardcode exactly how many "poll:none"/
+   "poll:ev" tokens land between the landmarks in each scenario, which
+   varies with the fake clock and would make these assertions fragile
+   against a harmless change to how many times the loop happens to poll.
+   Comparing substring POSITIONS still proves the real property (one
+   call ran before another) without that coupling. */
+static void assert_before(const char *log, const char *first, const char *second) {
+    const char *p1 = strstr(log, first);
+    const char *p2 = strstr(log, second);
+    TEST_ASSERT_NOT_NULL_MESSAGE(p1, first);
+    TEST_ASSERT_NOT_NULL_MESSAGE(p2, second);
+    TEST_ASSERT_TRUE_MESSAGE(p1 < p2, first);
 }
 
 /* ---- fakes for every ops field ------------------------------------------ */
@@ -47,6 +68,17 @@ static bool fake_extend_awake(int seconds) {
     m_extend_arg = seconds;
     note("extend");
     return m_extend_ok;
+}
+
+/* Wall clock, fake. Every fake_poll() call below advances this by the
+   `timeout_ms` it was given, BEFORE reporting an event — "the tests'
+   fake clock advances per poll", matching how the real device's
+   xQueueReceive(..., pdMS_TO_TICKS(timeout_ms)) genuinely spends that
+   much wall time whether or not something was already waiting. */
+static uint32_t m_fake_now_ms;
+
+static uint32_t fake_now_ms(void) {
+    return m_fake_now_ms;
 }
 
 static int m_rand_idx;
@@ -88,8 +120,8 @@ static int m_script_pos;
 static int m_poll_calls;
 
 static setup_session_event_t fake_poll(uint32_t timeout_ms, setup_session_poll_out_t *out) {
-    (void)timeout_ms;
     m_poll_calls++;
+    m_fake_now_ms += timeout_ms;
     if (m_script_pos < m_script_len) {
         setup_session_event_t ev = m_script_ev[m_script_pos];
         *out = m_script_out[m_script_pos];
@@ -163,6 +195,7 @@ static setup_session_ops_t make_ops(void) {
     setup_session_ops_t ops;
     memset(&ops, 0, sizeof(ops));
     ops.extend_awake = fake_extend_awake;
+    ops.now_ms = fake_now_ms;
     ops.rand_byte = fake_rand_byte;
     ops.start = fake_start;
     ops.stop = fake_stop;
@@ -192,15 +225,12 @@ static void script_wifi_fail(void) {
     m_script_len++;
 }
 
-static void script_mqtt_submit(const char *uri, const char *user, const char *pass, bool keep_pass) {
-    setup_session_poll_out_t out;
-    memset(&out, 0, sizeof(out));
-    snprintf(out.mqtt_uri, sizeof(out.mqtt_uri), "%s", uri);
-    snprintf(out.mqtt_user, sizeof(out.mqtt_user), "%s", user);
-    snprintf(out.mqtt_pass, sizeof(out.mqtt_pass), "%s", pass);
-    out.mqtt_keep_pass = keep_pass;
-    m_script_ev[m_script_len] = SETUP_SESSION_EVENT_MQTT_SUBMIT;
-    m_script_out[m_script_len] = out;
+/* No payload: by the time this event reaches setup_session_run, the
+   httpd handler (setup_session_apply_mqtt, exercised directly below)
+   has already stored the credentials. This event only says "stored". */
+static void script_mqtt_stored(void) {
+    memset(&m_script_out[m_script_len], 0, sizeof(m_script_out[0]));
+    m_script_ev[m_script_len] = SETUP_SESSION_EVENT_MQTT_STORED;
     m_script_len++;
 }
 
@@ -221,6 +251,7 @@ void setUp(void) {
     m_extend_calls = 0;
     m_extend_arg = 0;
     m_extend_ok = true;
+    m_fake_now_ms = 0;
     m_rand_idx = 0;
     m_start_calls = 0;
     m_start_ok = true;
@@ -321,6 +352,28 @@ void test_ap_password_rejects_out_of_range_bytes_without_modulo_bias(void) {
     TEST_ASSERT_EQUAL_INT(SETUP_SESSION_AP_PASS_LEN + 1, m_script_rand_calls);
 }
 
+void test_ap_password_rejection_boundary_228_vs_227(void) {
+    /* limit == 228 exactly: 228 must be REJECTED (>= limit) and cost a
+       second draw; 227 is the largest byte that must be ACCEPTED. Once
+       227 is drawn, scripted_rand_byte keeps returning it (it is the
+       sequence's last entry), so every remaining character costs
+       exactly 1 call — the same "+1 total calls" signature as the 230
+       case above, but anchored at the boundary itself rather than deep
+       in the rejected range. */
+    static const uint8_t seq[] = {228, 227};
+    m_script_rand_bytes = seq;
+    m_script_rand_len = (int)(sizeof(seq) / sizeof(seq[0]));
+    m_script_rand_pos = 0;
+    m_script_rand_calls = 0;
+
+    char out[SETUP_SESSION_AP_PASS_BUF];
+    setup_session_make_ap_password(scripted_rand_byte, out);
+
+    static const char alphabet[] = "23456789ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnopqrstuvwxyz";
+    TEST_ASSERT_EQUAL_INT(alphabet[227 % 57], out[0]);
+    TEST_ASSERT_EQUAL_INT(SETUP_SESSION_AP_PASS_LEN + 1, m_script_rand_calls);
+}
+
 /* ===== pure helper: AP SSID ================================================ */
 
 void test_ap_ssid_strips_the_devices_own_magtag_prefix(void) {
@@ -350,9 +403,12 @@ void test_qr_payload_matches_the_espressif_sec2_softap_format(void) {
     char out[SETUP_SESSION_QR_MAX];
     bool ok = setup_session_make_qr_payload("MagTag-a1b2c3", "Xk3mQ9Lp7R", out, sizeof(out));
     TEST_ASSERT_TRUE(ok);
+    /* password + security:2: both stock phone apps' QR parsers read
+       these to join the SoftAP itself rather than sending the owner to
+       the OS WiFi picker. */
     TEST_ASSERT_EQUAL_STRING(
-        "{\"ver\":\"v1\",\"name\":\"MagTag-a1b2c3\",\"username\":\"magtag\",\"pop\":\"Xk3mQ9Lp7R\",\"transport\":"
-        "\"softap\"}",
+        "{\"ver\":\"v1\",\"name\":\"MagTag-a1b2c3\",\"username\":\"magtag\",\"pop\":\"Xk3mQ9Lp7R\",\"password\":"
+        "\"Xk3mQ9Lp7R\",\"transport\":\"softap\",\"security\":2}",
         out);
 }
 
@@ -384,6 +440,52 @@ void test_format_mqtt_status_omits_the_field_label_when_there_is_none(void) {
     mqtt_form_status_t st = {MQTT_FORM_ERR_BODY_TOO_LONG, MQTT_FORM_FIELD_NONE};
     setup_session_format_mqtt_status(false, st, out, sizeof(out));
     TEST_ASSERT_EQUAL_STRING("request body is too long", out);
+}
+
+/* ===== pure helper: setup_session_apply_mqtt =============================== */
+/* Coverage for the parse-result -> stored-credential step, pulled out of
+   setup_session_idf.c's two handlers into one pure function and tested
+   directly here, rather than only through setup_session_run (which no
+   longer calls set_mqtt_creds at all; storage happens before the session
+   ever hears about it). */
+
+void test_apply_mqtt_forwards_the_result_to_set_mqtt_creds(void) {
+    mqtt_form_result_t result;
+    memset(&result, 0, sizeof(result));
+    snprintf(result.uri, sizeof(result.uri), "mqtt://broker");
+    snprintf(result.user, sizeof(result.user), "bob");
+    snprintf(result.pass, sizeof(result.pass), "secret");
+    result.keep_pass = false;
+    setup_session_ops_t ops = make_ops();
+
+    bool ok = setup_session_apply_mqtt(&ops, &result);
+
+    TEST_ASSERT_TRUE(ok);
+    TEST_ASSERT_EQUAL_INT(1, m_set_mqtt_calls);
+    TEST_ASSERT_EQUAL_STRING("mqtt://broker", m_set_mqtt_uri);
+    TEST_ASSERT_EQUAL_STRING("bob", m_set_mqtt_user);
+    TEST_ASSERT_EQUAL_STRING("secret", m_set_mqtt_pass);
+    TEST_ASSERT_FALSE(m_set_mqtt_keep_pass);
+}
+
+void test_apply_mqtt_propagates_keep_pass(void) {
+    mqtt_form_result_t result;
+    memset(&result, 0, sizeof(result));
+    snprintf(result.uri, sizeof(result.uri), "mqtt://broker");
+    result.keep_pass = true;
+    setup_session_ops_t ops = make_ops();
+
+    TEST_ASSERT_TRUE(setup_session_apply_mqtt(&ops, &result));
+    TEST_ASSERT_TRUE(m_set_mqtt_keep_pass);
+}
+
+void test_apply_mqtt_propagates_a_store_failure(void) {
+    mqtt_form_result_t result;
+    memset(&result, 0, sizeof(result));
+    setup_session_ops_t ops = make_ops();
+    m_set_mqtt_ok = false;
+
+    TEST_ASSERT_FALSE(setup_session_apply_mqtt(&ops, &result));
 }
 
 /* ===== pure helper: the /mqtt page ========================================= */
@@ -483,10 +585,143 @@ void test_success_with_wifi_only(void) {
     TEST_ASSERT_EQUAL_STRING(m_start_pass, m_render_setup_info.ap_password);
     TEST_ASSERT_TRUE(strncmp(m_render_setup_info.ap_ssid, "MagTag-", 7) == 0);
     assert_teardown_ran();
+
+    /* Ordering, not just "did it happen". */
+    assert_before(g_log, "extend", "start");
+    assert_before(g_log, "start", "render_setup");
+    assert_before(g_log, "set_wifi", "clear_driver");
+    assert_before(g_log, "clear_driver", "stop");
+    assert_before(g_log, "stop", "render_complete");
 }
 
-void test_wifi_plus_mqtt_in_the_same_session(void) {
-    script_mqtt_submit("mqtt://broker", "bob", "secret", false);
+/* WIFI_SUCCESS does not return immediately -- it lingers so a
+   polling phone app's own "connected now?" query still gets an answer
+   (see setup_session.h's SETUP_SESSION_SUCCESS_LINGER_MS comment). */
+void test_wifi_success_lingers_before_returning_ok(void) {
+    script_wifi_success("HomeNet", "homepass1");
+    setup_session_ops_t ops = make_ops();
+    setup_session_cfg_t cfg = {.has_wifi_ssid = false, .budget_sec = 600};
+
+    setup_session_result_t r = setup_session_run(&ops, &cfg);
+
+    TEST_ASSERT_EQUAL(SETUP_SESSION_OUTCOME_WIFI_OK, r.outcome);
+    /* One poll resolves WIFI_SUCCESS; the rest is the linger, which
+       polls in SETUP_SESSION_POLL_QUANTUM_MS steps until
+       SETUP_SESSION_SUCCESS_LINGER_MS has elapsed. A 600 s budget does
+       not cap it short, so the count is exact. */
+    int expected_linger_polls = (int)(SETUP_SESSION_SUCCESS_LINGER_MS / SETUP_SESSION_POLL_QUANTUM_MS);
+    TEST_ASSERT_EQUAL_INT(1 + expected_linger_polls, m_poll_calls);
+    /* stop() -- and hence teardown -- must not have run until the
+       linger finished, which assert_teardown_ran (checked after the
+       call returns) already pins at exactly once; what this adds is
+       that it was still exactly once across all those extra polls. */
+    assert_teardown_ran();
+}
+
+/* A session with little budget left when WIFI_SUCCESS arrives lingers
+   only until the overall deadline, not the full linger period -- the
+   linger ends early when the budget runs out. */
+void test_wifi_success_linger_is_capped_by_the_overall_budget(void) {
+    script_wifi_success("HomeNet", "homepass1");
+    setup_session_ops_t ops = make_ops();
+    setup_session_cfg_t cfg = {.has_wifi_ssid = false, .budget_sec = 1}; /* far shorter than the 15 s linger */
+
+    setup_session_result_t r = setup_session_run(&ops, &cfg);
+
+    TEST_ASSERT_EQUAL(SETUP_SESSION_OUTCOME_WIFI_OK, r.outcome); /* NOT timeout -- WiFi already succeeded */
+    TEST_ASSERT_EQUAL(SETUP_SESSION_SLEEP_NET_WINDOW, r.sleep);
+    /* deadline is 1000 ms; the first poll (WIFI_SUCCESS) consumes 250 of
+       it, leaving exactly 3 more 250 ms steps for the linger to reach
+       the overall deadline instead of the full 15 s. */
+    TEST_ASSERT_EQUAL_INT(4, m_poll_calls);
+    assert_teardown_ran();
+}
+
+/* During the linger, an MQTT submit is still accepted and stored. */
+void test_mqtt_stored_during_the_linger_does_not_end_it_early(void) {
+    script_wifi_success("HomeNet", "homepass1");
+    script_mqtt_stored();
+    setup_session_ops_t ops = make_ops();
+    setup_session_cfg_t cfg = {.has_wifi_ssid = false, .budget_sec = 600};
+
+    setup_session_result_t r = setup_session_run(&ops, &cfg);
+
+    TEST_ASSERT_EQUAL(SETUP_SESSION_OUTCOME_WIFI_OK, r.outcome);
+    /* Same total as the plain linger test: MQTT_STORED just occupies
+       one of the linger's poll slots instead of a NONE; it is not
+       treated specially. */
+    int expected_linger_polls = (int)(SETUP_SESSION_SUCCESS_LINGER_MS / SETUP_SESSION_POLL_QUANTUM_MS);
+    TEST_ASSERT_EQUAL_INT(1 + expected_linger_polls, m_poll_calls);
+    assert_teardown_ran();
+}
+
+/* A HARD_ERROR during the linger ends it early, but the credentials are
+   already safely stored, so the outcome must stay WIFI_OK, not degrade
+   to ERROR. */
+void test_hard_error_during_the_linger_ends_it_early_but_outcome_stays_ok(void) {
+    script_wifi_success("HomeNet", "homepass1");
+    script_hard_error();
+    setup_session_ops_t ops = make_ops();
+    setup_session_cfg_t cfg = {.has_wifi_ssid = false, .budget_sec = 600};
+
+    setup_session_result_t r = setup_session_run(&ops, &cfg);
+
+    TEST_ASSERT_EQUAL(SETUP_SESSION_OUTCOME_WIFI_OK, r.outcome);
+    TEST_ASSERT_EQUAL_INT(2, m_poll_calls); /* WIFI_SUCCESS, then the HARD_ERROR that cuts the linger short */
+    TEST_ASSERT_EQUAL_INT(1, m_render_complete_calls);
+    assert_teardown_ran();
+}
+
+/* A WIFI_SUCCESS whose credential store fails must not claim
+   success, and must not clear the only verified copy that is left
+   (the driver's own store). */
+void test_wifi_store_failure_is_an_error_with_the_timeout_screen(void) {
+    script_wifi_success("HomeNet", "homepass1");
+    m_set_wifi_ok = false;
+    setup_session_ops_t ops = make_ops();
+    setup_session_cfg_t cfg = {.has_wifi_ssid = false, .budget_sec = 600};
+
+    setup_session_result_t r = setup_session_run(&ops, &cfg);
+
+    TEST_ASSERT_EQUAL(SETUP_SESSION_OUTCOME_ERROR, r.outcome);
+    TEST_ASSERT_EQUAL(SETUP_SESSION_SLEEP_BUTTON_ONLY, r.sleep);
+    TEST_ASSERT_EQUAL_INT(1, m_set_wifi_calls);
+    TEST_ASSERT_EQUAL_INT(0, m_clear_driver_calls);
+    TEST_ASSERT_EQUAL_INT(0, m_render_complete_calls);
+    /* Unlike every other ERROR path in this suite, this one DOES render
+       a screen: by the time this is decided the panel is already
+       showing the (about to be torn down) AP's name, password and QR,
+       and there is no dedicated error screen, so this reuses the
+       timeout one. */
+    TEST_ASSERT_EQUAL_INT(1, m_render_timeout_calls);
+    TEST_ASSERT_EQUAL_INT(1, m_poll_calls); /* no linger on this path */
+    assert_teardown_ran();
+
+    assert_before(g_log, "set_wifi", "stop");
+    assert_before(g_log, "stop", "render_timeout");
+}
+
+void test_wifi_store_failure_with_an_ssid_present_sleeps_the_normal_schedule(void) {
+    script_wifi_success("HomeNet", "homepass1");
+    m_set_wifi_ok = false;
+    setup_session_ops_t ops = make_ops();
+    setup_session_cfg_t cfg = {.has_wifi_ssid = true, .budget_sec = 600};
+
+    setup_session_result_t r = setup_session_run(&ops, &cfg);
+
+    TEST_ASSERT_EQUAL(SETUP_SESSION_OUTCOME_ERROR, r.outcome);
+    TEST_ASSERT_EQUAL(SETUP_SESSION_SLEEP_NORMAL, r.sleep);
+    TEST_ASSERT_EQUAL_INT(1, m_render_timeout_calls);
+    assert_teardown_ran();
+}
+
+/* MQTT storage itself happens outside this pure layer now (the httpd
+   handler calls setup_session_apply_mqtt before this event is even
+   posted — see the tests above), so an MQTT_STORED event arriving
+   before WiFi is provisioned is purely a "does this end the session"
+   question: it must not, because the device still has no SSID. */
+void test_mqtt_stored_before_wifi_still_waits_for_wifi(void) {
+    script_mqtt_stored();
     script_wifi_success("HomeNet", "homepass1");
     setup_session_ops_t ops = make_ops();
     setup_session_cfg_t cfg = {.has_wifi_ssid = false, .budget_sec = 600};
@@ -496,14 +731,15 @@ void test_wifi_plus_mqtt_in_the_same_session(void) {
     TEST_ASSERT_EQUAL(SETUP_SESSION_OUTCOME_WIFI_OK, r.outcome);
     TEST_ASSERT_EQUAL(SETUP_SESSION_SLEEP_NET_WINDOW, r.sleep);
     TEST_ASSERT_EQUAL_INT(1, m_set_wifi_calls);
-    TEST_ASSERT_EQUAL_INT(1, m_set_mqtt_calls);
-    TEST_ASSERT_EQUAL_STRING("mqtt://broker", m_set_mqtt_uri);
-    TEST_ASSERT_FALSE(m_set_mqtt_keep_pass);
+    /* Not this layer's job any more -- set_mqtt_creds is only
+       ever reached through setup_session_apply_mqtt, which the httpd
+       handler calls before this layer hears about it at all. */
+    TEST_ASSERT_EQUAL_INT(0, m_set_mqtt_calls);
     assert_teardown_ran();
 }
 
 void test_mqtt_only_with_an_ssid_already_present(void) {
-    script_mqtt_submit("mqtt://broker", "bob", "", true);
+    script_mqtt_stored();
     setup_session_ops_t ops = make_ops();
     setup_session_cfg_t cfg = {.has_wifi_ssid = true, .budget_sec = 600};
 
@@ -513,14 +749,13 @@ void test_mqtt_only_with_an_ssid_already_present(void) {
     TEST_ASSERT_EQUAL(SETUP_SESSION_SLEEP_NET_WINDOW, r.sleep);
     TEST_ASSERT_EQUAL_INT(0, m_set_wifi_calls);
     TEST_ASSERT_EQUAL_INT(0, m_clear_driver_calls);
-    TEST_ASSERT_EQUAL_INT(1, m_set_mqtt_calls);
-    TEST_ASSERT_TRUE(m_set_mqtt_keep_pass);
+    TEST_ASSERT_EQUAL_INT(0, m_set_mqtt_calls); /* already stored before this event was posted */
     TEST_ASSERT_EQUAL_INT(1, m_render_complete_calls);
     assert_teardown_ran();
 }
 
-void test_mqtt_submitted_on_a_no_ssid_device_then_times_out(void) {
-    script_mqtt_submit("mqtt://broker", "bob", "secret", false);
+void test_mqtt_stored_on_a_no_ssid_device_then_times_out(void) {
+    script_mqtt_stored();
     setup_session_ops_t ops = make_ops();
     setup_session_cfg_t cfg = {.has_wifi_ssid = false, .budget_sec = 1}; /* 4 poll quanta at 250 ms */
 
@@ -528,7 +763,6 @@ void test_mqtt_submitted_on_a_no_ssid_device_then_times_out(void) {
 
     TEST_ASSERT_EQUAL(SETUP_SESSION_OUTCOME_TIMEOUT, r.outcome);
     TEST_ASSERT_EQUAL(SETUP_SESSION_SLEEP_BUTTON_ONLY, r.sleep);
-    TEST_ASSERT_EQUAL_INT(1, m_set_mqtt_calls); /* stored even though the session keeps waiting */
     TEST_ASSERT_EQUAL_INT(0, m_set_wifi_calls);
     TEST_ASSERT_EQUAL_INT(0, m_render_complete_calls);
     TEST_ASSERT_EQUAL_INT(1, m_render_timeout_calls);
@@ -536,6 +770,10 @@ void test_mqtt_submitted_on_a_no_ssid_device_then_times_out(void) {
     assert_teardown_ran();
 }
 
+/* The device layer resets the manager's state machine on CRED_FAIL so a
+   retry can succeed (not host-tested, that call is in
+   setup_session_idf.c) — what THIS layer must guarantee is that it
+   never stops the session just because one attempt failed. */
 void test_a_wrong_wifi_password_is_not_stored_and_the_session_continues(void) {
     script_wifi_fail();
     script_wifi_success("HomeNet", "homepass1");
@@ -612,7 +850,10 @@ void test_extend_awake_failure_is_a_hard_error_and_still_tears_down(void) {
 
     TEST_ASSERT_EQUAL(SETUP_SESSION_OUTCOME_ERROR, r.outcome);
     TEST_ASSERT_EQUAL_INT(1, m_extend_calls);
-    TEST_ASSERT_EQUAL_INT(600, m_extend_arg);
+    /* The tail is added on top of the caller's own budget -- this
+       is the one call that arms the failsafe for the whole session, so
+       it has to cover everything that runs after the loop too. */
+    TEST_ASSERT_EQUAL_INT(600 + SETUP_SESSION_TAIL_SEC, m_extend_arg);
     TEST_ASSERT_EQUAL_INT(0, m_start_calls);
     TEST_ASSERT_EQUAL_INT(0, m_poll_calls);
     assert_teardown_ran();
@@ -637,6 +878,7 @@ int main(void) {
     RUN_TEST(test_ap_password_length_is_wpa2_valid);
     RUN_TEST(test_ap_password_excludes_ambiguous_characters);
     RUN_TEST(test_ap_password_rejects_out_of_range_bytes_without_modulo_bias);
+    RUN_TEST(test_ap_password_rejection_boundary_228_vs_227);
 
     RUN_TEST(test_ap_ssid_strips_the_devices_own_magtag_prefix);
     RUN_TEST(test_ap_ssid_without_the_prefix_falls_back_to_the_whole_id);
@@ -649,6 +891,10 @@ int main(void) {
     RUN_TEST(test_format_mqtt_status_names_the_field_when_there_is_one);
     RUN_TEST(test_format_mqtt_status_omits_the_field_label_when_there_is_none);
 
+    RUN_TEST(test_apply_mqtt_forwards_the_result_to_set_mqtt_creds);
+    RUN_TEST(test_apply_mqtt_propagates_keep_pass);
+    RUN_TEST(test_apply_mqtt_propagates_a_store_failure);
+
     RUN_TEST(test_mqtt_page_prefills_uri_and_user_escaped);
     RUN_TEST(test_mqtt_page_never_prefills_a_password);
     RUN_TEST(test_mqtt_page_shows_the_status_banner_when_present);
@@ -656,9 +902,15 @@ int main(void) {
     RUN_TEST(test_mqtt_page_stops_the_moment_the_sink_refuses);
 
     RUN_TEST(test_success_with_wifi_only);
-    RUN_TEST(test_wifi_plus_mqtt_in_the_same_session);
+    RUN_TEST(test_wifi_success_lingers_before_returning_ok);
+    RUN_TEST(test_wifi_success_linger_is_capped_by_the_overall_budget);
+    RUN_TEST(test_mqtt_stored_during_the_linger_does_not_end_it_early);
+    RUN_TEST(test_hard_error_during_the_linger_ends_it_early_but_outcome_stays_ok);
+    RUN_TEST(test_wifi_store_failure_is_an_error_with_the_timeout_screen);
+    RUN_TEST(test_wifi_store_failure_with_an_ssid_present_sleeps_the_normal_schedule);
+    RUN_TEST(test_mqtt_stored_before_wifi_still_waits_for_wifi);
     RUN_TEST(test_mqtt_only_with_an_ssid_already_present);
-    RUN_TEST(test_mqtt_submitted_on_a_no_ssid_device_then_times_out);
+    RUN_TEST(test_mqtt_stored_on_a_no_ssid_device_then_times_out);
     RUN_TEST(test_a_wrong_wifi_password_is_not_stored_and_the_session_continues);
     RUN_TEST(test_timeout_with_no_ssid_sleeps_buttons_only);
     RUN_TEST(test_timeout_with_an_ssid_present_sleeps_the_normal_schedule);
