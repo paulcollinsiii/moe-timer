@@ -32,14 +32,40 @@ bool config_is_iso_date(const char *s);
    about URL legality and it stays correct for both. */
 bool config_is_https_url(const char *s);
 
-/* True when s is a valid MQTT broker URI: the scheme (case-insensitive)
-   "mqtt://" or "mqtts://" plus a non-empty host, and the same character
-   rule as config_is_https_url (no spaces, control chars, quotes or
-   backslashes). Empty is NOT accepted here, on purpose, the same split
-   config_is_ota_url makes for the https case: "empty means MQTT off" is
-   mqtt_form.c's rule about the FORM FIELD, not a fact about what a
-   syntactically valid URI looks like, so it lives at that caller and not
-   here. NULL is not accepted either.
+/* The reasons config_mqtt_uri_check() can refuse a string.
+   CONFIG_MQTT_URI_OK is the only value config_is_mqtt_uri() treats as
+   accepted; the rest exist so mqtt_form.c can tell a caller which part
+   of the URI to point at instead of re-deriving the grammar itself. */
+typedef enum {
+    CONFIG_MQTT_URI_OK = 0,
+    CONFIG_MQTT_URI_BAD_SCHEME, /* not "mqtt://" or "mqtts://", case-insensitive */
+    CONFIG_MQTT_URI_NO_HOST,    /* right scheme, but the host is empty */
+    CONFIG_MQTT_URI_BAD_HOST,   /* unreachable with today's host grammar (see below):
+                                   the host scan just stops at the first byte outside
+                                   [A-Za-z0-9.-], which then falls through to BAD_CHAR.
+                                   Reserved for a future stricter host rule (an IPv6
+                                   literal, say) that can fail without being empty. */
+    CONFIG_MQTT_URI_BAD_PORT,   /* ":" present but not 1-5 digits with a value of 1-65535 */
+    CONFIG_MQTT_URI_BAD_CHAR,   /* anything left over after host[:port][/]: a path,
+                                   query, fragment, userinfo ("user:pass@"), '%', DEL,
+                                   or a byte >= 0x80 */
+} config_mqtt_uri_check_t;
+
+/* The one classifier both config_is_mqtt_uri() and mqtt_form.c's
+   field-level diagnosis run through, so there is exactly one place that
+   knows the grammar: ("mqtt://" | "mqtts://") host [":" port] ["/"], and
+   nothing else. host is 1+ of [A-Za-z0-9.-] -- no "@", so a URI typed
+   with a username:password@ falls through this grammar instead of being
+   accepted and then logged or echoed back in the clear -- and port, when
+   present, is 1-5 digits whose value is 1-65535. */
+config_mqtt_uri_check_t config_mqtt_uri_check(const char *s);
+
+/* True when s is a valid MQTT broker URI: config_mqtt_uri_check(s) ==
+   CONFIG_MQTT_URI_OK. Empty is NOT accepted here, on purpose, the same
+   split config_is_ota_url makes for the https case: "empty means MQTT
+   off" is mqtt_form.c's rule about the FORM FIELD, not a fact about what
+   a syntactically valid URI looks like, so it lives at that caller and
+   not here. NULL is not accepted either.
 
    Plain mqtt:// (no TLS) is accepted, unlike config_is_https_url's
    plaintext refusal: this URI is never fetched by the device the way an

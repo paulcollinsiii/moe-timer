@@ -108,6 +108,37 @@ void test_mqtt_uri_rejects_unsafe_characters(void) {
     TEST_ASSERT_FALSE(config_is_mqtt_uri("mqtt://broker.local/\\x"));
 }
 
+/* ---- the strict authority grammar: host[:port][/], nothing else ---- */
+
+void test_mqtt_uri_accepts_host_port_and_trailing_slash(void) {
+    TEST_ASSERT_TRUE(config_is_mqtt_uri("mqtt://h"));
+    TEST_ASSERT_TRUE(config_is_mqtt_uri("mqtt://h:1883"));
+    TEST_ASSERT_TRUE(config_is_mqtt_uri("mqtts://broker.lan:8883/"));
+    TEST_ASSERT_TRUE(config_is_mqtt_uri("mqtt://192.168.1.5"));
+}
+
+void test_mqtt_uri_rejects_malformed_authority(void) {
+    TEST_ASSERT_FALSE(config_is_mqtt_uri("mqtt://:1883"));   /* no host */
+    TEST_ASSERT_FALSE(config_is_mqtt_uri("mqtt://@"));       /* no host */
+    TEST_ASSERT_FALSE(config_is_mqtt_uri("mqtt:///"));       /* no host */
+    TEST_ASSERT_FALSE(config_is_mqtt_uri("mqtt://?x"));      /* no host, query */
+    TEST_ASSERT_FALSE(config_is_mqtt_uri("mqtt://h:abc"));   /* non-numeric port */
+    TEST_ASSERT_FALSE(config_is_mqtt_uri("mqtt://h:99999")); /* port out of range */
+    TEST_ASSERT_FALSE(config_is_mqtt_uri("mqtt://h:0"));     /* port out of range */
+    TEST_ASSERT_FALSE(config_is_mqtt_uri("mqtt://u:p@h"));   /* userinfo */
+    TEST_ASSERT_FALSE(config_is_mqtt_uri("mqtt://h%20x"));   /* '%' */
+    TEST_ASSERT_FALSE(config_is_mqtt_uri("mqtt://h\x7f"));   /* DEL */
+    TEST_ASSERT_FALSE(config_is_mqtt_uri("mqtt://h\xff"));   /* byte >= 0x80 */
+}
+
+void test_mqtt_uri_check_returns_the_specific_reason(void) {
+    TEST_ASSERT_EQUAL(CONFIG_MQTT_URI_OK, config_mqtt_uri_check("mqtt://h"));
+    TEST_ASSERT_EQUAL(CONFIG_MQTT_URI_BAD_SCHEME, config_mqtt_uri_check("ftp://h"));
+    TEST_ASSERT_EQUAL(CONFIG_MQTT_URI_NO_HOST, config_mqtt_uri_check("mqtt://"));
+    TEST_ASSERT_EQUAL(CONFIG_MQTT_URI_BAD_PORT, config_mqtt_uri_check("mqtt://h:0"));
+    TEST_ASSERT_EQUAL(CONFIG_MQTT_URI_BAD_CHAR, config_mqtt_uri_check("mqtt://h/path"));
+}
+
 /* ---- OTA URL field rule (the one both apply paths share) ---- */
 
 void test_ota_url_allows_empty_as_the_off_switch(void) {
@@ -241,6 +272,9 @@ int main(void) {
     RUN_TEST(test_mqtt_uri_rejects_other_schemes);
     RUN_TEST(test_mqtt_uri_rejects_empty_null_and_hostless);
     RUN_TEST(test_mqtt_uri_rejects_unsafe_characters);
+    RUN_TEST(test_mqtt_uri_accepts_host_port_and_trailing_slash);
+    RUN_TEST(test_mqtt_uri_rejects_malformed_authority);
+    RUN_TEST(test_mqtt_uri_check_returns_the_specific_reason);
     RUN_TEST(test_ota_url_allows_empty_as_the_off_switch);
     RUN_TEST(test_ota_url_otherwise_matches_the_https_rule);
     RUN_TEST(test_clean_str_accepts_ordinary_values);

@@ -15,6 +15,7 @@
 #include "ha_day_cmds.h"
 #include "hal_nvs.h"
 #include "mqtt_client.h"
+#include "mqtt_form.h"
 #include "mqtt_rx.h"
 #include "mqtt_topics.h"
 #include "nvs_config.h"
@@ -837,7 +838,7 @@ void mqtt_ha_window(const stats_snapshot_t *snap) {
        nvs_get_str return ESP_ERR_NVS_INVALID_LENGTH and leave them
        UNTOUCHED, and neither call below checks the return. Uninitialised
        stack would reach esp_mqtt_client_config_t.broker.address.uri. */
-    char uri[128] = {0}, user[64] = {0}, pass[64] = {0};
+    char uri[MQTT_FORM_URI_MAX] = {0}, user[MQTT_FORM_USER_MAX] = {0}, pass[MQTT_FORM_PASS_MAX] = {0};
     nvs_config_get_mqtt_uri(uri, sizeof(uri));
     if (uri[0] == '\0') {
         /* Was silent — the #1 reason "nothing shows up in HA": the broker

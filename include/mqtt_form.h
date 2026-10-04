@@ -13,14 +13,14 @@
 
    ---- buffer sizes ----
 
-   MQTT_FORM_URI_MAX/USER_MAX/PASS_MAX match the stack buffers
-   mqtt_ha.c's mqtt_ha_window() reads NVS into
-   (`char uri[128], user[64], pass[64]` at main/mqtt_ha.c:840) and that
-   nvs_config_get_mqtt_uri/user/pass fill. They are declared independently
-   here rather than shared by symbol with mqtt_ha.c, because this task's
-   scope is the validator only — if a future change resizes one of those
-   stack buffers, it must update the matching constant here too, or a
-   value this module accepts could overflow NVS's actual column width.
+   MQTT_FORM_URI_MAX/USER_MAX/PASS_MAX are the one definition of these
+   three widths. mqtt_ha.c's mqtt_ha_window() includes this (pure) header
+   and declares its own NVS-read stack buffers with these same constants
+   rather than its own literals, so the two can no longer drift apart. If
+   they ever did, the failure would not be an overflow: nvs_get_str
+   returns ESP_ERR_NVS_INVALID_LENGTH into the smaller buffer and leaves
+   it at its zeroed default, so the symptom is a device that silently
+   never connects to MQTT ("no broker configured").
 
    ---- empty URI: MQTT is a disable-able feature, not a required one ----
 
@@ -35,7 +35,15 @@
    them for something that survived. The one way to get a MISSING error
    for uri is to not send the field at all (no `uri=` pair in the
    urlencoded body, no "uri" key in the JSON object); an explicit empty
-   value is always accepted. */
+   value is always accepted.
+
+   This only skips the CONTENT rule finalize() would otherwise apply to
+   user and pass (today, just the control-character check) — it does NOT
+   skip the per-field SYNTAX rules the decode step enforces regardless of
+   uri. A user or pass that is too long, mis-percent-encoded, or
+   submitted twice is still rejected even when uri is empty, because that
+   rejection happens while the body is being decoded, before finalize()
+   (and its empty-uri shortcut) ever runs. */
 
 #define MQTT_FORM_URI_MAX 128
 #define MQTT_FORM_USER_MAX 64
@@ -45,8 +53,32 @@
    before anything else runs (including, for JSON, before cJSON ever
    sees the bytes). One constant so the form page and the protocomm
    endpoint cannot be tuned to disagree about how large a body the
-   device will even look at. */
-#define MQTT_FORM_BODY_MAX 512
+   device will even look at.
+
+   Must be at least the largest legitimate urlencoded submission: a
+   browser percent-encodes reserved characters (`: / @ ! # $ ...`) to
+   three bytes each, so a uri/user/pass all at their own MAX and entirely
+   percent-encoded costs 3 * ((URI_MAX-1) + (USER_MAX-1) + (PASS_MAX-1))
+   bytes of encoded content, plus the field names and the `=`/`&`
+   separators ("uri=" + "&user=" + "&pass=" = 16 bytes) around them. */
+#define MQTT_FORM_BODY_MAX 1024
+_Static_assert(MQTT_FORM_BODY_MAX >=
+                   3 * ((MQTT_FORM_URI_MAX - 1) + (MQTT_FORM_USER_MAX - 1) + (MQTT_FORM_PASS_MAX - 1)) + 16,
+               "MQTT_FORM_BODY_MAX must fit the worst-case fully percent-encoded uri+user+pass submission");
+
+/* Worst-case output size for mqtt_form_html_escape() given an input
+   buffer of capacity n (holding up to n-1 characters plus a NUL): every
+   character could be the one entity that expands widest (`"` -> 6-byte
+   "&quot;"), so 6 bytes per input character plus the output's own NUL
+   covers anything the escaper can be given. Task 4's two prefilled
+   fields (uri, user -- pass is never escaped, see the escaper's own doc
+   comment below) should size their escape buffers with this rather than
+   guess, and remember that buffer sits on the same protocomm httpd task
+   stack a deeply recursive request body can already run close to the
+   limit of (mqtt_form_parse_json's nesting pre-scan keeps that body
+   itself off the stack, but an escape buffer sized by guesswork is a
+   second way to the same failure). */
+#define MQTT_FORM_HTML_ESCAPED_MAX(n) (6 * ((n)-1) + 1)
 
 #ifdef __cplusplus
 extern "C" {
@@ -92,24 +124,37 @@ typedef struct {
     mqtt_form_field_t field; /* MQTT_FORM_FIELD_NONE when err has no single field */
 } mqtt_form_status_t;
 
+/* THE FAILURE CONTRACT, shared by both parse functions below: on any
+   non-OK return, *out is zeroed in full (not just the field status.field
+   names) before the function returns. A field decoded successfully
+   before a later one failed -- which can be the password -- is never
+   left sitting in *out for a caller to read after checking only err. */
+
 /* Parses an `application/x-www-form-urlencoded` body: `uri`, `user` and
    `pass` fields, `&`-separated, `+` decoded to space and `%XX` to its
-   byte. body need not be NUL-terminated — body_len is authoritative.
-   Unknown field names are ignored; a known field name appearing twice is
-   MQTT_FORM_ERR_DUPLICATE_FIELD. On success (err == MQTT_FORM_ERR_NONE),
-   *out is fully populated (see the empty-URI note above) and every byte
-   of *out that is not explicitly documented as meaningful (e.g. the tail
-   of a short string's buffer) has been zero-initialised. On failure,
-   *out's contents are unspecified — callers must check err before
-   reading it. */
+   byte. body need not be NUL-terminated — body_len is authoritative. A
+   raw NUL byte anywhere in body is MQTT_FORM_ERR_MALFORMED_ENCODING, the
+   same as a decoded one (`%00`). Unknown field names are ignored; a
+   known field name appearing twice is MQTT_FORM_ERR_DUPLICATE_FIELD. On
+   success (err == MQTT_FORM_ERR_NONE), *out is fully populated (see the
+   empty-URI note above) and every byte of *out that is not explicitly
+   documented as meaningful (e.g. the tail of a short string's buffer)
+   has been zero-initialised. On failure, see THE FAILURE CONTRACT above. */
 mqtt_form_status_t mqtt_form_parse_urlencoded(const char *body, size_t body_len, mqtt_form_result_t *out);
 
 /* Parses a JSON object body with the same three keys, via the vendored
    cJSON. A present key whose value is not a JSON string is
    MQTT_FORM_ERR_BAD_JSON naming that field; a body that isn't a JSON
-   object at all is MQTT_FORM_ERR_BAD_JSON with MQTT_FORM_FIELD_NONE.
-   Same body_len / empty-URI / zero-on-failure contract as the
-   urlencoded parser above. */
+   object at all, that nests a `[`/`{` deeper than the one flat object
+   this format allows, that contains a raw NUL byte or a `\u0000` escape
+   (any case), or that has anything but whitespace after the closing `}`,
+   is MQTT_FORM_ERR_BAD_JSON with MQTT_FORM_FIELD_NONE -- all checked,
+   and the first three rejected, before cJSON ever sees the bytes, since
+   cJSON's own recursive descent is what a maliciously deep body is
+   trying to reach. A known field name appearing twice (regardless of
+   the second occurrence's type) is MQTT_FORM_ERR_DUPLICATE_FIELD. Same
+   body_len / empty-URI contract as the urlencoded parser above, and see
+   THE FAILURE CONTRACT above for a non-OK return. */
 mqtt_form_status_t mqtt_form_parse_json(const char *body, size_t body_len, mqtt_form_result_t *out);
 
 /* Short, human-readable text for a status's err, for the message task

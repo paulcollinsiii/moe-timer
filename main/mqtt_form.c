@@ -1,58 +1,36 @@
 /* Setup-mode MQTT entry point — see include/mqtt_form.h for the module's
-   job and the empty-URI contract. Two parse entry points funnel into one
-   `finalize()` so the form page and the JSON endpoint can never accept a
-   value the other would refuse. */
+   job, the empty-URI contract and the failure contract. Two parse entry
+   points funnel into one `finalize()` so the form page and the JSON
+   endpoint can never accept a value the other would refuse, and every
+   non-OK return — from either entry point, or from finalize() itself —
+   goes through fail() below so *out is always zeroed on the way out. */
 #include "mqtt_form.h"
 
-#include <ctype.h>
 #include <string.h>
 
 #include "cJSON.h"
-#include "config_validate.h" /* config_is_mqtt_uri */
+#include "config_validate.h" /* config_mqtt_uri_check */
+
+/* ---- the one non-OK exit, shared by every failure path below -------- */
+
+static mqtt_form_status_t fail(mqtt_form_result_t *out, mqtt_form_err_t err, mqtt_form_field_t field) {
+    memset(out, 0, sizeof(*out));
+    return (mqtt_form_status_t){err, field};
+}
 
 /* ---- shared field-value checks ------------------------------------- */
 
-/* True if s contains a control character (< 0x20). Deliberately not
-   config_is_clean_str: that rule also forbids '"' and '\\', which this
-   field's spec does not ask for (a username or password containing
-   either is unusual but not a device-level hazard — these values are
-   never interpolated into hand-built JSON the way a config field is). */
+/* True if s contains a C0 control character (< 0x20) or DEL (0x7F).
+   Deliberately not config_is_clean_str: that rule also forbids '"' and
+   '\\', which this field's spec does not ask for (a username or
+   password containing either is unusual but not a device-level hazard —
+   these values are never interpolated into hand-built JSON the way a
+   config field is). */
 static bool has_control_char(const char *s) {
     for (; *s != '\0'; s++)
-        if ((unsigned char)*s < 0x20)
+        if ((unsigned char)*s < 0x20 || (unsigned char)*s == 0x7F)
             return true;
     return false;
-}
-
-/* Case-insensitive prefix compare, matching config_is_mqtt_uri's own
-   scheme rule exactly (it uses tolower() too) — a case mismatch here
-   would mis-report a BAD_CHAR uri ("MQTT://ho st") as BAD_SCHEME instead,
-   because the scheme check would wrongly fail before the character
-   check ever runs. */
-static bool scheme_prefix_eq_ci(const char *s, const char *scheme, size_t len) {
-    for (size_t i = 0; i < len; i++)
-        if (tolower((unsigned char)s[i]) != scheme[i])
-            return false;
-    return true;
-}
-
-/* Diagnostic only — config_is_mqtt_uri() already made the one accept/
-   reject call in finalize() below. This just separates its two failure
-   reasons (wrong/absent scheme vs. bad character in an otherwise valid
-   URI) so the form page can say which. A URI with the right scheme but
-   no host is reported as BAD_SCHEME, matching config_is_mqtt_uri's own
-   "scheme but no host" refusal. */
-static bool has_mqtt_scheme_and_host(const char *s) {
-    static const char scheme_mqtts[] = "mqtts://";
-    static const char scheme_mqtt[] = "mqtt://";
-    size_t len;
-    if (scheme_prefix_eq_ci(s, scheme_mqtts, sizeof(scheme_mqtts) - 1))
-        len = sizeof(scheme_mqtts) - 1;
-    else if (scheme_prefix_eq_ci(s, scheme_mqtt, sizeof(scheme_mqtt) - 1))
-        len = sizeof(scheme_mqtt) - 1;
-    else
-        return false;
-    return s[len] != '\0';
 }
 
 /* The semantic rules, applied identically after either parser has
@@ -68,20 +46,26 @@ static mqtt_form_status_t finalize(mqtt_form_result_t *out) {
         return (mqtt_form_status_t){MQTT_FORM_ERR_NONE, MQTT_FORM_FIELD_NONE};
     }
 
-    if (!config_is_mqtt_uri(out->uri)) {
-        if (!has_mqtt_scheme_and_host(out->uri))
-            return (mqtt_form_status_t){MQTT_FORM_ERR_BAD_SCHEME, MQTT_FORM_FIELD_URI};
-        return (mqtt_form_status_t){MQTT_FORM_ERR_BAD_CHAR, MQTT_FORM_FIELD_URI};
+    config_mqtt_uri_check_t uri_check = config_mqtt_uri_check(out->uri);
+    if (uri_check != CONFIG_MQTT_URI_OK) {
+        /* NO_HOST reads to the person filling in the form as "you didn't
+           finish the scheme", the same as BAD_SCHEME; every other
+           non-OK reason is a problem with a character somewhere after
+           the scheme (a bad port, userinfo, a path, ...). */
+        mqtt_form_err_t err = (uri_check == CONFIG_MQTT_URI_BAD_SCHEME || uri_check == CONFIG_MQTT_URI_NO_HOST)
+                                  ? MQTT_FORM_ERR_BAD_SCHEME
+                                  : MQTT_FORM_ERR_BAD_CHAR;
+        return fail(out, err, MQTT_FORM_FIELD_URI);
     }
 
     if (has_control_char(out->user))
-        return (mqtt_form_status_t){MQTT_FORM_ERR_BAD_CHAR, MQTT_FORM_FIELD_USER};
+        return fail(out, MQTT_FORM_ERR_BAD_CHAR, MQTT_FORM_FIELD_USER);
 
     if (out->pass[0] == '\0') {
         out->keep_pass = true;
     } else {
         if (has_control_char(out->pass))
-            return (mqtt_form_status_t){MQTT_FORM_ERR_BAD_CHAR, MQTT_FORM_FIELD_PASS};
+            return fail(out, MQTT_FORM_ERR_BAD_CHAR, MQTT_FORM_FIELD_PASS);
         out->keep_pass = false;
     }
 
@@ -138,7 +122,13 @@ static mqtt_form_err_t decode_value(const char *src, size_t src_len, char *dst, 
 
 mqtt_form_status_t mqtt_form_parse_urlencoded(const char *body, size_t body_len, mqtt_form_result_t *out) {
     if (body_len > MQTT_FORM_BODY_MAX)
-        return (mqtt_form_status_t){MQTT_FORM_ERR_BODY_TOO_LONG, MQTT_FORM_FIELD_NONE};
+        return fail(out, MQTT_FORM_ERR_BODY_TOO_LONG, MQTT_FORM_FIELD_NONE);
+    /* A raw NUL byte would silently truncate whatever reads a field
+       buffer as a C string later, the same hazard a decoded '%00' is —
+       reject it here so every byte of body has actually been looked at,
+       not just the bytes decode_value happens to reach before quitting. */
+    if (memchr(body, '\0', body_len) != NULL)
+        return fail(out, MQTT_FORM_ERR_MALFORMED_ENCODING, MQTT_FORM_FIELD_NONE);
 
     memset(out, 0, sizeof(*out));
     bool uri_seen = false, user_seen = false, pass_seen = false, uri_present = false;
@@ -186,23 +176,104 @@ mqtt_form_status_t mqtt_form_parse_urlencoded(const char *body, size_t body_len,
         }
 
         if (*seen)
-            return (mqtt_form_status_t){MQTT_FORM_ERR_DUPLICATE_FIELD, field};
+            return fail(out, MQTT_FORM_ERR_DUPLICATE_FIELD, field);
         *seen = true;
         if (field == MQTT_FORM_FIELD_URI)
             uri_present = true;
 
         mqtt_form_err_t derr = decode_value(val, val_len, dst, dst_cap);
         if (derr != MQTT_FORM_ERR_NONE)
-            return (mqtt_form_status_t){derr, field};
+            return fail(out, derr, field);
     }
 
     if (!uri_present)
-        return (mqtt_form_status_t){MQTT_FORM_ERR_MISSING, MQTT_FORM_FIELD_URI};
+        return fail(out, MQTT_FORM_ERR_MISSING, MQTT_FORM_FIELD_URI);
 
     return finalize(out);
 }
 
 /* ---- JSON body -------------------------------------------------------- */
+
+/* True if body contains a `\u0000` escape (any case on the 'u') anywhere
+   -- including, harmlessly, inside what will turn out to be a string
+   value. cJSON does not expose a parsed string's original length, only
+   its NUL-terminated valuestring, so comparing decoded-vs-source length
+   is not available here; scanning the raw source for the escape is the
+   alternative the header documents, and it can false-positive on an
+   escaped backslash immediately followed by literal "u0000" -- rejecting
+   that is harmless. A decoded \u0000 would silently truncate whatever
+   later reads the field as a C string, the same hazard a raw embedded
+   NUL byte is, so both are checked before cJSON ever runs. */
+static bool body_has_nul_escape(const char *body, size_t body_len) {
+    if (body_len < 6)
+        return false;
+    for (size_t i = 0; i + 6 <= body_len; i++)
+        if (body[i] == '\\' && (body[i + 1] == 'u' || body[i + 1] == 'U') && body[i + 2] == '0' && body[i + 3] == '0' &&
+            body[i + 4] == '0' && body[i + 5] == '0')
+            return true;
+    return false;
+}
+
+/* Bounded pre-scan, run before cJSON ever sees the bytes: this format's
+   only valid shape is one flat object of string values, so anything
+   nesting a `[`/`{` past depth 1 is structurally invalid and is rejected
+   here rather than handed to cJSON's recursive-descent parser. Honours
+   string state and backslash escapes, so brackets inside a string value
+   (which cJSON must still accept) are never mistaken for nesting -- the
+   scan tracks "inside a string" the same way a JSON tokenizer does: an
+   unescaped `"` toggles it, and a `\` inside a string escapes the next
+   byte so an escaped quote cannot end the string early. */
+static bool json_nesting_too_deep(const char *body, size_t body_len) {
+    bool in_string = false;
+    bool escaped = false;
+    int depth = 0;
+    for (size_t i = 0; i < body_len; i++) {
+        char c = body[i];
+        if (in_string) {
+            if (escaped)
+                escaped = false;
+            else if (c == '\\')
+                escaped = true;
+            else if (c == '"')
+                in_string = false;
+            continue;
+        }
+        if (c == '"')
+            in_string = true;
+        else if (c == '[' || c == '{') {
+            if (++depth > 1)
+                return true;
+        } else if (c == ']' || c == '}') {
+            depth--;
+        }
+    }
+    return false;
+}
+
+/* True when every byte from p (exclusive of nothing, inclusive of p) up
+   to end is JSON whitespace. Used to require that nothing but trailing
+   whitespace follows the one object cJSON_ParseWithLengthOpts parsed, so
+   a second JSON value or arbitrary trailing bytes cannot ride along
+   unexamined. */
+static bool only_json_whitespace(const char *p, const char *end) {
+    for (; p < end; p++)
+        if (*p != ' ' && *p != '\t' && *p != '\n' && *p != '\r')
+            return false;
+    return true;
+}
+
+/* True when name appears more than once as a top-level key of root,
+   compared case-sensitively (the same sense cJSON_GetObjectItemCaseSensitive
+   already looks up a key in) -- regardless of what type any of the
+   duplicates' values are, so `{"uri":"a","uri":5}` is caught here before
+   the second occurrence's type is ever inspected. */
+static bool json_has_duplicate(const cJSON *root, const char *name) {
+    int count = 0;
+    for (const cJSON *item = root->child; item != NULL; item = item->next)
+        if (item->string != NULL && strcmp(item->string, name) == 0)
+            count++;
+    return count > 1;
+}
 
 static mqtt_form_status_t copy_json_str(const char *s, char *dst, size_t dst_cap, mqtt_form_field_t field) {
     size_t len = strlen(s);
@@ -214,18 +285,40 @@ static mqtt_form_status_t copy_json_str(const char *s, char *dst, size_t dst_cap
 
 mqtt_form_status_t mqtt_form_parse_json(const char *body, size_t body_len, mqtt_form_result_t *out) {
     if (body_len > MQTT_FORM_BODY_MAX)
-        return (mqtt_form_status_t){MQTT_FORM_ERR_BODY_TOO_LONG, MQTT_FORM_FIELD_NONE};
+        return fail(out, MQTT_FORM_ERR_BODY_TOO_LONG, MQTT_FORM_FIELD_NONE);
+    if (memchr(body, '\0', body_len) != NULL)
+        return fail(out, MQTT_FORM_ERR_BAD_JSON, MQTT_FORM_FIELD_NONE);
+    if (body_has_nul_escape(body, body_len))
+        return fail(out, MQTT_FORM_ERR_BAD_JSON, MQTT_FORM_FIELD_NONE);
+    if (json_nesting_too_deep(body, body_len))
+        return fail(out, MQTT_FORM_ERR_BAD_JSON, MQTT_FORM_FIELD_NONE);
 
     memset(out, 0, sizeof(*out));
 
-    /* require_null_terminated is 0 behind cJSON_ParseWithLength: body_len
-       is authoritative and body need not carry a trailing NUL, matching
-       the urlencoded parser's contract and what a protocomm/httpd body
-       buffer actually looks like. */
-    cJSON *root = cJSON_ParseWithLength(body, body_len);
-    if (root == NULL || !cJSON_IsObject(root)) {
+    /* require_null_terminated is 0: body_len is authoritative and body
+       need not carry a trailing NUL, matching the urlencoded parser's
+       contract and what a protocomm/httpd body buffer actually looks
+       like. parse_end lets the caller see what cJSON did NOT consume, so
+       trailing garbage after the one object can be rejected below rather
+       than silently ignored. */
+    const char *parse_end = NULL;
+    cJSON *root = cJSON_ParseWithLengthOpts(body, body_len, &parse_end, 0);
+    if (root == NULL || !cJSON_IsObject(root) || !only_json_whitespace(parse_end, body + body_len)) {
         cJSON_Delete(root);
-        return (mqtt_form_status_t){MQTT_FORM_ERR_BAD_JSON, MQTT_FORM_FIELD_NONE};
+        return fail(out, MQTT_FORM_ERR_BAD_JSON, MQTT_FORM_FIELD_NONE);
+    }
+
+    if (json_has_duplicate(root, "uri")) {
+        cJSON_Delete(root);
+        return fail(out, MQTT_FORM_ERR_DUPLICATE_FIELD, MQTT_FORM_FIELD_URI);
+    }
+    if (json_has_duplicate(root, "user")) {
+        cJSON_Delete(root);
+        return fail(out, MQTT_FORM_ERR_DUPLICATE_FIELD, MQTT_FORM_FIELD_USER);
+    }
+    if (json_has_duplicate(root, "pass")) {
+        cJSON_Delete(root);
+        return fail(out, MQTT_FORM_ERR_DUPLICATE_FIELD, MQTT_FORM_FIELD_PASS);
     }
 
     const cJSON *uri_item = cJSON_GetObjectItemCaseSensitive(root, "uri");
@@ -251,7 +344,7 @@ mqtt_form_status_t mqtt_form_parse_json(const char *body, size_t body_len, mqtt_
 
     cJSON_Delete(root);
     if (st.err != MQTT_FORM_ERR_NONE)
-        return st;
+        return fail(out, st.err, st.field);
     return finalize(out);
 }
 

@@ -1,3 +1,4 @@
+#include <stdio.h>
 #include <string.h>
 #include <unity.h>
 
@@ -230,6 +231,126 @@ void test_urlencoded_rejects_duplicate_known_field(void) {
     TEST_ASSERT_EQUAL(MQTT_FORM_FIELD_USER, st.field);
 }
 
+void test_urlencoded_pass_key_with_no_equals_means_keep(void) {
+    /* "pass" present with no "=" at all decodes to the same empty value
+       as "pass=" -- both mean "keep the current password". */
+    static const char body[] = "uri=mqtt://h&pass";
+    mqtt_form_result_t out;
+    mqtt_form_status_t st = mqtt_form_parse_urlencoded(body, strlen(body), &out);
+    TEST_ASSERT_EQUAL(MQTT_FORM_ERR_NONE, st.err);
+    TEST_ASSERT_TRUE(out.keep_pass);
+    TEST_ASSERT_EQUAL_STRING("", out.pass);
+}
+
+/* ---- raw embedded NUL: a decoded-NUL-shaped hazard without a %00 ---- */
+
+void test_urlencoded_rejects_raw_nul_byte(void) {
+    /* A literal 0x00 byte in the body, not a "%00" escape -- decode_value
+       never reaches it on this field, so the guard has to run before any
+       field is decoded, over the whole body. */
+    char body[24];
+    size_t n = 0;
+    memcpy(body + n, "uri=mqtt://h", 12);
+    n += 12;
+    body[n++] = '\0';
+    memcpy(body + n, "junk", 4);
+    n += 4;
+
+    mqtt_form_result_t out;
+    mqtt_form_status_t st = mqtt_form_parse_urlencoded(body, n, &out);
+    TEST_ASSERT_EQUAL(MQTT_FORM_ERR_MALFORMED_ENCODING, st.err);
+}
+
+/* ---- empty uri: syntax errors in other fields still fail ---- */
+
+void test_urlencoded_empty_uri_still_checks_other_fields_syntax(void) {
+    /* The empty-uri shortcut in finalize() skips the CONTENT rule
+       (control characters) it would otherwise apply to user/pass -- it
+       does not skip the SYNTAX rules the decode step enforces on every
+       submission regardless of uri. */
+    mqtt_form_result_t out;
+    mqtt_form_status_t st;
+
+    char too_long[16 + MQTT_FORM_USER_MAX];
+    memcpy(too_long, "uri=&user=", 10);
+    memset(too_long + 10, 'a', MQTT_FORM_USER_MAX);
+    st = mqtt_form_parse_urlencoded(too_long, 10 + MQTT_FORM_USER_MAX, &out);
+    TEST_ASSERT_EQUAL(MQTT_FORM_ERR_TOO_LONG, st.err);
+    TEST_ASSERT_EQUAL(MQTT_FORM_FIELD_USER, st.field);
+
+    static const char malformed[] = "uri=&user=%zz";
+    st = mqtt_form_parse_urlencoded(malformed, strlen(malformed), &out);
+    TEST_ASSERT_EQUAL(MQTT_FORM_ERR_MALFORMED_ENCODING, st.err);
+    TEST_ASSERT_EQUAL(MQTT_FORM_FIELD_USER, st.field);
+
+    static const char dup[] = "uri=&user=a&user=b";
+    st = mqtt_form_parse_urlencoded(dup, strlen(dup), &out);
+    TEST_ASSERT_EQUAL(MQTT_FORM_ERR_DUPLICATE_FIELD, st.err);
+    TEST_ASSERT_EQUAL(MQTT_FORM_FIELD_USER, st.field);
+
+    /* %01 decodes to a control character: this is the one check the
+       empty-uri shortcut DOES skip, so this one succeeds. */
+    static const char control_char[] = "uri=&user=%01";
+    st = mqtt_form_parse_urlencoded(control_char, strlen(control_char), &out);
+    TEST_ASSERT_EQUAL(MQTT_FORM_ERR_NONE, st.err);
+}
+
+/* ---- the strict uri classifier (config_mqtt_uri_check), end to end ---- */
+
+void test_urlencoded_rejects_malformed_mqtt_uri_variants(void) {
+    static const char *const bad[] = {
+        "uri=mqtt://:1883", "uri=mqtt://@",       "uri=mqtt:///",    "uri=mqtt://?x",
+        "uri=mqtt://h:abc", "uri=mqtt://h:99999", "uri=mqtt://h:0",  "uri=mqtt://u:p@h",
+        "uri=mqtt://h%25x", "uri=mqtt://h%7F",    "uri=mqtt://h%FF",
+    };
+    for (size_t i = 0; i < sizeof(bad) / sizeof(bad[0]); i++) {
+        mqtt_form_result_t out;
+        mqtt_form_status_t st = mqtt_form_parse_urlencoded(bad[i], strlen(bad[i]), &out);
+        TEST_ASSERT_TRUE(st.err != MQTT_FORM_ERR_NONE);
+        TEST_ASSERT_EQUAL(MQTT_FORM_FIELD_URI, st.field);
+    }
+}
+
+void test_urlencoded_accepts_strict_mqtt_uri_variants(void) {
+    static const char *const good[] = {
+        "uri=mqtt://h",
+        "uri=mqtt://h:1883",
+        "uri=mqtts://broker.lan:8883/",
+        "uri=mqtt://192.168.1.5",
+    };
+    for (size_t i = 0; i < sizeof(good) / sizeof(good[0]); i++) {
+        mqtt_form_result_t out;
+        mqtt_form_status_t st = mqtt_form_parse_urlencoded(good[i], strlen(good[i]), &out);
+        TEST_ASSERT_EQUAL(MQTT_FORM_ERR_NONE, st.err);
+    }
+}
+
+void test_urlencoded_rejects_bad_port_as_bad_char(void) {
+    /* Pinned separately from the variants list above: a bad port is a
+       character-level problem with what follows the scheme, so it must
+       report BAD_CHAR (pointing at the uri field's content), not
+       BAD_SCHEME (which would read as "you typed the wrong scheme"). */
+    static const char body[] = "uri=mqtt://h:99999";
+    mqtt_form_result_t out;
+    mqtt_form_status_t st = mqtt_form_parse_urlencoded(body, strlen(body), &out);
+    TEST_ASSERT_EQUAL(MQTT_FORM_ERR_BAD_CHAR, st.err);
+    TEST_ASSERT_EQUAL(MQTT_FORM_FIELD_URI, st.field);
+}
+
+/* ---- the failure contract: *out is zeroed, including a password ---- */
+
+void test_failed_parse_zeroes_output_struct(void) {
+    static const char body[] = "pass=secret&uri=ftp://x";
+    mqtt_form_result_t out;
+    memset(&out, 0xAA, sizeof(out)); /* poison, so a missed field shows up */
+    mqtt_form_status_t st = mqtt_form_parse_urlencoded(body, strlen(body), &out);
+    TEST_ASSERT_EQUAL(MQTT_FORM_ERR_BAD_SCHEME, st.err);
+    TEST_ASSERT_EQUAL_STRING("", out.uri);
+    TEST_ASSERT_EQUAL_STRING("", out.user);
+    TEST_ASSERT_EQUAL_STRING("", out.pass);
+    TEST_ASSERT_FALSE(out.keep_pass);
+}
+
 /* ---- exact length boundaries ---- */
 
 void test_urlencoded_uri_length_boundary(void) {
@@ -303,6 +424,46 @@ void test_urlencoded_body_at_cap_is_accepted_over_cap_is_rejected(void) {
     TEST_ASSERT_EQUAL(MQTT_FORM_FIELD_NONE, st.field);
 }
 
+void test_urlencoded_worst_case_percent_encoded_body_is_accepted(void) {
+    /* The body MQTT_FORM_BODY_MAX's header comment derives: uri, user and
+       pass each at their own MAX, every byte of every one of them
+       percent-encoded. Pins the arithmetic (775 for today's sizes) and
+       that the cap set from it actually accepts the body it was raised
+       for. */
+    char body[MQTT_FORM_BODY_MAX];
+    size_t n = 0;
+
+    memcpy(body + n, "uri=", 4);
+    n += 4;
+    {
+        char decoded[MQTT_FORM_URI_MAX];
+        memcpy(decoded, "mqtt://", 7);
+        memset(decoded + 7, 'h', MQTT_FORM_URI_MAX - 1 - 7);
+        for (size_t i = 0; i < MQTT_FORM_URI_MAX - 1; i++)
+            n += (size_t)sprintf(body + n, "%%%02X", (unsigned char)decoded[i]);
+    }
+
+    memcpy(body + n, "&user=", 6);
+    n += 6;
+    for (size_t i = 0; i < MQTT_FORM_USER_MAX - 1; i++)
+        n += (size_t)sprintf(body + n, "%%61");
+
+    memcpy(body + n, "&pass=", 6);
+    n += 6;
+    for (size_t i = 0; i < MQTT_FORM_PASS_MAX - 1; i++)
+        n += (size_t)sprintf(body + n, "%%62");
+
+    TEST_ASSERT_EQUAL(775u, n);
+    TEST_ASSERT_TRUE(n <= MQTT_FORM_BODY_MAX);
+
+    mqtt_form_result_t out;
+    mqtt_form_status_t st = mqtt_form_parse_urlencoded(body, n, &out);
+    TEST_ASSERT_EQUAL(MQTT_FORM_ERR_NONE, st.err);
+    TEST_ASSERT_EQUAL(127u, strlen(out.uri));
+    TEST_ASSERT_EQUAL(63u, strlen(out.user));
+    TEST_ASSERT_EQUAL(63u, strlen(out.pass));
+}
+
 /* ---- JSON body: the same three keys, the same validated result ---- */
 
 void test_json_accepts_full_submission(void) {
@@ -369,10 +530,22 @@ void test_json_rejects_non_string_values(void) {
     TEST_ASSERT_EQUAL(MQTT_FORM_ERR_BAD_JSON, st.err);
     TEST_ASSERT_EQUAL(MQTT_FORM_FIELD_USER, st.field);
 
+    /* A number value for pass, same shape as num_uri/bool_user above:
+       not nested, so this one does reach the per-field type check and
+       names the field. */
+    static const char num_pass[] = "{\"uri\":\"mqtt://broker.local\",\"pass\":5}";
+    st = mqtt_form_parse_json(num_pass, strlen(num_pass), &out);
+    TEST_ASSERT_EQUAL(MQTT_FORM_ERR_BAD_JSON, st.err);
+    TEST_ASSERT_EQUAL(MQTT_FORM_FIELD_PASS, st.field);
+
+    /* An array value, unlike the three above, IS nesting: the body-level
+       pre-scan (this format's one-flat-object-of-strings rule) rejects
+       it before cJSON ever runs, so this is a body-level failure
+       (FIELD_NONE), not a per-field one. */
     static const char arr_pass[] = "{\"uri\":\"mqtt://broker.local\",\"pass\":[1,2]}";
     st = mqtt_form_parse_json(arr_pass, strlen(arr_pass), &out);
     TEST_ASSERT_EQUAL(MQTT_FORM_ERR_BAD_JSON, st.err);
-    TEST_ASSERT_EQUAL(MQTT_FORM_FIELD_PASS, st.field);
+    TEST_ASSERT_EQUAL(MQTT_FORM_FIELD_NONE, st.field);
 }
 
 void test_json_rejects_malformed_or_non_object_json(void) {
@@ -386,6 +559,117 @@ void test_json_rejects_malformed_or_non_object_json(void) {
     static const char not_object[] = "[1,2,3]";
     st = mqtt_form_parse_json(not_object, strlen(not_object), &out);
     TEST_ASSERT_EQUAL(MQTT_FORM_ERR_BAD_JSON, st.err);
+}
+
+/* ---- the pre-scan that runs before cJSON ever sees the body ---- */
+
+void test_json_rejects_deeply_nested_body(void) {
+    /* Just the opening brackets are enough: depth crosses 1 on the
+       second one, long before cJSON would ever be called. */
+    char body[300];
+    memset(body, '[', sizeof(body));
+    mqtt_form_result_t out;
+    mqtt_form_status_t st = mqtt_form_parse_json(body, sizeof(body), &out);
+    TEST_ASSERT_EQUAL(MQTT_FORM_ERR_BAD_JSON, st.err);
+}
+
+void test_json_accepts_brackets_inside_string_value(void) {
+    /* The nesting pre-scan must not mistake a bracket inside a string
+       for structural nesting -- this stays a flat, one-level object. */
+    static const char body[] = "{\"uri\":\"mqtt://h\",\"user\":\"[{]}\"}";
+    mqtt_form_result_t out;
+    mqtt_form_status_t st = mqtt_form_parse_json(body, strlen(body), &out);
+    TEST_ASSERT_EQUAL(MQTT_FORM_ERR_NONE, st.err);
+    TEST_ASSERT_EQUAL_STRING("[{]}", out.user);
+}
+
+void test_json_rejects_duplicate_known_fields(void) {
+    mqtt_form_result_t out;
+    mqtt_form_status_t st;
+
+    static const char dup_uri[] = "{\"uri\":\"mqtt://a\",\"uri\":\"mqtt://b\"}";
+    st = mqtt_form_parse_json(dup_uri, strlen(dup_uri), &out);
+    TEST_ASSERT_EQUAL(MQTT_FORM_ERR_DUPLICATE_FIELD, st.err);
+    TEST_ASSERT_EQUAL(MQTT_FORM_FIELD_URI, st.field);
+
+    /* The second occurrence's type must not matter -- this is a
+       duplicate-key rejection, not a type check on whichever one
+       cJSON_GetObjectItemCaseSensitive would have returned. */
+    static const char dup_uri_bad_type[] = "{\"uri\":\"mqtt://a\",\"uri\":5}";
+    st = mqtt_form_parse_json(dup_uri_bad_type, strlen(dup_uri_bad_type), &out);
+    TEST_ASSERT_EQUAL(MQTT_FORM_ERR_DUPLICATE_FIELD, st.err);
+    TEST_ASSERT_EQUAL(MQTT_FORM_FIELD_URI, st.field);
+
+    static const char dup_user[] = "{\"uri\":\"mqtt://a\",\"user\":\"x\",\"user\":\"y\"}";
+    st = mqtt_form_parse_json(dup_user, strlen(dup_user), &out);
+    TEST_ASSERT_EQUAL(MQTT_FORM_ERR_DUPLICATE_FIELD, st.err);
+    TEST_ASSERT_EQUAL(MQTT_FORM_FIELD_USER, st.field);
+
+    static const char dup_pass[] = "{\"uri\":\"mqtt://a\",\"pass\":\"x\",\"pass\":\"y\"}";
+    st = mqtt_form_parse_json(dup_pass, strlen(dup_pass), &out);
+    TEST_ASSERT_EQUAL(MQTT_FORM_ERR_DUPLICATE_FIELD, st.err);
+    TEST_ASSERT_EQUAL(MQTT_FORM_FIELD_PASS, st.field);
+}
+
+void test_json_rejects_raw_nul_byte(void) {
+    static const char prefix[] = "{\"uri\":\"mqtt://h";
+    static const char suffix[] = "\"}";
+    char body[40];
+    size_t n = 0;
+    memcpy(body + n, prefix, sizeof(prefix) - 1);
+    n += sizeof(prefix) - 1;
+    body[n++] = '\0';
+    memcpy(body + n, suffix, sizeof(suffix) - 1);
+    n += sizeof(suffix) - 1;
+
+    mqtt_form_result_t out;
+    mqtt_form_status_t st = mqtt_form_parse_json(body, n, &out);
+    TEST_ASSERT_EQUAL(MQTT_FORM_ERR_BAD_JSON, st.err);
+}
+
+void test_json_rejects_u0000_escape(void) {
+    mqtt_form_result_t out;
+    mqtt_form_status_t st;
+
+    static const char in_uri[] = "{\"uri\":\"mqtt://h\\u0000junk\"}";
+    st = mqtt_form_parse_json(in_uri, strlen(in_uri), &out);
+    TEST_ASSERT_EQUAL(MQTT_FORM_ERR_BAD_JSON, st.err);
+
+    static const char in_pass[] = "{\"uri\":\"mqtt://h\",\"pass\":\"ab\\u0000cd\"}";
+    st = mqtt_form_parse_json(in_pass, strlen(in_pass), &out);
+    TEST_ASSERT_EQUAL(MQTT_FORM_ERR_BAD_JSON, st.err);
+
+    /* Case-insensitive on the 'u'. */
+    static const char upper[] = "{\"uri\":\"mqtt://h\\U0000junk\"}";
+    st = mqtt_form_parse_json(upper, strlen(upper), &out);
+    TEST_ASSERT_EQUAL(MQTT_FORM_ERR_BAD_JSON, st.err);
+}
+
+void test_json_rejects_trailing_bytes_after_the_object(void) {
+    mqtt_form_result_t out;
+    mqtt_form_status_t st;
+
+    static const char garbage[] = "{\"uri\":\"mqtt://h\"}garbage";
+    st = mqtt_form_parse_json(garbage, strlen(garbage), &out);
+    TEST_ASSERT_EQUAL(MQTT_FORM_ERR_BAD_JSON, st.err);
+
+    static const char second_obj[] = "{\"uri\":\"mqtt://h\"}{\"uri\":5}";
+    st = mqtt_form_parse_json(second_obj, strlen(second_obj), &out);
+    TEST_ASSERT_EQUAL(MQTT_FORM_ERR_BAD_JSON, st.err);
+
+    /* Trailing whitespace, unlike trailing garbage, is fine. */
+    static const char ws[] = "{\"uri\":\"mqtt://h\"}  \n";
+    st = mqtt_form_parse_json(ws, strlen(ws), &out);
+    TEST_ASSERT_EQUAL(MQTT_FORM_ERR_NONE, st.err);
+}
+
+void test_json_failed_parse_zeroes_output_struct(void) {
+    static const char body[] = "{\"pass\":\"secret\",\"uri\":\"ftp://x\"}";
+    mqtt_form_result_t out;
+    memset(&out, 0xAA, sizeof(out));
+    mqtt_form_status_t st = mqtt_form_parse_json(body, strlen(body), &out);
+    TEST_ASSERT_EQUAL(MQTT_FORM_ERR_BAD_SCHEME, st.err);
+    TEST_ASSERT_EQUAL_STRING("", out.pass);
 }
 
 void test_json_shares_the_uri_scheme_and_char_rule(void) {
@@ -422,6 +706,37 @@ void test_json_uri_length_boundary(void) {
     st = mqtt_form_parse_json(body, (size_t)n, &out);
     TEST_ASSERT_EQUAL(MQTT_FORM_ERR_TOO_LONG, st.err);
     TEST_ASSERT_EQUAL(MQTT_FORM_FIELD_URI, st.field);
+}
+
+void test_json_user_and_pass_length_boundary(void) {
+    char user63[64], user64[65];
+    memset(user63, 'b', 63);
+    user63[63] = '\0';
+    memset(user64, 'b', 64);
+    user64[64] = '\0';
+
+    char body[256];
+    mqtt_form_result_t out;
+    mqtt_form_status_t st;
+
+    int n = snprintf(body, sizeof(body), "{\"uri\":\"mqtt://h\",\"user\":\"%s\"}", user63);
+    st = mqtt_form_parse_json(body, (size_t)n, &out);
+    TEST_ASSERT_EQUAL(MQTT_FORM_ERR_NONE, st.err);
+    TEST_ASSERT_EQUAL(63u, strlen(out.user));
+
+    n = snprintf(body, sizeof(body), "{\"uri\":\"mqtt://h\",\"user\":\"%s\"}", user64);
+    st = mqtt_form_parse_json(body, (size_t)n, &out);
+    TEST_ASSERT_EQUAL(MQTT_FORM_ERR_TOO_LONG, st.err);
+    TEST_ASSERT_EQUAL(MQTT_FORM_FIELD_USER, st.field);
+
+    n = snprintf(body, sizeof(body), "{\"uri\":\"mqtt://h\",\"pass\":\"%s\"}", user63);
+    st = mqtt_form_parse_json(body, (size_t)n, &out);
+    TEST_ASSERT_EQUAL(MQTT_FORM_ERR_NONE, st.err);
+
+    n = snprintf(body, sizeof(body), "{\"uri\":\"mqtt://h\",\"pass\":\"%s\"}", user64);
+    st = mqtt_form_parse_json(body, (size_t)n, &out);
+    TEST_ASSERT_EQUAL(MQTT_FORM_ERR_TOO_LONG, st.err);
+    TEST_ASSERT_EQUAL(MQTT_FORM_FIELD_PASS, st.field);
 }
 
 void test_json_body_at_cap_is_accepted_over_cap_is_rejected(void) {
@@ -487,6 +802,18 @@ void test_html_escape_exact_fit_boundary(void) {
     TEST_ASSERT_EQUAL_STRING("", too_small);
 }
 
+void test_html_escape_exact_fit_with_entity(void) {
+    /* "&" -> "&amp;" + NUL = 6 bytes: fits exactly in a 6-byte buffer. */
+    char out6[6];
+    TEST_ASSERT_TRUE(mqtt_form_html_escape("&", out6, sizeof(out6)));
+    TEST_ASSERT_EQUAL_STRING("&amp;", out6);
+
+    /* One byte short must fail and clear the output. */
+    char out5[5];
+    TEST_ASSERT_FALSE(mqtt_form_html_escape("&", out5, sizeof(out5)));
+    TEST_ASSERT_EQUAL_STRING("", out5);
+}
+
 void test_html_escape_fails_on_overflow_mid_expansion(void) {
     /* "&" alone expands to "&amp;" (5 bytes); a 5-byte buffer has room
        for only "&amp;" with no NUL, so even the first character fails. */
@@ -525,9 +852,17 @@ int main(void) {
     RUN_TEST(test_urlencoded_percent_edge_cases_are_malformed);
     RUN_TEST(test_urlencoded_ignores_unknown_fields_even_if_malformed);
     RUN_TEST(test_urlencoded_rejects_duplicate_known_field);
+    RUN_TEST(test_urlencoded_pass_key_with_no_equals_means_keep);
+    RUN_TEST(test_urlencoded_rejects_raw_nul_byte);
+    RUN_TEST(test_urlencoded_empty_uri_still_checks_other_fields_syntax);
+    RUN_TEST(test_urlencoded_rejects_malformed_mqtt_uri_variants);
+    RUN_TEST(test_urlencoded_accepts_strict_mqtt_uri_variants);
+    RUN_TEST(test_urlencoded_rejects_bad_port_as_bad_char);
+    RUN_TEST(test_failed_parse_zeroes_output_struct);
     RUN_TEST(test_urlencoded_uri_length_boundary);
     RUN_TEST(test_urlencoded_user_and_pass_length_boundary);
     RUN_TEST(test_urlencoded_body_at_cap_is_accepted_over_cap_is_rejected);
+    RUN_TEST(test_urlencoded_worst_case_percent_encoded_body_is_accepted);
     RUN_TEST(test_json_accepts_full_submission);
     RUN_TEST(test_json_missing_uri_is_an_error);
     RUN_TEST(test_json_empty_body_is_bad_json);
@@ -535,13 +870,22 @@ int main(void) {
     RUN_TEST(test_json_blank_or_absent_pass_keeps_existing);
     RUN_TEST(test_json_rejects_non_string_values);
     RUN_TEST(test_json_rejects_malformed_or_non_object_json);
+    RUN_TEST(test_json_rejects_deeply_nested_body);
+    RUN_TEST(test_json_accepts_brackets_inside_string_value);
+    RUN_TEST(test_json_rejects_duplicate_known_fields);
+    RUN_TEST(test_json_rejects_raw_nul_byte);
+    RUN_TEST(test_json_rejects_u0000_escape);
+    RUN_TEST(test_json_rejects_trailing_bytes_after_the_object);
+    RUN_TEST(test_json_failed_parse_zeroes_output_struct);
     RUN_TEST(test_json_shares_the_uri_scheme_and_char_rule);
     RUN_TEST(test_json_uri_length_boundary);
+    RUN_TEST(test_json_user_and_pass_length_boundary);
     RUN_TEST(test_json_body_at_cap_is_accepted_over_cap_is_rejected);
     RUN_TEST(test_error_str_is_nonempty_for_every_error_and_empty_for_none);
     RUN_TEST(test_html_escape_escapes_all_five_characters);
     RUN_TEST(test_html_escape_passes_plain_text_through);
     RUN_TEST(test_html_escape_exact_fit_boundary);
+    RUN_TEST(test_html_escape_exact_fit_with_entity);
     RUN_TEST(test_html_escape_fails_on_overflow_mid_expansion);
     RUN_TEST(test_html_escape_null_and_zero_length_safety);
     return UNITY_END();

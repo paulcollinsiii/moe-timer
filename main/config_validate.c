@@ -76,21 +76,57 @@ bool config_is_https_url(const char *s) {
     return url_rest_is_clean(rest);
 }
 
-bool config_is_mqtt_uri(const char *s) {
+/* The host grammar config_mqtt_uri_check() accepts: 1+ of [A-Za-z0-9.-].
+   No '@' -- a URI carrying "user:pass@" would have its credential both
+   logged (mqtt_ha.c's connect-log line) and echoed back by the form
+   page's prefill, so userinfo has to fail the grammar rather than be
+   accepted and stripped afterward. */
+static bool is_mqtt_host_char(char c) {
+    return (c >= 'A' && c <= 'Z') || (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9') || c == '.' || c == '-';
+}
+
+config_mqtt_uri_check_t config_mqtt_uri_check(const char *s) {
     static const char scheme_mqtts[] = "mqtts://";
     static const char scheme_mqtt[] = "mqtt://";
     if (s == NULL)
-        return false;
+        return CONFIG_MQTT_URI_BAD_SCHEME;
+
     const char *rest;
     if (scheme_prefix_eq(s, scheme_mqtts, sizeof(scheme_mqtts) - 1))
         rest = s + sizeof(scheme_mqtts) - 1;
     else if (scheme_prefix_eq(s, scheme_mqtt, sizeof(scheme_mqtt) - 1))
         rest = s + sizeof(scheme_mqtt) - 1;
     else
-        return false; /* neither scheme */
-    if (*rest == '\0')
-        return false; /* scheme but no host */
-    return url_rest_is_clean(rest);
+        return CONFIG_MQTT_URI_BAD_SCHEME; /* neither scheme */
+
+    const char *p = rest;
+    while (is_mqtt_host_char(*p))
+        p++;
+    if (p == rest)
+        return CONFIG_MQTT_URI_NO_HOST;
+
+    if (*p == ':') {
+        const char *port = ++p;
+        while (*p >= '0' && *p <= '9')
+            p++;
+        size_t digits = (size_t)(p - port);
+        if (digits == 0 || digits > 5)
+            return CONFIG_MQTT_URI_BAD_PORT;
+        int value = 0;
+        for (size_t i = 0; i < digits; i++)
+            value = value * 10 + (port[i] - '0');
+        if (value < 1 || value > 65535)
+            return CONFIG_MQTT_URI_BAD_PORT;
+    }
+
+    if (*p == '/')
+        p++;
+
+    return (*p == '\0') ? CONFIG_MQTT_URI_OK : CONFIG_MQTT_URI_BAD_CHAR;
+}
+
+bool config_is_mqtt_uri(const char *s) {
+    return config_mqtt_uri_check(s) == CONFIG_MQTT_URI_OK;
 }
 
 bool config_is_ota_url(const char *s) {
