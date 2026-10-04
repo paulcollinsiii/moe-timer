@@ -2,3 +2,7 @@ dependencies:
   idf: ">=6.0"
   lvgl/lvgl: "^9.3.0"
   espressif/mqtt: "^1.0.0"
+  # WiFi provisioning plan, task 4: SoftAP + security 2 provisioning
+  # (replaces the in-tree wifi_provisioning component on IDF 6). Pinned to
+  # the version task 0's spike actually measured against, not "*".
+  espressif/network_provisioning: "^1.3.1"

@@ -440,6 +440,20 @@ menu "MagTag Timer"
             release starts the setup session. A shorter press, or a
             release before this elapses, does nothing.
 
+    config MAGTAG_SETUP_MAX_SEC
+        int "Setup session budget (seconds)"
+        default 600
+        range 120 1800
+        help
+            How long the SoftAP + provisioning manager + MQTT form stay up
+            before the session gives up and times out (panel: "Setup timed
+            out — hold BOOT to retry"). Same role as MAGTAG_MAX_AWAKE_SEC
+            but its own knob: a setup session is the single most expensive
+            thing this device does (SoftAP, httpd and a 3072-bit SRP6a
+            modexp, all running instead of a normal sleep cycle), and an
+            owner fumbling a WPA2 password or a QR scan needs longer than
+            the ordinary awake failsafe's 180 s default allows.
+
     comment "Over-the-air firmware updates"
 
     config MAGTAG_OTA_URL

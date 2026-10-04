@@ -38,6 +38,8 @@ idf_component_register(
         "light.c"
         "nvs_config.c"
         "mqtt_form.c"
+        "setup_session.c"
+        "setup_session_idf.c"
         "../lib/cJSON/cJSON.c"
         "schedule.c"
         "buttons.c"
@@ -82,6 +84,9 @@ idf_component_register(
         esp_https_ota
         app_update
         ssd1680
+        esp_http_server
+        protocomm
+        espressif__network_provisioning
     # Root CA for the OTA endpoint, pinned into the image.
     #
     # TXTFILES, not BINFILES: esp_http_client_config_t::cert_pem takes a
