@@ -43,10 +43,10 @@ titles are the device names.
 uv run tools/gen_ha_dashboard.py --mqtt --sdkconfig ~/magtag-mqtt.cfg > ha_setup.txt
 ```
 
-For now, the generator cannot read `include/credentials.local.h`. It reads
-the broker settings from an sdkconfig-style file (by default `sdkconfig` at
-the repository root). Keep a small file of your own outside the repository
-with three lines, and pass it with `--sdkconfig`:
+`--mqtt` needs `--sdkconfig PATH`, with no default. The firmware build no
+longer holds the broker (you enter it on the device), so the generator reads
+the broker settings from an sdkconfig-style file you keep outside the
+repository, with three lines:
 
 ```
 CONFIG_MAGTAG_MQTT_URI="mqtt://homeassistant.local:1883"

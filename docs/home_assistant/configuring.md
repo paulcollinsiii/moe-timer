@@ -293,7 +293,7 @@ A control edit and a document behave differently once applied:
   from the broker. A refused edit is the exception: it stays and is retried.
 - **A document is replayed.** It stays retained. The device applies it
   whenever its `ver` is new, and again after a **reseed**: the first boot
-  after a flash that changed the built-in allocations or credentials
+  after a flash that changed the built-in allocations
   ([What a flash does to NVS](../developer_setup.md#what-a-flash-does-to-nvs)).
 
 So **a document overwrites every field it carries, each time it applies**,

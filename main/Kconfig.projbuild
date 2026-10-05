@@ -450,7 +450,8 @@ menu "MagTag Timer"
         help
             How long the SoftAP + provisioning manager + MQTT form stay up
             before the session gives up and times out (panel: "Setup timed
-            out — hold BOOT to retry"). Same role as MAGTAG_MAX_AWAKE_SEC
+            out", with a retry line that depends on whether WiFi is
+            already set). Same role as MAGTAG_MAX_AWAKE_SEC
             but its own knob: a setup session is the single most expensive
             thing this device does (SoftAP, httpd and a 3072-bit SRP6a
             modexp, all running instead of a normal sleep cycle), and an

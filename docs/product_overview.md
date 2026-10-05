@@ -23,6 +23,7 @@ watches it from Home Assistant.
 | Chore checklist | Up to three chores that unlock the rest of the day's screen time when they are ticked | [Chores](behavior/chores.md) |
 | Locks | Full-screen stops for a flat battery, bed time, an unset clock and a broken setting | [Locks](behavior/locks.md) |
 | Sleep, sync and updates | Minute-by-minute deep sleep, clock and Home Assistant sync, the battery display, and firmware updates | [Power and sync](behavior/power_and_sync.md) |
+| Setup mode | Entering the WiFi and the MQTT broker on the device, with a phone app and a web page | [Setup mode](behavior/setup_mode.md) |
 | Home Assistant | Settings, time adjustments, the chore list, the dashboard, and "Find my timer" | [Home Assistant setup](home_assistant/setup.md) |
 
 ## The device at a glance
@@ -49,6 +50,7 @@ the device sleeps.
 | CHORES | The child pressed A | [Chores](behavior/chores.md#the-checklist) |
 | Charge Me!, Bed Time, No Clock, Config Error | A lock is on | [Locks](behavior/locks.md) |
 | Updating Firmware | An update is installing | [Power and sync](behavior/power_and_sync.md#firmware-updates) |
+| Setup, Release to enter setup, Setup complete, Setup timed out, Setup failed | The device has no WiFi, or BOOT was held | [Setup mode](behavior/setup_mode.md) |
 
 **The header.** The top line of the timer screen looks the same for Screen and
 for every extra timer. The left side shows the date and time, for example
@@ -56,7 +58,9 @@ for every extra timer. The left side shows the date and time, for example
 shows `Last sync: 12:30 PM`, which is the last time the clock was set from the
 network (`--:--` before the first sync). While a break runs behind another
 timer, that spot shows an inverted `BREAK 12:34` chip instead
-([Screen breaks](behavior/screen_breaks.md#other-timers-during-a-break)).
+([Screen breaks](behavior/screen_breaks.md#other-timers-during-a-break)). After
+three failed syncs in a row it shows `No WiFi: hold BOOT`
+([Setup mode](behavior/setup_mode.md#the-no-wifi-hint)).
 
 ## How a press is handled
 

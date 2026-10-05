@@ -34,13 +34,17 @@ include EXT1 to the button handler; everything else, including a power-on,
 which reports no cause, goes to the tick handler. The button handler first
 drops a press that is a hold carried over from the last sleep: the same
 button, still down, after a sleep of 2 s or less goes straight back to sleep
-(S24). After that, both follow the same shape:
+(S24). A wake caused by BOOT is taken ahead of that guard, because BOOT decodes
+as no A–D button. After that, both follow the same shape:
 
 ```
-day rollover ─▶ lock gates ─▶ break-end drain ─▶ the wake's own work ─▶ render
-      ─▶ latched presses ─▶ awake watch ─▶ OTA download if one is pending ─▶ sleep
+setup route ─▶ day rollover ─▶ lock gates ─▶ break-end drain ─▶ the wake's own
+      work ─▶ render ─▶ latched presses ─▶ awake watch ─▶ OTA download if pending
+      ─▶ sleep
 ```
 
+- **Setup route.** A wake with no stored SSID leaves the path here and does not
+  return, and so does a BOOT hold ([below](#setup-mode)).
 - **Day rollover.** On a new local date: queue yesterday's summary, arm the
   daily update check, open a network window, then restore today's snapshot
   or reset the day. The window comes first so the date is judged on a
@@ -78,6 +82,62 @@ Off this path: either handler starts a screen break, before or after its
 render, once the exposure balance has crossed its interval. It paints the
 break screen and sleeps at once, skipping the rest of the wake.
 
+## Setup mode
+
+Setup is a wake outcome, not a timer mode: it records no day, it has no
+`app_mode_t`, and it never calls `esp_restart()`, which would zero the RTC state
+(S47). It always ends in one sleep through the funnel (S48). The charge gate
+runs in `app_main` first, so a charge-locked device never reaches it.
+
+**The no-SSID route.** `wake_flow_route_no_ssid()` is the first step of both
+handlers, ahead of the rollover and the lock gates. It asks
+`lock_gate_bedtime_in_force()` first, because Bed Time on a plausible clock
+outranks setup, then the pure `setup_trigger_decide()` over four facts: has an
+SSID, button wake, cold boot, hold completed. With no SSID, a cold boot or any
+button wake enters setup. `wake_flow_reset_class()` folds the reset reason into
+three classes: a deep-sleep wake, COLD (power-on, EN, software restart, USB) and
+FAULT (everything else). A FAULT reset with no SSID does not open setup
+unasked: it paints the no-SSID `Setup failed` screen over whatever a crashed
+session left on the glass and sleeps buttons-only, so the next press starts
+setup. A timer wake with no SSID changes nothing.
+
+It runs ahead of the rollover because a rollover window cannot succeed with no
+SSID and would count a join failure before setup ran, and ahead of the no-clock
+gate because a new device's clock is unset and that gate would end the wake. The
+rollover then happens on the first wake after setup, since the stored day is
+still empty.
+
+**The BOOT route.** `buttons_woke_by_boot()` identifies a BOOT-only wake, and a
+press of A–D with GPIO0 low is routed the same way, so the gesture works on
+builds where BOOT cannot wake the device. Both go to
+`wake_flow_handle_boot_wake()`, never the press path: no strip claim, no LED
+ack, no rollover, no window. With no SSID it enters setup at once. With one,
+`wake_flow_wait_for_boot_hold()` samples GPIO0 every 100 ms through the pure
+`setup_trigger_boot_hold_sample()` tracker. Crossing `MAGTAG_BOOT_HOLD_MS` paints
+the release hint, and a release after that returns true. A release before it, or
+a pad that was never down, does nothing and paints nothing. The wait is bounded
+at the threshold plus 10 s, below the awake failsafe by a `_Static_assert`, and a
+bound hit after the hint repaints the standing lock or the current screen. The
+config-error sleep arms D alone, so there the gesture is D with BOOT held.
+
+**The session.** `wake_flow_run_setup_and_sleep()` darkens the LEDs and runs
+`setup_session_run()` with the ops table that `setup_mode_ops()`
+(`setup_session_idf.c`) builds; `main.c` supplies only the failsafe extend.
+The order is: extend the failsafe to `MAGTAG_SETUP_MAX_SEC` + 60 s, paint the
+setup screen, start the SoftAP and provisioning ([network_and_ha.md](network_and_ha.md#provisioning)),
+poll for events until one ends it, stop everything, paint the end screen. The
+screen is painted before the AP starts because a refresh during a WiFi transmit
+burst has browned out this board. The result picks the sleep:
+
+| Session result | Sleep | Next wake |
+|----------------|-------|-----------|
+| WiFi or MQTT saved | `WAKE_SLEEP_SETUP_NET_WINDOW`: 1 s, buttons armed | A tick wake. `timer_force_ntp_sync()` makes its cadence check open a network window at once, and the failure count is cleared, because it described the old credentials |
+| Timeout or failure, no SSID | `WAKE_SLEEP_BUTTONS_ONLY`: no timer, buttons armed | A press |
+| Timeout or failure, with an SSID | The ordinary mode from `lock_gate_sleep_mode()` | The normal schedule, any standing lock kept |
+
+Neither new mode is a lock, and `wake_sleep_mode_select()` never returns them;
+only the setup path chooses them.
+
 ## The break-end edge
 
 A screen break ends on its own wall clock, often inside some other tick.
@@ -103,7 +163,8 @@ due. Any wake is pulled in to land about 70 s before an expiry or a break
 end. A break running behind another timer counts as a second event only when
 its end will chime, because a silent end needs no wake of its own. A lock
 replaces the plan with a fixed interval: 600 s for charge, 7200 s for Bed
-Time, 1800 s for config error and no-clock.
+Time, 1800 s for config error and no-clock. The two setup sleeps
+([above](#setup-mode)) are fixed too: 1 s, and none.
 
 ## The sleep funnel
 
@@ -116,7 +177,9 @@ Every sleep goes through `enter_deep_sleep()`, the only call to
 5. turns the LEDs off with an acknowledged stop, then holds GPIO 21 (gate)
    and GPIO 16 (amp) through the sleep;
 6. reports a break end that was never drained;
-7. arms the button wake mask and the planned timer wake, and sleeps.
+7. arms the button wake mask and the planned timer wake, and sleeps. The timer
+   is armed by `sleep_plan_arm_timer()`, which arms nothing for a zero
+   interval: that is the buttons-only sleep, and no planned sleep is zero.
 
 ## The awake failsafe
 
@@ -124,4 +187,6 @@ A one-shot `esp_timer` armed at boot forces a sleep after
 `CONFIG_MAGTAG_MAX_AWAKE_SEC` (180 s), so a hung radio or a stuck panel cannot
 drain the battery. It enters the same funnel, so the snapshot is still saved,
 but it first tells `ota_flow` that this sleep must not certify a new image.
-Only the locate alarm and an OTA download may push it out (S41).
+Only the locate alarm, an OTA download and a setup session may push it out
+(S41). A setup session extends it to its own budget plus 60 s; if the failsafe
+still fires mid-session, it sleeps on the ordinary schedule and paints nothing.

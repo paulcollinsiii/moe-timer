@@ -22,6 +22,7 @@ you touch `partitions.csv` or the bootloader settings.
 | GPIO | Function | Owner |
 |------|----------|-------|
 | 15, 14, 12, 11 | Buttons A, B, C, D. Active low, pulled up. All four are RTC-capable, so they can wake the chip from deep sleep. | `main/buttons.c` |
+| 0 | BOOT button. Active low, pulled up, RTC-capable. Also a strapping pin: held low at reset it selects the ROM download mode. It starts setup mode when held ([peripherals.md](peripherals.md#buttons)). | `main/buttons.c` |
 | 1 | NeoPixel data (4 × RGB) | `main/neopixel.c` |
 | 21 | NeoPixel power gate: LOW = on, HIGH = off | `main/neopixel.c` |
 | 17 | Speaker, driven by DAC channel 0 | `main/audio.c` |

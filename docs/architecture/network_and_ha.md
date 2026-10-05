@@ -1,9 +1,10 @@
 # Network and Home Assistant
 
 How a network window works, how its results get back to the main task, how
-clock corrections reach a running timer, and when Home Assistant is told
-about new entities. WiFi is powered only inside a window (S29), and a window
-is short and bounded, so everything the device exchanges with HA rides one.
+clock corrections reach a running timer, when Home Assistant is told about new
+entities, and how WiFi and the broker get onto the device. WiFi is powered only
+inside a window or a setup session (S29), and a window is short and bounded, so
+everything the device exchanges with HA rides one.
 
 ## One window, in order
 
@@ -97,3 +98,56 @@ not stamped, so the next window tries again.
 
 Discovery and the stat payload go out before the incoming config is applied.
 A list change applied in one window therefore reaches HA in the next.
+
+## Provisioning
+
+A window needs WiFi and, for HA, a broker. Both arrive through setup mode
+([wake_cycle.md](wake_cycle.md#setup-mode)), which runs instead of a window and
+never beside one: the SoftAP, the HTTP server and the SRP6a handshake share
+internal RAM with only a few KB to spare, and a window's MQTT and OTA work needs
+the same room. With no broker URI stored, `mqtt_ha_window()` logs
+`MQTT disabled: no broker configured; enter it in setup mode` and skips the HA
+phase; a WiFi-only device is a supported state.
+
+**Components.** `setup_session_idf.c` runs Espressif's `network_provisioning`
+manager (SoftAP scheme, security 2, which is SRP6a) on an `esp_http_server`
+instance the app creates itself (6144 B stack, 10 handler slots) and hands to
+the scheme. The app registers two more entry points on that server: `GET` and
+`POST /mqtt`, a page with no script and no external resources, and a protocomm
+endpoint `mqtt-config` that takes the same fields as JSON, so
+`esp_prov.py --custom_data` can script it. The stock phone apps collect WiFi
+only, which is why MQTT needs its own path.
+
+**The AP and the QR.** `setup_session_make_ap_password()` draws a 10-character
+password per session from a 49-character alphabet that drops confusable glyphs,
+by rejection sampling over `esp_random()`. It is the WPA2 key, the SRP6a proof
+of possession and part of the QR payload, which carries the fields both stock
+apps read: `ver`, `name`, `username` (`magtag`), `pop`, `password`, `transport`
+(`softap`) and `security` (2). The password lives in RAM and is zeroed once the
+AP is up.
+
+**The form.** `mqtt_form.c` parses the urlencoded and JSON bodies through one
+validator. It caps the body at 1024 B, accepts only a flat JSON object (the
+nesting check runs before cJSON, which recurses on the small httpd stack) and
+rejects duplicate fields, embedded NULs and DEL. The URI grammar,
+`config_mqtt_uri_check()`, is `mqtt[s]://host[:port][/]` and nothing else, with no
+userinfo, so a password can never land in the logged URI. An empty URI is valid
+and clears the user and password; a blank password with a URI means keep the
+stored one. Both entry points store synchronously through
+`setup_session_apply_mqtt()` before they reply, so `Saved.` never appears for a
+write that failed. A rejected form leaves a zeroed result, so a decoded password
+does not outlive it.
+
+**One credential store.** The app keeps WiFi in its own NVS keys
+(`include/nvs_keys.h`), and `wifi_session.c` hands them to `esp_wifi_set_config`
+itself, with the driver in `WIFI_STORAGE_RAM`. Those keys are therefore the only
+persisted copy. The manager writes its own copy to flash when credentials
+arrive, so on a verified join the session copies the SSID and password into the
+app's keys and then clears the driver's store (`esp_wifi_restore`, deferred to
+teardown), leaving no second copy to disagree. If the copy fails, the session
+ends in error and leaves the driver's copy alone. A wrong password is reported
+to the phone app, resets the manager so the app can retry, and is stored
+nowhere. After a verified join the session stays up for 15 s
+(`SETUP_SESSION_SUCCESS_LINGER_MS`): the stock apps keep polling for status and
+report failure if the endpoints disappear. The STA netif is created in one
+place, `wifi_session_sta_netif()`, and shared with the window code.

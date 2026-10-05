@@ -23,6 +23,12 @@ because both of those need to know the time. A device that has both a broken
 setting and a flat battery has no way out, neither a button nor a sync, until
 the battery is charged.
 
+**Setup mode.** A device with no WiFi opens [setup mode](setup_mode.md) ahead
+of No Clock and Config Error, but not ahead of Charge Me! or Bed Time. On a
+device that has WiFi, holding BOOT also gets out of No Clock into setup, and
+BOOT held with D does so under Config Error. Those are the only button
+exceptions to the table above.
+
 ## Charge Me!
 
 At 10 % battery or lower, the device pauses a running timer, paints

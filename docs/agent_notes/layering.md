@@ -40,7 +40,7 @@ Scanned 2026-10-01.
 | `net_window.c` | `timer_record_ntp_sync`, in `net_window_wait_ntp` and `net_window_join` | Mutator. Both run on the main task, not inside `net_window_task`. The task itself still rewrites the RTC chore acks through `config_apply.c:apply_chores` (invariant S28). |
 | `net_window.c` | `ota_flow_check`, inside `net_window_task` | Control-flow inversion: layer 3 supplies the thread, layer 2 the sequence. The check has to ride the window the wake already opened. |
 | `ota_task.c` | `ota_flow_apply` | The same inversion. The module exists only to give the download a 16 KB stack, keeping `ota_flow.c` free of FreeRTOS. |
-| `buttons.c` | `timer_swap_allowed`, `lock_gate_wake_d_only` | Reads, to fill the `buttons_policy` input. |
+| `buttons.c` | `timer_swap_allowed`, `lock_gate_config_locked`, `lock_gate_clock_locked` | Reads, to fill the `buttons_policy` input. The two lock flags are separate fields because the policy keeps BOOT dark for one lock and arms it for the other. |
 | `mqtt_ha.c` | `timer_slot_def` | Read, for discovery. |
 | `mqtt_ha.c` | `ota_flow_stat` | Read at publish time, because the stats snapshot is built before the OTA check runs ([architecture/ota.md](../architecture/ota.md)). |
 | `mqtt_ha.c` | `ha_config_discovery_gate`, `ha_config_discovery`, `ha_config_discovery_topic`, `ha_config_fields`, `ha_config_json_escape`, `ha_config_state_json`, `ha_config_set`, `config_apply`, `cmd_apply_for_snapshot` | The densest caller, and an ordinary shape there rather than an exception: the HA session is where the documents arrive. `ha_config_set`, `config_apply` and `cmd_apply_for_snapshot` are mutators. The parsing and validation they delegate to is host-tested. |
@@ -73,7 +73,10 @@ Some layer-1 modules bend "no ESP-IDF, no globals" without leaving the layer:
 - `display_screens` compiles against LVGL and calls `localtime_r`/`strftime`
   on a `time_t` it was handed.
 - `ota_policy` parses the manifest with the vendored cJSON, as layer-2
-  `config_apply` does.
+  `config_apply` does. `mqtt_form` does the same for the setup form's JSON body.
+- `qr_render` has no ESP-IDF dependency but keeps the last encoded code in a
+  heap pointer between `qr_render_encode()` and `qr_render_release()`, because
+  the draw callback reads it after the encode returns.
 - `ota_facts` includes ESP-IDF headers (`esp_ota_ops.h`,
   `esp_image_format.h`, `esp_tls_errors.h`) for their error constants only. The
   host build supplies those constants, so it is still tested with nothing

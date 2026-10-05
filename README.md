@@ -42,13 +42,11 @@ time for kids. Some of the major features:
   into the container. If you're running from a different host, you'll need to
   adjust `.devcontainer/devcontainer.json`.
 * In a VS Code terminal window inside the dev container:
-  * Copy `include/credentials.local.h.example` to `include/credentials.local.h`.
-    In it, set your WiFi credentials, then uncomment and set your MQTT broker
-    URI, user and password (the OTA URL is optional; read [OTA
-    Setup](./docs/ota_manifest.md) before setting it). This gitignored file is
-    the one place for every secret and URL. Do this before you build: an image
-    built without it ships empty credentials. If that happens, fill in the
-    file, run `idf.py fullclean` and flash again. Never erase NVS to fix it.
+  * Optionally, copy `include/credentials.local.h.example` to
+    `include/credentials.local.h` and set the OTA URL (read [OTA
+    Setup](./docs/ota_manifest.md) first). That is the only value it holds:
+    WiFi and MQTT credentials are not part of the build, and you enter them on
+    the device after flashing. Create the file before you build.
   * `source ~/esp/esp-idf/export.sh`
   * Optionally, run `idf.py menuconfig` and pre-configure other settings in the
     MagTag Timer menu. They're only defaults, used in the absence of HA.
@@ -56,9 +54,14 @@ time for kids. Some of the major features:
     Reset, then let go of the Boot button), and then run `idf.py flash`.
     If the device doesn't start once flashing finishes, press Reset. It can
     take a few presses.
-* After flashing, the device boots and runs its first network window right
-  away, and that's when it appears in HA as `magtag-xxxxxx`. If it doesn't
-  show up, press D (force sync) to run another window.
+* A device with no stored WiFi opens **setup mode** as soon as it boots. The
+  panel shows a QR code: scan it with Espressif's "ESP SoftAP Prov" phone app
+  to give the device your WiFi, then join the device's own network and open
+  `http://192.168.4.1/mqtt` to give it your MQTT broker. The full walkthrough
+  is [Setup mode](./docs/behavior/setup_mode.md).
+* When setup finishes, the device runs its first network window right away,
+  and that's when it appears in HA as `magtag-xxxxxx`. If it doesn't show up,
+  press D (force sync) to run another window.
 
 ## Home Assistant Configuration
 The full runbook, step by step, is
@@ -79,8 +82,8 @@ device is auto-discovered in HA:
 * Run
   `uv run ./tools/gen_ha_dashboard.py --mqtt --sdkconfig ~/magtag-mqtt.cfg > ha_setup.txt`
   to generate the dashboard and automation config for your MOE Timer(s).
-  * For now, the generator can't read `credentials.local.h`, so it takes the
-    broker from a small file kept outside the repo, with three lines:
+  * The firmware build no longer holds the broker, so the generator takes it
+    from a small file kept outside the repo, with three lines:
     `CONFIG_MAGTAG_MQTT_URI="mqtt://..."`, `CONFIG_MAGTAG_MQTT_USER="..."` and
     `CONFIG_MAGTAG_MQTT_PASS="..."`.
 * Paste the dashboard from `ha_setup.txt` (step 7 of the runbook).

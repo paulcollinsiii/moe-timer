@@ -17,8 +17,9 @@ components/ssd1680  SPI writes, refresh, BUSY wait, rate guard, panel sleep
 ```
 
 `display_screen_for()` picks which of three layouts to build: the timer
-screen, the break screen or the chore checklist. The lock, TIME'S UP and
-update screens are full-screen takeovers with painters of their own. Every
+screen, the break screen or the chore checklist. The lock, TIME'S UP, update
+and setup screens ([below](#setup-screens)) are full-screen takeovers with
+painters of their own. Every
 paint renders synchronously, so the main task is blocked until the panel is
 done. After each flush `display.c` puts the panel into deep sleep with its RAM
 kept, and wakes it before the next one.
@@ -53,6 +54,37 @@ unchanged pixels around it are driven away and back, which clears the
 residue a run of partials leaves. Pass two starts as soon as BUSY releases.
 The cost on the glass is estimated at about 0.8 s, not measured. The pass is
 skipped when nothing changed and when there is no valid previous frame.
+
+## Setup screens
+
+`display_screens.c` also builds the setup-mode screens, each a full-screen
+takeover with a full refresh: the setup screen (QR code, AP name, user,
+password, form URL), `Release to enter setup`, and the end screens
+(`Setup complete` for a WiFi save or an MQTT save, `Setup timed out`, `Setup
+failed`). `setup_screens.c` is the thin adapter that wires them to the session's
+ops. The end screens' retry line is worded for the build and the state: no
+SSID, `Press any button to retry`; with an SSID, the BOOT hold, in the
+press-then-hold form on a build without `MAGTAG_BOOT_WAKES`. The main screen's
+header also takes an optional `status_hint` string (`display_state_t`), drawn in
+the Last-sync slot for the `No WiFi: hold BOOT` hint. Its default is NULL, so no
+existing golden moved.
+
+**The QR is drawn as rectangle runs.** `qr_render.c` encodes the payload with the
+vendored Nayuki `qrcodegen` (`lib/qrcodegen/`) into a module matrix, and a
+`LV_EVENT_DRAW_MAIN` handler on a plain object paints each horizontal run of dark
+modules with one `lv_draw_rect`, at 2 px per module. `LV_USE_QRCODE` stays off,
+and the reason is the ARGB8888 trap: that widget draws through an indexed-image
+canvas, LVGL's decoder turns the indexed image into ARGB8888 before the blit, and
+the ARGB8888-to-I1 blend sits behind `LV_DRAW_SW_SUPPORT_ARGB8888`, which
+`sdkconfig.defaults` turns off. With `LV_USE_LOG` off that fails silently: the QR
+draws nothing, on the device and on the host. Rectangle fills on I1 are the path
+the bars already use. The real payload is 132 B, which encodes as QR version 6;
+up to version 7 (154 B) still fits the 128 px height, and a longer payload falls
+back to text.
+
+That is also why `sdkconfig.defaults` trims LVGL to the label and bar widgets
+and the I1 draw path only, mirrored in `test/mocks/lv_conf_host.h`. Re-enabling
+any of it is a flash cost and needs the host config changed with it.
 
 ## Golden tests
 

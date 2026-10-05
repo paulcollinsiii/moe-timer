@@ -23,26 +23,26 @@ at once.
 
 ## 1. Point the device at the broker
 
-Put the broker in `include/credentials.local.h`, next to the WiFi
-credentials, **before you build**:
+The broker is entered on the device, not in the build. Flash the device
+([README](../../README.md#esp-idf-for-local-flashing-included-in-the-dev-container)),
+and a device with no stored WiFi opens [setup mode](../behavior/setup_mode.md)
+on its own. After you give it your WiFi, join the device's setup network and
+open `http://192.168.4.1/mqtt`. Enter the broker URI, for example
+`mqtt://homeassistant.local:1883`, and the broker user and password from
+above. An empty URI turns MQTT off.
 
-```c
-#define NVS_DEFAULT_MQTT_URI "mqtt://homeassistant.local:1883"
-#define NVS_DEFAULT_MQTT_USER "magtag"
-#define NVS_DEFAULT_MQTT_PASS "..."
-```
+A device that already has WiFi gets back into setup mode by holding BOOT, so
+the broker can be added or changed later without touching WiFi. The
+[setup mode page](../behavior/setup_mode.md) has the steps.
 
-An empty URI turns MQTT off. [Developer setup](../developer_setup.md) covers
-this file, and what happens when you change it on a device that is already
-running.
+## 2. Find it in HA
 
-## 2. Flash it and find it in HA
-
-Flash the device. It runs its first network window as soon as it boots, and
-it appears under **Settings → Devices & services → MQTT** as
-`magtag-xxxxxx`: the last three bytes of its WiFi MAC address. The name is
-unique on your network and survives every reflash. If it does not show up,
-press **D** on the timer screen to run another window.
+When setup ends, the device runs its first network window at once, and it
+appears under **Settings → Devices & services → MQTT** as `magtag-xxxxxx`:
+the last three bytes of its WiFi MAC address. The name is unique on your
+network and survives every reflash. If it does not show up, press **D** on the
+timer screen to run another window, or see
+[troubleshooting](troubleshooting.md#the-device-never-appears-in-ha).
 
 ## 3. Create the school calendar
 
@@ -120,9 +120,9 @@ on the broker:
 uv run tools/gen_ha_dashboard.py --mqtt --sdkconfig ~/magtag-mqtt.cfg > ha_setup.txt
 ```
 
-For now, the generator cannot read `credentials.local.h`, so it takes the
-broker from a small file you keep outside the repository, here
-`~/magtag-mqtt.cfg`, with three lines:
+The firmware build no longer holds the broker, so the generator takes it from
+a small file you keep outside the repository, here `~/magtag-mqtt.cfg`, with
+three lines:
 
 ```
 CONFIG_MAGTAG_MQTT_URI="mqtt://homeassistant.local:1883"

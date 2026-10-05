@@ -6,9 +6,10 @@ host tests cover the logic behind each one (see
 [Running host tests](developer_setup.md#running-host-tests)). Each item is a
 step and the result to expect.
 
-The device needs working WiFi credentials
-([Configuration and credentials](developer_setup.md#configuration-and-credentials));
-without them, a power-on stops at the No Clock screen and only D wakes it.
+The device needs working WiFi, entered on the device in
+[setup mode](behavior/setup_mode.md). A device with no stored WiFi opens setup
+mode at power-on instead of showing the timer screen; one whose WiFi no longer
+works stops at the No Clock screen, where D retries and BOOT reopens setup.
 Items marked **HA** also need a broker with the device set up in Home
 Assistant ([Home Assistant setup](home_assistant/setup.md)). Items marked
 **cell** need a LiPo cell.
@@ -105,3 +106,41 @@ or quiet hours from HA instead of rebuilding. Never erase NVS.
   reaches HA.
 - [ ] **Start without WiFi.** Start a timer with WiFi unreachable. → The
   timer still starts, and the WiFi pixel turns red instead of green.
+
+## Setup mode
+
+These cover [setup mode](behavior/setup_mode.md). The first one erases the
+device's NVS on purpose, so use a device whose settings you can lose.
+
+- [ ] **First setup.** Erase flash, flash, and power on. → The setup screen
+  appears. Scan its QR with Espressif's ESP SoftAP Prov app, on Android and
+  on iOS, and pick your WiFi. → The app does not report failure after
+  success. The panel shows `Setup complete`, and about a second later the
+  first network window runs.
+- [ ] **WiFi first, MQTT later.** On a device with WiFi, hold BOOT. → The
+  panel shows `Release to enter setup`, and letting go opens the setup
+  screen. Join the `MagTag-` network, open `http://192.168.4.1/mqtt`, and
+  save a broker. → The panel shows `MQTT broker saved`, and the device
+  appears in HA at its next window.
+- [ ] **Wrong WiFi password.** Give the app a wrong password. → The app
+  reports it and nothing is saved. A retry with the right one, in the same
+  session, succeeds.
+- [ ] **Timeout.** Leave a device with no WiFi in setup for
+  `MAGTAG_SETUP_MAX_SEC`. → The panel shows `Setup timed out` and
+  `Press any button to retry`, the log shows a buttons-only sleep, and no
+  timer wakes it. A press opens setup again.
+- [ ] **A crash in setup.** With no WiFi, cause a brownout or panic while the
+  setup screen is up. → The device boots to `Setup failed`, and a press opens
+  setup again.
+- [ ] **Credentials survive an update.** OTA a device that has WiFi and a
+  broker to this build. → It still joins and still reaches HA.
+- [ ] **BOOT across a deep-sleep wake.** With `MAGTAG_BOOT_WAKES` on, hold
+  BOOT while the device sleeps. → It wakes and times the hold, and it does
+  not enter ROM download mode. If it does, build with `MAGTAG_BOOT_WAKES` off.
+- [ ] **A hold that runs out.** Hold BOOT well past the release prompt. → The
+  device gives up and repaints what it showed before.
+- [ ] **The No WiFi hint.** Make WiFi unreachable for three windows. → The
+  header reads `No WiFi: hold BOOT` without running into a long date such as
+  `Wed Sep 30 12:59 PM`.
+- [ ] **Session cost.** Read the log of a session. → It gives the SRP6a time
+  and the HTTP server's stack high-water mark at teardown.

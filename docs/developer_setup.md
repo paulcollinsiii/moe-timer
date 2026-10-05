@@ -77,45 +77,65 @@ ls /dev/ttyUSB*   # a UART adapter, if you use one
 
 ### Where settings live
 
-- **`include/credentials.local.h`** holds every secret and URL: the WiFi
-  SSID and password, the MQTT broker URI, user and password, and the optional
-  OTA manifest URL. Copy it from `include/credentials.local.h.example`. It is
-  gitignored, and it is the one place these values go.
+- **WiFi and the MQTT broker are not build-time settings.** The device owner
+  enters both on the device, in [setup mode](behavior/setup_mode.md), and they
+  live only in NVS. No file or menu in the build carries them.
+- **`include/credentials.local.h`** holds one optional value: the OTA manifest
+  URL. Copy it from `include/credentials.local.h.example`. It is gitignored.
 - **`idf.py menuconfig`**, under the **MagTag Timer** menu, holds every other
-  build-time default: allocations, timer slots, breaks, quiet hours, alarms
-  and so on. Home Assistant overrides most of them once the device is in HA.
-  The menu also has MQTT and OTA URL fields. Leave them empty. They are used
-  only when `credentials.local.h` leaves a key undefined, and anything typed
-  there ends up in `sdkconfig`. (The dashboard generator takes its broker
-  from a separate file, not from here:
-  [From the broker](home_assistant/dashboard.md#from-the-broker---mqtt).)
+  build-time default: allocations, timer slots, breaks, quiet hours, alarms,
+  the setup-mode knobs and so on. Home Assistant overrides most of them once
+  the device is in HA. The menu also has an OTA URL field. Leave it empty:
+  it is used only when `credentials.local.h` leaves the key undefined, and
+  anything typed there ends up in `sdkconfig`.
+- **The dashboard generator** needs the broker address for `--mqtt`, and the
+  build no longer carries it. Keep it in a small file outside the repo:
+  [From the broker](home_assistant/dashboard.md#from-the-broker---mqtt).
 
 ### What a flash does to NVS
 
 The compiled defaults only *seed* NVS. On every boot the firmware compares a
 fingerprint of the seeded defaults with the one stamped in NVS. The seeded
-defaults are the four allocations (weekday, weekend, holiday, summer) and the
-WiFi and MQTT strings. When the fingerprint changes, the firmware reseeds: it
-rewrites those values and the holiday list, and clears the applied HA config
-version, so HA's retained config is applied again in the next network window.
+defaults are the four allocations (weekday, weekend, holiday, summer). When
+the fingerprint changes, the firmware reseeds: it rewrites those values and the
+holiday list, and clears the applied HA config version, so HA's retained
+config is applied again in the next network window. A reseed never touches the
+stored WiFi and MQTT keys.
 
-So to change a credential or an allocation default, edit it, rebuild and
-reflash. **Never erase NVS** to pick up new values. `idf.py erase-flash` or an
-erased `nvs` partition also wipes the HA config, the chore ticks, the timer
-table and the saved timer state.
+So to change an allocation default, edit it, rebuild and reflash. **Never
+erase NVS** to pick up new values. `idf.py erase-flash` or an erased `nvs`
+partition also wipes the HA config, the chore ticks, the timer table and the
+saved timer state, and it wipes the WiFi and MQTT credentials. Nothing
+restores those: the device comes back with no SSID and opens setup mode, and
+the owner enters them again.
 
-The OTA URL is the exception. It is not in the fingerprint, and it is only
-the fallback while NVS holds no URL. To change it on a device that already
-has one, set it from HA (see [ota_manifest.md](ota_manifest.md)).
+The OTA URL is the exception to seeding. It is not in the fingerprint, and it
+is only the fallback while NVS holds no URL. To change it on a device that
+already has one, set it from HA (see [ota_manifest.md](ota_manifest.md)).
+`include/nvs_defaults.h` includes `credentials.local.h` only if it exists,
+and an incremental build does not notice a file created after the first
+build, so create the file before you build, or run `idf.py fullclean` after.
 
-### Build only after the credentials exist
+### Moving a checkout from build-time credentials
 
-`include/nvs_defaults.h` includes `credentials.local.h` only if it exists.
-Without it, every credential falls back to `""` (or to a menuconfig field you
-filled in), and nothing warns you. An image built before you created the
-file ships empty credentials, and an incremental build does not notice the
-new file. If that happens, run `idf.py fullclean`, then build and flash
-again. The new fingerprint reseeds NVS.
+A checkout that still builds credentials in needs three steps, once, around
+the merge that removes them:
+
+1. **Before the merge**, copy the three `CONFIG_MAGTAG_MQTT_URI`, `_USER` and
+   `_PASS` lines out of `sdkconfig` into a file outside the repo, for example
+   `~/magtag-mqtt.cfg`. Removing the symbols means the next
+   `idf.py reconfigure` deletes those lines, and `sdkconfig` may hold the only
+   copy of the broker. The dashboard generator's `--sdkconfig` reads that file.
+2. **After the merge**, run `idf.py reconfigure`
+   ([below](#sdkconfig-holds-your-hand-set-values)).
+3. Delete the WiFi and MQTT `NVS_DEFAULT_*` lines from
+   `include/credentials.local.h`. Nothing reads them, and the build prints a
+   notice until they are gone.
+
+A device already in service keeps its stored credentials through the update.
+If its old image was built with credentials, the fingerprint changes, and the
+first boot reseeds the allocations and holidays. HA's retained config applies
+them again in the next window.
 
 ### `sdkconfig` holds your hand-set values
 
@@ -133,13 +153,23 @@ cp sdkconfig sdkconfig.bak   # gitignored
 
 After the pull, run `idf.py reconfigure` before `idf.py build`, because a
 plain build can compile a new option's `#else` fallback without warning.
-Then diff `sdkconfig` against your copy: it should only have gained the new
-lines.
+Then diff `sdkconfig` against your copy: it should differ only in the options
+the pull added or removed.
 
-To pick up one changed default, change that one value in menuconfig. Don't
-delete the file. Whether an existing `sdkconfig` or a changed
-`sdkconfig.defaults` line wins depends on the symbol. To find out for a
-given symbol, reconfigure a copy and read the symbol back from it:
+**Which file wins** follows one rule. kconfgen loads `sdkconfig.defaults`
+first, then `sdkconfig`:
+- A `sdkconfig` line under a `# default:` marker is an untouched default, not
+  a user value, so a changed `sdkconfig.defaults` line wins over it.
+- An unmarked line is a value menuconfig or you set, so it wins over
+  `sdkconfig.defaults`.
+
+Nothing is applied until you run `idf.py reconfigure`. A plain `idf.py build`
+does not re-read `sdkconfig.defaults`, because it is not a CMake configure
+dependency, so a build can pass while it quietly runs the old configuration.
+
+To pick up one changed default whose `sdkconfig` line is unmarked, change that
+one value in menuconfig. Don't delete the file. To see what a reconfigure
+would do before you let it, run it on a copy and read the symbol back:
 
 ```bash
 cp sdkconfig /tmp/sdkconfig.probe

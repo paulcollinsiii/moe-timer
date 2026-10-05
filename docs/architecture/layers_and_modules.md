@@ -61,19 +61,22 @@ on hardware only.
 | Module | Job | Host test |
 |--------|-----|-----------|
 | `wake_policy` | Refresh vs. alert choice for a render, round-minute snap, sync cadence, render-grid wait, final-minute countdown steps | `test_wake_policy` |
-| `sleep_plan` | Sleep length (minute grid, sync lead, event lead, a second break event) and the lock sleep that overrides it | `test_sleep_plan` |
+| `sleep_plan` | Sleep length (minute grid, sync lead, event lead, a second break event), the lock sleep that overrides it, and the two setup sleeps (1 s, and none) | `test_sleep_plan` |
 | `bedtime` | Bed Time: time validation, window test, whether an engage alerts, whether a break would cross it | `test_bedtime` |
 | `quiet_hours` | Minutes-of-day window math, including windows that wrap midnight | `test_quiet_hours` |
 | `battery_policy` | Low-battery tiers: warn at 15 %, charge lock at 10 % with release above 15 % | `test_battery` |
 | `battery_soc` | LiPo voltage to state of charge | `test_battery` |
 | `chores` | Chore ticks as a bit mask, the list hash that clears them on an edit, the withheld time and its release | `test_chores` |
 | `button_actions` | What a press of A, B or a chore button does, and the allocation a start receives | `test_button_actions` |
-| `buttons_policy` | The EXT1 wake mask: which buttons may wake the device | `test_buttons_policy` |
+| `buttons_policy` | The EXT1 wake mask: which A–D buttons may wake the device, and whether BOOT may | `test_buttons_policy` |
+| `setup_trigger` | Whether a wake enters setup mode, the BOOT hold tracker, and the "No WiFi" header hint | `test_setup_trigger` |
+| `mqtt_form` | Parses and validates the setup page's MQTT form, as urlencoded or JSON, and escapes its prefill | `test_mqtt_form` |
+| `qr_render` | Encodes the setup QR payload through the vendored `lib/qrcodegen` and answers the module matrix | `test_qr_render` |
 | `button_latch` | Press latch fed by the button ISR, the release gate, and the B > C > D > A pick | `test_button_latch` |
 | `status_led` | Colors for the timer-state pixel and the chore strip | `test_status_led` |
 | `display_layout` | Layout arithmetic, the partial/full refresh cadence, ghost-clean bands | `test_display` |
 | `display_screens` | LVGL screen builders (no ESP-IDF dependencies) | `test_display_render` (goldens) |
-| `config_validate` | Field validators shared by both HA config paths | `test_config_validate` |
+| `config_validate` | Field validators shared by both HA config paths, and the MQTT URI grammar the setup form uses | `test_config_validate` |
 | `stats_json` | JSON for the stat, summary and discovery payloads; owns `STATS_JSON_DISC_SCHEMA_VER` | `test_stats_json` |
 | `mqtt_rx` | Routes inbound MQTT by topic and reassembles chunked payloads | `test_mqtt_rx` |
 | `mqtt_topics` | Topic string formatters | `test_mqtt_topics` |
@@ -88,7 +91,8 @@ on hardware only.
 
 | Module | Job | Host test |
 |--------|-----|-----------|
-| `wake_flow` | The wake: decode, both handlers, day rollover, break start and end, the awake watches, latched presses, the OTA apply point | `test_wake_flow` |
+| `wake_flow` | The wake: decode, both handlers, the setup route and BOOT hold, day rollover, break start and end, the awake watches, latched presses, the OTA apply point | `test_wake_flow` |
+| `setup_session` | The setup session: AP name and password, QR payload, the `/mqtt` page, the poll loop, and which sleep each outcome owes. Every device effect arrives through an ops table, like `ota_flow` | `test_setup_session` |
 | `lock_gate` | The four locks: flags, engage and release, the full-refresh promotion, the sleep mode each implies | `test_lock_gate` |
 | `timer` | The slot state machine (slot 0 is Screen, 1–4 are extra timers), breaks, the exposure balance, the RTC state | `test_timer` |
 | `timer_defs` | Installs the extra-timer definitions each boot: NVS table first, Kconfig table as fallback | `test_timer_defs` |
@@ -115,7 +119,10 @@ on hardware only.
 | `battery` | Calibrated battery-voltage read | no (curve: `battery_soc`) |
 | `light` | Ambient light read, in millivolts | no |
 | `net_window` | The network window's task, its two completion signals and the snapshot rendezvous | no |
-| `wifi_session` | WiFi station up and down for one window | no |
+| `wifi_session` | WiFi station up and down for one window, and the one STA netif shared with setup | no |
+| `setup_session_idf` | The real ops for `setup_session`: SoftAP, `esp_http_server`, the provisioning manager, SRP6a, the `/mqtt` handlers. `setup_mode_ops()` builds the table, so `main.c` supplies only the failsafe extend | no (decisions: `setup_session`, `mqtt_form`) |
+| `setup_screens` | Thin adapters from the session's render ops to the `display` setup screens | no |
+| `sleep_plan_idf` | Arms the deep-sleep timer, or nothing for a zero interval | no (decision: `sleep_plan_timer_armed`) |
 | `ntp` | SNTP sync inside an open window | no |
 | `mqtt_ha` | The HA MQTT session inside a window: publish, receive, apply | no (decisions: `ha_day_cmds`, `ha_config`, `mqtt_rx`) |
 | `ota` | OTA transport: manifest GET, stepwise download, rollback cancel | no |
@@ -131,12 +138,13 @@ on hardware only.
 | Header | Holds |
 |--------|-------|
 | `include/nvs_keys.h` | Every NVS key name |
-| `include/nvs_defaults.h` | Compile-time defaults that seed NVS; pulls in `credentials.local.h` |
+| `include/nvs_defaults.h` | Compile-time defaults that seed NVS; pulls in `credentials.local.h` for the OTA URL fallback. WiFi and MQTT are not defaults: setup mode enters them |
 | `include/time_util.h` | Clock plausibility floor, local minutes of day (`test_time_util`) |
 | `include/date_fmt.h` | The ISO date format every date comparison uses |
 | `include/ota_timing.h` | Socket timeout, read buffer and the failsafe abort tail, tied by a `_Static_assert` |
 | `include/panic_soak.h` | A reset-loop soak harness, compiled out unless hand-enabled |
 | `include/esp_compat.h` | `esp_err_t` for code that also builds on the host |
 
-`lib/cJSON` is vendored upstream code. The scripts in `tools/` are described
+`lib/cJSON` and `lib/qrcodegen` (Nayuki's QR generator, with the LVGL wrapper
+stripped) are vendored upstream code. The scripts in `tools/` are described
 in [developer_setup.md](../developer_setup.md).

@@ -30,7 +30,9 @@ from a time server (it shows local time in the time zone set in Home Assistant,
 [configuring](../home_assistant/configuring.md#the-controls)), and exchanges
 news with Home Assistant: it reports its
 timers, battery and chores, and picks up new settings, time adjustments and the
-chore list. Then it turns WiFi off again. WiFi is never on at any other time.
+chore list. Then it turns WiFi off again. WiFi is never on at any other time,
+except during [setup mode](setup_mode.md), when the device runs a network of
+its own.
 
 A sync happens:
 
@@ -52,7 +54,9 @@ clock that was slightly off keeps its full length after the correction.
 The sync light shows red each minute outside quiet hours, and the battery
 drains faster. The countdown stays right as a length of time, and only the
 displayed clock may drift until a sync succeeds. The header's `Last sync` shows
-when the clock was last set.
+when the clock was last set. After three failed syncs in a row it reads
+`No WiFi: hold BOOT`, the way into
+[setup mode](setup_mode.md#the-no-wifi-hint) to correct the WiFi.
 
 ### D: sync now
 

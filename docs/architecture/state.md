@@ -9,10 +9,10 @@ decides whether a value is still there on the next wake.
 
 | Store | What it holds | Owner |
 |-------|---------------|-------|
-| RTC memory (`RTC_DATA_ATTR`) | The timer state `g_rtc_state`: each slot's state, expiry, banked and allocated seconds, completions; the exposure balance and break end; the selected slot; today's date; today's chore ticks, release and mode; the next sync time. The authoritative layout is `rtc_state_t` in `include/timer.h`. | `main/timer.c` |
+| RTC memory (`RTC_DATA_ATTR`) | The timer state `g_rtc_state`: each slot's state, expiry, banked and allocated seconds, completions; the exposure balance and break end; the selected slot; today's date; today's chore ticks, release and mode; the next sync time; the count of consecutive failed network windows. The authoritative layout is `rtc_state_t` in `include/timer.h` (`RTC_STATE_VERSION` 4). | `main/timer.c` |
 | RTC memory, other owners | The four lock flags, the display's previous frame and refresh cadence, the panel driver's rate-guard timestamp, the held-button guard | [agent_notes/rtc_and_reboot.md](../agent_notes/rtc_and_reboot.md) lists every variable |
 | RTC no-init memory | The panic breadcrumb, checked by magic and checksum because it is garbage after power-on | `main/panic_diag.c` |
-| NVS (namespace `timer_cfg`) | Settings (allocations, holidays, time zone, quiet hours, Bed Time, tones, volume, OTA URL), WiFi and MQTT credentials, the extra-timer table, the chore list and today's tick record, the timer snapshot, the OTA status keys | Key names: `include/nvs_keys.h` |
+| NVS (namespace `timer_cfg`) | Settings (allocations, holidays, time zone, quiet hours, Bed Time, tones, volume, OTA URL), WiFi and MQTT credentials (entered only in setup mode), the extra-timer table, the chore list and today's tick record, the timer snapshot, the OTA status keys | Key names: `include/nvs_keys.h` |
 | The image (rodata) | Compile-time defaults that seed NVS on first boot and back it up when a key is missing: `include/nvs_defaults.h` and the Kconfig values | `main/nvs_config.c` |
 | Plain RAM | Everything else, for one wake only: config caches, buffered network results, a found-but-not-downloaded update, the locks' "just released" flags | |
 
@@ -58,6 +58,24 @@ restored: a restart comes back on the timer screen.
 
 So a power cycle never refunds or costs the day. A snapshot from yesterday is
 refused, and the day resets only on a genuine date change.
+
+## The failed-window count and the forced sync
+
+Two pieces of RTC state serve setup mode ([wake_cycle.md](wake_cycle.md#setup-mode)).
+
+`wifi_join_failures` (RTC state v4) counts consecutive network windows that
+found no working network path: a failed join, or a join that never reached an
+SNTP server. `net_apply_finish()` advances it once per window, saturating at
+255, and the first window that works zeroes it. The only reader asks whether it
+has reached 3, which turns on the `No WiFi: hold BOOT` header hint
+(`setup_trigger_status_hint()`). It is not an automatic setup trigger. A day
+rollover clears it with the rest of the RTC state, and any reset that zeroes RTC
+data does too, so a failing network rebuilds it in three windows.
+
+`timer_force_ntp_sync()` sets `next_ntp_sync` to 0, which reads as "never
+synced", so the next tick wake's cadence check opens a window at once. Setup
+calls it after a save: the new credentials have never been tried, and a device
+with a fresh clock would otherwise wait out its sync interval.
 
 ## Timer state is absolute
 

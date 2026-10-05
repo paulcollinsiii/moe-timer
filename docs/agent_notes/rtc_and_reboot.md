@@ -18,7 +18,7 @@ Re-grep before trusting this: `grep -rn 'RTC_DATA_ATTR\|RTC_NOINIT_ATTR' main co
 
 | Variable | File | Holds | After a reboot |
 |----------|------|-------|----------------|
-| `g_rtc_state` | `main/timer.c` | All timer state, today's date, chore ticks, release and mode, next sync | Zeroed. Boot restores today's NVS snapshot and chore record (`timer_persist_try_restore`). Without a snapshot dated today, the day resets. The mode comes back as Timers. |
+| `g_rtc_state` | `main/timer.c` | All timer state, today's date, chore ticks, release and mode, next sync, consecutive failed network windows (`wifi_join_failures`, layout v4) | Zeroed. Boot restores today's NVS snapshot and chore record (`timer_persist_try_restore`). Without a snapshot dated today, the day resets. The mode comes back as Timers. The failure count is not in the snapshot, so it restarts at 0 and the `No WiFi` hint needs three more failed windows. |
 | `s_charge_locked`, `s_bedtime_locked`, `s_config_locked`, `s_clock_locked` | `main/lock_gate.c` | Which locks are engaged | Cleared. The next gate run re-engages any lock that still applies, as after any hard reset. The engage is idempotent: it costs one more paint. |
 | `s_prev_fb`, `s_prev_fb_valid` | `main/display.c` | The last frame painted, for the ghost-clean diff | Invalid, so the next partial skips the clean pass. |
 | `s_partial_count` | `main/display.c` | Refresh cadence counter | Restarts at 0. |
