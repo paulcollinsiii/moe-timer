@@ -26,6 +26,9 @@
 #include "nvs_defaults.h"
 #include "ota_flow.h"
 #include "ota_task.h"
+#include "setup_screens.h" /* setup_screens_render_release_hint() */
+#include "setup_session.h"
+#include "setup_trigger.h"
 #include "sleep_plan.h"
 #include "status_led.h"
 #include "time_util.h"
@@ -189,6 +192,13 @@ static display_state_t make_display_state(int32_t remaining, time_t now) {
         .fw_version = esp_app_get_description()->version,
     };
     display_state_t st = app_state_display(&in, remaining, now);
+    /* The "WiFi failing" advice rides every paint of the main header, set
+       here for the same reason the mode guard below is: this is the one
+       choke point every state in this module passes through. Only the hint
+       is raised, never a trigger — repeated join failures must not turn
+       wakes into SoftAP sessions (setup_trigger.h). */
+    st.status_hint =
+        setup_trigger_wifi_failing_hint(timer_wifi_join_failures()) ? SETUP_TRIGGER_WIFI_FAILING_HINT_TEXT : NULL;
     /* C16's third edge: chore mode is stored but the list is no longer
        configured, so there is nothing to paint a checklist from. Design
        4.2 asks for "a guard at paint time, not a stored revert" and the
@@ -2513,6 +2523,135 @@ void wake_flow_note_sleep_entry(void) {
     s_sleep_entry_time = (int64_t)hal_time_now();
 }
 
+/* ---- setup mode ---------------------------------------------------------
+
+   WHERE IT SITS. app_main runs the charge gate before any wake handler, and
+   it does not return while locked, so a charge-locked device never gets
+   here at all. The bed-time gate is each handler's own, and may not return
+   either; setup is routed AFTER it, so a bed-time-locked wake ends exactly
+   as it did before setup existed whatever the SSID state. Nothing about
+   setup is allowed to outrank a lock: the decision has no lock input, and
+   its position is how it stays that way.
+
+   The one entry that comes BEFORE the bed-time gate is the BOOT wake, which
+   is not a wake the gates were ever written for: policy arms BOOT only on
+   unlocked sleeps (buttons_policy_boot_wake_allowed), so it cannot arrive
+   behind a lock, and it must not run the A-D press path at all. */
+
+static setup_session_ops_t s_setup_ops;
+static bool s_setup_ops_installed;
+
+void wake_flow_set_setup_ops(const setup_session_ops_t *ops) {
+    s_setup_ops = *ops;
+    s_setup_ops_installed = true;
+}
+
+/* How often the BOOT pad is sampled while a hold is being timed. The tracker
+   has no debounce of its own and this cadence is the only one, the same
+   arrangement as every other awake poll in this module (100 ms). */
+#define WAKE_FLOW_BOOT_HOLD_POLL_MS 100u
+/* The whole hold wait is bounded, so a pad stuck low cannot keep the device
+   awake: past the threshold it leaves 10 s to let go. That is a fixed 10 s
+   rather than a multiple because the threshold is a Kconfig knob up to 15 s,
+   and the bound has to stay under the awake failsafe, whose own floor is
+   30 s. The failsafe is the backstop, not the plan: it paints nothing and
+   resumes the normal schedule. */
+#define WAKE_FLOW_BOOT_HOLD_MAX_WAIT_MS (SETUP_TRIGGER_BOOT_HOLD_MS + 10000u)
+_Static_assert(WAKE_FLOW_BOOT_HOLD_MAX_WAIT_MS < CONFIG_MAGTAG_MAX_AWAKE_SEC * 1000u,
+               "the BOOT hold wait must end before the awake failsafe does");
+
+/* The NVS read is treated as "has one" on failure: a transient read error
+   must not throw a provisioned device into a SoftAP session. */
+static bool wake_flow_has_wifi_ssid(void) {
+    char ssid[NVS_CONFIG_WIFI_SSID_BUF] = "";
+    return nvs_config_get_wifi_ssid(ssid, sizeof ssid) != ESP_OK || ssid[0] != '\0';
+}
+
+/* Time one BOOT hold, true when it ended in a release past the threshold.
+   Paints the release hint when the threshold is crossed. A release before
+   it, a pad that is already up on the first sample (a tap shorter than the
+   wake itself), and the bound all answer false, and none of them paints,
+   claims the strip or acks on the LED: a short press does nothing. */
+static bool wake_flow_wait_for_boot_hold(void) {
+    setup_trigger_boot_hold_t hold;
+    setup_trigger_boot_hold_reset(&hold);
+    const uint32_t start_ms = hal_time_now_ms();
+    while ((uint32_t)(hal_time_now_ms() - start_ms) < WAKE_FLOW_BOOT_HOLD_MAX_WAIT_MS) {
+        const setup_trigger_boot_hold_event_t ev =
+            setup_trigger_boot_hold_sample(&hold, hal_time_now_ms(), buttons_is_boot_pressed());
+        if (ev == SETUP_TRIGGER_BOOT_HOLD_EVENT_ENTER_SETUP) {
+            return true;
+        }
+        if (ev == SETUP_TRIGGER_BOOT_HOLD_EVENT_CANCELLED || hold.state == SETUP_TRIGGER_BOOT_HOLD_IDLE) {
+            return false; /* IDLE after a sample is "never went down": the tap was over before we looked */
+        }
+        if (ev == SETUP_TRIGGER_BOOT_HOLD_EVENT_ARMED) {
+            setup_screens_render_release_hint();
+        }
+        hal_delay_ms(WAKE_FLOW_BOOT_HOLD_POLL_MS);
+    }
+    return false;
+}
+
+/* Run the session and sleep into whatever it owes. Never esp_restart()s: a
+   restart would zero every RTC variable (the timer snapshot included), and
+   the sleep funnel already flushes what has to survive. A session that
+   cannot run (no ops installed) sleeps the normal schedule. */
+static void wake_flow_run_setup_and_sleep(bool has_wifi_ssid) {
+    wake_sleep_mode_t mode = lock_gate_sleep_mode();
+    if (s_setup_ops_installed) {
+        const setup_session_cfg_t cfg = {.has_wifi_ssid = has_wifi_ssid, .budget_sec = SETUP_SESSION_MAX_SEC_DEFAULT};
+        const setup_session_result_t result = setup_session_run(&s_setup_ops, &cfg);
+        switch (result.sleep) {
+            case SETUP_SESSION_SLEEP_NET_WINDOW:
+                /* The first window with the new credentials has to open on
+                   the 1 s wake and run NTP and HA at once. A device with a
+                   fresh clock would otherwise wait out its sync interval,
+                   so the clock is declared unsynced. The old failure run
+                   described the old credentials. */
+                timer_force_ntp_sync();
+                timer_note_wifi_join_result(true);
+                mode = WAKE_SLEEP_SETUP_NET_WINDOW;
+                break;
+            case SETUP_SESSION_SLEEP_BUTTON_ONLY:
+                mode = WAKE_SLEEP_BUTTONS_ONLY;
+                break;
+            case SETUP_SESSION_SLEEP_NORMAL:
+            default:
+                break;
+        }
+    }
+    enter_deep_sleep(mode);
+}
+
+/* The automatic rule: no SSID on a cold boot or an A-D press goes straight
+   to setup, with no hold. Returns only when setup was not chosen. The
+   BOOT-hold gesture never reaches this decision: its own wait already
+   answered, and it is not a function of the SSID. */
+static void wake_flow_maybe_enter_setup(bool cold_boot, bool button_wake) {
+    const bool has_ssid = wake_flow_has_wifi_ssid();
+    const setup_trigger_in_t in = {
+        .has_wifi_ssid = has_ssid,
+        .button_wake = button_wake,
+        .cold_boot = cold_boot,
+        .boot_hold_completed = false,
+    };
+    if (setup_trigger_decide(&in) == SETUP_TRIGGER_MODE_SETUP) {
+        wake_flow_run_setup_and_sleep(has_ssid);
+    }
+}
+
+/* A wake caused by BOOT alone. It is not a button wake in the A-D sense and
+   must not reach any of that path (the continuation guard, the chore claim,
+   the LED ack, the rollover, the tail windows): a tap that does nothing
+   must cost nothing but the wake. Does not return. */
+static void wake_flow_handle_boot_wake(void) {
+    if (wake_flow_wait_for_boot_hold()) {
+        wake_flow_run_setup_and_sleep(wake_flow_has_wifi_ssid());
+    }
+    enter_deep_sleep(lock_gate_sleep_mode());
+}
+
 void wake_flow_handle_timer_tick(void) {
     time_t now = hal_time_now();
     wake_flow_handle_day_rollover(&now);
@@ -2531,6 +2670,12 @@ void wake_flow_handle_timer_tick(void) {
     if (lock_released) {
         s_lock_screen_on_glass = true;
     }
+    /* A cold boot with no SSID is setup's. Only a cold boot: a deep-sleep
+       tick wake keeps timers running offline, and the no-SSID network path
+       already fails cleanly. The reset reason is read for itself, like the
+       two gates below. After the bed-time gate on purpose (see the setup
+       section above). */
+    wake_flow_maybe_enter_setup(esp_reset_reason() != ESP_RST_DEEPSLEEP, false);
     /* After rollover + bedtime (both of which want to see a live break),
        and before `before` is captured below — so a snap back to Screen is
        invisible to the before/after comparison and the wake-sticky
@@ -2676,6 +2821,13 @@ void wake_flow_handle_timer_tick(void) {
 void wake_flow_handle_button_wake(void) {
     button_id_t btn = buttons_get_wakeup_button();
 
+    /* BOOT decodes as BTN_NONE, which the A-D path below would treat as a
+       press with no action and run in full. Taken here, with the same
+       wake's resolved button, before anything of that path happens. */
+    if (buttons_woke_by_boot(btn)) {
+        wake_flow_handle_boot_wake(); /* does not return */
+    }
+
     /* Continuation of a hold, not a new press: same button as at sleep
        entry and the sleep lasted no time at all. Skip all action AND
        display work (a hold would otherwise churn the panel every ~3 s)
@@ -2797,6 +2949,10 @@ void wake_flow_handle_button_wake(void) {
         btn = BTN_NONE;
         s_lock_screen_on_glass = true;
     }
+    /* No SSID: any A-D press is setup's, with no hold. A cold boot is the
+       tick handler's, never this one's, so it is false here by construction.
+       After the bed-time gate on purpose (see the setup section above). */
+    wake_flow_maybe_enter_setup(false, true);
     /* Same ordering as the tick handler: after rollover + bedtime, before
        `before` is captured, so a snap back to Screen rides the
        wake-sticky break-ended promotion rather than confusing the state

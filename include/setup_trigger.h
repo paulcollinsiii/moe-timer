@@ -121,15 +121,22 @@ setup_trigger_boot_hold_event_t setup_trigger_boot_hold_sample(setup_trigger_boo
    only the status-line hint that tells the owner BOOT is the way out. */
 #define SETUP_TRIGGER_WIFI_FAIL_HINT_THRESHOLD 3
 
-/* True once `consecutive_join_failures` reaches the threshold: the status
-   line should read "WiFi failing — hold BOOT for setup". Pure function over
-   a caller-supplied count — no persistent consecutive-join-failure counter
-   exists yet anywhere in this tree (wifi_session.c's s_retry_num resets on
-   every connect attempt and is not RTC-backed; stats_json.h's ota->fails
-   counts OTA retries, a different failure). Whoever wires this up owns
-   adding and threading that count; see docs/planning/20261003.wifi-
-   provisioning.plan.md task 2's notes before adding an RTC field for it —
-   that's a RTC_STATE_VERSION bump and this task deliberately defers it. */
+/* The status line itself. Shared by the caller that sets it and the render
+   test that draws it, so the wording that is checked is the wording that
+   ships. It replaces the Last-sync label and shares the header row with the
+   date and time, which end near x=125 on a 296 px panel: at 12 pt that leaves
+   room for about 18 characters. "WiFi failing: hold BOOT" (23) ran into the
+   time and "WiFi failing - hold BOOT for setup" is longer still, so the line
+   says what the owner can act on and drops the diagnosis. */
+#define SETUP_TRIGGER_WIFI_FAILING_HINT_TEXT "No WiFi: hold BOOT"
+
+/* True once `consecutive_join_failures` reaches the threshold: the main
+   header should carry SETUP_TRIGGER_WIFI_FAILING_HINT_TEXT. Pure function
+   over a caller-supplied count. The count is timer_wifi_join_failures()
+   (RTC, survives deep sleep), advanced by net_apply_finish() once per
+   network window — not wifi_session.c's s_retry_num, which resets on every
+   connect attempt, and not stats_json.h's ota->fails, which counts OTA
+   retries, a different failure. */
 bool setup_trigger_wifi_failing_hint(uint32_t consecutive_join_failures);
 
 #ifdef __cplusplus

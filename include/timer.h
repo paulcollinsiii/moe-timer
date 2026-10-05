@@ -175,9 +175,10 @@ typedef enum {
  * magic but disagree on the offsets behind it are exactly the case the
  * magic alone cannot catch. */
 #define RTC_STATE_MAGIC 0x4D414754u /* "MAGT", legible in a memory dump */
-/* v3: + chore_acked, chore_released, mode (the chore checklist)
+/* v4: + wifi_join_failures (the "WiFi failing" status hint)
+   v3: + chore_acked, chore_released, mode (the chore checklist)
    v2: timer_slot_state_t gained adjust_today_sec */
-#define RTC_STATE_VERSION 3
+#define RTC_STATE_VERSION 4
 
 typedef struct {
     /* First two fields, deliberately: a struct whose head is its own
@@ -227,6 +228,13 @@ typedef struct {
        read back by a different build of the firmware. */
     uint8_t mode;
     int64_t next_ntp_sync;
+    /* Consecutive network windows that found no working network path,
+       saturating at UINT8_MAX and zeroed by the first window that does.
+       Only ever read as "has it reached the hint threshold" (setup_trigger.h),
+       so the exact figure past that does not matter. Day rollover clears it
+       with everything else in this struct (timer_reset's memset); the next
+       few failing windows rebuild it. */
+    uint8_t wifi_join_failures;
 } rtc_state_t;
 
 extern rtc_state_t g_rtc_state;
@@ -487,6 +495,18 @@ void timer_record_ntp_sync(time_t now);
 /* Last recorded sync, derived from next_ntp_sync (single RTC source).
    0 = none since RTC loss or day rollover. */
 time_t timer_last_ntp_sync(void);
+/* Make the clock count as never synced, so the next tick wake's cadence
+   check opens a window at once (timer_needs_ntp_sync() true, and
+   timer_last_ntp_sync() 0 for the idle-state cadence). Used after a setup
+   session: new credentials have never been tried, and a device that already
+   had a clock would otherwise wait out its sync interval before using them. */
+void timer_force_ntp_sync(void);
+
+/* Record how a network window ended: true = a working network path (the
+   sync settled), false = it did not. The count of consecutive failures
+   feeds the "WiFi failing" status hint. */
+void timer_note_wifi_join_result(bool ok);
+uint8_t timer_wifi_join_failures(void);
 /* Revert selection to Screen (slot 0) when the active slot's definition
    is disabled (snapshot restore, or a config edit mid-window) — and first
    retire any extra whose definition is gone while it is RUNNING (BUG-7: a

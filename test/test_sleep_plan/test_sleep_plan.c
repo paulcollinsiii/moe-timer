@@ -571,6 +571,32 @@ void test_unknown_mode_fails_closed(void) {
     TEST_ASSERT_EQUAL_STRING("unknown mode, ", out.reason);
 }
 
+/* The two sleeps a finished setup session can owe. Neither is a lock, so
+   both keep the buttons armed, and the planner's answer (43 s here) must not
+   leak into either. */
+void test_setup_net_window_sleep_is_one_second_with_buttons_armed(void) {
+    sleep_plan_in_t in = idle_at(17);
+    sleep_outcome_t out = sleep_plan_outcome(WAKE_SLEEP_SETUP_NET_WINDOW, &in);
+    TEST_ASSERT_EQUAL_UINT32(1, out.seconds);
+    TEST_ASSERT_TRUE(out.enable_buttons);
+    TEST_ASSERT_TRUE(sleep_plan_timer_armed(out.seconds));
+}
+
+void test_buttons_only_sleep_arms_no_timer_but_arms_the_buttons(void) {
+    sleep_plan_in_t in = idle_at(17);
+    sleep_outcome_t out = sleep_plan_outcome(WAKE_SLEEP_BUTTONS_ONLY, &in);
+    TEST_ASSERT_TRUE(out.enable_buttons);
+    TEST_ASSERT_FALSE_MESSAGE(sleep_plan_timer_armed(out.seconds), "a drawer device would cycle the radio on a timer");
+}
+
+void test_no_planned_sleep_is_ever_mistaken_for_no_timer(void) {
+    sleep_plan_in_t in = idle_at(17);
+    TEST_ASSERT_TRUE(sleep_plan_timer_armed(sleep_plan_outcome(WAKE_SLEEP_NORMAL, &in).seconds));
+    TEST_ASSERT_TRUE(sleep_plan_timer_armed(sleep_plan_outcome(WAKE_SLEEP_CHARGE_LOCK, &in).seconds));
+    TEST_ASSERT_TRUE(sleep_plan_timer_armed(sleep_plan_outcome(WAKE_SLEEP_BEDTIME, &in).seconds));
+    TEST_ASSERT_TRUE(sleep_plan_timer_armed(sleep_plan_outcome(WAKE_SLEEP_CONFIG_ERR, &in).seconds));
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_running_never_sleeps_past_the_minute_grid);
@@ -611,5 +637,8 @@ int main(void) {
     RUN_TEST(test_lock_outcomes_ignore_the_planner_input);
     RUN_TEST(test_the_fast_lock_soak_knob_ships_off_and_touches_only_the_interval);
     RUN_TEST(test_unknown_mode_fails_closed);
+    RUN_TEST(test_setup_net_window_sleep_is_one_second_with_buttons_armed);
+    RUN_TEST(test_buttons_only_sleep_arms_no_timer_but_arms_the_buttons);
+    RUN_TEST(test_no_planned_sleep_is_ever_mistaken_for_no_timer);
     return UNITY_END();
 }

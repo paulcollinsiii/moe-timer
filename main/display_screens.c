@@ -174,6 +174,15 @@ static void build_main_header(lv_obj_t *scr, const display_state_t *st) {
         return;
     }
 
+    if (st->status_hint != NULL && st->status_hint[0] != '\0') {
+        /* Same slot, same font: it is the Last-sync line's replacement, so
+           it inherits that line's clean-band rows and nothing new has to be
+           added to display.c's refresh tables. */
+        lv_obj_t *hint = make_label(scr, st->status_hint, &lv_font_montserrat_12, LV_ALIGN_TOP_RIGHT, -4, 3);
+        lv_obj_set_style_text_letter_space(hint, 1, 0);
+        return;
+    }
+
     if (st->last_sync_time > 0) {
         struct tm ts;
         localtime_r(&st->last_sync_time, &ts);

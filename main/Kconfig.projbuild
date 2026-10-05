@@ -409,26 +409,27 @@ menu "MagTag Timer"
 
     config MAGTAG_BOOT_WAKES
         bool "Let the BOOT button (GPIO0) wake the device from deep sleep"
-        default n
+        default y
         help
             Adds GPIO0 to the EXT1 wake mask so holding BOOT can wake the
             device, the first half of the "hold BOOT 5 s to enter setup"
-            gesture. Off (n) by default: nothing in wake_flow routes a
-            BOOT wake into setup mode yet (that is task 6 of the WiFi
-            provisioning plan), so turning this on today just wakes the
-            device, and spends a panel refresh, for a press that goes
-            nowhere. Flip it to y only once that routing has landed AND
-            the bench check below has passed — both, not either.
+            gesture. A BOOT wake runs the hold wait and nothing else: a
+            short press goes back to sleep without a panel refresh, an LED
+            ack or any timer work, and a hold past the threshold followed
+            by a release starts the setup session. With this off nothing
+            wakes the device on BOOT, so a provisioned device has no way
+            into setup short of clearing its WiFi credentials: turn it off
+            only as the fallback below.
 
             GPIO0 is also a strapping pin: it is sampled at boot to pick
             the ROM's boot mode, and the expectation is that this
             sampling happens only on a chip/system reset, not on a
             deep-sleep wake — but that has not been confirmed on a bench
-            (the plan's task 7, "C8" check — still open). Changing this
-            symbol needs a rebuild and a reflash like any other Kconfig
-            option, not a runtime toggle: there is no way to back out of
-            a wrong answer in the field, so a board whose C8 result is
-            unconfirmed should stay at the default.
+            (the "C8" check in the setup bench plan — still open). If a
+            board enters the ROM download mode when BOOT is held across a
+            deep-sleep wake, set this to n: the device then never arms
+            GPIO0 for sleep. Changing this symbol needs a rebuild and a
+            reflash like any other Kconfig option, not a runtime toggle.
 
     config MAGTAG_BOOT_HOLD_MS
         int "BOOT hold duration to enter setup mode (ms)"

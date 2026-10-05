@@ -3,6 +3,11 @@
 static time_t s_mock_time = MOCK_TIME_DEFAULT;
 static uint32_t s_delay_total_ms;
 static uint32_t s_delay_carry_ms; /* sub-second remainder, see hal_delay_ms */
+/* Free-running, so never cleared by mock_time_set()/mock_time_reset(): the
+   real counter is since boot and a test pinning the wall clock does not
+   rewind it. Every case therefore reads it by subtraction, as the code
+   under test must anyway. */
+static uint32_t s_mono_ms;
 static void (*s_delay_hook)(void);
 
 void mock_delay_set_hook(void (*fn)(void)) {
@@ -39,7 +44,12 @@ time_t hal_time_now(void) {
    only second resolution, so carry the sub-second remainder forward:
    four 250 ms polls advance the clock by exactly one second, where
    truncating each call would freeze it. */
+uint32_t hal_time_now_ms(void) {
+    return s_mono_ms;
+}
+
 void hal_delay_ms(uint32_t ms) {
+    s_mono_ms += ms;
     s_delay_total_ms += ms;
     s_delay_carry_ms += ms;
     s_mock_time += (time_t)(s_delay_carry_ms / 1000u);

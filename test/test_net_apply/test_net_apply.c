@@ -244,6 +244,54 @@ void test_try_window_reports_sync_failure_but_still_finishes(void) {
     TEST_ASSERT_FALSE(net_window_active());
 }
 
+/* ---- the "WiFi failing" count: every window ends in net_apply_finish ------ */
+
+void test_a_window_with_no_working_network_counts_one_failure(void) {
+    mock_nw_ntp_result = ESP_FAIL;
+    net_apply_try_window();
+    net_apply_try_window();
+    TEST_ASSERT_EQUAL_UINT8(2, timer_wifi_join_failures());
+}
+
+void test_a_working_window_resets_the_failure_count(void) {
+    mock_nw_ntp_result = ESP_FAIL;
+    net_apply_try_window();
+    net_apply_try_window();
+    mock_nw_ntp_result = ESP_OK;
+    net_apply_try_window();
+    TEST_ASSERT_EQUAL_UINT8(0, timer_wifi_join_failures());
+}
+
+void test_the_two_phase_open_then_finish_path_counts_too(void) {
+    mock_nw_ntp_result = ESP_FAIL;
+    TEST_ASSERT_TRUE(net_apply_open());
+    net_apply_finish();
+    TEST_ASSERT_EQUAL_UINT8(1, timer_wifi_join_failures());
+}
+
+void test_a_wedged_window_counts_as_a_failure(void) {
+    TEST_ASSERT_TRUE(net_apply_open());
+    mock_nw_join_ok = false;
+    net_apply_finish();
+    TEST_ASSERT_EQUAL_UINT8(1, timer_wifi_join_failures());
+}
+
+/* No window means nothing was tried: neither a failure nor a success, so a
+   stuck count survives a stray second finish. */
+void test_finish_with_no_window_leaves_the_count_alone(void) {
+    timer_note_wifi_join_result(false);
+    timer_note_wifi_join_result(false);
+    mock_nw_ntp_result = ESP_OK;
+    net_apply_finish();
+    TEST_ASSERT_EQUAL_UINT8(2, timer_wifi_join_failures());
+}
+
+void test_a_spawn_failure_is_not_a_join_attempt(void) {
+    mock_nw_spawn_ok = false;
+    net_apply_try_window();
+    TEST_ASSERT_EQUAL_UINT8(0, timer_wifi_join_failures());
+}
+
 /* ---- the after-NTP hook (BUG-14) -----------------------------------------
 
    The no-clock lock settles the real day in this hook, and the whole fix
@@ -705,5 +753,11 @@ int main(void) {
     RUN_TEST(test_pending_shift_skipped_when_sync_failed);
     RUN_TEST(test_no_pending_shift_means_finish_never_shifts);
     RUN_TEST(test_pending_shift_cleared_by_next_open);
+    RUN_TEST(test_a_window_with_no_working_network_counts_one_failure);
+    RUN_TEST(test_a_working_window_resets_the_failure_count);
+    RUN_TEST(test_the_two_phase_open_then_finish_path_counts_too);
+    RUN_TEST(test_a_wedged_window_counts_as_a_failure);
+    RUN_TEST(test_finish_with_no_window_leaves_the_count_alone);
+    RUN_TEST(test_a_spawn_failure_is_not_a_join_attempt);
     return UNITY_END();
 }

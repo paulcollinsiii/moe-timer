@@ -17,6 +17,7 @@
    below). display_screens.c itself never includes this: display.c must
    not depend on setup_session.h, and display_screens.c follows it. */
 #include "setup_session.h"
+#include "setup_trigger.h" /* SETUP_TRIGGER_WIFI_FAILING_HINT_TEXT */
 
 /* Single-TU compilation of the layout math + screen builders */
 // clang-format off
@@ -263,6 +264,44 @@ void test_main_break_chip_no_start(void) {
     display_screens_build_main(&st);
     assert_matches_golden("main_break_chip_no_start");
     assert_rows_blank(24, 25);
+}
+
+void test_main_wifi_failing_hint(void) {
+    /* The status hint takes the Last-sync slot. Same rows as that line, so
+       nothing below the header band may change. */
+    display_state_t st = base_state();
+    st.status_hint = SETUP_TRIGGER_WIFI_FAILING_HINT_TEXT;
+    display_screens_build_main(&st);
+    assert_matches_golden("main_wifi_failing_hint");
+    assert_rows_blank(24, 25);
+}
+
+/* A hint is optional: NULL and "" must both draw the stock header. */
+void test_main_empty_status_hint_draws_the_stock_header(void) {
+    display_state_t stock = base_state();
+    display_screens_build_main(&stock);
+    uint8_t want[FB_BYTES];
+    memcpy(want, s_captured, FB_BYTES);
+
+    display_state_t st = base_state();
+    st.status_hint = "";
+    display_screens_build_main(&st);
+    TEST_ASSERT_EQUAL_MEMORY(want, s_captured, FB_BYTES);
+}
+
+/* A running break's chip outranks the hint for the slot. */
+void test_main_break_chip_outranks_the_status_hint(void) {
+    display_state_t chip = base_state();
+    chip.break_banner = true;
+    chip.break_remaining_sec = 754;
+    display_screens_build_main(&chip);
+    uint8_t want[FB_BYTES];
+    memcpy(want, s_captured, FB_BYTES);
+
+    display_state_t st = chip;
+    st.status_hint = SETUP_TRIGGER_WIFI_FAILING_HINT_TEXT;
+    display_screens_build_main(&st);
+    TEST_ASSERT_EQUAL_MEMORY(want, s_captured, FB_BYTES);
 }
 
 void test_break_screen_no_eligible(void) {
@@ -2567,6 +2606,9 @@ int main(void) {
     RUN_TEST(test_break_screen_no_extras);
     RUN_TEST(test_main_break_chip);
     RUN_TEST(test_main_break_chip_no_start);
+    RUN_TEST(test_main_wifi_failing_hint);
+    RUN_TEST(test_main_empty_status_hint_draws_the_stock_header);
+    RUN_TEST(test_main_break_chip_outranks_the_status_hint);
     RUN_TEST(test_start_available_only_changes_button_b);
     RUN_TEST(test_reload_label_fits_its_cell);
     RUN_TEST(test_the_main_screen_offers_chores_exactly_when_button_a_would_act);

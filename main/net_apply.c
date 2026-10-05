@@ -122,8 +122,17 @@ static net_finish_t reconcile_defs(void) {
 net_finish_t net_apply_finish(void) {
     if (!net_window_active())
         return NET_FINISH_IDLE; /* no window this wake: nothing arrived */
-    if (!net_window_join(NET_JOIN_TIMEOUT_MS, s_ops.join_poll))
+    if (!net_window_join(NET_JOIN_TIMEOUT_MS, s_ops.join_poll)) {
+        timer_note_wifi_join_result(false);
         return NET_FINISH_IDLE; /* wedged: no results to apply */
+    }
+    /* The one place every window ends, so the one place to count how they
+       end. The sync result stands in for "the WiFi join worked": a failed
+       join leaves it non-OK, and a join that worked but never reached an
+       SNTP server is no network path either, which is all the "WiFi
+       failing" hint claims. A call with no window open (above) says
+       nothing about the network and counts as neither. */
+    timer_note_wifi_join_result(net_window_ntp_result() == ESP_OK);
     /* C3: the sync settled after the paint's bounded wait gave up, but a
        timer was started this wake against the uncorrected clock — apply
        the measured step now, before anything below reads the expiry. The

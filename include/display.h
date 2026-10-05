@@ -194,6 +194,13 @@ typedef struct {
        app_mode_t in timer.h), so a painter must treat anything that is not
        APP_MODE_CHORES as Timers rather than switch on it exhaustively. */
     app_mode_t app_mode;
+    /* An optional one-line status for the main header, drawn in the
+       Last-sync slot in place of it. NULL or "" (the default every
+       existing paint and golden has) draws the header exactly as before.
+       Borrowed, not copied: callers pass a string literal. A Screen Break
+       chip still wins the slot, because it is the louder, time-critical
+       thing and the hint is advice that will still be true next wake. */
+    const char *status_hint;
 } display_state_t;
 
 #ifdef __cplusplus

@@ -41,6 +41,7 @@ idf_component_register(
         "setup_session.c"
         "setup_session_idf.c"
         "setup_screens.c"
+        "setup_trigger.c"
         "qr_render.c"
         "../lib/cJSON/cJSON.c"
         "../lib/qrcodegen/qrcodegen.c"

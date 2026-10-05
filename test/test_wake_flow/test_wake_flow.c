@@ -32,6 +32,7 @@
 #include "../../main/chores.c"
 #include "../../main/display_layout.c"
 #include "../../main/quiet_hours.c"
+#include "../../main/setup_trigger.c"
 #include "../../main/wake_policy.c"
 #include "mock_hal_time.c"
 // clang-format on
@@ -146,6 +147,11 @@ typedef enum {
     /* the OTA call sites */
     EV_OTA_ARM,
     EV_OTA_APPLY,
+    /* setup mode */
+    EV_BOOT_SAMPLE,
+    EV_RELEASE_HINT,
+    EV_SETUP_RUN,
+    EV_FORCE_SYNC,
     EV_SLEEP,
 } flow_event_t;
 
@@ -1659,6 +1665,93 @@ void enter_deep_sleep(wake_sleep_mode_t mode) {
     longjmp(flow_sleep_jmp, 1);
 }
 
+/* ---- setup mode ----------------------------------------------------------
+
+   The session is a black box here, exactly as ota_flow is: it has its own
+   suite (test_setup_session), and what only this file can see is the ROUTING
+   — which wakes enter it, with what facts, and what sleep follows each way
+   it can end. The defaults model the shipped fleet, so every older case
+   keeps running the ordinary path: an SSID is stored, and no wake is BOOT's. */
+
+static char flow_ssid[NVS_CONFIG_WIFI_SSID_BUF];
+static esp_err_t flow_ssid_err;
+static int flow_ssid_reads;
+
+esp_err_t nvs_config_get_wifi_ssid(char *buf, size_t len) {
+    flow_ssid_reads++;
+    if (flow_ssid_err == ESP_OK) {
+        snprintf(buf, len, "%s", flow_ssid);
+    }
+    return flow_ssid_err;
+}
+
+/* BOOT. The pad is modelled as down for `flow_boot_down_ms` from the FIRST
+   sample, which is when the wake looks at it. 0 = already up by then (a tap
+   shorter than the wake), UINT32_MAX = stuck low for ever. */
+static bool flow_woke_by_boot;
+static button_id_t flow_woke_by_boot_arg;
+static int flow_woke_by_boot_reads;
+static uint32_t flow_boot_down_ms;
+static bool flow_boot_sampled;
+static uint32_t flow_boot_first_ms;
+static int flow_boot_samples;
+
+bool buttons_woke_by_boot(button_id_t wakeup_button) {
+    flow_woke_by_boot_reads++;
+    flow_woke_by_boot_arg = wakeup_button;
+    return flow_woke_by_boot;
+}
+
+bool buttons_is_boot_pressed(void) {
+    flow_log_push(EV_BOOT_SAMPLE);
+    flow_boot_samples++;
+    if (!flow_boot_sampled) {
+        flow_boot_sampled = true;
+        flow_boot_first_ms = hal_time_now_ms();
+    }
+    return (uint32_t)(hal_time_now_ms() - flow_boot_first_ms) < flow_boot_down_ms;
+}
+
+static int flow_release_hints;
+
+void setup_screens_render_release_hint(void) {
+    flow_log_push(EV_RELEASE_HINT);
+    flow_release_hints++;
+}
+
+static setup_session_result_t flow_setup_result;
+static int flow_setup_runs;
+static setup_session_cfg_t flow_setup_cfg;
+static const setup_session_ops_t *flow_setup_ops_seen;
+
+setup_session_result_t setup_session_run(const setup_session_ops_t *ops, const setup_session_cfg_t *cfg) {
+    flow_log_push(EV_SETUP_RUN);
+    flow_setup_runs++;
+    flow_setup_cfg = *cfg;
+    flow_setup_ops_seen = ops;
+    return flow_setup_result;
+}
+
+/* The clock's forced-sync flag, modelled as the real one is: it makes the
+   next cadence check answer "due". */
+static uint8_t flow_join_failures;
+static int flow_force_syncs;
+
+void timer_force_ntp_sync(void) {
+    flow_log_push(EV_FORCE_SYNC);
+    flow_force_syncs++;
+    flow_needs_sync = true;
+    flow_last_ntp = 0;
+}
+
+void timer_note_wifi_join_result(bool ok) {
+    flow_join_failures = ok ? 0 : (uint8_t)(flow_join_failures + 1);
+}
+
+uint8_t timer_wifi_join_failures(void) {
+    return flow_join_failures;
+}
+
 // clang-format off
 #include "../../main/wake_flow.c"
 // clang-format on
@@ -2002,6 +2095,30 @@ void setUp(void) {
     flow_light_pct = 0;
     flow_charge_locked = false;
     flow_clock_locked = false;
+
+    /* Setup mode: a provisioned device and no BOOT wake, so a case opts INTO
+       each of the things that route a wake there. Ops are not installed by
+       default (the real table is main.c's wiring); the setup cases install
+       one. */
+    snprintf(flow_ssid, sizeof flow_ssid, "home");
+    flow_ssid_err = ESP_OK;
+    flow_ssid_reads = 0;
+    flow_woke_by_boot = false;
+    flow_woke_by_boot_arg = (button_id_t)-1;
+    flow_woke_by_boot_reads = 0;
+    flow_boot_down_ms = 0;
+    flow_boot_sampled = false;
+    flow_boot_first_ms = 0;
+    flow_boot_samples = 0;
+    flow_release_hints = 0;
+    flow_setup_result = (setup_session_result_t){SETUP_SESSION_OUTCOME_WIFI_OK, SETUP_SESSION_SLEEP_NET_WINDOW};
+    flow_setup_runs = 0;
+    memset(&flow_setup_cfg, 0xEE, sizeof flow_setup_cfg);
+    flow_setup_ops_seen = NULL;
+    flow_join_failures = 0;
+    flow_force_syncs = 0;
+    s_setup_ops_installed = false;
+    memset(&s_setup_ops, 0, sizeof s_setup_ops);
 
     /* OTA: nothing armed, nothing buffered, a cell that does not move.
        Every case opts into each of the three, the same way it opts into
@@ -5987,17 +6104,18 @@ void test_row8_a_deep_sleep_tick_wake_stays_dark(void) {
     TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_LED));
 }
 
-/* Both guards read the reset reason for themselves. Pinned as a count
-   because merging them into one cached read is exactly the sort of
-   tidy-up that would change nothing on host and everything in a wake
-   where the reason is re-latched between them. */
-void test_row8_the_reset_reason_is_asked_at_both_gates(void) {
+/* All three guards read the reset reason for themselves: the two the cold
+   boot LED and the grid wait always had, and the cold-boot input to the
+   setup decision. Pinned as a count because merging them into one cached
+   read is exactly the sort of tidy-up that would change nothing on host and
+   everything in a wake where the reason is re-latched between them. */
+void test_row8_the_reset_reason_is_asked_at_all_three_gates(void) {
     flow_tick_clock(flow_at(15, 0));
     flow_reset_reason = ESP_RST_DEEPSLEEP;
 
     TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_tick());
 
-    TEST_ASSERT_EQUAL_INT(2, flow_reset_reason_reads);
+    TEST_ASSERT_EQUAL_INT(3, flow_reset_reason_reads);
 }
 
 /* ---- CYCLE 11, ROW 10: expiry and break in the same tick ---------------
@@ -10695,6 +10813,445 @@ void test_m3t4_an_unlocked_d_wake_in_chore_mode_still_claims_the_strip(void) {
     TEST_ASSERT_TRUE(flow_log_count(EV_CHORE_LEDS) >= 1);
 }
 
+/* ---- setup mode: routing ------------------------------------------------
+
+   What is pinned is WHICH wakes enter the session, what it is told, and the
+   sleep each way it can end maps to. The session itself is faked (its own
+   suite owns it). */
+
+static const setup_session_ops_t FLOW_NO_OPS = {0};
+
+static void flow_install_setup_ops(void) {
+    wake_flow_set_setup_ops(&FLOW_NO_OPS);
+}
+
+static void flow_no_ssid(void) {
+    flow_ssid[0] = '\0';
+}
+
+/* A cold boot is a tick-handler wake with a reset reason that is not an
+   exit from deep sleep. */
+static flow_wake_result_t flow_run_cold_boot(void) {
+    flow_tick_clock(flow_at(15, 0));
+    flow_reset_reason = ESP_RST_POWERON;
+    return flow_run_tick();
+}
+
+void test_setup_a_cold_boot_with_no_ssid_runs_setup(void) {
+    flow_install_setup_ops();
+    flow_no_ssid();
+
+    TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_cold_boot());
+
+    TEST_ASSERT_EQUAL_INT(1, flow_setup_runs);
+    TEST_ASSERT_FALSE(flow_setup_cfg.has_wifi_ssid);
+    TEST_ASSERT_EQUAL_INT(SETUP_SESSION_MAX_SEC_DEFAULT, flow_setup_cfg.budget_sec);
+    TEST_ASSERT_TRUE(flow_setup_ops_seen == &s_setup_ops);
+    /* The ordinary tick never ran: no panel work of its own. */
+    TEST_ASSERT_EQUAL_INT(0, FLOW_RENDERS());
+    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_TIMER_TICK));
+}
+
+void test_setup_a_button_wake_with_no_ssid_runs_setup_and_does_not_run_the_press(void) {
+    flow_install_setup_ops();
+    flow_no_ssid();
+    flow_wakeup_btn = BTN_B;
+    flow_b_result = BTN_B_STARTED;
+
+    TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_button());
+
+    TEST_ASSERT_EQUAL_INT(1, flow_setup_runs);
+    TEST_ASSERT_FALSE(flow_setup_cfg.has_wifi_ssid);
+    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_B_APPLY)); /* the press is setup's, not Start */
+    TEST_ASSERT_EQUAL_INT(0, FLOW_RENDERS());
+}
+
+void test_setup_a_timer_wake_with_no_ssid_stays_normal(void) {
+    flow_install_setup_ops();
+    flow_no_ssid();
+    flow_tick_clock(flow_at(15, 0));
+    flow_reset_reason = ESP_RST_DEEPSLEEP;
+
+    TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_tick());
+
+    TEST_ASSERT_EQUAL_INT(0, flow_setup_runs);
+    TEST_ASSERT_EQUAL_INT(1, FLOW_RENDERS()); /* timers keep running offline */
+}
+
+void test_setup_a_cold_boot_with_an_ssid_is_the_ordinary_wake(void) {
+    flow_install_setup_ops();
+
+    TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_cold_boot());
+
+    TEST_ASSERT_EQUAL_INT(0, flow_setup_runs);
+    TEST_ASSERT_EQUAL_INT(1, FLOW_RENDERS());
+}
+
+void test_setup_a_button_wake_with_an_ssid_is_the_ordinary_press(void) {
+    flow_install_setup_ops();
+    flow_wakeup_btn = BTN_B;
+    flow_b_result = BTN_B_STARTED;
+
+    TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_button());
+
+    TEST_ASSERT_EQUAL_INT(0, flow_setup_runs);
+    TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_B_APPLY));
+}
+
+/* A failed NVS read says nothing about the SSID, and must not throw a
+   provisioned device into a SoftAP session. */
+void test_setup_an_unreadable_ssid_is_not_a_missing_one(void) {
+    flow_install_setup_ops();
+    flow_ssid_err = ESP_FAIL;
+
+    TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_cold_boot());
+
+    TEST_ASSERT_EQUAL_INT(0, flow_setup_runs);
+}
+
+/* ---- setup mode: where it sits against the locks ------------------------- */
+
+/* The charge gate is app_main's and runs before any handler, ending the
+   wake while locked, so no wake_flow entry can ever be charge-locked; what
+   a handler can still meet is the bed-time gate, and that one has to win
+   over a missing SSID exactly as it wins over everything else. The SSID is
+   not even read behind it. */
+void test_setup_the_bedtime_lock_wins_over_a_missing_ssid_on_a_cold_boot(void) {
+    flow_install_setup_ops();
+    flow_no_ssid();
+    flow_bedtime_locks = true;
+
+    TEST_ASSERT_EQUAL_INT(FLOW_WAKE_BEDTIME, flow_run_cold_boot());
+
+    TEST_ASSERT_EQUAL_INT(0, flow_setup_runs);
+    TEST_ASSERT_EQUAL_INT(0, flow_ssid_reads);
+}
+
+void test_setup_the_bedtime_lock_wins_over_a_missing_ssid_on_a_button_wake(void) {
+    flow_install_setup_ops();
+    flow_no_ssid();
+    flow_bedtime_locks = true;
+    flow_wakeup_btn = BTN_C;
+
+    TEST_ASSERT_EQUAL_INT(FLOW_WAKE_BEDTIME, flow_run_button());
+
+    TEST_ASSERT_EQUAL_INT(0, flow_setup_runs);
+    TEST_ASSERT_EQUAL_INT(0, flow_ssid_reads);
+}
+
+/* A lock that is held ASKS the setup decision nothing: with the lock
+   released this wake the decision runs after it, in order. */
+void test_setup_runs_after_the_bedtime_gate(void) {
+    flow_install_setup_ops();
+    flow_no_ssid();
+
+    flow_run_cold_boot();
+
+    TEST_ASSERT_TRUE(flow_log_at(EV_CHECK_BEDTIME) >= 0);
+    TEST_ASSERT_TRUE(flow_log_at(EV_CHECK_BEDTIME) < flow_log_at(EV_SETUP_RUN));
+}
+
+/* ---- setup mode: the BOOT wake ------------------------------------------- */
+
+void test_setup_a_boot_hold_paints_the_hint_then_runs_setup(void) {
+    flow_install_setup_ops();
+    flow_woke_by_boot = true;
+    flow_boot_down_ms = 7000;
+
+    TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_button());
+
+    TEST_ASSERT_EQUAL_INT(1, flow_release_hints);
+    TEST_ASSERT_EQUAL_INT(1, flow_setup_runs);
+    TEST_ASSERT_TRUE(flow_log_at(EV_RELEASE_HINT) < flow_log_at(EV_SETUP_RUN));
+    TEST_ASSERT_TRUE(flow_setup_cfg.has_wifi_ssid); /* the gesture works on a provisioned device */
+}
+
+void test_setup_a_boot_hold_on_a_device_with_no_ssid_tells_the_session_so(void) {
+    flow_install_setup_ops();
+    flow_no_ssid();
+    flow_woke_by_boot = true;
+    flow_boot_down_ms = 7000;
+
+    flow_run_button();
+
+    TEST_ASSERT_EQUAL_INT(1, flow_setup_runs);
+    TEST_ASSERT_FALSE(flow_setup_cfg.has_wifi_ssid);
+}
+
+/* The decode gets the SAME wake's resolved button, read once. */
+void test_setup_the_boot_decode_is_handed_the_resolved_button(void) {
+    flow_woke_by_boot = true;
+    flow_wakeup_btn = BTN_NONE;
+    flow_boot_down_ms = 0;
+
+    flow_run_button();
+
+    TEST_ASSERT_EQUAL_INT(1, flow_wakeup_btn_reads);
+    TEST_ASSERT_EQUAL_INT(1, flow_woke_by_boot_reads);
+    TEST_ASSERT_EQUAL_INT(BTN_NONE, flow_woke_by_boot_arg);
+}
+
+/* A short press does nothing at all, and in particular none of what an A-D
+   press does: no LED ack, no strip claim, no rollover, no window, no panel
+   work. It is not a phantom button wake. */
+static void flow_assert_a_quiet_wake(void) {
+    TEST_ASSERT_EQUAL_INT(0, flow_setup_runs);
+    TEST_ASSERT_EQUAL_INT(0, flow_release_hints);
+    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_LED));
+    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_LED_CLAIM));
+    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_CHORE_LEDS));
+    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_IS_NEW_DAY));
+    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_CHECK_BEDTIME));
+    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_NET_OPEN));
+    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_TRY_WINDOW));
+    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_MAKE_STATE));
+    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_FULL_REFRESH));
+    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_PARTIAL));
+    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_B_APPLY));
+    TEST_ASSERT_EQUAL_INT(1, flow_sleeps);
+    TEST_ASSERT_EQUAL_INT(WAKE_SLEEP_NORMAL, flow_slept_mode);
+}
+
+void test_setup_a_short_boot_press_is_cancelled_quietly(void) {
+    flow_install_setup_ops();
+    flow_woke_by_boot = true;
+    flow_boot_down_ms = 1500;
+
+    TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_button());
+
+    flow_assert_a_quiet_wake();
+}
+
+/* A tap that is over before the wake first looks at the pad. The tracker
+   never sees it go down, so it can never report a cancel: the wake has to
+   notice that itself rather than spin out the bound. */
+void test_setup_a_boot_tap_over_before_the_first_sample_does_not_wait(void) {
+    flow_install_setup_ops();
+    flow_woke_by_boot = true;
+    flow_boot_down_ms = 0;
+
+    TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_button());
+
+    TEST_ASSERT_EQUAL_INT(1, flow_boot_samples);
+    flow_assert_a_quiet_wake();
+}
+
+/* The threshold, from both sides: released one poll before it is a cancel,
+   one poll after it is a hold. */
+void test_setup_a_release_just_before_the_threshold_is_cancelled(void) {
+    flow_install_setup_ops();
+    flow_woke_by_boot = true;
+    flow_boot_down_ms = SETUP_TRIGGER_BOOT_HOLD_MS - 50;
+
+    flow_run_button();
+
+    flow_assert_a_quiet_wake();
+}
+
+void test_setup_a_release_just_after_the_threshold_runs_setup(void) {
+    flow_install_setup_ops();
+    flow_woke_by_boot = true;
+    flow_boot_down_ms = SETUP_TRIGGER_BOOT_HOLD_MS + 50;
+
+    flow_run_button();
+
+    TEST_ASSERT_EQUAL_INT(1, flow_release_hints);
+    TEST_ASSERT_EQUAL_INT(1, flow_setup_runs);
+}
+
+/* A pad stuck low ends the wait on its own bound, short of the awake
+   failsafe, and that is a quiet cancel: one hint at the threshold (that was
+   true when it painted) and nothing after it. */
+void test_setup_a_boot_pad_stuck_low_is_bounded_short_of_the_failsafe(void) {
+    flow_install_setup_ops();
+    flow_woke_by_boot = true;
+    flow_boot_down_ms = UINT32_MAX;
+
+    TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_button());
+
+    TEST_ASSERT_EQUAL_INT(0, flow_setup_runs);
+    TEST_ASSERT_EQUAL_INT(1, flow_release_hints);
+    TEST_ASSERT_TRUE(mock_delay_total_ms() >= WAKE_FLOW_BOOT_HOLD_MAX_WAIT_MS - WAKE_FLOW_BOOT_HOLD_POLL_MS);
+    TEST_ASSERT_TRUE(mock_delay_total_ms() <= WAKE_FLOW_BOOT_HOLD_MAX_WAIT_MS);
+    TEST_ASSERT_TRUE(mock_delay_total_ms() < (uint32_t)CONFIG_MAGTAG_MAX_AWAKE_SEC * 1000u);
+    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_LED));
+    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_FULL_REFRESH));
+    TEST_ASSERT_EQUAL_INT(WAKE_SLEEP_NORMAL, flow_slept_mode);
+}
+
+/* Through the real decode: EXT1 in the cause mask is what routes a BOOT wake
+   to the button handler in the first place. */
+void test_setup_a_boot_wake_through_the_wake_decode_runs_setup(void) {
+    flow_install_setup_ops();
+    flow_woke_by_boot = true;
+    flow_boot_down_ms = 6000;
+
+    TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_wake_causes(BIT(ESP_SLEEP_WAKEUP_EXT1)));
+
+    TEST_ASSERT_EQUAL_INT(1, flow_setup_runs);
+    TEST_ASSERT_TRUE(FLOW_TOOK_BUTTON_PATH());
+}
+
+/* An A-D wake never asks the BOOT hold anything. */
+void test_setup_an_a_to_d_wake_never_samples_the_boot_pad(void) {
+    flow_wakeup_btn = BTN_C;
+
+    flow_run_button();
+
+    TEST_ASSERT_EQUAL_INT(0, flow_boot_samples);
+}
+
+/* ---- setup mode: what each way the session ends sleeps into -------------- */
+
+static void flow_run_setup_ending(setup_session_outcome_t outcome, setup_session_sleep_t sleep) {
+    flow_install_setup_ops();
+    flow_no_ssid();
+    flow_setup_result = (setup_session_result_t){outcome, sleep};
+    flow_sleep_mode_answer = WAKE_SLEEP_NORMAL;
+    TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_cold_boot());
+}
+
+void test_setup_wifi_ok_sleeps_into_the_net_window(void) {
+    flow_run_setup_ending(SETUP_SESSION_OUTCOME_WIFI_OK, SETUP_SESSION_SLEEP_NET_WINDOW);
+    TEST_ASSERT_EQUAL_INT(WAKE_SLEEP_SETUP_NET_WINDOW, flow_slept_mode);
+}
+
+void test_setup_mqtt_only_sleeps_into_the_net_window(void) {
+    flow_run_setup_ending(SETUP_SESSION_OUTCOME_MQTT_ONLY, SETUP_SESSION_SLEEP_NET_WINDOW);
+    TEST_ASSERT_EQUAL_INT(WAKE_SLEEP_SETUP_NET_WINDOW, flow_slept_mode);
+}
+
+void test_setup_a_timeout_with_no_ssid_sleeps_buttons_only(void) {
+    flow_run_setup_ending(SETUP_SESSION_OUTCOME_TIMEOUT, SETUP_SESSION_SLEEP_BUTTON_ONLY);
+    TEST_ASSERT_EQUAL_INT(WAKE_SLEEP_BUTTONS_ONLY, flow_slept_mode);
+    TEST_ASSERT_EQUAL_INT(0, flow_force_syncs); /* nothing to try */
+}
+
+void test_setup_an_error_with_no_ssid_sleeps_buttons_only(void) {
+    flow_run_setup_ending(SETUP_SESSION_OUTCOME_ERROR, SETUP_SESSION_SLEEP_BUTTON_ONLY);
+    TEST_ASSERT_EQUAL_INT(WAKE_SLEEP_BUTTONS_ONLY, flow_slept_mode);
+}
+
+/* NORMAL is the ordinary schedule, whichever lock state says what that is. */
+void test_setup_a_normal_ending_takes_the_ordinary_sleep(void) {
+    flow_run_setup_ending(SETUP_SESSION_OUTCOME_TIMEOUT, SETUP_SESSION_SLEEP_NORMAL);
+    TEST_ASSERT_EQUAL_INT(WAKE_SLEEP_NORMAL, flow_slept_mode);
+    TEST_ASSERT_EQUAL_INT(0, flow_force_syncs);
+}
+
+void test_setup_a_normal_ending_keeps_a_lock_that_is_standing(void) {
+    flow_install_setup_ops();
+    flow_woke_by_boot = true;
+    flow_boot_down_ms = 7000;
+    flow_setup_result = (setup_session_result_t){SETUP_SESSION_OUTCOME_ERROR, SETUP_SESSION_SLEEP_NORMAL};
+    flow_sleep_mode_answer = WAKE_SLEEP_CONFIG_ERR;
+
+    flow_run_button();
+
+    TEST_ASSERT_EQUAL_INT(WAKE_SLEEP_CONFIG_ERR, flow_slept_mode);
+}
+
+/* Leaving setup is a sleep through the funnel and never a restart, which
+   would zero every RTC variable. The funnel is the only exit this stub can
+   observe, and it was reached exactly once. */
+void test_setup_ends_through_the_sleep_funnel_exactly_once(void) {
+    flow_run_setup_ending(SETUP_SESSION_OUTCOME_WIFI_OK, SETUP_SESSION_SLEEP_NET_WINDOW);
+    TEST_ASSERT_EQUAL_INT(1, flow_sleeps);
+    TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_SLEEP));
+}
+
+void test_setup_without_installed_ops_sleeps_normally_instead_of_calling_through_null(void) {
+    flow_no_ssid();
+    flow_sleep_mode_answer = WAKE_SLEEP_NORMAL;
+
+    TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_cold_boot());
+
+    TEST_ASSERT_EQUAL_INT(0, flow_setup_runs);
+    TEST_ASSERT_EQUAL_INT(WAKE_SLEEP_NORMAL, flow_slept_mode);
+}
+
+/* ---- setup mode: the first window afterwards ------------------------------ */
+
+/* The wake that follows a successful session must open a window and sync at
+   once, even though the clock was synced a minute ago and nothing else is
+   due. The forced flag is what makes the cadence check answer "due". */
+static void flow_assert_the_next_wake_opens_a_window(setup_session_outcome_t outcome) {
+    flow_run_setup_ending(outcome, SETUP_SESSION_SLEEP_NET_WINDOW);
+    TEST_ASSERT_EQUAL_INT(1, flow_force_syncs);
+    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_TRY_WINDOW)); /* setup's wake opened none */
+
+    /* Next wake: a 1 s timer wake, with credentials stored now. */
+    flow_log_n = 0;
+    flow_ssid[0] = 'h';
+    flow_ssid[1] = '\0';
+    mock_time_set(flow_at(15, 0) + 1);
+    flow_reset_reason = ESP_RST_DEEPSLEEP;
+    flow_state = TIMER_IDLE;
+    TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_tick());
+
+    TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_TRY_WINDOW));
+    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_SETUP_RUN));
+}
+
+void test_setup_the_wake_after_wifi_ok_opens_a_window_at_once(void) {
+    flow_assert_the_next_wake_opens_a_window(SETUP_SESSION_OUTCOME_WIFI_OK);
+}
+
+void test_setup_the_wake_after_mqtt_only_opens_a_window_at_once(void) {
+    flow_assert_the_next_wake_opens_a_window(SETUP_SESSION_OUTCOME_MQTT_ONLY);
+}
+
+/* The control: with nothing forced, a freshly synced idle device does NOT
+   open a window on the next tick. Without this the cases above could pass
+   on a cadence that always syncs. */
+void test_setup_without_the_forced_flag_a_fresh_sync_opens_no_window(void) {
+    flow_tick_clock(flow_at(15, 0));
+    flow_reset_reason = ESP_RST_DEEPSLEEP;
+    flow_state = TIMER_IDLE;
+
+    TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_tick());
+
+    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_TRY_WINDOW));
+}
+
+/* New credentials have not failed yet, so the old failure run is dropped. */
+void test_setup_a_successful_session_clears_the_failure_run(void) {
+    flow_join_failures = 5;
+    flow_run_setup_ending(SETUP_SESSION_OUTCOME_WIFI_OK, SETUP_SESSION_SLEEP_NET_WINDOW);
+    TEST_ASSERT_EQUAL_UINT8(0, flow_join_failures);
+}
+
+void test_setup_a_failed_session_keeps_the_failure_run(void) {
+    flow_join_failures = 5;
+    flow_run_setup_ending(SETUP_SESSION_OUTCOME_TIMEOUT, SETUP_SESSION_SLEEP_BUTTON_ONLY);
+    TEST_ASSERT_EQUAL_UINT8(5, flow_join_failures);
+}
+
+/* ---- the "WiFi failing" hint --------------------------------------------- */
+
+void test_the_hint_is_off_below_the_threshold(void) {
+    flow_join_failures = SETUP_TRIGGER_WIFI_FAIL_HINT_THRESHOLD - 1;
+    display_state_t st = make_display_state(100, flow_at(15, 0));
+    TEST_ASSERT_NULL(st.status_hint);
+}
+
+void test_the_hint_is_on_at_the_threshold_and_carries_the_shared_wording(void) {
+    flow_join_failures = SETUP_TRIGGER_WIFI_FAIL_HINT_THRESHOLD;
+    display_state_t st = make_display_state(100, flow_at(15, 0));
+    TEST_ASSERT_EQUAL_STRING(SETUP_TRIGGER_WIFI_FAILING_HINT_TEXT, st.status_hint);
+}
+
+/* The hint is advice and never a trigger: a long run of failures on a
+   provisioned device must not turn a wake into a setup session. */
+void test_a_long_failure_run_never_triggers_setup_by_itself(void) {
+    flow_install_setup_ops();
+    flow_join_failures = 200;
+
+    TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_cold_boot());
+
+    TEST_ASSERT_EQUAL_INT(0, flow_setup_runs);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_deepsleep_is_the_healthy_reason);
@@ -10947,7 +11504,7 @@ int main(void) {
     RUN_TEST(test_row8_every_reason_but_deep_sleep_skips_the_grid_wait);
     RUN_TEST(test_row8_a_cold_boot_lights_the_state_pixel_before_the_paint);
     RUN_TEST(test_row8_a_deep_sleep_tick_wake_stays_dark);
-    RUN_TEST(test_row8_the_reset_reason_is_asked_at_both_gates);
+    RUN_TEST(test_row8_the_reset_reason_is_asked_at_all_three_gates);
     RUN_TEST(test_row10_an_expiry_and_a_break_in_the_same_tick_alert_then_break);
     RUN_TEST(test_row10_the_post_render_gate_is_asked_with_a_freshly_read_clock);
     RUN_TEST(test_row10_a_break_already_due_on_arrival_wins_before_the_paint);
@@ -11160,5 +11717,40 @@ int main(void) {
     RUN_TEST(test_m3t4_a_config_locked_d_wake_in_chore_mode_does_not_claim_the_strip);
     RUN_TEST(test_m3t4_a_release_by_d_in_chore_mode_leaves_the_strip_unclaimed);
     RUN_TEST(test_m3t4_an_unlocked_d_wake_in_chore_mode_still_claims_the_strip);
+    RUN_TEST(test_setup_a_cold_boot_with_no_ssid_runs_setup);
+    RUN_TEST(test_setup_a_button_wake_with_no_ssid_runs_setup_and_does_not_run_the_press);
+    RUN_TEST(test_setup_a_timer_wake_with_no_ssid_stays_normal);
+    RUN_TEST(test_setup_a_cold_boot_with_an_ssid_is_the_ordinary_wake);
+    RUN_TEST(test_setup_a_button_wake_with_an_ssid_is_the_ordinary_press);
+    RUN_TEST(test_setup_an_unreadable_ssid_is_not_a_missing_one);
+    RUN_TEST(test_setup_the_bedtime_lock_wins_over_a_missing_ssid_on_a_cold_boot);
+    RUN_TEST(test_setup_the_bedtime_lock_wins_over_a_missing_ssid_on_a_button_wake);
+    RUN_TEST(test_setup_runs_after_the_bedtime_gate);
+    RUN_TEST(test_setup_a_boot_hold_paints_the_hint_then_runs_setup);
+    RUN_TEST(test_setup_a_boot_hold_on_a_device_with_no_ssid_tells_the_session_so);
+    RUN_TEST(test_setup_the_boot_decode_is_handed_the_resolved_button);
+    RUN_TEST(test_setup_a_short_boot_press_is_cancelled_quietly);
+    RUN_TEST(test_setup_a_boot_tap_over_before_the_first_sample_does_not_wait);
+    RUN_TEST(test_setup_a_release_just_before_the_threshold_is_cancelled);
+    RUN_TEST(test_setup_a_release_just_after_the_threshold_runs_setup);
+    RUN_TEST(test_setup_a_boot_pad_stuck_low_is_bounded_short_of_the_failsafe);
+    RUN_TEST(test_setup_a_boot_wake_through_the_wake_decode_runs_setup);
+    RUN_TEST(test_setup_an_a_to_d_wake_never_samples_the_boot_pad);
+    RUN_TEST(test_setup_wifi_ok_sleeps_into_the_net_window);
+    RUN_TEST(test_setup_mqtt_only_sleeps_into_the_net_window);
+    RUN_TEST(test_setup_a_timeout_with_no_ssid_sleeps_buttons_only);
+    RUN_TEST(test_setup_an_error_with_no_ssid_sleeps_buttons_only);
+    RUN_TEST(test_setup_a_normal_ending_takes_the_ordinary_sleep);
+    RUN_TEST(test_setup_a_normal_ending_keeps_a_lock_that_is_standing);
+    RUN_TEST(test_setup_ends_through_the_sleep_funnel_exactly_once);
+    RUN_TEST(test_setup_without_installed_ops_sleeps_normally_instead_of_calling_through_null);
+    RUN_TEST(test_setup_the_wake_after_wifi_ok_opens_a_window_at_once);
+    RUN_TEST(test_setup_the_wake_after_mqtt_only_opens_a_window_at_once);
+    RUN_TEST(test_setup_without_the_forced_flag_a_fresh_sync_opens_no_window);
+    RUN_TEST(test_setup_a_successful_session_clears_the_failure_run);
+    RUN_TEST(test_setup_a_failed_session_keeps_the_failure_run);
+    RUN_TEST(test_the_hint_is_off_below_the_threshold);
+    RUN_TEST(test_the_hint_is_on_at_the_threshold_and_carries_the_shared_wording);
+    RUN_TEST(test_a_long_failure_run_never_triggers_setup_by_itself);
     return UNITY_END();
 }

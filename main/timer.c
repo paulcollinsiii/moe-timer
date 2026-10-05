@@ -920,6 +920,22 @@ void timer_record_ntp_sync(time_t now) {
     g_rtc_state.next_ntp_sync = (int64_t)now + NTP_SYNC_INTERVAL_SEC;
 }
 
+void timer_force_ntp_sync(void) {
+    g_rtc_state.next_ntp_sync = 0;
+}
+
+void timer_note_wifi_join_result(bool ok) {
+    if (ok) {
+        g_rtc_state.wifi_join_failures = 0;
+    } else if (g_rtc_state.wifi_join_failures < UINT8_MAX) {
+        g_rtc_state.wifi_join_failures++;
+    }
+}
+
+uint8_t timer_wifi_join_failures(void) {
+    return g_rtc_state.wifi_join_failures;
+}
+
 time_t timer_last_ntp_sync(void) {
     /* Derived, not stored twice: next_ntp_sync is written only by
        timer_record_ntp_sync, so subtracting the interval recovers the

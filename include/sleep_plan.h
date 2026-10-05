@@ -181,11 +181,27 @@ sleep_plan_in_t sleep_plan_from_timer(const sleep_plan_timer_in_t *in);
    which lock it is. */
 #define CONFIG_ERR_SLEEP_SEC 1800
 
+/* How long the sleep after a successful setup session lasts: just long
+   enough to leave the SoftAP session's heap and radio state behind without
+   an esp_restart (which would zero every RTC variable), then wake into an
+   ordinary network window. */
+#define SETUP_NET_WINDOW_SLEEP_SEC 1
+
+/* `seconds` of a sleep that arms no timer wake at all. The planner clamps
+   every real sleep to SLEEP_PLAN_MIN_SEC or more, so 0 can never be a
+   planned interval. */
+#define SLEEP_PLAN_NO_TIMER_SEC 0u
+
 typedef enum {
     WAKE_SLEEP_NORMAL = 0,
     WAKE_SLEEP_CHARGE_LOCK,
     WAKE_SLEEP_BEDTIME,
     WAKE_SLEEP_CONFIG_ERR,
+    /* The two ways a setup session ends that are not "the usual schedule".
+       Neither is a lock: both arm the buttons, and neither is ever returned
+       by wake_sleep_mode_select(). */
+    WAKE_SLEEP_SETUP_NET_WINDOW, /* ~1 s timer wake into a real network window */
+    WAKE_SLEEP_BUTTONS_ONLY,     /* no timer: an unprovisioned device in a drawer must not cycle the radio */
 } wake_sleep_mode_t;
 
 /* Precedence between the locks. Both can be engaged at once, by a
@@ -225,6 +241,16 @@ typedef struct {
    unconditionally — they are all side-effect-free getters). Pure —
    host-tested. */
 sleep_outcome_t sleep_plan_outcome(wake_sleep_mode_t mode, const sleep_plan_in_t *in);
+
+/* Whether a sleep of this length arms the RTC timer at all. Pure. */
+bool sleep_plan_timer_armed(uint32_t seconds);
+
+/* Arm the deep-sleep timer wake for `seconds`, or arm nothing when
+   sleep_plan_timer_armed() says this sleep has no timer. A device call, so
+   it exists on the target only; the decision it makes is the one above. */
+#ifndef NATIVE
+void sleep_plan_arm_timer(uint32_t seconds);
+#endif
 
 #ifdef __cplusplus
 }

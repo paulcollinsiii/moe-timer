@@ -6,13 +6,12 @@
    live in setup_session.c; nothing here branches on the session's own
    outcome.
 
-   Composition is main.c's: it assembles a setup_session_ops_t from the
-   eight exported functions below plus its own extend_awake_failsafe
-   (already injected into ota_flow_ops_t the same way) and the setup
-   screens' two render functions. This file is added to main/CMakeLists.txt
-   SRCS so it compiles against the real network_provisioning headers, but
-   nothing calls into it yet — gc-sections strips it out of the image
-   until the wake flow wires it in. */
+   setup_mode_ops() at the bottom assembles the whole setup_session_ops_t
+   from the eight exported functions below and the setup screens' two render
+   functions. The one member it cannot supply is extend_awake, whose real
+   implementation owns the awake failsafe's esp_timer handle in main.c; the
+   caller passes it in, so the table is built here and not in the
+   composition root. */
 #include "setup_session_idf.h" /* prototypes for the eight exported functions below, checked against their definitions */
 
 #include <stdlib.h>
@@ -33,6 +32,7 @@
 #include "network_provisioning/manager.h"
 #include "network_provisioning/scheme_softap.h"
 #include "nvs_config.h"
+#include "setup_screens.h" /* the two render functions setup_mode_ops() installs */
 #include "setup_session.h"
 #include "wifi_session.h" /* wifi_session_sta_netif() — the one shared STA netif */
 
@@ -735,4 +735,20 @@ bool setup_session_idf_set_mqtt_creds(const char *uri, const char *user, const c
         return false;
     }
     return true;
+}
+
+setup_session_ops_t setup_mode_ops(bool (*extend_awake)(int seconds)) {
+    return (setup_session_ops_t){
+        .extend_awake = extend_awake,
+        .now_ms = setup_session_idf_now_ms,
+        .rand_byte = setup_session_idf_rand_byte,
+        .start = setup_session_idf_start,
+        .stop = setup_session_idf_stop,
+        .poll = setup_session_idf_poll,
+        .render_setup_screen = setup_screens_render_setup_screen,
+        .render_end_screen = setup_screens_render_end_screen,
+        .set_wifi_creds = setup_session_idf_set_wifi_creds,
+        .clear_wifi_driver_store = setup_session_idf_clear_wifi_driver_store,
+        .set_mqtt_creds = setup_session_idf_set_mqtt_creds,
+    };
 }

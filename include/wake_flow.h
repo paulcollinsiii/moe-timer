@@ -3,9 +3,10 @@
 #include <stdint.h>
 #include <time.h>
 
-#include "buttons.h"    /* button_id_t */
-#include "stats_json.h" /* stats_snapshot_t */
-#include "timer.h"      /* timer_state_t */
+#include "buttons.h"       /* button_id_t */
+#include "setup_session.h" /* setup_session_ops_t */
+#include "stats_json.h"    /* stats_snapshot_t */
+#include "timer.h"         /* timer_state_t */
 #ifndef NATIVE
 #include "esp_system.h" /* esp_reset_reason_t */
 #endif
@@ -362,7 +363,13 @@ void wake_flow_watch_final_minute(void);
    while the button handler owns the wake-press decode, the
    held-through-sleep guard and the immediate LED ack. What they do share
    — the post-action tail and the pre-sleep event watch — they share by
-   calling the same statics, not by being the same function. */
+   calling the same statics, not by being the same function.
+
+   Setup mode branches off both, after the bed-time gate: a cold boot or an
+   A-D press with no stored SSID runs the setup session instead of the
+   ordinary wake. A wake caused by BOOT alone is the button handler's first
+   branch, ahead of everything A-D: it times the hold and either runs the
+   session or goes straight back to sleep. */
 void wake_flow_handle_timer_tick(void);
 void wake_flow_handle_button_wake(void);
 
@@ -380,6 +387,16 @@ void wake_flow_handle_button_wake(void);
 
    DOES NOT RETURN — see the handlers above. */
 void wake_flow_handle_wake(uint32_t causes);
+
+/* Hand the wake flow the setup session's device effects (the table
+   setup_mode_ops() builds). Copied by value, so the caller's copy may live on
+   its stack. Called once from app_main before the first wake handler; a wake
+   that needs setup mode with nothing installed here skips the session and
+   sleeps its normal sleep rather than calling through a null table.
+
+   Installed rather than built here because wake_flow.c is compiled into the
+   host suite, and the table's members (SoftAP, httpd, the panel) are not. */
+void wake_flow_set_setup_ops(const setup_session_ops_t *ops);
 
 /* Record what was still held at sleep entry, for the continuation guard
    at the top of the button handler. EXT1 ANY_LOW is level-triggered, so a

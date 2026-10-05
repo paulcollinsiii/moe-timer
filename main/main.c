@@ -26,6 +26,7 @@
 #include "ota_flow.h"
 #include "panic_diag.h"
 #include "panic_soak.h"
+#include "setup_session_idf.h"
 #include "sleep_plan.h"
 #include "timer.h"
 #include "timer_persist.h"
@@ -213,7 +214,7 @@ void enter_deep_sleep(wake_sleep_mode_t mode) {
        this path straight. */
     sleep_outcome_t out = sleep_plan_outcome(mode, &plan_in);
     buttons_configure_wakeup_if(out.enable_buttons);
-    esp_sleep_enable_timer_wakeup((uint64_t)out.seconds * 1000000ULL);
+    sleep_plan_arm_timer(out.seconds);
     ESP_LOGI(TAG, "Entering deep sleep (%s%lu s)", out.reason, (unsigned long)out.seconds);
     esp_deep_sleep_start();
 }
@@ -533,6 +534,13 @@ void app_main(void) {
        against arm_awake_failsafe is free — the extender null-guards. */
     alerts_set_extend_awake(alerts_extend_awake_cb);
     net_apply_init(&NET_APPLY_OPS);
+    /* Wiring in the same bucket as the install above and the ota_cfg below:
+       a data table assembled by a builder in setup_session_idf.c (the only
+       member main.c owns is the failsafe extender) and handed over once, with
+       no branch and nothing decided here. Under reason 1 as part of the boot
+       sequence — wake_flow_handle_wake below is where it is first needed. */
+    const setup_session_ops_t setup_ops = setup_mode_ops(extend_awake_failsafe);
+    wake_flow_set_setup_ops(&setup_ops);
     /* Before wake_flow_handle_wake at the bottom of this function, which
        is where the first ota_flow_arm() happens — the module's contract
        is "once, before any other call", and this is the only point that

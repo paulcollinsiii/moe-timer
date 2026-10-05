@@ -2730,6 +2730,42 @@ void test_last_ntp_sync_cleared_by_reset(void) {
     TEST_ASSERT_EQUAL_INT64(0, (int64_t)timer_last_ntp_sync());
 }
 
+/* A sync that is fresh by the cadence is made due again, for both of the
+   questions the tick handler asks: the running recheck and the idle one. */
+void test_force_ntp_sync_makes_a_fresh_sync_due_again(void) {
+    timer_record_ntp_sync(T0);
+    TEST_ASSERT_FALSE(timer_needs_ntp_sync(T0 + 1));
+    timer_force_ntp_sync();
+    TEST_ASSERT_TRUE(timer_needs_ntp_sync(T0 + 1));
+    TEST_ASSERT_EQUAL_INT64(0, (int64_t)timer_last_ntp_sync());
+}
+
+/* The "WiFi failing" count: consecutive failures, zeroed by one success,
+   saturating rather than wrapping back to a count that reads as healthy. */
+void test_wifi_join_failures_count_consecutive_failures(void) {
+    TEST_ASSERT_EQUAL_UINT8(0, timer_wifi_join_failures());
+    timer_note_wifi_join_result(false);
+    timer_note_wifi_join_result(false);
+    TEST_ASSERT_EQUAL_UINT8(2, timer_wifi_join_failures());
+}
+
+void test_a_successful_window_resets_the_wifi_join_failures(void) {
+    timer_note_wifi_join_result(false);
+    timer_note_wifi_join_result(false);
+    timer_note_wifi_join_result(false);
+    timer_note_wifi_join_result(true);
+    TEST_ASSERT_EQUAL_UINT8(0, timer_wifi_join_failures());
+    timer_note_wifi_join_result(false);
+    TEST_ASSERT_EQUAL_UINT8(1, timer_wifi_join_failures());
+}
+
+void test_wifi_join_failures_saturate_instead_of_wrapping(void) {
+    for (int i = 0; i < 300; i++) {
+        timer_note_wifi_join_result(false);
+    }
+    TEST_ASSERT_EQUAL_UINT8(UINT8_MAX, timer_wifi_join_failures());
+}
+
 /* ------------------------------------------------------------------ */
 /* Active-slot guard: selection may never rest on a disabled slot      */
 /* ------------------------------------------------------------------ */
@@ -3725,6 +3761,10 @@ int main(void) {
     RUN_TEST(test_last_ntp_sync_zero_when_never_synced);
     RUN_TEST(test_last_ntp_sync_derived_from_record);
     RUN_TEST(test_last_ntp_sync_cleared_by_reset);
+    RUN_TEST(test_force_ntp_sync_makes_a_fresh_sync_due_again);
+    RUN_TEST(test_wifi_join_failures_count_consecutive_failures);
+    RUN_TEST(test_a_successful_window_resets_the_wifi_join_failures);
+    RUN_TEST(test_wifi_join_failures_saturate_instead_of_wrapping);
     RUN_TEST(test_ensure_active_slot_keeps_enabled_slot);
     RUN_TEST(test_ensure_active_slot_reverts_when_disabled);
     RUN_TEST(test_slot_accessors_read_state_alloc_completions);

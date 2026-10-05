@@ -129,6 +129,12 @@ sleep_outcome_t sleep_plan_outcome(wake_sleep_mode_t mode, const sleep_plan_in_t
                "config error" on a device whose config is fine misleads. */
             return (sleep_outcome_t){
                 .seconds = CONFIG_ERR_SLEEP_SEC, .enable_buttons = true, .reason = "config/no-clock lock, "};
+        case WAKE_SLEEP_SETUP_NET_WINDOW:
+            return (sleep_outcome_t){
+                .seconds = SETUP_NET_WINDOW_SLEEP_SEC, .enable_buttons = true, .reason = "setup done, "};
+        case WAKE_SLEEP_BUTTONS_ONLY:
+            return (sleep_outcome_t){
+                .seconds = SLEEP_PLAN_NO_TIMER_SEC, .enable_buttons = true, .reason = "buttons only, "};
     }
     /* Unreachable while wake_sleep_mode_select() is the only producer, but
        a cast value would land here. Fail CLOSED: this whole mechanism
@@ -137,3 +143,17 @@ sleep_outcome_t sleep_plan_outcome(wake_sleep_mode_t mode, const sleep_plan_in_t
        wake sources rather than a planner nap with buttons armed. */
     return (sleep_outcome_t){.seconds = CHARGE_LOCK_SLEEP_SEC, .enable_buttons = false, .reason = "unknown mode, "};
 }
+
+bool sleep_plan_timer_armed(uint32_t seconds) {
+    return seconds != SLEEP_PLAN_NO_TIMER_SEC;
+}
+
+#ifndef NATIVE
+#include "esp_sleep.h"
+
+void sleep_plan_arm_timer(uint32_t seconds) {
+    if (sleep_plan_timer_armed(seconds)) {
+        esp_sleep_enable_timer_wakeup((uint64_t)seconds * 1000000ULL);
+    }
+}
+#endif
