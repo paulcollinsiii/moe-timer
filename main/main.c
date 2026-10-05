@@ -537,8 +537,8 @@ void app_main(void) {
     /* Wiring in the same bucket as the install above and the ota_cfg below:
        a data table assembled by a builder in setup_session_idf.c (the only
        member main.c owns is the failsafe extender) and handed over once, with
-       no branch and nothing decided here. Boot-sequence wiring, like its
-       neighbours: wake_flow_handle_wake below is where it is first needed. */
+       no branch and nothing decided here. Boot-sequence wiring (residency
+       reason 1, whole-function), first needed by wake_flow_handle_wake below. */
     const setup_session_ops_t setup_ops = setup_mode_ops(extend_awake_failsafe);
     wake_flow_set_setup_ops(&setup_ops);
     /* Before wake_flow_handle_wake at the bottom of this function, which

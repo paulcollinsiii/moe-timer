@@ -2091,20 +2091,46 @@ void test_bug14_a_release_in_the_hook_owes_no_extra_window(void) {
     TEST_ASSERT_EQUAL_INT(1, gate_grant_window);
 }
 
-/* MINOR-3: the wake mask's question. D alone for the config lock and for
-   the no-clock lock, and for nothing else. buttons.c is in no host suite,
-   so this is the pin. */
-void test_bug14_the_no_clock_lock_arms_d_alone(void) {
-    TEST_ASSERT_FALSE(lock_gate_wake_d_only());
+/* The repaint a BOOT hold that ran out of time owes the panel: the screen of
+   the lock that stands, nothing at all (and false) when none does, and no
+   effect on the lock itself. */
+void test_repaint_standing_lock_paints_each_locks_own_screen(void) {
+    TEST_ASSERT_FALSE(lock_gate_repaint_standing_lock());
+    TEST_ASSERT_EQUAL_INT(0, gate_log_n);
+
     s_clock_locked = true;
-    TEST_ASSERT_TRUE_MESSAGE(lock_gate_wake_d_only(), "A/B/C armed under the no-clock lock");
+    TEST_ASSERT_TRUE(lock_gate_repaint_standing_lock());
+    TEST_ASSERT_EQUAL_INT(1, gate_log_count(EV_NO_CLOCK_SCREEN));
+    TEST_ASSERT_TRUE(s_clock_locked);
     s_clock_locked = false;
+
+    s_bedtime_locked = true;
+    TEST_ASSERT_TRUE(lock_gate_repaint_standing_lock());
+    TEST_ASSERT_EQUAL_INT(1, gate_log_count(EV_BEDTIME_SCREEN));
+    s_bedtime_locked = false;
+
     s_config_locked = true;
-    TEST_ASSERT_TRUE(lock_gate_wake_d_only());
+    TEST_ASSERT_TRUE(lock_gate_repaint_standing_lock());
+    TEST_ASSERT_EQUAL_INT(1, gate_log_count(EV_CONFIG_ERR_SCREEN));
+    TEST_ASSERT_TRUE(s_config_locked);
     s_config_locked = false;
-    s_bedtime_locked = true; /* its sleep arms nothing at all; not this question */
+
     s_charge_locked = true;
-    TEST_ASSERT_FALSE(lock_gate_wake_d_only());
+    TEST_ASSERT_TRUE(lock_gate_repaint_standing_lock());
+    TEST_ASSERT_EQUAL_INT(1, gate_log_count(EV_CHARGE_ME));
+    TEST_ASSERT_EQUAL_INT(4, gate_log_n); /* one paint each, no window, no sleep, no save */
+}
+
+/* Both the no-clock and config locks standing: the no-clock gate runs first
+   and ends the wake, so its screen is the one the device slept on. */
+void test_repaint_standing_lock_prefers_the_screen_the_gates_would_end_on(void) {
+    s_clock_locked = true;
+    s_config_locked = true;
+
+    TEST_ASSERT_TRUE(lock_gate_repaint_standing_lock());
+
+    TEST_ASSERT_EQUAL_INT(1, gate_log_count(EV_NO_CLOCK_SCREEN));
+    TEST_ASSERT_EQUAL_INT(0, gate_log_count(EV_CONFIG_ERR_SCREEN));
 }
 
 /* What buttons.c reads to build the wake policy: the two flags, separately.
@@ -2262,7 +2288,8 @@ int main(void) {
     RUN_TEST(test_bug14_a_late_sync_that_restores_today_applies_the_held_grant_at_once);
     RUN_TEST(test_bug14_a_late_release_into_a_later_gates_window_owes_no_extra_one);
     RUN_TEST(test_bug14_a_release_in_the_hook_owes_no_extra_window);
-    RUN_TEST(test_bug14_the_no_clock_lock_arms_d_alone);
+    RUN_TEST(test_repaint_standing_lock_paints_each_locks_own_screen);
+    RUN_TEST(test_repaint_standing_lock_prefers_the_screen_the_gates_would_end_on);
     RUN_TEST(test_the_no_clock_engage_raises_the_clock_flag_and_not_the_config_flag);
     RUN_TEST(test_the_no_clock_engage_wake_opens_no_window_of_its_own);
     RUN_TEST(test_bedtime_in_force_needs_an_active_window_and_a_real_clock);

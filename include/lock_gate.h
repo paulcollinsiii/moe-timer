@@ -65,14 +65,13 @@ bool lock_gate_config_locked(void);
    instead (app_state.c). */
 bool lock_gate_clock_locked(void);
 
-/* True when the sleep ahead arms Button D alone among A-D: the
-   config-error lock or the no-clock lock, which share one sleep
-   (lock_gate_sleep_mode folds both into WAKE_SLEEP_CONFIG_ERR). D is the
-   attended retry, and a press of A, B or C must not wake the device into a
-   full wake and a network window. BOOT is a separate matter: the no-clock
-   lock arms it and the config-error lock does not, which is why buttons.c
-   reads the two flags above rather than this fold. */
-bool lock_gate_wake_d_only(void);
+/* Repaint the screen of whichever lock is standing, for a wake that painted
+   something over it without engaging or releasing anything (the BOOT hold's
+   release hint). Returns false, painting nothing, when no lock stands: the
+   caller owes the ordinary screen then. Pure repaint, like the pre-sleep
+   one the gates end on: nothing is paused, saved or retried, and no window
+   runs. */
+bool lock_gate_repaint_standing_lock(void);
 
 /* Whether bed time is in force for `now`: the clock is plausible and the
    bed-time window is active. Pure of effects, unlike the gates: it paints

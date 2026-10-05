@@ -332,8 +332,10 @@ void buttons_configure_wakeup_if(bool enable) {
        separately, gated by buttons_policy_boot_wake_allowed() rather than
        OR'd in unconditionally, for two reasons:
          - it obeys config_locked, same as everything but D: the
-           config-error sleep's one exit is D, and BOOT does not get a
-           second one stacked on it. The no-clock lock is different and
+           config-error sleep's wake is D, and BOOT does not get a second
+           one stacked on it. Setup is still reachable there, by D with BOOT
+           held (wake_flow.c): the lock is cleared from HA, which a device
+           whose WiFi changed cannot reach. The no-clock lock is different and
            does arm BOOT: a device whose stored WiFi stopped working and
            then lost power sits behind that lock, D only retries the
            broken credentials, and BOOT is its way back into setup.

@@ -94,8 +94,8 @@ static bool s_config_released; /* fix applied: repaint over Config Error */
 
    It SHARES THE CONFIG LOCK'S SLEEP (lock_gate_sleep_mode below): the
    same CONFIG_ERR_SLEEP_SEC cadence, a window on every locked re-wake,
-   and Button D armed among A-D (plus BOOT, which only this lock arms: it
-   is the way back into setup) so a press retries at once. Both locks are "waiting for something a human
+   and Button D armed among A-D (plus BOOT, which the config-error lock
+   leaves dark: it is the way back into setup) so a press retries at once. Both locks are "waiting for something a human
    can fix, retried over the network", which is exactly what that sleep
    was sized for. It holds for as long as NTP fails, with no give-up:
    WiFi that works with NTP blocked keeps it locked indefinitely (owner
@@ -105,10 +105,6 @@ static bool s_clock_released; /* clock set: repaint over "No Clock" */
 
 wake_sleep_mode_t lock_gate_sleep_mode(void) {
     return wake_sleep_mode_select(s_charge_locked, s_bedtime_locked, s_config_locked || s_clock_locked);
-}
-
-bool lock_gate_wake_d_only(void) {
-    return s_config_locked || s_clock_locked;
 }
 
 bool lock_gate_clock_locked(void) {
@@ -346,7 +342,7 @@ static bool check_clock(time_t *now) {
         s_clock_locked = true;
         ESP_LOGW(TAG, "No-clock lock engaged: NTP failed after a power-on");
         display_no_clock();
-        enter_deep_sleep(lock_gate_sleep_mode()); /* config-lock sleep: 30 min, D armed */
+        enter_deep_sleep(lock_gate_sleep_mode()); /* config-lock sleep: 30 min, D and BOOT armed */
         return false;                             /* unreachable on device */
     }
     /* Locked re-wake, on the cadence or on a D press: the retry. */
@@ -581,6 +577,28 @@ static bool check_config_error(time_t now) {
     display_config_error(day_type, free_min, alloc_min);
     enter_deep_sleep(lock_gate_sleep_mode());
     return false; /* unreachable on device: enter_deep_sleep does not return */
+}
+
+/* Same precedence as the gates themselves: charge in app_main, then the
+   no-clock gate, bed time, and config error last. The first one standing is
+   the screen the device would have slept on. */
+bool lock_gate_repaint_standing_lock(void) {
+    if (s_charge_locked) {
+        display_charge_me();
+    } else if (s_clock_locked) {
+        display_no_clock();
+    } else if (s_bedtime_locked) {
+        display_bedtime();
+    } else if (s_config_locked) {
+        day_type_t day_type = DAY_WEEKDAY;
+        uint16_t free_min = 0;
+        uint16_t alloc_min = 0;
+        (void)config_pair_ok(hal_time_now(), &day_type, &free_min, &alloc_min);
+        display_config_error(day_type, free_min, alloc_min);
+    } else {
+        return false;
+    }
+    return true;
 }
 
 bool lock_gate_check_bedtime(time_t now) {

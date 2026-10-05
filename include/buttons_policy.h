@@ -60,10 +60,13 @@ typedef struct {
     /* lock_gate_clock_locked() — the no-clock lock (BUG-14). Narrows the
        A-D mask to D exactly as config_locked does, because its press is the
        same retry. It is a separate field because the two locks differ on
-       BOOT: a config-error device is fixed from HA and has no use for setup,
-       but a no-clock device may have lost its WiFi (a new router, then a
-       power cut) and BOOT is then the only way back into setup, since D
-       retries credentials that no longer work. */
+       BOOT: a config-error device is normally fixed from HA, so BOOT alone
+       does not wake it, but a no-clock device may have lost its WiFi (a new
+       router, then a power cut) and BOOT is then the only way back into
+       setup, since D retries credentials that no longer work. A
+       config-locked device whose WiFi changed is in the same position, and
+       it has no BOOT wake: D pressed with BOOT already held still enters
+       setup (wake_flow.c), so the gesture is its way back. */
     bool clock_locked;
     /* gpio_get_level(GPIO_NUM_0) == 0 at sleep entry, sampled raw by the
        driver like the other fields here — NOT consumed by
@@ -88,10 +91,12 @@ typedef struct {
 
    Armed when `enable` is true and `config_locked` is false. The
    config-error lock keeps the sleep to Button D alone: its fix is made in
-   HA, and BOOT's recovery (setup) is not what it is waiting for. The
+   HA, and BOOT's recovery (setup) is not what it is waiting for. That does
+   not close setup to it, because D with BOOT held already is the gesture
+   (wake_flow.c), and a device that cannot reach HA needs it. The
    no-clock lock arms BOOT beside D, because a device whose stored WiFi
    stopped working and then lost power would otherwise have no way into
-   setup at all. The charge and Bed Time locks arm nothing, same as every
+   setup without that gesture. The charge and Bed Time locks arm nothing, same as every
    other button; `enable` false covers both without a separate check.
 
    And never armed while `boot_currently_down` is true: see that field's

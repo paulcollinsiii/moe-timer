@@ -158,6 +158,9 @@ typedef enum {
     EV_SLEEP,
     /* the no-clock gate's paint (display_no_clock), when a case models it */
     EV_NO_CLOCK_PAINT,
+    /* the session's end-screen op, and the standing lock's repaint */
+    EV_END_SCREEN,
+    EV_LOCK_REPAINT,
 } flow_event_t;
 
 /* Room for a whole watch: the final-minute loop spins at 250 ms for up to
@@ -1761,6 +1764,25 @@ void setup_screens_render_release_hint(void) {
     flow_release_hints++;
 }
 
+static int flow_end_screens;
+static setup_session_end_kind_t flow_end_kind;
+static bool flow_end_has_ssid;
+
+static void flow_render_end_screen(setup_session_end_kind_t kind, bool has_wifi_ssid) {
+    flow_log_push(EV_END_SCREEN);
+    flow_end_screens++;
+    flow_end_kind = kind;
+    flow_end_has_ssid = has_wifi_ssid;
+}
+
+/* Whether a lock is standing for the repaint below: the case's say-so. */
+static bool flow_lock_repaint_answer;
+
+bool lock_gate_repaint_standing_lock(void) {
+    flow_log_push(EV_LOCK_REPAINT);
+    return flow_lock_repaint_answer;
+}
+
 static setup_session_result_t flow_setup_result;
 static int flow_setup_runs;
 static setup_session_cfg_t flow_setup_cfg;
@@ -2155,6 +2177,10 @@ void setUp(void) {
     flow_boot_first_ms = 0;
     flow_boot_samples = 0;
     flow_release_hints = 0;
+    flow_end_screens = 0;
+    flow_end_kind = SETUP_SESSION_END_WIFI_SAVED;
+    flow_end_has_ssid = true;
+    flow_lock_repaint_answer = false;
     flow_setup_result = (setup_session_result_t){SETUP_SESSION_OUTCOME_WIFI_OK, SETUP_SESSION_SLEEP_NET_WINDOW};
     flow_setup_runs = 0;
     memset(&flow_setup_cfg, 0xEE, sizeof flow_setup_cfg);
@@ -10863,7 +10889,7 @@ void test_m3t4_an_unlocked_d_wake_in_chore_mode_still_claims_the_strip(void) {
    sleep each way it can end maps to. The session itself is faked (its own
    suite owns it). */
 
-static const setup_session_ops_t FLOW_NO_OPS = {0};
+static const setup_session_ops_t FLOW_NO_OPS = {.render_end_screen = flow_render_end_screen};
 
 static void flow_install_setup_ops(void) {
     wake_flow_set_setup_ops(&FLOW_NO_OPS);
@@ -11061,6 +11087,7 @@ void test_setup_the_boot_decode_is_handed_the_resolved_button(void) {
 static void flow_assert_a_quiet_wake(void) {
     TEST_ASSERT_EQUAL_INT(0, flow_setup_runs);
     TEST_ASSERT_EQUAL_INT(0, flow_release_hints);
+    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_LOCK_REPAINT)); /* nothing was painted over, so nothing to put back */
     TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_LED));
     TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_LED_CLAIM));
     TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_CHORE_LEDS));
@@ -11125,7 +11152,8 @@ void test_setup_a_release_just_after_the_threshold_runs_setup(void) {
 
 /* A pad stuck low ends the wait on its own bound, short of the awake
    failsafe, and that is a quiet cancel: one hint at the threshold (that was
-   true when it painted) and nothing after it. */
+   true when it painted), then the screen the device would normally show put
+   back over it, and nothing else. */
 void test_setup_a_boot_pad_stuck_low_is_bounded_short_of_the_failsafe(void) {
     flow_install_setup_ops();
     flow_woke_by_boot = true;
@@ -11139,8 +11167,99 @@ void test_setup_a_boot_pad_stuck_low_is_bounded_short_of_the_failsafe(void) {
     TEST_ASSERT_TRUE(mock_delay_total_ms() <= WAKE_FLOW_BOOT_HOLD_MAX_WAIT_MS);
     TEST_ASSERT_TRUE(mock_delay_total_ms() < (uint32_t)CONFIG_MAGTAG_MAX_AWAKE_SEC * 1000u);
     TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_LED));
-    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_FULL_REFRESH));
+    /* No lock stands, so the hint is replaced by the current state, once. */
+    TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_LOCK_REPAINT));
+    TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_FULL_REFRESH));
+    TEST_ASSERT_TRUE(flow_log_at(EV_RELEASE_HINT) < flow_log_at(EV_FULL_REFRESH));
+    TEST_ASSERT_TRUE(flow_log_at(EV_FULL_REFRESH) < flow_log_at(EV_SLEEP));
     TEST_ASSERT_EQUAL_INT(WAKE_SLEEP_NORMAL, flow_slept_mode);
+}
+
+/* Under a standing lock the lock's own screen goes back, not the main one. */
+void test_setup_a_hold_that_hits_its_bound_under_a_lock_repaints_the_lock_screen(void) {
+    flow_install_setup_ops();
+    flow_woke_by_boot = true;
+    flow_boot_down_ms = UINT32_MAX;
+    flow_sleep_mode_answer = WAKE_SLEEP_CONFIG_ERR;
+    flow_lock_repaint_answer = true;
+
+    TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_button());
+
+    TEST_ASSERT_EQUAL_INT(1, flow_release_hints);
+    TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_LOCK_REPAINT));
+    TEST_ASSERT_TRUE(flow_log_at(EV_RELEASE_HINT) < flow_log_at(EV_LOCK_REPAINT));
+    TEST_ASSERT_TRUE(flow_log_at(EV_LOCK_REPAINT) < flow_log_at(EV_SLEEP));
+    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_FULL_REFRESH));
+    TEST_ASSERT_EQUAL_INT(0, flow_setup_runs);
+}
+
+/* A press that a held A-D button from the last sleep merely continues is not
+   a new gesture, even with BOOT held beside it: the continuation guard goes
+   first, so there is no hold wait, no hint and no setup. */
+void test_setup_a_held_button_with_boot_held_is_a_continuation_not_a_gesture(void) {
+    flow_install_setup_ops();
+    mock_time_set(flow_at(15, 0));
+    flow_wakeup_btn = BTN_A;
+    flow_boot_down_ms = UINT32_MAX;
+    s_held_mask_at_sleep = 1u << BTN_A;
+    s_sleep_entry_time = (int64_t)flow_at(15, 0) - 1;
+
+    TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_button());
+
+    TEST_ASSERT_EQUAL_INT(0, flow_boot_samples);
+    TEST_ASSERT_EQUAL_INT(0, flow_release_hints);
+    TEST_ASSERT_EQUAL_INT(0, flow_setup_runs);
+    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_FULL_REFRESH));
+    TEST_ASSERT_TRUE(mock_delay_total_ms() < 1000u);
+    TEST_ASSERT_EQUAL_INT(1, flow_sleeps);
+}
+
+/* The control: a BOOT-only wake carries no A-D button, so the guard has
+   nothing to say about it and it times its hold as ever. */
+void test_setup_a_boot_only_wake_still_takes_the_boot_path_with_a_stale_held_mask(void) {
+    flow_install_setup_ops();
+    mock_time_set(flow_at(15, 0));
+    flow_woke_by_boot = true;
+    flow_boot_down_ms = 7000;
+    s_held_mask_at_sleep = 1u << BTN_A;
+    s_sleep_entry_time = (int64_t)flow_at(15, 0) - 1;
+
+    TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_button());
+
+    TEST_ASSERT_EQUAL_INT(1, flow_release_hints);
+    TEST_ASSERT_EQUAL_INT(1, flow_setup_runs);
+}
+
+/* A press that really is new, made with BOOT held, still reaches the hold
+   path after the guard (the last sleep's mask did not include it). */
+void test_setup_a_new_press_with_boot_held_after_the_guard_still_runs_setup(void) {
+    flow_install_setup_ops();
+    mock_time_set(flow_at(15, 0));
+    flow_wakeup_btn = BTN_B;
+    flow_boot_down_ms = 7000;
+    s_held_mask_at_sleep = 1u << BTN_A;
+    s_sleep_entry_time = (int64_t)flow_at(15, 0) - 1;
+
+    TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_button());
+
+    TEST_ASSERT_EQUAL_INT(1, flow_setup_runs);
+}
+
+/* D with BOOT held reaches setup behind the config-error lock. That lock is
+   cleared from HA, which a device whose WiFi changed cannot reach, so the
+   gesture is its way back; the D retry is dropped for it. */
+void test_setup_boot_plus_d_under_the_config_lock_enters_setup(void) {
+    flow_install_setup_ops();
+    flow_sleep_mode_answer = WAKE_SLEEP_CONFIG_ERR;
+    flow_wakeup_btn = BTN_D;
+    flow_boot_down_ms = 7000;
+
+    TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_button());
+
+    TEST_ASSERT_EQUAL_INT(1, flow_release_hints);
+    TEST_ASSERT_EQUAL_INT(1, flow_setup_runs);
+    TEST_ASSERT_TRUE(flow_setup_cfg.has_wifi_ssid);
+    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_TRY_WINDOW)); /* no retry ran */
 }
 
 /* Through the real decode: EXT1 in the cause mask is what routes a BOOT wake
@@ -11561,9 +11680,11 @@ void test_unset_clock_the_config_error_lock_still_arms_d_alone(void) {
 
 /* ---- setup mode: any press with no SSID ---------------------------------- */
 
-/* A no-SSID device never drops to the timer schedule: a timed-out session
+/* A no-SSID device stays out of the timer schedule: a timed-out session
    sleeps buttons-only, and every press from there (a BOOT tap, a BOOT wake
-   that stays down, an A-D press) enters setup again and ends buttons-only. */
+   that stays down, an A-D press) enters setup again and ends buttons-only.
+   The one exception is bed time in force on a plausible clock, which both
+   press legs yield to (test_a_boot_wake_with_no_ssid_yields_to_bed_time). */
 void test_a_no_ssid_device_stays_in_the_setup_and_buttons_only_cycle(void) {
     flow_install_setup_ops();
     flow_no_ssid();
@@ -11615,6 +11736,40 @@ void test_a_boot_wake_with_no_ssid_enters_setup_without_a_hold(void) {
     TEST_ASSERT_EQUAL_INT(0, flow_boot_samples);
     TEST_ASSERT_EQUAL_INT(0, flow_release_hints);
     TEST_ASSERT_TRUE(mock_delay_total_ms() < 1000u);
+}
+
+/* Bed time in force outranks a no-SSID BOOT tap as it does an A-D press: no
+   session, and the ordinary sleep, whose timer wake engages the lock. */
+void test_a_boot_wake_with_no_ssid_yields_to_bed_time(void) {
+    flow_install_setup_ops();
+    flow_no_ssid();
+    flow_tick_clock(flow_at(23, 30));
+    flow_bedtime_locks = true;
+    flow_woke_by_boot = true;
+    flow_boot_down_ms = UINT32_MAX;
+
+    TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_button());
+
+    TEST_ASSERT_EQUAL_INT(0, flow_setup_runs);
+    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_END_SCREEN));
+    TEST_ASSERT_EQUAL_INT(0, flow_boot_samples);
+    TEST_ASSERT_EQUAL_INT(1, flow_sleeps);
+    TEST_ASSERT_EQUAL_INT(WAKE_SLEEP_NORMAL, flow_slept_mode);
+}
+
+/* ...and only while it is in force: out of the window the same tap enters
+   setup. */
+void test_a_boot_wake_with_no_ssid_outside_bed_time_enters_setup(void) {
+    flow_install_setup_ops();
+    flow_no_ssid();
+    flow_tick_clock(flow_at(15, 0));
+    flow_bedtime_locks = false;
+    flow_woke_by_boot = true;
+    flow_boot_down_ms = 0;
+
+    TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_button());
+
+    TEST_ASSERT_EQUAL_INT(1, flow_setup_runs);
 }
 
 /* The control: with an SSID a BOOT tap still does nothing and sleeps normally. */
@@ -11699,6 +11854,14 @@ static void flow_assert_a_no_ssid_tick_waits_for_a_press_after(esp_reset_reason_
     TEST_ASSERT_EQUAL_INT(WAKE_SLEEP_BUTTONS_ONLY, flow_slept_mode);
     TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_TRY_WINDOW));
     TEST_ASSERT_EQUAL_INT(0, FLOW_RENDERS());
+    /* Whatever the crashed session left on the glass is replaced by the
+       no-SSID end screen, once, through the session's own op, and before the
+       sleep; the pixels are dark by then. */
+    TEST_ASSERT_EQUAL_INT(1, flow_end_screens);
+    TEST_ASSERT_EQUAL_INT(SETUP_SESSION_END_FAILED, flow_end_kind);
+    TEST_ASSERT_FALSE(flow_end_has_ssid);
+    TEST_ASSERT_TRUE(flow_log_at(EV_PIXELS_OFF) < flow_log_at(EV_END_SCREEN));
+    TEST_ASSERT_TRUE(flow_log_at(EV_END_SCREEN) < flow_log_at(EV_SLEEP));
 }
 
 void test_a_no_ssid_panic_waits_for_a_press(void) {
@@ -12267,6 +12430,13 @@ int main(void) {
     RUN_TEST(test_setup_a_release_just_before_the_threshold_is_cancelled);
     RUN_TEST(test_setup_a_release_just_after_the_threshold_runs_setup);
     RUN_TEST(test_setup_a_boot_pad_stuck_low_is_bounded_short_of_the_failsafe);
+    RUN_TEST(test_setup_a_hold_that_hits_its_bound_under_a_lock_repaints_the_lock_screen);
+    RUN_TEST(test_setup_a_held_button_with_boot_held_is_a_continuation_not_a_gesture);
+    RUN_TEST(test_setup_a_boot_only_wake_still_takes_the_boot_path_with_a_stale_held_mask);
+    RUN_TEST(test_setup_a_new_press_with_boot_held_after_the_guard_still_runs_setup);
+    RUN_TEST(test_setup_boot_plus_d_under_the_config_lock_enters_setup);
+    RUN_TEST(test_a_boot_wake_with_no_ssid_yields_to_bed_time);
+    RUN_TEST(test_a_boot_wake_with_no_ssid_outside_bed_time_enters_setup);
     RUN_TEST(test_setup_a_boot_wake_through_the_wake_decode_runs_setup);
     RUN_TEST(test_setup_an_a_to_d_wake_samples_the_boot_pad_once_and_acts);
     RUN_TEST(test_setup_an_a_to_d_press_with_boot_already_held_times_the_hold_and_runs_setup);

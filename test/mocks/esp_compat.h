@@ -71,13 +71,10 @@ typedef int esp_err_t;
    On native, it's a no-op — g_rtc_state is a regular static. */
 #define RTC_DATA_ATTR
 
-/* Reset causes, in ESP-IDF's declaration order so the values match the
-   real enum (esp_system.h). Trimmed to the causes the forensics map
-   names, plus USB, which the setup trigger classifies as a cold boot;
-   IDF's remaining reasons (SDIO, JTAG, ...) exist only on device and
-   reach the maps' default arm there. USB sits after BROWNOUT here, so its
-   value differs from the real enum's (SDIO comes between them there):
-   nothing on host depends on the numeric value. */
+/* Reset causes, mirroring ESP-IDF's enum (esp_system.h) in order and value,
+   so a test built on a value means what it does on device. The reasons the
+   firmware names are used as they are; the rest (SDIO, JTAG, ...) exist so
+   a test can drive the maps' default arm with a real reason. */
 typedef enum {
     ESP_RST_UNKNOWN = 0,
     ESP_RST_POWERON,
@@ -89,7 +86,12 @@ typedef enum {
     ESP_RST_WDT,
     ESP_RST_DEEPSLEEP,
     ESP_RST_BROWNOUT,
+    ESP_RST_SDIO,
     ESP_RST_USB,
+    ESP_RST_JTAG,
+    ESP_RST_EFUSE,
+    ESP_RST_PWR_GLITCH,
+    ESP_RST_CPU_LOCKUP,
 } esp_reset_reason_t;
 
 /* The app description ESP-IDF builds into the image (esp_app_desc.h).

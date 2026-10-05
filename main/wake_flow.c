@@ -2564,9 +2564,12 @@ void wake_flow_note_sleep_entry(void) {
    reasons that both come from there being nothing to sync with:
      - the rollover's network window cannot succeed with no SSID, so on a
        cold boot it would burn a full association timeout and count a join
-       failure before setup ever ran. Setup touches no timer state, and the
+       failure before setup ever ran. Setup records no day, and the
        rollover simply happens on the next wake (the stored day is still
-       empty, so it fires then, with the new credentials).
+       empty, so it fires then, with the new credentials). The only timer
+       state a session writes is the NET_WINDOW ending's forced-sync flag
+       and cleared join-failure run (wake_flow_run_setup_and_sleep), which
+       the rollover's own reset rewrites to the same zeros.
      - the no-clock gate ends the wake. On a fresh device the clock is
        unset, the gate would engage and sleep, and setup would never be
        reached. Bed time does not apply to an unset clock, so there is no
@@ -2578,12 +2581,18 @@ void wake_flow_note_sleep_entry(void) {
    which a device with no SSID cannot reach.
 
    BOOT arrives as a wake of its own, or as an A-D press that finds BOOT
-   already down. Policy arms BOOT on unlocked and no-clock-locked sleeps
-   only, so it cannot arrive behind a config-error, charge or bed-time lock.
-   Bed time can still begin by the wall clock while the device is asleep,
-   but the window is under a minute on the normal schedule and the next
-   tick engages it, so the BOOT path does not ask. It must not run the A-D
-   press path at all. */
+   already down. Policy arms BOOT on unlocked, no-clock-locked and
+   buttons-only sleeps, so BOOT alone cannot wake the device behind a
+   config-error, charge or bed-time lock. An A-D press can: the config-error
+   sleep arms D, and D with BOOT held still enters setup there, which is
+   wanted. That lock is cleared from HA, which a device whose WiFi changed
+   cannot reach, and D only retries the credentials that broke, so the
+   gesture is the way back short of a power cycle. Charge and bed time arm
+   no buttons, so neither can arrive this way.
+   Bed time can begin by the wall clock during a buttons-only sleep. A
+   no-SSID BOOT wake asks about it first, as the A-D leg does, and then
+   sleeps the ordinary schedule: that arms a timer wake, whose tick engages
+   it. The BOOT path must not run the A-D press path at all. */
 
 static setup_session_ops_t s_setup_ops;
 static bool s_setup_ops_installed;
@@ -2611,10 +2620,16 @@ _Static_assert(WAKE_FLOW_BOOT_HOLD_MAX_WAIT_MS < CONFIG_MAGTAG_MAX_AWAKE_SEC * 1
    Paints the release hint when the threshold is crossed. A release before
    it, a pad that is already up on the first sample (a tap shorter than the
    wake itself), and the bound all answer false, and none of them paints,
-   claims the strip or acks on the LED: a short press does nothing. */
+   claims the strip or acks on the LED: a short press does nothing.
+
+   A wait that runs out its bound after painting the hint repaints what the
+   device would normally show before it returns, or the hint ("Release to
+   enter setup") would sit on the glass through the whole sleep: a standing
+   lock's own screen, otherwise the current state. */
 static bool wake_flow_wait_for_boot_hold(void) {
     setup_trigger_boot_hold_t hold;
     setup_trigger_boot_hold_reset(&hold);
+    bool hint_painted = false;
     const uint32_t start_ms = hal_time_now_ms();
     while ((uint32_t)(hal_time_now_ms() - start_ms) < WAKE_FLOW_BOOT_HOLD_MAX_WAIT_MS) {
         const setup_trigger_boot_hold_event_t ev =
@@ -2627,8 +2642,12 @@ static bool wake_flow_wait_for_boot_hold(void) {
         }
         if (ev == SETUP_TRIGGER_BOOT_HOLD_EVENT_ARMED) {
             setup_screens_render_release_hint();
+            hint_painted = true;
         }
         hal_delay_ms(WAKE_FLOW_BOOT_HOLD_POLL_MS);
+    }
+    if (hint_painted && !lock_gate_repaint_standing_lock()) {
+        paint_current_state_full();
     }
     return false;
 }
@@ -2684,7 +2703,8 @@ static void wake_flow_run_setup_and_sleep(bool has_wifi_ssid) {
    same place a timed-out session leaves it.
 
    Bed time is asked first and wins (see the section header). The BOOT-hold
-   gesture never reaches this: its own wait already answered. */
+   gesture never reaches this: its own wait already answered, and its
+   no-SSID leg asks about bed time for itself. */
 static void wake_flow_route_no_ssid(time_t now, setup_trigger_reset_class_t reset, bool button_wake) {
     if (lock_gate_bedtime_in_force(now)) {
         return;
@@ -2700,6 +2720,14 @@ static void wake_flow_route_no_ssid(time_t now, setup_trigger_reset_class_t rese
         wake_flow_run_setup_and_sleep(has_ssid);
     } else if (!has_ssid && reset == SETUP_TRIGGER_RESET_FAULT) {
         ESP_LOGW(TAG, "No SSID after a crash: not entering setup unasked, sleeping until a press");
+        /* The crash may have come inside a session, whose QR code and
+           access-point password are still on the glass for an AP that is
+           gone. Paint the no-SSID end screen over them ("press any
+           button") through the session's own op, and darken the pixels. */
+        neopixel_stop();
+        if (s_setup_ops_installed) {
+            s_setup_ops.render_end_screen(SETUP_SESSION_END_FAILED, false);
+        }
         enter_deep_sleep(WAKE_SLEEP_BUTTONS_ONLY);
     }
 }
@@ -2713,9 +2741,15 @@ static void wake_flow_route_no_ssid(time_t now, setup_trigger_reset_class_t rese
 
    With no SSID any press enters setup, this one included: no hold is
    needed, and nothing falls back to the schedule, so a device in a drawer
-   stays in the setup / buttons-only cycle. */
+   stays in the setup / buttons-only cycle. The one exception is bed time
+   in force on a plausible clock, which outranks the press as it does on the
+   A-D leg: the device sleeps the ordinary schedule, and the timer wake that
+   arms is what engages the lock. */
 static void wake_flow_handle_boot_wake(void) {
     const bool has_ssid = wake_flow_has_wifi_ssid();
+    if (!has_ssid && lock_gate_bedtime_in_force(hal_time_now())) {
+        enter_deep_sleep(lock_gate_sleep_mode()); /* does not return */
+    }
     if (!has_ssid || wake_flow_wait_for_boot_hold()) {
         wake_flow_run_setup_and_sleep(has_ssid);
     }
@@ -2893,24 +2927,32 @@ void wake_flow_handle_button_wake(void) {
        press with no action and run in full. Taken here, with the same
        wake's resolved button, before anything of that path happens.
 
-       THE SAME BRANCH TAKES AN A-D PRESS MADE WITH BOOT ALREADY HELD. That
+       THE SAME HANDLER TAKES AN A-D PRESS MADE WITH BOOT ALREADY HELD (the
+       second test below, after the continuation guard). That
        is the gesture on a build where BOOT cannot wake the device: nothing
        is listening to BOOT while it sleeps, so the owner holds it first and
        lets the press wake the device. It is checked at entry because the
        awake waits poll only the A-D latch, and the press is not an action
        either way: BOOT held beside it means setup, not "refresh". */
-    if (buttons_woke_by_boot(btn) || (btn != BTN_NONE && buttons_is_boot_pressed())) {
+    if (buttons_woke_by_boot(btn)) {
         wake_flow_handle_boot_wake(); /* does not return */
     }
 
     /* Continuation of a hold, not a new press: same button as at sleep
        entry and the sleep lasted no time at all. Skip all action AND
        display work (a hold would otherwise churn the panel every ~3 s)
-       and go back to waiting for release. */
+       and go back to waiting for release. It runs AHEAD of the awake
+       gesture below: an A still held from the last sleep is not a new
+       gesture, and with BOOT held beside it the gesture would otherwise run
+       a fresh hold wait on every instant re-wake. */
     if (btn != BTN_NONE && (s_held_mask_at_sleep & (1u << (int)btn)) &&
         (int64_t)hal_time_now() - s_sleep_entry_time <= 2) {
         ESP_LOGI(TAG, "button %d still held from previous wake - ignoring", (int)btn);
         enter_deep_sleep(lock_gate_sleep_mode()); /* does not return */
+    }
+
+    if (btn != BTN_NONE && buttons_is_boot_pressed()) {
+        wake_flow_handle_boot_wake(); /* does not return */
     }
 
     /* No SSID: any press is setup's, with no hold. Ahead of the strip claim,

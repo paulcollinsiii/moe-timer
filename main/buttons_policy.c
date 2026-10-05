@@ -119,7 +119,8 @@ uint8_t buttons_policy_wake_mask(const buttons_policy_in_t *in) {
 
 bool buttons_policy_boot_wake_allowed(const buttons_policy_in_t *in) {
     /* Same "arm nothing" early exit as wake_source()'s narrowing. Only the
-       config-error lock keeps BOOT dark: its one exit is D. The no-clock
+       config-error lock keeps BOOT dark: its wake is D (D with BOOT held
+       still reaches setup, in wake_flow.c). The no-clock
        lock arms BOOT, the way back into setup for a device whose WiFi no
        longer works. */
     if (!in->enable || in->config_locked)
