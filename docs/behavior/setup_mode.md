@@ -70,7 +70,7 @@ the panel, then open the address.
 | Field | Rule |
 |-------|------|
 | Network name | Up to 32 bytes. Left blank on a device that already has WiFi, the saved network is kept; the current name is shown greyed as a hint. Required on a device with none |
-| WiFi password | Left blank for an open network. Otherwise 8 to 63 characters, or a 64-digit hex key. Ignored when the network name is blank |
+| WiFi password | Left blank for an open network. Otherwise 8 to 63 characters, or exactly 64 hex digits (a raw key; any other 64 characters are refused). Accents and other non-ASCII characters work: the page is UTF-8, and the 32-byte limit on the name counts bytes. Ignored when the network name is blank |
 | Broker URI | `mqtt://host`, with an optional `:port` and a trailing `/`. Up to 127 characters, no user name or path in it. Left blank, the saved broker is kept. The page cannot turn MQTT off |
 | Username | Up to 63 characters. Ignored when the URI is blank |
 | Password | Up to 63 characters. Left blank, the saved password is kept. Ignored when the URI is blank |
@@ -82,11 +82,20 @@ nothing is saved.
 
 **The WiFi join is checked before it is saved.** After Save, the page says
 `Connecting to WiFi...` and updates itself. The device tries the network, and
-only a join that works is saved. A wrong password or a network not found is
-reported on the page, nothing is saved, and you can correct it and press Save
-again in the same session. Without JavaScript, reload the page to see the result.
-Joining moves the device's own network to your router's channel, so the phone may
-drop off it for a moment and reconnect; the page waits.
+only a join that works is saved. A join that fails, after three tries, is
+reported on the page with the likely cause (a wrong password, a network not
+found, or a security mismatch, which is what a blank password against a protected
+network usually produces). Nothing is saved, and you can correct it and press
+Save again in the same session. Without JavaScript, reload the page to see the
+result. Joining moves the device's own network to your router's channel, so the
+phone may drop off it, and a phone's sign-in sheet may close with it. The page
+checks for about two minutes; if it stops hearing from the device it says so and
+points you at the device screen. Reconnect to `MagTag-xxxxxx` and reopen
+`http://192.168.4.1` to see the result. After a successful join the network
+disappears, so an open page ends the same way.
+
+A page submitted while a join is running, or after WiFi is already saved, does
+not change the WiFi. A broker in that same submit is still saved.
 
 The broker goes in the same submit as the WiFi, so fill in both at once. A device
 that already has WiFi ends setup the moment a broker-only submit is saved. To add

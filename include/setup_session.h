@@ -247,16 +247,62 @@ typedef enum {
     SETUP_JOIN_SAVED,
 } setup_join_state_t;
 
-/* Why a FAILED join failed. WRONG_PASSWORD and NOT_FOUND are the manager's
-   own two disconnect reasons, UNKNOWN any other, SAVE_FAILED a verified
-   join whose credentials the flash would not take. */
+/* Why a FAILED join failed. SECURITY_MISMATCH is the router refusing the
+   security the owner's entry implies (typically a blank password against a
+   protected network). UNKNOWN is any other disconnect, SAVE_FAILED a
+   verified join whose credentials the flash would not take. */
 typedef enum {
     SETUP_JOIN_REASON_NONE = 0,
     SETUP_JOIN_REASON_WRONG_PASSWORD,
     SETUP_JOIN_REASON_NOT_FOUND,
     SETUP_JOIN_REASON_UNKNOWN,
     SETUP_JOIN_REASON_SAVE_FAILED,
+    SETUP_JOIN_REASON_SECURITY_MISMATCH,
 } setup_join_reason_t;
+
+/* The raw wifi_err_reason_t values (esp_wifi_types_generic.h) that decide
+   the reason. They are restated here, as plain numbers, so the mapping
+   below can be host-tested without ESP-IDF; the device file records the
+   real WIFI_EVENT_STA_DISCONNECTED reason and passes it straight in. */
+#define SETUP_WIFI_REASON_MIC_FAILURE 14
+#define SETUP_WIFI_REASON_4WAY_HANDSHAKE_TIMEOUT 15
+#define SETUP_WIFI_REASON_NO_AP_FOUND 201
+#define SETUP_WIFI_REASON_AUTH_FAIL 202
+#define SETUP_WIFI_REASON_HANDSHAKE_TIMEOUT 204
+#define SETUP_WIFI_REASON_NO_AP_FOUND_W_COMPATIBLE_SECURITY 210
+#define SETUP_WIFI_REASON_NO_AP_FOUND_IN_AUTHMODE_THRESHOLD 211
+
+/* The failure reason for the last raw disconnect code. The manager's own
+   reason covers only two codes and leaves a stale value for every other,
+   so the mapping uses the raw code instead. Anything unlisted, including 0
+   (no disconnect was recorded), is UNKNOWN. */
+setup_join_reason_t setup_join_reason_from_disconnect(int wifi_reason);
+
+/* The page's and /status's view of the join. Written by the event-loop,
+   httpd and session tasks and read by httpd, so every member is a single
+   aligned word; the reason is always written before the state that makes it
+   visible. */
+typedef struct {
+    volatile setup_join_state_t state;
+    volatile setup_join_reason_t reason;
+} setup_join_t;
+
+void setup_join_init(setup_join_t *j);           /* IDLE, no reason */
+void setup_join_on_connecting(setup_join_t *j);  /* credentials accepted by the manager */
+void setup_join_on_saved(setup_join_t *j);       /* verified AND stored */
+void setup_join_on_save_failed(setup_join_t *j); /* verified, but the flash refused */
+
+/* A join failed. `reset` is the manager's reset-after-failure call; it runs
+   BEFORE FAILED becomes visible, because the page invites a retry the
+   moment it shows FAILED and the manager refuses any submit until the reset
+   has run. Its result only affects logging, so it is not consulted here. */
+void setup_join_on_failed(setup_join_t *j, int wifi_reason, void (*reset)(void *ctx), void *ctx);
+
+/* Every HTML response is served as UTF-8 (the page also carries a meta tag):
+   a browser encodes a form's text in the page's own charset, and without a
+   declaration a non-ASCII network name or password is submitted as other
+   bytes. */
+#define SETUP_SESSION_HTML_CONTENT_TYPE "text/html; charset=utf-8"
 
 /* `{"state":"idle|connecting|failed|saved","reason":"<text>"}`. The reason
    is the human phrase ("wrong password", "network not found", "unknown",
@@ -462,19 +508,21 @@ bool setup_session_apply_mqtt(const setup_session_ops_t *ops, const mqtt_form_re
 /* ---- one setup page submit ------------------------------------------------- */
 
 typedef enum {
-    SETUP_APPLY_NOTHING,      /* both groups blank: there was nothing to save */
-    SETUP_APPLY_JOIN_REFUSED, /* the manager would not take the network; nothing was stored */
-    SETUP_APPLY_MQTT_FAILED,  /* the broker could not be stored (a join, if requested, is still underway) */
-    SETUP_APPLY_JOINING,      /* the join started; its outcome arrives as a WIFI_SUCCESS/WIFI_FAIL event */
-    SETUP_APPLY_MQTT_SAVED,   /* an MQTT-only submit stored the broker; no join involved */
+    SETUP_APPLY_NOTHING,                 /* both groups blank: there was nothing to save */
+    SETUP_APPLY_JOIN_REFUSED,            /* the manager would not take the network; the form had no broker to store */
+    SETUP_APPLY_JOIN_REFUSED_MQTT_SAVED, /* same, but the broker in the same submit was stored */
+    SETUP_APPLY_MQTT_FAILED,             /* the broker could not be stored (a join, if requested, is still underway) */
+    SETUP_APPLY_JOINING,                 /* the join started; its outcome arrives as a WIFI_SUCCESS/WIFI_FAIL event */
+    SETUP_APPLY_MQTT_SAVED,              /* an MQTT-only submit stored the broker; no join involved */
 } setup_session_apply_t;
 
-/* Acts on a parsed setup form. The WiFi group goes first, so a refused join
-   leaves the broker untouched and the page can honestly say nothing was
-   saved. Then the MQTT group, stored synchronously like
-   setup_session_apply_mqtt. The caller posts MQTT_STORED only for
-   SETUP_APPLY_MQTT_SAVED: with a join in flight, that event would end a
-   session that already has an SSID before the join has been verified. */
+/* Acts on a parsed setup form. The WiFi group goes first. The MQTT group is
+   stored synchronously like setup_session_apply_mqtt, even when the join
+   was refused: a refusal means a join is running or WiFi is already saved,
+   and the broker needs neither, so dropping it would lose the owner's input
+   for nothing. The caller posts MQTT_STORED only for SETUP_APPLY_MQTT_SAVED:
+   with a join in flight, that event would end a session that already has an
+   SSID before the join has been verified. */
 setup_session_apply_t setup_session_apply_setup(const setup_session_ops_t *ops, const mqtt_form_setup_t *form);
 
 /* The banner text for an apply result: fixed literals, safe to show

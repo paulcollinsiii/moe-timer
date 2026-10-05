@@ -181,11 +181,29 @@ static const char *join_banner(setup_join_state_t state, setup_join_reason_t rea
         case SETUP_JOIN_CONNECTING:
             return "Connecting to WiFi... reload this page to see the result.";
         case SETUP_JOIN_FAILED:
-            *tail = ". Check the password and try again.";
-            return reason == SETUP_JOIN_REASON_WRONG_PASSWORD ? "Could not join: wrong password"
-                   : reason == SETUP_JOIN_REASON_NOT_FOUND    ? "Could not join: network not found"
-                   : reason == SETUP_JOIN_REASON_SAVE_FAILED  ? "Joined, but could not save: flash write failed"
-                                                              : "Could not join: unknown";
+            /* Each reason gets advice that fits it: telling the owner to
+               check the password after "network not found", or to retry a
+               save the device has already given up on, sends them the
+               wrong way. */
+            switch (reason) {
+                case SETUP_JOIN_REASON_WRONG_PASSWORD:
+                    *tail = ". Check the password and try again.";
+                    return "Could not join: wrong password";
+                case SETUP_JOIN_REASON_NOT_FOUND:
+                    *tail = ". Check the network name and try again.";
+                    return "Could not join: network not found";
+                case SETUP_JOIN_REASON_SECURITY_MISMATCH:
+                    *tail = ". Check the password (leave it blank only for an open network) and try again.";
+                    return "Could not join: the network did not accept the security setting";
+                case SETUP_JOIN_REASON_SAVE_FAILED:
+                    *tail = ". The device will end setup.";
+                    return "Joined, but could not save: flash write failed";
+                case SETUP_JOIN_REASON_NONE:
+                case SETUP_JOIN_REASON_UNKNOWN:
+                default:
+                    *tail = ". Check the name and password and try again.";
+                    return "Could not join: unknown";
+            }
         case SETUP_JOIN_SAVED:
             return "WiFi saved. The device will reconnect on its own; you can close this page.";
         case SETUP_JOIN_IDLE:
@@ -199,7 +217,8 @@ bool setup_session_render_page(const setup_session_page_in_t *in, setup_session_
     bool has_ssid = in->ssid_escaped != NULL && in->ssid_escaped[0] != '\0';
 
     emit(&st,
-         "<!doctype html><meta name=viewport content=\"width=device-width,initial-scale=1\">"
+         "<!doctype html><meta charset=utf-8>"
+         "<meta name=viewport content=\"width=device-width,initial-scale=1\">"
          "<title>MagTag setup</title>"
          "<body style=\"font-family:sans-serif;max-width:360px;margin:2em auto\">"
          "<h1>MagTag setup</h1>");
@@ -207,7 +226,7 @@ bool setup_session_render_page(const setup_session_page_in_t *in, setup_session_
     const char *tail = "";
     const char *banner = in->status_msg != NULL ? in->status_msg : join_banner(in->join_state, in->join_reason, &tail);
     if (banner != NULL) {
-        emit(&st, "<p><b>");
+        emit(&st, "<p><b id=b>");
         emit(&st, banner);
         emit(&st, tail);
         emit(&st, "</b></p>");
@@ -232,9 +251,17 @@ bool setup_session_render_page(const setup_session_page_in_t *in, setup_session_
 
     if (in->join_state == SETUP_JOIN_CONNECTING) {
         emit(&st,
-             "<script>function p(){fetch('/status').then(function(r){return r.json()}).then(function(j){"
-             "if(j.state=='connecting')setTimeout(p,2000);else location.reload()})"
-             ".catch(function(){setTimeout(p,2000)})}setTimeout(p,2000)</script>");
+             /* The phone can leave the SoftAP when the join moves it to the
+                router's channel, and the AP itself goes away after a
+                success, so the poll stops after 60 tries (2 minutes) or 5
+                failed fetches in a row and says where to look instead. */
+             "<script>var n=0,f=0;function g(){document.getElementById('b').textContent="
+             "'This page stopped hearing from the device. Check the device screen, "
+             "or reopen http://" SETUP_SESSION_AP_IP
+             " to see the result.'}"
+             "function p(){if(n++>60||f>4)return g();fetch('/status').then(function(r){return r.json()})"
+             ".then(function(j){f=0;if(j.state=='connecting')setTimeout(p,2000);else location.reload()})"
+             ".catch(function(){f++;setTimeout(p,2000)})}setTimeout(p,2000)</script>");
     }
     return st.ok;
 }
@@ -261,6 +288,8 @@ static const char *join_reason_str(setup_join_reason_t reason) {
             return "wrong password";
         case SETUP_JOIN_REASON_NOT_FOUND:
             return "network not found";
+        case SETUP_JOIN_REASON_SECURITY_MISMATCH:
+            return "security mismatch";
         case SETUP_JOIN_REASON_UNKNOWN:
             return "unknown";
         case SETUP_JOIN_REASON_SAVE_FAILED:
@@ -289,13 +318,59 @@ setup_session_apply_t setup_session_apply_setup(const setup_session_ops_t *ops, 
     if (!form->has_wifi && !form->has_mqtt)
         return SETUP_APPLY_NOTHING;
 
-    if (form->has_wifi && !ops->join_wifi(form->ssid, form->wifi_pass))
-        return SETUP_APPLY_JOIN_REFUSED;
+    bool join_refused = form->has_wifi && !ops->join_wifi(form->ssid, form->wifi_pass);
 
     if (form->has_mqtt && !setup_session_apply_mqtt(ops, &form->mqtt))
         return SETUP_APPLY_MQTT_FAILED;
 
+    if (join_refused)
+        return form->has_mqtt ? SETUP_APPLY_JOIN_REFUSED_MQTT_SAVED : SETUP_APPLY_JOIN_REFUSED;
     return form->has_wifi ? SETUP_APPLY_JOINING : SETUP_APPLY_MQTT_SAVED;
+}
+
+/* ---- the join's reasons and transitions ------------------------------------ */
+
+setup_join_reason_t setup_join_reason_from_disconnect(int wifi_reason) {
+    switch (wifi_reason) {
+        case SETUP_WIFI_REASON_AUTH_FAIL:
+        case SETUP_WIFI_REASON_4WAY_HANDSHAKE_TIMEOUT:
+        case SETUP_WIFI_REASON_HANDSHAKE_TIMEOUT:
+        case SETUP_WIFI_REASON_MIC_FAILURE:
+            return SETUP_JOIN_REASON_WRONG_PASSWORD;
+        case SETUP_WIFI_REASON_NO_AP_FOUND:
+            return SETUP_JOIN_REASON_NOT_FOUND;
+        case SETUP_WIFI_REASON_NO_AP_FOUND_W_COMPATIBLE_SECURITY:
+        case SETUP_WIFI_REASON_NO_AP_FOUND_IN_AUTHMODE_THRESHOLD:
+            return SETUP_JOIN_REASON_SECURITY_MISMATCH;
+        default:
+            return SETUP_JOIN_REASON_UNKNOWN;
+    }
+}
+
+void setup_join_init(setup_join_t *j) {
+    j->reason = SETUP_JOIN_REASON_NONE;
+    j->state = SETUP_JOIN_IDLE;
+}
+
+void setup_join_on_connecting(setup_join_t *j) {
+    j->reason = SETUP_JOIN_REASON_NONE;
+    j->state = SETUP_JOIN_CONNECTING;
+}
+
+void setup_join_on_saved(setup_join_t *j) {
+    j->state = SETUP_JOIN_SAVED;
+}
+
+void setup_join_on_save_failed(setup_join_t *j) {
+    j->reason = SETUP_JOIN_REASON_SAVE_FAILED;
+    j->state = SETUP_JOIN_FAILED;
+}
+
+void setup_join_on_failed(setup_join_t *j, int wifi_reason, void (*reset)(void *ctx), void *ctx) {
+    if (reset != NULL)
+        reset(ctx);
+    j->reason = setup_join_reason_from_disconnect(wifi_reason);
+    j->state = SETUP_JOIN_FAILED;
 }
 
 const char *setup_session_apply_msg(setup_session_apply_t result) {
@@ -303,7 +378,9 @@ const char *setup_session_apply_msg(setup_session_apply_t result) {
         case SETUP_APPLY_NOTHING:
             return "Nothing to save: enter a WiFi network or a broker.";
         case SETUP_APPLY_JOIN_REFUSED:
-            return "Could not start the WiFi join (one may already be running). Reload and try again.";
+            return "WiFi was not changed: a join is running, or WiFi is already saved. Reload to see which.";
+        case SETUP_APPLY_JOIN_REFUSED_MQTT_SAVED:
+            return "Broker saved. WiFi was not changed: a join is running, or WiFi is already saved.";
         case SETUP_APPLY_MQTT_FAILED:
             return "could not save: flash write failed";
         case SETUP_APPLY_JOINING:

@@ -947,9 +947,9 @@ void test_setup_wifi_password_length_boundaries(void) {
         TEST_ASSERT_EQUAL(MQTT_FORM_ERR_TOO_SHORT, st.err);
         TEST_ASSERT_EQUAL(MQTT_FORM_FIELD_WIFI_PASS, st.field);
     }
-    /* 8 and 63 are passphrases, 64 is a raw hex PSK */
-    size_t ok_lens[] = {8, 63, 64};
-    for (size_t i = 0; i < 3; i++) {
+    /* 8 and 63 are passphrases of any printable character */
+    size_t ok_lens[] = {8, 63};
+    for (size_t i = 0; i < 2; i++) {
         memset(body + 15, 'p', ok_lens[i]);
         body[15 + ok_lens[i]] = '\0';
         TEST_ASSERT_EQUAL(MQTT_FORM_ERR_NONE, parse_setup(body, &out).err);
@@ -960,6 +960,57 @@ void test_setup_wifi_password_length_boundaries(void) {
     mqtt_form_status_t st = parse_setup(body, &out);
     TEST_ASSERT_EQUAL(MQTT_FORM_ERR_TOO_LONG, st.err);
     TEST_ASSERT_EQUAL(MQTT_FORM_FIELD_WIFI_PASS, st.field);
+}
+
+/* Exactly 64 characters is a raw PSK, which the driver only accepts as hex;
+   anything else of that length is neither a passphrase (max 63) nor a key. */
+void test_setup_64_character_password_must_be_hex(void) {
+    char body[128];
+    mqtt_form_setup_t out;
+    memcpy(body, "ssid=Net&wpass=", 15);
+
+    memset(body + 15, 'a', 64);
+    body[15 + 64] = '\0';
+    TEST_ASSERT_EQUAL(MQTT_FORM_ERR_NONE, parse_setup(body, &out).err);
+    TEST_ASSERT_EQUAL(64, strlen(out.wifi_pass));
+
+    memcpy(body + 15, "0123456789abcdefABCDEF0123456789abcdefABCDEF0123456789abcdefABCD", 64);
+    TEST_ASSERT_EQUAL(MQTT_FORM_ERR_NONE, parse_setup(body, &out).err);
+
+    memset(body + 15, 'p', 64);
+    mqtt_form_status_t st = parse_setup(body, &out);
+    TEST_ASSERT_EQUAL(MQTT_FORM_ERR_BAD_CHAR, st.err);
+    TEST_ASSERT_EQUAL(MQTT_FORM_FIELD_WIFI_PASS, st.field);
+    TEST_ASSERT_EQUAL(0, out.wifi_pass[0]); /* zeroed on failure */
+
+    memset(body + 15, 'a', 64);
+    body[15 + 63] = 'g'; /* one non-hex digit at the end */
+    TEST_ASSERT_EQUAL(MQTT_FORM_ERR_BAD_CHAR, parse_setup(body, &out).err);
+}
+
+/* A browser sends UTF-8 once the page declares it. The parser must hand
+   those bytes through untouched and count the SSID limit in bytes, which is
+   what the 802.11 SSID field is. */
+void test_setup_ssid_utf8_passes_through_and_counts_bytes(void) {
+    mqtt_form_setup_t out;
+    TEST_ASSERT_EQUAL(MQTT_FORM_ERR_NONE, parse_setup("ssid=Caf%C3%A9&wpass=pass%C3%A9word", &out).err);
+    TEST_ASSERT_EQUAL_STRING("Caf\xC3\xA9", out.ssid);
+    TEST_ASSERT_EQUAL_STRING("pass\xC3\xA9word", out.wifi_pass);
+
+    /* 16 two-byte characters = 32 bytes: fits. 17 = 34 bytes: too long. */
+    char body[256] = "ssid=";
+    size_t n = 5;
+    for (int i = 0; i < 16; i++) {
+        memcpy(body + n, "%C3%A9", 6);
+        n += 6;
+    }
+    body[n] = '\0';
+    TEST_ASSERT_EQUAL(MQTT_FORM_ERR_NONE, parse_setup(body, &out).err);
+    TEST_ASSERT_EQUAL(32, strlen(out.ssid));
+    memcpy(body + n, "%C3%A9", 7);
+    mqtt_form_status_t st = parse_setup(body, &out);
+    TEST_ASSERT_EQUAL(MQTT_FORM_ERR_TOO_LONG, st.err);
+    TEST_ASSERT_EQUAL(MQTT_FORM_FIELD_WIFI_SSID, st.field);
 }
 
 void test_setup_rejects_control_characters_in_the_wifi_fields(void) {
@@ -1059,6 +1110,8 @@ int main(void) {
     RUN_TEST(test_setup_decodes_percent_and_plus_in_the_wifi_fields);
     RUN_TEST(test_setup_ssid_length_boundary_is_32_bytes);
     RUN_TEST(test_setup_wifi_password_length_boundaries);
+    RUN_TEST(test_setup_64_character_password_must_be_hex);
+    RUN_TEST(test_setup_ssid_utf8_passes_through_and_counts_bytes);
     RUN_TEST(test_setup_rejects_control_characters_in_the_wifi_fields);
     RUN_TEST(test_setup_runs_the_mqtt_validators_when_a_uri_is_present);
     RUN_TEST(test_setup_a_failure_zeroes_every_field_including_the_wifi_password);

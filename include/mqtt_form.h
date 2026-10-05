@@ -82,7 +82,7 @@ _Static_assert(MQTT_FORM_BODY_MAX >=
    buffer of capacity n (holding up to n-1 characters plus a NUL): every
    character could be the one entity that expands widest (`"` -> 6-byte
    "&quot;"), so 6 bytes per input character plus the output's own NUL
-   covers anything the escaper can be given. Task 4's two prefilled
+   covers anything the escaper can be given. The page's prefilled
    fields (uri, user -- pass is never escaped, see the escaper's own doc
    comment below) should size their escape buffers with this rather than
    guess, and remember that buffer sits on the same protocomm httpd task
@@ -183,8 +183,10 @@ typedef struct {
 /* Parses the setup page's urlencoded body, same decoding, body cap, NUL
    and duplicate rules as mqtt_form_parse_urlencoded. WiFi rules: the SSID
    is at most 32 bytes with no control character; the password is blank
-   (open network), or 8-63 characters, or a 64-character hex PSK, with no
-   control character (MQTT_FORM_ERR_TOO_SHORT for 1-7). The MQTT group
+   (open network), or 8-63 characters, or exactly 64 hex digits (a raw
+   PSK; 64 characters that are not all hex are MQTT_FORM_ERR_BAD_CHAR),
+   with no control character (MQTT_FORM_ERR_TOO_SHORT for 1-7). Bytes pass
+   through as decoded, so UTF-8 survives and the 32 is a byte count. The MQTT group
    goes through the same validation as the MQTT-only parser. On any non-OK
    return *out is zeroed in full (THE FAILURE CONTRACT above). */
 mqtt_form_status_t mqtt_form_parse_setup(const char *body, size_t body_len, mqtt_form_setup_t *out);
@@ -212,7 +214,7 @@ mqtt_form_status_t mqtt_form_parse_json(const char *body, size_t body_len, mqtt_
 const char *mqtt_form_error_str(mqtt_form_err_t err);
 
 /* Escapes &, <, >, " and ' so `in` is safe to place inside a double-quoted
-   HTML attribute value (`value="..."`), which is how task 4's form page
+   HTML attribute value (`value="..."`), which is how the setup page
    prefills uri and user from NVS. Writes the escaped text plus a NUL
    into out (capacity out_len) and returns true, or, if the escaped text
    (including its NUL) would not fit, writes an empty string to out

@@ -130,8 +130,10 @@ hand. The password lives in RAM and is zeroed once the AP is up.
 
 **The captive portal.** So the page opens by itself, three things point a
 joining phone at the device. DHCP offers the device as the DNS server and names
-`http://192.168.4.1` in option 114 (set while the AP's DHCP server is still
-stopped; the option's string is static because the server keeps the pointer). A
+`http://192.168.4.1` in option 114, the captive-portal URI (set while the AP's
+DHCP server is still stopped; the option's string is static because the server
+keeps the pointer). Whether a phone acts on option 114 is unproven; the DNS answer
+and the redirect are what carry the popup. A
 small task, `dns_task`, answers every A query on UDP 53 with `192.168.4.1` and
 every other query type with an empty answer, built by the pure
 `dns_reply_build()`, which drops anything malformed rather than answering it. And
@@ -164,22 +166,36 @@ state machine and one set of events, and a join is refused while one is already
 past accepting credentials. The page stores nothing for WiFi. `GET /status`
 reports `{"state":"idle|connecting|failed|saved","reason":"..."}`; `failed` is
 published only after the manager's state has been reset, because it refuses a
-retry until then, and the reason is `wrong password` or `network not found` from
-the manager's disconnect reason. A submit with both groups joins first and stores
-the broker second, so a refused join stores nothing, and it posts no
-broker-stored event, which would end a session that already has WiFi before the
-join is verified.
+retry until then. The manager is configured for three connection attempts: its
+default of unlimited attempts retries forever on every disconnect reason except
+five, so a join failing for any other reason would sit at `connecting` and the
+manager would refuse every later submit. After three, every reason ends in the
+failure event. The reason shown is mapped from the raw
+`WIFI_EVENT_STA_DISCONNECTED` code by `setup_join_reason_from_disconnect()`
+(`wrong password`, `network not found`, `security mismatch`, else `unknown`),
+because the manager's own reason covers two codes and is stale for the rest. The
+transitions, including the reset-before-`failed` order, live in `setup_join_*` in
+`setup_session.c`. A submit with both groups joins first and stores the broker
+second, and it posts no broker-stored event, which would end a session that
+already has WiFi before the join is verified. If the join is refused (one is
+running, or WiFi is already saved), the broker is stored anyway, since it needs no
+join, and the page says WiFi was not changed. Every HTML response is sent as
+`text/html; charset=utf-8` and the page carries a `<meta charset>`, so a browser
+submits a non-ASCII name or password as UTF-8.
 
 **One credential store.** The app keeps WiFi in its own NVS keys
 (`include/nvs_keys.h`), and `wifi_session.c` hands them to `esp_wifi_set_config`
-itself, with the driver in `WIFI_STORAGE_RAM`. Those keys are therefore the only
-persisted copy. The manager writes its own copy to flash when credentials
-arrive, so on a verified join the session copies the SSID and password into the
-app's keys and then clears the driver's store (`esp_wifi_restore`, deferred to
-teardown), leaving no second copy to disagree. If the copy fails, the session
+itself, with the driver in `WIFI_STORAGE_RAM`, so the driver's flash copy is never
+read: those keys are the only copy the device uses. The manager writes its own
+copy to flash when credentials arrive, before they are verified, so the session
+copies a verified SSID and password into the app's keys, and teardown clears the
+driver's store (`esp_wifi_restore`) whenever a join was attempted, whether it
+verified, failed or was cut off by the timeout, leaving no second copy behind. If the copy fails, the session
 ends in error and leaves the driver's copy alone. A wrong password is reported
 on the page or to the phone app, resets the manager so a retry can follow, and
 is stored nowhere. After a verified join the session stays up for 15 s
-(`SETUP_SESSION_SUCCESS_LINGER_MS`): the page polls `/status` and the stock apps
-poll for status, and both report failure if the endpoints disappear. The STA netif is created in one
+(`SETUP_SESSION_SUCCESS_LINGER_MS`) so the page and the stock apps can poll
+`/status`. The page gives up after about two minutes or five failed fetches and
+tells the owner to check the device screen; it cannot do more, because the phone
+may have left the AP. The STA netif is created in one
 place, `wifi_session_sta_netif()`, and shared with the window code.

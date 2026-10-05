@@ -228,6 +228,13 @@ mqtt_form_status_t mqtt_form_parse_setup(const char *body, size_t body_len, mqtt
             return setup_fail(out, MQTT_FORM_ERR_BAD_CHAR, MQTT_FORM_FIELD_WIFI_PASS);
         if (pass_len > 0 && pass_len < 8)
             return setup_fail(out, MQTT_FORM_ERR_TOO_SHORT, MQTT_FORM_FIELD_WIFI_PASS);
+        /* A passphrase tops out at 63, so 64 can only be a raw PSK, which
+           the driver takes as hex digits and nothing else. */
+        if (pass_len == 64) {
+            for (size_t i = 0; i < pass_len; i++)
+                if (hex_val(out->wifi_pass[i]) < 0)
+                    return setup_fail(out, MQTT_FORM_ERR_BAD_CHAR, MQTT_FORM_FIELD_WIFI_PASS);
+        }
         out->has_wifi = true;
     } else {
         memset(out->wifi_pass, 0, sizeof(out->wifi_pass));

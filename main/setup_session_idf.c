@@ -97,7 +97,7 @@ static const char *TAG = "setup_session_idf";
 
 static bool s_wifi_inited;
 static bool s_mgr_inited;
-static bool s_clear_driver_store_requested; /* D3, deferred — see setup_session_idf_clear_wifi_driver_store() */
+static bool s_clear_driver_store_requested; /* deferred — see setup_session_idf_clear_wifi_driver_store() */
 /* True from the top of setup_session_idf_stop() until it returns: an
    NETWORK_PROV_END/_DEINIT our OWN stop provokes is not a failure to
    report — see prov_event_handler's NETWORK_PROV_END case. */
@@ -108,11 +108,22 @@ static QueueHandle_t s_evt_queue;
 
 /* Where the browser-or-app WiFi join stands, for the page and /status. Written by
    the event-loop task (the manager's events), the httpd task (a submit) and
-   the session task (the credential store), read by httpd; each is one
-   aligned word, and the reason is always written before the state that
-   makes it visible, so a reader never sees FAILED with a stale reason. */
-static volatile setup_join_state_t s_join_state;
-static volatile setup_join_reason_t s_join_reason;
+   the session task (the credential store), read by httpd; setup_join_t's
+   own contract keeps a reader from seeing FAILED with a stale reason. */
+static setup_join_t s_join;
+
+/* The raw reason of the latest WIFI_EVENT_STA_DISCONNECTED. The manager's
+   own reason covers two codes and is stale for the rest, so CRED_FAIL reads
+   this instead. Both events run on the event-loop task, and the manager
+   posts CRED_FAIL from inside its own handler for that disconnect, so this
+   is always written before the CRED_FAIL that reads it. */
+static volatile int s_last_disconnect_reason;
+static esp_event_handler_instance_t s_inst_wifi_disc;
+
+/* A failed join gets this many tries before the manager gives up. With the
+   default (0) the manager retries forever on every reason except the five
+   it knows, which leaves it, and this page, stuck at "connecting". */
+#define SETUP_SESSION_WIFI_CONN_ATTEMPTS 3
 
 /* Captive portal DNS responder. s_dns_done is given by the task as its last
    act, so stop() knows the socket is closed before the netifs go away. */
@@ -188,9 +199,9 @@ static void send_page(httpd_req_t *req, const char *status_msg) {
                                   .uri_escaped = s->uri_esc,
                                   .user_escaped = s->user_esc,
                                   .status_msg = status_msg,
-                                  .join_state = s_join_state,
-                                  .join_reason = s_join_reason};
-    httpd_resp_set_type(req, "text/html");
+                                  .join_state = s_join.state,
+                                  .join_reason = s_join.reason};
+    httpd_resp_set_type(req, SETUP_SESSION_HTML_CONTENT_TYPE);
     (void)setup_session_render_page(&in, httpd_chunk_sink, req);
     httpd_resp_send_chunk(req, NULL, 0); /* ends the chunked response */
     free(s);
@@ -203,7 +214,7 @@ static esp_err_t page_get_handler(httpd_req_t *req) {
 
 static esp_err_t status_get_handler(httpd_req_t *req) {
     char json[96];
-    (void)setup_session_format_status_json(s_join_state, s_join_reason, json, sizeof(json));
+    (void)setup_session_format_status_json(s_join.state, s_join.reason, json, sizeof(json));
     httpd_resp_set_type(req, "application/json");
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
     return httpd_resp_send(req, json, HTTPD_RESP_USE_STRLEN);
@@ -366,7 +377,7 @@ static esp_err_t setup_post_handler(httpd_req_t *req) {
 }
 
 /* The protocomm "mqtt-config" endpoint — the esp_prov.py --custom_data
-   path (plan, D2's secondary route). Same parse-and-store, same JSON
+   path, the secondary route to the page. Same parse-and-store, same JSON
    instead of a browser form and a short plain-text reply instead of a
    page. */
 static esp_err_t mqtt_endpoint_handler(uint32_t session_id, const uint8_t *inbuf, ssize_t inlen, uint8_t **outbuf,
@@ -390,19 +401,19 @@ static esp_err_t mqtt_endpoint_handler(uint32_t session_id, const uint8_t *inbuf
 
 /* ---- the manager's own events -------------------------------------------- */
 
-/* NETWORK_PROV_WIFI_CRED_FAIL's data is a pointer to the manager's disconnect
-   reason (manager.h); anything else it adds later reads as unknown. */
-static setup_join_reason_t join_reason_from_manager(const void *data) {
-    if (data == NULL)
-        return SETUP_JOIN_REASON_UNKNOWN;
-    switch (*(const network_prov_wifi_sta_fail_reason_t *)data) {
-        case NETWORK_PROV_WIFI_STA_AUTH_ERROR:
-            return SETUP_JOIN_REASON_WRONG_PASSWORD;
-        case NETWORK_PROV_WIFI_STA_AP_NOT_FOUND:
-            return SETUP_JOIN_REASON_NOT_FOUND;
-        default:
-            return SETUP_JOIN_REASON_UNKNOWN;
-    }
+static void wifi_disconnect_handler(void *arg, esp_event_base_t base, int32_t id, void *data) {
+    (void)arg;
+    (void)base;
+    (void)id;
+    s_last_disconnect_reason = ((const wifi_event_sta_disconnected_t *)data)->reason;
+}
+
+/* setup_join_on_failed's reset callback: the manager's own reset after a
+   failure, whose result only matters for the log. */
+static void reset_manager_after_failure(void *ctx) {
+    (void)ctx;
+    if (network_prov_mgr_reset_wifi_sm_state_on_failure() != ESP_OK)
+        ESP_LOGW(TAG, "reset_wifi_sm_state_on_failure failed: a retry after this failure may be refused");
 }
 
 static void prov_event_handler(void *arg, esp_event_base_t base, int32_t id, void *data) {
@@ -433,8 +444,13 @@ static void prov_event_handler(void *arg, esp_event_base_t base, int32_t id, voi
             memcpy(s_cred_pass, cfg->password, pass_len);
             /* Whichever route the credentials came by (the page or the
                phone app), the page should show a join in progress. */
-            s_join_reason = SETUP_JOIN_REASON_NONE;
-            s_join_state = SETUP_JOIN_CONNECTING;
+            setup_join_on_connecting(&s_join);
+            s_last_disconnect_reason = 0;
+            /* The manager has just written these credentials, unverified,
+               to the driver's flash store. A failure wipes them again, but
+               a session that ends mid-join (a timeout) would not, so
+               stop() clears the store whenever a join was ever attempted. */
+            s_clear_driver_store_requested = true;
             return;
         }
         case NETWORK_PROV_WIFI_CRED_FAIL:
@@ -448,14 +464,13 @@ static void prov_event_handler(void *arg, esp_event_base_t base, int32_t id, voi
                the driver's store either. Safe on
                this task (the event-loop task) — the IDF example
                (app_main.c) calls it from the same place. */
-            if (network_prov_mgr_reset_wifi_sm_state_on_failure() != ESP_OK)
-                ESP_LOGW(TAG, "reset_wifi_sm_state_on_failure failed: a retry after this failure may be refused");
-            /* Only now is FAILED shown: the page invites a retry, and the
-               manager refuses one (network_prov_mgr_configure_wifi_sta
-               returns ESP_FAIL while its state is FAIL) until the reset
-               above has run. */
-            s_join_reason = join_reason_from_manager(data);
-            s_join_state = SETUP_JOIN_FAILED;
+            /* The reset runs before FAILED is shown: the page invites a
+               retry, and the manager refuses one
+               (network_prov_mgr_configure_wifi_sta returns ESP_FAIL while
+               its state is FAIL) until the reset has run. The reason is the
+               raw disconnect code, not the manager's two-value one, which
+               is stale for every other reason. */
+            setup_join_on_failed(&s_join, s_last_disconnect_reason, reset_manager_after_failure, NULL);
             msg.event = SETUP_SESSION_EVENT_WIFI_FAIL;
             break;
         case NETWORK_PROV_WIFI_CRED_SUCCESS:
@@ -559,8 +574,11 @@ static void dns_stop(void) {
     } else {
         /* The task is still holding its socket. Leaving the semaphore alone
            (a few dozen bytes, once) is what keeps its final give from
-           landing on freed memory. */
+           landing on freed memory, and s_dns_task stays set so dns_start
+           will not run a second responder over the same globals and port
+           while this one is alive. */
         ESP_LOGW(TAG, "dns task did not stop within %d ms", SETUP_SESSION_DNS_STOP_WAIT_MS);
+        return;
     }
     s_dns_task = NULL;
 }
@@ -568,6 +586,11 @@ static void dns_stop(void) {
 /* Fail-soft: without the responder the QR still joins the network and the
    panel still shows the address to type; only the popup is lost. */
 static void dns_start(void) {
+    dns_stop(); /* collects a responder an earlier stop gave up waiting for */
+    if (s_dns_task != NULL) {
+        ESP_LOGW(TAG, "dns: the previous responder never stopped; not starting another");
+        return;
+    }
     s_dns_stop = false;
     s_dns_done = xSemaphoreCreateBinary();
     if (s_dns_done == NULL || xTaskCreate(dns_task, "setup_dns", SETUP_SESSION_DNS_TASK_STACK, NULL,
@@ -583,7 +606,9 @@ static void dns_start(void) {
 
 /* The captive portal's DHCP half, best-effort for the same reason: hand
    clients this device as their DNS server and name the setup page in
-   option 114, which Android 11+ uses to open the page itself. The AP's
+   option 114 (the captive-portal URI; whether a given phone acts on it is
+   unproven, the DNS answer and the 404 redirect are what carry the popup).
+   The AP's
    DHCP server is not running yet (it starts with the AP), so the options
    can be set without stopping it. */
 static void dhcp_set_portal_options(esp_netif_t *ap_netif) {
@@ -644,6 +669,10 @@ void setup_session_idf_stop(void) {
            from surviving into the next session this boot. */
         network_prov_scheme_softap_set_httpd_handle(NULL);
     }
+    if (s_inst_wifi_disc != NULL) {
+        esp_event_handler_instance_unregister(WIFI_EVENT, WIFI_EVENT_STA_DISCONNECTED, s_inst_wifi_disc);
+        s_inst_wifi_disc = NULL;
+    }
     if (s_inst_prov != NULL) {
         esp_event_handler_instance_unregister(NETWORK_PROV_EVENT, ESP_EVENT_ANY_ID, s_inst_prov);
         s_inst_prov = NULL;
@@ -660,7 +689,7 @@ void setup_session_idf_stop(void) {
         free(s_srp_verifier);
         s_srp_verifier = NULL;
     }
-    /* D3's clear, deferred from setup_session_idf_clear_wifi_driver_store()
+    /* The driver-store clear, deferred from setup_session_idf_clear_wifi_driver_store()
        above: the manager is fully stopped by this point (nothing left to
        disrupt) and esp_wifi is still inited (esp_wifi_restore() needs
        that), which is the one window where this is safe to do. */
@@ -700,7 +729,7 @@ bool setup_session_idf_start(const char *ap_ssid, const char *ap_password) {
     /* netif + the default event loop are boot-global singletons; tolerate
        "already created" the same way wifi_session.c does, because a setup
        session and a normal network window never run in the same wake
-       (plan, "The setup session" item 4) but DO share a boot's lifetime of
+       but DO share a boot's lifetime of
        these two calls on the rare path where setup runs on a wake that
        skips straight past the normal window's own init. */
     ret = esp_netif_init();
@@ -740,8 +769,8 @@ bool setup_session_idf_start(const char *ap_ssid, const char *ap_password) {
         }
     }
     dhcp_set_portal_options(s_ap_netif);
-    s_join_reason = SETUP_JOIN_REASON_NONE;
-    s_join_state = SETUP_JOIN_IDLE;
+    setup_join_init(&s_join);
+    s_last_disconnect_reason = 0;
 
     wifi_init_config_t wifi_cfg = WIFI_INIT_CONFIG_DEFAULT();
     ret = esp_wifi_init(&wifi_cfg);
@@ -765,15 +794,20 @@ bool setup_session_idf_start(const char *ap_ssid, const char *ap_password) {
         setup_session_idf_stop();
         return false;
     }
+    /* Without the raw reason every failure reads as unknown, which only
+       costs the page its advice, so a failed registration is not fatal. */
+    ret = esp_event_handler_instance_register(WIFI_EVENT, WIFI_EVENT_STA_DISCONNECTED, wifi_disconnect_handler, NULL,
+                                              &s_inst_wifi_disc);
+    if (ret != ESP_OK)
+        ESP_LOGW(TAG, "disconnect handler register: %s", esp_err_to_name(ret));
 
-    /* Our own httpd instance, so the setup page can be registered on it (plan:
-       "Create the httpd instance yourself and pass it to
-       network_prov_scheme_softap_set_httpd_handle"). max_uri_handlers
-       and lru_purge_enable both raised from HTTPD_DEFAULT_CONFIG's own
-       defaults (8, false): 8 is exactly how many this session registers
-       today with zero headroom for the next one, and protocomm's own
-       httpd transport sets lru_purge_enable itself (protocomm_httpd.c)
-       while ours did not. */
+    /* Our own httpd instance, so the setup page can be registered on it
+       (the manager's scheme takes the handle through
+       network_prov_scheme_softap_set_httpd_handle). max_uri_handlers and
+       lru_purge_enable are both raised from HTTPD_DEFAULT_CONFIG's own
+       defaults (8, false): the 11 handlers this session registers would
+       overflow 8, and protocomm's own httpd transport sets
+       lru_purge_enable itself (protocomm_httpd.c) while ours did not. */
     httpd_config_t httpd_cfg = HTTPD_DEFAULT_CONFIG();
     httpd_cfg.stack_size = SETUP_SESSION_HTTPD_STACK_SIZE;
     httpd_cfg.max_uri_handlers = SETUP_SESSION_HTTPD_MAX_URI_HANDLERS;
@@ -817,6 +851,7 @@ bool setup_session_idf_start(const char *ap_ssid, const char *ap_password) {
         .scheme = network_prov_scheme_softap,
         .scheme_event_handler = NETWORK_PROV_EVENT_HANDLER_NONE,
         .app_event_handler = NETWORK_PROV_EVENT_HANDLER_NONE,
+        .network_prov_wifi_conn_cfg = {.wifi_conn_attempts = SETUP_SESSION_WIFI_CONN_ATTEMPTS},
     };
     ret = network_prov_mgr_init(mgr_cfg);
     if (ret != ESP_OK) {
@@ -923,13 +958,14 @@ bool setup_session_idf_set_wifi_creds(const char *ssid, const char *password) {
     esp_err_t r2 = nvs_config_set_wifi_pass(password);
     if (r1 != ESP_OK || r2 != ESP_OK) {
         ESP_LOGW(TAG, "wifi credential write failed (%d/%d)", r1, r2);
-        s_join_reason = SETUP_JOIN_REASON_SAVE_FAILED;
-        s_join_state = SETUP_JOIN_FAILED;
+        setup_join_on_save_failed(&s_join);
+        /* The driver's copy is the only verified one left; keep it. */
+        s_clear_driver_store_requested = false;
         return false;
     }
     /* The only place the page may say "saved": the join was verified and the
        app's own keys now hold it. */
-    s_join_state = SETUP_JOIN_SAVED;
+    setup_join_on_saved(&s_join);
     return true;
 }
 
@@ -958,12 +994,11 @@ bool setup_session_idf_join_wifi(const char *ssid, const char *password) {
         ESP_LOGW(TAG, "configure_wifi_sta refused the join: %s", esp_err_to_name(ret));
         return false;
     }
-    s_join_reason = SETUP_JOIN_REASON_NONE;
-    s_join_state = SETUP_JOIN_CONNECTING;
+    setup_join_on_connecting(&s_join);
     return true;
 }
 
-/* D3: the driver's own flash-backed copy can't disagree with the app's
+/* The driver's own flash-backed copy can't disagree with the app's
    NVS keys if it no longer exists. network_prov_mgr_reset_wifi_provisioning()
    is a thin wrapper over esp_wifi_restore() (network_provisioning 1.3.1's
    manager.c:2443-2448) and esp_wifi_restore() is documented to erase

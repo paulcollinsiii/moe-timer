@@ -752,6 +752,59 @@ void test_page_after_a_failed_join_names_the_reason_and_does_not_poll(void) {
     }
 }
 
+/* Each failure tells the owner what to do about THAT failure. */
+void test_page_failure_advice_matches_the_reason(void) {
+    struct {
+        setup_join_reason_t reason;
+        const char *must_have;
+        const char *must_not_have;
+    } cases[] = {
+        {SETUP_JOIN_REASON_WRONG_PASSWORD, "Check the password", NULL},
+        {SETUP_JOIN_REASON_NOT_FOUND, "Check the network name", "Check the password"},
+        {SETUP_JOIN_REASON_SECURITY_MISMATCH, "blank only for an open network", NULL},
+        {SETUP_JOIN_REASON_UNKNOWN, "try again", NULL},
+        {SETUP_JOIN_REASON_SAVE_FAILED, "Joined, but could not save", "Check the password"},
+    };
+    for (size_t i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        reset_page_capture();
+        setup_session_page_in_t in = plain_page();
+        in.join_state = SETUP_JOIN_FAILED;
+        in.join_reason = cases[i].reason;
+        setup_session_render_page(&in, page_sink, NULL);
+        TEST_ASSERT_NOT_NULL_MESSAGE(strstr(m_page_buf, cases[i].must_have), cases[i].must_have);
+        if (cases[i].must_not_have != NULL)
+            TEST_ASSERT_NULL_MESSAGE(strstr(m_page_buf, cases[i].must_not_have), cases[i].must_not_have);
+        if (cases[i].reason == SETUP_JOIN_REASON_SAVE_FAILED)
+            TEST_ASSERT_NULL(strstr(m_page_buf, "try again"));
+    }
+}
+
+void test_page_declares_utf8_before_anything_else(void) {
+    reset_page_capture();
+    setup_session_page_in_t in = plain_page();
+    setup_session_render_page(&in, page_sink, NULL);
+    const char *meta = strstr(m_page_buf, "<meta charset=utf-8>");
+    TEST_ASSERT_NOT_NULL(meta);
+    /* within the first 1024 bytes, which is what a browser sniffs, and ahead of the title */
+    TEST_ASSERT_LESS_THAN_size_t(1024, (size_t)(meta - m_page_buf));
+    TEST_ASSERT_TRUE(meta < strstr(m_page_buf, "<title>"));
+    TEST_ASSERT_NOT_NULL(strstr(SETUP_SESSION_HTML_CONTENT_TYPE, "charset=utf-8"));
+}
+
+/* The poll must end: a phone that dropped off the AP, or a session that
+   finished, would otherwise leave "Connecting..." on screen forever. */
+void test_page_poll_gives_up_with_a_message(void) {
+    reset_page_capture();
+    setup_session_page_in_t in = plain_page();
+    in.join_state = SETUP_JOIN_CONNECTING;
+    setup_session_render_page(&in, page_sink, NULL);
+    TEST_ASSERT_NOT_NULL(strstr(m_page_buf, "n++>60"));
+    TEST_ASSERT_NOT_NULL(strstr(m_page_buf, "f>4"));
+    TEST_ASSERT_NOT_NULL(strstr(m_page_buf, "Check the device"));
+    TEST_ASSERT_NOT_NULL(strstr(m_page_buf, "http://" SETUP_SESSION_AP_IP));
+    TEST_ASSERT_NOT_NULL(strstr(m_page_buf, "<b id=b>"));
+}
+
 void test_page_after_a_saved_join_says_saved(void) {
     reset_page_capture();
     setup_session_page_in_t in = plain_page();
@@ -823,6 +876,9 @@ void test_status_json_failed_carries_the_reason(void) {
     TEST_ASSERT_TRUE(
         setup_session_format_status_json(SETUP_JOIN_FAILED, SETUP_JOIN_REASON_SAVE_FAILED, out, sizeof(out)));
     TEST_ASSERT_EQUAL_STRING("{\"state\":\"failed\",\"reason\":\"could not save\"}", out);
+    TEST_ASSERT_TRUE(
+        setup_session_format_status_json(SETUP_JOIN_FAILED, SETUP_JOIN_REASON_SECURITY_MISMATCH, out, sizeof(out)));
+    TEST_ASSERT_EQUAL_STRING("{\"state\":\"failed\",\"reason\":\"security mismatch\"}", out);
 }
 
 /* A stale reason left from an earlier failure must not leak into a
@@ -881,12 +937,114 @@ void test_apply_setup_wifi_and_mqtt_joins_first_then_stores_the_broker(void) {
     assert_before(g_log, "join", "set_mqtt");
 }
 
-void test_apply_setup_a_refused_join_stores_nothing_at_all(void) {
+void test_apply_setup_a_refused_join_still_stores_the_broker(void) {
     setup_session_ops_t ops = make_ops();
     m_join_ok = false;
     mqtt_form_setup_t f = parsed("ssid=HomeNet&wpass=hunter22x&uri=mqtt://b.local");
+    TEST_ASSERT_EQUAL(SETUP_APPLY_JOIN_REFUSED_MQTT_SAVED, setup_session_apply_setup(&ops, &f));
+    TEST_ASSERT_EQUAL_INT_MESSAGE(1, m_set_mqtt_calls, "the broker needs no join, so it must not be dropped");
+    TEST_ASSERT_EQUAL_STRING("mqtt://b.local", m_set_mqtt_uri);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(0, m_set_wifi_calls, "a refused join stores no WiFi");
+    TEST_ASSERT_NOT_NULL(strstr(setup_session_apply_msg(SETUP_APPLY_JOIN_REFUSED_MQTT_SAVED), "roker saved"));
+}
+
+void test_apply_setup_a_refused_join_without_a_broker_stores_nothing(void) {
+    setup_session_ops_t ops = make_ops();
+    m_join_ok = false;
+    mqtt_form_setup_t f = parsed("ssid=HomeNet&wpass=hunter22x");
     TEST_ASSERT_EQUAL(SETUP_APPLY_JOIN_REFUSED, setup_session_apply_setup(&ops, &f));
-    TEST_ASSERT_EQUAL_INT_MESSAGE(0, m_set_mqtt_calls, "a join that never started must not half-save the broker");
+    TEST_ASSERT_EQUAL_INT(0, m_set_mqtt_calls);
+}
+
+void test_apply_setup_a_refused_join_and_a_failed_broker_store_reports_the_failure(void) {
+    setup_session_ops_t ops = make_ops();
+    m_join_ok = false;
+    m_set_mqtt_ok = false;
+    mqtt_form_setup_t f = parsed("ssid=HomeNet&wpass=hunter22x&uri=mqtt://b.local");
+    TEST_ASSERT_EQUAL(SETUP_APPLY_MQTT_FAILED, setup_session_apply_setup(&ops, &f));
+}
+
+void test_refused_join_message_does_not_blame_a_running_join_alone(void) {
+    /* After a verified join the refusal is not "one may already be running". */
+    const char *msg = setup_session_apply_msg(SETUP_APPLY_JOIN_REFUSED);
+    TEST_ASSERT_NOT_NULL(strstr(msg, "already saved"));
+    TEST_ASSERT_NOT_NULL(strstr(msg, "running"));
+}
+
+/* ===== pure helper: the join's reasons and state transitions =============== */
+
+void test_join_reason_maps_the_raw_disconnect_code(void) {
+    TEST_ASSERT_EQUAL(SETUP_JOIN_REASON_WRONG_PASSWORD, setup_join_reason_from_disconnect(202));
+    TEST_ASSERT_EQUAL(SETUP_JOIN_REASON_WRONG_PASSWORD, setup_join_reason_from_disconnect(15));
+    TEST_ASSERT_EQUAL(SETUP_JOIN_REASON_WRONG_PASSWORD, setup_join_reason_from_disconnect(204));
+    TEST_ASSERT_EQUAL(SETUP_JOIN_REASON_WRONG_PASSWORD, setup_join_reason_from_disconnect(14));
+    TEST_ASSERT_EQUAL(SETUP_JOIN_REASON_NOT_FOUND, setup_join_reason_from_disconnect(201));
+    TEST_ASSERT_EQUAL(SETUP_JOIN_REASON_SECURITY_MISMATCH, setup_join_reason_from_disconnect(210));
+    TEST_ASSERT_EQUAL(SETUP_JOIN_REASON_SECURITY_MISMATCH, setup_join_reason_from_disconnect(211));
+    /* beacon timeout, assoc fail, connection fail, none recorded: unknown */
+    TEST_ASSERT_EQUAL(SETUP_JOIN_REASON_UNKNOWN, setup_join_reason_from_disconnect(200));
+    TEST_ASSERT_EQUAL(SETUP_JOIN_REASON_UNKNOWN, setup_join_reason_from_disconnect(203));
+    TEST_ASSERT_EQUAL(SETUP_JOIN_REASON_UNKNOWN, setup_join_reason_from_disconnect(205));
+    TEST_ASSERT_EQUAL(SETUP_JOIN_REASON_UNKNOWN, setup_join_reason_from_disconnect(0));
+    TEST_ASSERT_EQUAL(SETUP_JOIN_REASON_UNKNOWN, setup_join_reason_from_disconnect(-1));
+}
+
+static setup_join_t *m_reset_join;
+static setup_join_state_t m_state_seen_by_reset;
+static int m_reset_calls;
+static void join_reset_probe(void *ctx) {
+    (void)ctx;
+    m_reset_calls++;
+    m_state_seen_by_reset = m_reset_join->state;
+}
+
+void test_join_failed_runs_the_reset_before_the_failure_is_visible(void) {
+    setup_join_t j;
+    setup_join_init(&j);
+    setup_join_on_connecting(&j);
+    m_reset_join = &j;
+    m_reset_calls = 0;
+    setup_join_on_failed(&j, 202, join_reset_probe, NULL);
+    TEST_ASSERT_EQUAL_INT(1, m_reset_calls);
+    TEST_ASSERT_EQUAL_MESSAGE(SETUP_JOIN_CONNECTING, m_state_seen_by_reset,
+                              "FAILED invites a retry the manager still refuses");
+    TEST_ASSERT_EQUAL(SETUP_JOIN_FAILED, j.state);
+    TEST_ASSERT_EQUAL(SETUP_JOIN_REASON_WRONG_PASSWORD, j.reason);
+}
+
+void test_join_failed_for_an_other_reason_still_fails_and_resets(void) {
+    setup_join_t j;
+    setup_join_init(&j);
+    setup_join_on_connecting(&j);
+    m_reset_join = &j;
+    m_reset_calls = 0;
+    setup_join_on_failed(&j, 205, join_reset_probe, NULL);
+    TEST_ASSERT_EQUAL_INT(1, m_reset_calls);
+    TEST_ASSERT_EQUAL(SETUP_JOIN_FAILED, j.state);
+    TEST_ASSERT_EQUAL(SETUP_JOIN_REASON_UNKNOWN, j.reason);
+}
+
+void test_join_failed_tolerates_a_missing_reset(void) {
+    setup_join_t j;
+    setup_join_init(&j);
+    setup_join_on_failed(&j, 201, NULL, NULL);
+    TEST_ASSERT_EQUAL(SETUP_JOIN_FAILED, j.state);
+    TEST_ASSERT_EQUAL(SETUP_JOIN_REASON_NOT_FOUND, j.reason);
+}
+
+void test_join_transitions_clear_the_old_reason(void) {
+    setup_join_t j;
+    setup_join_init(&j);
+    TEST_ASSERT_EQUAL(SETUP_JOIN_IDLE, j.state);
+    setup_join_on_failed(&j, 202, NULL, NULL);
+    setup_join_on_connecting(&j); /* a retry */
+    TEST_ASSERT_EQUAL(SETUP_JOIN_CONNECTING, j.state);
+    TEST_ASSERT_EQUAL(SETUP_JOIN_REASON_NONE, j.reason);
+    setup_join_on_saved(&j);
+    TEST_ASSERT_EQUAL(SETUP_JOIN_SAVED, j.state);
+    setup_join_on_save_failed(&j);
+    TEST_ASSERT_EQUAL(SETUP_JOIN_FAILED, j.state);
+    TEST_ASSERT_EQUAL(SETUP_JOIN_REASON_SAVE_FAILED, j.reason);
 }
 
 void test_apply_setup_mqtt_only_stores_the_broker_without_a_join(void) {
@@ -920,11 +1078,12 @@ void test_apply_setup_an_empty_submission_is_nothing_to_save(void) {
 }
 
 void test_apply_setup_messages_are_distinct_and_only_saved_says_saved(void) {
-    setup_session_apply_t all[] = {SETUP_APPLY_NOTHING, SETUP_APPLY_JOIN_REFUSED, SETUP_APPLY_MQTT_FAILED,
-                                   SETUP_APPLY_JOINING, SETUP_APPLY_MQTT_SAVED};
-    for (size_t i = 0; i < 5; i++) {
+    setup_session_apply_t all[] = {
+        SETUP_APPLY_NOTHING,     SETUP_APPLY_JOIN_REFUSED, SETUP_APPLY_JOIN_REFUSED_MQTT_SAVED,
+        SETUP_APPLY_MQTT_FAILED, SETUP_APPLY_JOINING,      SETUP_APPLY_MQTT_SAVED};
+    for (size_t i = 0; i < 6; i++) {
         TEST_ASSERT_TRUE(strlen(setup_session_apply_msg(all[i])) > 0);
-        for (size_t j = i + 1; j < 5; j++)
+        for (size_t j = i + 1; j < 6; j++)
             TEST_ASSERT_NOT_EQUAL(0, strcmp(setup_session_apply_msg(all[i]), setup_session_apply_msg(all[j])));
     }
     TEST_ASSERT_EQUAL_STRING("Saved.", setup_session_apply_msg(SETUP_APPLY_MQTT_SAVED));
@@ -1321,7 +1480,15 @@ int main(void) {
 
     RUN_TEST(test_apply_setup_wifi_only_starts_the_join_and_stores_nothing);
     RUN_TEST(test_apply_setup_wifi_and_mqtt_joins_first_then_stores_the_broker);
-    RUN_TEST(test_apply_setup_a_refused_join_stores_nothing_at_all);
+    RUN_TEST(test_apply_setup_a_refused_join_still_stores_the_broker);
+    RUN_TEST(test_apply_setup_a_refused_join_without_a_broker_stores_nothing);
+    RUN_TEST(test_apply_setup_a_refused_join_and_a_failed_broker_store_reports_the_failure);
+    RUN_TEST(test_refused_join_message_does_not_blame_a_running_join_alone);
+    RUN_TEST(test_join_reason_maps_the_raw_disconnect_code);
+    RUN_TEST(test_join_failed_runs_the_reset_before_the_failure_is_visible);
+    RUN_TEST(test_join_failed_for_an_other_reason_still_fails_and_resets);
+    RUN_TEST(test_join_failed_tolerates_a_missing_reset);
+    RUN_TEST(test_join_transitions_clear_the_old_reason);
     RUN_TEST(test_apply_setup_mqtt_only_stores_the_broker_without_a_join);
     RUN_TEST(test_apply_setup_an_mqtt_store_failure_is_reported);
     RUN_TEST(test_apply_setup_an_empty_submission_is_nothing_to_save);
@@ -1342,6 +1509,9 @@ int main(void) {
     RUN_TEST(test_page_omits_the_banner_and_script_on_a_plain_load);
     RUN_TEST(test_page_while_connecting_says_so_and_polls_status);
     RUN_TEST(test_page_after_a_failed_join_names_the_reason_and_does_not_poll);
+    RUN_TEST(test_page_failure_advice_matches_the_reason);
+    RUN_TEST(test_page_declares_utf8_before_anything_else);
+    RUN_TEST(test_page_poll_gives_up_with_a_message);
     RUN_TEST(test_page_after_a_saved_join_says_saved);
     RUN_TEST(test_page_status_msg_wins_the_banner_but_a_running_join_still_polls);
     RUN_TEST(test_page_stays_small);
