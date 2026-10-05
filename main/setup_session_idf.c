@@ -571,7 +571,10 @@ bool setup_session_idf_start(const char *ap_ssid, const char *ap_password) {
         setup_session_idf_stop();
         return false;
     }
-    network_prov_scheme_softap_set_httpd_handle(s_httpd);
+    /* The address of the handle, not the handle: protocomm_httpd keeps this
+       as its priv and dereferences it as httpd_handle_t * on every endpoint
+       registration. Passing s_httpd itself panics in start_provisioning. */
+    network_prov_scheme_softap_set_httpd_handle(&s_httpd);
 
     httpd_uri_t get_uri = {.uri = "/mqtt", .method = HTTP_GET, .handler = mqtt_get_handler, .user_ctx = NULL};
     httpd_uri_t post_uri = {.uri = "/mqtt", .method = HTTP_POST, .handler = mqtt_post_handler, .user_ctx = NULL};
