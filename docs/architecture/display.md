@@ -64,10 +64,10 @@ password, form URL), `Release to enter setup`, and the end screens
 failed`). `setup_screens.c` is the thin adapter that wires them to the session's
 ops. The end screens' retry line is worded for the build and the state: no
 SSID, `Press any button to retry`; with an SSID, the BOOT hold, in the
-press-then-hold form on a build without `MAGTAG_BOOT_WAKES`. The main screen's
-header also takes an optional `status_hint` string (`display_state_t`), drawn in
-the Last-sync slot for the `No WiFi: hold BOOT` hint. Its default is NULL, so no
-existing golden moved.
+hold-then-press form (`Hold BOOT, press a button, hold N s`) on a build without
+`MAGTAG_BOOT_WAKES`. The main screen's header also takes an optional
+`status_hint` string (`display_state_t`), drawn in the Last-sync slot for the
+setup hint. Its default is NULL.
 
 **The QR is drawn as rectangle runs.** `qr_render.c` encodes the payload with the
 vendored Nayuki `qrcodegen` (`lib/qrcodegen/`) into a module matrix, and a
@@ -78,8 +78,9 @@ canvas, LVGL's decoder turns the indexed image into ARGB8888 before the blit, an
 the ARGB8888-to-I1 blend sits behind `LV_DRAW_SW_SUPPORT_ARGB8888`, which
 `sdkconfig.defaults` turns off. With `LV_USE_LOG` off that fails silently: the QR
 draws nothing, on the device and on the host. Rectangle fills on I1 are the path
-the bars already use. The real payload is 132 B, which encodes as QR version 6;
-up to version 7 (154 B) still fits the 128 px height, and a longer payload falls
+the bars already use. The real payload has a fixed length (derived in `setup_session.h` beside
+`SETUP_SESSION_QR_MAX`) and encodes as QR version 6; up to
+`QR_RENDER_MAX_VERSION` still fits the 128 px height, and a longer payload falls
 back to text.
 
 That is also why `sdkconfig.defaults` trims LVGL to the label and bar widgets

@@ -43,8 +43,8 @@ titles are the device names.
 uv run tools/gen_ha_dashboard.py --mqtt --sdkconfig ~/magtag-mqtt.cfg > ha_setup.txt
 ```
 
-`--mqtt` needs `--sdkconfig PATH`, with no default. The firmware build no
-longer holds the broker (you enter it on the device), so the generator reads
+`--mqtt` needs `--sdkconfig PATH`, with no default. The firmware build does not
+hold the broker (you enter it on the device), so the generator reads
 the broker settings from an sdkconfig-style file you keep outside the
 repository, with three lines:
 

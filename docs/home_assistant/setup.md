@@ -120,15 +120,9 @@ on the broker:
 uv run tools/gen_ha_dashboard.py --mqtt --sdkconfig ~/magtag-mqtt.cfg > ha_setup.txt
 ```
 
-The firmware build no longer holds the broker, so the generator takes it from
-a small file you keep outside the repository, here `~/magtag-mqtt.cfg`, with
-three lines:
-
-```
-CONFIG_MAGTAG_MQTT_URI="mqtt://homeassistant.local:1883"
-CONFIG_MAGTAG_MQTT_USER="magtag"
-CONFIG_MAGTAG_MQTT_PASS="..."
-```
+The firmware build does not hold the broker, so the generator takes it from a
+small file you keep outside the repository, here `~/magtag-mqtt.cfg`
+([the format](dashboard.md#from-the-broker---mqtt)).
 
 `ha_setup.txt` has three parts: **1**, the steps of step 5 with each
 device's names filled in, handy for the next device you add; **2**, the

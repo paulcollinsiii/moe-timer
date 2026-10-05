@@ -67,10 +67,11 @@ Two pieces of RTC state serve setup mode ([wake_cycle.md](wake_cycle.md#setup-mo
 found no working network path: a failed join, or a join that never reached an
 SNTP server. `net_apply_finish()` advances it once per window, saturating at
 255, and the first window that works zeroes it. The only reader asks whether it
-has reached 3, which turns on the `No WiFi: hold BOOT` header hint
-(`setup_trigger_status_hint()`). It is not an automatic setup trigger. A day
-rollover clears it with the rest of the RTC state, and any reset that zeroes RTC
-data does too, so a failing network rebuilds it in three windows.
+has reached `SETUP_TRIGGER_WIFI_FAIL_HINT_THRESHOLD`, which turns on the
+header's setup hint (`setup_trigger_status_hint()`). It is not an automatic
+setup trigger. A day rollover clears it with the rest of the RTC state, and any
+reset that zeroes RTC data does too, so a failing network rebuilds it within a
+few windows.
 
 `timer_force_ntp_sync()` sets `next_ntp_sync` to 0, which reads as "never
 synced", so the next tick wake's cadence check opens a window at once. Setup

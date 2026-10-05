@@ -44,12 +44,17 @@ A BOOT-only wake decodes through `buttons_get_wakeup_button()` as `BTN_NONE`
 without the A–D scan, so a merely held A–D pad is never blamed for it.
 
 *The strapping caveat.* GPIO0 selects the ROM boot mode at reset. The design
-assumes it is sampled only on a chip or system reset and not on a deep-sleep
-wake, so holding BOOT to wake the device does not enter download mode. That is
-unconfirmed on the board ([hardware_checklist.md](../hardware_checklist.md)). If
-a board does enter download mode, build with `MAGTAG_BOOT_WAKES` off: nothing
-then arms GPIO0 for sleep, and the gesture still works as a held BOOT plus any
-A–D press, because that press wakes the device with BOOT already down.
+assumes it is sampled at power-on and other chip resets but not on a deep-sleep
+wake, so holding BOOT across a wake does not enter download mode. That is
+unconfirmed on the board ([hardware_checklist.md](../hardware_checklist.md)).
+Download mode depends on GPIO0's level at the reset, not on which pad caused
+the wake. So if a board does enter it, every BOOT-held wake does, including the
+held BOOT plus an A–D press that `MAGTAG_BOOT_WAKES` off leaves as the only
+route, and turning the symbol off is not a fix. With it off nothing arms GPIO0
+for sleep, but the setup gesture (a wake with `buttons_is_boot_pressed()` true
+at entry) still needs GPIO0 low across the wake reset, and the awake waits poll
+only the A–D latch, so no gesture works without that. A device with no stored
+WiFi is unaffected, since any press enters setup. This check gates the feature.
 
 **Awake: the press latch.** EXT1 is only a wake source, so without help the
 device would be deaf while awake: during a sync, the render-grid wait or an

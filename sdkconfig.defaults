@@ -41,11 +41,11 @@ CONFIG_ESP_CONSOLE_USB_CDC=y
 #
 # PRECEDENCE: see the rule under CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE below.
 # Here it means a checkout whose gitignored sdkconfig carries this symbol as
-# an unmarked =y (hand-set, with no "# default:" line above it) keeps =y, and
-# this line does NOT retrofit it: delete that one line from sdkconfig (never
-# the file) and run idf.py reconfigure. A sdkconfig line under a "# default:"
-# marker loses to this one, and so does a freshly cloned tree with no
-# sdkconfig. To re-enable for a bench session, set it in menuconfig — and
+# an unmarked =y (hand-set, or left by an earlier configure of this file, with
+# no "# default:" line above it) keeps =y, and this line does NOT retrofit it:
+# delete that one line from sdkconfig (never the file) and run idf.py
+# reconfigure. A sdkconfig line under a "# default:" marker loses to this one,
+# and so does a freshly cloned tree with no sdkconfig. To re-enable for a bench session, set it in menuconfig — and
 # expect the panic back while USB-attached.
 CONFIG_ESP_CONSOLE_USB_CDC_SUPPORT_ETS_PRINTF=n
 # Hold ~3 s after a panic before restarting. This used to be here so the ROM
@@ -93,19 +93,15 @@ CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions.csv"
 # This line IS picked up on a tree that already has a gitignored sdkconfig,
 # because that sdkconfig had the symbol "not set" under a "# default:" marker.
 #
-# THE PRECEDENCE RULE (not symbol-dependent). kconfgen loads this file first,
-# as user values, then sdkconfig. A sdkconfig line under a "# default:" marker
-# is not applied as a user value (esp_kconfiglib/core.py, load_config), so
-# this file wins over it. An unmarked line, one that menuconfig or a hand edit
-# set to a non-default value, wins over this file. The two measured cases
-# fit it: this symbol lost its sdkconfig line because that line was marked,
-# and CONFIG_MAGTAG_PARENT_TESTING (a project symbol since removed) beat this
-# file in both directions because its lines were unmarked. Nothing takes
-# effect until an explicit idf.py reconfigure, because this file is not a
-# CMake configure dependency (tools/cmake/kconfig.cmake). To see what a
-# reconfigure would do, without touching the real config:
-#   cp sdkconfig /tmp/sdkconfig.probe
-#   idf.py -B /tmp/build.probe -D SDKCONFIG=/tmp/sdkconfig.probe reconfigure
+# THE PRECEDENCE RULE (not symbol-dependent) and when this file is applied are
+# stated once, in docs/developer_setup.md ("sdkconfig holds your hand-set
+# values"). In short: a "# default:"-marked sdkconfig line loses to this file,
+# and any unmarked line wins over it, including a value an earlier configure
+# of this file wrote there. This file is applied at the next CMake configure
+# (idf.py reconfigure, or a build after a CMakeLists, idf_component.yml or
+# sdkconfig change), not on a build after editing this file alone
+# (tools/cmake/kconfig.cmake). The probe that shows what a reconfigure would
+# do is in that doc too.
 #
 # The next real build rewrites sdkconfig in place, changing exactly 4 lines:
 # this symbol, the newly-visible CONFIG_BOOTLOADER_APP_ANTI_ROLLBACK at n,
@@ -162,8 +158,7 @@ CONFIG_LV_FONT_MONTSERRAT_28=y
 CONFIG_LV_FONT_MONTSERRAT_48=y
 CONFIG_LV_FONT_DEFAULT_MONTSERRAT_12=y
 
-# LVGL size trim (size-spike task 0, docs/planning/20261003.wifi-provisioning.plan.md):
-# the panel renders 1-bit (LV_COLOR_FORMAT_I1) and the UI only ever creates
+# LVGL size trim: the panel renders 1-bit (LV_COLOR_FORMAT_I1) and the UI only ever creates
 # lv_label and lv_bar widgets (display_screens.c) — no LV_SYMBOL, no flex/grid
 # layout, no shadow/transform. Every other widget, layout engine and the
 # observer/examples/demos code is dead weight; LVGL is the single largest

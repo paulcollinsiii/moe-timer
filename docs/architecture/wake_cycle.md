@@ -43,8 +43,10 @@ setup route ─▶ day rollover ─▶ lock gates ─▶ break-end drain ─▶ 
       ─▶ sleep
 ```
 
-- **Setup route.** A wake with no stored SSID leaves the path here and does not
-  return, and so does a BOOT hold ([below](#setup-mode)).
+- **Setup route.** A no-SSID power-on or press, and every BOOT wake, leave the
+  path here and do not return: a completed BOOT hold enters setup, and a short
+  one just sleeps ([below](#setup-mode)). A no-SSID timer wake, or one under Bed
+  Time, carries on.
 - **Day rollover.** On a new local date: queue yesterday's summary, arm the
   daily update check, open a network window, then restore today's snapshot
   or reset the day. The window comes first so the date is judged on a
@@ -111,7 +113,9 @@ still empty.
 press of A–D with GPIO0 low is routed the same way, so the gesture works on
 builds where BOOT cannot wake the device. Both go to
 `wake_flow_handle_boot_wake()`, never the press path: no strip claim, no LED
-ack, no rollover, no window. With no SSID it enters setup at once. With one,
+ack, no rollover, no window. With no SSID it enters setup at once, unless Bed
+Time is in force on a plausible clock: then it sleeps the ordinary schedule,
+whose timer wake engages the lock. With one,
 `wake_flow_wait_for_boot_hold()` samples GPIO0 every 100 ms through the pure
 `setup_trigger_boot_hold_sample()` tracker. Crossing `MAGTAG_BOOT_HOLD_MS` paints
 the release hint, and a release after that returns true. A release before it, or
@@ -123,7 +127,7 @@ config-error sleep arms D alone, so there the gesture is D with BOOT held.
 **The session.** `wake_flow_run_setup_and_sleep()` darkens the LEDs and runs
 `setup_session_run()` with the ops table that `setup_mode_ops()`
 (`setup_session_idf.c`) builds; `main.c` supplies only the failsafe extend.
-The order is: extend the failsafe to `MAGTAG_SETUP_MAX_SEC` + 60 s, paint the
+The order is: extend the failsafe to `MAGTAG_SETUP_MAX_SEC` + `SETUP_SESSION_TAIL_SEC`, paint the
 setup screen, start the SoftAP and provisioning ([network_and_ha.md](network_and_ha.md#provisioning)),
 poll for events until one ends it, stop everything, paint the end screen. The
 screen is painted before the AP starts because a refresh during a WiFi transmit
@@ -188,5 +192,5 @@ A one-shot `esp_timer` armed at boot forces a sleep after
 drain the battery. It enters the same funnel, so the snapshot is still saved,
 but it first tells `ota_flow` that this sleep must not certify a new image.
 Only the locate alarm, an OTA download and a setup session may push it out
-(S41). A setup session extends it to its own budget plus 60 s; if the failsafe
+(S41). A setup session extends it to its own budget plus `SETUP_SESSION_TAIL_SEC`; if the failsafe
 still fires mid-session, it sleeps on the ordinary schedule and paints nothing.

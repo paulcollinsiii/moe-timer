@@ -1175,8 +1175,8 @@ static void format_hold_seconds(uint32_t hold_ms, char *out, size_t out_cap) {
 
 /* The timeout/failed screens' second line — what will actually retry
    setup on THIS build, in THIS state, never a bare "hold BOOT" promise
-   that does nothing on the (default) build where BOOT cannot wake the
-   device from deep sleep:
+   that does nothing on a build where BOOT cannot wake the device from deep
+   sleep (CONFIG_MAGTAG_BOOT_WAKES off):
      no SSID      -> any press that wakes the device re-enters setup on
                      its own (setup_trigger_decide's no-SSID rule), so a
                      button press is the whole gesture.

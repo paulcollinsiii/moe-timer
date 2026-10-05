@@ -10,7 +10,7 @@ saves both. This is when setup starts, what to do in it, and how it ends.
 | Situation | What starts setup |
 |-----------|-------------------|
 | A new device, or one that has lost its stored WiFi | Power it on or reset it, or press any button. No hold is needed |
-| A device that has WiFi and works | Hold BOOT until the panel says `Release to enter setup`, then let go |
+| A device that has stored WiFi | Hold BOOT until the panel says `Release to enter setup`, then let go |
 | A device with no WiFi that restarted after a crash | A button press. The panel first says `Setup failed` and `Press any button to retry`, and the device sleeps until you press one |
 
 A device that has no WiFi and is woken by its timer does nothing new: it keeps
@@ -19,9 +19,9 @@ its timers running offline and waits for you.
 **The BOOT hold.** Hold BOOT for `MAGTAG_BOOT_HOLD_MS` (5 seconds by default).
 There are two ways in:
 - hold BOOT while the device is asleep, and it wakes and starts timing;
-- hold BOOT first, then press any other button: the press wakes the device with
-  BOOT already down. This is the only way on a build with `MAGTAG_BOOT_WAKES`
-  off, which cannot be woken by BOOT.
+- hold BOOT first, then press B or D (or any other button that is armed): the
+  press wakes the device with BOOT already down. This is the only way on a
+  build with `MAGTAG_BOOT_WAKES` off, which cannot be woken by BOOT.
 
 The count starts when the device wakes, so it runs a moment longer than the
 figure. Let go before the prompt and nothing happens: a tap does nothing. If you
@@ -30,9 +30,10 @@ repaints what it was showing.
 
 **Locks.** A setup request that a lock outranks does nothing:
 - **Charge Me!** and **Bed Time** arm no buttons, so BOOT cannot wake the
-  device. Bed Time also outranks a new device's setup while it is in force, and
-  the device waits for its next wake. A new device with an unset clock has no
-  Bed Time, so it reaches setup.
+  device. Both also hold back a new device's setup while they are in force: a
+  new device powered on with a flat cell shows Charge Me!, and under Bed Time
+  it waits for its next wake. A new device with an unset clock has no Bed Time,
+  so it reaches setup.
 - **No Clock** leaves BOOT armed, so a device whose WiFi stopped working can
   hold BOOT to reopen setup.
 - **Config Error** arms D alone. Hold BOOT first, then press D. The lock is
@@ -80,9 +81,11 @@ The URI and username are filled in from what is saved. `mqtts://` is accepted
 too, but the device sets up no broker certificate, so use `mqtt://`. A field
 that fails is named on the page and nothing is saved.
 
-Enter the broker **before** you finish the WiFi step: setup ends about 15
-seconds after WiFi is saved. To add it later, see
-[below](#wifi-first-mqtt-later).
+On a new device, enter the broker **before** you finish the WiFi step: setup
+ends a few seconds (`SETUP_SESSION_SUCCESS_LINGER_MS`, 15 s) after WiFi is
+saved. On a device that already has WiFi, saving the broker ends setup at once,
+so to change both, do WiFi first and the broker within that window. To add the
+broker later, see [below](#wifi-first-mqtt-later).
 
 ## How setup ends
 
@@ -95,7 +98,7 @@ else: no sync, no timer repaint, no alarms.
 | WiFi saved | `Setup complete`, `Connecting to WiFi...` | Sleeps 1 second and runs its first network window: the clock, then Home Assistant. A broker saved in the same session is used there |
 | Broker saved, and the device already had WiFi | `Setup complete`, `MQTT broker saved` | The same first network window |
 | Ran out of time | `Setup timed out` | See below |
-| Could not start, stopped unexpectedly, or could not save the credentials | `Setup failed` | See below |
+| Could not start, stopped unexpectedly, or could not save the credentials | `Setup failed` (except a start refused before anything was painted) | See below |
 
 After a timeout or a failure, the panel says what retries setup. With no WiFi
 it is `Press any button to retry`, and the device sleeps with no timer wake at
@@ -107,10 +110,11 @@ for the WiFi.
 
 ## The No WiFi hint
 
-After 3 network windows in a row find no working network, the header's
-`Last sync` spot reads `No WiFi: hold BOOT`. On a build where BOOT cannot wake
-the device it reads `BOOT+button: setup`. A window that works clears it. A
-running Screen Break chip takes the spot first.
+After `SETUP_TRIGGER_WIFI_FAIL_HINT_THRESHOLD` (3) network windows in a row find
+no working network, the header's `Last sync` spot reads `No WiFi: hold BOOT`. On
+a build where BOOT cannot wake the device it reads `BOOT+button: setup`. A window
+that works clears it, and so does midnight. A running Screen Break chip takes
+the spot first.
 
 The hint is advice, never a trigger: a router outage must not turn every wake
 into a setup session that drains the battery. A device with no WiFi never shows
@@ -135,9 +139,10 @@ BOOT and go through the app again.
 ## Security
 
 - The network is WPA2 with a random 10-character password per session, shown
-  only on the panel. It exists only while setup runs.
-- WiFi provisioning is encrypted with SRP6a, using that password as the proof of
-  possession.
+  only on the panel. It exists only while setup runs. If the device cannot
+  narrow the network to WPA2-only it stays WPA/WPA2 mixed and logs a warning.
+- WiFi provisioning authenticates with SRP6a, using that password as the proof
+  of possession, and the session after it is encrypted.
 - The `/mqtt` page is plain HTTP. It is reachable only on that network, and
   the broker password crosses it unencrypted.
 - No saved password is ever shown back, on the panel or on the page.

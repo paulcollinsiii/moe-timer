@@ -9,7 +9,8 @@ step and the result to expect.
 The device needs working WiFi, entered on the device in
 [setup mode](behavior/setup_mode.md). A device with no stored WiFi opens setup
 mode at power-on instead of showing the timer screen; one whose WiFi no longer
-works stops at the No Clock screen, where D retries and BOOT reopens setup.
+works stops at the No Clock screen after a power-on, where D retries and BOOT
+reopens setup.
 Items marked **HA** also need a broker with the device set up in Home
 Assistant ([Home Assistant setup](home_assistant/setup.md)). Items marked
 **cell** need a LiPo cell.
@@ -77,7 +78,7 @@ or quiet hours from HA instead of rebuilding. Never erase NVS.
 - [ ] **Power cycle.** Power-cycle it during a break. → The break resumes
   with its original end time.
 - [ ] **Power-on without WiFi.** Power on with WiFi unreachable. → The No
-  Clock screen shows, and only D wakes it.
+  Clock screen shows, and only D (or BOOT, to open setup) wakes it.
 - [ ] **WiFi back.** Then bring WiFi back and press D. → The timer screen
   returns with the day's used time intact.
 - [ ] **Battery reading (HA).** Check the header battery icon and HA's
@@ -133,13 +134,18 @@ device's NVS on purpose, so use a device whose settings you can lose.
   setup screen is up. → The device boots to `Setup failed`, and a press opens
   setup again.
 - [ ] **Credentials survive an update.** OTA a device that has WiFi and a
-  broker to this build. → It still joins and still reaches HA.
+  broker to a newer build. → It still joins and still reaches HA.
 - [ ] **BOOT across a deep-sleep wake.** With `MAGTAG_BOOT_WAKES` on, hold
   BOOT while the device sleeps. → It wakes and times the hold, and it does
-  not enter ROM download mode. If it does, build with `MAGTAG_BOOT_WAKES` off.
+  not enter ROM download mode. If it does, stop: see
+  [the strapping caveat](architecture/peripherals.md#buttons).
+- [ ] **BOOT held, then a button, with `MAGTAG_BOOT_WAKES` off.** Hold BOOT and
+  press D. → It wakes and times the hold, and it does not enter ROM download
+  mode.
 - [ ] **A hold that runs out.** Hold BOOT well past the release prompt. → The
   device gives up and repaints what it showed before.
-- [ ] **The No WiFi hint.** Make WiFi unreachable for three windows. → The
+- [ ] **The No WiFi hint.** Make WiFi unreachable until the hint appears
+  ([threshold](behavior/setup_mode.md#the-no-wifi-hint)). → The
   header reads `No WiFi: hold BOOT` without running into a long date such as
   `Wed Sep 30 12:59 PM`.
 - [ ] **Session cost.** Read the log of a session. → It gives the SRP6a time

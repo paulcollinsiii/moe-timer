@@ -54,9 +54,8 @@ clock that was slightly off keeps its full length after the correction.
 The sync light shows red each minute outside quiet hours, and the battery
 drains faster. The countdown stays right as a length of time, and only the
 displayed clock may drift until a sync succeeds. The header's `Last sync` shows
-when the clock was last set. After three failed syncs in a row it reads
-`No WiFi: hold BOOT`, the way into
-[setup mode](setup_mode.md#the-no-wifi-hint) to correct the WiFi.
+when the clock was last set. After repeated failed syncs it shows a setup hint,
+the way into [setup mode](setup_mode.md#the-no-wifi-hint) to correct the WiFi.
 
 ### D: sync now
 

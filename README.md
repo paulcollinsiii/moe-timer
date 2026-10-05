@@ -82,10 +82,9 @@ device is auto-discovered in HA:
 * Run
   `uv run ./tools/gen_ha_dashboard.py --mqtt --sdkconfig ~/magtag-mqtt.cfg > ha_setup.txt`
   to generate the dashboard and automation config for your MOE Timer(s).
-  * The firmware build no longer holds the broker, so the generator takes it
-    from a small file kept outside the repo, with three lines:
-    `CONFIG_MAGTAG_MQTT_URI="mqtt://..."`, `CONFIG_MAGTAG_MQTT_USER="..."` and
-    `CONFIG_MAGTAG_MQTT_PASS="..."`.
+  * The firmware build does not hold the broker, so the generator takes it
+    from a small file kept outside the repo
+    ([the format](./docs/home_assistant/dashboard.md#from-the-broker---mqtt)).
 * Paste the dashboard from `ha_setup.txt` (step 7 of the runbook).
 
 Once you have the dashboard set up, here are some recommendations:

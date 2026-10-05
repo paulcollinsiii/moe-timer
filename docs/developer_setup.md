@@ -89,7 +89,7 @@ ls /dev/ttyUSB*   # a UART adapter, if you use one
   it is used only when `credentials.local.h` leaves the key undefined, and
   anything typed there ends up in `sdkconfig`.
 - **The dashboard generator** needs the broker address for `--mqtt`, and the
-  build no longer carries it. Keep it in a small file outside the repo:
+  build does not carry it. Keep it in a small file outside the repo:
   [From the broker](home_assistant/dashboard.md#from-the-broker---mqtt).
 
 ### What a flash does to NVS
@@ -116,26 +116,12 @@ already has one, set it from HA (see [ota_manifest.md](ota_manifest.md)).
 and an incremental build does not notice a file created after the first
 build, so create the file before you build, or run `idf.py fullclean` after.
 
-### Moving a checkout from build-time credentials
-
-A checkout that still builds credentials in needs three steps, once, around
-the merge that removes them:
-
-1. **Before the merge**, copy the three `CONFIG_MAGTAG_MQTT_URI`, `_USER` and
-   `_PASS` lines out of `sdkconfig` into a file outside the repo, for example
-   `~/magtag-mqtt.cfg`. Removing the symbols means the next
-   `idf.py reconfigure` deletes those lines, and `sdkconfig` may hold the only
-   copy of the broker. The dashboard generator's `--sdkconfig` reads that file.
-2. **After the merge**, run `idf.py reconfigure`
-   ([below](#sdkconfig-holds-your-hand-set-values)).
-3. Delete the WiFi and MQTT `NVS_DEFAULT_*` lines from
-   `include/credentials.local.h`. Nothing reads them, and the build prints a
-   notice until they are gone.
-
-A device already in service keeps its stored credentials through the update.
-If its old image was built with credentials, the fingerprint changes, and the
-first boot reseeds the allocations and holidays. HA's retained config applies
-them again in the next window.
+A `credentials.local.h` that still defines `NVS_DEFAULT_WIFI_*` or
+`NVS_DEFAULT_MQTT_*` gets a build notice until those lines are removed. An
+`sdkconfig` that still holds `CONFIG_MAGTAG_MQTT_*` may hold the only copy of
+the broker: save those lines before the first build, because the next CMake
+configure drops them ([below](#sdkconfig-holds-your-hand-set-values)). Keep
+them in the [broker file](home_assistant/dashboard.md#from-the-broker---mqtt).
 
 ### `sdkconfig` holds your hand-set values
 
@@ -158,14 +144,20 @@ the pull added or removed.
 
 **Which file wins** follows one rule. kconfgen loads `sdkconfig.defaults`
 first, then `sdkconfig`:
-- A `sdkconfig` line under a `# default:` marker is an untouched default, not
-  a user value, so a changed `sdkconfig.defaults` line wins over it.
-- An unmarked line is a value menuconfig or you set, so it wins over
-  `sdkconfig.defaults`.
+- A `sdkconfig` line under a `# default:` marker holds the Kconfig default.
+  Nothing set it, so a changed `sdkconfig.defaults` line wins over it.
+- Any unmarked line is a user value, and it wins over `sdkconfig.defaults`.
+  That includes a value set in menuconfig or by hand, **and a value an earlier
+  `sdkconfig.defaults` line put there**: once a configure has applied a
+  `sdkconfig.defaults` line, `sdkconfig` holds it unmarked. So a change to an
+  existing `sdkconfig.defaults` line does not reach a checkout that has already
+  configured with the old line.
 
-Nothing is applied until you run `idf.py reconfigure`. A plain `idf.py build`
-does not re-read `sdkconfig.defaults`, because it is not a CMake configure
-dependency, so a build can pass while it quietly runs the old configuration.
+**When it is applied.** `sdkconfig.defaults` is read whenever CMake configures:
+on `idf.py reconfigure`, and on any `idf.py build` that follows a change to a
+`CMakeLists.txt`, an `idf_component.yml` or `sdkconfig` itself. A build after a
+change to `sdkconfig.defaults` or `Kconfig.projbuild` alone does not
+re-configure, so it can pass while it quietly runs the old configuration.
 
 To pick up one changed default whose `sdkconfig` line is unmarked, change that
 one value in menuconfig. Don't delete the file. To see what a reconfigure

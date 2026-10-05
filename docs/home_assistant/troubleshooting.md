@@ -20,12 +20,12 @@ screen to force one.
 
 - **No broker set.** The serial log says `MQTT disabled: no broker
   configured; enter it in setup mode`. The broker is entered on the device, so
-  hold BOOT and open the `/mqtt` page
+  hold BOOT, join the `MagTag-` network and open `http://192.168.4.1/mqtt`
   ([Setup](setup.md#1-point-the-device-at-the-broker)).
 - **WiFi does not work.** The timer works without it, but no window can reach
-  the broker. After three failed windows in a row the header's `Last sync`
-  spot reads `No WiFi: hold BOOT`. Hold BOOT to open setup mode and enter the
-  WiFi again ([Setup mode](../behavior/setup_mode.md#the-no-wifi-hint)).
+  the broker. After repeated failed windows the header shows a setup hint, and
+  setup mode lets you enter the WiFi again
+  ([Setup mode](../behavior/setup_mode.md#the-no-wifi-hint)).
 - **It is charge-locked.** A charge-locked device opens no network windows
   until it is charged.
 

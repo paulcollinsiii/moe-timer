@@ -413,24 +413,29 @@ menu "MagTag Timer"
         help
             Adds GPIO0 to the EXT1 wake mask so holding BOOT can wake the
             device, the first half of the "hold BOOT 5 s to enter setup"
-            gesture. A BOOT wake runs the hold wait and nothing else: a
-            short press goes back to sleep without a panel refresh, an LED
-            ack or any timer work, and a hold past the threshold followed
-            by a release starts the setup session. With this off nothing
-            wakes the device on BOOT; the gesture still works the other
-            way round, because a button press that wakes the device while
-            BOOT is already held starts the same hold timing. The on-panel
-            wording on an off build says so ("Hold BOOT, press a button").
+            gesture. A BOOT wake on a device with WiFi runs the hold wait
+            and nothing else: a short press goes back to sleep without a
+            panel refresh, an LED ack or any timer work, and a hold past
+            the threshold followed by a release starts the setup session.
+            With no WiFi a BOOT wake enters setup at once. With this off
+            nothing wakes the device on BOOT; the gesture still works the
+            other way round, because a button press that wakes the device
+            while BOOT is already held starts the same hold timing. The
+            on-panel wording on an off build says so ("Hold BOOT, press a
+            button").
 
             GPIO0 is also a strapping pin: it is sampled at boot to pick
             the ROM's boot mode, and the expectation is that this
-            sampling happens only on a chip/system reset, not on a
+            sampling happens at power-on and other chip resets, not on a
             deep-sleep wake — but that has not been confirmed on a bench
             (the check that holding BOOT across a deep-sleep wake does not
-            enter the ROM download mode is still open). If a
-            board enters the ROM download mode when BOOT is held across a
-            deep-sleep wake, set this to n: the device then never arms
-            GPIO0 for sleep. Changing this symbol needs a rebuild and a
+            enter the ROM download mode is still open). If a board enters
+            the ROM download mode when BOOT is held across a deep-sleep
+            wake, turning this off does NOT fix it: download mode depends
+            on GPIO0 being low at the reset, so a BOOT-held A-D press wakes
+            into it too, and both setup gestures need GPIO0 low across the
+            wake. Such a board has no setup gesture for a device that
+            already has WiFi. Changing this symbol needs a rebuild and a
             reflash like any other Kconfig option, not a runtime toggle.
 
     config MAGTAG_BOOT_HOLD_MS
@@ -438,10 +443,11 @@ menu "MagTag Timer"
         default 5000
         range 1000 15000
         help
-            How long BOOT must be held — while awake, however it got that
-            way — before the panel shows "Release to enter setup" and a
-            release starts the setup session. A shorter press, or a
-            release before this elapses, does nothing.
+            How long BOOT must be held, timed from the wake that BOOT (or a
+            press made with BOOT already held) caused, before the panel
+            shows "Release to enter setup" and a release starts the setup
+            session. A shorter press, or a release before this elapses,
+            does nothing.
 
     config MAGTAG_SETUP_MAX_SEC
         int "Setup session budget (seconds)"

@@ -299,9 +299,10 @@ setup_session_result_t setup_session_run(const setup_session_ops_t *ops, const s
        down, not beaconing at full TX power throughout it: net_window.c's
        own rendezvous comment (~line 120) documents a panel refresh
        coinciding with a WiFi TX burst browning out the rail on this
-       board, and a brownout reset on a no-SSID device cold-boots
-       straight back into setup and repaints — exactly the loop this
-       ordering avoids. */
+       board, and a brownout reset on a no-SSID device is a FAULT reset
+       that repaints Setup failed and waits buttons-only for a press, so a
+       session that browned out each time would cost a refresh and a
+       press per attempt — the cost this ordering avoids. */
     {
         setup_session_screen_info_t info;
         memset(&info, 0, sizeof(info));

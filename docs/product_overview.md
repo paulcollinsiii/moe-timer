@@ -59,7 +59,7 @@ shows `Last sync: 12:30 PM`, which is the last time the clock was set from the
 network (`--:--` before the first sync). While a break runs behind another
 timer, that spot shows an inverted `BREAK 12:34` chip instead
 ([Screen breaks](behavior/screen_breaks.md#other-timers-during-a-break)). After
-three failed syncs in a row it shows `No WiFi: hold BOOT`
+repeated failed syncs it shows a setup hint
 ([Setup mode](behavior/setup_mode.md#the-no-wifi-hint)).
 
 ## How a press is handled
