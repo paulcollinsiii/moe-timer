@@ -38,6 +38,7 @@ idf_component_register(
         "light.c"
         "nvs_config.c"
         "mqtt_form.c"
+        "dns_reply.c"
         "setup_session.c"
         "setup_session_idf.c"
         "sleep_plan_idf.c"

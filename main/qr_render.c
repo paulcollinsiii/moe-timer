@@ -7,7 +7,7 @@
 #include "qrcodegen.h"
 
 /* This module's own sizing: buffers sized for exactly QR_RENDER_MAX_VERSION
-   (qr_render.h owns why 7 is enough), not qrcodegen's own 40-version
+   (qr_render.h owns why 3 is enough), not qrcodegen's own 40-version
    worst case (qrcodegen_BUFFER_LEN_MAX, almost 4 KB) — this module never
    asks qrcodegen for a version it could not draw on the panel anyway, so
    there is nothing to gain from a bigger buffer. The panel-fit arithmetic
@@ -20,7 +20,7 @@
    than held in permanent static storage: this screen paints at most a
    handful of times across the device's whole life, and the setup
    session's own heap is tightest exactly while it runs (SoftAP + httpd +
-   the SRP6a modexp) — 255 B of .bss sitting idle for the rest of the
+   the SRP6a modexp) — 107 B of .bss sitting idle for the rest of the
    device's life is not a trade this module needs to make. Freed
    explicitly through qr_render_release() (called from display.c's setup
    wrapper right after render() returns) rather than only at the start of
@@ -56,7 +56,7 @@ bool qr_render_encode(const char *payload, int *size_out) {
                                       larger version or turn a success into a
                                       failure — it is not a correctness lever here.
                                       It stays off so the one capacity ceiling this
-                                      module documents (154 bytes at version 7, ECC
+                                      module documents (53 bytes at version 3, ECC
                                       LOW) is true of every encode this module ever
                                       does, rather than true only of the ones
                                       boosting happened not to touch. */

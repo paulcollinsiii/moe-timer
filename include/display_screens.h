@@ -42,18 +42,18 @@ void display_screens_build_ota(const char *from_version, const char *to_version)
 
 /* The QR at the left (display_screens.c owns the pixel-scale/quiet-zone
    arithmetic that fits it on this panel; qr_render.h owns the version
-   this module asks qrcodegen for), and on the right: a short instruction,
-   the AP name, the manual-entry username, the AP password (labelled as
-   also being the PoP the stock app's own field asks for), and the MQTT
-   setup page's URL. `qr_payload` is handed straight to qr_render_encode();
-   if it does not fit QR_RENDER_MAX_VERSION at ECC LOW, no QR is drawn and
-   the text lines render unchanged — they are the complete manual-entry
-   path, not merely a note that one exists. ap_ssid longer than the column
-   budget (up to SETUP_SESSION_AP_SSID_MAX-1, the input buffer's own
-   width) is clipped rather than overflowing into the QR block or off the
-   panel's right edge. */
+   this module asks qrcodegen for), and on the right: the instruction
+   "scan to join, then open" and the address to open (`page_host`), then
+   the AP name and password as text for a phone that will not scan.
+   `qr_payload` is handed straight to qr_render_encode(); if it does not
+   fit QR_RENDER_MAX_VERSION at ECC LOW, no QR is drawn and the text lines
+   render unchanged — they are the complete manual-entry path, not merely
+   a note that one exists. ap_ssid longer than the column budget (up to
+   SETUP_SESSION_AP_SSID_MAX-1, the input buffer's own width) is clipped
+   rather than overflowing into the QR block or off the panel's right
+   edge. */
 void display_screens_build_setup(const char *ap_ssid, const char *ap_password, const char *qr_payload,
-                                 const char *username, const char *form_url);
+                                 const char *page_host);
 /* Shown while the BOOT hold is armed (SETUP_TRIGGER_BOOT_HOLD_IDLE's
    threshold reached) — releasing now enters setup. */
 void display_screens_build_setup_release(void);

@@ -26,10 +26,10 @@ at once.
 The broker is entered on the device, not in the build. Flash the device
 ([README](../../README.md#esp-idf-for-local-flashing-included-in-the-dev-container)),
 and a device with no stored WiFi opens [setup mode](../behavior/setup_mode.md)
-on its own. After you give it your WiFi, join the device's setup network and
-open `http://192.168.4.1/mqtt`. Enter the broker URI, for example
-`mqtt://homeassistant.local:1883`, and the broker user and password from
-above. An empty URI turns MQTT off.
+on its own. Scan the panel's QR code to join the device's setup network, and on
+the page that opens (or `http://192.168.4.1`) enter your WiFi and the broker URI,
+for example `mqtt://homeassistant.local:1883`, with the broker user and password
+from above, then Save.
 
 A device that already has WiFi gets back into setup mode by holding BOOT, so
 the broker can be added or changed later without touching WiFi. The

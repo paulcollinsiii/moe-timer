@@ -120,18 +120,30 @@ static mqtt_form_err_t decode_value(const char *src, size_t src_len, char *dst, 
     return MQTT_FORM_ERR_NONE;
 }
 
-mqtt_form_status_t mqtt_form_parse_urlencoded(const char *body, size_t body_len, mqtt_form_result_t *out) {
+/* One form field the walker below fills: its key, where the decoded value
+   goes, and whether the key has been seen (a second sighting is a
+   DUPLICATE_FIELD). The two urlencoded entry points differ only in this
+   table, so they cannot disagree about decoding. */
+typedef struct {
+    const char *name;
+    char *dst;
+    size_t dst_cap;
+    mqtt_form_field_t field;
+    bool seen;
+} form_field_t;
+
+/* Decodes every `key=value` pair of body into the matching entry of
+   fields[0..nfields). Unknown keys are ignored. The caller owns zeroing
+   its result on a non-OK return. */
+static mqtt_form_status_t decode_pairs(const char *body, size_t body_len, form_field_t *fields, size_t nfields) {
     if (body_len > MQTT_FORM_BODY_MAX)
-        return fail(out, MQTT_FORM_ERR_BODY_TOO_LONG, MQTT_FORM_FIELD_NONE);
+        return (mqtt_form_status_t){MQTT_FORM_ERR_BODY_TOO_LONG, MQTT_FORM_FIELD_NONE};
     /* A raw NUL byte would silently truncate whatever reads a field
        buffer as a C string later, the same hazard a decoded '%00' is —
        reject it here so every byte of body has actually been looked at,
        not just the bytes decode_value happens to reach before quitting. */
     if (memchr(body, '\0', body_len) != NULL)
-        return fail(out, MQTT_FORM_ERR_MALFORMED_ENCODING, MQTT_FORM_FIELD_NONE);
-
-    memset(out, 0, sizeof(*out));
-    bool uri_seen = false, user_seen = false, pass_seen = false, uri_present = false;
+        return (mqtt_form_status_t){MQTT_FORM_ERR_MALFORMED_ENCODING, MQTT_FORM_FIELD_NONE};
 
     size_t i = 0;
     while (i < body_len) {
@@ -152,44 +164,84 @@ mqtt_form_status_t mqtt_form_parse_urlencoded(const char *body, size_t body_len,
         const char *val = (eq < pair_end) ? body + eq + 1 : body + pair_end;
         size_t val_len = (eq < pair_end) ? (size_t)(pair_end - eq - 1) : 0;
 
-        char *dst;
-        size_t dst_cap;
-        bool *seen;
-        mqtt_form_field_t field;
-        if (key_len == 3 && memcmp(key, "uri", 3) == 0) {
-            dst = out->uri;
-            dst_cap = MQTT_FORM_URI_MAX;
-            seen = &uri_seen;
-            field = MQTT_FORM_FIELD_URI;
-        } else if (key_len == 4 && memcmp(key, "user", 4) == 0) {
-            dst = out->user;
-            dst_cap = MQTT_FORM_USER_MAX;
-            seen = &user_seen;
-            field = MQTT_FORM_FIELD_USER;
-        } else if (key_len == 4 && memcmp(key, "pass", 4) == 0) {
-            dst = out->pass;
-            dst_cap = MQTT_FORM_PASS_MAX;
-            seen = &pass_seen;
-            field = MQTT_FORM_FIELD_PASS;
-        } else {
-            continue; /* unknown field: ignored, per the module contract */
+        form_field_t *f = NULL;
+        for (size_t k = 0; k < nfields; k++) {
+            if (strlen(fields[k].name) == key_len && memcmp(key, fields[k].name, key_len) == 0) {
+                f = &fields[k];
+                break;
+            }
         }
+        if (f == NULL)
+            continue; /* unknown field: ignored, per the module contract */
 
-        if (*seen)
-            return fail(out, MQTT_FORM_ERR_DUPLICATE_FIELD, field);
-        *seen = true;
-        if (field == MQTT_FORM_FIELD_URI)
-            uri_present = true;
+        if (f->seen)
+            return (mqtt_form_status_t){MQTT_FORM_ERR_DUPLICATE_FIELD, f->field};
+        f->seen = true;
 
-        mqtt_form_err_t derr = decode_value(val, val_len, dst, dst_cap);
+        mqtt_form_err_t derr = decode_value(val, val_len, f->dst, f->dst_cap);
         if (derr != MQTT_FORM_ERR_NONE)
-            return fail(out, derr, field);
+            return (mqtt_form_status_t){derr, f->field};
     }
+    return (mqtt_form_status_t){MQTT_FORM_ERR_NONE, MQTT_FORM_FIELD_NONE};
+}
 
-    if (!uri_present)
+mqtt_form_status_t mqtt_form_parse_urlencoded(const char *body, size_t body_len, mqtt_form_result_t *out) {
+    memset(out, 0, sizeof(*out));
+    form_field_t fields[] = {
+        {"uri", out->uri, MQTT_FORM_URI_MAX, MQTT_FORM_FIELD_URI, false},
+        {"user", out->user, MQTT_FORM_USER_MAX, MQTT_FORM_FIELD_USER, false},
+        {"pass", out->pass, MQTT_FORM_PASS_MAX, MQTT_FORM_FIELD_PASS, false},
+    };
+    mqtt_form_status_t st = decode_pairs(body, body_len, fields, sizeof(fields) / sizeof(fields[0]));
+    if (st.err != MQTT_FORM_ERR_NONE)
+        return fail(out, st.err, st.field);
+
+    if (!fields[0].seen)
         return fail(out, MQTT_FORM_ERR_MISSING, MQTT_FORM_FIELD_URI);
 
     return finalize(out);
+}
+
+static mqtt_form_status_t setup_fail(mqtt_form_setup_t *out, mqtt_form_err_t err, mqtt_form_field_t field) {
+    memset(out, 0, sizeof(*out));
+    return (mqtt_form_status_t){err, field};
+}
+
+mqtt_form_status_t mqtt_form_parse_setup(const char *body, size_t body_len, mqtt_form_setup_t *out) {
+    memset(out, 0, sizeof(*out));
+    form_field_t fields[] = {
+        {"ssid", out->ssid, MQTT_FORM_WIFI_SSID_MAX, MQTT_FORM_FIELD_WIFI_SSID, false},
+        {"wpass", out->wifi_pass, MQTT_FORM_WIFI_PASS_MAX, MQTT_FORM_FIELD_WIFI_PASS, false},
+        {"uri", out->mqtt.uri, MQTT_FORM_URI_MAX, MQTT_FORM_FIELD_URI, false},
+        {"user", out->mqtt.user, MQTT_FORM_USER_MAX, MQTT_FORM_FIELD_USER, false},
+        {"pass", out->mqtt.pass, MQTT_FORM_PASS_MAX, MQTT_FORM_FIELD_PASS, false},
+    };
+    mqtt_form_status_t st = decode_pairs(body, body_len, fields, sizeof(fields) / sizeof(fields[0]));
+    if (st.err != MQTT_FORM_ERR_NONE)
+        return setup_fail(out, st.err, st.field);
+
+    if (out->ssid[0] != '\0') {
+        size_t pass_len = strlen(out->wifi_pass);
+        if (has_control_char(out->ssid))
+            return setup_fail(out, MQTT_FORM_ERR_BAD_CHAR, MQTT_FORM_FIELD_WIFI_SSID);
+        if (has_control_char(out->wifi_pass))
+            return setup_fail(out, MQTT_FORM_ERR_BAD_CHAR, MQTT_FORM_FIELD_WIFI_PASS);
+        if (pass_len > 0 && pass_len < 8)
+            return setup_fail(out, MQTT_FORM_ERR_TOO_SHORT, MQTT_FORM_FIELD_WIFI_PASS);
+        out->has_wifi = true;
+    } else {
+        memset(out->wifi_pass, 0, sizeof(out->wifi_pass));
+    }
+
+    if (out->mqtt.uri[0] != '\0') {
+        st = finalize(&out->mqtt);
+        if (st.err != MQTT_FORM_ERR_NONE)
+            return setup_fail(out, st.err, st.field);
+        out->has_mqtt = true;
+    } else {
+        memset(&out->mqtt, 0, sizeof(out->mqtt));
+    }
+    return (mqtt_form_status_t){MQTT_FORM_ERR_NONE, MQTT_FORM_FIELD_NONE};
 }
 
 /* ---- JSON body -------------------------------------------------------- */
@@ -370,6 +422,8 @@ const char *mqtt_form_error_str(mqtt_form_err_t err) {
             return "field was submitted twice";
         case MQTT_FORM_ERR_BAD_JSON:
             return "malformed JSON request";
+        case MQTT_FORM_ERR_TOO_SHORT:
+            return "value is too short";
         default:
             break;
     }

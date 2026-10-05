@@ -10,9 +10,14 @@
 void setUp(void) {}
 void tearDown(void) {}
 
+/* One byte past version 3's ECC LOW byte-mode capacity (53), the ceiling
+   QR_RENDER_MAX_VERSION sets. Lowercase forces byte mode, so no
+   alphanumeric shortcut can make it fit. */
+#define TOO_LONG_LEN 54
+
 /* ---- qr_render_encode: version/size, measured against the real payloads
-   this project actually sends (see main/qr_render.c's own arithmetic
-   comment for the version-7 ceiling these numbers are measured against) --- */
+   this project actually sends (see include/qr_render.h for the version-3
+   ceiling these numbers are measured against) --- */
 
 void test_a_short_payload_encodes_at_the_smallest_version(void) {
     int size = -1;
@@ -20,31 +25,26 @@ void test_a_short_payload_encodes_at_the_smallest_version(void) {
     TEST_ASSERT_EQUAL_INT(21, size); /* version 1 */
 }
 
-void test_the_tasks_example_payload_encodes(void) {
-    const char *example =
-        "{\"ver\":\"v1\",\"name\":\"MagTag-a1b2c3\",\"username\":\"magtag\",\"pop\":\"ABCDEFGHJK\","
-        "\"password\":\"ABCDEFGHJK\",\"transport\":\"softap\",\"security\":2}";
+/* The payload this device really sends: a 13-byte SSID and a 10-byte
+   password, 41 bytes in all. */
+void test_the_real_device_payload_encodes_at_version_3(void) {
+    const char *real = "WIFI:T:WPA;S:MagTag-a1b2c3;P:ABCDEFGHJK;;";
+    TEST_ASSERT_EQUAL_UINT(41, strlen(real));
     int size = -1;
-    TEST_ASSERT_TRUE(qr_render_encode(example, &size));
-    TEST_ASSERT_EQUAL_INT(41, size); /* version 6 */
+    TEST_ASSERT_TRUE(qr_render_encode(real, &size));
+    TEST_ASSERT_EQUAL_INT(29, size); /* version 3 */
 }
 
-/* The HYPOTHETICAL worst-case skeleton from setup_session.h's own
-   comment: a 31-byte SSID (SETUP_SESSION_AP_SSID_MAX - 1) and the
-   10-char AP password used twice (pop and password), 150 bytes total.
-   This is what QR_RENDER_MAX_VERSION is sized against — not what this
-   device ever actually sends, which is a fixed 132 bytes every time
-   (device_id()'s SSID is always exactly 13 characters; see
-   test_setup_session.c for a test against the real payload builder). */
-void test_the_worst_case_150_byte_payload_still_fits_version_7(void) {
-    const char *worst =
-        "{\"ver\":\"v1\",\"name\":\"1234567890123456789012345678901\",\"username\":\"magtag\","
-        "\"pop\":\"ABCDEFGHJK\",\"password\":\"ABCDEFGHJK\",\"transport\":\"softap\","
-        "\"security\":2}";
-    TEST_ASSERT_EQUAL_UINT(150, strlen(worst));
+/* The longest payload that still fits: 53 bytes, filling version 3 to its
+   ECC LOW byte-mode capacity. */
+void test_a_payload_at_the_ceiling_still_fits_the_largest_version(void) {
+    char buf[54];
+    for (int i = 0; i < 53; i++)
+        buf[i] = (char)('a' + (i % 26));
+    buf[53] = '\0';
     int size = -1;
-    TEST_ASSERT_TRUE(qr_render_encode(worst, &size));
-    TEST_ASSERT_EQUAL_INT(QR_RENDER_MAX_MODULES, size); /* version 7, 45x45 */
+    TEST_ASSERT_TRUE(qr_render_encode(buf, &size));
+    TEST_ASSERT_EQUAL_INT(QR_RENDER_MAX_MODULES, size); /* version 3, 29x29 */
 }
 
 /* Every QR's finder pattern puts a black module at each of these three
@@ -62,22 +62,17 @@ void test_finder_pattern_corners_are_black(void) {
     TEST_ASSERT_TRUE(qr_render_encode("hello", &size));
     assert_finder_corners_are_black(size);
 
-    TEST_ASSERT_TRUE(
-        qr_render_encode("{\"ver\":\"v1\",\"name\":\"MagTag-a1b2c3\",\"username\":\"magtag\",\"pop\":\"ABCDEFGHJK\","
-                         "\"password\":\"ABCDEFGHJK\",\"transport\":\"softap\",\"security\":2}",
-                         &size));
+    TEST_ASSERT_TRUE(qr_render_encode("WIFI:T:WPA;S:MagTag-a1b2c3;P:ABCDEFGHJK;;", &size));
     assert_finder_corners_are_black(size);
 }
 
-/* ---- failure: a payload too long for version 7 at ECC LOW ------------- */
+/* ---- failure: a payload too long for the largest version at ECC LOW --- */
 
 void test_a_too_long_payload_fails_cleanly(void) {
-    /* 155 lowercase bytes: forces byte mode (no alphanumeric shortcut) and
-       is one byte past version 7 ECC LOW's measured 154-byte ceiling. */
-    char buf[156];
-    for (int i = 0; i < 155; i++)
+    char buf[TOO_LONG_LEN + 1];
+    for (int i = 0; i < TOO_LONG_LEN; i++)
         buf[i] = (char)('a' + (i % 26));
-    buf[155] = '\0';
+    buf[TOO_LONG_LEN] = '\0';
 
     int size = 99;
     TEST_ASSERT_FALSE(qr_render_encode(buf, &size));
@@ -85,10 +80,10 @@ void test_a_too_long_payload_fails_cleanly(void) {
 }
 
 void test_a_failed_encode_leaves_every_module_white(void) {
-    char buf[156];
-    for (int i = 0; i < 155; i++)
+    char buf[TOO_LONG_LEN + 1];
+    for (int i = 0; i < TOO_LONG_LEN; i++)
         buf[i] = (char)('a' + (i % 26));
-    buf[155] = '\0';
+    buf[TOO_LONG_LEN] = '\0';
     TEST_ASSERT_FALSE(qr_render_encode(buf, &(int){0}));
 
     /* Every coordinate, not just one: a stale buffer from a previous
@@ -104,10 +99,10 @@ void test_a_failed_encode_leaves_every_module_white(void) {
    before drawing should see this never matters in practice; this pins the
    buffer-level behaviour anyway, since nothing else does. */
 void test_a_failed_encode_does_not_corrupt_a_later_success(void) {
-    char buf[156];
-    for (int i = 0; i < 155; i++)
+    char buf[TOO_LONG_LEN + 1];
+    for (int i = 0; i < TOO_LONG_LEN; i++)
         buf[i] = (char)('a' + (i % 26));
-    buf[155] = '\0';
+    buf[TOO_LONG_LEN] = '\0';
     int size = -1;
     TEST_ASSERT_FALSE(qr_render_encode(buf, &size));
     TEST_ASSERT_TRUE(qr_render_encode("hello", &size));
@@ -122,10 +117,7 @@ void test_a_second_encode_replaces_the_first(void) {
     TEST_ASSERT_TRUE(qr_render_encode("hello", &size_a));
 
     int size_b = -1;
-    TEST_ASSERT_TRUE(
-        qr_render_encode("{\"ver\":\"v1\",\"name\":\"1234567890123456789012345678901\",\"username\":\"magtag\","
-                         "\"pop\":\"ABCDEFGHJK\",\"password\":\"ABCDEFGHJK\",\"transport\":\"softap\",\"security\":2}",
-                         &size_b));
+    TEST_ASSERT_TRUE(qr_render_encode("WIFI:T:WPA;S:MagTag-a1b2c3;P:ABCDEFGHJK;;", &size_b));
     TEST_ASSERT_TRUE(size_b != size_a);
 
     int size_c = -1;
@@ -141,10 +133,7 @@ void test_a_second_encode_replaces_the_first(void) {
    boost) with INDEPENDENT buffers, so a bug that only shows up through
    qr_render.c's own static state cannot hide from it. */
 void test_every_module_matches_an_independent_qrcodegen_encode(void) {
-    const char *payload =
-        "{\"ver\":\"v1\",\"name\":\"MagTag-a1b2c3\",\"username\":\"magtag\","
-        "\"pop\":\"ABCDEFGHJK\",\"password\":\"ABCDEFGHJK\",\"transport\":\"softap\","
-        "\"security\":2}";
+    const char *payload = "WIFI:T:WPA;S:MagTag-a1b2c3;P:ABCDEFGHJK;;";
 
     int size = -1;
     TEST_ASSERT_TRUE(qr_render_encode(payload, &size));
@@ -179,10 +168,10 @@ void test_last_size_is_zero_before_any_encode_and_after_a_failure(void) {
        in one binary is not guaranteed independent of global state, so
        this pins the POST-FAILURE case, which is the one the draw callback
        actually depends on, rather than relying on being run first. */
-    char buf[156];
-    for (int i = 0; i < 155; i++)
+    char buf[TOO_LONG_LEN + 1];
+    for (int i = 0; i < TOO_LONG_LEN; i++)
         buf[i] = (char)('a' + (i % 26));
-    buf[155] = '\0';
+    buf[TOO_LONG_LEN] = '\0';
     TEST_ASSERT_FALSE(qr_render_encode(buf, &(int){0}));
     TEST_ASSERT_EQUAL_INT(0, qr_render_last_size());
 }
@@ -228,10 +217,10 @@ void test_a_failed_encode_after_a_success_blanks_every_module(void) {
     TEST_ASSERT_TRUE(qr_render_encode("hello", &size));
     TEST_ASSERT_TRUE(size > 0);
 
-    char buf[156];
-    for (int i = 0; i < 155; i++)
+    char buf[TOO_LONG_LEN + 1];
+    for (int i = 0; i < TOO_LONG_LEN; i++)
         buf[i] = (char)('a' + (i % 26));
-    buf[155] = '\0';
+    buf[TOO_LONG_LEN] = '\0';
     TEST_ASSERT_FALSE(qr_render_encode(buf, &size));
 
     TEST_ASSERT_EQUAL_INT(0, qr_render_last_size());
@@ -243,8 +232,8 @@ void test_a_failed_encode_after_a_success_blanks_every_module(void) {
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_a_short_payload_encodes_at_the_smallest_version);
-    RUN_TEST(test_the_tasks_example_payload_encodes);
-    RUN_TEST(test_the_worst_case_150_byte_payload_still_fits_version_7);
+    RUN_TEST(test_the_real_device_payload_encodes_at_version_3);
+    RUN_TEST(test_a_payload_at_the_ceiling_still_fits_the_largest_version);
     RUN_TEST(test_finder_pattern_corners_are_black);
     RUN_TEST(test_a_too_long_payload_fails_cleanly);
     RUN_TEST(test_a_failed_encode_leaves_every_module_white);

@@ -2,8 +2,9 @@
 
 Setup mode is how the device gets its WiFi and its MQTT broker. Neither is
 built into the firmware. The device opens a short-lived WiFi network of its own,
-you give it your WiFi with a phone app and your broker with a web page, and it
-saves both. This is when setup starts, what to do in it, and how it ends.
+you join it by scanning the panel's QR code with your phone's camera, give it
+your WiFi and your broker on one web page, and it saves both. No app is needed.
+This is when setup starts, what to do in it, and how it ends.
 
 ## When setup starts
 
@@ -44,48 +45,57 @@ The locks themselves are in [Locks](locks.md).
 ## What the screen shows
 
 ```
-[QR code]   Scan with ESP SoftAP Prov
+[QR code]   Scan to join, then open
+            192.168.4.1
             AP: MagTag-a1b2c3
-            User: magtag
-            Password (PoP):
+            Password:
             K7mNp3Rt4W
-            MQTT: http://192.168.4.1/mqtt
+            It may open by itself
 ```
 
 The device is now a WiFi network named `MagTag-` and its id. The password is new
-every session, shown only here, and doubles as the proof of possession for the
-app.
+every session and shown only here.
 
-**WiFi.**
-1. Install Espressif's **ESP SoftAP Prov** app on a phone.
-2. Choose to provision a device and scan the QR code. The app joins the
-   device's network itself.
-3. Pick your home WiFi and enter its password. The device tries the join. A
-   wrong password is reported in the app and saved nowhere, and you can try
-   again in the same session.
+1. Scan the QR code with your phone's camera. Android and iOS offer to join the
+   network; accept.
+2. The setup page usually opens by itself, as a "sign in to network" prompt. If
+   it does not, open `http://192.168.4.1` in a browser. The page only exists on
+   that network, and a phone may warn that the network has no internet: stay
+   connected.
+3. Fill in the form and press Save.
 
-If the scan fails, join `MagTag-xxxxxx` by hand with the password on the panel,
-then use the app's manual option with username `magtag` and the password as the
-PoP.
-
-**MQTT.** While your phone is joined to the device's network, open
-`http://192.168.4.1/mqtt`. The page only exists on that network. It asks for:
+If the camera will not join, join `MagTag-xxxxxx` by hand with the password on
+the panel, then open the address.
 
 | Field | Rule |
 |-------|------|
-| Broker URI | `mqtt://host`, with an optional `:port` and a trailing `/`. Up to 127 characters, no user name or path in it. Left empty, MQTT is turned off and the saved user and password are cleared |
-| Username | Up to 63 characters |
-| Password | Up to 63 characters. Left blank, the saved password is kept. It is never shown back |
+| Network name | Up to 32 bytes. Left blank on a device that already has WiFi, the saved network is kept; the current name is shown greyed as a hint. Required on a device with none |
+| WiFi password | Left blank for an open network. Otherwise 8 to 63 characters, or a 64-digit hex key. Ignored when the network name is blank |
+| Broker URI | `mqtt://host`, with an optional `:port` and a trailing `/`. Up to 127 characters, no user name or path in it. Left blank, the saved broker is kept. The page cannot turn MQTT off |
+| Username | Up to 63 characters. Ignored when the URI is blank |
+| Password | Up to 63 characters. Left blank, the saved password is kept. Ignored when the URI is blank |
 
-The URI and username are filled in from what is saved. `mqtts://` is accepted
-too, but the device sets up no broker certificate, so use `mqtt://`. A field
-that fails is named on the page and nothing is saved.
+The broker URI and username are filled in from what is saved. Neither password is
+ever shown back. `mqtts://` is accepted too, but the device sets up no broker
+certificate, so use `mqtt://`. A field that fails is named on the page and
+nothing is saved.
 
-On a new device, enter the broker **before** you finish the WiFi step: setup
-ends a few seconds (`SETUP_SESSION_SUCCESS_LINGER_MS`, 15 s) after WiFi is
-saved. On a device that already has WiFi, saving the broker ends setup at once,
-so to change both, do WiFi first and the broker within that window. To add the
-broker later, see [below](#wifi-first-mqtt-later).
+**The WiFi join is checked before it is saved.** After Save, the page says
+`Connecting to WiFi...` and updates itself. The device tries the network, and
+only a join that works is saved. A wrong password or a network not found is
+reported on the page, nothing is saved, and you can correct it and press Save
+again in the same session. Without JavaScript, reload the page to see the result.
+Joining moves the device's own network to your router's channel, so the phone may
+drop off it for a moment and reconnect; the page waits.
+
+The broker goes in the same submit as the WiFi, so fill in both at once. A device
+that already has WiFi ends setup the moment a broker-only submit is saved. To add
+the broker later, see [below](#wifi-first-mqtt-later).
+
+**Fallback: the app.** Espressif's **ESP SoftAP Prov** app still works for the WiFi
+step, but the QR code no longer carries what it needs. Join the network by hand,
+choose the app's manual option, and enter username `magtag` and the panel
+password as the PoP.
 
 ## How setup ends
 
@@ -124,9 +134,9 @@ it, because any press already starts setup.
 
 A device does not need an MQTT broker. Without one, it keeps its own timers and
 syncs its clock, and Home Assistant never sees it. To add or change the broker
-later, hold BOOT, join the device's network, and open the `/mqtt` page. Setup
-ends as soon as the broker is saved, and WiFi is untouched. To change WiFi, hold
-BOOT and go through the app again.
+later, hold BOOT, join the device's network, and fill in only the broker fields.
+Setup ends as soon as the broker is saved, and WiFi is untouched. To change WiFi,
+hold BOOT and enter the new network on the same page.
 
 ## What survives
 
@@ -141,10 +151,13 @@ BOOT and go through the app again.
 - The network is WPA2 with a random 10-character password per session, shown
   only on the panel. It exists only while setup runs. If the device cannot
   narrow the network to WPA2-only it stays WPA/WPA2 mixed and logs a warning.
-- WiFi provisioning authenticates with SRP6a, using that password as the proof
-  of possession, and the session after it is encrypted.
-- The `/mqtt` page is plain HTTP. It is reachable only on that network, and
-  the broker password crosses it unencrypted.
+- The QR code carries the network password, so anyone who can see the panel can
+  join. That is the same exposure as the printed password.
+- The setup page is plain HTTP. It is reachable only on that network, and the
+  WiFi and broker passwords cross it unencrypted. The app route authenticates
+  with SRP6a and encrypts the session; the page does not.
+- The device answers every DNS name on that network with its own address, so a
+  phone's connectivity probe opens the page. It forwards nothing.
 - No saved password is ever shown back, on the panel or on the page.
 
 The firmware side is in [Wake cycle](../architecture/wake_cycle.md#setup-mode)

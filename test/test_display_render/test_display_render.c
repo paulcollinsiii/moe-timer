@@ -11,9 +11,9 @@
 
 #include "lvgl.h"
 
-/* Header only, test-only — ties this suite's SETUP_TEST_USERNAME to the
-   real device's SETUP_SESSION_QR_USERNAME (see
-   test_setup_screens_own_test_username_matches_the_real_qr_username
+/* Header only, test-only — ties this suite's SETUP_TEST_HOST to the
+   real device's SETUP_SESSION_AP_IP (see
+   test_setup_screens_own_test_host_matches_the_real_softap_address
    below). display_screens.c itself never includes this: display.c must
    not depend on setup_session.h, and display_screens.c follows it. */
 #include "setup_session.h"
@@ -1476,32 +1476,27 @@ void test_the_config_error_screen_renders_the_pair_it_is_given(void) {
 /* ---- WiFi + MQTT provisioning plan: the setup screens -------------------
 
    Deterministic inputs for every test below: a fixed SSID, AP password,
-   QR payload, username and form URL, so the goldens never depend on a
-   real device id or a freshly drawn random password. */
+   QR payload and page host, so the goldens never depend on a real device
+   id or a freshly drawn random password. */
 #define SETUP_TEST_SSID "MagTag-a1b2c3"
 #define SETUP_TEST_PASSWORD "ABCDEFGHJK"
-#define SETUP_TEST_USERNAME "magtag"
-#define SETUP_TEST_URL "http://192.168.4.1/mqtt"
-#define SETUP_TEST_PAYLOAD                                                                       \
-    "{\"ver\":\"v1\",\"name\":\"MagTag-a1b2c3\",\"username\":\"magtag\",\"pop\":\"ABCDEFGHJK\"," \
-    "\"password\":\"ABCDEFGHJK\",\"transport\":\"softap\",\"security\":2}"
+#define SETUP_TEST_HOST "192.168.4.1"
+#define SETUP_TEST_PAYLOAD "WIFI:T:WPA;S:MagTag-a1b2c3;P:ABCDEFGHJK;;"
 
 void test_setup_screen(void) {
-    display_screens_build_setup(SETUP_TEST_SSID, SETUP_TEST_PASSWORD, SETUP_TEST_PAYLOAD, SETUP_TEST_USERNAME,
-                                SETUP_TEST_URL);
+    display_screens_build_setup(SETUP_TEST_SSID, SETUP_TEST_PASSWORD, SETUP_TEST_PAYLOAD, SETUP_TEST_HOST);
     assert_matches_golden("setup");
 }
 
-/* setup_session.h's QR-payload comment names the literal username this
-   device's QR always carries (SETUP_SESSION_QR_USERNAME); display.c must
-   not depend on that header (same reason display_setup() takes plain
-   strings instead of a setup_session_screen_info_t), so this file
-   includes it ITSELF, test-only, to tie the two together instead of
-   leaving that to a comment alone — the same shape as
-   test_the_break_chore_tick_matches_the_checklist_glyph's own check
-   against LV_SYMBOL_OK. */
-void test_setup_screens_own_test_username_matches_the_real_qr_username(void) {
-    TEST_ASSERT_EQUAL_STRING(SETUP_SESSION_QR_USERNAME, SETUP_TEST_USERNAME);
+/* setup_session.h names the SoftAP's address (SETUP_SESSION_AP_IP) and the
+   panel shows it for the owner to type; display.c must not depend on that
+   header (same reason display_setup() takes plain strings instead of a
+   setup_session_screen_info_t), so this file includes it ITSELF,
+   test-only, to tie the two together instead of leaving that to a comment
+   alone — the same shape as test_the_break_chore_tick_matches_the_checklist_glyph's
+   own check against LV_SYMBOL_OK. */
+void test_setup_screens_own_test_host_matches_the_real_softap_address(void) {
+    TEST_ASSERT_EQUAL_STRING(SETUP_SESSION_AP_IP, SETUP_TEST_HOST);
 }
 
 static bool fb_pixel_is_black(int x, int y) {
@@ -1520,8 +1515,7 @@ static bool fb_pixel_is_black(int x, int y) {
    are display_screens.c's own macros, visible here because this file
    #includes it as one translation unit. */
 void test_setup_screen_qr_matches_the_encoding(void) {
-    display_screens_build_setup(SETUP_TEST_SSID, SETUP_TEST_PASSWORD, SETUP_TEST_PAYLOAD, SETUP_TEST_USERNAME,
-                                SETUP_TEST_URL);
+    display_screens_build_setup(SETUP_TEST_SSID, SETUP_TEST_PASSWORD, SETUP_TEST_PAYLOAD, SETUP_TEST_HOST);
     lv_refr_now(s_disp);
 
     int size = 0;
@@ -1552,15 +1546,15 @@ void test_setup_screen_qr_matches_the_encoding(void) {
    characters is the longest possible SSID. The AP line must stay inside
    its column (cap_width()'s LONG_CLIP), never overflow into the QR block
    to its left or off the panel's right edge. Found by its y coordinate
-   (24, the same one display_screens_build_setup() aligns it at) rather
-   than a hardcoded child index, so adding or reordering a label on this
-   screen cannot silently point this at the wrong widget. */
+   (SETUP_AP_Y, the same one display_screens_build_setup() aligns it at)
+   rather than a hardcoded child index, so adding or reordering a label on
+   this screen cannot silently point this at the wrong widget. */
 void test_the_setup_screen_clips_a_31_byte_ssid_without_overflowing_its_column(void) {
     char ssid31[32];
     memset(ssid31, 'X', 31);
     ssid31[31] = '\0';
 
-    display_screens_build_setup(ssid31, SETUP_TEST_PASSWORD, SETUP_TEST_PAYLOAD, SETUP_TEST_USERNAME, SETUP_TEST_URL);
+    display_screens_build_setup(ssid31, SETUP_TEST_PASSWORD, SETUP_TEST_PAYLOAD, SETUP_TEST_HOST);
     lv_obj_t *scr = lv_screen_active();
     lv_obj_update_layout(scr);
 
@@ -1568,10 +1562,10 @@ void test_the_setup_screen_clips_a_31_byte_ssid_without_overflowing_its_column(v
     uint32_t n = lv_obj_get_child_count(scr);
     for (uint32_t i = 0; i < n; i++) {
         lv_obj_t *o = lv_obj_get_child(scr, i);
-        if (lv_obj_check_type(o, &lv_label_class) && lv_obj_get_y(o) == 22)
+        if (lv_obj_check_type(o, &lv_label_class) && lv_obj_get_y(o) == SETUP_AP_Y)
             ap_line = o;
     }
-    TEST_ASSERT_NOT_NULL_MESSAGE(ap_line, "AP line (y=22) not found");
+    TEST_ASSERT_NOT_NULL_MESSAGE(ap_line, "AP line not found at SETUP_AP_Y");
 
     char msg[96];
     snprintf(msg, sizeof(msg), "AP line is %d px wide, column budget is %d", (int)lv_obj_get_width(ap_line),
@@ -1597,18 +1591,18 @@ void test_the_setup_screen_clips_a_31_byte_ssid_without_overflowing_its_column(v
                              "budget - this test would pass even with no clip at all");
 }
 
-/* qr_render.h's own ceiling: version 7 at ECC LOW holds at most 154 byte-
-   mode bytes. 155 forces a failure qr_render_encode() cannot recover
+/* qr_render.h's own ceiling: version 3 at ECC LOW holds at most 53 byte-
+   mode bytes. 54 forces a failure qr_render_encode() cannot recover
    from — the screen must still render every text line, just with no QR
    block, and those lines are the complete manual-entry path (SSID,
-   username, password/PoP, MQTT URL), not merely a note that one exists. */
+   password, the address to open), not merely a note that one exists. */
 void test_the_setup_screen_falls_back_to_text_when_the_payload_is_too_long(void) {
-    char too_long[156];
-    for (int i = 0; i < 155; i++)
+    char too_long[55];
+    for (int i = 0; i < 54; i++)
         too_long[i] = (char)('a' + (i % 26));
-    too_long[155] = '\0';
+    too_long[54] = '\0';
 
-    display_screens_build_setup(SETUP_TEST_SSID, SETUP_TEST_PASSWORD, too_long, SETUP_TEST_USERNAME, SETUP_TEST_URL);
+    display_screens_build_setup(SETUP_TEST_SSID, SETUP_TEST_PASSWORD, too_long, SETUP_TEST_HOST);
     lv_obj_t *scr = lv_screen_active();
     lv_obj_update_layout(scr);
 
@@ -1618,6 +1612,31 @@ void test_the_setup_screen_falls_back_to_text_when_the_payload_is_too_long(void)
         TEST_ASSERT_TRUE_MESSAGE(lv_obj_check_type(lv_obj_get_child(scr, i), &lv_label_class),
                                  "every child is a label when no QR was drawn");
     }
+}
+
+/* The instruction the owner follows: scan to join, then open the address.
+   Looked up by label text, so reordering the lines cannot make this pass
+   vacuously. The AP name and password stay as text for joining by hand. */
+void test_the_setup_screen_says_scan_to_join_then_open_the_address_and_keeps_the_manual_text(void) {
+    display_screens_build_setup(SETUP_TEST_SSID, SETUP_TEST_PASSWORD, SETUP_TEST_PAYLOAD, SETUP_TEST_HOST);
+    lv_obj_t *scr = lv_screen_active();
+
+    bool scan = false, host = false, ap = false, pw = false;
+    uint32_t n = lv_obj_get_child_count(scr);
+    for (uint32_t i = 0; i < n; i++) {
+        lv_obj_t *o = lv_obj_get_child(scr, i);
+        if (!lv_obj_check_type(o, &lv_label_class))
+            continue;
+        const char *t = lv_label_get_text(o);
+        scan |= strstr(t, "Scan to join") != NULL;
+        host |= strcmp(t, SETUP_TEST_HOST) == 0;
+        ap |= strstr(t, SETUP_TEST_SSID) != NULL;
+        pw |= strcmp(t, SETUP_TEST_PASSWORD) == 0;
+    }
+    TEST_ASSERT_TRUE_MESSAGE(scan, "no 'Scan to join' instruction");
+    TEST_ASSERT_TRUE_MESSAGE(host, "the address to open is not shown on its own line");
+    TEST_ASSERT_TRUE_MESSAGE(ap, "the AP name is gone");
+    TEST_ASSERT_TRUE_MESSAGE(pw, "the AP password is gone");
 }
 
 void test_setup_release_screen(void) {
@@ -2638,10 +2657,11 @@ int main(void) {
     RUN_TEST(test_the_config_error_screen_fits_the_panel_at_its_widest);
     RUN_TEST(test_the_config_error_screen_renders_the_pair_it_is_given);
     RUN_TEST(test_setup_screen);
-    RUN_TEST(test_setup_screens_own_test_username_matches_the_real_qr_username);
+    RUN_TEST(test_setup_screens_own_test_host_matches_the_real_softap_address);
     RUN_TEST(test_setup_screen_qr_matches_the_encoding);
     RUN_TEST(test_the_setup_screen_clips_a_31_byte_ssid_without_overflowing_its_column);
     RUN_TEST(test_the_setup_screen_falls_back_to_text_when_the_payload_is_too_long);
+    RUN_TEST(test_the_setup_screen_says_scan_to_join_then_open_the_address_and_keeps_the_manual_text);
     RUN_TEST(test_setup_release_screen);
     RUN_TEST(test_setup_end_wifi_saved_screen);
     RUN_TEST(test_setup_end_mqtt_saved_screen);

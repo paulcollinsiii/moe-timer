@@ -831,8 +831,240 @@ void test_html_escape_null_and_zero_length_safety(void) {
     TEST_ASSERT_FALSE(mqtt_form_html_escape("x", out, 0));
 }
 
+/* ---- the setup page's combined form: WiFi + MQTT, each group optional ---- */
+
+static mqtt_form_status_t parse_setup(const char *body, mqtt_form_setup_t *out) {
+    return mqtt_form_parse_setup(body, strlen(body), out);
+}
+
+void test_setup_accepts_wifi_and_mqtt_together(void) {
+    mqtt_form_setup_t out;
+    mqtt_form_status_t st =
+        parse_setup("ssid=HomeNet&wpass=hunter22x&uri=mqtt://broker.local&user=bob&pass=secret", &out);
+    TEST_ASSERT_EQUAL(MQTT_FORM_ERR_NONE, st.err);
+    TEST_ASSERT_TRUE(out.has_wifi);
+    TEST_ASSERT_EQUAL_STRING("HomeNet", out.ssid);
+    TEST_ASSERT_EQUAL_STRING("hunter22x", out.wifi_pass);
+    TEST_ASSERT_TRUE(out.has_mqtt);
+    TEST_ASSERT_EQUAL_STRING("mqtt://broker.local", out.mqtt.uri);
+    TEST_ASSERT_EQUAL_STRING("bob", out.mqtt.user);
+    TEST_ASSERT_EQUAL_STRING("secret", out.mqtt.pass);
+    TEST_ASSERT_FALSE(out.mqtt.keep_pass);
+}
+
+void test_setup_blank_mqtt_group_leaves_the_broker_alone(void) {
+    mqtt_form_setup_t out;
+    mqtt_form_status_t st = parse_setup("ssid=HomeNet&wpass=hunter22x&uri=&user=&pass=", &out);
+    TEST_ASSERT_EQUAL(MQTT_FORM_ERR_NONE, st.err);
+    TEST_ASSERT_TRUE(out.has_wifi);
+    TEST_ASSERT_FALSE(out.has_mqtt);
+    TEST_ASSERT_EQUAL_STRING("", out.mqtt.uri);
+
+    /* The MQTT fields absent altogether is the same thing. */
+    st = parse_setup("ssid=HomeNet&wpass=hunter22x", &out);
+    TEST_ASSERT_EQUAL(MQTT_FORM_ERR_NONE, st.err);
+    TEST_ASSERT_FALSE(out.has_mqtt);
+}
+
+void test_setup_blank_wifi_group_means_an_mqtt_only_update(void) {
+    mqtt_form_setup_t out;
+    mqtt_form_status_t st = parse_setup("ssid=&wpass=&uri=mqtt://broker.local&user=&pass=", &out);
+    TEST_ASSERT_EQUAL(MQTT_FORM_ERR_NONE, st.err);
+    TEST_ASSERT_FALSE(out.has_wifi);
+    TEST_ASSERT_TRUE(out.has_mqtt);
+    TEST_ASSERT_TRUE(out.mqtt.keep_pass); /* a blank password never overwrites the stored one */
+}
+
+void test_setup_a_password_without_its_ssid_is_ignored_not_stored(void) {
+    /* A password manager fills the password box on its own; with no
+       network name there is nothing to join and nothing to keep. */
+    mqtt_form_setup_t out;
+    mqtt_form_status_t st = parse_setup("ssid=&wpass=autofilled&uri=mqtt://b.local", &out);
+    TEST_ASSERT_EQUAL(MQTT_FORM_ERR_NONE, st.err);
+    TEST_ASSERT_FALSE(out.has_wifi);
+    TEST_ASSERT_EQUAL_STRING("", out.wifi_pass);
+}
+
+void test_setup_a_user_or_pass_without_a_uri_is_ignored(void) {
+    mqtt_form_setup_t out;
+    mqtt_form_status_t st = parse_setup("ssid=HomeNet&wpass=&uri=&user=bob&pass=secret", &out);
+    TEST_ASSERT_EQUAL(MQTT_FORM_ERR_NONE, st.err);
+    TEST_ASSERT_FALSE(out.has_mqtt);
+    TEST_ASSERT_EQUAL_STRING("", out.mqtt.user);
+    TEST_ASSERT_EQUAL_STRING("", out.mqtt.pass);
+}
+
+void test_setup_an_empty_submission_parses_as_nothing_to_save(void) {
+    mqtt_form_setup_t out;
+    mqtt_form_status_t st = mqtt_form_parse_setup("", 0, &out);
+    TEST_ASSERT_EQUAL(MQTT_FORM_ERR_NONE, st.err);
+    TEST_ASSERT_FALSE(out.has_wifi);
+    TEST_ASSERT_FALSE(out.has_mqtt);
+}
+
+void test_setup_a_blank_wifi_password_is_an_open_network(void) {
+    mqtt_form_setup_t out;
+    mqtt_form_status_t st = parse_setup("ssid=CafeOpen&wpass=", &out);
+    TEST_ASSERT_EQUAL(MQTT_FORM_ERR_NONE, st.err);
+    TEST_ASSERT_TRUE(out.has_wifi);
+    TEST_ASSERT_EQUAL_STRING("", out.wifi_pass);
+}
+
+void test_setup_decodes_percent_and_plus_in_the_wifi_fields(void) {
+    mqtt_form_setup_t out;
+    mqtt_form_status_t st = parse_setup("ssid=My+Net%21&wpass=p%26ss+word%3B", &out);
+    TEST_ASSERT_EQUAL(MQTT_FORM_ERR_NONE, st.err);
+    TEST_ASSERT_EQUAL_STRING("My Net!", out.ssid);
+    TEST_ASSERT_EQUAL_STRING("p&ss word;", out.wifi_pass);
+}
+
+void test_setup_ssid_length_boundary_is_32_bytes(void) {
+    char body[96];
+    mqtt_form_setup_t out;
+    memcpy(body, "ssid=", 5);
+    memset(body + 5, 'n', 32);
+    body[37] = '\0';
+    TEST_ASSERT_EQUAL(MQTT_FORM_ERR_NONE, parse_setup(body, &out).err);
+    TEST_ASSERT_EQUAL(32u, strlen(out.ssid));
+
+    body[37] = 'n';
+    body[38] = '\0';
+    mqtt_form_status_t st = parse_setup(body, &out);
+    TEST_ASSERT_EQUAL(MQTT_FORM_ERR_TOO_LONG, st.err);
+    TEST_ASSERT_EQUAL(MQTT_FORM_FIELD_WIFI_SSID, st.field);
+}
+
+void test_setup_wifi_password_length_boundaries(void) {
+    char body[128];
+    mqtt_form_setup_t out;
+    memcpy(body, "ssid=Net&wpass=", 15);
+
+    /* 1..7 characters can never be a WPA2 passphrase */
+    for (size_t len = 1; len <= 7; len++) {
+        memset(body + 15, 'p', len);
+        body[15 + len] = '\0';
+        mqtt_form_status_t st = parse_setup(body, &out);
+        TEST_ASSERT_EQUAL(MQTT_FORM_ERR_TOO_SHORT, st.err);
+        TEST_ASSERT_EQUAL(MQTT_FORM_FIELD_WIFI_PASS, st.field);
+    }
+    /* 8 and 63 are passphrases, 64 is a raw hex PSK */
+    size_t ok_lens[] = {8, 63, 64};
+    for (size_t i = 0; i < 3; i++) {
+        memset(body + 15, 'p', ok_lens[i]);
+        body[15 + ok_lens[i]] = '\0';
+        TEST_ASSERT_EQUAL(MQTT_FORM_ERR_NONE, parse_setup(body, &out).err);
+        TEST_ASSERT_EQUAL(ok_lens[i], strlen(out.wifi_pass));
+    }
+    memset(body + 15, 'p', 65);
+    body[15 + 65] = '\0';
+    mqtt_form_status_t st = parse_setup(body, &out);
+    TEST_ASSERT_EQUAL(MQTT_FORM_ERR_TOO_LONG, st.err);
+    TEST_ASSERT_EQUAL(MQTT_FORM_FIELD_WIFI_PASS, st.field);
+}
+
+void test_setup_rejects_control_characters_in_the_wifi_fields(void) {
+    mqtt_form_setup_t out;
+    mqtt_form_status_t st = parse_setup("ssid=Net%0Aname&wpass=", &out);
+    TEST_ASSERT_EQUAL(MQTT_FORM_ERR_BAD_CHAR, st.err);
+    TEST_ASSERT_EQUAL(MQTT_FORM_FIELD_WIFI_SSID, st.field);
+
+    st = parse_setup("ssid=Net&wpass=pass%09word1", &out);
+    TEST_ASSERT_EQUAL(MQTT_FORM_ERR_BAD_CHAR, st.err);
+    TEST_ASSERT_EQUAL(MQTT_FORM_FIELD_WIFI_PASS, st.field);
+}
+
+void test_setup_runs_the_mqtt_validators_when_a_uri_is_present(void) {
+    mqtt_form_setup_t out;
+    mqtt_form_status_t st = parse_setup("ssid=Net&wpass=hunter22x&uri=http://nope", &out);
+    TEST_ASSERT_EQUAL(MQTT_FORM_ERR_BAD_SCHEME, st.err);
+    TEST_ASSERT_EQUAL(MQTT_FORM_FIELD_URI, st.field);
+}
+
+void test_setup_a_failure_zeroes_every_field_including_the_wifi_password(void) {
+    mqtt_form_setup_t out;
+    memset(&out, 0xAA, sizeof(out));
+    mqtt_form_status_t st = parse_setup("ssid=Net&wpass=hunter22x&uri=http://nope&pass=secret", &out);
+    TEST_ASSERT_NOT_EQUAL(MQTT_FORM_ERR_NONE, st.err);
+    mqtt_form_setup_t zero;
+    memset(&zero, 0, sizeof(zero));
+    TEST_ASSERT_EQUAL_MEMORY(&zero, &out, sizeof(out));
+}
+
+void test_setup_rejects_a_duplicated_field_of_either_group(void) {
+    mqtt_form_setup_t out;
+    mqtt_form_status_t st = parse_setup("ssid=a&ssid=b", &out);
+    TEST_ASSERT_EQUAL(MQTT_FORM_ERR_DUPLICATE_FIELD, st.err);
+    TEST_ASSERT_EQUAL(MQTT_FORM_FIELD_WIFI_SSID, st.field);
+
+    st = parse_setup("ssid=a&wpass=x&wpass=y", &out);
+    TEST_ASSERT_EQUAL(MQTT_FORM_ERR_DUPLICATE_FIELD, st.err);
+    TEST_ASSERT_EQUAL(MQTT_FORM_FIELD_WIFI_PASS, st.field);
+
+    st = parse_setup("uri=mqtt://a&uri=mqtt://b", &out);
+    TEST_ASSERT_EQUAL(MQTT_FORM_ERR_DUPLICATE_FIELD, st.err);
+    TEST_ASSERT_EQUAL(MQTT_FORM_FIELD_URI, st.field);
+}
+
+void test_setup_body_cap_applies_and_the_worst_case_encoded_body_fits(void) {
+    static char body[MQTT_FORM_BODY_MAX + 2];
+    mqtt_form_setup_t out;
+    memset(body, 'a', sizeof(body));
+    TEST_ASSERT_EQUAL(MQTT_FORM_ERR_BODY_TOO_LONG, mqtt_form_parse_setup(body, MQTT_FORM_BODY_MAX + 1, &out).err);
+
+    /* every field at its own MAX with every byte percent-encoded */
+    size_t n = 0;
+    n += (size_t)sprintf(body + n, "ssid=");
+    for (int i = 0; i < 32; i++)
+        n += (size_t)sprintf(body + n, "%%61");
+    n += (size_t)sprintf(body + n, "&wpass=");
+    for (int i = 0; i < 64; i++)
+        n += (size_t)sprintf(body + n, "%%62");
+    n += (size_t)sprintf(body + n, "&uri=");
+    {
+        char decoded[MQTT_FORM_URI_MAX];
+        memcpy(decoded, "mqtt://", 7);
+        memset(decoded + 7, 'h', MQTT_FORM_URI_MAX - 1 - 7);
+        for (size_t i = 0; i < MQTT_FORM_URI_MAX - 1; i++)
+            n += (size_t)sprintf(body + n, "%%%02X", (unsigned char)decoded[i]);
+    }
+    n += (size_t)sprintf(body + n, "&user=");
+    for (int i = 0; i < MQTT_FORM_USER_MAX - 1; i++)
+        n += (size_t)sprintf(body + n, "%%63");
+    n += (size_t)sprintf(body + n, "&pass=");
+    for (int i = 0; i < MQTT_FORM_PASS_MAX - 1; i++)
+        n += (size_t)sprintf(body + n, "%%64");
+
+    TEST_ASSERT_TRUE(n <= MQTT_FORM_BODY_MAX);
+    mqtt_form_status_t st = mqtt_form_parse_setup(body, n, &out);
+    TEST_ASSERT_EQUAL(MQTT_FORM_ERR_NONE, st.err);
+    TEST_ASSERT_EQUAL(32u, strlen(out.ssid));
+    TEST_ASSERT_EQUAL(64u, strlen(out.wifi_pass));
+    TEST_ASSERT_EQUAL(127u, strlen(out.mqtt.uri));
+}
+
+void test_setup_error_text_covers_the_new_error_and_fields_are_distinct(void) {
+    TEST_ASSERT_EQUAL_STRING("value is too short", mqtt_form_error_str(MQTT_FORM_ERR_TOO_SHORT));
+    TEST_ASSERT_NOT_EQUAL(MQTT_FORM_FIELD_WIFI_SSID, MQTT_FORM_FIELD_WIFI_PASS);
+}
+
 int main(void) {
     UNITY_BEGIN();
+    RUN_TEST(test_setup_accepts_wifi_and_mqtt_together);
+    RUN_TEST(test_setup_blank_mqtt_group_leaves_the_broker_alone);
+    RUN_TEST(test_setup_blank_wifi_group_means_an_mqtt_only_update);
+    RUN_TEST(test_setup_a_password_without_its_ssid_is_ignored_not_stored);
+    RUN_TEST(test_setup_a_user_or_pass_without_a_uri_is_ignored);
+    RUN_TEST(test_setup_an_empty_submission_parses_as_nothing_to_save);
+    RUN_TEST(test_setup_a_blank_wifi_password_is_an_open_network);
+    RUN_TEST(test_setup_decodes_percent_and_plus_in_the_wifi_fields);
+    RUN_TEST(test_setup_ssid_length_boundary_is_32_bytes);
+    RUN_TEST(test_setup_wifi_password_length_boundaries);
+    RUN_TEST(test_setup_rejects_control_characters_in_the_wifi_fields);
+    RUN_TEST(test_setup_runs_the_mqtt_validators_when_a_uri_is_present);
+    RUN_TEST(test_setup_a_failure_zeroes_every_field_including_the_wifi_password);
+    RUN_TEST(test_setup_rejects_a_duplicated_field_of_either_group);
+    RUN_TEST(test_setup_body_cap_applies_and_the_worst_case_encoded_body_fits);
+    RUN_TEST(test_setup_error_text_covers_the_new_error_and_fields_are_distinct);
     RUN_TEST(test_urlencoded_accepts_full_submission);
     RUN_TEST(test_urlencoded_percent_decodes_and_plus_decodes);
     RUN_TEST(test_urlencoded_field_order_does_not_matter);

@@ -70,7 +70,8 @@ on hardware only.
 | `button_actions` | What a press of A, B or a chore button does, and the allocation a start receives | `test_button_actions` |
 | `buttons_policy` | The EXT1 wake mask: which A–D buttons may wake the device, and whether BOOT may | `test_buttons_policy` |
 | `setup_trigger` | Whether a wake enters setup mode, the BOOT hold tracker, and the "No WiFi" header hint | `test_setup_trigger` |
-| `mqtt_form` | Parses and validates the setup page's MQTT form, as urlencoded or JSON, and escapes its prefill | `test_mqtt_form` |
+| `mqtt_form` | Parses and validates the setup page's form (WiFi and MQTT groups) and the MQTT-only JSON body, and escapes its prefill | `test_mqtt_form` |
+| `dns_reply` | Builds the captive portal's DNS answer: the device's own address for every A query, an empty answer otherwise, nothing for a malformed packet | `test_dns_reply` |
 | `qr_render` | Encodes the setup QR payload through the vendored `lib/qrcodegen` and answers the module matrix | `test_qr_render` |
 | `button_latch` | Press latch fed by the button ISR, the release gate, and the B > C > D > A pick | `test_button_latch` |
 | `status_led` | Colors for the timer-state pixel and the chore strip | `test_status_led` |
@@ -92,7 +93,7 @@ on hardware only.
 | Module | Job | Host test |
 |--------|-----|-----------|
 | `wake_flow` | The wake: decode, both handlers, the setup route and BOOT hold, day rollover, break start and end, the awake watches, latched presses, the OTA apply point | `test_wake_flow` |
-| `setup_session` | The setup session: AP name and password, QR payload, the `/mqtt` page, the poll loop, and which sleep each outcome owes. Every device effect arrives through an ops table, like `ota_flow` | `test_setup_session` |
+| `setup_session` | The setup session: AP name and password, the QR join payload, the setup page and its `/status` JSON, one submit's apply step, the poll loop, and which sleep each outcome owes. Every device effect arrives through an ops table, like `ota_flow` | `test_setup_session` |
 | `lock_gate` | The four locks: flags, engage and release, the full-refresh promotion, the sleep mode each implies | `test_lock_gate` |
 | `timer` | The slot state machine (slot 0 is Screen, 1–4 are extra timers), breaks, the exposure balance, the RTC state | `test_timer` |
 | `timer_defs` | Installs the extra-timer definitions each boot: NVS table first, Kconfig table as fallback | `test_timer_defs` |
@@ -120,7 +121,7 @@ on hardware only.
 | `light` | Ambient light read, in millivolts | no |
 | `net_window` | The network window's task, its two completion signals and the snapshot rendezvous | no |
 | `wifi_session` | WiFi station up and down for one window, and the one STA netif shared with setup | no |
-| `setup_session_idf` | The real ops for `setup_session`: SoftAP, `esp_http_server`, the provisioning manager, SRP6a, the `/mqtt` handlers. `setup_mode_ops()` builds the table, so `main.c` supplies only the failsafe extend | no (decisions: `setup_session`, `mqtt_form`) |
+| `setup_session_idf` | The real ops for `setup_session`: SoftAP, `esp_http_server`, the provisioning manager, SRP6a, the page handlers, the captive-portal DHCP options and DNS task. `setup_mode_ops()` builds the table, so `main.c` supplies only the failsafe extend | no (decisions: `setup_session`, `mqtt_form`) |
 | `setup_screens` | Thin adapters from the session's render ops to the `display` setup screens | no |
 | `sleep_plan_idf` | Arms the deep-sleep timer, or nothing for a zero interval | no (decision: `sleep_plan_timer_armed`) |
 | `ntp` | SNTP sync inside an open window | no |

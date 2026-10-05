@@ -111,32 +111,64 @@ phase; a WiFi-only device is a supported state.
 
 **Components.** `setup_session_idf.c` runs Espressif's `network_provisioning`
 manager (SoftAP scheme, security 2, which is SRP6a) on an `esp_http_server`
-instance the app creates itself (6144 B stack, 10 handler slots) and hands to
-the scheme. The app registers two more entry points on that server: `GET` and
-`POST /mqtt`, a page with no script and no external resources, and a protocomm
-endpoint `mqtt-config` that takes the same fields as JSON, so
-`esp_prov.py --custom_data` can script it. The stock phone apps collect WiFi
-only, which is why MQTT needs its own path.
+instance the app creates itself (6144 B stack, 14 handler slots) and hands to
+the scheme. The app registers more entry points on that server: the setup page
+(`GET` and `POST` on `/`, with `/mqtt` as an alias), `GET /status`, a 404
+handler that redirects to the page, and a protocomm endpoint `mqtt-config` that
+takes the broker fields as JSON, so `esp_prov.py --custom_data` can script it.
+The page has no external resources and a few-line script only while a join is
+running.
 
 **The AP and the QR.** `setup_session_make_ap_password()` draws a 10-character
 password per session from a 49-character alphabet that drops confusable glyphs,
-by rejection sampling over `esp_random()`. It is the WPA2 key, the SRP6a proof
-of possession and part of the QR payload, which carries the fields both stock
-apps read: `ver`, `name`, `username` (`magtag`), `pop`, `password`, `transport`
-(`softap`) and `security` (2). The password lives in RAM and is zeroed once the
-AP is up.
+by rejection sampling over `esp_random()`. It is the WPA2 key and the SRP6a
+proof of possession. The QR payload is the standard
+`WIFI:T:WPA;S:<ssid>;P:<password>;;` that a phone camera joins with, built and
+backslash-escaped by `setup_session_make_qr_payload()`; the stock provisioning
+apps no longer read it, so they take the username (`magtag`) and the password by
+hand. The password lives in RAM and is zeroed once the AP is up.
+
+**The captive portal.** So the page opens by itself, three things point a
+joining phone at the device. DHCP offers the device as the DNS server and names
+`http://192.168.4.1` in option 114 (set while the AP's DHCP server is still
+stopped; the option's string is static because the server keeps the pointer). A
+small task, `dns_task`, answers every A query on UDP 53 with `192.168.4.1` and
+every other query type with an empty answer, built by the pure
+`dns_reply_build()`, which drops anything malformed rather than answering it. And
+the httpd 404 handler redirects any unknown path, a phone's connectivity probe
+included, to the page. The DHCP options and the task start fail-soft: without
+them the QR still joins and the panel still shows the address. `stop()` ends the
+task before the radio goes.
 
 **The form.** `mqtt_form.c` parses the urlencoded and JSON bodies through one
-validator. It caps the body at 1024 B, accepts only a flat JSON object (the
-nesting check runs before cJSON, which recurses on the small httpd stack) and
+validator. The page's one form, `mqtt_form_parse_setup()`, has an optional WiFi
+group (`ssid`, `wpass`) and an optional MQTT group (`uri`, `user`, `pass`), each
+present when its key field is non-blank: a blank SSID is an MQTT-only update, a
+blank URI leaves the stored broker alone. The SSID is not prefilled, only shown as
+a placeholder, because a prefilled name with a blank password would read as an
+open-network join. It caps the body at 1280 B, accepts only a flat JSON object
+(the nesting check runs before cJSON, which recurses on the small httpd stack) and
 rejects duplicate fields, embedded NULs and DEL. The URI grammar,
 `config_mqtt_uri_check()`, is `mqtt[s]://host[:port][/]` and nothing else, with no
-userinfo, so a password can never land in the logged URI. An empty URI is valid
-and clears the user and password; a blank password with a URI means keep the
-stored one. Both entry points store synchronously through
-`setup_session_apply_mqtt()` before they reply, so `Saved.` never appears for a
+userinfo, so a password can never land in the logged URI. On the JSON endpoint an
+empty URI is valid and clears the user and password; a blank password with a URI
+means keep the stored one. The broker is stored synchronously through
+`setup_session_apply_mqtt()` before the reply, so `Saved.` never appears for a
 write that failed. A rejected form leaves a zeroed result, so a decoded password
 does not outlive it.
+
+**The WiFi join.** A submit with a network hands it to the manager through
+`network_prov_mgr_configure_wifi_sta()`, called from the httpd task as the
+manager's own protocomm handler does, so the page and the phone app share one
+state machine and one set of events, and a join is refused while one is already
+past accepting credentials. The page stores nothing for WiFi. `GET /status`
+reports `{"state":"idle|connecting|failed|saved","reason":"..."}`; `failed` is
+published only after the manager's state has been reset, because it refuses a
+retry until then, and the reason is `wrong password` or `network not found` from
+the manager's disconnect reason. A submit with both groups joins first and stores
+the broker second, so a refused join stores nothing, and it posts no
+broker-stored event, which would end a session that already has WiFi before the
+join is verified.
 
 **One credential store.** The app keeps WiFi in its own NVS keys
 (`include/nvs_keys.h`), and `wifi_session.c` hands them to `esp_wifi_set_config`
@@ -146,8 +178,8 @@ arrive, so on a verified join the session copies the SSID and password into the
 app's keys and then clears the driver's store (`esp_wifi_restore`, deferred to
 teardown), leaving no second copy to disagree. If the copy fails, the session
 ends in error and leaves the driver's copy alone. A wrong password is reported
-to the phone app, resets the manager so the app can retry, and is stored
-nowhere. After a verified join the session stays up for 15 s
-(`SETUP_SESSION_SUCCESS_LINGER_MS`): the stock apps keep polling for status and
-report failure if the endpoints disappear. The STA netif is created in one
+on the page or to the phone app, resets the manager so a retry can follow, and
+is stored nowhere. After a verified join the session stays up for 15 s
+(`SETUP_SESSION_SUCCESS_LINGER_MS`): the page polls `/status` and the stock apps
+poll for status, and both report failure if the endpoints disappear. The STA netif is created in one
 place, `wifi_session_sta_netif()`, and shared with the window code.

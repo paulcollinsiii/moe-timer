@@ -55,10 +55,10 @@ time for kids. Some of the major features:
     If the device doesn't start once flashing finishes, press Reset. It can
     take a few presses.
 * A device with no stored WiFi opens **setup mode** as soon as it boots. The
-  panel shows a QR code: scan it with Espressif's "ESP SoftAP Prov" phone app
-  to give the device your WiFi, then join the device's own network and open
-  `http://192.168.4.1/mqtt` to give it your MQTT broker. The full walkthrough
-  is [Setup mode](./docs/behavior/setup_mode.md).
+  panel shows a QR code: scan it with your phone's camera to join the device's
+  own network, and the setup page opens (or go to `http://192.168.4.1`) to give
+  it your WiFi and your MQTT broker. No app is needed. The full walkthrough is
+  [Setup mode](./docs/behavior/setup_mode.md).
 * When setup finishes, the device runs its first network window right away,
   and that's when it appears in HA as `magtag-xxxxxx`. If it doesn't show up,
   press D (force sync) to run another window.

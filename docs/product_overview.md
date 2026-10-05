@@ -23,7 +23,7 @@ watches it from Home Assistant.
 | Chore checklist | Up to three chores that unlock the rest of the day's screen time when they are ticked | [Chores](behavior/chores.md) |
 | Locks | Full-screen stops for a flat battery, bed time, an unset clock and a broken setting | [Locks](behavior/locks.md) |
 | Sleep, sync and updates | Minute-by-minute deep sleep, clock and Home Assistant sync, the battery display, and firmware updates | [Power and sync](behavior/power_and_sync.md) |
-| Setup mode | Entering the WiFi and the MQTT broker on the device, with a phone app and a web page | [Setup mode](behavior/setup_mode.md) |
+| Setup mode | Entering the WiFi and the MQTT broker on the device, by scanning a QR code and filling in a web page | [Setup mode](behavior/setup_mode.md) |
 | Home Assistant | Settings, time adjustments, the chore list, the dashboard, and "Find my timer" | [Home Assistant setup](home_assistant/setup.md) |
 
 ## The device at a glance

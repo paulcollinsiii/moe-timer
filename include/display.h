@@ -231,8 +231,7 @@ void display_ota(const char *from_version, const char *to_version);
    takes bare version strings instead of an ota_flow struct. main/
    setup_screens.c is the thin adapter that unpacks the session's struct
    into these. */
-void display_setup(const char *ap_ssid, const char *ap_password, const char *qr_payload, const char *username,
-                   const char *form_url);
+void display_setup(const char *ap_ssid, const char *ap_password, const char *qr_payload, const char *page_host);
 /* The BOOT hold is armed; releasing now enters setup. */
 void display_setup_release(void);
 

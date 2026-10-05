@@ -191,6 +191,8 @@ add_host_test(test_setup_session
                ${CMAKE_CURRENT_SOURCE_DIR}/../lib/qrcodegen/qrcodegen.c
     EXTRA_INCLUDES ${CMAKE_CURRENT_SOURCE_DIR}/../lib/cJSON
                    ${CMAKE_CURRENT_SOURCE_DIR}/../lib/qrcodegen)
+# The captive portal's DNS answer builder: pure bytes in, bytes out.
+add_host_test(test_dns_reply)
 add_host_test(test_ha_config EXTRA_LIBS m) # m: tones.c sine LUT
 add_host_test(test_tones EXTRA_LIBS m)
 add_host_test(test_wav_header)

@@ -114,18 +114,28 @@ These cover [setup mode](behavior/setup_mode.md). The first one erases the
 device's NVS on purpose, so use a device whose settings you can lose.
 
 - [ ] **First setup.** Erase flash, flash, and power on. → The setup screen
-  appears. Scan its QR with Espressif's ESP SoftAP Prov app, on Android and
-  on iOS, and pick your WiFi. → The app does not report failure after
-  success. The panel shows `Setup complete`, and about a second later the
-  first network window runs.
+  appears. Scan its QR with the stock camera on Android and on iOS. → The phone
+  offers to join `MagTag-xxxxxx` and joins it, and the setup page opens by
+  itself. Enter your WiFi and a broker and Save. → The page says
+  `Connecting to WiFi...` and then `WiFi saved` (the phone may drop off the
+  network and come back). The panel shows `Setup complete`, and about a second
+  later the first network window runs.
+- [ ] **Browser fallback.** Repeat with the page not opening by itself, then
+  with a phone browser at `http://192.168.4.1`, and once with JavaScript off
+  (reload to see the result). → The page works each way, and a made-up URL such
+  as `http://example.com/x` also lands on it.
 - [ ] **WiFi first, MQTT later.** On a device with WiFi, hold BOOT. → The
   panel shows `Release to enter setup`, and letting go opens the setup
-  screen. Join the `MagTag-` network, open `http://192.168.4.1/mqtt`, and
-  save a broker. → The panel shows `MQTT broker saved`, and the device
-  appears in HA at its next window.
-- [ ] **Wrong WiFi password.** Give the app a wrong password. → The app
-  reports it and nothing is saved. A retry with the right one, in the same
-  session, succeeds.
+  screen. Scan the QR, leave the WiFi fields blank, and save a broker. → The
+  panel shows `MQTT broker saved`, and the device appears in HA at its next
+  window.
+- [ ] **Wrong WiFi password.** Enter a wrong password on the page. → The page
+  reports `wrong password`, a made-up network name reports
+  `network not found`, and nothing is saved. A retry with the right one, in
+  the same session, succeeds.
+- [ ] **The app fallback.** Join the network by hand and provision with the
+  ESP SoftAP Prov app's manual option (username `magtag`, the panel password
+  as the PoP). → It still works, and the page shows the same progress.
 - [ ] **Timeout.** Leave a device with no WiFi in setup for
   `MAGTAG_SETUP_MAX_SEC`. → The panel shows `Setup timed out` and
   `Press any button to retry`, the log shows a buttons-only sleep, and no

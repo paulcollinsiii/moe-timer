@@ -20,7 +20,8 @@ screen to force one.
 
 - **No broker set.** The serial log says `MQTT disabled: no broker
   configured; enter it in setup mode`. The broker is entered on the device, so
-  hold BOOT, join the `MagTag-` network and open `http://192.168.4.1/mqtt`
+  hold BOOT, scan the QR code to join the `MagTag-` network, and fill in the
+  broker fields on the page that opens, or at `http://192.168.4.1`
   ([Setup](setup.md#1-point-the-device-at-the-broker)).
 - **WiFi does not work.** The timer works without it, but no window can reach
   the broker. After repeated failed windows the header shows a setup hint, and

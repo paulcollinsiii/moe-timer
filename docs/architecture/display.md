@@ -58,8 +58,8 @@ skipped when nothing changed and when there is no valid previous frame.
 ## Setup screens
 
 `display_screens.c` also builds the setup-mode screens, each a full-screen
-takeover with a full refresh: the setup screen (QR code, AP name, user,
-password, form URL), `Release to enter setup`, and the end screens
+takeover with a full refresh: the setup screen (QR code, `Scan to join, then
+open`, the address, AP name, password), `Release to enter setup`, and the end screens
 (`Setup complete` for a WiFi save or an MQTT save, `Setup timed out`, `Setup
 failed`). `setup_screens.c` is the thin adapter that wires them to the session's
 ops. The end screens' retry line is worded for the build and the state: no
@@ -72,16 +72,17 @@ setup hint. Its default is NULL.
 **The QR is drawn as rectangle runs.** `qr_render.c` encodes the payload with the
 vendored Nayuki `qrcodegen` (`lib/qrcodegen/`) into a module matrix, and a
 `LV_EVENT_DRAW_MAIN` handler on a plain object paints each horizontal run of dark
-modules with one `lv_draw_rect`, at 2 px per module. `LV_USE_QRCODE` stays off,
+modules with one `lv_draw_rect`, at 3 px per module. `LV_USE_QRCODE` stays off,
 and the reason is the ARGB8888 trap: that widget draws through an indexed-image
 canvas, LVGL's decoder turns the indexed image into ARGB8888 before the blit, and
 the ARGB8888-to-I1 blend sits behind `LV_DRAW_SW_SUPPORT_ARGB8888`, which
 `sdkconfig.defaults` turns off. With `LV_USE_LOG` off that fails silently: the QR
 draws nothing, on the device and on the host. Rectangle fills on I1 are the path
 the bars already use. The real payload has a fixed length (derived in `setup_session.h` beside
-`SETUP_SESSION_QR_MAX`) and encodes as QR version 6; up to
-`QR_RENDER_MAX_VERSION` still fits the 128 px height, and a longer payload falls
-back to text.
+`SETUP_SESSION_QR_MAX`) and encodes as QR version 3, 29 modules, an 87 px code
+in a 111 px block with the 4-module quiet zone; 3 px is the most a 128 px panel
+allows. `QR_RENDER_MAX_VERSION` is 3 to match, and a longer payload falls back
+to the text lines.
 
 That is also why `sdkconfig.defaults` trims LVGL to the label and bar widgets
 and the I1 draw path only, mirrored in `test/mocks/lv_conf_host.h`. Re-enabling

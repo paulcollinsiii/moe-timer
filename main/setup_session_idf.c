@@ -7,16 +7,19 @@
    outcome.
 
    setup_mode_ops() at the bottom assembles the whole setup_session_ops_t
-   from the eight exported functions below and the setup screens' two render
+   from the nine exported functions below and the setup screens' two render
    functions. The one member it cannot supply is extend_awake, whose real
    implementation owns the awake failsafe's esp_timer handle in main.c; the
    caller passes it in, so the table is built here and not in the
    composition root. */
-#include "setup_session_idf.h" /* prototypes for the eight exported functions below, checked against their definitions */
+#include "setup_session_idf.h" /* prototypes for the nine exported functions below, checked against their definitions */
 
+#include <errno.h>
 #include <stdlib.h>
 #include <string.h>
 
+#include "dhcpserver/dhcpserver.h" /* OFFER_DNS */
+#include "dns_reply.h"
 #include "esp_event.h"
 #include "esp_http_server.h"
 #include "esp_log.h"
@@ -27,7 +30,9 @@
 #include "esp_wifi.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
+#include "freertos/semphr.h"
 #include "freertos/task.h" /* xTaskGetHandle, uxTaskGetStackHighWaterMark — bench measurement of the httpd stack */
+#include "lwip/sockets.h"
 #include "mbedtls/platform_util.h" /* mbedtls_platform_zeroize — non-elidable wipe, already linked via esp-tls */
 #include "network_provisioning/manager.h"
 #include "network_provisioning/scheme_softap.h"
@@ -45,21 +50,31 @@ static const char *TAG = "setup_session_idf";
 #define SRP_SALT_LEN 16
 
 /* httpd_register_uri_handler's registrations (5 of the manager's own
-   fixed endpoints + "mqtt-config" + our /mqtt GET/POST, each one its own
-   URI handler at the esp_http_server level — protocomm's httpd transport
-   registers a handler per endpoint, same as this file registers one per
-   method on /mqtt) comes to exactly 8 today. A few slots of headroom so
-   the next endpoint anyone adds does not fail silently against a config
-   nobody remembered to grow. */
-#define SETUP_SESSION_HTTPD_MAX_URI_HANDLERS 10
+   fixed endpoints + "mqtt-config", each one its own URI handler at the
+   esp_http_server level, plus this file's page GET/POST on "/" and on the
+   "/mqtt" alias, and GET "/status") comes to exactly 11 today. Three
+   slots of headroom so the next endpoint anyone adds does not fail
+   silently against a config nobody remembered to grow. */
+#define SETUP_SESSION_HTTPD_MAX_URI_HANDLERS 14
+
+/* The captive portal's DNS responder task: one UDP socket, one 512 B query
+   buffer and one reply buffer on its stack, with the lwip send/receive
+   frames below them. Not measured; the high-water mark is logged on stop
+   so a bench run can replace this guess. */
+#define SETUP_SESSION_DNS_TASK_STACK 3072
+#define SETUP_SESSION_DNS_TASK_PRIO 4
+/* The receive timeout is how often the responder looks at its stop flag,
+   so it bounds how long stop() can wait for it. */
+#define SETUP_SESSION_DNS_RECV_TIMEOUT_MS 500
+#define SETUP_SESSION_DNS_STOP_WAIT_MS 2000
 
 /* HTTPD_DEFAULT_CONFIG's own 4096 B is tight against this feature's
-   worst case. With the /mqtt page's locals
-   moved to the heap (send_mqtt_page below) the two paths left on this
+   worst case. With the setup page's locals
+   moved to the heap (send_page below) the two paths left on this
    stack are:
-     - our own handler frames: mqtt_form_result_t + a queue_msg_t (now
-       just two short wifi strings) + a short status buffer, on the
-       order of 500 B;
+     - our own handler frames: an mqtt_form_setup_t (~370 B) + a
+       wifi_config_t for the join + a short status buffer, on the
+       order of 700 B;
      - esp_http_server's own dispatch frames plus, on the protocomm
        endpoint path, one mbedtls GCM decrypt and a bounded-depth cJSON
        parse (mqtt_form_parse_json pre-scans nesting before cJSON ever
@@ -70,7 +85,7 @@ static const char *TAG = "setup_session_idf";
    measurement can replace this estimate with a real number). */
 #define SETUP_SESSION_HTTPD_STACK_SIZE 6144
 
-/* Consecutive HTTPD_SOCK_ERR_TIMEOUT returns the /mqtt POST body read
+/* Consecutive HTTPD_SOCK_ERR_TIMEOUT returns the setup POST body read
    tolerates before giving up: unbounded retry pins the single httpd
    task on a client that sent a Content-Length and then went quiet,
    and httpd_stop() in teardown then blocks joining that same task.
@@ -90,6 +105,25 @@ static bool s_our_own_stop;
 static httpd_handle_t s_httpd;
 static esp_event_handler_instance_t s_inst_prov;
 static QueueHandle_t s_evt_queue;
+
+/* Where the browser-or-app WiFi join stands, for the page and /status. Written by
+   the event-loop task (the manager's events), the httpd task (a submit) and
+   the session task (the credential store), read by httpd; each is one
+   aligned word, and the reason is always written before the state that
+   makes it visible, so a reader never sees FAILED with a stale reason. */
+static volatile setup_join_state_t s_join_state;
+static volatile setup_join_reason_t s_join_reason;
+
+/* Captive portal DNS responder. s_dns_done is given by the task as its last
+   act, so stop() knows the socket is closed before the netifs go away. */
+static TaskHandle_t s_dns_task;
+static SemaphoreHandle_t s_dns_done;
+static volatile bool s_dns_stop;
+
+/* The captive portal URI handed to DHCP clients (option 114). The DHCP
+   server keeps this pointer rather than copying it, so it must outlive the
+   session: static, never freed. */
+static char s_portal_uri[] = "http://" SETUP_SESSION_AP_IP;
 
 static char *s_srp_salt;
 static char *s_srp_verifier;
@@ -111,7 +145,7 @@ typedef struct {
     setup_session_poll_out_t out;
 } queue_msg_t;
 
-/* ---- the httpd side of the /mqtt form ----------------------------------- */
+/* ---- the httpd side of the setup page ----------------------------------- */
 
 static bool httpd_chunk_sink(const char *chunk, size_t len, void *ctx) {
     httpd_req_t *req = (httpd_req_t *)ctx;
@@ -123,50 +157,86 @@ static bool httpd_chunk_sink(const char *chunk, size_t len, void *ctx) {
    escaped widenings) they were the single largest consumer of this
    handler's share of the httpd task stack. A transient allocation,
    freed before this function returns — the same
-   call/free shape mqtt_post_handler's body buffer already uses below,
+   call/free shape setup_post_handler's body buffer already uses below,
    and for the same reason: setup mode is not a path this device needs
    to keep off the heap allocator for timing reasons. */
 typedef struct {
+    char ssid[NVS_CONFIG_WIFI_SSID_BUF];
     char uri[MQTT_FORM_URI_MAX];
     char user[MQTT_FORM_USER_MAX];
+    char ssid_esc[MQTT_FORM_HTML_ESCAPED_MAX(NVS_CONFIG_WIFI_SSID_BUF)];
     char uri_esc[MQTT_FORM_HTML_ESCAPED_MAX(MQTT_FORM_URI_MAX)];
     char user_esc[MQTT_FORM_HTML_ESCAPED_MAX(MQTT_FORM_USER_MAX)];
-} mqtt_page_scratch_t;
+} page_scratch_t;
 
-static void send_mqtt_page(httpd_req_t *req, const char *status_msg) {
-    mqtt_page_scratch_t *s = malloc(sizeof(*s));
+static void send_page(httpd_req_t *req, const char *status_msg) {
+    page_scratch_t *s = malloc(sizeof(*s));
     if (s == NULL) {
-        ESP_LOGW(TAG, "/mqtt: out of memory building the page");
+        ESP_LOGW(TAG, "setup page: out of memory building the page");
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, NULL);
         return;
     }
     memset(s, 0, sizeof(*s));
+    (void)nvs_config_get_wifi_ssid(s->ssid, sizeof(s->ssid));
     (void)nvs_config_get_mqtt_uri(s->uri, sizeof(s->uri));
     (void)nvs_config_get_mqtt_user(s->user, sizeof(s->user));
+    (void)mqtt_form_html_escape(s->ssid, s->ssid_esc, sizeof(s->ssid_esc));
     (void)mqtt_form_html_escape(s->uri, s->uri_esc, sizeof(s->uri_esc));
     (void)mqtt_form_html_escape(s->user, s->user_esc, sizeof(s->user_esc));
 
-    setup_session_mqtt_page_in_t in = {
-        .uri_escaped = s->uri_esc, .user_escaped = s->user_esc, .status_msg = status_msg};
+    setup_session_page_in_t in = {.ssid_escaped = s->ssid_esc,
+                                  .uri_escaped = s->uri_esc,
+                                  .user_escaped = s->user_esc,
+                                  .status_msg = status_msg,
+                                  .join_state = s_join_state,
+                                  .join_reason = s_join_reason};
     httpd_resp_set_type(req, "text/html");
-    (void)setup_session_render_mqtt_page(&in, httpd_chunk_sink, req);
+    (void)setup_session_render_page(&in, httpd_chunk_sink, req);
     httpd_resp_send_chunk(req, NULL, 0); /* ends the chunked response */
     free(s);
 }
 
-static esp_err_t mqtt_get_handler(httpd_req_t *req) {
-    send_mqtt_page(req, NULL);
+static esp_err_t page_get_handler(httpd_req_t *req) {
+    send_page(req, NULL);
     return ESP_OK;
 }
 
-/* Parses body/body_len with `parse`, and on success stores the result
-   synchronously (setup_session_apply_mqtt, setup_session.h) and — only
-   once it is actually saved — posts SETUP_SESSION_EVENT_MQTT_STORED so
-   the session can decide whether that ends it. Shared by both MQTT
-   entry points (the /mqtt form and the "mqtt-config" protocomm
-   endpoint) so the parse-then-store-then-notify sequence exists in
-   exactly one place rather than twice. Writes a
-   short human status into `status` (capacity status_cap) that is
+static esp_err_t status_get_handler(httpd_req_t *req) {
+    char json[96];
+    (void)setup_session_format_status_json(s_join_state, s_join_reason, json, sizeof(json));
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    return httpd_resp_send(req, json, HTTPD_RESP_USE_STRLEN);
+}
+
+/* Phones probe a handful of well-known URLs (generate_204 and the like) to
+   decide whether the network is "captive". The DNS responder sends every
+   name here, and answering any unknown path with a redirect to the setup
+   page is what turns that probe into the sign-in popup. */
+static esp_err_t not_found_redirect(httpd_req_t *req, httpd_err_code_t err) {
+    (void)err;
+    httpd_resp_set_status(req, "302 Found");
+    httpd_resp_set_hdr(req, "Location", "http://" SETUP_SESSION_AP_IP "/");
+    return httpd_resp_send(req, NULL, 0);
+}
+
+/* Tells the session an MQTT-only submit has been stored (the session decides
+   whether that ends it). NVS writes from the httpd task are safe — nvs_flash
+   is thread-safe across tasks. */
+static void notify_mqtt_stored(void) {
+    queue_msg_t msg;
+    memset(&msg, 0, sizeof(msg));
+    msg.event = SETUP_SESSION_EVENT_MQTT_STORED;
+    if (s_evt_queue == NULL || xQueueSend(s_evt_queue, &msg, 0) != pdTRUE) {
+        /* The data is already in NVS — only the "end the session now"
+           notification is lost, and the session's own timeout still covers
+           that. */
+        ESP_LOGW(TAG, "mqtt credentials saved, but the session queue would not take the notification");
+    }
+}
+
+/* The "mqtt-config" protocomm endpoint's parse-then-store-then-notify.
+   Writes a short human status into `status` (capacity status_cap) that is
    "Saved." only when the store actually happened — never when it was
    merely queued, which is what let a dropped post still claim success
    before this fix. */
@@ -187,21 +257,8 @@ static void apply_and_notify(mqtt_form_status_t parse_st, const mqtt_form_result
         apply_ops.set_mqtt_creds = setup_session_idf_set_mqtt_creds;
         stored = setup_session_apply_mqtt(&apply_ops, result);
 
-        if (stored) {
-            queue_msg_t msg;
-            memset(&msg, 0, sizeof(msg));
-            msg.event = SETUP_SESSION_EVENT_MQTT_STORED;
-            /* NVS writes from this (httpd) task are safe — nvs_flash is
-               thread-safe across tasks, unlike the esp_wifi driver calls
-               this file also makes, which all run on the task that calls
-               setup_session_run(). */
-            if (s_evt_queue == NULL || xQueueSend(s_evt_queue, &msg, 0) != pdTRUE) {
-                /* The data is already in NVS — only the "end the session
-                   now" notification is lost, and the session's own
-                   timeout still covers that. */
-                ESP_LOGW(TAG, "mqtt credentials saved, but the session queue would not take the notification");
-            }
-        }
+        if (stored)
+            notify_mqtt_stored();
     }
 
     if (!parsed) {
@@ -226,17 +283,17 @@ static void apply_and_notify(mqtt_form_status_t parse_st, const mqtt_form_result
    is not a path anything here needs to keep off the heap allocator for
    timing reasons. A body longer than the cap is reported as too-long
    without ever being read into memory. */
-static esp_err_t mqtt_post_handler(httpd_req_t *req) {
+static esp_err_t setup_post_handler(httpd_req_t *req) {
     mqtt_form_status_t st;
-    mqtt_form_result_t result;
-    memset(&result, 0, sizeof(result));
+    mqtt_form_setup_t form;
+    memset(&form, 0, sizeof(form));
 
     if (req->content_len > MQTT_FORM_BODY_MAX) {
         st = (mqtt_form_status_t){MQTT_FORM_ERR_BODY_TOO_LONG, MQTT_FORM_FIELD_NONE};
     } else {
         char *body = malloc(MQTT_FORM_BODY_MAX);
         if (body == NULL) {
-            ESP_LOGW(TAG, "/mqtt POST: out of memory reading the body");
+            ESP_LOGW(TAG, "setup POST: out of memory reading the body");
             return ESP_ERR_NO_MEM;
         }
         size_t received = 0;
@@ -246,14 +303,14 @@ static esp_err_t mqtt_post_handler(httpd_req_t *req) {
             int r = httpd_req_recv(req, body + received, req->content_len - received);
             if (r == HTTPD_SOCK_ERR_TIMEOUT) {
                 if (++timeouts > SETUP_SESSION_POST_RECV_MAX_TIMEOUTS) {
-                    ESP_LOGW(TAG, "/mqtt POST: recv timed out %d times in a row", timeouts);
+                    ESP_LOGW(TAG, "setup POST: recv timed out %d times in a row", timeouts);
                     recv_failed = ESP_ERR_TIMEOUT;
                     break;
                 }
                 continue;
             }
             if (r <= 0) {
-                ESP_LOGW(TAG, "/mqtt POST: recv failed (%d)", r);
+                ESP_LOGW(TAG, "setup POST: recv failed (%d)", r);
                 recv_failed = ESP_FAIL;
                 break;
             }
@@ -270,15 +327,41 @@ static esp_err_t mqtt_post_handler(httpd_req_t *req) {
             free(body);
             return ESP_FAIL;
         }
-        st = mqtt_form_parse_urlencoded(body, received, &result);
-        mbedtls_platform_zeroize(body, MQTT_FORM_BODY_MAX); /* held the submitted password in cleartext */
+        st = mqtt_form_parse_setup(body, received, &form);
+        mbedtls_platform_zeroize(body, MQTT_FORM_BODY_MAX); /* held the submitted passwords in cleartext */
         free(body);
     }
 
     char status[80];
-    apply_and_notify(st, &result, status, sizeof(status));
-    mbedtls_platform_zeroize(&result, sizeof(result)); /* result.pass */
-    send_mqtt_page(req, status);
+    setup_session_apply_t applied = SETUP_APPLY_NOTHING;
+    if (st.err != MQTT_FORM_ERR_NONE) {
+        setup_session_format_mqtt_status(false, st, status, sizeof(status));
+    } else {
+        /* A table of only the two device ops a submit needs, for the same
+           reason apply_and_notify builds one: setup_session_run's own table
+           belongs to main.c and is out of reach from here. */
+        setup_session_ops_t apply_ops;
+        memset(&apply_ops, 0, sizeof(apply_ops));
+        apply_ops.set_mqtt_creds = setup_session_idf_set_mqtt_creds;
+        apply_ops.join_wifi = setup_session_idf_join_wifi;
+        applied = setup_session_apply_setup(&apply_ops, &form);
+        snprintf(status, sizeof(status), "%s", setup_session_apply_msg(applied));
+    }
+    mbedtls_platform_zeroize(&form, sizeof(form)); /* form.wifi_pass, form.mqtt.pass */
+
+    if (applied == SETUP_APPLY_MQTT_SAVED)
+        notify_mqtt_stored();
+
+    if (applied == SETUP_APPLY_JOINING) {
+        /* Post/redirect/get: the join takes seconds, and a reload of this
+           POST's own response would resubmit the form (which the manager
+           refuses mid-join). Redirecting means a plain reload, with JS off,
+           re-reads the join state instead. */
+        httpd_resp_set_status(req, "303 See Other");
+        httpd_resp_set_hdr(req, "Location", "/");
+        return httpd_resp_send(req, NULL, 0);
+    }
+    send_page(req, status);
     return ESP_OK;
 }
 
@@ -307,6 +390,21 @@ static esp_err_t mqtt_endpoint_handler(uint32_t session_id, const uint8_t *inbuf
 
 /* ---- the manager's own events -------------------------------------------- */
 
+/* NETWORK_PROV_WIFI_CRED_FAIL's data is a pointer to the manager's disconnect
+   reason (manager.h); anything else it adds later reads as unknown. */
+static setup_join_reason_t join_reason_from_manager(const void *data) {
+    if (data == NULL)
+        return SETUP_JOIN_REASON_UNKNOWN;
+    switch (*(const network_prov_wifi_sta_fail_reason_t *)data) {
+        case NETWORK_PROV_WIFI_STA_AUTH_ERROR:
+            return SETUP_JOIN_REASON_WRONG_PASSWORD;
+        case NETWORK_PROV_WIFI_STA_AP_NOT_FOUND:
+            return SETUP_JOIN_REASON_NOT_FOUND;
+        default:
+            return SETUP_JOIN_REASON_UNKNOWN;
+    }
+}
+
 static void prov_event_handler(void *arg, esp_event_base_t base, int32_t id, void *data) {
     (void)arg;
     if (base != NETWORK_PROV_EVENT)
@@ -333,6 +431,10 @@ static void prov_event_handler(void *arg, esp_event_base_t base, int32_t id, voi
             memset(s_cred_pass, 0, sizeof(s_cred_pass));
             memcpy(s_cred_ssid, cfg->ssid, ssid_len);
             memcpy(s_cred_pass, cfg->password, pass_len);
+            /* Whichever route the credentials came by (the page or the
+               phone app), the page should show a join in progress. */
+            s_join_reason = SETUP_JOIN_REASON_NONE;
+            s_join_state = SETUP_JOIN_CONNECTING;
             return;
         }
         case NETWORK_PROV_WIFI_CRED_FAIL:
@@ -348,6 +450,12 @@ static void prov_event_handler(void *arg, esp_event_base_t base, int32_t id, voi
                (app_main.c) calls it from the same place. */
             if (network_prov_mgr_reset_wifi_sm_state_on_failure() != ESP_OK)
                 ESP_LOGW(TAG, "reset_wifi_sm_state_on_failure failed: a retry after this failure may be refused");
+            /* Only now is FAILED shown: the page invites a retry, and the
+               manager refuses one (network_prov_mgr_configure_wifi_sta
+               returns ESP_FAIL while its state is FAIL) until the reset
+               above has run. */
+            s_join_reason = join_reason_from_manager(data);
+            s_join_state = SETUP_JOIN_FAILED;
             msg.event = SETUP_SESSION_EVENT_WIFI_FAIL;
             break;
         case NETWORK_PROV_WIFI_CRED_SUCCESS:
@@ -378,7 +486,7 @@ static void prov_event_handler(void *arg, esp_event_base_t base, int32_t id, voi
         (void)xQueueSend(s_evt_queue, &msg, 0);
 }
 
-/* ---- the ops table's eight real implementations -------------------------- */
+/* ---- the ops table's nine real implementations --------------------------- */
 
 uint8_t setup_session_idf_rand_byte(void) {
     return (uint8_t)esp_random();
@@ -393,6 +501,106 @@ uint32_t setup_session_idf_now_ms(void) {
     return (uint32_t)(esp_timer_get_time() / 1000);
 }
 
+/* ---- the captive portal's DNS responder -------------------------------- */
+
+/* Answers every A query with the SoftAP's own address (dns_reply_build) so a
+   phone's connectivity probe reaches our httpd. Bound to the wildcard
+   address because the AP netif's IP may not be up yet when this starts; the
+   only traffic that reaches it is the SoftAP's and, while a join runs, the
+   joined LAN's, and an answer pointing at ourselves does a LAN client no
+   harm. */
+static void dns_task(void *arg) {
+    (void)arg;
+    uint8_t ap_ip[4];
+    uint32_t ap_addr = esp_ip4addr_aton(SETUP_SESSION_AP_IP); /* already in network byte order */
+    memcpy(ap_ip, &ap_addr, sizeof(ap_ip));
+    int sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (sock < 0) {
+        ESP_LOGW(TAG, "dns: socket failed (errno %d); the page needs its address typed", errno);
+    } else {
+        struct sockaddr_in addr = {.sin_family = AF_INET, .sin_port = htons(53), .sin_addr.s_addr = htonl(INADDR_ANY)};
+        struct timeval tv = {.tv_sec = 0, .tv_usec = SETUP_SESSION_DNS_RECV_TIMEOUT_MS * 1000};
+        (void)setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+        if (bind(sock, (struct sockaddr *)&addr, sizeof(addr)) != 0) {
+            ESP_LOGW(TAG, "dns: bind failed (errno %d); the page needs its address typed", errno);
+        } else {
+            uint8_t query[DNS_QUERY_MAX];
+            uint8_t reply[DNS_REPLY_MAX];
+            while (!s_dns_stop) {
+                struct sockaddr_in from;
+                socklen_t from_len = sizeof(from);
+                int n = recvfrom(sock, query, sizeof(query), 0, (struct sockaddr *)&from, &from_len);
+                if (n < 0 && errno != EAGAIN && errno != EWOULDBLOCK) {
+                    vTaskDelay(pdMS_TO_TICKS(100)); /* a hard error must not spin */
+                    continue;
+                }
+                if (n <= 0)
+                    continue;
+                size_t rn = dns_reply_build(query, (size_t)n, ap_ip, reply, sizeof(reply));
+                if (rn > 0)
+                    (void)sendto(sock, reply, rn, 0, (struct sockaddr *)&from, from_len);
+            }
+        }
+        close(sock);
+    }
+    UBaseType_t stack_free = uxTaskGetStackHighWaterMark(NULL);
+    ESP_LOGI(TAG, "dns task stack high-water mark: %u words free", (unsigned)stack_free);
+    xSemaphoreGive(s_dns_done);
+    vTaskDelete(NULL);
+}
+
+static void dns_stop(void) {
+    if (s_dns_task == NULL)
+        return;
+    s_dns_stop = true;
+    if (xSemaphoreTake(s_dns_done, pdMS_TO_TICKS(SETUP_SESSION_DNS_STOP_WAIT_MS)) == pdTRUE) {
+        vSemaphoreDelete(s_dns_done);
+        s_dns_done = NULL;
+    } else {
+        /* The task is still holding its socket. Leaving the semaphore alone
+           (a few dozen bytes, once) is what keeps its final give from
+           landing on freed memory. */
+        ESP_LOGW(TAG, "dns task did not stop within %d ms", SETUP_SESSION_DNS_STOP_WAIT_MS);
+    }
+    s_dns_task = NULL;
+}
+
+/* Fail-soft: without the responder the QR still joins the network and the
+   panel still shows the address to type; only the popup is lost. */
+static void dns_start(void) {
+    s_dns_stop = false;
+    s_dns_done = xSemaphoreCreateBinary();
+    if (s_dns_done == NULL || xTaskCreate(dns_task, "setup_dns", SETUP_SESSION_DNS_TASK_STACK, NULL,
+                                          SETUP_SESSION_DNS_TASK_PRIO, &s_dns_task) != pdPASS) {
+        ESP_LOGW(TAG, "dns: could not start the responder; the page needs its address typed");
+        if (s_dns_done != NULL) {
+            vSemaphoreDelete(s_dns_done);
+            s_dns_done = NULL;
+        }
+        s_dns_task = NULL;
+    }
+}
+
+/* The captive portal's DHCP half, best-effort for the same reason: hand
+   clients this device as their DNS server and name the setup page in
+   option 114, which Android 11+ uses to open the page itself. The AP's
+   DHCP server is not running yet (it starts with the AP), so the options
+   can be set without stopping it. */
+static void dhcp_set_portal_options(esp_netif_t *ap_netif) {
+    esp_netif_dns_info_t dns = {0};
+    dns.ip.type = ESP_IPADDR_TYPE_V4;
+    dns.ip.u_addr.ip4.addr = esp_ip4addr_aton(SETUP_SESSION_AP_IP);
+    uint8_t offer_dns = OFFER_DNS;
+    esp_err_t r1 =
+        esp_netif_dhcps_option(ap_netif, ESP_NETIF_OP_SET, ESP_NETIF_DOMAIN_NAME_SERVER, &offer_dns, sizeof(offer_dns));
+    esp_err_t r2 = esp_netif_set_dns_info(ap_netif, ESP_NETIF_DNS_MAIN, &dns);
+    esp_err_t r3 = esp_netif_dhcps_option(ap_netif, ESP_NETIF_OP_SET, ESP_NETIF_CAPTIVEPORTAL_URI, s_portal_uri,
+                                          strlen(s_portal_uri));
+    if (r1 != ESP_OK || r2 != ESP_OK || r3 != ESP_OK)
+        ESP_LOGW(TAG, "dhcp portal options not fully set (%s/%s/%s)", esp_err_to_name(r1), esp_err_to_name(r2),
+                 esp_err_to_name(r3));
+}
+
 /* Idempotent-by-construction cleanup: every resource is torn down behind
    a null/flag guard, so calling this when `start` was never reached, or
    failed partway through, is a correctly-shaped no-op rather than a
@@ -400,6 +608,8 @@ uint32_t setup_session_idf_now_ms(void) {
    contract for `stop`). */
 void setup_session_idf_stop(void) {
     s_our_own_stop = true; /* see prov_event_handler's NETWORK_PROV_END/_DEINIT case */
+
+    dns_stop(); /* before the radio goes: it holds a socket on the AP's netif */
 
     if (s_mgr_inited) {
         /* network_prov_mgr_deinit() alone — not stop_provisioning() +
@@ -529,6 +739,9 @@ bool setup_session_idf_start(const char *ap_ssid, const char *ap_password) {
             return false;
         }
     }
+    dhcp_set_portal_options(s_ap_netif);
+    s_join_reason = SETUP_JOIN_REASON_NONE;
+    s_join_state = SETUP_JOIN_IDLE;
 
     wifi_init_config_t wifi_cfg = WIFI_INIT_CONFIG_DEFAULT();
     ret = esp_wifi_init(&wifi_cfg);
@@ -553,7 +766,7 @@ bool setup_session_idf_start(const char *ap_ssid, const char *ap_password) {
         return false;
     }
 
-    /* Our own httpd instance, so /mqtt can be registered on it (plan:
+    /* Our own httpd instance, so the setup page can be registered on it (plan:
        "Create the httpd instance yourself and pass it to
        network_prov_scheme_softap_set_httpd_handle"). max_uri_handlers
        and lru_purge_enable both raised from HTTPD_DEFAULT_CONFIG's own
@@ -576,17 +789,26 @@ bool setup_session_idf_start(const char *ap_ssid, const char *ap_password) {
        registration. Passing s_httpd itself panics in start_provisioning. */
     network_prov_scheme_softap_set_httpd_handle(&s_httpd);
 
-    httpd_uri_t get_uri = {.uri = "/mqtt", .method = HTTP_GET, .handler = mqtt_get_handler, .user_ctx = NULL};
-    httpd_uri_t post_uri = {.uri = "/mqtt", .method = HTTP_POST, .handler = mqtt_post_handler, .user_ctx = NULL};
-    ret = httpd_register_uri_handler(s_httpd, &get_uri);
-    if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "httpd_register_uri_handler(GET /mqtt): %s", esp_err_to_name(ret));
-        setup_session_idf_stop();
-        return false;
+    /* The page lives at "/", and "/mqtt" stays as an alias so a link or
+       bookmark to the old broker form still lands on the same page. */
+    static const httpd_uri_t routes[] = {
+        {.uri = "/", .method = HTTP_GET, .handler = page_get_handler},
+        {.uri = "/", .method = HTTP_POST, .handler = setup_post_handler},
+        {.uri = "/mqtt", .method = HTTP_GET, .handler = page_get_handler},
+        {.uri = "/mqtt", .method = HTTP_POST, .handler = setup_post_handler},
+        {.uri = "/status", .method = HTTP_GET, .handler = status_get_handler},
+    };
+    for (size_t i = 0; i < sizeof(routes) / sizeof(routes[0]); i++) {
+        ret = httpd_register_uri_handler(s_httpd, &routes[i]);
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "httpd_register_uri_handler(%s): %s", routes[i].uri, esp_err_to_name(ret));
+            setup_session_idf_stop();
+            return false;
+        }
     }
-    ret = httpd_register_uri_handler(s_httpd, &post_uri);
+    ret = httpd_register_err_handler(s_httpd, HTTPD_404_NOT_FOUND, not_found_redirect);
     if (ret != ESP_OK) {
-        ESP_LOGE(TAG, "httpd_register_uri_handler(POST /mqtt): %s", esp_err_to_name(ret));
+        ESP_LOGE(TAG, "httpd_register_err_handler(404): %s", esp_err_to_name(ret));
         setup_session_idf_stop();
         return false;
     }
@@ -634,7 +856,7 @@ bool setup_session_idf_start(const char *ap_ssid, const char *ap_password) {
     char *salt = NULL;
     char *verifier = NULL;
     int verifier_len = 0;
-    ret = esp_srp_gen_salt_verifier(SETUP_SESSION_QR_USERNAME, (int)strlen(SETUP_SESSION_QR_USERNAME), ap_password,
+    ret = esp_srp_gen_salt_verifier(SETUP_SESSION_PROV_USERNAME, (int)strlen(SETUP_SESSION_PROV_USERNAME), ap_password,
                                     (int)strlen(ap_password), &salt, SRP_SALT_LEN, &verifier, &verifier_len);
     int64_t srp_us = esp_timer_get_time() - srp_start_us;
     ESP_LOGI(TAG, "SRP6a salt/verifier generated in %lld ms", (long long)(srp_us / 1000));
@@ -681,6 +903,8 @@ bool setup_session_idf_start(const char *ap_ssid, const char *ap_password) {
         setup_session_idf_stop();
         return false;
     }
+
+    dns_start();
     return true;
 }
 
@@ -699,8 +923,43 @@ bool setup_session_idf_set_wifi_creds(const char *ssid, const char *password) {
     esp_err_t r2 = nvs_config_set_wifi_pass(password);
     if (r1 != ESP_OK || r2 != ESP_OK) {
         ESP_LOGW(TAG, "wifi credential write failed (%d/%d)", r1, r2);
+        s_join_reason = SETUP_JOIN_REASON_SAVE_FAILED;
+        s_join_state = SETUP_JOIN_FAILED;
         return false;
     }
+    /* The only place the page may say "saved": the join was verified and the
+       app's own keys now hold it. */
+    s_join_state = SETUP_JOIN_SAVED;
+    return true;
+}
+
+/* The page's WiFi submit. Handed to the provisioning manager rather than
+   stored: network_prov_mgr_configure_wifi_sta() drives the same state
+   machine the phone app does, so the join is verified and the same
+   CRED_SUCCESS / CRED_FAIL events (and the CRED_FAIL reset) are the only
+   route to storage. It is called straight from the httpd task rather than
+   posted to the session task because the manager's own protocomm handler
+   makes the very same call from this same task, it serialises on its own
+   lock, and it returns before the join (a one-second timer starts the
+   connect), so it cannot hold the httpd task. A refusal (ESP_FAIL) means a
+   join is already past the point of accepting credentials. */
+bool setup_session_idf_join_wifi(const char *ssid, const char *password) {
+    wifi_config_t cfg = {0};
+    /* memcpy of the real length, as in prov_event_handler: ssid[32] and
+       password[64] are not NUL-terminated by contract, and a full-width
+       value has no room for a terminator. */
+    memcpy(cfg.sta.ssid, ssid, strnlen(ssid, sizeof(cfg.sta.ssid)));
+    memcpy(cfg.sta.password, password, strnlen(password, sizeof(cfg.sta.password)));
+    cfg.sta.scan_method = WIFI_FAST_SCAN; /* what the manager's own handler asks for */
+
+    esp_err_t ret = network_prov_mgr_configure_wifi_sta(&cfg);
+    mbedtls_platform_zeroize(&cfg, sizeof(cfg));
+    if (ret != ESP_OK) {
+        ESP_LOGW(TAG, "configure_wifi_sta refused the join: %s", esp_err_to_name(ret));
+        return false;
+    }
+    s_join_reason = SETUP_JOIN_REASON_NONE;
+    s_join_state = SETUP_JOIN_CONNECTING;
     return true;
 }
 
@@ -753,5 +1012,6 @@ setup_session_ops_t setup_mode_ops(bool (*extend_awake)(int seconds)) {
         .set_wifi_creds = setup_session_idf_set_wifi_creds,
         .clear_wifi_driver_store = setup_session_idf_clear_wifi_driver_store,
         .set_mqtt_creds = setup_session_idf_set_mqtt_creds,
+        .join_wifi = setup_session_idf_join_wifi,
     };
 }

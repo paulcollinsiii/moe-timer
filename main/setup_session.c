@@ -77,16 +77,39 @@ void setup_session_make_ap_ssid(char out[SETUP_SESSION_AP_SSID_MAX]) {
 
 /* ---- QR payload ----------------------------------------------------------- */
 
+/* Appends s to out at *o, backslash-escaping the characters the WIFI: format
+   reserves. Whole escapes only: a character that needs two bytes and has
+   room for one is a failure, never a dangling backslash. Always leaves one
+   byte for the NUL. */
+static bool put_escaped(char *out, size_t cap, size_t *o, const char *s, bool escape) {
+    for (; *s != '\0'; s++) {
+        bool special = escape && (*s == '\\' || *s == ';' || *s == ',' || *s == ':' || *s == '"');
+        size_t need = special ? 2 : 1;
+        if (*o + need + 1 > cap)
+            return false;
+        if (special)
+            out[(*o)++] = '\\';
+        out[(*o)++] = *s;
+    }
+    return true;
+}
+
 bool setup_session_make_qr_payload(const char *ap_ssid, const char *ap_password, char *out, size_t out_cap) {
-    int n = snprintf(out, out_cap,
-                     "{\"ver\":\"v1\",\"name\":\"%s\",\"username\":\"%s\",\"pop\":\"%s\",\"password\":\"%s\","
-                     "\"transport\":\"%s\",\"security\":2}",
-                     ap_ssid, SETUP_SESSION_QR_USERNAME, ap_password, ap_password, SETUP_SESSION_QR_TRANSPORT);
-    if (n < 0 || (size_t)n >= out_cap) {
-        if (out_cap > 0)
-            out[0] = '\0';
+    if (out == NULL || out_cap == 0)
+        return false;
+    out[0] = '\0';
+    if (ap_ssid == NULL || ap_password == NULL)
+        return false;
+
+    size_t o = 0;
+    bool ok = put_escaped(out, out_cap, &o, "WIFI:T:WPA;S:", false) && put_escaped(out, out_cap, &o, ap_ssid, true) &&
+              put_escaped(out, out_cap, &o, ";P:", false) && put_escaped(out, out_cap, &o, ap_password, true) &&
+              put_escaped(out, out_cap, &o, ";;", false);
+    if (!ok) {
+        out[0] = '\0';
         return false;
     }
+    out[o] = '\0';
     return true;
 }
 
@@ -100,6 +123,10 @@ static const char *field_label(mqtt_form_field_t f) {
             return "user";
         case MQTT_FORM_FIELD_PASS:
             return "pass";
+        case MQTT_FORM_FIELD_WIFI_SSID:
+            return "network name";
+        case MQTT_FORM_FIELD_WIFI_PASS:
+            return "wifi password";
         case MQTT_FORM_FIELD_NONE:
         default:
             return "";
@@ -145,34 +172,146 @@ static void emit(page_emit_t *st, const char *s) {
         st->ok = false;
 }
 
-bool setup_session_render_mqtt_page(const setup_session_mqtt_page_in_t *in, setup_session_chunk_sink_fn sink,
-                                    void *ctx) {
+/* The join state's own banner, shown when no submit message overrides it.
+   The CONNECTING text tells a JavaScript-off browser to reload by hand;
+   with the script on, the page reloads itself. */
+static const char *join_banner(setup_join_state_t state, setup_join_reason_t reason, const char **tail) {
+    *tail = "";
+    switch (state) {
+        case SETUP_JOIN_CONNECTING:
+            return "Connecting to WiFi... reload this page to see the result.";
+        case SETUP_JOIN_FAILED:
+            *tail = ". Check the password and try again.";
+            return reason == SETUP_JOIN_REASON_WRONG_PASSWORD ? "Could not join: wrong password"
+                   : reason == SETUP_JOIN_REASON_NOT_FOUND    ? "Could not join: network not found"
+                   : reason == SETUP_JOIN_REASON_SAVE_FAILED  ? "Joined, but could not save: flash write failed"
+                                                              : "Could not join: unknown";
+        case SETUP_JOIN_SAVED:
+            return "WiFi saved. The device will reconnect on its own; you can close this page.";
+        case SETUP_JOIN_IDLE:
+        default:
+            return NULL;
+    }
+}
+
+bool setup_session_render_page(const setup_session_page_in_t *in, setup_session_chunk_sink_fn sink, void *ctx) {
     page_emit_t st = {.sink = sink, .ctx = ctx, .ok = true};
+    bool has_ssid = in->ssid_escaped != NULL && in->ssid_escaped[0] != '\0';
 
     emit(&st,
          "<!doctype html><meta name=viewport content=\"width=device-width,initial-scale=1\">"
-         "<title>MagTag MQTT setup</title>"
+         "<title>MagTag setup</title>"
          "<body style=\"font-family:sans-serif;max-width:360px;margin:2em auto\">"
-         "<h1>MQTT broker</h1>");
-    if (in->status_msg != NULL) {
+         "<h1>MagTag setup</h1>");
+
+    const char *tail = "";
+    const char *banner = in->status_msg != NULL ? in->status_msg : join_banner(in->join_state, in->join_reason, &tail);
+    if (banner != NULL) {
         emit(&st, "<p><b>");
-        emit(&st, in->status_msg);
+        emit(&st, banner);
+        emit(&st, tail);
         emit(&st, "</b></p>");
     }
+
+    emit(&st, "<form method=post action=/><h2>WiFi</h2><p>Network name ");
+    emit(&st, has_ssid ? "(blank keeps the current one)" : "(required)");
+    emit(&st, "<br><input name=ssid maxlength=32 style=\"width:100%\" placeholder=\"");
+    emit(&st, in->ssid_escaped);
     emit(&st,
-         "<form method=post>"
-         "<p>Broker URI<br><input name=uri style=\"width:100%\" value=\"");
+         "\"></p><p>Password (blank for an open network)<br>"
+         "<input name=wpass type=password maxlength=64 style=\"width:100%\"></p>"
+         "<h2>MQTT broker</h2><p>Broker URI (blank keeps the current one)<br>"
+         "<input name=uri style=\"width:100%\" placeholder=\"mqtt://host:1883\" value=\"");
     emit(&st, in->uri_escaped);
-    emit(&st,
-         "\" placeholder=\"mqtt://host:1883\"></p>"
-         "<p>Username<br><input name=user style=\"width:100%\" value=\"");
+    emit(&st, "\"></p><p>Username<br><input name=user style=\"width:100%\" value=\"");
     emit(&st, in->user_escaped);
     emit(&st,
-         "\"></p>"
-         "<p>Password (leave blank to keep the current one)<br>"
+         "\"></p><p>Password (blank keeps the current one)<br>"
          "<input name=pass type=password style=\"width:100%\"></p>"
          "<p><button type=submit>Save</button></p></form>");
+
+    if (in->join_state == SETUP_JOIN_CONNECTING) {
+        emit(&st,
+             "<script>function p(){fetch('/status').then(function(r){return r.json()}).then(function(j){"
+             "if(j.state=='connecting')setTimeout(p,2000);else location.reload()})"
+             ".catch(function(){setTimeout(p,2000)})}setTimeout(p,2000)</script>");
+    }
     return st.ok;
+}
+
+/* ---- the join state's wire forms ------------------------------------------ */
+
+static const char *join_state_str(setup_join_state_t state) {
+    switch (state) {
+        case SETUP_JOIN_CONNECTING:
+            return "connecting";
+        case SETUP_JOIN_FAILED:
+            return "failed";
+        case SETUP_JOIN_SAVED:
+            return "saved";
+        case SETUP_JOIN_IDLE:
+        default:
+            return "idle";
+    }
+}
+
+static const char *join_reason_str(setup_join_reason_t reason) {
+    switch (reason) {
+        case SETUP_JOIN_REASON_WRONG_PASSWORD:
+            return "wrong password";
+        case SETUP_JOIN_REASON_NOT_FOUND:
+            return "network not found";
+        case SETUP_JOIN_REASON_UNKNOWN:
+            return "unknown";
+        case SETUP_JOIN_REASON_SAVE_FAILED:
+            return "could not save";
+        case SETUP_JOIN_REASON_NONE:
+        default:
+            return "";
+    }
+}
+
+bool setup_session_format_status_json(setup_join_state_t state, setup_join_reason_t reason, char *out, size_t out_cap) {
+    if (out == NULL || out_cap == 0)
+        return false;
+    const char *reason_text = (state == SETUP_JOIN_FAILED) ? join_reason_str(reason) : "";
+    int n = snprintf(out, out_cap, "{\"state\":\"%s\",\"reason\":\"%s\"}", join_state_str(state), reason_text);
+    if (n < 0 || (size_t)n >= out_cap) {
+        out[0] = '\0';
+        return false;
+    }
+    return true;
+}
+
+/* ---- one setup page submit ------------------------------------------------- */
+
+setup_session_apply_t setup_session_apply_setup(const setup_session_ops_t *ops, const mqtt_form_setup_t *form) {
+    if (!form->has_wifi && !form->has_mqtt)
+        return SETUP_APPLY_NOTHING;
+
+    if (form->has_wifi && !ops->join_wifi(form->ssid, form->wifi_pass))
+        return SETUP_APPLY_JOIN_REFUSED;
+
+    if (form->has_mqtt && !setup_session_apply_mqtt(ops, &form->mqtt))
+        return SETUP_APPLY_MQTT_FAILED;
+
+    return form->has_wifi ? SETUP_APPLY_JOINING : SETUP_APPLY_MQTT_SAVED;
+}
+
+const char *setup_session_apply_msg(setup_session_apply_t result) {
+    switch (result) {
+        case SETUP_APPLY_NOTHING:
+            return "Nothing to save: enter a WiFi network or a broker.";
+        case SETUP_APPLY_JOIN_REFUSED:
+            return "Could not start the WiFi join (one may already be running). Reload and try again.";
+        case SETUP_APPLY_MQTT_FAILED:
+            return "could not save: flash write failed";
+        case SETUP_APPLY_JOINING:
+            return "Connecting to WiFi...";
+        case SETUP_APPLY_MQTT_SAVED:
+        default:
+            return "Saved.";
+    }
 }
 
 /* ---- the session itself ---------------------------------------------------- */
@@ -309,7 +448,7 @@ setup_session_result_t setup_session_run(const setup_session_ops_t *ops, const s
         setup_session_make_ap_ssid(info.ap_ssid);
         setup_session_make_ap_password(ops->rand_byte, info.ap_password);
         (void)setup_session_make_qr_payload(info.ap_ssid, info.ap_password, info.qr_payload, sizeof(info.qr_payload));
-        info.form_url = "http://192.168.4.1/mqtt";
+        info.page_host = SETUP_SESSION_AP_IP;
 
         ops->render_setup_screen(&info);
         screen_painted = true;

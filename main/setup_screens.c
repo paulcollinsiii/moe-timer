@@ -8,7 +8,7 @@
 #include "display.h"
 
 void setup_screens_render_setup_screen(const setup_session_screen_info_t *info) {
-    display_setup(info->ap_ssid, info->ap_password, info->qr_payload, SETUP_SESSION_QR_USERNAME, info->form_url);
+    display_setup(info->ap_ssid, info->ap_password, info->qr_payload, info->page_host);
 }
 
 /* The only place setup_session_end_kind_t and display_setup_end_t meet —

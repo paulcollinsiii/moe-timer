@@ -997,17 +997,14 @@ void display_screens_build_ota(const char *from_version, const char *to_version)
 /* ---- WiFi + MQTT provisioning plan: the setup screens --------------------
 
    QR arithmetic (also in main/qr_render.c, which owns the version/capacity
-   half of it): QR_RENDER_MAX_MODULES (45, version 7) at 2 px/module is a
-   90x90 px code; a 4-module quiet zone (the spec's own minimum) adds 8 px
-   a side, for a 106x106 px block. The panel is 128 px tall, so the block
-   is centred with 11 px to spare top and bottom, and sits at a 4 px left
-   margin like every other screen's left-aligned content. The block's
-   SIZE is fixed at the worst case so the text column's x never moves
-   between sessions; an actual code smaller than version 7 (every real
-   session's is — see below) just leaves extra quiet white space at the
-   block's own right and bottom edges, which is indistinguishable from
-   quiet zone because it is quiet zone. */
-#define QR_SCALE_PX 2
+   half of it): QR_RENDER_MAX_MODULES (29, version 3, the version every
+   real payload encodes at) at 3 px/module is an 87x87 px code; a 4-module
+   quiet zone (the spec's own minimum) adds 12 px a side, for a 111x111 px
+   block. 3 px per module is the most the 128 px panel allows: 4 px would
+   need 148 px even with the minimum quiet zone. The block is centred with
+   8 px to spare top and bottom, and sits at a 4 px left margin like every
+   other screen's left-aligned content. */
+#define QR_SCALE_PX 3
 #define QR_QUIET_MODULES 4
 #define QR_BLOCK_PX ((QR_RENDER_MAX_MODULES + 2 * QR_QUIET_MODULES) * QR_SCALE_PX)
 #define QR_LEFT_MARGIN 4
@@ -1015,9 +1012,19 @@ void display_screens_build_ota(const char *from_version, const char *to_version)
 #define SETUP_TEXT_X (QR_LEFT_MARGIN + QR_BLOCK_PX + 4)
 #define SETUP_TEXT_MAX_W (DISP_HOR - SETUP_TEXT_X - 4)
 
+/* The text column's rows (y of each label's top edge). The instruction and
+   the address to open come first, being what the owner acts on; the AP name
+   and password below them are only for a phone that will not scan. */
+#define SETUP_SCAN_Y 2
+#define SETUP_HOST_Y 18
+#define SETUP_AP_Y 44
+#define SETUP_PW_LABEL_Y 62
+#define SETUP_PW_Y 78
+#define SETUP_HINT_Y 108
+
 /* LV_EVENT_DRAW_MAIN handler for the QR block created below. Draws one
    lv_draw_rect() per horizontal run of dark modules rather than one per
-   module (cheaper, and the module count can reach 2025 at version 7) —
+   module (cheaper, and the module count can reach 841 at version 3) —
    the same draw call style_bar()'s indicator already issues, so this adds
    no new draw path on the I1 side. The module count comes from
    qr_render_last_size() rather than a value captured when the lv_obj was
@@ -1084,50 +1091,46 @@ static void build_setup_qr(lv_obj_t *scr, const char *qr_payload) {
 }
 
 void display_screens_build_setup(const char *ap_ssid, const char *ap_password, const char *qr_payload,
-                                 const char *username, const char *form_url) {
+                                 const char *page_host) {
     lv_obj_t *scr = fresh_screen(false);
     char buf[48];
 
     build_setup_qr(scr, qr_payload);
 
-    make_label(scr, "Scan with ESP SoftAP Prov", &lv_font_montserrat_12, LV_ALIGN_TOP_LEFT, SETUP_TEXT_X, 4);
+    make_label(scr, "Scan to join, then open", &lv_font_montserrat_12, LV_ALIGN_TOP_LEFT, SETUP_TEXT_X, SETUP_SCAN_Y);
+
+    /* Larger than the lines around it: this is the one thing a phone that
+       does not open the page by itself needs typed into its browser. The
+       caller supplies it, so it gets the same cap_width() backstop as every
+       other caller-supplied line in this tree. */
+    cap_width(make_label(scr, page_host, &lv_font_montserrat_18, LV_ALIGN_TOP_LEFT, SETUP_TEXT_X, SETUP_HOST_Y),
+              SETUP_TEXT_MAX_W);
 
     snprintf(buf, sizeof(buf), "AP: %s", ap_ssid);
-    cap_width(make_label(scr, buf, &lv_font_montserrat_12, LV_ALIGN_TOP_LEFT, SETUP_TEXT_X, 22), SETUP_TEXT_MAX_W);
+    cap_width(make_label(scr, buf, &lv_font_montserrat_12, LV_ALIGN_TOP_LEFT, SETUP_TEXT_X, SETUP_AP_Y),
+              SETUP_TEXT_MAX_W);
 
-    /* The stock app's own manual-entry fields are "Username" and "PoP"
-       (setup_session.h's QR-payload comment names both); a scan never
-       needs this line, but a phone that will not scan has to be told what
-       to type. `username` is caller-supplied (setup_screens.c forwards
-       SETUP_SESSION_QR_USERNAME, a fixed "magtag" today) rather than a
-       literal here, so it gets the same cap_width() backstop as every
-       other caller-supplied line in this tree. */
-    snprintf(buf, sizeof(buf), "User: %s", username);
-    cap_width(make_label(scr, buf, &lv_font_montserrat_12, LV_ALIGN_TOP_LEFT, SETUP_TEXT_X, 40), SETUP_TEXT_MAX_W);
-
-    /* "(PoP)" rather than a separate line: this password IS the Proof of
-       Possession the stock app's manual-entry form asks for under that
-       name, not a second secret — labelling it here is cheaper than a
-       whole extra line for the same fact. */
-    make_label(scr, "Password (PoP):", &lv_font_montserrat_12, LV_ALIGN_TOP_LEFT, SETUP_TEXT_X, 58);
+    /* The AP name and password stay as text for a phone that will not scan
+       the code: join by hand, then open the address above. */
+    make_label(scr, "Password:", &lv_font_montserrat_12, LV_ALIGN_TOP_LEFT, SETUP_TEXT_X, SETUP_PW_LABEL_Y);
 
     /* The largest compiled size that fits the column for a typical draw —
        measured, not assumed: 28 pt already clips a sample password (201 px
        natural against a 178 px column), so 18 pt is the ceiling, at 129 px
-       for that same string. AP_PASS_ALPHABET (setup_session.c) still
+       for that same string (the column is 173 px since the QR block grew
+       to 111 px, still ample). AP_PASS_ALPHABET (setup_session.c) still
        includes 'W'/'w'/'M'/'m', so a cap_width() backstop stays on this
        label the same as every other variable-content line in this tree —
        NOT because ten of the alphabet's widest glyph in a row is the only
-       input that could ever clip (any draw over the 178 px budget does,
+       input that could ever clip (any draw over the column budget does,
        the same as on every other capped label here), but because 2,000,000
        sampled passwords measured zero clips, which is the sort of margin a
        geometric cap exists to hold rather than a font size to chase (see
        the OTA screen's own all-'W' case for the same trade-off). */
-    cap_width(make_label(scr, ap_password, &lv_font_montserrat_18, LV_ALIGN_TOP_LEFT, SETUP_TEXT_X, 76),
+    cap_width(make_label(scr, ap_password, &lv_font_montserrat_18, LV_ALIGN_TOP_LEFT, SETUP_TEXT_X, SETUP_PW_Y),
               SETUP_TEXT_MAX_W);
 
-    snprintf(buf, sizeof(buf), "MQTT: %s", form_url);
-    cap_width(make_label(scr, buf, &lv_font_montserrat_12, LV_ALIGN_TOP_LEFT, SETUP_TEXT_X, 104), SETUP_TEXT_MAX_W);
+    make_label(scr, "It may open by itself", &lv_font_montserrat_12, LV_ALIGN_TOP_LEFT, SETUP_TEXT_X, SETUP_HINT_Y);
 }
 
 /* Shown while the BOOT hold is armed; releasing now enters setup

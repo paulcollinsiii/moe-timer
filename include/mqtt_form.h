@@ -49,7 +49,15 @@
 #define MQTT_FORM_USER_MAX 64
 #define MQTT_FORM_PASS_MAX 64
 
-/* The request body length cap enforced by BOTH parse entry points,
+/* The setup page's WiFi fields, as buffer sizes: an 802.11 SSID is up to
+   32 bytes and a WPA2 passphrase 8-63 characters or a 64-digit hex PSK
+   (wifi_sta_config_t's own widths), each plus a NUL. setup_session.h
+   asserts these equal the NVS widths the verified credentials are stored
+   into. */
+#define MQTT_FORM_WIFI_SSID_MAX 33
+#define MQTT_FORM_WIFI_PASS_MAX 65
+
+/* The request body length cap enforced by every parse entry point,
    before anything else runs (including, for JSON, before cJSON ever
    sees the bytes). One constant so the form page and the protocomm
    endpoint cannot be tuned to disagree about how large a body the
@@ -57,14 +65,18 @@
 
    Must be at least the largest legitimate urlencoded submission: a
    browser percent-encodes reserved characters (`: / @ ! # $ ...`) to
-   three bytes each, so a uri/user/pass all at their own MAX and entirely
-   percent-encoded costs 3 * ((URI_MAX-1) + (USER_MAX-1) + (PASS_MAX-1))
-   bytes of encoded content, plus the field names and the `=`/`&`
-   separators ("uri=" + "&user=" + "&pass=" = 16 bytes) around them. */
-#define MQTT_FORM_BODY_MAX 1024
+   three bytes each, so the five setup page fields all at their own MAX
+   and entirely percent-encoded cost 3 * ((URI_MAX-1) + (USER_MAX-1) +
+   (PASS_MAX-1) + (SSID_MAX-1) + (WIFI_PASS_MAX-1)) bytes of encoded
+   content, plus the field names and the `=`/`&` separators ("uri=" +
+   "&user=" + "&pass=" + "&ssid=" + "&wpass=" = 29 bytes) around them. */
+#define MQTT_FORM_BODY_MAX 1280
 _Static_assert(MQTT_FORM_BODY_MAX >=
-                   3 * ((MQTT_FORM_URI_MAX - 1) + (MQTT_FORM_USER_MAX - 1) + (MQTT_FORM_PASS_MAX - 1)) + 16,
-               "MQTT_FORM_BODY_MAX must fit the worst-case fully percent-encoded uri+user+pass submission");
+                   3 * ((MQTT_FORM_URI_MAX - 1) + (MQTT_FORM_USER_MAX - 1) + (MQTT_FORM_PASS_MAX - 1) +
+                        (MQTT_FORM_WIFI_SSID_MAX - 1) + (MQTT_FORM_WIFI_PASS_MAX - 1)) +
+                       29,
+               "MQTT_FORM_BODY_MAX must fit the worst-case fully percent-encoded setup page submission "
+               "(the five field names and separators are 29 bytes)");
 
 /* Worst-case output size for mqtt_form_html_escape() given an input
    buffer of capacity n (holding up to n-1 characters plus a NUL): every
@@ -105,6 +117,8 @@ typedef enum {
     MQTT_FORM_FIELD_URI,
     MQTT_FORM_FIELD_USER,
     MQTT_FORM_FIELD_PASS,
+    MQTT_FORM_FIELD_WIFI_SSID,
+    MQTT_FORM_FIELD_WIFI_PASS,
 } mqtt_form_field_t;
 
 typedef enum {
@@ -117,6 +131,7 @@ typedef enum {
     MQTT_FORM_ERR_BODY_TOO_LONG,      /* request body over MQTT_FORM_BODY_MAX */
     MQTT_FORM_ERR_DUPLICATE_FIELD,    /* a known field name appeared twice */
     MQTT_FORM_ERR_BAD_JSON,           /* unparseable JSON, not an object, or a non-string field value */
+    MQTT_FORM_ERR_TOO_SHORT,          /* a WiFi password of 1-7 characters: no WPA2 passphrase is that short */
 } mqtt_form_err_t;
 
 typedef struct {
@@ -141,6 +156,38 @@ typedef struct {
    documented as meaningful (e.g. the tail of a short string's buffer)
    has been zero-initialised. On failure, see THE FAILURE CONTRACT above. */
 mqtt_form_status_t mqtt_form_parse_urlencoded(const char *body, size_t body_len, mqtt_form_result_t *out);
+
+/* What the setup page's one form submits: an optional WiFi group (`ssid`,
+   `wpass`) and an optional MQTT group (`uri`, `user`, `pass`). A group is
+   present when its key field is non-blank, `ssid` for WiFi and `uri` for
+   MQTT, and a blank key field means "leave that part alone": that is how
+   a device that already has an SSID updates only its broker, and how a
+   WiFi-only owner skips MQTT. The other field of an absent group is
+   ignored and zeroed rather than rejected, because a browser's password
+   manager fills the password box whatever the owner meant.
+
+   Blank `ssid` + any `wpass` is therefore not an open-network join; an open
+   network is a non-blank ssid with a blank wpass. An empty submission
+   parses clean with both flags false; whether that is an error depends on
+   the device (an SSID already stored or not), so the caller decides.
+   `mqtt` is meaningful only when has_mqtt, and then holds exactly what
+   mqtt_form_parse_urlencoded would (the keep_pass contract included). */
+typedef struct {
+    char ssid[MQTT_FORM_WIFI_SSID_MAX];
+    char wifi_pass[MQTT_FORM_WIFI_PASS_MAX];
+    bool has_wifi;
+    mqtt_form_result_t mqtt;
+    bool has_mqtt;
+} mqtt_form_setup_t;
+
+/* Parses the setup page's urlencoded body, same decoding, body cap, NUL
+   and duplicate rules as mqtt_form_parse_urlencoded. WiFi rules: the SSID
+   is at most 32 bytes with no control character; the password is blank
+   (open network), or 8-63 characters, or a 64-character hex PSK, with no
+   control character (MQTT_FORM_ERR_TOO_SHORT for 1-7). The MQTT group
+   goes through the same validation as the MQTT-only parser. On any non-OK
+   return *out is zeroed in full (THE FAILURE CONTRACT above). */
+mqtt_form_status_t mqtt_form_parse_setup(const char *body, size_t body_len, mqtt_form_setup_t *out);
 
 /* Parses a JSON object body with the same three keys, via the vendored
    cJSON. A present key whose value is not a JSON string is

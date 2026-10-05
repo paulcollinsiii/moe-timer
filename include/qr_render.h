@@ -6,7 +6,7 @@
    drawing itself (turning this matrix into panel pixels) lives in
    display_screens.c, the same file that turns every other piece of state
    in this tree into widgets — and which also owns the panel-fit
-   arithmetic (pixel scale, quiet zone, how a version-7 code sits on this
+   arithmetic (pixel scale, quiet zone, how a version-3 code sits on this
    128 px-tall panel): this header and qr_render.c are about what this
    module asks qrcodegen for, not about the screen, so that arithmetic is
    not restated here.
@@ -24,18 +24,19 @@ extern "C" {
 #endif
 
 /* The largest QR version this module will ever produce. setup_session.h's
-   QR payload is always JSON (braces, colons, quotes, a lowercase
-   "ver"/"name"/etc.), so qrcodegen always falls back to byte mode for it.
-   Measured directly against this library: byte mode at error-correction
-   LOW fits up to 154 bytes at version 7 (45x45 modules). The real payload
-   this device ever sends is a fixed 132 bytes (device_id()'s SSID is
-   always exactly 13 characters — see setup_session.c), nowhere near that
-   ceiling; 7 is sized for the slack setup_session.h's QR buffer reserves
-   above that real payload, not for a size this device has ever produced.
-   Capping maxVersion here is what makes a too-long payload fail cleanly
-   instead of growing into a QR the panel has no room for: see
-   qr_render_encode()'s doc comment. */
-#define QR_RENDER_MAX_VERSION 7
+   QR payload is a WIFI: join string with mixed-case letters, so qrcodegen
+   uses byte mode for it. Byte mode at error-correction LOW fits up to 53
+   bytes at version 3 (29x29 modules). The real payload this device sends
+   is a fixed 41 bytes (device_id()'s SSID is always exactly 13 characters,
+   the AP password 10 — see setup_session.c), so every real session
+   encodes at exactly version 3; the 12 spare bytes are all the headroom
+   there is, and a longer SSID falls back to the screen's text lines.
+   The panel block is sized to exactly this version (display_screens.c has
+   the arithmetic), so a bigger ceiling would leave dead space beside
+   every real code: capping maxVersion here is what makes a too-long
+   payload fail cleanly instead of growing into a QR the panel has no room
+   for: see qr_render_encode()'s doc comment. */
+#define QR_RENDER_MAX_VERSION 3
 
 /* Modules per side at QR_RENDER_MAX_VERSION, the QR Code Model 2 formula
    (4 * version + 17). Odd, and the ceiling qr_render_module()'s valid

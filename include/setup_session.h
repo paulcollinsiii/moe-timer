@@ -29,6 +29,11 @@ extern "C" {
 
 /* ---- the Kconfig-fallback pattern (setup_trigger.h's MAGTAG_BOOT_HOLD_MS) --- */
 
+/* The form's WiFi buffers are the NVS widths, so a verified join stores
+   exactly what it accepted. */
+_Static_assert(MQTT_FORM_WIFI_SSID_MAX == NVS_CONFIG_WIFI_SSID_BUF, "form and NVS SSID widths must agree");
+_Static_assert(MQTT_FORM_WIFI_PASS_MAX == NVS_CONFIG_WIFI_PASS_BUF, "form and NVS password widths must agree");
+
 #ifdef CONFIG_MAGTAG_SETUP_MAX_SEC
 #define SETUP_SESSION_MAX_SEC_DEFAULT CONFIG_MAGTAG_SETUP_MAX_SEC
 #else
@@ -190,55 +195,33 @@ void setup_session_make_ap_ssid(char out[SETUP_SESSION_AP_SSID_MAX]);
 
 /* ---- the provisioning QR payload: pure, from the two strings above ------- */
 
-/* Espressif's ESP SoftAP Prov app JSON, security 2 over SoftAP transport:
-     {"ver":"v1","name":"<ap_ssid>","username":"<user>","pop":"<ap_password>",
-      "password":"<ap_password>","transport":"softap","security":2}
+/* The de-facto standard WiFi join string, `WIFI:T:WPA;S:<ssid>;P:<password>;;`,
+   which a phone camera reads as "join this network" with no app: Android's
+   camera and Google Lens offer to connect, and iOS's camera does too. A
+   backslash escapes `\` `;` `,` `:` and `"` inside the two values, the
+   characters the format reserves. (This module's own generators never
+   produce any of them — the password alphabet has none and the SSID is
+   "MagTag-" plus hex — so escaping costs nothing and exists so a future
+   generator cannot break the join silently.)
 
-   ver/name/username/pop/transport confirmed against espressif/network_
-   provisioning 1.3.1's own example (examples/wifi_prov/main/app_main.c:
-   264-277, the sec2 branch) and its README's logged QR text (README.md:145).
-   "pop" doubles as the SRP password — the example's own comment says so:
-   "this pop field represents the password that will be used to generate
-   salt and verifier ... present here in order to generate the QR code
-   containing password."
-
-   "password" and "security" are additional keys both stock phone apps
-   read from this same JSON object to join the SoftAP itself, rather than
-   making the owner find it in the OS WiFi picker: Android's
-   ESPProvisionManager.processQrCode decodes name/pop/transport/security/
-   username/password and, for softap, builds a WiFiAccessPoint from
-   name+password and joins it programmatically; iOS's parseQrCode decodes
-   the same keys and passes `softAPPassword: decodeResponse.password ??
-   ""`. The example this format was first confirmed against omits both
-   because it runs dev-mode with service_key = NULL (an open AP), which
-   is not this device's case — its AP is WPA2, so without "password" the
-   scanning app has no way to join it and the QR-scan flow never
-   completes. ap_ssid/ap_password are never escaped:
-   both come from this module's own generators, whose alphabets contain
-   no `"` or `\`. "security":2 is a JSON number, matching this session's
-   fixed security level, not a string.
-
-   Writes the JSON into `out` (capacity out_cap) and returns true, or
-   writes "" and returns false if it would not fit (out_cap >= 1
-   required to see even that). */
-#define SETUP_SESSION_QR_USERNAME "magtag"
-#define SETUP_SESSION_QR_TRANSPORT "softap"
+   Writes the string into `out` (capacity out_cap) and returns true, or
+   writes "" and returns false if it would not fit, or a NULL argument:
+   never a truncated string, which would hand a phone the wrong password
+   or a dangling escape. */
+#define SETUP_SESSION_PROV_USERNAME "magtag"
+/* The address the SoftAP netif always has (esp_netif's default AP
+   config), shown on the panel, answered by the captive portal's DNS and
+   named in its redirect. */
+#define SETUP_SESSION_AP_IP "192.168.4.1"
 /* device_id() (device_id.c) always returns "magtag-" plus exactly 6 hex
-   nibbles — never more, never fewer — so the AP SSID this module builds
-   is always exactly 13 bytes and the real payload is always exactly 132
-   bytes, encoding at QR version 6 with 2 bytes to spare under
-   qr_render.h's version-6 ceiling. The 31-byte ap_ssid
-   (SETUP_SESSION_AP_SSID_MAX-1) this buffer's 160 bytes could instead
-   hold is slack for a future field, not a size this device has sent or
-   ever will: that hypothetical skeleton, with the fixed-length
-   ap_password used twice (pop and password), comes to 150 bytes — still
-   inside qr_render.h's documented 154-byte/version-7 ceiling, with 10
-   bytes of this buffer's own 160 left over on top of that. A payload
-   between 155 and 159 bytes would fit in THIS buffer but fail
-   qr_render_encode() — the text fallback the setup screen already has
-   for exactly that case — and is unreachable today because nothing in
-   this module ever produces a payload anywhere near that large. */
-#define SETUP_SESSION_QR_MAX 160
+   nibbles, so the AP SSID this module builds is always 13 bytes and the
+   real payload is always exactly 41, which encodes at QR version 3 with 12
+   bytes to spare under qr_render.h's 53-byte ceiling. The buffer holds the
+   widest case the generators could ever produce, a 31-byte SSID with every
+   character escaped (13 + 62 + 3 + 10 + 2 + NUL = 91); anything past 53
+   bytes fails qr_render_encode() and the setup screen falls back to its
+   text lines, which carry the same name and password. */
+#define SETUP_SESSION_QR_MAX 96
 
 bool setup_session_make_qr_payload(const char *ap_ssid, const char *ap_password, char *out, size_t out_cap);
 
@@ -248,10 +231,42 @@ typedef struct {
     char ap_ssid[SETUP_SESSION_AP_SSID_MAX];
     char ap_password[SETUP_SESSION_AP_PASS_BUF];
     char qr_payload[SETUP_SESSION_QR_MAX];
-    const char *form_url; /* fixed literal; the setup screen renders it verbatim */
+    const char *page_host; /* fixed literal; the setup screen shows it as the address to open */
 } setup_session_screen_info_t;
 
-/* ---- the /mqtt form page: pure, chunked (no stack buffer) ---------------- */
+/* ---- the WiFi join's progress: what the page and /status report ---------- */
+
+/* Where the browser-submitted WiFi join stands. IDLE until a submit starts
+   one; CONNECTING from the manager accepting the credentials until it
+   reports; FAILED when it could not join (a retry is possible); SAVED once
+   the verified credentials are stored. */
+typedef enum {
+    SETUP_JOIN_IDLE = 0,
+    SETUP_JOIN_CONNECTING,
+    SETUP_JOIN_FAILED,
+    SETUP_JOIN_SAVED,
+} setup_join_state_t;
+
+/* Why a FAILED join failed. WRONG_PASSWORD and NOT_FOUND are the manager's
+   own two disconnect reasons, UNKNOWN any other, SAVE_FAILED a verified
+   join whose credentials the flash would not take. */
+typedef enum {
+    SETUP_JOIN_REASON_NONE = 0,
+    SETUP_JOIN_REASON_WRONG_PASSWORD,
+    SETUP_JOIN_REASON_NOT_FOUND,
+    SETUP_JOIN_REASON_UNKNOWN,
+    SETUP_JOIN_REASON_SAVE_FAILED,
+} setup_join_reason_t;
+
+/* `{"state":"idle|connecting|failed|saved","reason":"<text>"}`. The reason
+   is the human phrase ("wrong password", "network not found", "unknown",
+   "could not save") for FAILED and "" for every other state, whatever
+   `reason` says, so a stale reason cannot outlive its failure. An
+   out-of-range state reads as idle. Returns false (writing "" if it can)
+   when it will not fit. */
+bool setup_session_format_status_json(setup_join_state_t state, setup_join_reason_t reason, char *out, size_t out_cap);
+
+/* ---- the setup page: pure, chunked (no stack buffer) ---------------------- */
 
 /* Sink for one piece of the page. `chunk` is NOT NUL-terminated-by-
    contract beyond what `len` says (every chunk this module hands it is in
@@ -263,24 +278,35 @@ typedef struct {
 typedef bool (*setup_session_chunk_sink_fn)(const char *chunk, size_t len, void *ctx);
 
 typedef struct {
-    const char
-        *uri_escaped; /* mqtt_form_html_escape() output (or "" ), sized MQTT_FORM_HTML_ESCAPED_MAX(MQTT_FORM_URI_MAX) */
-    const char *user_escaped; /* same, MQTT_FORM_HTML_ESCAPED_MAX(MQTT_FORM_USER_MAX) */
-    /* NULL = no status banner (a plain GET). Non-NULL is shown verbatim,
+    /* All three are mqtt_form_html_escape() output (or ""), sized
+       MQTT_FORM_HTML_ESCAPED_MAX of their own buffer. The SSID is the
+       currently stored network, shown only as a placeholder: a prefilled
+       value with a password box left blank would read as an open-network
+       join of the owner's own WPA2 network. Empty means no network is
+       stored yet, and the page marks the field required. */
+    const char *ssid_escaped;
+    const char *uri_escaped;
+    const char *user_escaped;
+    /* NULL = no submit banner (a plain GET). Non-NULL is shown verbatim,
        with NO further escaping: the only strings this project ever passes
-       here are the fixed literal "Saved." and setup_session_format_mqtt_status's
-       output, both built from mqtt_form_error_str()'s fixed literals —
-       never a submitted value. A caller that ever changes that must escape
-       first. */
+       here are setup_session_apply_msg's literals and
+       setup_session_format_mqtt_status's output, both built from fixed
+       literals — never a submitted value. A caller that ever changes that
+       must escape first. It wins over the join state's own text. */
     const char *status_msg;
-} setup_session_mqtt_page_in_t;
+    /* The join's progress. The banner text comes from here so that a plain
+       reload with JavaScript off shows the same outcome the script would. */
+    setup_join_state_t join_state;
+    setup_join_reason_t join_reason;
+} setup_session_page_in_t;
 
-/* Never prefills the password field — credentials are never echoed back
-   — and carries no JS and no external resources, keeping the page tiny.
-   Returns false the moment `sink` does (see the
+/* One page for both the WiFi network and the MQTT broker. Never prefills a
+   password — credentials are never echoed back. While a join is CONNECTING
+   it adds a few-line script that polls /status and reloads the page once
+   the state changes; with JavaScript off the banner says to reload by hand.
+   No external resources. Returns false the moment `sink` does (see the
    sink's own doc comment); true once the whole page has been handed over. */
-bool setup_session_render_mqtt_page(const setup_session_mqtt_page_in_t *in, setup_session_chunk_sink_fn sink,
-                                    void *ctx);
+bool setup_session_render_page(const setup_session_page_in_t *in, setup_session_chunk_sink_fn sink, void *ctx);
 
 /* A short, human status line from a form submit's result — "Saved." on
    success, or "<field>: <reason>" / "<reason>" (field NONE) built from
@@ -353,8 +379,9 @@ typedef struct {
        ap_password (esp_srp_gen_salt_verifier — log how long this takes,
        it is a 3072-bit modexp on an S2), then bring up the SoftAP, the
        httpd instance, the provisioning manager (security 2, service_name =
-       ap_ssid, service_key = ap_password), the /mqtt GET+POST handlers and
-       the "mqtt-config" protocomm endpoint. False on any failure — nothing
+       ap_ssid, service_key = ap_password), the setup page's handlers, the
+       "mqtt-config" protocomm endpoint and the captive portal (DHCP option,
+       DNS responder, redirect). False on any failure — nothing
        was reachable, so ERROR. render_setup_screen has already run by the
        time this is called (setup_session_run's own flow comment says why),
        so this ERROR still renders the FAILED screen, not none. */
@@ -408,6 +435,13 @@ typedef struct {
        that both MQTT entry points store synchronously before posting
        MQTT_STORED. */
     bool (*set_mqtt_creds)(const char *uri, const char *user, const char *pass, bool keep_pass);
+
+    /* Hand the browser-submitted network to the provisioning manager, the
+       same route the phone app's credentials take, so the join is verified
+       and only a verified join ever reaches set_wifi_creds. Stores nothing
+       itself. False means the manager would not take it (a join is already
+       underway, or the credentials were refused) and nothing changed. */
+    bool (*join_wifi)(const char *ssid, const char *password);
 } setup_session_ops_t;
 
 /* ---- the one place an MQTT form result becomes a stored credential ------
@@ -424,6 +458,28 @@ typedef struct {
    set_mqtt_creds rather than threading setup_session_run's full table
    through the httpd layer. */
 bool setup_session_apply_mqtt(const setup_session_ops_t *ops, const mqtt_form_result_t *result);
+
+/* ---- one setup page submit ------------------------------------------------- */
+
+typedef enum {
+    SETUP_APPLY_NOTHING,      /* both groups blank: there was nothing to save */
+    SETUP_APPLY_JOIN_REFUSED, /* the manager would not take the network; nothing was stored */
+    SETUP_APPLY_MQTT_FAILED,  /* the broker could not be stored (a join, if requested, is still underway) */
+    SETUP_APPLY_JOINING,      /* the join started; its outcome arrives as a WIFI_SUCCESS/WIFI_FAIL event */
+    SETUP_APPLY_MQTT_SAVED,   /* an MQTT-only submit stored the broker; no join involved */
+} setup_session_apply_t;
+
+/* Acts on a parsed setup form. The WiFi group goes first, so a refused join
+   leaves the broker untouched and the page can honestly say nothing was
+   saved. Then the MQTT group, stored synchronously like
+   setup_session_apply_mqtt. The caller posts MQTT_STORED only for
+   SETUP_APPLY_MQTT_SAVED: with a join in flight, that event would end a
+   session that already has an SSID before the join has been verified. */
+setup_session_apply_t setup_session_apply_setup(const setup_session_ops_t *ops, const mqtt_form_setup_t *form);
+
+/* The banner text for an apply result: fixed literals, safe to show
+   unescaped (see setup_session_page_in_t.status_msg). */
+const char *setup_session_apply_msg(setup_session_apply_t result);
 
 /* ---- the session itself --------------------------------------------------
 

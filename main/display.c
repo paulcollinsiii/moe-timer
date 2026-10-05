@@ -434,11 +434,10 @@ void display_ota(const char *from_version, const char *to_version) {
    same reason it is fine after TIME'S UP or Charge Me — see
    s_takeover_on_panel's own comment for which screen actually needs the
    flag, and why. */
-void display_setup(const char *ap_ssid, const char *ap_password, const char *qr_payload, const char *username,
-                   const char *form_url) {
+void display_setup(const char *ap_ssid, const char *ap_password, const char *qr_payload, const char *page_host) {
     if (!s_initialized)
         display_init();
-    display_screens_build_setup(ap_ssid, ap_password, qr_payload, username, form_url);
+    display_screens_build_setup(ap_ssid, ap_password, qr_payload, page_host);
     s_partial_count = 0;
     render(SSD1680_REFRESH_FULL, false);
     /* The draw callback (display_screens.c's qr_draw_cb) reads the QR
