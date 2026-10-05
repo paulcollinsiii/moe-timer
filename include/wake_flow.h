@@ -5,6 +5,7 @@
 
 #include "buttons.h"       /* button_id_t */
 #include "setup_session.h" /* setup_session_ops_t */
+#include "setup_trigger.h" /* setup_trigger_reset_class_t */
 #include "stats_json.h"    /* stats_snapshot_t */
 #include "timer.h"         /* timer_state_t */
 #ifndef NATIVE
@@ -31,6 +32,19 @@ extern "C" {
    returns NULL: the result goes straight into a log format and a JSON
    payload. */
 const char *wake_flow_reset_reason_str(esp_reset_reason_t reason);
+
+/* How the setup trigger reads a reset reason. Pure over its argument, for
+   the same reason as the string table above.
+     COLD   power-on, the EN pin, a software restart (which includes an OTA
+            reboot) and a USB reset: somebody or something deliberate
+            started the device, so a device with no SSID may open setup by
+            itself.
+     WAKE   a deep-sleep wake: the ordinary tick or press.
+     FAULT  everything else (panic, any watchdog, brownout, unknown, ...):
+            the device died. A deterministic fault inside a setup session
+            would otherwise reboot straight back into the session with no
+            one asking, so a fault never opens setup by itself. */
+setup_trigger_reset_class_t wake_flow_reset_class(esp_reset_reason_t reason);
 
 /* The panic-loop breaker, called from app_main before the boot prints.
    The S2 ROM USB console can panic when a host port-open races those
@@ -365,11 +379,13 @@ void wake_flow_watch_final_minute(void);
    — the post-action tail and the pre-sleep event watch — they share by
    calling the same statics, not by being the same function.
 
-   Setup mode branches off both, after the bed-time gate: a cold boot or an
-   A-D press with no stored SSID runs the setup session instead of the
-   ordinary wake. A wake caused by BOOT alone is the button handler's first
-   branch, ahead of everything A-D: it times the hold and either runs the
-   session or goes straight back to sleep. */
+   Setup mode branches off both, ahead of the day rollover and every lock
+   gate except bed time: a cold boot or a press with no stored SSID runs the
+   setup session instead of the ordinary wake, and bed time still outranks
+   it while the clock says it is in force. A wake caused by BOOT, or an A-D
+   press that finds BOOT already held, is the button handler's first
+   branch: with no SSID it runs the session at once, otherwise it times the
+   hold and either runs the session or goes straight back to sleep. */
 void wake_flow_handle_timer_tick(void);
 void wake_flow_handle_button_wake(void);
 

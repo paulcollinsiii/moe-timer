@@ -1678,13 +1678,15 @@ void test_setup_retry_line_with_ssid_and_boot_wakes_says_hold_boot(void) {
     TEST_ASSERT_EQUAL_STRING(expect, out);
 }
 
-void test_setup_retry_line_with_ssid_and_no_boot_wakes_says_press_then_hold(void) {
+/* Nothing samples BOOT while the device sleeps on this build, so the line
+   has to put BOOT first: the press that wakes the device finds it down. */
+void test_setup_retry_line_with_ssid_and_no_boot_wakes_says_hold_then_press(void) {
     char out[64];
     format_setup_retry_line(true, false, out, sizeof(out));
     char expect[64];
     char secs[16];
     format_hold_seconds(SETUP_TRIGGER_BOOT_HOLD_MS, secs, sizeof(secs));
-    snprintf(expect, sizeof(expect), "Press a button, then hold BOOT %s s", secs);
+    snprintf(expect, sizeof(expect), "Hold BOOT, press a button, hold %s s", secs);
     TEST_ASSERT_EQUAL_STRING(expect, out);
 }
 
@@ -2649,7 +2651,7 @@ int main(void) {
     RUN_TEST(test_setup_end_failed_with_ssid_screen);
     RUN_TEST(test_setup_retry_line_no_ssid_says_press_any_button);
     RUN_TEST(test_setup_retry_line_with_ssid_and_boot_wakes_says_hold_boot);
-    RUN_TEST(test_setup_retry_line_with_ssid_and_no_boot_wakes_says_press_then_hold);
+    RUN_TEST(test_setup_retry_line_with_ssid_and_no_boot_wakes_says_hold_then_press);
     RUN_TEST(test_format_hold_seconds_whole_and_fractional);
     RUN_TEST(test_ota_screen);
     RUN_TEST(test_ota_screen_lines_fit_the_panel);

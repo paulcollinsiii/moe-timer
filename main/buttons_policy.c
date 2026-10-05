@@ -28,7 +28,9 @@
      chore mode only the swap arms C, and on the chore screen only the ack
      does.
    - B and D are unconditional, with ONE exception above all of them: the
-     config-error lock (design 5.3) narrows the mask to D alone. That is
+     config-error lock (design 5.3), and the no-clock lock that shares its
+     sleep, narrow the mask to D alone (they differ only on BOOT, which the
+     no-clock lock arms: see buttons_policy_boot_wake_allowed). That is
      the same UX rule pointed at the device rather than at a press — every
      button's action would be refused, because the wake it bought ends in
      the gate — with D exempted because it is the exit: it forces the
@@ -90,7 +92,7 @@ static bool wake_source(button_id_t btn, const buttons_policy_in_t *in) {
        into them: it is a statement about the DEVICE, not about what any
        one press would do, and B has no gate of its own to carry it (see
        buttons_policy.h). D is the exit and everything else is dark. */
-    if (in->config_locked)
+    if (in->config_locked || in->clock_locked)
         return btn == BTN_D;
     switch (btn) {
         case BTN_A:
@@ -116,9 +118,10 @@ uint8_t buttons_policy_wake_mask(const buttons_policy_in_t *in) {
 }
 
 bool buttons_policy_boot_wake_allowed(const buttons_policy_in_t *in) {
-    /* Same "arm nothing" early exit as wake_source()'s D-only narrowing,
-       plus the narrowing itself: a config-locked (or no-clock-locked)
-       sleep's one exit is D, not a second escape hatch stacked on it. */
+    /* Same "arm nothing" early exit as wake_source()'s narrowing. Only the
+       config-error lock keeps BOOT dark: its one exit is D. The no-clock
+       lock arms BOOT, the way back into setup for a device whose WiFi no
+       longer works. */
     if (!in->enable || in->config_locked)
         return false;
     /* Refuse to arm while already held — see boot_currently_down's

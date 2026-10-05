@@ -1177,15 +1177,17 @@ static void format_hold_seconds(uint32_t hold_ms, char *out, size_t out_cap) {
    setup on THIS build, in THIS state, never a bare "hold BOOT" promise
    that does nothing on the (default) build where BOOT cannot wake the
    device from deep sleep:
-     no SSID      -> any A-D press re-enters setup on its own
-                     (setup_trigger_decide's no-SSID rule) — a button
-                     press is the whole gesture, so holding BOOT first
-                     would only be true if it also woke the device, which
-                     an unprovisioned device's sleep policy never arms.
-     SSID present -> a button press only wakes the device; the hold still
-                     has to follow it, UNLESS BOOT itself can wake it
-                     (CONFIG_MAGTAG_BOOT_WAKES), in which case the hold
-                     alone is the whole gesture, same as while awake.
+     no SSID      -> any press that wakes the device re-enters setup on
+                     its own (setup_trigger_decide's no-SSID rule), so a
+                     button press is the whole gesture.
+     SSID present -> a button press alone only wakes the device. Where
+                     BOOT itself can wake it (CONFIG_MAGTAG_BOOT_WAKES),
+                     holding BOOT is the whole gesture. Where it cannot,
+                     the owner holds BOOT FIRST and then presses a button:
+                     the press wakes the device with BOOT already down, and
+                     wake_flow.c takes that as the start of the hold. The
+                     opposite order (press, then hold) would find nothing
+                     listening, which is why the line is worded this way.
    has_wifi_ssid and boot_wakes are parameters rather than a global/#if
    read here so a host test can drive every combination directly. */
 static void format_setup_retry_line(bool has_wifi_ssid, bool boot_wakes, char *out, size_t out_cap) {
@@ -1196,11 +1198,11 @@ static void format_setup_retry_line(bool has_wifi_ssid, bool boot_wakes, char *o
     else if (boot_wakes)
         snprintf(out, out_cap, "Hold BOOT %s s to retry", secs);
     else
-        snprintf(out, out_cap, "Press a button, then hold BOOT %s s", secs);
+        snprintf(out, out_cap, "Hold BOOT, press a button, hold %s s", secs);
 }
 
 /* The retry line is too long at 18 pt to survive a single-line clip — the
-   "press a button, then hold BOOT" phrasing measured well past the panel
+   "hold BOOT, press a button, hold" phrasing measures well past the panel
    width — so this wraps it across up to two lines inside a fixed-width,
    centred box anchored to the bottom edge, rather than cap_width()'s
    single-line LONG_CLIP (fine for the shorter caller-supplied lines

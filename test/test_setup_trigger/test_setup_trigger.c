@@ -1,5 +1,6 @@
 #include <stddef.h>
 #include <stdint.h>
+#include <string.h>
 #include <unity.h>
 
 /* Single-TU compilation */
@@ -334,8 +335,40 @@ void test_wifi_fail_hint_true_at_and_above_threshold(void) {
     TEST_ASSERT_TRUE(setup_trigger_wifi_failing_hint(SETUP_TRIGGER_WIFI_FAIL_HINT_THRESHOLD + 10));
 }
 
+/* ---- the status line for a paint ----------------------------------------- */
+
+void test_status_hint_is_none_below_the_threshold(void) {
+    TEST_ASSERT_NULL(setup_trigger_status_hint(SETUP_TRIGGER_WIFI_FAIL_HINT_THRESHOLD - 1, true, true));
+    TEST_ASSERT_NULL(setup_trigger_status_hint(0, true, false));
+}
+
+/* Where BOOT wakes the device, holding it is the whole gesture. */
+void test_status_hint_says_hold_boot_where_boot_wakes(void) {
+    TEST_ASSERT_EQUAL_STRING(SETUP_TRIGGER_WIFI_FAILING_HINT_TEXT,
+                             setup_trigger_status_hint(SETUP_TRIGGER_WIFI_FAIL_HINT_THRESHOLD, true, true));
+    TEST_ASSERT_EQUAL_STRING("No WiFi: hold BOOT", SETUP_TRIGGER_WIFI_FAILING_HINT_TEXT);
+}
+
+/* Where it cannot, "hold BOOT" alone would be false: the hint names the
+   combination that works. */
+void test_status_hint_names_the_combination_where_boot_cannot_wake(void) {
+    const char *h = setup_trigger_status_hint(SETUP_TRIGGER_WIFI_FAIL_HINT_THRESHOLD + 3, true, false);
+    TEST_ASSERT_EQUAL_STRING(SETUP_TRIGGER_WIFI_FAILING_HINT_TEXT_NO_BOOT_WAKE, h);
+    TEST_ASSERT_NOT_EQUAL(0, strcmp(h, SETUP_TRIGGER_WIFI_FAILING_HINT_TEXT));
+}
+
+/* With no SSID any press enters setup by itself, so there is no hint at all. */
+void test_status_hint_is_none_for_a_device_with_no_ssid(void) {
+    TEST_ASSERT_NULL(setup_trigger_status_hint(SETUP_TRIGGER_WIFI_FAIL_HINT_THRESHOLD + 10, false, true));
+    TEST_ASSERT_NULL(setup_trigger_status_hint(SETUP_TRIGGER_WIFI_FAIL_HINT_THRESHOLD + 10, false, false));
+}
+
 int main(void) {
     UNITY_BEGIN();
+    RUN_TEST(test_status_hint_is_none_below_the_threshold);
+    RUN_TEST(test_status_hint_says_hold_boot_where_boot_wakes);
+    RUN_TEST(test_status_hint_names_the_combination_where_boot_cannot_wake);
+    RUN_TEST(test_status_hint_is_none_for_a_device_with_no_ssid);
     RUN_TEST(test_no_ssid_cold_boot_enters_setup);
     RUN_TEST(test_no_ssid_button_wake_enters_setup);
     RUN_TEST(test_no_ssid_timer_wake_stays_normal);

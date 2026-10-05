@@ -275,15 +275,15 @@ void buttons_configure_wakeup_if(bool enable) {
        sleeps, where `enable` is false and the entire mask is discarded a
        line later. */
     /* The no-clock lock (BUG-14) sleeps the config lock's sleep and wants
-       the same mask: D alone, and a D press is its retry. Folded into the
-       one field rather than given a second, because "D is the only exit"
-       is one rule and buttons_policy.c applies it in one place. The fold
-       itself is lock_gate_wake_d_only(), so test_lock_gate pins it; this
-       file is in no host suite. */
-    const bool config_locked = lock_gate_wake_d_only();
+       the same A-D mask: D alone, and a D press is its retry. The two
+       locks are reported as two fields because they differ on BOOT:
+       buttons_policy.c keeps BOOT dark for the config-error lock and arms
+       it for the no-clock one. This file is in no host suite, so the
+       distinction lives in that policy, where it is tested. */
     buttons_policy_in_t pol = {
         .enable = enable,
-        .config_locked = config_locked,
+        .config_locked = lock_gate_config_locked(),
+        .clock_locked = lock_gate_clock_locked(),
         .swap_allowed = timer_swap_allowed(),
         .mode_toggle_allowed = button_a_toggle_allowed(),
         /* C's chore binding (design 2.4): the middle checkbox. A SECOND
@@ -331,12 +331,12 @@ void buttons_configure_wakeup_if(bool enable) {
        above (buttons_policy.c's mask knows nothing about it); arm it
        separately, gated by buttons_policy_boot_wake_allowed() rather than
        OR'd in unconditionally, for two reasons:
-         - it obeys config_locked, same as everything but D. Arming BOOT
-           there as a "way out of a bad WiFi config" would break S21
-           (docs/architecture.md, lock_gate.h): the config-error sleep's
-           one exit is D, and BOOT does not get a second one stacked on
-           it. A no-SSID device still recovers: D wakes it, and
-           setup_trigger_decide() sends a no-SSID button wake to setup.
+         - it obeys config_locked, same as everything but D: the
+           config-error sleep's one exit is D, and BOOT does not get a
+           second one stacked on it. The no-clock lock is different and
+           does arm BOOT: a device whose stored WiFi stopped working and
+           then lost power sits behind that lock, D only retries the
+           broken credentials, and BOOT is its way back into setup.
          - it refuses to arm while GPIO0 already reads low. EXT1 is
            level-triggered: arming a pad that is already down wakes the
            device the instant it reaches deep sleep, and keeps doing so

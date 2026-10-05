@@ -3,6 +3,8 @@
    split as wake_policy.c / sleep_plan.c. */
 #include "setup_trigger.h"
 
+#include <stddef.h>
+
 setup_trigger_mode_t setup_trigger_decide(const setup_trigger_in_t *in) {
     /* The explicit gesture outranks every automatic rule below it,
        whatever the SSID state or wake cause: the plan's BOOT-hold row is
@@ -89,4 +91,10 @@ setup_trigger_boot_hold_event_t setup_trigger_boot_hold_sample(setup_trigger_boo
 
 bool setup_trigger_wifi_failing_hint(uint32_t consecutive_join_failures) {
     return consecutive_join_failures >= SETUP_TRIGGER_WIFI_FAIL_HINT_THRESHOLD;
+}
+
+const char *setup_trigger_status_hint(uint32_t consecutive_join_failures, bool has_wifi_ssid, bool boot_wakes) {
+    if (!has_wifi_ssid || !setup_trigger_wifi_failing_hint(consecutive_join_failures))
+        return NULL;
+    return boot_wakes ? SETUP_TRIGGER_WIFI_FAILING_HINT_TEXT : SETUP_TRIGGER_WIFI_FAILING_HINT_TEXT_NO_BOOT_WAKE;
 }

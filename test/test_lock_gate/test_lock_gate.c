@@ -2107,6 +2107,62 @@ void test_bug14_the_no_clock_lock_arms_d_alone(void) {
     TEST_ASSERT_FALSE(lock_gate_wake_d_only());
 }
 
+/* What buttons.c reads to build the wake policy: the two flags, separately.
+   The no-clock engage raises the clock flag and NOT the config flag, which
+   is what lets the policy arm BOOT beside D for it (and only for it). */
+void test_the_no_clock_engage_raises_the_clock_flag_and_not_the_config_flag(void) {
+    gate_tz_utc_minus_2();
+    gate_set_now(GATE_NEAR_EPOCH);
+
+    TEST_ASSERT_TRUE(gate_run(gate_body_check_bedtime));
+
+    TEST_ASSERT_TRUE(lock_gate_clock_locked());
+    TEST_ASSERT_FALSE(lock_gate_config_locked());
+    TEST_ASSERT_EQUAL_INT(WAKE_SLEEP_CONFIG_ERR, lock_gate_sleep_mode());
+}
+
+/* A device with no SSID has an unset clock and a failing window: the gate
+   engages and ends the wake with no window of its own (the rollover's has
+   just failed). Setup has to be decided BEFORE this gate (wake_flow.c) for
+   that device to be reachable; this pins what the gate does on its own. */
+void test_the_no_clock_engage_wake_opens_no_window_of_its_own(void) {
+    gate_set_now(GATE_NEAR_EPOCH);
+
+    TEST_ASSERT_TRUE(gate_run(gate_body_check_bedtime));
+
+    TEST_ASSERT_EQUAL_INT(0, gate_log_count(EV_NET_WINDOW));
+    TEST_ASSERT_EQUAL(EV_NO_CLOCK_SCREEN, gate_last_paint_before_sleep());
+}
+
+/* Bed time "in force", the question the setup routing asks ahead of the
+   gates: the window is active AND the clock is real. */
+void test_bedtime_in_force_needs_an_active_window_and_a_real_clock(void) {
+    gate_set_bedtime(GATE_BEDTIME_2200);
+    TEST_ASSERT_TRUE(lock_gate_bedtime_in_force(gate_at(23, 0)));
+    TEST_ASSERT_FALSE(lock_gate_bedtime_in_force(gate_at(15, 0)));
+
+    /* An unset clock that lands inside the window is still not in force. */
+    gate_tz_utc_minus_2();
+    TEST_ASSERT_TRUE(bedtime_active(time_util_minutes_of_day(GATE_NEAR_EPOCH), GATE_BEDTIME_2200));
+    TEST_ASSERT_FALSE(lock_gate_bedtime_in_force(GATE_NEAR_EPOCH));
+
+    /* Disabled bed time is never in force. */
+    gate_set_bedtime(-1);
+    TEST_ASSERT_FALSE(lock_gate_bedtime_in_force(gate_at(23, 0)));
+}
+
+/* It asks and does nothing else: no paint, no pause, no flag, no sleep. */
+void test_bedtime_in_force_has_no_effects(void) {
+    gate_set_bedtime(GATE_BEDTIME_2200);
+    gate_timer_state = TIMER_RUNNING;
+
+    TEST_ASSERT_TRUE(lock_gate_bedtime_in_force(gate_at(23, 0)));
+
+    TEST_ASSERT_FALSE(s_bedtime_locked);
+    TEST_ASSERT_EQUAL_INT(0, gate_log_n);
+    TEST_ASSERT_EQUAL(TIMER_RUNNING, gate_timer_state);
+}
+
 /* Precedence: the charge lock still wins the sleep. */
 void test_bug14_the_charge_lock_outranks_the_no_clock_sleep(void) {
     s_clock_locked = true;
@@ -2207,6 +2263,10 @@ int main(void) {
     RUN_TEST(test_bug14_a_late_release_into_a_later_gates_window_owes_no_extra_one);
     RUN_TEST(test_bug14_a_release_in_the_hook_owes_no_extra_window);
     RUN_TEST(test_bug14_the_no_clock_lock_arms_d_alone);
+    RUN_TEST(test_the_no_clock_engage_raises_the_clock_flag_and_not_the_config_flag);
+    RUN_TEST(test_the_no_clock_engage_wake_opens_no_window_of_its_own);
+    RUN_TEST(test_bedtime_in_force_needs_an_active_window_and_a_real_clock);
+    RUN_TEST(test_bedtime_in_force_has_no_effects);
     RUN_TEST(test_bug14_the_charge_lock_outranks_the_no_clock_sleep);
     return UNITY_END();
 }

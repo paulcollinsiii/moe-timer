@@ -121,7 +121,7 @@ sleep_outcome_t sleep_plan_outcome(wake_sleep_mode_t mode, const sleep_plan_in_t
         case WAKE_SLEEP_CONFIG_ERR:
             /* THE ONE LOCK THAT ARMS ANYTHING, and `true` here is the
                whole of it: buttons_policy.c narrows the mask to D alone
-               off lock_gate_wake_d_only(), but it never gets asked
+               off the lock flags, but it never gets asked
                unless this flag says the driver may arm at all. Flipping
                this to false to "match the other two" leaves a device that
                can only be recovered with a serial cable. The reason names
@@ -147,13 +147,3 @@ sleep_outcome_t sleep_plan_outcome(wake_sleep_mode_t mode, const sleep_plan_in_t
 bool sleep_plan_timer_armed(uint32_t seconds) {
     return seconds != SLEEP_PLAN_NO_TIMER_SEC;
 }
-
-#ifndef NATIVE
-#include "esp_sleep.h"
-
-void sleep_plan_arm_timer(uint32_t seconds) {
-    if (sleep_plan_timer_armed(seconds)) {
-        esp_sleep_enable_timer_wakeup((uint64_t)seconds * 1000000ULL);
-    }
-}
-#endif

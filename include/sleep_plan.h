@@ -247,7 +247,8 @@ bool sleep_plan_timer_armed(uint32_t seconds);
 
 /* Arm the deep-sleep timer wake for `seconds`, or arm nothing when
    sleep_plan_timer_armed() says this sleep has no timer. A device call, so
-   it exists on the target only; the decision it makes is the one above. */
+   it exists on the target only (sleep_plan_idf.c); the decision it makes is
+   the one above. */
 #ifndef NATIVE
 void sleep_plan_arm_timer(uint32_t seconds);
 #endif

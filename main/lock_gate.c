@@ -94,8 +94,8 @@ static bool s_config_released; /* fix applied: repaint over Config Error */
 
    It SHARES THE CONFIG LOCK'S SLEEP (lock_gate_sleep_mode below): the
    same CONFIG_ERR_SLEEP_SEC cadence, a window on every locked re-wake,
-   and Button D armed alone (lock_gate_wake_d_only, read by buttons.c) so
-   a press retries at once. Both locks are "waiting for something a human
+   and Button D armed among A-D (plus BOOT, which only this lock arms: it
+   is the way back into setup) so a press retries at once. Both locks are "waiting for something a human
    can fix, retried over the network", which is exactly what that sleep
    was sized for. It holds for as long as NTP fails, with no give-up:
    WiFi that works with NTP blocked keeps it locked indefinitely (owner
@@ -113,6 +113,14 @@ bool lock_gate_wake_d_only(void) {
 
 bool lock_gate_clock_locked(void) {
     return s_clock_locked;
+}
+
+bool lock_gate_bedtime_in_force(time_t now) {
+    /* The same two questions check_bedtime() asks, answered without any of
+       its effects. An unset clock gets no bed-time decision (BUG-11), so it
+       is never in force here either. */
+    return time_util_clock_plausible(now) &&
+           bedtime_active(time_util_minutes_of_day(now), config_cache_bedtime_minutes());
 }
 
 bool lock_gate_charge_locked(void) {

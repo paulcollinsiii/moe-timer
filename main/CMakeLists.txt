@@ -40,6 +40,7 @@ idf_component_register(
         "mqtt_form.c"
         "setup_session.c"
         "setup_session_idf.c"
+        "sleep_plan_idf.c"
         "setup_screens.c"
         "setup_trigger.c"
         "qr_render.c"

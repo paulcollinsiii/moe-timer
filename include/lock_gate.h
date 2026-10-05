@@ -53,10 +53,9 @@ wake_sleep_mode_t lock_gate_sleep_mode(void);
    anyone asks of it. */
 bool lock_gate_charge_locked(void);
 
-/* The config-error lock's own flag. The WAKE MASK asks
-   lock_gate_wake_d_only() below, which is this OR the no-clock lock:
-   buttons.c narrows the EXT1 mask to Button D alone while that is true
-   (buttons_policy.h). Not published to HA: a device that is
+/* The config-error lock's own flag. The WAKE MASK reads it and the
+   no-clock flag below as two fields (buttons_policy.h): either narrows the
+   A-D mask to D, and only this one also keeps BOOT unarmed. Not published to HA: a device that is
    config-locked has just told the parent so on the panel, which is a
    louder channel than a stat nobody has a card for. */
 bool lock_gate_config_locked(void);
@@ -66,15 +65,22 @@ bool lock_gate_config_locked(void);
    instead (app_state.c). */
 bool lock_gate_clock_locked(void);
 
-/* THE WAKE MASK'S QUESTION: true when the sleep ahead must arm Button D
-   alone. That is the config-error lock and the no-clock lock, which
-   share one sleep (lock_gate_sleep_mode folds both into
-   WAKE_SLEEP_CONFIG_ERR) and one exit: D is the attended retry, and a
-   press of A, B or C must not wake the device into a full wake and a
-   network window. buttons.c asks this and nothing else, so the fold is
-   pinned here by the host suite rather than living in buttons.c, which
-   has none. */
+/* True when the sleep ahead arms Button D alone among A-D: the
+   config-error lock or the no-clock lock, which share one sleep
+   (lock_gate_sleep_mode folds both into WAKE_SLEEP_CONFIG_ERR). D is the
+   attended retry, and a press of A, B or C must not wake the device into a
+   full wake and a network window. BOOT is a separate matter: the no-clock
+   lock arms it and the config-error lock does not, which is why buttons.c
+   reads the two flags above rather than this fold. */
 bool lock_gate_wake_d_only(void);
+
+/* Whether bed time is in force for `now`: the clock is plausible and the
+   bed-time window is active. Pure of effects, unlike the gates: it paints
+   nothing, engages nothing and never sleeps. Asked by code that must run
+   ahead of the gates (setup mode) and still has to yield to bed time. An
+   unset clock is never in force (BUG-11), so ahead of the no-clock gate
+   it answers false. */
+bool lock_gate_bedtime_in_force(time_t now);
 
 /* A release leaves the panel showing Charge Me!, Bed Time, Config Error
    or No Clock, which a partial refresh cannot clear, so the wake that observes

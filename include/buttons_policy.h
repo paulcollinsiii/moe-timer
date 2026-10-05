@@ -35,10 +35,11 @@ typedef struct {
        gate could leave the middle checkbox dead from sleep while the two
        either side of it worked. */
     bool chore_ack_allowed;
-    /* lock_gate_wake_d_only() — the config-error lock (design 5.3) or,
-       since BUG-14, the no-clock lock that shares its sleep — and
-       the ONLY field here that NARROWS rather than widens. True arms D
-       and drops everything else, whatever the three gates above say.
+    /* lock_gate_config_locked() — the config-error lock (design 5.3) — and,
+       with clock_locked below, one of the two fields here that NARROW
+       rather than widen. True arms D and drops everything else, whatever
+       the three gates above say, and it also keeps BOOT dark (see
+       buttons_policy_boot_wake_allowed).
 
        It has to live here and not in those gates. B is UNCONDITIONAL
        everywhere else in this module and there is no gate to hang its
@@ -56,6 +57,14 @@ typedef struct {
        edits config, and D forces the network window that carries the fix
        rather than waiting out CONFIG_ERR_SLEEP_SEC. */
     bool config_locked;
+    /* lock_gate_clock_locked() — the no-clock lock (BUG-14). Narrows the
+       A-D mask to D exactly as config_locked does, because its press is the
+       same retry. It is a separate field because the two locks differ on
+       BOOT: a config-error device is fixed from HA and has no use for setup,
+       but a no-clock device may have lost its WiFi (a new router, then a
+       power cut) and BOOT is then the only way back into setup, since D
+       retries credentials that no longer work. */
+    bool clock_locked;
     /* gpio_get_level(GPIO_NUM_0) == 0 at sleep entry, sampled raw by the
        driver like the other fields here — NOT consumed by
        buttons_policy_wake_mask() above (BOOT is not a button_id_t and
@@ -77,15 +86,13 @@ typedef struct {
    against BTN_GPIOS, and a fifth one would need a GPIO table entry and a
    BTN_NONE-sized widening everywhere that loops `i < BTN_NONE` over it.
 
-   Armed only on an UNLOCKED sleep: `enable` true and `config_locked`
-   false. That is S21 extended to BOOT rather than relaxed for it — the
-   config-error (and, since BUG-14, no-clock) lock still narrows the mask
-   to Button D alone, exactly as docs/architecture.md's S21 and
-   lock_gate.h say, because BOOT's own recovery path (a cold boot or any
-   button wake with no SSID, setup_trigger.h) does not need a second
-   wake source layered on top of D's. The charge and Bed Time locks arm
-   nothing at all, same as every other button; `enable` false covers both
-   without a separate check.
+   Armed when `enable` is true and `config_locked` is false. The
+   config-error lock keeps the sleep to Button D alone: its fix is made in
+   HA, and BOOT's recovery (setup) is not what it is waiting for. The
+   no-clock lock arms BOOT beside D, because a device whose stored WiFi
+   stopped working and then lost power would otherwise have no way into
+   setup at all. The charge and Bed Time locks arm nothing, same as every
+   other button; `enable` false covers both without a separate check.
 
    And never armed while `boot_currently_down` is true: see that field's
    comment for why (the level-triggered re-wake loop). Pure — host-tested. */

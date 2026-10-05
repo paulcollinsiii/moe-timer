@@ -73,8 +73,11 @@ typedef int esp_err_t;
 
 /* Reset causes, in ESP-IDF's declaration order so the values match the
    real enum (esp_system.h). Trimmed to the causes the forensics map
-   names; IDF's remaining reasons (SDIO, USB, JTAG, ...) exist only on
-   device and reach the map's default arm there. */
+   names, plus USB, which the setup trigger classifies as a cold boot;
+   IDF's remaining reasons (SDIO, JTAG, ...) exist only on device and
+   reach the maps' default arm there. USB sits after BROWNOUT here, so its
+   value differs from the real enum's (SDIO comes between them there):
+   nothing on host depends on the numeric value. */
 typedef enum {
     ESP_RST_UNKNOWN = 0,
     ESP_RST_POWERON,
@@ -86,6 +89,7 @@ typedef enum {
     ESP_RST_WDT,
     ESP_RST_DEEPSLEEP,
     ESP_RST_BROWNOUT,
+    ESP_RST_USB,
 } esp_reset_reason_t;
 
 /* The app description ESP-IDF builds into the image (esp_app_desc.h).

@@ -417,15 +417,17 @@ menu "MagTag Timer"
             short press goes back to sleep without a panel refresh, an LED
             ack or any timer work, and a hold past the threshold followed
             by a release starts the setup session. With this off nothing
-            wakes the device on BOOT, so a provisioned device has no way
-            into setup short of clearing its WiFi credentials: turn it off
-            only as the fallback below.
+            wakes the device on BOOT; the gesture still works the other
+            way round, because a button press that wakes the device while
+            BOOT is already held starts the same hold timing. The on-panel
+            wording on an off build says so ("Hold BOOT, press a button").
 
             GPIO0 is also a strapping pin: it is sampled at boot to pick
             the ROM's boot mode, and the expectation is that this
             sampling happens only on a chip/system reset, not on a
             deep-sleep wake — but that has not been confirmed on a bench
-            (the "C8" check in the setup bench plan — still open). If a
+            (the check that holding BOOT across a deep-sleep wake does not
+            enter the ROM download mode is still open). If a
             board enters the ROM download mode when BOOT is held across a
             deep-sleep wake, set this to n: the device then never arms
             GPIO0 for sleep. Changing this symbol needs a rebuild and a

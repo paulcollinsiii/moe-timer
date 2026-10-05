@@ -245,7 +245,8 @@ void test_bit_positions_match_the_button_ids(void) {
    buttons_policy_boot_wake_allowed() is a separate decision from the mask
    above: BOOT is not a button_id_t and never occupies a bit in it
    (buttons.h). It reads only two fields -- config_locked (shared with the
-   mask's D-only narrowing) and boot_currently_down (BOOT's own gate, which
+   mask's D-only narrowing; clock_locked narrows the mask but leaves BOOT
+   armed) and boot_currently_down (BOOT's own gate, which
    stops a level-triggered re-wake loop while BOOT is held) -- and the sweep at the end of this
    section is what proves the other three gates cannot move it. */
 static buttons_policy_in_t boot_in(bool enable, bool config_locked, bool boot_currently_down) {
@@ -273,12 +274,43 @@ void test_boot_not_armed_while_currently_down(void) {
     TEST_ASSERT_FALSE(buttons_policy_boot_wake_allowed(&in));
 }
 
-/* Finding 3 / S21: the config-error (and, since BUG-14, no-clock) lock's
-   one exit stays D alone. BOOT does not get a second escape hatch
-   stacked on top of it, whatever GPIO0 happens to read. */
+/* The config-error lock's one exit stays D alone: its fix is made in HA, and
+   BOOT does not get a second escape hatch stacked on top of it, whatever
+   GPIO0 happens to read. */
 void test_boot_not_armed_on_a_config_locked_sleep(void) {
     buttons_policy_in_t in = boot_in(true, true, false);
     TEST_ASSERT_FALSE(buttons_policy_boot_wake_allowed(&in));
+    TEST_ASSERT_EQUAL_UINT8(1u << BTN_D, buttons_policy_wake_mask(&in));
+}
+
+/* The no-clock lock is different: D alone among A-D, and BOOT as well. A
+   device whose stored WiFi broke and then lost power has only BOOT to get
+   back into setup. */
+void test_a_no_clock_sleep_arms_d_and_boot(void) {
+    buttons_policy_in_t in = {.enable = true,
+                              .swap_allowed = true,
+                              .mode_toggle_allowed = true,
+                              .chore_ack_allowed = true,
+                              .clock_locked = true};
+    TEST_ASSERT_EQUAL_UINT8(1u << BTN_D, buttons_policy_wake_mask(&in));
+    TEST_ASSERT_TRUE(buttons_policy_boot_wake_allowed(&in));
+}
+
+/* ...still never while BOOT already reads low (the level-triggered re-wake
+   loop), and never when the sleep arms nothing. */
+void test_a_no_clock_sleep_keeps_boots_other_two_rules(void) {
+    buttons_policy_in_t held = {.enable = true, .clock_locked = true, .boot_currently_down = true};
+    TEST_ASSERT_FALSE(buttons_policy_boot_wake_allowed(&held));
+    buttons_policy_in_t off = {.enable = false, .clock_locked = true};
+    TEST_ASSERT_FALSE(buttons_policy_boot_wake_allowed(&off));
+    TEST_ASSERT_EQUAL_UINT8(0x00, buttons_policy_wake_mask(&off));
+}
+
+/* Both locks standing: the config-error lock's rule wins for BOOT. */
+void test_both_locks_standing_keep_boot_dark(void) {
+    buttons_policy_in_t in = {.enable = true, .config_locked = true, .clock_locked = true};
+    TEST_ASSERT_FALSE(buttons_policy_boot_wake_allowed(&in));
+    TEST_ASSERT_EQUAL_UINT8(1u << BTN_D, buttons_policy_wake_mask(&in));
 }
 
 /* The charge and Bed Time locks arm nothing at all -- BOOT included,
@@ -332,6 +364,9 @@ int main(void) {
     RUN_TEST(test_boot_armed_on_an_unlocked_sleep_not_currently_down);
     RUN_TEST(test_boot_not_armed_while_currently_down);
     RUN_TEST(test_boot_not_armed_on_a_config_locked_sleep);
+    RUN_TEST(test_a_no_clock_sleep_arms_d_and_boot);
+    RUN_TEST(test_a_no_clock_sleep_keeps_boots_other_two_rules);
+    RUN_TEST(test_both_locks_standing_keep_boot_dark);
     RUN_TEST(test_boot_not_armed_when_the_sleep_is_disabled);
     RUN_TEST(test_boot_arm_decision_ignores_the_per_button_gates);
     return UNITY_END();
