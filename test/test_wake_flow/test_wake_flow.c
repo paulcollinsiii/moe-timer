@@ -873,6 +873,11 @@ static time_t flow_record_date_arg;
 static bool flow_reset_called;
 static time_t flow_clock_after_window; /* 0 = the window does not step the clock */
 static int flow_state_after_window;    /* -1 = the window leaves the state alone */
+/* What timer_is_new_day() answers once the window has stepped the clock.
+   -1 (the default) leaves the answer alone; 0 is the clock that ran fast
+   through deep sleep and woke "at midnight" a few seconds early: NTP
+   steps it back onto the day RAM still holds. */
+static int flow_new_day_after_window;
 /* M3-T4 fix pass: a B pressed DURING the window, handed to the real join
    poll the way net_window_join() would hand it. BTN_NONE (the default)
    leaves the window exactly as it was; the poll's answer is kept. */
@@ -1039,6 +1044,9 @@ esp_err_t net_apply_try_window(void) {
     }
     if (flow_state_after_window >= 0) {
         flow_state = (timer_state_t)flow_state_after_window;
+    }
+    if (flow_new_day_after_window >= 0) {
+        flow_new_day = (flow_new_day_after_window != 0);
     }
     if (flow_acked_after_window >= 0) {
         flow_chore_acked = (uint8_t)flow_acked_after_window;
@@ -2106,6 +2114,7 @@ void setUp(void) {
     flow_painted_mode = (app_mode_t)-1;
     flow_clock_after_window = 0;
     flow_state_after_window = -1;
+    flow_new_day_after_window = -1;
     flow_window_join_press = BTN_NONE;
     flow_window_join_polled = false;
     flow_completion_asks = 0;
@@ -4537,6 +4546,39 @@ void test_a_rollover_whose_window_never_syncs_still_resets_the_day(void) {
     TEST_ASSERT_EQUAL_INT64(flow_at(0, 5), now);
 }
 
+/* ---- the day rollover: a clock that ran fast through deep sleep ---------
+
+   The device wakes at ~23:59:30 real time believing it is midnight, so the
+   rollover fires and the window's NTP steps the clock back onto the day RAM
+   still holds. try_restore() refuses (the RTC day is intact), so resetting
+   here would wipe the day, record the same date again, and at the real
+   midnight send a second summary for that date with every count at zero:
+   HA's state_class total sensors record that as a drop of -N. */
+
+void test_a_rollover_the_synced_clock_takes_back_keeps_the_day(void) {
+    time_t now = flow_at(0, 0);
+    flow_new_day = true;
+    flow_new_day_after_window = 0;
+    flow_clock_after_window = flow_at(0, 0) - 30;
+    wake_flow_handle_day_rollover(&now);
+    TEST_ASSERT_FALSE(flow_reset_called);
+    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_TIMER_RESET));
+    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_RECORD_DATE));
+    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_PERSIST_RESTORE));
+    /* the caller still gets the corrected clock */
+    TEST_ASSERT_EQUAL_INT64(flow_at(0, 0) - 30, now);
+}
+
+/* The second ask is with the corrected clock, after the window. */
+void test_the_rollover_rechecks_the_day_against_the_corrected_clock(void) {
+    time_t now = flow_at(0, 5);
+    flow_new_day = true;
+    flow_clock_after_window = flow_at(6, 30);
+    wake_flow_handle_day_rollover(&now);
+    TEST_ASSERT_EQUAL_INT(2, flow_log_count(EV_IS_NEW_DAY));
+    TEST_ASSERT_EQUAL_INT64(flow_at(6, 30), flow_new_day_arg);
+}
+
 /* ---- the day rollover: yesterday's summary ------------------------------ */
 
 /* Captured BEFORE the reset wipes the counters — and before the window
@@ -4834,8 +4876,9 @@ void test_the_rollover_effect_order_is_pinned_end_to_end(void) {
        makes that a pinned position rather than an incidental one — an arm
        moved after EV_TRY_WINDOW fails here even though every count-based
        assertion in the OTA cases below would still pass. */
-    static const flow_event_t expect[] = {EV_IS_NEW_DAY, EV_QUEUE_SUMMARY,   EV_BONUS_CLEAR, EV_OTA_ARM,
-                                          EV_TRY_WINDOW, EV_PERSIST_RESTORE, EV_TIMER_RESET, EV_RECORD_DATE};
+    static const flow_event_t expect[] = {EV_IS_NEW_DAY,      EV_QUEUE_SUMMARY, EV_BONUS_CLEAR,
+                                          EV_OTA_ARM,         EV_TRY_WINDOW,    EV_IS_NEW_DAY,
+                                          EV_PERSIST_RESTORE, EV_TIMER_RESET,   EV_RECORD_DATE};
     TEST_ASSERT_EQUAL_INT((int)(sizeof expect / sizeof expect[0]), flow_log_n);
     for (int i = 0; i < flow_log_n; i++) {
         TEST_ASSERT_EQUAL_INT((int)expect[i], (int)flow_log[i]);
@@ -12090,6 +12133,8 @@ int main(void) {
     RUN_TEST(test_the_rollover_hands_the_corrected_clock_back_to_the_caller);
     RUN_TEST(test_the_recorded_date_is_the_corrected_clock_too);
     RUN_TEST(test_a_rollover_whose_window_never_syncs_still_resets_the_day);
+    RUN_TEST(test_a_rollover_the_synced_clock_takes_back_keeps_the_day);
+    RUN_TEST(test_the_rollover_rechecks_the_day_against_the_corrected_clock);
     RUN_TEST(test_yesterdays_summary_is_queued_before_anything_is_reset);
     RUN_TEST(test_the_summary_carries_the_stored_date_and_the_days_screen_usage);
     RUN_TEST(test_the_summary_reads_the_extra_slots_not_the_screen_slot);

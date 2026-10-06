@@ -50,7 +50,9 @@ setup route ─▶ day rollover ─▶ lock gates ─▶ break-end drain ─▶ 
 - **Day rollover.** On a new local date: queue yesterday's summary, arm the
   daily update check, open a network window, then restore today's snapshot
   or reset the day. The window comes first so the date is judged on a
-  corrected clock.
+  corrected clock. If the corrected clock is still on the stored date (the
+  clock ran fast in deep sleep and woke "at midnight" early), the day is kept,
+  and the real midnight sends that date's summary again with final counts.
 - **Lock gates.** Three of the four locks run here, after the rollover
   because they need the day settled; the charge lock already ran in
   `app_main`. `lock_gate_check_bedtime()` runs all three, despite its name:

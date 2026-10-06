@@ -2002,6 +2002,25 @@ void wake_flow_handle_day_rollover(time_t *now) {
     /* Fail-open: reset to IDLE with today's allocation even if sync fails */
     net_apply_try_window();
     *now = hal_time_now();
+    /* A ROLLOVER THE SYNCED CLOCK TAKES BACK. The RTC runs fast through
+       deep sleep, so a wake planned for midnight can land at ~23:59:30
+       real time with the clock already past midnight. The window's NTP
+       then steps it back onto the day RAM still holds. Resetting here
+       would wipe the last minute's counts and record the same date again,
+       and the real midnight would send a second summary for that date
+       with every count at zero. HA's per-day sensors (state_class total,
+       last_reset unchanged) record that as a drop of -N. Keep the day
+       instead. The real midnight rolls it over and sends the date's final
+       counts, which never go below the ones already sent. The summary,
+       bonus clear and update check above already ran in the window, and
+       that does no harm. A window that never synced leaves the clock
+       alone, so this cannot fire on it. */
+    if (!timer_is_new_day(*now)) {
+        const char *kept_date = timer_current_date();
+        (void)kept_date;
+        ESP_LOGW(TAG, "Day rollover withdrawn: the synced clock is still on '%s'", kept_date);
+        return;
+    }
     /* Power cycling must not refund the allocation: with the clock now
        corrected, a same-day NVS snapshot beats a reset. Only a genuine
        date change resets the day. That includes the wake that first
