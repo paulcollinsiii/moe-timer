@@ -149,6 +149,14 @@ uint16_t ha_config_device_hash(const char *dev_name, const char *fw) {
         .options = tones_names, .n_options = TONE_COUNT                                                \
     }
 
+/* The chore reward select: same CFG_ENUM shape, but its OWN option list
+   (reward_tones_names — Off plus the three jingles), not the alert tones. */
+#define REWARD_SELECT(k, nm, set, get)                                                                 \
+    {                                                                                                  \
+        .key = k, .component = "select", .name = nm, .kind = CFG_ENUM, .set_u16 = set, .get_u16 = get, \
+        .options = reward_tones_names, .n_options = REWARD_COUNT                                       \
+    }
+
 /* The registry hardcodes extra-timer slots 1..4; if TIMER_EXTRA_SLOTS ever
    shrinks, defs[slot-1] in the state builder would read out of bounds. */
 _Static_assert(TIMER_EXTRA_SLOTS >= 4, "ha_config registry assumes >= 4 extra-timer slots");
@@ -232,6 +240,7 @@ static const cfg_field_t FIELDS[] = {
     TONE_SELECT("tone_expiry", "Expiry tone", nvs_config_set_tone_expiry, nvs_config_get_tone_expiry),
     TONE_SELECT("tone_break", "Break tone", nvs_config_set_tone_break, nvs_config_get_tone_break),
     TONE_SELECT("tone_bed", "Bed time tone", nvs_config_set_tone_bed, nvs_config_get_tone_bed),
+    REWARD_SELECT("tone_chores", "Chores done tone", nvs_config_set_tone_chores, nvs_config_get_tone_chores),
     /* >100% applies clipping gain in the renderer — louder, harsher. */
     NUM_U16("alert_volume", "Alert volume", "%", 0, TONES_VOLUME_MAX, 1, nvs_config_set_alert_volume,
             nvs_config_get_alert_volume),

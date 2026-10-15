@@ -34,6 +34,7 @@
 #include "time_util.h"
 #include "timer.h"
 #include "timer_persist.h"
+#include "tones.h" /* REWARD_TONE_MAX_MS: the chime blocks inside the gesture */
 #include "wake_policy.h"
 
 #ifndef NATIVE
@@ -634,7 +635,8 @@ static void wake_flow_show_status_leds(void) {
    buttons — the one caller with no prologue, and the one design 2.6 cares
    about — is fully protected. */
 static bool wake_flow_apply_chore_ack(uint8_t idx, time_t now) {
-    if (button_chore_ack_apply(idx, now) == BTN_ACK_NONE) {
+    const btn_ack_action_t ack = button_chore_ack_apply(idx, now);
+    if (ack == BTN_ACK_NONE) {
         /* Before the drain, so a refused ack leaves the break-end edge
            exactly where a refused A leaves it — latched, for a later
            consumer or the sleep safety net. A refusal must not consume an
@@ -684,6 +686,30 @@ static bool wake_flow_apply_chore_ack(uint8_t idx, time_t now) {
             hal_delay_ms(STATUS_LED_ACK_HOLD_MS);
         }
         wake_flow_paint_chore_strip();
+    }
+
+    /* THE REWARD CHIME (docs/planning/20261015.chore-reward-chime.plan.md):
+       the press that ticked the LAST chore. BTN_ACK_RELEASED is the edge
+       and the only trigger, which is what makes every property below hold
+       without a flag of its own:
+         - once per day: `released` is latched, so un-ticking and re-ticking
+           the last chore answers TOGGLED and never replays it;
+         - on a day where chore_free already covers the allocation: the
+           edge still fires (with a zero-second grant) — the reward is for
+           the list, not the seconds;
+         - never from a rollover, a config apply, a list change or a
+           restore: none of them reach this function;
+         - whether or not the strip is lit: a latched ack drained on a
+           non-button wake still releases the day and the release is never
+           replayed, so gating this on s_chore_strip_lit would lose the
+           reward for good. Hence it sits OUTSIDE the guard above.
+       AFTER the paint, so the pixels cover the panel's latency and the
+       sound follows them. It is not gated on quiet hours or bed time, like
+       the alarms (quiet hours dim only the pixels; design 9, decided
+       2026-09-22): do not add a quiet-hours check. Off (the default) and volume 0 return
+       inside the audio module. */
+    if (ack == BTN_ACK_RELEASED) {
+        audio_chores_done_chime();
     }
     return true;
 }
@@ -845,14 +871,21 @@ _Static_assert(CHORE_ACK_COALESCE_POLL_MS > 0,
    network window and possibly an expiry alert (~15 s), and a coalescer
    that could spend the whole ceiling on its own leaves them none. Half is
    a judgment, not a measurement. At the defaults (400 / 1200 / 8000) the
-   worst case is 400 + 8000 + 8 x 4000 = 40.4 s against 90 s. */
+   worst case is 400 + 8000 + 8 x 4000 + 1100 + 256 = 41.756 s against 90 s.
+
+   The reward chime is the last term: audio_chores_done_chime() BLOCKS this
+   task while it plays, after the final paint, so it is part of the gesture.
+   REWARD_TONE_MAX_MS bounds the longest jingle's notes (test_tones asserts
+   every jingle fits) and REWARD_TONE_DRAIN_MS is audio.c's DAC drain tail
+   before the amp is cut. Charged whether or not a jingle is selected: the
+   bound must hold for the setting an operator can choose. */
 #define CHORE_WORST_PAINT_MS 4000u /* a full refresh (~3 s, estimate) + the driver's 1 s minimum interval */
 #define CHORE_BUDGET_WINDOWS \
     (((uint32_t)CHORE_ACK_COALESCE_BUDGET_MS + (uint32_t)CHORE_PAINT_QUIET_MS - 1u) / (uint32_t)CHORE_PAINT_QUIET_MS)
 #define CHORE_WORST_PAINTS ((CHORE_BUDGET_WINDOWS > 2u ? CHORE_BUDGET_WINDOWS : 2u) + 1u)
 #define CHORE_WORST_GESTURE_MS                                                   \
     ((uint32_t)STATUS_LED_ACK_HOLD_MS + (uint32_t)CHORE_ACK_COALESCE_BUDGET_MS + \
-     CHORE_WORST_PAINTS * CHORE_WORST_PAINT_MS)
+     CHORE_WORST_PAINTS * CHORE_WORST_PAINT_MS + (uint32_t)REWARD_TONE_MAX_MS + (uint32_t)REWARD_TONE_DRAIN_MS)
 _Static_assert(CHORE_WORST_GESTURE_MS <= (uint32_t)CONFIG_MAGTAG_MAX_AWAKE_SEC * 1000u / 2u,
                "MAGTAG_CHORE_ACK_BURST_MS / MAGTAG_CHORE_PAINT_QUIET_MS allow a chore gesture whose worst case "
                "(hold + budget + every repaint it permits, each as a full refresh) exceeds half the awake failsafe");

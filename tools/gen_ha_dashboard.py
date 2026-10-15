@@ -491,7 +491,7 @@ SCREEN_TIMER = (
 # say it twice. A divider groups each slot instead.
 ADDITIONAL_TIMERS = ("Additional Timers", [[f"timer{n}_{fld}" for fld in TIMER_FIELDS] for n in SLOTS])
 QUIET = ("Quiet hours & bed time", [["quiet_start", "quiet_end", "bedtime"]])
-TONES = ("Tones & volume", [["tone_expiry", "tone_break", "tone_bed", "alert_volume"]])
+TONES = ("Tones & volume", [["tone_expiry", "tone_break", "tone_bed", "tone_chores", "alert_volume"]])
 SYSTEM = (
     "System & OTA",
     [["name", "tz", "ota_url", "ota_on_sync", "locate"], ["ota_result", "ota_target", "ota_fails", "ota_dl_ms"]],

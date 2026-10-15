@@ -79,6 +79,62 @@ int tones_clamp_id(int idx, int fallback) {
     return (idx >= 0 && idx < TONE_COUNT) ? idx : fallback;
 }
 
+/* ---- chore reward jingles ----------------------------------------------
+   Synthesised from the melodies' note sequences only (no samples). The sine
+   renderer and the small speaker are the limit: recognisable, not identical. */
+
+/* "Secret discovered": G5 F#5 D#5 A4 G#4 E5 G#5 C6, last note rings (~1 s). */
+static const tone_note_t NOTES_REWARD_ZELDA[] = {
+    {784, 100}, {740, 100}, {622, 100}, {440, 100}, {415, 100}, {659, 100}, {831, 100}, {1047, 300},
+};
+
+/* Coin: B5 short, then E6 rings (~0.6 s). */
+static const tone_note_t NOTES_REWARD_COIN[] = {
+    {988, 90},
+    {1319, 510},
+};
+
+/* 1-up: E6 G6 E7 C7 D7 G7, quick even notes (~0.8 s). */
+static const tone_note_t NOTES_REWARD_1UP[] = {
+    {1319, 130}, {1568, 130}, {2637, 130}, {2093, 130}, {2349, 130}, {3136, 130},
+};
+
+const char *const reward_tones_names[REWARD_COUNT] = {
+    [REWARD_OFF] = "Off",
+    [REWARD_ZELDA] = "Zelda secret",
+    [REWARD_COIN] = "Mario coin",
+    [REWARD_1UP] = "Mario 1-up",
+};
+
+static const tone_def_t REWARD_TONES[REWARD_COUNT] = {
+    [REWARD_OFF] = {NULL, 0, 0, 0},
+    [REWARD_ZELDA] = {NOTES_REWARD_ZELDA, N(NOTES_REWARD_ZELDA), 4, 60},
+    [REWARD_COIN] = {NOTES_REWARD_COIN, N(NOTES_REWARD_COIN), 2, 80},
+    [REWARD_1UP] = {NOTES_REWARD_1UP, N(NOTES_REWARD_1UP), 4, 50},
+};
+
+const tone_def_t *reward_tones_get(int id) {
+    if (id > REWARD_OFF && id < REWARD_COUNT)
+        return &REWARD_TONES[id];
+    return NULL;
+}
+
+const tone_def_t *reward_tones_resolve(uint16_t stored_sel, uint16_t volume) {
+    if (volume == 0)
+        return NULL;
+    return reward_tones_get((int)stored_sel);
+}
+
+const char *reward_tones_option_name(int idx) {
+    if (idx < 0 || idx >= REWARD_COUNT)
+        return NULL;
+    return reward_tones_names[idx];
+}
+
+int reward_tones_option_count(void) {
+    return REWARD_COUNT;
+}
+
 /* ---- renderer ---------------------------------------------------------- */
 
 /* One sine period = 256 LUT entries = (1 << 24) phase units. Built on
@@ -104,9 +160,12 @@ static void load_note(tone_player_t *p) {
 }
 
 void tones_player_init(tone_player_t *p, int id, uint32_t sample_rate) {
+    tones_player_init_def(p, tones_get(id), sample_rate);
+}
+
+void tones_player_init_def(tone_player_t *p, const tone_def_t *def, uint32_t sample_rate) {
     sine_lut_init();
     memset(p, 0, sizeof(*p));
-    const tone_def_t *def = tones_get(id);
     p->sample_rate = sample_rate;
     p->def = (def && def->notes) ? def : NULL; /* TONE_CUSTOM/invalid: empty */
     p->peak = TONE_AMPLITUDE;                  /* 100% */

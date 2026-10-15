@@ -243,8 +243,162 @@ void test_render_after_finish_stays_finished(void) {
     TEST_ASSERT_EQUAL_UINT32(0, (uint32_t)tones_render(&p, s_buf, 1024));
 }
 
+/* ---- chore reward jingles (their own list; not tone_id_t) ---- */
+
+static uint32_t reward_total_ms(int id) {
+    const tone_def_t *def = reward_tones_get(id);
+    uint32_t ms = 0;
+    for (int i = 0; i < def->n_notes; i++)
+        ms += def->notes[i].dur_ms;
+    return ms;
+}
+
+void test_reward_option_list_is_off_first_and_unique(void) {
+    TEST_ASSERT_EQUAL_INT(0, REWARD_OFF);
+    TEST_ASSERT_EQUAL_INT(4, REWARD_COUNT);
+    TEST_ASSERT_EQUAL_INT(REWARD_COUNT, reward_tones_option_count());
+    TEST_ASSERT_EQUAL_STRING("Off", reward_tones_option_name(REWARD_OFF));
+    TEST_ASSERT_EQUAL_STRING("Zelda secret", reward_tones_option_name(REWARD_ZELDA));
+    TEST_ASSERT_EQUAL_STRING("Mario coin", reward_tones_option_name(REWARD_COIN));
+    TEST_ASSERT_EQUAL_STRING("Mario 1-up", reward_tones_option_name(REWARD_1UP));
+    TEST_ASSERT_NULL(reward_tones_option_name(-1));
+    TEST_ASSERT_NULL(reward_tones_option_name(REWARD_COUNT));
+    for (int i = 0; i < REWARD_COUNT; i++)
+        for (int j = i + 1; j < REWARD_COUNT; j++)
+            TEST_ASSERT_TRUE(strcmp(reward_tones_names[i], reward_tones_names[j]) != 0);
+}
+
+void test_reward_does_not_widen_the_alert_tone_list(void) {
+    /* Decision 2: the jingles are not offered to expiry/break/bed. */
+    TEST_ASSERT_EQUAL_INT(6, TONE_COUNT);
+    TEST_ASSERT_EQUAL_INT(TONE_COUNT, tones_option_count());
+    for (int i = 0; i < TONE_COUNT; i++) {
+        for (int j = 0; j < REWARD_COUNT; j++)
+            TEST_ASSERT_TRUE(strcmp(tones_option_name(i), reward_tones_option_name(j)) != 0);
+    }
+}
+
+void test_reward_off_and_out_of_range_have_no_def(void) {
+    TEST_ASSERT_NULL(reward_tones_get(REWARD_OFF));
+    TEST_ASSERT_NULL(reward_tones_get(-1));
+    TEST_ASSERT_NULL(reward_tones_get(REWARD_COUNT));
+    for (int id = REWARD_ZELDA; id < REWARD_COUNT; id++) {
+        const tone_def_t *def = reward_tones_get(id);
+        TEST_ASSERT_NOT_NULL(def);
+        TEST_ASSERT_NOT_NULL(def->notes);
+        TEST_ASSERT_TRUE(def->n_notes > 0);
+    }
+}
+
+void test_reward_resolve_plays_only_a_real_jingle_at_audible_volume(void) {
+    for (int id = REWARD_ZELDA; id < REWARD_COUNT; id++) {
+        TEST_ASSERT_EQUAL_PTR(reward_tones_get(id), reward_tones_resolve((uint16_t)id, 100));
+        TEST_ASSERT_EQUAL_PTR(reward_tones_get(id), reward_tones_resolve((uint16_t)id, 1));
+        TEST_ASSERT_EQUAL_PTR(reward_tones_get(id), reward_tones_resolve((uint16_t)id, TONES_VOLUME_MAX));
+        TEST_ASSERT_NULL(reward_tones_resolve((uint16_t)id, 0)); /* mute */
+    }
+    TEST_ASSERT_NULL(reward_tones_resolve(REWARD_OFF, 100));
+    TEST_ASSERT_NULL(reward_tones_resolve(REWARD_COUNT, 100)); /* future/older firmware */
+    TEST_ASSERT_NULL(reward_tones_resolve(999, 100));
+    TEST_ASSERT_NULL(reward_tones_resolve(0xFFFF, 100)); /* NVS sentinel */
+}
+
+void test_reward_every_jingle_fits_the_blocking_budget(void) {
+    for (int id = REWARD_ZELDA; id < REWARD_COUNT; id++)
+        TEST_ASSERT_TRUE_MESSAGE(reward_total_ms(id) <= REWARD_TONE_MAX_MS, reward_tones_option_name(id));
+    /* The drain tail is fixed by audio.c's DAC ring: 4 desc x 1024 B at 16 kHz. */
+    TEST_ASSERT_EQUAL_INT(256, REWARD_TONE_DRAIN_MS);
+}
+
+void test_reward_notes_are_under_8khz(void) {
+    for (int id = REWARD_ZELDA; id < REWARD_COUNT; id++) {
+        const tone_def_t *def = reward_tones_get(id);
+        for (int i = 0; i < def->n_notes; i++) {
+            TEST_ASSERT_TRUE_MESSAGE(def->notes[i].freq_hz < 8000, reward_tones_option_name(id));
+            TEST_ASSERT_TRUE_MESSAGE(def->notes[i].dur_ms > 0, reward_tones_option_name(id));
+        }
+    }
+}
+
+void test_reward_note_counts_and_durations(void) {
+    TEST_ASSERT_EQUAL_UINT8(8, reward_tones_get(REWARD_ZELDA)->n_notes);
+    TEST_ASSERT_EQUAL_UINT8(2, reward_tones_get(REWARD_COIN)->n_notes);
+    TEST_ASSERT_EQUAL_UINT8(6, reward_tones_get(REWARD_1UP)->n_notes);
+    TEST_ASSERT_TRUE(reward_total_ms(REWARD_ZELDA) >= 900 && reward_total_ms(REWARD_ZELDA) <= 1100);
+    TEST_ASSERT_TRUE(reward_total_ms(REWARD_COIN) >= 500 && reward_total_ms(REWARD_COIN) <= 700);
+    TEST_ASSERT_TRUE(reward_total_ms(REWARD_1UP) >= 700 && reward_total_ms(REWARD_1UP) <= 900);
+}
+
+void test_reward_last_note_rings_on_zelda_and_coin(void) {
+    for (int id = REWARD_ZELDA; id <= REWARD_COIN; id++) {
+        const tone_def_t *def = reward_tones_get(id);
+        const uint16_t last = def->notes[def->n_notes - 1].dur_ms;
+        for (int i = 0; i + 1 < def->n_notes; i++)
+            TEST_ASSERT_TRUE_MESSAGE(last > def->notes[i].dur_ms, reward_tones_option_name(id));
+    }
+}
+
+void test_reward_renders_exactly_its_note_table(void) {
+    for (int id = REWARD_ZELDA; id < REWARD_COUNT; id++) {
+        tone_player_t p;
+        tones_player_init_def(&p, reward_tones_get(id), RATE);
+        size_t total = 0, got;
+        while ((got = tones_render(&p, s_buf + total, 61)) > 0)
+            total += got;
+        uint32_t expect = 0;
+        const tone_def_t *def = reward_tones_get(id);
+        for (int i = 0; i < def->n_notes; i++)
+            expect += (uint32_t)def->notes[i].dur_ms * RATE / 1000u;
+        TEST_ASSERT_EQUAL_UINT32_MESSAGE(expect, (uint32_t)total, reward_tones_option_name(id));
+        int up, down;
+        peak_deviation(s_buf, total, &up, &down);
+        TEST_ASSERT_TRUE_MESSAGE(up > 10, "reward jingle rendered silence");
+    }
+}
+
+void test_reward_off_renders_nothing(void) {
+    tone_player_t p;
+    tones_player_init_def(&p, reward_tones_get(REWARD_OFF), RATE);
+    TEST_ASSERT_EQUAL_UINT32(0, (uint32_t)tones_render(&p, s_buf, 1024));
+    tones_player_init_def(&p, NULL, RATE);
+    TEST_ASSERT_EQUAL_UINT32(0, (uint32_t)tones_render(&p, s_buf, 1024));
+}
+
+void test_player_init_def_matches_player_init_for_alert_ids(void) {
+    static uint8_t other[RATE * 2];
+    tone_player_t a, b;
+    tones_player_init(&a, TONE_DING, RATE);
+    tones_player_init_def(&b, tones_get(TONE_DING), RATE);
+    size_t na = tones_render(&a, s_buf, sizeof(s_buf));
+    size_t nb = tones_render(&b, other, sizeof(other));
+    TEST_ASSERT_EQUAL_UINT32((uint32_t)na, (uint32_t)nb);
+    TEST_ASSERT_EQUAL_MEMORY(s_buf, other, na);
+}
+
+void test_reward_volume_zero_is_silent(void) {
+    tone_player_t p;
+    tones_player_init_def(&p, reward_tones_get(REWARD_COIN), RATE);
+    tones_player_set_volume(&p, 0);
+    size_t got = tones_render(&p, s_buf, sizeof(s_buf));
+    TEST_ASSERT_TRUE(got > 0);
+    for (size_t i = 0; i < got; i++)
+        TEST_ASSERT_EQUAL_UINT8(128, s_buf[i]);
+}
+
 int main(void) {
     UNITY_BEGIN();
+    RUN_TEST(test_reward_option_list_is_off_first_and_unique);
+    RUN_TEST(test_reward_does_not_widen_the_alert_tone_list);
+    RUN_TEST(test_reward_off_and_out_of_range_have_no_def);
+    RUN_TEST(test_reward_resolve_plays_only_a_real_jingle_at_audible_volume);
+    RUN_TEST(test_reward_every_jingle_fits_the_blocking_budget);
+    RUN_TEST(test_reward_notes_are_under_8khz);
+    RUN_TEST(test_reward_note_counts_and_durations);
+    RUN_TEST(test_reward_last_note_rings_on_zelda_and_coin);
+    RUN_TEST(test_reward_renders_exactly_its_note_table);
+    RUN_TEST(test_reward_off_renders_nothing);
+    RUN_TEST(test_player_init_def_matches_player_init_for_alert_ids);
+    RUN_TEST(test_reward_volume_zero_is_silent);
     RUN_TEST(test_all_tones_have_unique_names);
     RUN_TEST(test_synth_tones_have_notes_custom_does_not);
     RUN_TEST(test_clamp_id);

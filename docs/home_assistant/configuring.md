@@ -47,6 +47,7 @@ value until the device applies the new one.
 | Timer 1–4 minutes | `timer1_min` … | 1–1440 | |
 | Timer 1–4 reloadable / break eligible | `timer1_reload`, `timer1_break` … | on / off | Break eligible: may run during a Screen Break and counts as time away from a screen ([screen breaks](../behavior/screen_breaks.md#other-timers-during-a-break)). |
 | Expiry / Break / Bed time tone | `tone_expiry`, `tone_break`, `tone_bed` | Classic beep, Ding-ding, Gentle chime, Marimba arpeggio, Gran Vals, Custom WAV | Custom WAV plays the file flashed to the assets partition ([Developer setup](../developer_setup.md)). |
+| Chores done tone | `tone_chores` | Off, Zelda secret, Mario coin, Mario 1-up | Plays once when the last chore is ticked ([reward chime](../behavior/chores.md#reward-chime)). Its own list: the jingles are not offered on the other tone selects, and Off is not offered there. Default Off. Not gated on quiet hours (like the alarms); Alert volume 0 mutes it. |
 | Alert volume | `alert_volume` | 0–200 % | 100 is the clean reference level. Above that adds gain that clips, for real loudness; around 150 is a good start. 0 mutes. |
 | Device name | `name` | up to 31 bytes | Blank uses the device ID (`magtag-xxxxxx`). |
 | Timezone | `tz` | POSIX TZ string, up to 47 bytes | For example `EST5EDT,M3.2.0,M11.1.0`. Blank means UTC. |

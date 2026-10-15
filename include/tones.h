@@ -50,6 +50,42 @@ int tones_option_count(void);
    negative sentinel) collapses to fallback. */
 int tones_clamp_id(int idx, int fallback);
 
+/* ---- chore reward jingles -------------------------------------------------
+   The "all chores done" chime has its OWN option list: the jingles are not
+   tone_id_t entries, so they are never offered to the expiry/break/bed
+   selects and TONE_COUNT / the stored alert-tone indices do not move.
+   REWARD_OFF exists only here (silence, and the default). Synthesised note
+   tables only — never samples. */
+typedef enum {
+    REWARD_OFF = 0,
+    REWARD_ZELDA, /* "secret discovered": eight rising/falling notes, last rings */
+    REWARD_COIN,  /* two-note coin blip, last rings */
+    REWARD_1UP,   /* six quick even notes climbing */
+    REWARD_COUNT,
+} reward_tone_id_t;
+
+extern const char *const reward_tones_names[REWARD_COUNT];
+
+/* NULL for REWARD_OFF and for out-of-range ids (nothing to play). */
+const tone_def_t *reward_tones_get(int id);
+
+/* HA select plumbing: option strings by index (NULL out of range). */
+const char *reward_tones_option_name(int idx);
+int reward_tones_option_count(void);
+
+/* What audio_chores_done_chime() plays for a stored selection and volume:
+   NULL (play nothing, touch no hardware) for Off, for an index from a
+   future/older firmware (out of range collapses to Off, the default), and
+   for volume 0 (mute). Otherwise the jingle's def. */
+const tone_def_t *reward_tones_resolve(uint16_t stored_sel, uint16_t volume);
+
+/* Longest jingle's note total, with headroom (longest today: Zelda, 1000 ms).
+   test_tones asserts every jingle fits. */
+#define REWARD_TONE_MAX_MS 1100
+/* audio.c's dac_drain() waits for the DMA ring to play out before the amp
+   is cut: DAC_DESC_NUM * DAC_BUF_SIZE / SYNTH_RATE_HZ = 256 ms. */
+#define REWARD_TONE_DRAIN_MS 256
+
 /* Volume ceiling (percent). 100 = the tuned reference amplitude; above
    that the renderer applies digital gain and clips at the DAC rails,
    trading sine purity for real loudness on the small speaker. */
@@ -67,6 +103,10 @@ typedef struct {
 } tone_player_t;
 
 void tones_player_init(tone_player_t *p, int id, uint32_t sample_rate);
+
+/* Same, from a definition (e.g. reward_tones_get()). NULL or a def with no
+   notes renders nothing. tones_player_init() is this with tones_get(id). */
+void tones_player_init_def(tone_player_t *p, const tone_def_t *def, uint32_t sample_rate);
 
 /* Volume in percent, clamped to [0, TONES_VOLUME_MAX]; init defaults to
    100. 0 renders silence (timing preserved). */

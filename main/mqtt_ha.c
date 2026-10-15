@@ -887,7 +887,7 @@ void mqtt_ha_window(const stats_snapshot_t *snap) {
        buffer.size, which would silently double this allocation. Outgoing
        messages do not need it: esp_mqtt_client_publish fragments a payload
        larger than the buffer itself and sends the remainder from the
-       caller's memory, which is how the 1164 B worst-case cfg_state already
+       caller's memory, which is how the 1193 B worst-case cfg_state already
        goes out through a 1024 B buffer. */
     esp_mqtt_client_config_t cfg = {
         .broker.address.uri = uri,

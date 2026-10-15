@@ -806,6 +806,10 @@ config_result_t config_apply(const char *json, char *ack, size_t ack_len) {
     apply_enum(root, "tone_expiry", tones_names, TONE_COUNT, nvs_config_set_tone_expiry, &e);
     apply_enum(root, "tone_break", tones_names, TONE_COUNT, nvs_config_set_tone_break, &e);
     apply_enum(root, "tone_bed", tones_names, TONE_COUNT, nvs_config_set_tone_bed, &e);
+    /* The chore reward jingle: its OWN option list (Off + three jingles), not
+       the alert tones — and, like the three above, an HA select, so it must
+       be expressible here (the durability rule, ha_config.c above FIELDS). */
+    apply_enum(root, "tone_chores", reward_tones_names, REWARD_COUNT, nvs_config_set_tone_chores, &e);
     apply_u16(root, "alert_volume", 0, TONES_VOLUME_MAX, nvs_config_set_alert_volume, &e);
     apply_date(root, "summer_start", nvs_config_set_summer_start, &e);
     apply_date(root, "school_start", nvs_config_set_school_start, &e);

@@ -129,16 +129,20 @@ static void dac_drain(void) {
     }
 }
 
-static void play_synth(int tone_id, int volume_pct) {
+static void play_synth_def(const tone_def_t *def, int volume_pct) {
     if (!dac_ensure(SYNTH_RATE_HZ))
         return;
     tone_player_t player;
-    tones_player_init(&player, tone_id, SYNTH_RATE_HZ);
+    tones_player_init_def(&player, def, SYNTH_RATE_HZ);
     tones_player_set_volume(&player, volume_pct);
     size_t n;
     while (!s_stop_requested && (n = tones_render(&player, s_pcm, sizeof(s_pcm))) > 0) {
         dac_push(s_pcm, n);
     }
+}
+
+static void play_synth(int tone_id, int volume_pct) {
+    play_synth_def(tones_get(tone_id), volume_pct);
 }
 
 /* Stream the assets-partition WAV: header-validate, then read 16-bit LE
@@ -189,10 +193,22 @@ static bool play_wav(int volume_pct) {
     return true;
 }
 
-static void play_tone_at(int tone_id, int cycles, int volume) {
+/* Shared bracket around every playback: amp up before, drain + amp down +
+   DAC teardown after. */
+static void amp_begin(void) {
     s_stop_requested = false;
     audio_init();
     gpio_set_level(AMP_ENABLE_GPIO, 1);
+}
+
+static void amp_end(void) {
+    dac_drain();
+    gpio_set_level(AMP_ENABLE_GPIO, 0);
+    dac_teardown();
+}
+
+static void play_tone_at(int tone_id, int cycles, int volume) {
+    amp_begin();
     for (int cycle = 0; cycle < cycles && !s_stop_requested; cycle++) {
         if (tone_id == TONE_CUSTOM) {
             if (!play_wav(volume)) {
@@ -206,18 +222,20 @@ static void play_tone_at(int tone_id, int cycles, int volume) {
             vTaskDelay(pdMS_TO_TICKS(CYCLE_GAP_MS));
         }
     }
-    dac_drain();
-    gpio_set_level(AMP_ENABLE_GPIO, 0);
-    dac_teardown();
+    amp_end();
 }
 
-void audio_play_tone(int tone_id, int cycles) {
-    /* HA-configurable volume, one NVS read per alert (not per cycle). */
+/* HA-configurable volume, one NVS read per alert (not per cycle). */
+static uint16_t alert_volume(void) {
     uint16_t volume = NVS_DEFAULT_ALERT_VOLUME;
     (void)nvs_config_get_alert_volume(&volume);
     if (volume > TONES_VOLUME_MAX)
         volume = TONES_VOLUME_MAX; /* stored by a future/older firmware */
-    play_tone_at(tone_id, cycles, volume);
+    return volume;
+}
+
+void audio_play_tone(int tone_id, int cycles) {
+    play_tone_at(tone_id, cycles, alert_volume());
 }
 
 /* Per-alert tone from NVS (HA select); clamp shields against a stored
@@ -244,6 +262,22 @@ void audio_break_over_chime(void) {
     /* "Your timer changed" chirp: fixed Ding-ding so it stays distinct
        from whatever the configurable alarms are set to. */
     audio_play_tone(TONE_DING, 1);
+}
+
+void audio_chores_done_chime(void) {
+    /* The jingle comes from its own list (reward_tone_id_t). The decision
+       (Off, a stored index from another firmware, volume 0 -> nothing) is
+       reward_tones_resolve(), host-tested; NULL returns before the DAC or
+       the amp is touched. */
+    uint16_t sel = NVS_DEFAULT_TONE_CHORES;
+    (void)nvs_config_get_tone_chores(&sel);
+    const uint16_t volume = alert_volume();
+    const tone_def_t *def = reward_tones_resolve(sel, volume);
+    if (def == NULL)
+        return;
+    amp_begin();
+    play_synth_def(def, volume);
+    amp_end();
 }
 
 void audio_locate_alarm(void) {

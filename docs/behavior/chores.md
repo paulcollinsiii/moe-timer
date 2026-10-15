@@ -103,7 +103,8 @@ press is answered on the LEDs:
 
 The chore LEDs light only when someone is pressing buttons, and they light
 during quiet hours too, because a tick means somebody is awake at the device.
-There is no sound. A minute wake that repaints the checklist leaves them dark,
+Ticking a chore makes no sound, with one exception: the [reward chime](#reward-chime).
+A minute wake that repaints the checklist leaves them dark,
 but if that wake syncs, the LED above A briefly shows the sync light: blue,
 then green or red. That green is not the gate
 ([Power and sync](power_and_sync.md#the-sync-light)).
@@ -112,6 +113,34 @@ then green or red. That green is not the gate
 button has been pressed for 1.2 seconds, within an 8-second limit, before it
 repaints. Ticking two or three chores in a row therefore shows up in a single
 refresh. A tick made during the repaint is picked up and painted after it.
+
+## Reward chime
+
+When the press that ticks the **last** chore lands, the device can play one short
+jingle. It is chosen in Home Assistant with the **Chores done tone** select
+(`tone_chores`):
+
+| Option | Sound |
+| --- | --- |
+| **Off** (default) | Silence. Off is the default for a fresh device. |
+| Zelda secret | A rising-and-falling "secret discovered" run of eight notes, about a second. |
+| Mario coin | A two-note coin blip, about 0.6 s. |
+| Mario 1-up | Six quick climbing notes, about 0.8 s. |
+
+These are synthesized from note tables, not recordings, so they are recognisable
+rather than identical. The jingles are offered only on this select, never on the
+Expiry, Break or Bed time tone selects.
+
+- **It plays once a day.** It is tied to the release: unticking and re-ticking the
+  last chore does not play it again.
+- **It plays on a day with no gate** (chore-free equal to the allowance) too. The
+  reward is for finishing the list, not for the minutes.
+- **It follows the press only.** Midnight, a restart, a config change or editing
+  the list in Home Assistant never play it.
+- **It uses Alert volume**, so a volume of 0 mutes it.
+- **It is not gated on quiet hours**, like the alarms (which also sound then;
+  only the pixels honour quiet hours). The press means somebody is awake.
+- It plays whether or not the LEDs lit for that press.
 
 ## The day
 

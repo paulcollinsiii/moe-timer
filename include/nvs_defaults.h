@@ -120,6 +120,10 @@
 #define NVS_DEFAULT_TONE_EXPIRY TONE_MARIMBA
 #define NVS_DEFAULT_TONE_BREAK TONE_CHIME
 #define NVS_DEFAULT_TONE_BED TONE_GRANVALS
+/* The chore reward jingle (reward_tone_id_t, its OWN list — not tone_id_t).
+   Off is the default for a fresh device. (Not a seeded-defaults row, so it
+   stays out of the fingerprint and a defaults reseed does not touch it.) */
+#define NVS_DEFAULT_TONE_CHORES REWARD_OFF
 
 /* Alert volume percent (0-TONES_VOLUME_MAX; >100 = clipping boost). The
    default is the loud end — the DAC sine at reference level is much

@@ -348,7 +348,7 @@ void test_discovery_schema_version_moves_with_the_entity_table(void) {
        whose cause is outside ENTITIES is legitimate and is recorded here
        as such. The config registry has a joint pin of its own in
        test_ha_config. */
-    TEST_ASSERT_EQUAL_INT(24, STATS_JSON_DISC_SCHEMA_VER);
+    TEST_ASSERT_EQUAL_INT(25, STATS_JSON_DISC_SCHEMA_VER);
 }
 
 /* ---- the OTA leg of the stat payload ---- */
