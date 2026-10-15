@@ -287,6 +287,7 @@ sections:
           - {entity: select.magtag_1a0a5c_tone_expiry, name: {type: entity}}
           - {entity: select.magtag_1a0a5c_tone_break, name: {type: entity}}
           - {entity: select.magtag_1a0a5c_tone_bed, name: {type: entity}}
+          - {entity: select.magtag_1a0a5c_tone_chores, name: {type: entity}}
           - {entity: number.magtag_1a0a5c_alert_volume, name: {type: entity}}
       - {type: heading, heading: Daily Chores, heading_style: subtitle}
       - {type: todo-list, entity: todo.magtag_1a0a5c_chores}
@@ -421,6 +422,7 @@ sections:
             - number.magtag_1a0a5c_weekend_min
             - select.magtag_1a0a5c_tone_bed
             - select.magtag_1a0a5c_tone_break
+            - select.magtag_1a0a5c_tone_chores
             - select.magtag_1a0a5c_tone_expiry
             - sensor.magtag_1a0a5c_active_timer
             - sensor.magtag_1a0a5c_battery
@@ -623,6 +625,7 @@ static const cfg_field_t FIELDS[] = {
             "chore_free_sum": ("number", None),
             "timer4_break": ("switch", None),
             "tone_bed": ("select", None),
+            "tone_chores": ("select", None),
             "ota_url": ("text", None),
             "screen_bonus": ("number", None),
             "locate": ("switch", None),

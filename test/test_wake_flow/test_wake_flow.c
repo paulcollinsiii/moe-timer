@@ -74,6 +74,10 @@
 typedef enum {
     EV_BREAK_TICK = 1,
     EV_CHIME,
+    /* audio_chores_done_chime(): the reward jingle for the last chore. A
+       SEPARATE code from EV_CHIME (the break-over chirp) so a case can say
+       which of the two it is asserting about. */
+    EV_CHORES_CHIME,
     EV_SNAP_BACK,
     /* EV_REPAINT was here: paint_current_state_full()'s stub pushed it.
        That seam is wake_flow.c's own static now, so the repaint appears in
@@ -390,6 +394,10 @@ bool timer_select_interrupted(void) {
 
 void audio_break_over_chime(void) {
     flow_log_push(EV_CHIME);
+}
+
+void audio_chores_done_chime(void) {
+    flow_log_push(EV_CHORES_CHIME);
 }
 
 /* paint_current_state_full() was stubbed here until the audit's review
@@ -11990,6 +11998,178 @@ void test_a_no_ssid_press_in_chore_mode_claims_and_lights_nothing(void) {
     TEST_ASSERT_TRUE(flow_log_at(EV_PIXELS_OFF) < flow_log_at(EV_SETUP_RUN));
 }
 
+/* ---- the chore reward chime (docs/planning/20261015.chore-reward-chime.plan.md) ----
+
+   The chime rides the BTN_ACK_RELEASED return of button_chore_ack_apply()
+   and nothing else. The ack stub returns whatever flow_ack_result says, so
+   each case arms the return the real apply would give for the situation it
+   names; the real apply's own "once per day" and "fires on a free-covers-
+   everything day" behaviour is pinned in test_button_actions. */
+
+void test_chime_fires_on_the_press_that_releases_the_day(void) {
+    flow_mode = APP_MODE_CHORES;
+    flow_chore_count = 3;
+    flow_ack_result = BTN_ACK_RELEASED;
+    s_chore_strip_lit = true;
+    mock_time_set(flow_at(16, 0));
+
+    TEST_ASSERT_TRUE(wake_flow_apply_chore_ack(BUTTON_CHORE_IDX_D, flow_at(16, 0)));
+
+    TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_CHORES_CHIME));
+    TEST_ASSERT_EQUAL_INT_MESSAGE(0, flow_log_count(EV_CHIME), "the reward is not the break-over chirp");
+    /* AFTER the strip paint: the pixels cover the panel's latency, the
+       sound follows them. */
+    TEST_ASSERT_TRUE(flow_log_at(EV_CHORE_LEDS) >= 0);
+    TEST_ASSERT_TRUE_MESSAGE(flow_log_at(EV_CHORES_CHIME) > flow_log_at_nth(EV_CHORE_LEDS, flow_strip_n),
+                             "the chime played before the strip showed the ack");
+}
+
+void test_chime_does_not_fire_on_a_non_final_ack(void) {
+    flow_mode = APP_MODE_CHORES;
+    flow_chore_count = 3;
+    flow_ack_result = BTN_ACK_TOGGLED;
+    s_chore_strip_lit = true;
+    mock_time_set(flow_at(16, 0));
+
+    TEST_ASSERT_TRUE(wake_flow_apply_chore_ack(BUTTON_CHORE_IDX_B, flow_at(16, 0)));
+    TEST_ASSERT_TRUE(wake_flow_apply_chore_ack(BUTTON_CHORE_IDX_C, flow_at(16, 0)));
+
+    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_CHORES_CHIME));
+}
+
+void test_chime_does_not_fire_on_a_refused_ack(void) {
+    flow_mode = APP_MODE_CHORES;
+    flow_ack_result = BTN_ACK_NONE;
+    s_chore_strip_lit = true;
+    mock_time_set(flow_at(16, 0));
+
+    TEST_ASSERT_FALSE(wake_flow_apply_chore_ack(BUTTON_CHORE_IDX_B, flow_at(16, 0)));
+
+    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_CHORES_CHIME));
+}
+
+/* untick + retick of the last chore: the real apply answers RELEASED once
+   (released is latched) and TOGGLED for every later press, so the sequence
+   is chime, none, none. */
+void test_chime_is_not_replayed_by_untick_and_retick_of_the_last_chore(void) {
+    flow_mode = APP_MODE_CHORES;
+    flow_chore_count = 3;
+    s_chore_strip_lit = true;
+    mock_time_set(flow_at(16, 0));
+
+    flow_ack_result = BTN_ACK_RELEASED;
+    TEST_ASSERT_TRUE(wake_flow_apply_chore_ack(BUTTON_CHORE_IDX_D, flow_at(16, 0)));
+    flow_ack_result = BTN_ACK_TOGGLED; /* untick */
+    TEST_ASSERT_TRUE(wake_flow_apply_chore_ack(BUTTON_CHORE_IDX_D, flow_at(16, 0)));
+    flow_ack_result = BTN_ACK_TOGGLED; /* retick: released is latched */
+    TEST_ASSERT_TRUE(wake_flow_apply_chore_ack(BUTTON_CHORE_IDX_D, flow_at(16, 0)));
+
+    TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_CHORES_CHIME));
+}
+
+/* The release edge on a day whose chore_free already covers the whole
+   allocation grants zero seconds but still reports RELEASED, and the
+   reward is for the list. The wake flow must not second-guess the edge by
+   looking at seconds. */
+void test_chime_fires_when_the_release_grants_nothing(void) {
+    flow_mode = APP_MODE_CHORES;
+    flow_chore_count = 3;
+    flow_ack_result = BTN_ACK_RELEASED; /* chore_free >= allocation: edge true, 0 s */
+    s_chore_strip_lit = true;
+    mock_time_set(flow_at(16, 0));
+
+    TEST_ASSERT_TRUE(wake_flow_apply_chore_ack(BUTTON_CHORE_IDX_B, flow_at(16, 0)));
+
+    TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_CHORES_CHIME));
+}
+
+/* A latched ack drained on a non-button wake releases the day with the
+   strip unlit, and the release is never replayed: skipping the chime here
+   would lose the reward for good. */
+void test_chime_fires_even_when_the_strip_is_not_lit(void) {
+    flow_mode = APP_MODE_CHORES;
+    flow_chore_count = 3;
+    flow_ack_result = BTN_ACK_RELEASED;
+    s_chore_strip_lit = false;
+    mock_time_set(flow_at(16, 0));
+
+    TEST_ASSERT_TRUE(wake_flow_apply_chore_ack(BUTTON_CHORE_IDX_D, flow_at(16, 0)));
+
+    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_CHORE_LEDS)); /* the premise: nothing was lit */
+    TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_CHORES_CHIME));
+}
+
+/* The same release through the real wake: a chore-mode button wake whose
+   press releases the day chimes exactly once. */
+void test_chime_fires_once_through_a_whole_button_wake(void) {
+    flow_tick_clock(flow_at(15, 0));
+    flow_arm_chore_wake(BTN_D);
+    flow_ack_result = BTN_ACK_RELEASED;
+
+    TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_button());
+
+    TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_CHORES_CHIME));
+}
+
+/* NEGATIVE CONTROLS. The ack stub is armed with RELEASED so that a chime
+   wired to anything but the press path would be loud. */
+
+void test_chime_never_fires_from_a_day_rollover(void) {
+    time_t now = flow_at(0, 1);
+    mock_time_set(now);
+    flow_mode = APP_MODE_CHORES;
+    flow_chore_count = 3;
+    flow_chore_released = true;
+    flow_ack_result = BTN_ACK_RELEASED;
+    flow_new_day = true;
+    flow_restore_ok = false;
+
+    wake_flow_handle_day_rollover(&now);
+
+    TEST_ASSERT_TRUE(flow_reset_called); /* the premise: the rollover really ran */
+    TEST_ASSERT_EQUAL_INT_MESSAGE(0, flow_log_count(EV_CHORES_CHIME), "a day rollover chimed");
+}
+
+void test_chime_never_fires_from_a_same_day_restore(void) {
+    time_t now = flow_at(0, 1);
+    mock_time_set(now);
+    flow_mode = APP_MODE_CHORES;
+    flow_chore_count = 3;
+    flow_chore_released = true;
+    flow_ack_result = BTN_ACK_RELEASED;
+    flow_new_day = true;
+    flow_restore_ok = true;
+
+    wake_flow_handle_day_rollover(&now);
+
+    TEST_ASSERT_FALSE(flow_reset_called);
+    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_CHORES_CHIME));
+}
+
+void test_chime_never_fires_from_a_tick_wake_in_chore_mode(void) {
+    flow_tick_clock(flow_at(15, 0));
+    flow_mode = APP_MODE_CHORES;
+    flow_chore_count = 3;
+    flow_chore_released = true;
+    flow_ack_result = BTN_ACK_RELEASED;
+
+    TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_tick());
+
+    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_CHORE_ACK));
+    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_CHORES_CHIME));
+}
+
+void test_chime_never_fires_from_a_non_chore_button_wake(void) {
+    flow_tick_clock(flow_at(15, 0));
+    flow_mode = APP_MODE_TIMERS;
+    flow_ack_result = BTN_ACK_RELEASED;
+    flow_wakeup_btn = BTN_A;
+
+    (void)flow_run_button();
+
+    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_CHORES_CHIME));
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_deepsleep_is_the_healthy_reason);
@@ -12532,5 +12712,16 @@ int main(void) {
     RUN_TEST(test_a_press_after_a_no_ssid_crash_enters_setup);
     RUN_TEST(test_the_pixels_go_dark_before_the_session);
     RUN_TEST(test_a_no_ssid_press_in_chore_mode_claims_and_lights_nothing);
+    RUN_TEST(test_chime_fires_on_the_press_that_releases_the_day);
+    RUN_TEST(test_chime_does_not_fire_on_a_non_final_ack);
+    RUN_TEST(test_chime_does_not_fire_on_a_refused_ack);
+    RUN_TEST(test_chime_is_not_replayed_by_untick_and_retick_of_the_last_chore);
+    RUN_TEST(test_chime_fires_when_the_release_grants_nothing);
+    RUN_TEST(test_chime_fires_even_when_the_strip_is_not_lit);
+    RUN_TEST(test_chime_fires_once_through_a_whole_button_wake);
+    RUN_TEST(test_chime_never_fires_from_a_day_rollover);
+    RUN_TEST(test_chime_never_fires_from_a_same_day_restore);
+    RUN_TEST(test_chime_never_fires_from_a_tick_wake_in_chore_mode);
+    RUN_TEST(test_chime_never_fires_from_a_non_chore_button_wake);
     return UNITY_END();
 }

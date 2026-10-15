@@ -247,12 +247,15 @@ void test_state_json_worst_case_fits_firmware_buffer(void) {
     nvs_config_set_quiet_end(65535);
     nvs_config_set_bedtime(65535);
     nvs_config_set_alert_volume(65535);
-    /* Selects render the OPTION STRING, so all three go to the longest
-       one — two of the defaults are shorter, which is part of why this
+    /* Selects render the OPTION STRING, so the three alert selects go to
+       the longest one — two of the defaults are shorter, which is part of why this
        guard used to read ~190 B under the truth. */
     ha_config_set("tone_expiry", "Marimba arpeggio", ack, sizeof(ack));
     ha_config_set("tone_break", "Marimba arpeggio", ack, sizeof(ack));
     ha_config_set("tone_bed", "Marimba arpeggio", ack, sizeof(ack));
+    /* The chores select has its own, shorter list: "Off" is the DEFAULT and
+       the shortest, so it has to be moved to the longest ("Zelda secret"). */
+    ha_config_set("tone_chores", "Zelda secret", ack, sizeof(ack));
     /* OFF, not ON: every switch in the registry renders one of the two
        literals and "OFF" is the longer by a byte. Nine switches — this
        one plus reload and break_eligible on all four slots — so the ON
@@ -315,13 +318,15 @@ void test_state_json_worst_case_fits_firmware_buffer(void) {
        addition trips here rather than silently knocking every editable
        control offline (a truncated doc is never published).
 
-       THE REACHABLE MAXIMUM IS 1164 / 1536 B — headroom 372. It was 116
+       THE REACHABLE MAXIMUM IS 1193 / 1536 B — headroom 343 (1164 / 372 before the tone_chores
+       select). It was 116
        against the old 1280 ceiling (and 146 by an earlier, wronger shape
        of this fixture); 1280 was raised because 116 B is less than one
        more string field. Every axis above is at
        its widest: 65535 on all fourteen u16/HHMM keys, 65535 on all four
        timer minutes, "OFF" on all nine switches, the longest option string
-       on all three selects, and every string maxed AND filled with
+       on all four selects (the chores one from its own list), and every
+       string maxed AND filled with
        characters the escaper doubles. A fixture that renders the SHORTER
        option on an axis it controls does not understate the document
        harmlessly — it inflates the headroom a future field is measured
@@ -498,6 +503,61 @@ void test_discovery_select_lists_options(void) {
                                 "\"Marimba arpeggio\",\"Gran Vals\",\"Custom WAV\"]"));
     TEST_ASSERT_NOT_NULL(strstr(buf, "\"optimistic\":true"));
     TEST_ASSERT_NOT_NULL(strstr(buf, "\"cmd_t\":\"magtag/magtag-a1b2c3/set/tone_bed\""));
+}
+
+/* ---- chore reward select (CFG_ENUM with its OWN option list) ---- */
+
+void test_tone_chores_select_has_its_own_option_list(void) {
+    const cfg_field_t *f = field_by_key("tone_chores");
+    TEST_ASSERT_NOT_NULL(f);
+    TEST_ASSERT_EQUAL_STRING("select", f->component);
+    TEST_ASSERT_EQUAL_STRING("Chores done tone", f->name);
+    TEST_ASSERT_EQUAL_INT(REWARD_COUNT, f->n_options);
+    TEST_ASSERT_TRUE(f->options == reward_tones_names);
+    /* the alert selects keep theirs, and do not gain the jingles */
+    TEST_ASSERT_EQUAL_INT(TONE_COUNT, field_by_key("tone_bed")->n_options);
+    TEST_ASSERT_TRUE(field_by_key("tone_bed")->options == tones_names);
+    char buf[700];
+    ha_config_discovery(buf, sizeof(buf), "magtag-a1b2c3", "K", "fw", f);
+    TEST_ASSERT_NOT_NULL(strstr(buf, "\"options\":[\"Off\",\"Zelda secret\",\"Mario coin\",\"Mario 1-up\"]"));
+    TEST_ASSERT_NOT_NULL(strstr(buf, "\"cmd_t\":\"magtag/magtag-a1b2c3/set/tone_chores\""));
+}
+
+void test_tone_chores_defaults_off_and_sets_each_option(void) {
+    char buf[HA_CONFIG_STATE_MAX];
+    ha_config_state_json(buf, sizeof(buf));
+    TEST_ASSERT_NOT_NULL(strstr(buf, "\"tone_chores\":\"Off\""));
+    char ack[128];
+    const struct {
+        const char *opt;
+        int id;
+    } cases[] = {
+        {"Zelda secret", REWARD_ZELDA}, {"Mario coin", REWARD_COIN}, {"Mario 1-up", REWARD_1UP}, {"Off", REWARD_OFF}};
+    for (unsigned i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
+        TEST_ASSERT_EQUAL(HA_CFG_OK, ha_config_set("tone_chores", cases[i].opt, ack, sizeof(ack)));
+        uint16_t v = 99;
+        nvs_config_get_tone_chores(&v);
+        TEST_ASSERT_EQUAL_UINT16(cases[i].id, v);
+    }
+}
+
+void test_tone_chores_rejects_alert_tone_names(void) {
+    char ack[128];
+    /* "Gran Vals" is a valid alert tone and must not be a chores option. */
+    TEST_ASSERT_EQUAL(HA_CFG_REJECTED, ha_config_set("tone_chores", "Gran Vals", ack, sizeof(ack)));
+    TEST_ASSERT_EQUAL(HA_CFG_REJECTED, ha_config_set("tone_chores", "off", ack, sizeof(ack)));
+    /* and the jingles are not alert-tone options */
+    TEST_ASSERT_EQUAL(HA_CFG_REJECTED, ha_config_set("tone_bed", "Mario coin", ack, sizeof(ack)));
+    uint16_t v = 99;
+    nvs_config_get_tone_chores(&v);
+    TEST_ASSERT_EQUAL_UINT16(REWARD_OFF, v);
+}
+
+void test_state_json_clamps_out_of_range_tone_chores_to_off(void) {
+    nvs_config_set_tone_chores(999);
+    char buf[HA_CONFIG_STATE_MAX];
+    ha_config_state_json(buf, sizeof(buf));
+    TEST_ASSERT_NOT_NULL(strstr(buf, "\"tone_chores\":\"Off\""));
 }
 
 /* ---- alert volume (CFG_U16, percent with boost range) ---- */
@@ -2353,14 +2413,16 @@ void test_chore_free_entities_need_the_discovery_schema_bump(void) {
    STATS_JSON_DISC_SCHEMA_VER.
 
    HA_CONFIG_SET_SLOTS is the other number the count feeds (ha_config.c
-   static-asserts count + 2 <= 48, so the headroom is 9 fields). Do NOT
+   static-asserts count + 2 <= 48, so the headroom is 8 fields). Do NOT
    raise it to make room: it also sizes mqtt_ha.c's set transport, which
    lives on the net_win task's window heap. */
 void test_config_registry_count_moves_with_the_discovery_schema(void) {
     int n = 0;
     (void)ha_config_fields(&n);
-    TEST_ASSERT_EQUAL_INT(37, n);
-    /* 24 with the registry count unchanged: BUG-13 CHANGED this registry's
+    TEST_ASSERT_EQUAL_INT(38, n);
+    /* 25 with the registry count at 38: the tone_chores select (the chore
+       reward chime's Off / jingle choice) is field #38.
+       24 with the registry count unchanged: BUG-13 CHANGED this registry's
        payloads (cmd_tpl on every text control) without adding a field — a
        changed discovery payload needs the bump as much as a new control
        does, or a same-version reflash never tells HA.
@@ -2370,7 +2432,7 @@ void test_config_registry_count_moves_with_the_discovery_schema(void) {
        day_chores, and the battery's state_class), not editable fields —
        the mirror of v21, which moved this registry and left ENTITIES
        alone. test_stats_json's joint pin records that side. */
-    TEST_ASSERT_EQUAL_INT(24, STATS_JSON_DISC_SCHEMA_VER);
+    TEST_ASSERT_EQUAL_INT(25, STATS_JSON_DISC_SCHEMA_VER);
 }
 
 int main(void) {
@@ -2414,6 +2476,10 @@ int main(void) {
     RUN_TEST(test_set_tone_select_rejects_unknown_and_wrong_case);
     RUN_TEST(test_state_json_emits_tone_option_strings);
     RUN_TEST(test_state_json_clamps_out_of_range_tone_index);
+    RUN_TEST(test_tone_chores_select_has_its_own_option_list);
+    RUN_TEST(test_tone_chores_defaults_off_and_sets_each_option);
+    RUN_TEST(test_tone_chores_rejects_alert_tone_names);
+    RUN_TEST(test_state_json_clamps_out_of_range_tone_chores_to_off);
     RUN_TEST(test_discovery_select_lists_options);
     RUN_TEST(test_set_alert_volume_valid_persists);
     RUN_TEST(test_set_alert_volume_out_of_range_rejected);

@@ -222,6 +222,42 @@ void test_tone_enum_unknown_or_nonstring_rejected(void) {
     TEST_ASSERT_NOT_NULL(strstr(ack, "tone_bed"));
 }
 
+void test_tone_chores_applied_from_its_own_option_list(void) {
+    char ack[256];
+    apply("{\"ver\":\"1\",\"tone_chores\":\"Mario 1-up\"}", ack, sizeof(ack));
+    uint16_t v = 99;
+    nvs_config_get_tone_chores(&v);
+    TEST_ASSERT_EQUAL_UINT16(REWARD_1UP, v);
+    TEST_ASSERT_NOT_NULL(strstr(ack, "\"ok\":true"));
+    apply("{\"ver\":\"2\",\"tone_chores\":\"Off\"}", ack, sizeof(ack));
+    nvs_config_get_tone_chores(&v);
+    TEST_ASSERT_EQUAL_UINT16(REWARD_OFF, v);
+}
+
+void test_tone_chores_rejects_alert_names_and_nonstrings(void) {
+    char ack[256];
+    nvs_config_set_tone_chores(REWARD_COIN);
+    apply("{\"ver\":\"1\",\"tone_chores\":\"Gran Vals\"}", ack, sizeof(ack));
+    TEST_ASSERT_NOT_NULL(strstr(ack, "tone_chores"));
+    apply("{\"ver\":\"2\",\"tone_chores\":2}", ack, sizeof(ack));
+    TEST_ASSERT_NOT_NULL(strstr(ack, "tone_chores"));
+    uint16_t v = 99;
+    nvs_config_get_tone_chores(&v);
+    TEST_ASSERT_EQUAL_UINT16(REWARD_COIN, v); /* unchanged */
+    /* and the jingles are not alert-tone options */
+    apply("{\"ver\":\"3\",\"tone_bed\":\"Mario coin\"}", ack, sizeof(ack));
+    TEST_ASSERT_NOT_NULL(strstr(ack, "tone_bed"));
+}
+
+void test_tone_chores_absent_leaves_the_stored_choice(void) {
+    char ack[256];
+    nvs_config_set_tone_chores(REWARD_ZELDA);
+    apply("{\"ver\":\"1\",\"weekday_min\":45}", ack, sizeof(ack));
+    uint16_t v = 99;
+    nvs_config_get_tone_chores(&v);
+    TEST_ASSERT_EQUAL_UINT16(REWARD_ZELDA, v);
+}
+
 void test_alert_volume_applied_and_range_enforced(void) {
     char ack[256];
     apply("{\"ver\":\"1\",\"alert_volume\":150}", ack, sizeof(ack));
@@ -566,9 +602,10 @@ void test_bulk_ota_fields_reject_wrong_types(void) {
    the 22 fields this document used to carry; the chore checklist adds five
    more nameable ones and the list is the resource they compete for, so a
    document that omits them stopped being the worst case the moment they
-   landed. With 27 wrong fields the ack still surfaces 12 entries — the
+   landed. With 28 wrong fields (tone_chores, a late one, joined the
+   27) the ack still surfaces 12 entries — the
    four 13-14 byte chore_free_* names sort early (right after the
-   allocations) and consume ~68 of the 160 bytes, so 15 fields are now
+   allocations) and consume ~68 of the 160 bytes, so 16 fields are now
    dropped rather than 10.
 
    ONE CONSEQUENCE WORTH KNOWING BEFORE IT SURPRISES SOMEONE: "chores"
@@ -587,7 +624,7 @@ static const char *const ALL_WRONG =
     "\"chore_free_wd\":\"x\",\"chore_free_we\":\"x\",\"chore_free_hol\":\"x\","
     "\"chore_free_sum\":\"x\",\"quiet_start\":\"x\",\"quiet_end\":\"x\","
     "\"bedtime\":\"x\",\"break_interval_min\":\"x\",\"break_duration_min\":\"x\","
-    "\"tone_expiry\":1,\"tone_break\":1,\"tone_bed\":1,\"alert_volume\":\"x\","
+    "\"tone_expiry\":1,\"tone_break\":1,\"tone_bed\":1,\"tone_chores\":1,\"alert_volume\":\"x\","
     "\"summer_start\":1,\"school_start\":1,\"school_end\":1,"
     "\"ota_url\":42,\"ota_on_sync\":1,\"holidays\":5,\"chores\":5,\"timers\":5}";
 
@@ -621,7 +658,7 @@ void test_worst_case_ack_fits_the_declared_minimum(void) {
     TEST_ASSERT_TRUE(strlen(ack) < sizeof(ack));
     /* The headroom, stated rather than implied: 216 of CONFIG_ACK_MIN's 256
        bytes with the chore fields in the document (12 entries surfaced of
-       27 wrong fields). Asserted as a bound, not an equality — the exact
+       28 wrong fields). Asserted as a bound, not an equality — the exact
        figure moves with any field rename — but a change that eats the
        remaining 40 bytes should have to come here and say so, because the
        byte after the cap is where err_add's clean-termination guarantee is
@@ -1274,6 +1311,14 @@ static size_t build_worst_case_document(void) {
         snprintf(kv, sizeof(kv), "\"%s\":\"%s\",", tone_keys[i], tone);
         wc_cat(kv);
     }
+    /* The chores select has its own list: longest option, not the alert one. */
+    const char *reward = reward_tones_names[0];
+    for (int i = 1; i < REWARD_COUNT; i++) {
+        if (strlen(reward_tones_names[i]) > strlen(reward))
+            reward = reward_tones_names[i];
+    }
+    snprintf(kv, sizeof(kv), "\"tone_chores\":\"%s\",", reward);
+    wc_cat(kv);
     wc_num("alert_volume", TONES_VOLUME_MAX);
     wc_cat("\"summer_start\":\"2026-05-29\",\"school_start\":\"2026-08-20\",\"school_end\":\"2027-05-28\",");
     /* "https://" plus fill, CFG_BOUND_OTA_URL_MAX - 1 in all */
@@ -1372,6 +1417,9 @@ int main(void) {
     RUN_TEST(test_bedtime_applies_evening_and_zero_rejects_daytime);
     RUN_TEST(test_tone_enum_applied_by_option_string);
     RUN_TEST(test_tone_enum_unknown_or_nonstring_rejected);
+    RUN_TEST(test_tone_chores_applied_from_its_own_option_list);
+    RUN_TEST(test_tone_chores_rejects_alert_names_and_nonstrings);
+    RUN_TEST(test_tone_chores_absent_leaves_the_stored_choice);
     RUN_TEST(test_alert_volume_applied_and_range_enforced);
     RUN_TEST(test_short_timers_array_disables_trailing_slots);
     RUN_TEST(test_timers_wrong_type_rejected);

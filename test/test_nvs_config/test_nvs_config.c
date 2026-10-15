@@ -170,6 +170,21 @@ void test_get_tones_missing_return_defaults_and_roundtrip(void) {
     TEST_ASSERT_EQUAL_UINT16(TONE_CLASSIC, val);
 }
 
+void test_tone_chores_missing_returns_off_and_roundtrip(void) {
+    uint16_t val = 99;
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_tone_chores(&val));
+    TEST_ASSERT_EQUAL_UINT16(NVS_DEFAULT_TONE_CHORES, val);
+    TEST_ASSERT_EQUAL_UINT16(REWARD_OFF, val); /* a fresh device is silent */
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_set_tone_chores(REWARD_COIN));
+    TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_tone_chores(&val));
+    TEST_ASSERT_EQUAL_UINT16(REWARD_COIN, val);
+}
+
+void test_tone_chores_key_fits_nvs_limit_and_is_distinct(void) {
+    TEST_ASSERT_TRUE(strlen(NVS_KEY_TONE_CHORES) <= 15);
+    TEST_ASSERT_TRUE(strcmp(NVS_KEY_TONE_CHORES, NVS_KEY_TONE_BED) != 0);
+}
+
 void test_alert_volume_missing_returns_default_and_roundtrip(void) {
     uint16_t val = 0;
     TEST_ASSERT_EQUAL(ESP_OK, nvs_config_get_alert_volume(&val));
@@ -833,6 +848,8 @@ int main(void) {
     RUN_TEST(test_holidays_blob_round_trip);
     RUN_TEST(test_get_weekday_min_missing_returns_default);
     RUN_TEST(test_get_tones_missing_return_defaults_and_roundtrip);
+    RUN_TEST(test_tone_chores_missing_returns_off_and_roundtrip);
+    RUN_TEST(test_tone_chores_key_fits_nvs_limit_and_is_distinct);
     RUN_TEST(test_alert_volume_missing_returns_default_and_roundtrip);
     RUN_TEST(test_init_defaults_writes_fingerprint_stamp);
     RUN_TEST(test_defaults_fingerprint_is_nonzero_and_stable);

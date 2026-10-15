@@ -393,8 +393,14 @@ typedef struct {
         ENTITIES count nor the registry count moves, and both joint pins
         (test_stats_json, test_ha_config) record it as such. Until a
         device republishes at v24, HA keeps the old discovery and blanking
-        a text control still does nothing. */
-#define STATS_JSON_DISC_SCHEMA_VER 24
+        a text control still does nothing.
+
+   v25: + the `tone_chores` select ("Chores done tone"), one more
+        ha_config REGISTRY row (37 -> 38), so ENTITIES does not move. Its
+        option list is its OWN (Off, Zelda secret, Mario coin, Mario 1-up),
+        not the alert tones'. Until a device republishes at v25, HA does
+        not know the control exists. */
+#define STATS_JSON_DISC_SCHEMA_VER 25
 
 /* Buffer the stat/summary/discovery payloads are built into (mqtt_ha.c).
    Named here because stats_json_stat is what can outgrow it, and a stat

@@ -634,7 +634,8 @@ static void wake_flow_show_status_leds(void) {
    buttons — the one caller with no prologue, and the one design 2.6 cares
    about — is fully protected. */
 static bool wake_flow_apply_chore_ack(uint8_t idx, time_t now) {
-    if (button_chore_ack_apply(idx, now) == BTN_ACK_NONE) {
+    const btn_ack_action_t ack = button_chore_ack_apply(idx, now);
+    if (ack == BTN_ACK_NONE) {
         /* Before the drain, so a refused ack leaves the break-end edge
            exactly where a refused A leaves it — latched, for a later
            consumer or the sleep safety net. A refusal must not consume an
@@ -684,6 +685,30 @@ static bool wake_flow_apply_chore_ack(uint8_t idx, time_t now) {
             hal_delay_ms(STATUS_LED_ACK_HOLD_MS);
         }
         wake_flow_paint_chore_strip();
+    }
+
+    /* THE REWARD CHIME (docs/planning/20261015.chore-reward-chime.plan.md):
+       the press that ticked the LAST chore. BTN_ACK_RELEASED is the edge
+       and the only trigger, which is what makes every property below hold
+       without a flag of its own:
+         - once per day: `released` is latched, so un-ticking and re-ticking
+           the last chore answers TOGGLED and never replays it;
+         - on a day where chore_free already covers the allocation: the
+           edge still fires (with a zero-second grant) — the reward is for
+           the list, not the seconds;
+         - never from a rollover, a config apply, a list change or a
+           restore: none of them reach this function;
+         - whether or not the strip is lit: a latched ack drained on a
+           non-button wake still releases the day and the release is never
+           replayed, so gating this on s_chore_strip_lit would lose the
+           reward for good. Hence it sits OUTSIDE the guard above.
+       AFTER the paint, so the pixels cover the panel's latency and the
+       sound follows them. It plays through quiet hours and bed time, and is
+       the ONLY audio that does (design 9, decided 2026-09-22): do not "fix"
+       that with a quiet-hours check. Off (the default) and volume 0 return
+       inside the audio module. */
+    if (ack == BTN_ACK_RELEASED) {
+        audio_chores_done_chime();
     }
     return true;
 }

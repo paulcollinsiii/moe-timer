@@ -100,6 +100,9 @@ esp_err_t nvs_config_get_tone_break(uint16_t *out);
 esp_err_t nvs_config_set_tone_break(uint16_t id);
 esp_err_t nvs_config_get_tone_bed(uint16_t *out);
 esp_err_t nvs_config_set_tone_bed(uint16_t id);
+/* Chore reward jingle: a reward_tone_id_t index (its own list; audio.c clamps). */
+esp_err_t nvs_config_get_tone_chores(uint16_t *out);
+esp_err_t nvs_config_set_tone_chores(uint16_t id);
 /* Alert volume percent (0-TONES_VOLUME_MAX; audio.c clamps on read). */
 esp_err_t nvs_config_get_alert_volume(uint16_t *out);
 esp_err_t nvs_config_set_alert_volume(uint16_t pct);

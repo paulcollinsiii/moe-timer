@@ -274,6 +274,12 @@ esp_err_t nvs_config_get_tone_bed(uint16_t *out) {
 esp_err_t nvs_config_set_tone_bed(uint16_t id) {
     return hal_nvs_write_u16(NVS_KEY_TONE_BED, id);
 }
+esp_err_t nvs_config_get_tone_chores(uint16_t *out) {
+    return get_u16_with_default(NVS_KEY_TONE_CHORES, out, NVS_DEFAULT_TONE_CHORES);
+}
+esp_err_t nvs_config_set_tone_chores(uint16_t id) {
+    return hal_nvs_write_u16(NVS_KEY_TONE_CHORES, id);
+}
 
 esp_err_t nvs_config_get_alert_volume(uint16_t *out) {
     return get_u16_with_default(NVS_KEY_ALERT_VOL, out, NVS_DEFAULT_ALERT_VOLUME);
