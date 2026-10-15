@@ -114,9 +114,15 @@ static const tone_def_t REWARD_TONES[REWARD_COUNT] = {
 };
 
 const tone_def_t *reward_tones_get(int id) {
-    if (id <= REWARD_OFF || id >= REWARD_COUNT)
+    if (id > REWARD_OFF && id < REWARD_COUNT)
+        return &REWARD_TONES[id];
+    return NULL;
+}
+
+const tone_def_t *reward_tones_resolve(uint16_t stored_sel, uint16_t volume) {
+    if (volume == 0)
         return NULL;
-    return &REWARD_TONES[id];
+    return reward_tones_get((int)stored_sel);
 }
 
 const char *reward_tones_option_name(int idx) {
@@ -127,10 +133,6 @@ const char *reward_tones_option_name(int idx) {
 
 int reward_tones_option_count(void) {
     return REWARD_COUNT;
-}
-
-int reward_tones_clamp_id(int idx, int fallback) {
-    return (idx >= 0 && idx < REWARD_COUNT) ? idx : fallback;
 }
 
 /* ---- renderer ---------------------------------------------------------- */

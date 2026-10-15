@@ -121,7 +121,8 @@
 #define NVS_DEFAULT_TONE_BREAK TONE_CHIME
 #define NVS_DEFAULT_TONE_BED TONE_GRANVALS
 /* The chore reward jingle (reward_tone_id_t, its OWN list — not tone_id_t).
-   Off: a fresh device and a defaults reseed are silent. */
+   Off is the default for a fresh device. (Not a seeded-defaults row, so it
+   stays out of the fingerprint and a defaults reseed does not touch it.) */
 #define NVS_DEFAULT_TONE_CHORES REWARD_OFF
 
 /* Alert volume percent (0-TONES_VOLUME_MAX; >100 = clipping boost). The

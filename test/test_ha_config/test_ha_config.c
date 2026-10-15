@@ -1627,7 +1627,6 @@ void test_discovery_hash_changes_when_only_the_duration_enables_a_slot(void) {
 
 /* The reviewer's measured collision: these two hashed identically. */
 void test_discovery_hash_separates_zero_and_nonzero_duration(void) {
-    char ack[128];
     nvs_timer_defs_blob_t b;
     memset(&b, 0, sizeof(b));
     b.version = TIMER_DEFS_BLOB_VERSION;
@@ -1638,7 +1637,6 @@ void test_discovery_hash_separates_zero_and_nonzero_duration(void) {
     b.defs[0].min = 0;
     nvs_config_set_timer_defs(&b);
     TEST_ASSERT_NOT_EQUAL(with_duration, ha_config_discovery_hash("Kitchen", "1.5.0", NULL));
-    (void)ack;
 }
 
 /* Discovery depends on entity NAMES and existence, not on how long the

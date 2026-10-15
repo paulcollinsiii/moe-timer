@@ -193,10 +193,22 @@ static bool play_wav(int volume_pct) {
     return true;
 }
 
-static void play_tone_at(int tone_id, int cycles, int volume) {
+/* Shared bracket around every playback: amp up before, drain + amp down +
+   DAC teardown after. */
+static void amp_begin(void) {
     s_stop_requested = false;
     audio_init();
     gpio_set_level(AMP_ENABLE_GPIO, 1);
+}
+
+static void amp_end(void) {
+    dac_drain();
+    gpio_set_level(AMP_ENABLE_GPIO, 0);
+    dac_teardown();
+}
+
+static void play_tone_at(int tone_id, int cycles, int volume) {
+    amp_begin();
     for (int cycle = 0; cycle < cycles && !s_stop_requested; cycle++) {
         if (tone_id == TONE_CUSTOM) {
             if (!play_wav(volume)) {
@@ -210,9 +222,7 @@ static void play_tone_at(int tone_id, int cycles, int volume) {
             vTaskDelay(pdMS_TO_TICKS(CYCLE_GAP_MS));
         }
     }
-    dac_drain();
-    gpio_set_level(AMP_ENABLE_GPIO, 0);
-    dac_teardown();
+    amp_end();
 }
 
 /* HA-configurable volume, one NVS read per alert (not per cycle). */
@@ -255,22 +265,19 @@ void audio_break_over_chime(void) {
 }
 
 void audio_chores_done_chime(void) {
-    /* The jingle comes from its own list (reward_tone_id_t) — a stored index
-       from a future/older firmware collapses to the default, Off. Off, and a
-       volume of 0 (mute), return before the DAC or the amp is touched. */
+    /* The jingle comes from its own list (reward_tone_id_t). The decision
+       (Off, a stored index from another firmware, volume 0 -> nothing) is
+       reward_tones_resolve(), host-tested; NULL returns before the DAC or
+       the amp is touched. */
     uint16_t sel = NVS_DEFAULT_TONE_CHORES;
     (void)nvs_config_get_tone_chores(&sel);
-    const tone_def_t *def = reward_tones_get(reward_tones_clamp_id((int)sel, NVS_DEFAULT_TONE_CHORES));
     const uint16_t volume = alert_volume();
-    if (def == NULL || volume == 0)
+    const tone_def_t *def = reward_tones_resolve(sel, volume);
+    if (def == NULL)
         return;
-    s_stop_requested = false;
-    audio_init();
-    gpio_set_level(AMP_ENABLE_GPIO, 1);
+    amp_begin();
     play_synth_def(def, volume);
-    dac_drain();
-    gpio_set_level(AMP_ENABLE_GPIO, 0);
-    dac_teardown();
+    amp_end();
 }
 
 void audio_locate_alarm(void) {

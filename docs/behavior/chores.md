@@ -122,7 +122,7 @@ jingle. It is chosen in Home Assistant with the **Chores done tone** select
 
 | Option | Sound |
 | --- | --- |
-| **Off** (default) | Silence. A new device, and a defaults reseed, are silent. |
+| **Off** (default) | Silence. Off is the default for a fresh device. |
 | Zelda secret | A rising-and-falling "secret discovered" run of eight notes, about a second. |
 | Mario coin | A two-note coin blip, about 0.6 s. |
 | Mario 1-up | Six quick climbing notes, about 0.8 s. |
@@ -138,8 +138,8 @@ Expiry, Break or Bed time tone selects.
 - **It follows the press only.** Midnight, a restart, a config change or editing
   the list in Home Assistant never play it.
 - **It uses Alert volume**, so a volume of 0 mutes it.
-- **It plays during quiet hours.** It is the only sound on the device that does,
-  for the same reason the LEDs light then: the press means somebody is awake.
+- **It is not gated on quiet hours**, like the alarms (which also sound then;
+  only the pixels honour quiet hours). The press means somebody is awake.
 - It plays whether or not the LEDs lit for that press.
 
 ## The day

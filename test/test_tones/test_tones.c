@@ -290,11 +290,24 @@ void test_reward_off_and_out_of_range_have_no_def(void) {
     }
 }
 
-void test_reward_clamp_id(void) {
-    TEST_ASSERT_EQUAL_INT(REWARD_COIN, reward_tones_clamp_id(REWARD_COIN, REWARD_OFF));
-    TEST_ASSERT_EQUAL_INT(REWARD_OFF, reward_tones_clamp_id(-1, REWARD_OFF));
-    TEST_ASSERT_EQUAL_INT(REWARD_OFF, reward_tones_clamp_id(REWARD_COUNT, REWARD_OFF));
-    TEST_ASSERT_EQUAL_INT(REWARD_OFF, reward_tones_clamp_id(999, REWARD_OFF));
+void test_reward_resolve_plays_only_a_real_jingle_at_audible_volume(void) {
+    for (int id = REWARD_ZELDA; id < REWARD_COUNT; id++) {
+        TEST_ASSERT_EQUAL_PTR(reward_tones_get(id), reward_tones_resolve((uint16_t)id, 100));
+        TEST_ASSERT_EQUAL_PTR(reward_tones_get(id), reward_tones_resolve((uint16_t)id, 1));
+        TEST_ASSERT_EQUAL_PTR(reward_tones_get(id), reward_tones_resolve((uint16_t)id, TONES_VOLUME_MAX));
+        TEST_ASSERT_NULL(reward_tones_resolve((uint16_t)id, 0)); /* mute */
+    }
+    TEST_ASSERT_NULL(reward_tones_resolve(REWARD_OFF, 100));
+    TEST_ASSERT_NULL(reward_tones_resolve(REWARD_COUNT, 100)); /* future/older firmware */
+    TEST_ASSERT_NULL(reward_tones_resolve(999, 100));
+    TEST_ASSERT_NULL(reward_tones_resolve(0xFFFF, 100)); /* NVS sentinel */
+}
+
+void test_reward_every_jingle_fits_the_blocking_budget(void) {
+    for (int id = REWARD_ZELDA; id < REWARD_COUNT; id++)
+        TEST_ASSERT_TRUE_MESSAGE(reward_total_ms(id) <= REWARD_TONE_MAX_MS, reward_tones_option_name(id));
+    /* The drain tail is fixed by audio.c's DAC ring: 4 desc x 1024 B at 16 kHz. */
+    TEST_ASSERT_EQUAL_INT(256, REWARD_TONE_DRAIN_MS);
 }
 
 void test_reward_notes_are_under_8khz(void) {
@@ -377,7 +390,8 @@ int main(void) {
     RUN_TEST(test_reward_option_list_is_off_first_and_unique);
     RUN_TEST(test_reward_does_not_widen_the_alert_tone_list);
     RUN_TEST(test_reward_off_and_out_of_range_have_no_def);
-    RUN_TEST(test_reward_clamp_id);
+    RUN_TEST(test_reward_resolve_plays_only_a_real_jingle_at_audible_volume);
+    RUN_TEST(test_reward_every_jingle_fits_the_blocking_budget);
     RUN_TEST(test_reward_notes_are_under_8khz);
     RUN_TEST(test_reward_note_counts_and_durations);
     RUN_TEST(test_reward_last_note_rings_on_zelda_and_coin);

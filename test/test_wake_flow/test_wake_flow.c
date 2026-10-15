@@ -531,10 +531,31 @@ static uint8_t flow_chore_acked;
 static uint32_t flow_ack_at[4];
 static int flow_ack_n;
 
+/* Optional per-call script for the ack verdict: when armed, the Nth apply
+   answers flow_ack_seq[N] instead of flow_ack_result. A whole-gesture case
+   needs TOGGLED, TOGGLED, RELEASED in one wake, which one injected value
+   cannot say. Unarmed (n == 0), every other case is unaffected. */
+static btn_ack_action_t flow_ack_seq[4];
+static int flow_ack_seq_n;
+static int flow_ack_seq_i;
+
+/* config_cache_quiet_active(): flag-driven, so a case can put the device in
+   quiet hours and prove the reward chime does not consult it. Nothing in
+   wake_flow.c calls it today; a gate added there would flip this. */
+static bool flow_quiet;
+
+bool config_cache_quiet_active(time_t now) {
+    (void)now;
+    return flow_quiet;
+}
+
 btn_ack_action_t button_chore_ack_apply(uint8_t idx, time_t now) {
     flow_log_push(EV_CHORE_ACK);
     flow_ack_idx = (int)idx;
     flow_ack_now = now;
+    if (flow_ack_seq_i < flow_ack_seq_n) {
+        flow_ack_result = flow_ack_seq[flow_ack_seq_i++];
+    }
     if (flow_ack_n < (int)(sizeof flow_ack_at / sizeof flow_ack_at[0])) {
         flow_ack_at[flow_ack_n++] = mock_delay_total_ms();
     }
@@ -2064,7 +2085,10 @@ void setUp(void) {
        pick masks, the ordering — and they need the press to land. */
     flow_a_allowed = true;
     flow_ack_result = BTN_ACK_NONE; /* the shipped fleet: no list, no chore mode */
-    flow_ack_idx = -1;              /* poisoned: "never asked" must not read as row 0 */
+    flow_ack_seq_n = 0;
+    flow_ack_seq_i = 0;
+    flow_quiet = false;
+    flow_ack_idx = -1; /* poisoned: "never asked" must not read as row 0 */
     flow_ack_now = 0;
     flow_b_result = BTN_B_NONE;
     flow_b_apply_arg = 0;
@@ -12111,6 +12135,60 @@ void test_chime_fires_once_through_a_whole_button_wake(void) {
     TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_CHORES_CHIME));
 }
 
+/* The whole gesture through the coalescer: B wakes the device, C and D
+   follow inside the quiet window, and only the third answers RELEASED. The
+   chime must fire once, and only after the last ack's strip paint. Dies on
+   a chime keyed to the FIRST ack of the wake
+   (`ack == BTN_ACK_RELEASED && first_ack_this_wake`), which the single-press
+   case above cannot tell from the shipped code. */
+void test_chime_fires_once_after_the_last_strip_paint_of_a_three_ack_gesture(void) {
+    flow_tick_clock(flow_at(15, 0));
+    flow_arm_chore_wake(BTN_B);
+    flow_ack_seq[0] = BTN_ACK_TOGGLED;
+    flow_ack_seq[1] = BTN_ACK_TOGGLED;
+    flow_ack_seq[2] = BTN_ACK_RELEASED;
+    flow_ack_seq_n = 3;
+    flow_chore_count = CHORE_MAX;
+    flow_display_ms = FLOW_PANEL_COST_MS;
+    flow_gesture_presses = 0;
+    mock_delay_set_hook(flow_press_at_a_natural_pace);
+
+    TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_button());
+
+    TEST_ASSERT_EQUAL_INT_MESSAGE(3, flow_log_count(EV_CHORE_ACK), "the gesture did not reach three acks");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(1, flow_log_count(EV_CHORES_CHIME), "the gesture must chime exactly once");
+    /* One strip paint per ack, then the pre-press frame ahead of them. */
+    TEST_ASSERT_TRUE(flow_log_count(EV_CHORE_LEDS) >= 4);
+    const int third_ack = flow_log_at_nth(EV_CHORE_ACK, 3);
+    int strip_after_third = -1;
+    for (int n = 1; n <= flow_log_count(EV_CHORE_LEDS); n++) {
+        if (flow_log_at_nth(EV_CHORE_LEDS, n) > third_ack) {
+            strip_after_third = flow_log_at_nth(EV_CHORE_LEDS, n);
+            break;
+        }
+    }
+    TEST_ASSERT_TRUE_MESSAGE(strip_after_third >= 0, "no strip paint followed the releasing ack");
+    TEST_ASSERT_TRUE_MESSAGE(flow_log_at(EV_CHORES_CHIME) > strip_after_third,
+                             "the chime played before the releasing ack's strip paint");
+}
+
+/* Quiet hours gate the pixels and nothing else: the alarms sound in them
+   and so does the reward (plan decision 5). Dies on
+   `&& !config_cache_quiet_active(now)` in wake_flow_apply_chore_ack. */
+void test_chime_fires_during_quiet_hours(void) {
+    flow_quiet = true;
+    flow_mode = APP_MODE_CHORES;
+    flow_chore_count = 3;
+    flow_ack_result = BTN_ACK_RELEASED;
+    s_chore_strip_lit = true;
+    mock_time_set(flow_at(23, 30));
+
+    TEST_ASSERT_TRUE(config_cache_quiet_active(flow_at(23, 30))); /* the premise: quiet is on */
+    TEST_ASSERT_TRUE(wake_flow_apply_chore_ack(BUTTON_CHORE_IDX_D, flow_at(23, 30)));
+
+    TEST_ASSERT_EQUAL_INT_MESSAGE(1, flow_log_count(EV_CHORES_CHIME), "quiet hours silenced the reward chime");
+}
+
 /* NEGATIVE CONTROLS. The ack stub is armed with RELEASED so that a chime
    wired to anything but the press path would be loud. */
 
@@ -12719,6 +12797,8 @@ int main(void) {
     RUN_TEST(test_chime_fires_when_the_release_grants_nothing);
     RUN_TEST(test_chime_fires_even_when_the_strip_is_not_lit);
     RUN_TEST(test_chime_fires_once_through_a_whole_button_wake);
+    RUN_TEST(test_chime_fires_once_after_the_last_strip_paint_of_a_three_ack_gesture);
+    RUN_TEST(test_chime_fires_during_quiet_hours);
     RUN_TEST(test_chime_never_fires_from_a_day_rollover);
     RUN_TEST(test_chime_never_fires_from_a_same_day_restore);
     RUN_TEST(test_chime_never_fires_from_a_tick_wake_in_chore_mode);

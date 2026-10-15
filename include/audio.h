@@ -20,8 +20,8 @@ void audio_break_over_chime(void); /* short fixed chirp, fire-and-forget */
 void audio_locate_alarm(void);     /* find-my-timer: classic beeps, max volume */
 /* One reward jingle once the last chore is ticked: the HA "Chores done tone"
    selection (its own list, default Off), at the shared alert volume. Off or
-   volume 0 returns without touching the DAC or amp. Plays through quiet
-   hours — the only audio that does (chore checklist design 9). */
+   volume 0 returns without touching the DAC or amp. Not gated on quiet
+   hours, like the alarms (only the pixels honour them); do not add a check. */
 void audio_chores_done_chime(void);
 void audio_stop(void);
 

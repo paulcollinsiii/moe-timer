@@ -93,9 +93,9 @@ typedef enum { HA_CFG_OK = 0, HA_CFG_REJECTED, HA_CFG_UNKNOWN } ha_cfg_result_t;
    which was a hand estimate from before the fixture maxed every axis.)
 
    1280 left 116 B — under one more string field — so this is 1536, for
-   343 B of headroom (it was 1164 B / 372 B before the tone_chores select). It is part of the per-window heap struct in
-   mqtt_ha.c, which static-asserts the total; growing it again is a
-   deliberate edit there as well as here. */
+   343 B of headroom (it was 1164 B / 372 B before the tone_chores select).
+   It is part of the per-window heap struct in mqtt_ha.c, which static-asserts
+   the total; growing it again is a deliberate edit there as well as here. */
 #define HA_CONFIG_STATE_MAX 1536
 
 /* Set-buffer slots the MQTT window must provide (mqtt_ha.c's SET_MAX).
