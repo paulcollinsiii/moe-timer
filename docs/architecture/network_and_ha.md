@@ -37,6 +37,35 @@ rollover, the final-minute sync, the locks) use the blocking
 resume or a Button D sync) paints as soon as NTP settles and lets the MQTT
 phase drain behind the panel; Button B stays live during that drain.
 
+### Timer events publish too
+
+The HA burndown charts move on every start, resume, pause, expiry and chore
+release, so each of those owes HA one window. An event does not open it where
+it happens: `wake_flow.c` marks the wake as owing a publish
+(`s_event_publish_owed`), and a consumer opens the window where that is safe,
+after the paint and after any audio the event played, because radio TX must
+not overlap an e-ink refresh or the amp. A pause is therefore painted at once
+and published after.
+
+| Event | Marked | Served |
+|-------|--------|--------|
+| Pause (B, any wake path; the awake pause poll; a B press in a join) | `wake_flow_dispatch_button_action`, `wake_flow_poll_pause_button`, `wake_flow_poll_button_b_action` | After the render by `finish_action_and_render`; after the refresh in the final-minute watch; after the render in the tick handler |
+| Expiry | end of `wake_flow_fire_expiry_alert`, after the alarm and the repaint | The same consumers |
+| Chore release (`BTN_ACK_RELEASED`) | `wake_flow_apply_chore_ack`, after the reward chime | The same, or after the last chore repaint |
+| A start the caller declined a window for (a latched press on a wake that already synced; a press in the break tail) | the B arm of the dispatch | The same, or right after the break tail's render |
+
+A start that does open its window up front (a button wake, an unsynced tick
+wake) is its own publish. One window serves every event pending in the wake,
+and a window already open absorbs the debt. A locked device owes nothing: the
+lock gate owns the network there. Budget: the chore gesture's awake bound
+(`CHORE_WORST_GESTURE_MS`) includes one such window.
+
+`screen_remaining` is the minutes **available now**: an IDLE Screen on a
+chore-gated day publishes the allocation less the withheld block (the cap a
+start runs against, `button_chore_withheld_sec()`), so a start does not move
+the chart and only the release steps it up. `screen_limit` stays the full
+effective allocation.
+
 ## Who does what
 
 The window task owns the radio and nothing else. It never paints, never

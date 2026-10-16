@@ -131,6 +131,94 @@ static display_screen_t render_action_result(button_id_t btn, timer_state_t befo
 static display_screen_t render_action_result_as(button_id_t btn, timer_state_t before, time_t now,
                                                 bool selection_changed, bool break_end_on_glass);
 
+/* ---- one stats publish per timer event ---------------------------------
+
+   (docs/planning/20261016.stats-publish-events.plan.md) The HA burndown
+   charts move on pause, expiry, the chore-release edge and every start, and
+   a publish is a network window whose stats snapshot is posted after the
+   paint. The start and resume arm always opened such a window (before the
+   paint, so the render has the corrected clock); everything else used to
+   leave HA on its last sync, up to an hour stale.
+
+   An event does not open a window where it happens. It marks the wake as
+   OWING one, and a consumer opens it where that is safe: after the paint
+   (radio TX must never overlap an e-ink refresh) and after any audio the
+   event played (nor the amp — the expiry alert and the reward chime both
+   block until the amp is off, and both run before the event is marked
+   or before its consumer). A pause is therefore painted at once and
+   published after.
+
+   ONE EVENT, ONE WINDOW. The flag is a bool and not a count: two events
+   in one wake (a pause and a release) share the first window that serves
+   them, and a window that is ALREADY open when the consumer runs (the start
+   arm's, a D-sync) is the publish — its snapshot is posted after the paint
+   by the tail that opened it. Every consumer clears the flag before it
+   looks at anything else, so a refusal cannot leave it owing into a later
+   path of the same wake.
+
+   REFUSALS STAND. A locked device (lock_gate_sleep_mode() != NORMAL) buys
+   no event window — the lock gate owns the network there — and a spawn the
+   platform refuses is fail-open exactly as the start arm's always was. */
+static bool s_event_publish_owed;
+
+static void wake_flow_owe_publish(void) {
+    s_event_publish_owed = true;
+}
+
+/* Open the window an event owes and, for a RUNNING timer, do what the
+   start arm has always done once it is open: wait for the sync (seconds)
+   and apply the measured step to the expiry, or leave the step for the
+   finish when the sync settles late. Anything else (a pause, an expiry, a
+   release) has no countdown to correct and does not wait on NTP at all.
+   Shared by the start arm and by every owed publish, which is why a
+   start's window and a start gap's window are the same code. */
+static bool wake_flow_open_event_window(void) {
+    if (!net_apply_open()) {
+        return false;
+    }
+    if (timer_get_state() == TIMER_RUNNING) {
+        if (net_window_wait_ntp()) {
+            timer_shift_expiry(net_window_take_clock_step());
+        } else {
+            net_apply_note_start_unsynced();
+        }
+    }
+    return true;
+}
+
+/* For a tail that posts the snapshot itself (finish_action_and_render, the
+   break-start branch of finish_or_break): open the owed window, if any, so
+   the tail's own post_stats / join serve it. */
+static void wake_flow_open_owed_window(void) {
+    if (!s_event_publish_owed) {
+        return;
+    }
+    s_event_publish_owed = false;
+    if (lock_gate_sleep_mode() != WAKE_SLEEP_NORMAL || net_window_active()) {
+        return; /* a lock refuses; an open window is already the publish */
+    }
+    (void)wake_flow_open_event_window();
+}
+
+/* For a path with no tail of its own after the event: open, post, join.
+   The net_finish_t is deliberately dropped — every caller has already
+   painted what the event changed, and a config edit that lands in this
+   window repaints at the next wake, as the final-minute sync's does. */
+static void wake_flow_publish_owed_window(void) {
+    if (!s_event_publish_owed) {
+        return;
+    }
+    s_event_publish_owed = false;
+    if (lock_gate_sleep_mode() != WAKE_SLEEP_NORMAL || net_window_active()) {
+        return;
+    }
+    if (!wake_flow_open_event_window()) {
+        return;
+    }
+    wake_flow_post_stats_snapshot();
+    (void)net_apply_finish();
+}
+
 /* The NVS read is treated as "has one" on failure: a transient read error
    must not throw a provisioned device into a SoftAP session. Declared this
    early because the paint's status hint reads it too. */
@@ -710,6 +798,12 @@ static bool wake_flow_apply_chore_ack(uint8_t idx, time_t now) {
        inside the audio module. */
     if (ack == BTN_ACK_RELEASED) {
         audio_chores_done_chime();
+        /* The release moves screen_remaining (the withheld block comes
+           back), so HA is owed a publish. MARKED here, AFTER the chime
+           (which blocks until the amp is off) and not opened here: the
+           panel has not painted this ack yet, and the window must come
+           after that paint too. See "one stats publish per timer event". */
+        wake_flow_owe_publish();
     }
     return true;
 }
@@ -868,27 +962,42 @@ _Static_assert(CHORE_ACK_COALESCE_POLL_MS > 0,
    figure that cannot be undercut. The hold is paid once, the budget whole.
 
    HALF THE FAILSAFE, not all of it: the gesture shares its wake with a
-   network window and possibly an expiry alert (~15 s), and a coalescer
-   that could spend the whole ceiling on its own leaves them none. Half is
-   a judgment, not a measurement. At the defaults (400 / 1200 / 8000) the
-   worst case is 400 + 8000 + 8 x 4000 + 1100 + 256 = 41.756 s against 90 s.
+   network window (the wake's own sync, or the rollover's) and possibly an
+   expiry alert (~15 s), and a coalescer that could spend the whole ceiling
+   on its own leaves them none. Half is a judgment, not a measurement. At
+   the defaults (400 / 1200 / 8000) the worst case is 400 + 8000 + 8 x 4000
+   + 1100 + 256 + 15000 = 56.756 s against 90 s.
 
-   The reward chime is the last term: audio_chores_done_chime() BLOCKS this
-   task while it plays, after the final paint, so it is part of the gesture.
-   REWARD_TONE_MAX_MS bounds the longest jingle's notes (test_tones asserts
-   every jingle fits) and REWARD_TONE_DRAIN_MS is audio.c's DAC drain tail
-   before the amp is cut. Charged whether or not a jingle is selected: the
-   bound must hold for the setting an operator can choose. */
-#define CHORE_WORST_PAINT_MS 4000u /* a full refresh (~3 s, estimate) + the driver's 1 s minimum interval */
+   The reward chime is the second-to-last term: audio_chores_done_chime()
+   BLOCKS this task while it plays, after the final paint, so it is part of
+   the gesture. REWARD_TONE_MAX_MS bounds the longest jingle's notes
+   (test_tones asserts every jingle fits) and REWARD_TONE_DRAIN_MS is
+   audio.c's DAC drain tail before the amp is cut. Charged whether or not a
+   jingle is selected: the bound must hold for the setting an operator can
+   choose.
+
+   The last term is the release's own event window (stats-publish-events
+   plan): the chime ends the amp's use, the final paint is done, and the
+   release then owes HA one wifi+MQTT window before the wake can sleep.
+   CHORE_WORST_EVENT_WINDOW_MS is an ESTIMATE, as every radio figure here
+   is — the window's wifi join and MQTT session take ~5-10 s on the bench —
+   with margin for a slow join. It is NOT NET_JOIN_TIMEOUT_MS (90 s), which
+   is the wedged-join backstop the awake failsafe exists for, and which no
+   awake budget in this file charges. Charged whether or not the gesture
+   ends in a release: the bound holds for the worst gesture there is. */
+#define CHORE_WORST_PAINT_MS 4000u         /* a full refresh (~3 s, estimate) + the driver's 1 s minimum interval */
+#define CHORE_WORST_EVENT_WINDOW_MS 15000u /* one event window: wifi join + MQTT (~5-10 s, estimate) + margin */
 #define CHORE_BUDGET_WINDOWS \
     (((uint32_t)CHORE_ACK_COALESCE_BUDGET_MS + (uint32_t)CHORE_PAINT_QUIET_MS - 1u) / (uint32_t)CHORE_PAINT_QUIET_MS)
 #define CHORE_WORST_PAINTS ((CHORE_BUDGET_WINDOWS > 2u ? CHORE_BUDGET_WINDOWS : 2u) + 1u)
-#define CHORE_WORST_GESTURE_MS                                                   \
-    ((uint32_t)STATUS_LED_ACK_HOLD_MS + (uint32_t)CHORE_ACK_COALESCE_BUDGET_MS + \
-     CHORE_WORST_PAINTS * CHORE_WORST_PAINT_MS + (uint32_t)REWARD_TONE_MAX_MS + (uint32_t)REWARD_TONE_DRAIN_MS)
+#define CHORE_WORST_GESTURE_MS                                                                                   \
+    ((uint32_t)STATUS_LED_ACK_HOLD_MS + (uint32_t)CHORE_ACK_COALESCE_BUDGET_MS +                                 \
+     CHORE_WORST_PAINTS * CHORE_WORST_PAINT_MS + (uint32_t)REWARD_TONE_MAX_MS + (uint32_t)REWARD_TONE_DRAIN_MS + \
+     CHORE_WORST_EVENT_WINDOW_MS)
 _Static_assert(CHORE_WORST_GESTURE_MS <= (uint32_t)CONFIG_MAGTAG_MAX_AWAKE_SEC * 1000u / 2u,
                "MAGTAG_CHORE_ACK_BURST_MS / MAGTAG_CHORE_PAINT_QUIET_MS allow a chore gesture whose worst case "
-               "(hold + budget + every repaint it permits, each as a full refresh) exceeds half the awake failsafe");
+               "(hold + budget + every repaint it permits, each as a full refresh, the reward chime and the "
+               "release's event window) exceeds half the awake failsafe");
 
 /* The three ack buttons and the rows they tick, as a table rather than as
    `btn - BTN_B`: the arithmetic happens to work today only because the
@@ -1209,6 +1318,11 @@ static void wake_flow_repaint_chore_acks_until_quiet(time_t *now, uint32_t *spen
             break;
         }
     }
+    /* A release made by a press that landed during a paint: the tail's
+       window was joined before this loop, so nothing downstream serves it.
+       After the last paint (the loop's last act) and after the chime
+       (which ran inside the ack that made it). */
+    wake_flow_publish_owed_window();
 }
 
 bool wake_flow_break_end(void) {
@@ -1526,17 +1640,27 @@ bool wake_flow_dispatch_button_action(button_id_t btn, time_t *now, timer_state_
                        running on the uncorrected clock — remaining time is
                        still a consistent duration; only the shown clock may
                        be off. If the sync settles late (during the MQTT
-                       tail), the finish applies the step instead. */
-                    if (allow_net_window && net_apply_open()) {
-                        if (net_window_wait_ntp()) {
-                            timer_shift_expiry(net_window_take_clock_step());
-                        } else {
-                            net_apply_note_start_unsynced();
-                        }
+                       tail), the finish applies the step instead.
+
+                       A caller that declines the window (allow_net_window
+                       false: the tick wake's latched press after its own
+                       sync, and the break tail, whose window was joined
+                       before the press) still owes HA this start. The
+                       publish is marked and served by the caller's tail
+                       AFTER the paint — it cannot be opened here, because
+                       the paint it must follow has not happened. */
+                    if (allow_net_window) {
+                        (void)wake_flow_open_event_window();
+                    } else {
+                        wake_flow_owe_publish();
                     }
                     *now = hal_time_now();
                     return true;
                 case BTN_B_PAUSED:
+                    /* PAINTED FIRST, PUBLISHED AFTER: the pause must never
+                       wait on a window, so this arm only marks the debt.
+                       The caller's render runs, and its tail serves it. */
+                    wake_flow_owe_publish();
                     return true;
                 case BTN_B_RELOADED:
                     /* Bare, like the pause arm: the slot really did move
@@ -1674,6 +1798,11 @@ bool wake_flow_poll_pause_button(void) {
     time_t now = hal_time_now();
     timer_pause(now);
     ESP_LOGI(TAG, "button B while awake: paused");
+    /* Marked, not opened: this poll runs inside waits that paint right
+       after it (the grid wait's render, the final-minute watch's refresh),
+       and the window comes after that paint. The caller's consumer serves
+       it. */
+    wake_flow_owe_publish();
     return true;
 }
 
@@ -1729,6 +1858,10 @@ bool wake_flow_poll_button_b_action(void) {
     (void)after;
     ESP_LOGI(TAG, "button B during join: state %d -> %d", (int)st, (int)after);
     wake_flow_show_status_leds();
+    /* This window's snapshot is already posted (or about to be) and says
+       the state from before the press, so the press owes its own publish.
+       Served after the join, by whichever consumer the calling wake has. */
+    wake_flow_owe_publish();
     return true;
 }
 
@@ -1817,6 +1950,11 @@ bool wake_flow_poll_break_buttons(void) {
         return false;
     wake_flow_show_status_leds();
     render_action_result((button_id_t)pick, before, now, swapped);
+    /* The render half only (the window was joined before this poll runs),
+       so nothing downstream serves what the press owes: a start, a pause
+       or a chore release made in the break tail. Painted above, published
+       here. */
+    wake_flow_publish_owed_window();
     return true;
 }
 
@@ -1945,6 +2083,12 @@ void wake_flow_fire_expiry_alert(void) {
        refresh — so it reaches the panel through that same seam instead of
        carrying a second copy of it. */
     paint_current_state_full();
+    /* The last publish HA saw says RUNNING with N seconds left; the chart
+       is owed the expiry. Marked here, after the alarm and the repaint
+       (the amp is off and the panel is done), and served by whichever
+       consumer the calling path has: the tail's window, the tick
+       handler's post-render publish, or the final-minute watch's own. */
+    wake_flow_owe_publish();
 }
 
 /* ---- day rollover ------------------------------------------------------- */
@@ -2169,6 +2313,7 @@ void wake_flow_watch_final_minute(void) {
            edit); the alert (if any) already fired — don't watch a countdown
            that no longer exists, and never double-fire the alert below. */
         if (timer_get_state() != TIMER_RUNNING) {
+            wake_flow_publish_owed_window(); /* a press in the join poll moved it */
             return;
         }
     }
@@ -2199,6 +2344,7 @@ void wake_flow_watch_final_minute(void) {
             display_state_t st = make_display_state(timer_tick(pnow), pnow);
             wake_flow_show_status_leds(); /* amber through the refresh until sleep */
             display_full_refresh(&st);
+            wake_flow_publish_owed_window(); /* the pause, after its refresh */
             return;
         }
         if (break_interval_min != 0 && timer_break_due(hal_time_now(), (int32_t)break_interval_min * 60)) {
@@ -2224,6 +2370,7 @@ void wake_flow_watch_final_minute(void) {
     }
     timer_tick(hal_time_now()); /* RUNNING -> EXPIRED */
     wake_flow_fire_expiry_alert();
+    wake_flow_publish_owed_window(); /* the expiry, after the alarm and the repaint */
 }
 
 /* ---- the post-action tail ----------------------------------------------- */
@@ -2396,7 +2543,15 @@ static void finish_action_and_render(button_id_t btn, timer_state_t before, time
        the buffered network→timer effects, reconcile a redefined timer.
        Re-render only when something changed what the panel shows (a
        Button B action landed during the join, a config edit moved the
-       timer, or the expiry passed while draining). */
+       timer, or the expiry passed while draining).
+
+       A PUBLISH THIS WAKE OWES (a pause, an expiry alert, the chore
+       release, a start the caller declined a window for) is served here:
+       the paint above is done, and any audio it played has returned, so
+       the window opened now has nothing to collide with, and the snapshot
+       posted next is the one that carries the event. A window already open
+       (the start arm's) is the publish and no second one is opened. */
+    wake_flow_open_owed_window();
     wake_flow_post_stats_snapshot();
     timer_state_t painted = timer_get_state();
     net_finish_t nf = net_apply_finish();
@@ -2466,6 +2621,11 @@ static void finish_action_and_render(button_id_t btn, timer_state_t before, time
             }
         }
     }
+    /* What the window itself or the re-render owes: an expiry alert fired
+       by the reconcile or by the post-join re-render, or a B press made in
+       the join poll. The first window's snapshot predates both, and no
+       later tail follows. */
+    wake_flow_publish_owed_window();
 }
 
 /* Shared post-action tail: if the action pushed the accrual past the
@@ -2481,6 +2641,7 @@ static void finish_or_break(button_id_t btn, timer_state_t before, time_t now, b
        belongs to wake_flow_watch_final_minute — but it is not a
        guarantee. */
     if (wake_flow_maybe_start_break(now)) {
+        wake_flow_open_owed_window();    /* the press's own event, after the break alarm */
         wake_flow_post_stats_snapshot(); /* break screen painted: release MQTT */
         net_apply_finish();              /* drain + apply deferred before sleeping */
         enter_deep_sleep(lock_gate_sleep_mode());
@@ -2928,6 +3089,16 @@ void wake_flow_handle_timer_tick(void) {
         s_lock_screen_on_glass = false;
         (void)buttons_take_pressed();
     }
+
+    /* WHAT THE RENDER ABOVE (AND THE WAITS BEFORE IT) OWE HA: a pause made
+       in the grid wait, an expiry this tick found, or a press made in the
+       join poll of this wake's own sync. The panel is painted and the
+       alarm has returned, so the window opens now. BEFORE the break check
+       below, which paints a break and sleeps without returning here, so an
+       expiry-then-break wake publishes the expiry before the break alarm's
+       amp comes on. A press latched in the wake is a different event and
+       gets its own tail's window. */
+    wake_flow_publish_owed_window();
 
     /* A break earned in the SAME tick that expired a timer. The fast-path
        check above runs before timer_tick, so the expiry that pushed the

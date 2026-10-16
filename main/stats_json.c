@@ -202,7 +202,12 @@ static const ha_entity_t ENTITIES[] = {
      false, DIAG, NULL, NULL},
     /* Per-slot remaining/limit ([0] = Screen; extra slots below, runtime-
        named like completions_N) so each timer keeps its own HA history.
-       "Used" is derivable: limit - remaining. */
+       For an extra, "used" is derivable: limit - remaining. NOT for
+       Screen: its remaining is "available now" (an IDLE chore-gated day
+       publishes the allocation minus the withheld block, so a start does
+       not move the chart), so limit - remaining is the withheld block
+       while gated and not the minutes used. The day's Screen use is the
+       summary's screen_used_day. */
     {"sensor", "screen_remaining", "Screen time remaining", "min", "duration",
      "{{ (value_json.remaining_s[0] / 60) | round(0) }}", "stat", STAT_EXPIRE_SEC, false, NULL, NULL, NULL},
     {"sensor", "screen_limit", "Screen time limit", "min", "duration",

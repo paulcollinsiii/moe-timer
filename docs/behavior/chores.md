@@ -162,11 +162,14 @@ Home Assistant shows each chore's tick and the counts, but it **cannot tick or
 untick a chore**. The device is the only authority. A mis-press is undone on the
 device, and the history in Home Assistant is the parent's record.
 
-Ticking a chore does not open a network connection. Home Assistant learns about
-the tick at the device's next sync. That is often when the unlocked Screen time
-is started, otherwise the next scheduled sync, which is hourly while nothing is
-running. Pressing D on the timer screen syncs at once. So "Homework done at
-16:04" means the device reported it by 16:04. The entities are listed in the
+Ticking a chore does not open a network connection, except for the tick that
+completes the list: that one releases the withheld Screen time, so the device
+syncs right after the chime and the panel's repaint, and Home Assistant sees
+the release at once. Home Assistant learns about every other tick at the
+device's next sync. That is often when the Screen time is started, otherwise
+the next scheduled sync, which is hourly while nothing is running. Pressing D
+on the timer screen syncs at once. So "Homework done at 16:04" means the
+device reported it by 16:04. The entities are listed in the
 [reference](../home_assistant/reference.md#chores).
 
 ## Trust

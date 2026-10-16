@@ -8,6 +8,7 @@
 
 #include "battery.h"
 #include "battery_policy.h"
+#include "button_actions.h"
 #include "chore_store.h"
 #include "chores.h"
 #include "nvs_config.h"
@@ -218,6 +219,13 @@ void app_state_stats(const app_state_in_t *in, time_t now, stats_snapshot_t *out
     out->active_timer = (def != NULL) ? def->name : "Screen";
     day_type_t dt = schedule_get_day_type(now);
     out->day_type = schedule_day_type_name(dt);
+    /* Loaded ahead of the slot loop: the Screen's remaining below is capped
+       by the gate, and the gate needs the configured count. Fills n = 0 on
+       any failure; see app_state_display(). The chore block further down
+       reads the same pair. */
+    char names[CHORE_MAX][CHORE_NAME_BUF];
+    uint8_t n = 0;
+    chore_store_load_names(names, &n);
     for (int i = 0; i < TIMER_SLOT_COUNT; i++) {
         const timer_def_t *sd = timer_slot_def(i);
         if (i > 0 && sd == NULL) {
@@ -235,7 +243,22 @@ void app_state_stats(const app_state_in_t *in, time_t now, stats_snapshot_t *out
         uint32_t alloc = effective_allocation((i == 0) ? schedule_get_allocation_sec(dt) : (uint32_t)sd->duration_sec,
                                               i); /* i == 0 short-circuits the NULL sd */
         out->allocation_s[i] = alloc;
-        out->remaining_s[i] = timer_slot_remaining(i, now, (int32_t)alloc);
+        /* "AVAILABLE NOW", not "the whole day": an IDLE Screen on a
+           chore-gated day can start with only `alloc - withheld`, and the
+           other states already carry that cap (timer_start was handed it by
+           button_b_start_allocation). Publishing the whole day while IDLE
+           made the HA chart drop the moment the timer started and jump
+           back at the release. The cap comes from the one helper the start
+           uses; slot 0 only, because the gate withholds Screen time and
+           nothing else (an extra's remaining stays its duration).
+           Saturating, so a deduction past the cap empties it and stops
+           rather than wrapping the unsigned subtraction. */
+        int32_t idle_fallback = (int32_t)alloc;
+        if (i == 0) {
+            const uint32_t withheld = button_chore_withheld_sec(now, n);
+            idle_fallback = (alloc > withheld) ? (int32_t)(alloc - withheld) : 0;
+        }
+        out->remaining_s[i] = timer_slot_remaining(i, now, idle_fallback);
     }
     for (int i = 0; i < TIMER_EXTRA_SLOTS; i++) {
         out->completions[i] = timer_slot_completions(1 + i);
@@ -255,9 +278,6 @@ void app_state_stats(const app_state_in_t *in, time_t now, stats_snapshot_t *out
        high bit from a longer list reports neither as a done chore nor as a
        lit per-chore sensor. No chores configured: all three are 0, the
        inert C1 reading. */
-    char names[CHORE_MAX][CHORE_NAME_BUF];
-    uint8_t n = 0;
-    chore_store_load_names(names, &n); /* fills n = 0 on any failure; see app_state_display() */
     const uint8_t acked_raw = timer_chore_acked();
     for (uint8_t i = 0; i < CHORE_MAX; i++) {
         if (chores_is_acked(acked_raw, i, n)) {

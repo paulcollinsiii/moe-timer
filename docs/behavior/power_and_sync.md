@@ -39,6 +39,8 @@ A sync happens:
 | When | Why |
 |------|-----|
 | A timer starts or resumes (B) | The clock is checked as the countdown begins. The countdown starts at once and is not held back by the sync. |
+| A timer is paused, or runs out | Home Assistant is told straight away, so its charts stop at the right moment. The pause is painted first and the sync follows it; for a timer that runs out, the sync follows the alarm. |
+| The last chore is ticked | The unlocked Screen time is reported right away, after the chime ([Chores](chores.md#what-home-assistant-sees)). Ticking any other chore opens no sync. |
 | Every 10 minutes while a timer runs | The board has no accurate clock of its own and drifts in sleep, so this keeps the countdown and the end time accurate. |
 | Every hour while nothing runs | Keeps the clock right and Home Assistant up to date. No sync happens during a break with Screen selected. |
 | At midnight | Starts the new day ([Timers and schedule](timers_and_schedule.md#midnight)). |

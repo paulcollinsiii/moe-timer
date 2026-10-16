@@ -175,7 +175,8 @@ menu "MagTag Timer"
             after this many seconds (WiFi driver hang, stuck BUSY line,
             firmware bug), the device saves the timer snapshot and forces
             deep sleep. The longest legitimate wake (final-minute watch +
-            expiry alarm + refreshes) is ~2 minutes; keep a margin above
+            expiry alarm + refreshes + the stats window the expiry or a
+            pause publishes in) is ~2 minutes; keep a margin above
             that.
 
     config MAGTAG_IDLE_SYNC_INTERVAL_MIN
@@ -310,7 +311,8 @@ menu "MagTag Timer"
             which no range can express. wake_flow.c _Static_asserts that
             the worst case the two allow (hold + budget + every repaint
             they permit, each charged as a full refresh plus the driver's
-            1 s minimum interval) stays under half of
+            1 s minimum interval, then the reward chime and the one
+            wifi+MQTT window the release publishes in) stays under half of
             MAGTAG_MAX_AWAKE_SEC, so a short window with a long budget is
             refused at build time rather than forcing a failsafe sleep in
             the middle of a refresh.
