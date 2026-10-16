@@ -59,6 +59,14 @@ displayed clock may drift until a sync succeeds. The header's `Last sync` shows
 when the clock was last set. After repeated failed syncs it shows a setup hint,
 the way into [setup mode](setup_mode.md#the-no-wifi-hint) to correct the WiFi.
 
+**With WiFi down, every timer event costs a failed join.** A pause, a time-up,
+a start, a reload or the last chore ticked each open a sync, and with no WiFi
+each one waits out the 15 s connection attempt before the device sleeps. There
+is no back-off: each failed attempt counts toward the same run of failed syncs
+as the once-a-minute retries, so the setup hint appears sooner on a device that
+is being used. The timer itself is never held up by it, because the event is
+painted before the sync begins.
+
 ### D: sync now
 
 On the timer screen and on the break screen, D syncs at once and then repaints

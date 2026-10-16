@@ -1660,8 +1660,17 @@ void net_window_post_snapshot(const stats_snapshot_t *snap) {
    the clock the action left behind" pass exactly the same assertions. */
 static int32_t flow_finish_seconds;
 
+/* A B press made in the join poll of the Nth net_apply_finish() call
+   (1-based; bit N of the mask), the way the device's join runs
+   wake_flow_poll_button_b_action. `flow_finish_press_result` is what the
+   mocked button_b_apply answers to it. Off by default. */
+static uint32_t flow_finish_press_mask;
+static btn_b_action_t flow_finish_press_result;
+static int flow_finish_calls;
+
 net_finish_t net_apply_finish(void) {
     flow_log_push(EV_NET_FINISH);
+    flow_finish_calls++;
     flow_window_active = false; /* the join closes the window */
     if (flow_finish_seconds != 0) {
         mock_time_set(hal_time_now() + flow_finish_seconds);
@@ -1671,6 +1680,11 @@ net_finish_t net_apply_finish(void) {
     }
     if (flow_chores_after_finish >= 0) {
         flow_chore_count = (uint8_t)flow_chores_after_finish; /* a config payload applied in the window */
+    }
+    if (flow_finish_press_mask & (1u << flow_finish_calls)) {
+        flow_b_result = flow_finish_press_result;
+        flow_press(BTN_B);
+        (void)wake_flow_poll_button_b_action();
     }
     return flow_net_finish;
 }
@@ -2085,6 +2099,9 @@ void setUp(void) {
     s_chore_acked = false;        /* likewise: one wake is one boot */
     s_chore_strip_lit = false;    /* likewise: the claim lasts exactly one wake */
     s_event_publish_owed = false; /* likewise: what a wake owes HA dies with it */
+    s_gesture_defers_release_publish = false;
+    s_release_publish_deferred = false;
+    s_wake_start_ms = hal_time_now_ms(); /* headroom: this wake has only just begun */
 
     button_latch_reset();
     flow_edge_us = 1000000;
@@ -2267,6 +2284,9 @@ void setUp(void) {
     flow_state_after_finish = -1;
     flow_chores_after_finish = -1;
     flow_finish_seconds = 0;
+    flow_finish_press_mask = 0;
+    flow_finish_press_result = BTN_B_NONE;
+    flow_finish_calls = 0;
     flow_last_ntp = 0;
     flow_sleep_mode_answer = WAKE_SLEEP_NORMAL;
     flow_sleeps = 0;
@@ -12329,7 +12349,9 @@ static void flow_assert_one_event_window_after_the_paint(void) {
     TEST_ASSERT_TRUE_MESSAGE(flow_last_paint_at() < flow_log_at(EV_NET_OPEN),
                              "the window opened before the paint finished: radio TX could overlap the refresh");
     TEST_ASSERT_TRUE(flow_log_at(EV_NET_OPEN) < flow_log_at(EV_STATS_POST));
-    TEST_ASSERT_TRUE(flow_log_at(EV_STATS_POST) < flow_log_at(EV_NET_FINISH));
+    /* The LAST join: a tail that had no window of its own still calls
+       net_apply_finish() (a no-op on device) ahead of the owed window. */
+    TEST_ASSERT_TRUE(flow_log_at(EV_STATS_POST) < flow_log_at_nth(EV_NET_FINISH, flow_log_count(EV_NET_FINISH)));
     TEST_ASSERT_FALSE_MESSAGE(flow_window_active, "the window was left open");
 }
 
@@ -12786,8 +12808,162 @@ void test_ev_a_break_start_in_the_tail_still_publishes_the_owed_event_first(void
                              "the window opened before the break paint");
 }
 
+/* ---- what a consumer's own join can change (review finding 1) ----
+   The join runs the join poll, so a B press made inside an event window
+   moves the timer AFTER the paint that window followed. The consumer must
+   repaint it and serve the debt the press raised, in a bounded follow-up. */
+
+/* True when a paint was logged strictly between log indices `lo` and `hi`. */
+static bool flow_paint_between(int lo, int hi) {
+    for (int n = 1; n <= flow_log_count(EV_FULL_REFRESH); n++) {
+        int at = flow_log_at_nth(EV_FULL_REFRESH, n);
+        if (at > lo && at < hi)
+            return true;
+    }
+    for (int n = 1; n <= flow_log_count(EV_PARTIAL); n++) {
+        int at = flow_log_at_nth(EV_PARTIAL, n);
+        if (at > lo && at < hi)
+            return true;
+    }
+    return false;
+}
+
+void test_ev_a_b_press_in_the_final_minute_expiry_window_is_repainted_and_published(void) {
+    time_t now = flow_at(14, 0);
+    mock_time_set(now);
+    flow_state = TIMER_RUNNING;
+    flow_expiry_wall = (int64_t)now + 3;
+    flow_finish_press_mask = 1u << 1; /* B in the expiry window's join poll */
+    flow_finish_press_result = BTN_B_RELOADED;
+
+    wake_flow_watch_final_minute();
+
+    TEST_ASSERT_EQUAL_INT_MESSAGE(1, flow_log_count(EV_ALERT_EXPIRY), "the alert fired again");
+    TEST_ASSERT_EQUAL_INT(TIMER_IDLE, flow_state);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(2, flow_log_count(EV_NET_OPEN), "the press's debt never got its window");
+    TEST_ASSERT_EQUAL_INT(2, flow_log_count(EV_STATS_POST));
+    TEST_ASSERT_TRUE_MESSAGE(flow_paint_between(flow_log_at_nth(EV_NET_FINISH, 1), flow_log_at_nth(EV_NET_OPEN, 2)),
+                             "the press moved the timer and the panel still shows TIME'S UP");
+    TEST_ASSERT_FALSE(flow_window_active);
+}
+
+void test_ev_a_b_press_in_the_break_tail_start_window_is_repainted_and_published(void) {
+    flow_state = TIMER_IDLE;
+    flow_b_result = BTN_B_STARTED;
+    flow_press(BTN_B);
+    flow_finish_press_mask = 1u << 1;
+    flow_finish_press_result = BTN_B_PAUSED; /* start, then pause during its window */
+    mock_time_set(flow_at(16, 0));
+
+    TEST_ASSERT_TRUE(wake_flow_poll_break_buttons());
+
+    TEST_ASSERT_EQUAL_INT(TIMER_PAUSED, flow_state);
+    TEST_ASSERT_EQUAL_INT(2, flow_log_count(EV_NET_OPEN));
+    TEST_ASSERT_EQUAL_INT(2, flow_log_count(EV_STATS_POST));
+    TEST_ASSERT_TRUE_MESSAGE(flow_paint_between(flow_log_at_nth(EV_NET_FINISH, 1), flow_log_at_nth(EV_NET_OPEN, 2)),
+                             "the panel shows running on a paused timer");
+}
+
+void test_ev_a_config_change_in_an_event_window_repaints(void) {
+    mock_time_set(flow_at(15, 0));
+    flow_state = TIMER_PAUSED;
+    flow_net_finish = NET_FINISH_CHANGED;
+    s_event_publish_owed = true;
+
+    wake_flow_publish_owed_window();
+
+    TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_NET_OPEN));
+    TEST_ASSERT_TRUE_MESSAGE(flow_paint_between(flow_log_at(EV_NET_FINISH), flow_log_n),
+                             "a config edit applied in the window was never painted");
+}
+
+void test_ev_an_alerted_join_is_not_repainted_or_alerted_again(void) {
+    mock_time_set(flow_at(15, 0));
+    flow_state = TIMER_PAUSED;
+    flow_state_after_finish = TIMER_EXPIRED;
+    flow_net_finish = NET_FINISH_ALERTED;
+    s_event_publish_owed = true;
+
+    wake_flow_publish_owed_window();
+
+    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_ALERT_EXPIRY));
+    TEST_ASSERT_FALSE(flow_paint_between(flow_log_at(EV_NET_FINISH), flow_log_n));
+}
+
+void test_ev_follow_up_windows_are_bounded(void) {
+    mock_time_set(flow_at(15, 0));
+    flow_state = TIMER_PAUSED;
+    flow_finish_press_mask = 0xFFFFFFFEu; /* a press in EVERY join */
+    flow_finish_press_result = BTN_B_PAUSED;
+    s_event_publish_owed = true;
+
+    wake_flow_publish_owed_window();
+
+    TEST_ASSERT_EQUAL_INT_MESSAGE(WAKE_FLOW_OWED_WINDOWS_MAX, flow_log_count(EV_NET_OPEN),
+                                  "the follow-up chain is not bounded");
+    TEST_ASSERT_EQUAL_INT(2, WAKE_FLOW_OWED_WINDOWS_MAX);
+}
+
+/* A follow-up is admitted by awake headroom: a wake that has used the
+   failsafe's time does not open a window it could be cut off in. */
+void test_ev_a_follow_up_window_needs_awake_headroom(void) {
+    mock_time_set(flow_at(15, 0));
+    flow_state = TIMER_PAUSED;
+    flow_finish_press_mask = 0xFFFFFFFEu;
+    flow_finish_press_result = BTN_B_PAUSED;
+    s_event_publish_owed = true;
+    s_wake_start_ms = hal_time_now_ms() - (uint32_t)CONFIG_MAGTAG_MAX_AWAKE_SEC * 1000u;
+
+    wake_flow_publish_owed_window();
+
+    TEST_ASSERT_EQUAL_INT_MESSAGE(1, flow_log_count(EV_NET_OPEN), "a follow-up opened with no awake headroom");
+    TEST_ASSERT_FALSE_MESSAGE(s_event_publish_owed, "the refused debt stayed owed for a later path");
+}
+
+/* BTN_B_RELOADED moves remaining_N 0 -> the full duration: HA is owed it. */
+void test_ev_a_reload_owes_a_publish(void) {
+    flow_state = TIMER_EXPIRED;
+    flow_b_result = BTN_B_RELOADED;
+    mock_time_set(flow_at(16, 0));
+
+    TEST_ASSERT_TRUE(flow_dispatch(BTN_B, flow_at(16, 0), TIMER_EXPIRED, true));
+
+    TEST_ASSERT_TRUE_MESSAGE(s_event_publish_owed, "a reload changed the charts and owes no publish");
+}
+
+/* ONE WINDOW FOR THE WHOLE GESTURE: the release's window comes after the
+   repaint-until-quiet loop, so an ack made during the first paint is not
+   made to wait out a radio window. */
+void test_ev_the_release_window_follows_the_whole_chore_gesture(void) {
+    flow_tick_clock(flow_at(15, 0));
+    flow_arm_chore_wake(BTN_B);
+    flow_ack_seq[0] = BTN_ACK_RELEASED;
+    flow_ack_seq[1] = BTN_ACK_TOGGLED;
+    flow_ack_seq_n = 2;
+    flow_display_ms = FLOW_PANEL_COST_MS;
+    flow_deferred_press_btn = BTN_C;
+    flow_deferred_press_ms =
+        (int32_t)(STATUS_LED_ACK_HOLD_MS + CONFIG_MAGTAG_CHORE_PAINT_QUIET_MS + FLOW_PANEL_COST_MS / 2);
+
+    TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_button());
+
+    TEST_ASSERT_EQUAL_INT(2, flow_log_count(EV_CHORE_ACK));
+    flow_assert_one_event_window_after_the_paint();
+    TEST_ASSERT_TRUE_MESSAGE(flow_log_at_nth(EV_CHORE_ACK, 2) < flow_log_at(EV_NET_OPEN),
+                             "the second ack waited out the release's window");
+    TEST_ASSERT_TRUE(flow_log_at(EV_CHORES_CHIME) < flow_log_at(EV_NET_OPEN));
+}
+
 int main(void) {
     UNITY_BEGIN();
+    RUN_TEST(test_ev_a_b_press_in_the_final_minute_expiry_window_is_repainted_and_published);
+    RUN_TEST(test_ev_a_b_press_in_the_break_tail_start_window_is_repainted_and_published);
+    RUN_TEST(test_ev_a_config_change_in_an_event_window_repaints);
+    RUN_TEST(test_ev_an_alerted_join_is_not_repainted_or_alerted_again);
+    RUN_TEST(test_ev_follow_up_windows_are_bounded);
+    RUN_TEST(test_ev_a_follow_up_window_needs_awake_headroom);
+    RUN_TEST(test_ev_a_reload_owes_a_publish);
+    RUN_TEST(test_ev_the_release_window_follows_the_whole_chore_gesture);
     RUN_TEST(test_ev_a_pause_on_a_button_wake_publishes_after_the_paint);
     RUN_TEST(test_ev_a_pause_painted_immediately_means_the_window_is_not_opened_by_the_dispatch);
     RUN_TEST(test_ev_a_pause_on_a_tick_wake_latched_press_publishes_after_the_paint);

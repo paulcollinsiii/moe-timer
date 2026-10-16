@@ -8,7 +8,7 @@
 
 static const char *TAG = "ntp";
 
-#define SNTP_SYNC_TIMEOUT_MS 15000
+#define SNTP_SYNC_TIMEOUT_MS NTP_SYNC_TIMEOUT_MS /* ntp.h: wake_flow.c's budgets read it */
 
 esp_err_t ntp_sync_in_session(void) {
     /* TZ is set once at boot in app_main. */

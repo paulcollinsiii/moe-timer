@@ -62,7 +62,7 @@ rest are Diagnostic.
 |-----|-----------|---------------|
 | `battery` | Battery | Charge, %. Has long-term statistics. |
 | `state` | Timer state | The Screen timer's state, or `NO_CLOCK` (see [Troubleshooting](troubleshooting.md#the-device-shows-no-clock)). |
-| `screen_remaining` | Screen time remaining | Minutes available right now. On a day with unticked chores this is the day's allocation less the time the chores are still withholding, whether the timer is running or not, so starting the timer does not change it; it steps up once, when the last chore is ticked. |
+| `screen_remaining` | Screen time remaining | Minutes available right now. On a day with unticked chores this is the remaining time less the time the chores are still withholding: starting the timer does not change it at the moment of the start, it counts down while the timer is RUNNING, and it steps up once, when the last chore is ticked. |
 | `charge_lock` | Charge lock | On when the device has locked itself for a charge. |
 | `screen_break` | Screen break | On during a Screen Break. |
 | `chores_left` | Chores left | Configured chores not yet ticked today. |

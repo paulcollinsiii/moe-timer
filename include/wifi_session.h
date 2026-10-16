@@ -15,6 +15,10 @@
 extern "C" {
 #endif
 
+/* The bounded wait for association. Exposed so the awake budgets in
+   wake_flow.c are built from it rather than from a copy of the number. */
+#define WIFI_SESSION_CONNECT_TIMEOUT_MS 15000
+
 esp_err_t wifi_session_begin(void);
 void wifi_session_end(void);
 
