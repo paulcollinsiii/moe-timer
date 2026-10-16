@@ -37,6 +37,57 @@ rollover, the final-minute sync, the locks) use the blocking
 resume or a Button D sync) paints as soon as NTP settles and lets the MQTT
 phase drain behind the panel; Button B stays live during that drain.
 
+### Timer events publish too
+
+The HA burndown charts move on every start, resume, pause, expiry and chore
+release, so each of those owes HA one window. An event does not open it where
+it happens: `wake_flow.c` marks the wake as owing a publish
+(`s_event_publish_owed`), and a consumer opens the window where that is safe,
+after the paint and after any audio the event played, because radio TX must
+not overlap an e-ink refresh or the amp. A pause is therefore painted at once
+and published after.
+
+| Event | Marked | Served |
+|-------|--------|--------|
+| Pause (B, any wake path; the awake pause poll; a B press in a join) | `wake_flow_dispatch_button_action`, `wake_flow_poll_pause_button`, `wake_flow_poll_button_b_action` | After the render by `finish_action_and_render`; after the refresh in the final-minute watch; after the render in the tick handler |
+| Expiry | end of `wake_flow_fire_expiry_alert`, after the alarm and the repaint | The same consumers |
+| Chore release (`BTN_ACK_RELEASED`) | `wake_flow_apply_chore_ack`, after the reward chime; on a button wake held until the gesture's last paint | After the gesture's last repaint, one window for the whole gesture |
+| A reload (B on an EXPIRED reloadable slot) | the B arm of the dispatch | The same consumers as a pause |
+| A start the caller declined a window for (a latched press on a wake that already synced; a press in the break tail) | the B arm of the dispatch | The same, or right after the break tail's render |
+
+A start that does open its window up front (a button wake, an unsynced tick
+wake) is its own publish. One window serves every event pending in the wake,
+and a window already open absorbs the debt. A locked device owes nothing: the
+lock gate owns the network there.
+
+**The join can change the timer.** The join runs the join poll (a B press) and
+applies a config document, both after the paint the window followed. A consumer
+with no tail of its own (`wake_flow_publish_owed_window`) therefore repaints
+when the state moved or the join reports a change (never after an `ALERTED`
+join, which already repainted), and serves the debt the join raised with one
+follow-up window. A follow-up opens only while the awake failsafe leaves room
+for a window (`wake_flow_headroom_for_window`); debt past that, or raised on a
+path that sleeps straight away (the break branch of `finish_or_break`, the
+tick handler's fast-path break), is left to the next sync.
+
+**Budgets.** One window is `WAKE_FLOW_EVENT_WINDOW_MS`, derived from the
+timeouts that bound it: wifi connect 15 s, SNTP 15 s, MQTT connect 5 s, two
+publish drains of 3 s, the 1.5 s retained wait: 42.5 s, a working AP with SNTP
+unreachable. The chore gesture's bound (`CHORE_WORST_GESTURE_MS`) includes one
+such window, 84.3 s of its 90 s (half the failsafe); the final-minute wake
+(`WAKE_FLOW_FINAL_MINUTE_WORST_MS`: lead and grid wait 95 s, the alarm 15.1 s,
+one window, two refreshes) is 160.6 s of the 180 s failsafe. Both are
+`_Static_assert`ed. A follow-up window is not charged to either. With WiFi down
+each event costs the 15 s connect attempt and counts toward
+`wifi_join_failures` (see [State](state.md)), so the setup hint comes sooner;
+there is no back-off.
+
+`screen_remaining` is the minutes **available now**: an IDLE Screen on a
+chore-gated day publishes the allocation less the withheld block (the cap a
+start runs against, `button_chore_withheld_sec()`), so a start does not move
+the chart and only the release steps it up. `screen_limit` stays the full
+effective allocation.
+
 ## Who does what
 
 The window task owns the radio and nothing else. It never paints, never

@@ -46,6 +46,17 @@ btn_b_action_t button_b_apply(time_t now);
    def and no chore setting may touch it. */
 int32_t button_b_start_allocation(time_t now);
 
+/* Today's withheld seconds for the SCREEN timer: the figure
+   button_b_start_allocation() subtracts, exposed so that the one other
+   reader of the live cap derives nothing of its own. `n` is the configured
+   chore count, which the caller has usually loaded already (the names blob
+   is a flash read, and this does not repeat it). The stats snapshot
+   (app_state_stats) publishes an IDLE Screen's remaining as
+   `effective allocation - this`, so the figure HA charts is what a start
+   would run against and a start does not move it; only the release edge,
+   which brings this to 0, steps it up. 0 with no chores configured. */
+uint32_t button_chore_withheld_sec(time_t now, uint8_t n);
+
 /* ---- Button A: the mode toggle (design 4.2, row C3) --------------------- */
 
 typedef enum {

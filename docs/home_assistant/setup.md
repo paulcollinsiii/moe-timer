@@ -5,7 +5,8 @@ step says what to do and links to the page that explains it.
 
 **One idea underlies every Home Assistant page:** the MagTag sleeps almost
 all the time and talks to HA only during a brief network window: every 10
-minutes while a timer runs, hourly while idle, and whenever you press D on
+minutes while a timer runs, hourly while idle, whenever a timer starts,
+pauses or runs out or the last chore is ticked, and whenever you press D on
 the timer screen
 ([when it syncs](../behavior/power_and_sync.md#syncing) has the full
 list). So everything between the two is a **retained** MQTT message. HA

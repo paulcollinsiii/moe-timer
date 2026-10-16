@@ -121,10 +121,16 @@ static void net_window_task(void *arg) {
            orchestrator posts the snapshot only after the e-ink paint
            finished, so panel refresh current and WiFi TX bursts (plus the
            config NVS flash writes below) never coincide — the combination
-           browned out the rail in on-device testing. Stats are still
-           collected post clock-correction; exactly one post per window,
-           so this receive cannot starve. The radio just idles associated
-           while the panel refreshes. */
+           browned out the rail in on-device testing. The snapshot is
+           collected by the orchestrator after the paint, and the clock it
+           reads is corrected only when the caller waited for the sync
+           (a RUNNING timer's window does, and applies the step to the
+           expiry); a PAUSED / EXPIRED / IDLE event window posts on the
+           uncorrected clock, which the snapshot reads for the day type,
+           the chore day and the time-derived fields (break remaining,
+           withheld chore time), not for any countdown. Exactly one post
+           per window, so this receive cannot starve. The radio just
+           idles associated while the panel refreshes. */
         if (xQueueReceive(s_snapshot_q, &snap, portMAX_DELAY) == pdTRUE) {
             /* The update check RIDES this window: one small HTTPS GET,
                placed here for two reasons and constrained by a third.

@@ -173,9 +173,15 @@ bool wake_flow_break_ended_this_wake(void);
    partial, which ghosted the panel. Always written — false on every arm,
    including refusals and the buttons this function ignores.
 
-   allow_net_window gates the NTP window on a start/resume: a wake that
-   already ran a window skips the redundant second one (clock corrected,
-   buffered HA effects already applied).
+   allow_net_window gates the NTP window a start/resume opens BEFORE the
+   paint: a wake that already ran a window skips that redundant one (clock
+   corrected, buffered HA effects already applied). The start still owes
+   HA a publish (the earlier window's snapshot predates it), so a declined
+   window is served after the paint by the caller's tail instead, as the
+   publish a pause, an expiry and the chore-release edge also owe (the
+   stats-publish-events plan; wake_flow.c, "one stats publish per timer
+   event"). The dispatch only marks the debt; it never opens the window of
+   a pause, which is painted first.
 
    RETURNS true when the press left something the panel has to show, i.e.
    "the caller must render" — which is NOT the same as "timer state
@@ -199,7 +205,9 @@ bool wake_flow_dispatch_button_action(button_id_t btn, time_t *now, timer_state_
 
    MASKED take: only the B bit is consumed. A latched C press stays in the
    latch for the tick-wake drain — a poll during the grid wait must not
-   eat it. Returns true when it paused. */
+   eat it. Returns true when it paused, having marked the wake as owing HA a
+   publish: the caller paints the pause first and the window follows the
+   paint (wake_flow.c, "one stats publish per timer event"). */
 bool wake_flow_poll_pause_button(void);
 
 /* Latched Button B during the window join-wait: the screen has already
@@ -233,8 +241,10 @@ bool wake_flow_poll_button_b_action(void);
    Same mask, dispatch and guards as the tick handler's latch drain, so
    the break's own refusals (B on slot 0, a non-eligible slot) still
    apply. allow_net_window is false: the window for this wake has already
-   been joined by the time the watch runs, and a second one here would
-   paint over the tail. Returns true when the press changed what the panel
+   been joined by the time the watch runs, and one opened here BEFORE the
+   render would hold the press unanswered. What the press owes HA (a start,
+   a pause, a chore release) is published right AFTER the render, in a
+   window of its own. Returns true when the press changed what the panel
    shows — the caller stops watching, having already repainted. */
 bool wake_flow_poll_break_buttons(void);
 
@@ -275,7 +285,12 @@ bool wake_flow_maybe_start_break(time_t now);
    Exposed rather than wrapped in a main.c thunk because it is
    ADDRESS-TAKEN: net_apply's on_active_expired_alert hook points straight
    at it, so a network window that expires the active timer runs this same
-   sequence. */
+   sequence.
+
+   Ends by marking the wake as owing HA a publish of the expiry. The window
+   is NOT opened here: the alarm and the repaint are finished, and the
+   caller's own consumer opens it after them (never before: radio TX must
+   not overlap the amp). */
 void wake_flow_fire_expiry_alert(void);
 
 /* Day rollover, run first in both wake handlers. A no-op unless the

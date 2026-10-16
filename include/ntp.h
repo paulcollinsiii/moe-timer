@@ -5,6 +5,10 @@
 extern "C" {
 #endif
 
+/* The bounded wait for the first SNTP response. Exposed so the awake
+   budgets in wake_flow.c are built from it rather than from a copy. */
+#define NTP_SYNC_TIMEOUT_MS 15000
+
 /* SNTP clock sync; requires an open wifi_session window.
    On ESP_OK, time(NULL) reflects corrected UTC.
    Does NOT read or write expiry_wall_time. */

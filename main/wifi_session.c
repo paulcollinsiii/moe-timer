@@ -12,7 +12,7 @@
 
 static const char *TAG = "wifi_session";
 
-#define WIFI_CONNECT_TIMEOUT_MS 15000
+#define WIFI_CONNECT_TIMEOUT_MS WIFI_SESSION_CONNECT_TIMEOUT_MS /* wifi_session.h: wake_flow.c's budgets read it */
 
 /* On warm wakes the driver fast-reconnects from NVS-stored channel/BSSID;
    that first attempt routinely bounces once before a clean association, so

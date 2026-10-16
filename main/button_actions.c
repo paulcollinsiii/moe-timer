@@ -108,6 +108,13 @@ static uint32_t chore_withheld_now(time_t now, uint8_t n) {
                                timer_chore_released());
 }
 
+/* The public face of the above, for app_state_stats (button_actions.h says
+   why it asks). A wrapper and not the function itself so the release edge
+   below keeps its static, inlinable helper. */
+uint32_t button_chore_withheld_sec(time_t now, uint8_t n) {
+    return chore_withheld_now(now, n);
+}
+
 int32_t button_b_start_allocation(time_t now) {
     const timer_def_t *def = timer_active_def();
     if (def != NULL) {

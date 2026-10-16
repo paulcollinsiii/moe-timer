@@ -23,6 +23,7 @@
 #include "../../main/battery_policy.c"
 #include "../../main/chores.c"
 #include "../../main/chore_store.c"
+#include "../../main/button_actions.c" /* app_state_stats asks it what a start would be capped at */
 #include "../../main/app_state.c"
 // clang-format on
 
@@ -805,6 +806,88 @@ void test_stats_allocation_stays_the_effective_limit_not_the_default(void) {
     TEST_ASSERT_EQUAL_INT32(-1800, st.adjust_sec);
 }
 
+/* ---- screen_remaining is "available now" (stats-publish-events plan) ----
+   On a chore-gated day an IDLE Screen used to publish the whole day while a
+   start runs against `alloc - withheld`, so the HA chart dropped the moment
+   the timer started and jumped back when the last chore released the
+   block. IDLE now publishes the cap a start would run against, so only the
+   release moves it. screen_limit stays the full effective allocation. */
+
+void test_stats_idle_gated_day_publishes_what_a_start_would_get(void) {
+    set_chores(1);
+    hal_nvs_write_u16("chore_free_wd", 10); /* 10 free of the 60 min weekday */
+    schedule_cache_invalidate();
+    stats_snapshot_t s;
+    app_state_stats(&IN_HEALTHY, T0, &s);
+    TEST_ASSERT_EQUAL_INT32(600, s.remaining_s[0]);
+    TEST_ASSERT_EQUAL_UINT32(3600, s.allocation_s[0]); /* the limit is NOT capped */
+}
+
+void test_stats_starting_a_gated_screen_does_not_move_remaining(void) {
+    set_chores(1);
+    hal_nvs_write_u16("chore_free_wd", 10);
+    schedule_cache_invalidate();
+    stats_snapshot_t before;
+    app_state_stats(&IN_HEALTHY, T0, &before);
+    timer_start(T0, button_b_start_allocation(T0)); /* exactly what B does */
+    stats_snapshot_t running;
+    app_state_stats(&IN_HEALTHY, T0, &running);
+    TEST_ASSERT_EQUAL_INT32(before.remaining_s[0], running.remaining_s[0]);
+    /* ...and pausing after a minute only spends that minute. */
+    timer_pause(T0 + 60);
+    stats_snapshot_t paused;
+    app_state_stats(&IN_HEALTHY, T0 + 60, &paused);
+    TEST_ASSERT_EQUAL_INT32(before.remaining_s[0] - 60, paused.remaining_s[0]);
+}
+
+void test_stats_the_release_is_the_only_step_up(void) {
+    set_chores(1);
+    hal_nvs_write_u16("chore_free_wd", 10);
+    schedule_cache_invalidate();
+    stats_snapshot_t gated, released;
+    app_state_stats(&IN_HEALTHY, T0, &gated);
+    TEST_ASSERT_EQUAL_INT32(600, gated.remaining_s[0]);
+    timer_set_mode(APP_MODE_CHORES);                                        /* an ack only applies on the checklist */
+    TEST_ASSERT_EQUAL(BTN_ACK_RELEASED, button_chore_ack_apply(0, T0 + 5)); /* the last chore */
+    app_state_stats(&IN_HEALTHY, T0 + 5, &released);
+    TEST_ASSERT_EQUAL_INT32(3600, released.remaining_s[0]);
+}
+
+/* The gate is Screen's alone: an extra's IDLE remaining is its duration
+   whatever the day's gate says (S18). */
+void test_stats_the_gate_never_caps_an_extras_remaining(void) {
+    set_chores(1);
+    hal_nvs_write_u16("chore_free_wd", 10);
+    schedule_cache_invalidate();
+    stats_snapshot_t s;
+    app_state_stats(&IN_HEALTHY, T0, &s);
+    TEST_ASSERT_EQUAL_INT32(900, s.remaining_s[1]);
+    TEST_ASSERT_EQUAL_INT32(600, s.remaining_s[3]);
+}
+
+/* A banked grant rides on top of the cap, as it does at the start's fold. */
+void test_stats_gated_idle_remaining_keeps_a_banked_grant(void) {
+    set_chores(1);
+    hal_nvs_write_u16("chore_free_wd", 10);
+    schedule_cache_invalidate();
+    timer_bonus_reconcile(0, 300);
+    stats_snapshot_t s;
+    app_state_stats(&IN_HEALTHY, T0, &s);
+    TEST_ASSERT_EQUAL_UINT32(3900, s.allocation_s[0]);
+    TEST_ASSERT_EQUAL_INT32(900, s.remaining_s[0]);
+}
+
+/* A deduction larger than the cap empties it and stops. */
+void test_stats_gated_idle_remaining_clamps_at_zero(void) {
+    set_chores(1);
+    hal_nvs_write_u16("chore_free_wd", 10);
+    schedule_cache_invalidate();
+    timer_bonus_reconcile(0, -3300); /* effective 300 < withheld 3000 */
+    stats_snapshot_t s;
+    app_state_stats(&IN_HEALTHY, T0, &s);
+    TEST_ASSERT_EQUAL_INT32(0, s.remaining_s[0]);
+}
+
 void test_stats_started_slot_allocation_includes_grant(void) {
     timer_start(T0, 3600);
     timer_adjust(0, 300); /* HA grant mid-run */
@@ -1005,6 +1088,12 @@ int main(void) {
     RUN_TEST(test_stats_idle_screen_allocation_clamps_at_zero);
     RUN_TEST(test_stats_allocation_never_wraps_through_the_uint32_cast);
     RUN_TEST(test_stats_allocation_stays_the_effective_limit_not_the_default);
+    RUN_TEST(test_stats_idle_gated_day_publishes_what_a_start_would_get);
+    RUN_TEST(test_stats_starting_a_gated_screen_does_not_move_remaining);
+    RUN_TEST(test_stats_the_release_is_the_only_step_up);
+    RUN_TEST(test_stats_the_gate_never_caps_an_extras_remaining);
+    RUN_TEST(test_stats_gated_idle_remaining_keeps_a_banked_grant);
+    RUN_TEST(test_stats_gated_idle_remaining_clamps_at_zero);
     RUN_TEST(test_stats_started_slot_allocation_includes_grant);
     RUN_TEST(test_stats_completions_map_extra_slots);
     RUN_TEST(test_stats_injected_device_fields_pass_through);

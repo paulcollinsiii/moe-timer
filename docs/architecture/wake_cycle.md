@@ -66,7 +66,10 @@ setup route ─▶ day rollover ─▶ lock gates ─▶ break-end drain ─▶ 
   waits up to 25 s so the render lands on the minute. A button wake runs the
   press: B, A and C through one dispatch; D syncs on the timer screen and
   ticks chore 3 on the checklist. A start, a resume or a D sync paints
-  early ([network_and_ha.md](network_and_ha.md#one-window-in-order)).
+  early ([network_and_ha.md](network_and_ha.md#one-window-in-order)). A
+  pause, an expiry and the chore-release edge each owe HA a window of their
+  own, opened after the paint and after any audio
+  ([network_and_ha.md](network_and_ha.md#timer-events-publish-too)).
 - **Render.** `wake_policy_render()` picks a partial refresh, a full one, or
   the expiry alert ([display.md](display.md)).
 - **Latched presses.** A press made while the device was awake is acted on

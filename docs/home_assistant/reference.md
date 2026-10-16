@@ -62,7 +62,7 @@ rest are Diagnostic.
 |-----|-----------|---------------|
 | `battery` | Battery | Charge, %. Has long-term statistics. |
 | `state` | Timer state | The Screen timer's state, or `NO_CLOCK` (see [Troubleshooting](troubleshooting.md#the-device-shows-no-clock)). |
-| `screen_remaining` | Screen time remaining | Minutes left today. |
+| `screen_remaining` | Screen time remaining | Minutes available right now. On a day with unticked chores this is the remaining time less the time the chores are still withholding: starting the timer does not change it at the moment of the start, it counts down while the timer is RUNNING, and it steps up once, when the last chore is ticked. |
 | `charge_lock` | Charge lock | On when the device has locked itself for a charge. |
 | `screen_break` | Screen break | On during a Screen Break. |
 | `chores_left` | Chores left | Configured chores not yet ticked today. |
@@ -83,7 +83,7 @@ whose table gives each key, plus `screen_bonus` (Screen adjust (min) today).
 | `day_type` | Day type | Weekday, weekend, holiday or summer. |
 | `break_remaining` | Screen break remaining | Minutes left in the current break. |
 | `screen_exposure` | Screen exposure | The screen-exposure balance, in minutes, that decides when the next break fires ([screen breaks](../behavior/screen_breaks.md#when-a-break-comes-due)). |
-| `remaining_N`, `limit_N` | `<timer>` remaining / limit | Each extra timer's minutes left and its limit, per slot. Time used today = limit − remaining. |
+| `remaining_N`, `limit_N` | `<timer>` remaining / limit | Each extra timer's minutes left and its limit, per slot. Time used today = limit − remaining (extras only: not for Screen on a chore-gated day, where `screen_limit` − `screen_remaining` includes the withheld time; use the per-day Screen figure below). |
 | `completions_N` | `<timer>` runs | Each extra timer's completed runs today. |
 | `chores_done` | Chores done | Chores ticked today. Has long-term statistics. |
 | `config_warning` | Config warning | `OK`, or the day types whose chore-free pair is broken. See [Chores](#chores). |
@@ -128,8 +128,9 @@ The chore entities are read-only: only the device can tick a chore
   the logbook.
 - **Times are sync times.** Ticking a chore opens no network window, so HA
   hears of it at the next window: usually when the unlocked timer is
-  started, otherwise the next hourly sync. "Homework done at 16:04" means
-  the device reported it by 16:04.
+  started, otherwise the next hourly sync. The exception is the tick that
+  completes the list, which opens a window straight away. "Homework done at
+  16:04" means the device reported it by 16:04.
 - **A list change reaches HA one window late.** In a window the device
   reports first and applies the new document after, so new names (and the
   cleared ticks) show at the following window. If the device cannot read its

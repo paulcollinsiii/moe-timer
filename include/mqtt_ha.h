@@ -7,6 +7,14 @@
    window, entirely best-effort: any failure is logged and never affects
    the sync that opened the window. Empty broker URI in NVS = disabled. */
 
+/* The session's three waits, here so the awake budgets in wake_flow.c are
+   built from them rather than from copies: the broker connect, each of the
+   two publish drains (after the states, and the final one), and the wait
+   for the retained config/command after subscribing. */
+#define MQTT_HA_CONNECT_TIMEOUT_MS 5000
+#define MQTT_HA_PUBLISH_DRAIN_TIMEOUT_MS 3000
+#define MQTT_HA_RETAINED_RX_TIMEOUT_MS 1500
+
 #ifdef __cplusplus
 extern "C" {
 #endif

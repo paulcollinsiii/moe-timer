@@ -33,9 +33,10 @@ static const char *TAG = "mqtt_ha";
    was here until v18 and nothing else changed about how it is used. */
 #define DISC_SCHEMA_VER STATS_JSON_DISC_SCHEMA_VER
 
-#define CONNECT_TIMEOUT_MS 5000
-#define PUBLISH_DRAIN_TIMEOUT_MS 3000
-#define RETAINED_RX_TIMEOUT_MS 1500 /* config/cmd usually land right after subscribe */
+/* mqtt_ha.h: wake_flow.c's awake budgets read all three. */
+#define CONNECT_TIMEOUT_MS MQTT_HA_CONNECT_TIMEOUT_MS
+#define PUBLISH_DRAIN_TIMEOUT_MS MQTT_HA_PUBLISH_DRAIN_TIMEOUT_MS
+#define RETAINED_RX_TIMEOUT_MS MQTT_HA_RETAINED_RX_TIMEOUT_MS /* config/cmd usually land right after subscribe */
 
 static EventGroupHandle_t s_eg;
 #define EG_CONNECTED BIT0

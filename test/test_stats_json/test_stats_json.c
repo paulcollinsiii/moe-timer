@@ -732,7 +732,9 @@ static const ha_entity_t *find_entity(const char *key) {
 
 void test_retired_active_scoped_entities_gone(void) {
     /* The active-timer-scoped sensors mixed timers into one HA series;
-       screen_used is derivable from limit - remaining. All replaced by
+       screen_used was once derivable from limit - remaining (no longer for
+       Screen on a chore-gated day, whose remaining is "available now"; the
+       per-day summary carries the used figure). All replaced by
        the per-slot sensors below. */
     TEST_ASSERT_NULL(find_entity("remaining"));
     TEST_ASSERT_NULL(find_entity("allocation"));

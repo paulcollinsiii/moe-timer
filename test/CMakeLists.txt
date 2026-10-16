@@ -134,7 +134,8 @@ add_host_test(test_wake_flow
     EXTRA_DEFS CONFIG_MAGTAG_STATUS_LED_ACK_HOLD_MS=170
                CONFIG_MAGTAG_CHORE_PAINT_QUIET_MS=610
                CONFIG_MAGTAG_CHORE_ACK_BURST_MS=1725
-               CONFIG_MAGTAG_MAX_AWAKE_SEC=180)
+               CONFIG_MAGTAG_MAX_AWAKE_SEC=180
+               CONFIG_MAGTAG_EXPIRY_ALARM_CYCLES=5)
 add_host_test(test_status_led)
 # alerts.c reads two alarm-length Kconfig ints straight out of sdkconfig.h,
 # which the host build has no equivalent of. Supplied here rather than as
