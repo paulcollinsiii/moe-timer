@@ -146,7 +146,7 @@ watches the end itself:
   do nothing.
 
 When the time reaches zero, which happens within about a second of the real
-end, the panel shows **TIME'S UP** with an empty bar. The expiry tone plays five
+end, the panel shows the time's-up art (a shocked alarm clock, in the shipped template) with **TIME'S UP!** beside it. The expiry tone plays five
 times and the LEDs pulse red. A parent picks the tone in Home Assistant (the
 default is Marimba) and can set the volume there. The alarm also sounds in quiet
 hours. Any button silences it, and that press does nothing else. The timer

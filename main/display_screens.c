@@ -8,6 +8,8 @@
 #include "lvgl.h"
 #include "qr_render.h"
 #include "setup_trigger.h" /* SETUP_TRIGGER_BOOT_HOLD_MS: the timeout screen's retry hint */
+#include "sprite.h"
+#include "sprite_data.h"
 
 /* Bottom edge: labels centred over the physical buttons. Calibrated on
    hardware (2026-07): button D's centre lands at screen x=239 and the
@@ -57,6 +59,10 @@ static lv_obj_t *fresh_screen(bool inverted) {
     lv_obj_set_style_text_color(scr, inverted ? lv_color_white() : lv_color_black(), 0);
     return scr;
 }
+
+/* Defined with the sprite screens below; the break screen (above them in
+   this file) and the time's-up / charge screens all paint through it. */
+static void build_sprite(lv_obj_t *scr, const sprite_t *spr, int32_t x, int32_t y, int32_t scale, lv_color_t ink);
 
 /* The create/text/font/align quartet — every label on every screen. */
 static lv_obj_t *make_label(lv_obj_t *parent, const char *text, const lv_font_t *font, lv_align_t align, int32_t x,
@@ -539,42 +545,65 @@ void display_screens_build_main(const display_state_t *st) {
 
 /* ---- Screen Break layout (inverted), design §2.6 -----------------------
 
-   Two vertical stacks, chosen by whether a chore list is configured. The
-   figures below are MEASURED ink rows (inclusive) on the 128 px panel —
+   Two columns. At the left the break art (SPRITE_BREAK, a 46x52 slot; the
+   template is a meditating figure, see docs/developer_setup.md) drawn at
+   2x, WHITE on the black screen, at (4, 4): a 92x104 box, x 4..95,
+   y 4..107. At the right, a 192 px column x 100..291 holding the title,
+   countdown, bar and chore line. The art is static between partial
+   refreshes: nothing here repaints it.
+
+   The figures below are MEASURED ink rows (inclusive) on the 128 px panel —
    first/last row actually painted, not LVGL box extents, which for a
    48 pt label overstate the glyphs by 9 rows at each end:
 
-     element              no list        list configured
-     "SCREEN BREAK" 28pt    9..28          9..28      (y=4, the same)
-     break bar             40..55         34..49
-     countdown 48pt        71..104        55..88
-     chore line 16pt          —           93..104
-     bottom row 16pt      109..124       109..124     (BOTTOM -2, the same)
+     element               ink rows     box y
+     "SCREEN BREAK" 18pt     4..16       0     (centred on the column)
+     countdown 48pt         26..59      17     (m:ss / mm:ss / h:mm:ss)
+     break bar              68..83      68     (192 x 16)
+     chore line 16pt        89..104     88     (only with a chore list)
+     bottom row 16pt       109..124     BOTTOM -2 (unchanged)
 
-   The lift is not cosmetic. With the countdown where it stands there are
-   FOUR blank rows between it and the button row, and a 16 pt line needs
-   twelve: a chore line simply does not fit under it, so a configured list
-   raises the bar and the countdown to open one band. The gutters that
-   leaves are 5/5/4/4 rows, and 4 is what the unchanged screen already
-   runs at between its countdown and its row — this is as tight as the
-   layout has ever been, not tighter.
-   test_the_break_chore_line_clears_the_countdown_and_the_row measures the
-   bands off the framebuffer and fails if any two touch, because on e-ink
-   overlapping white-on-black text is unreadable and a regenerated golden
-   would record the overlap as the new correct answer.
+   The chore line's rows 89..104 are the '/' of "Chores 0/3", which
+   ascends and descends two rows past the 12-row letters (91..102); the tick
+   form paints only 91..102. Gutters between bands: 9 / 8 / 5 / 4 rows, and
+   4 is the gutter the screen has always run at, so this is no tighter than
+   it has been. test_the_break_chore_line_clears_the_countdown_and_the_row
+   measures the bands off the framebuffer and fails if any two touch,
+   because on e-ink overlapping white-on-black text is unreadable and a
+   regenerated golden would record the overlap as the new correct answer.
+   The art's box ends at row 107 and the bottom row starts at 109: one blank
+   row (a test pins that no ink crosses it).
 
-   With no list every band is byte-for-byte where it was, which is what
-   keeps the two no-chores cells of §2.6's matrix unchanged.
+   With no list the same stack stands and the chore band is simply empty;
+   the frozen screen time moves to cell A of the bottom row as before.
 
    12 pt renders illegibly white-on-black on e-ink (thin strokes eaten by
-   the inversion), so EVERY string on this screen is 16 pt — which is also
-   why the swap hint's name is truncated to a fixed budget, and why the
-   chore line had to be paid for in geometry rather than in font size. */
-#define BREAK_BAR_Y 40
-#define BREAK_BAR_Y_CHORES 34
-#define BREAK_COUNTDOWN_Y 62
-#define BREAK_COUNTDOWN_Y_CHORES 46
-#define BREAK_CHORE_LINE_Y 90
+   the inversion), so EVERY string on this screen is 16 pt or larger — which
+   is also why the swap hint's name is truncated to a fixed budget.
+
+   CLEAN_BANDS (display.c) needs no change and its geometry is the main
+   screen's, which jointly covers every byte of every row. Which band holds
+   which element here (test_the_break_elements_sit_inside_the_clean_bands_
+   that_cover_them reads the real table):
+     band 0 rows  0..23   the title (static, so never dirty)
+     band 1 rows 24..55   the top of the countdown
+     band 2 rows 56..87   the bottom of the countdown, the draining bar
+     band 3 rows 88..127  the chore line, the bottom row / footer
+   The countdown straddles bands 1 and 2, which is fine: no band shares a
+   framebuffer byte with another. */
+#define BREAK_ART_X 4
+#define BREAK_ART_Y 4
+#define BREAK_COL_X 100
+#define BREAK_COL_W 192
+#define BREAK_TITLE_Y 0
+#define BREAK_COUNTDOWN_Y 17
+#define BREAK_BAR_Y 68
+#define BREAK_BAR_H 16
+#define BREAK_CHORE_LINE_Y 88
+/* The widest chore prompt ("Chores 0/3", measured, CHORE_MAX is 3) and the
+   width left for the right-hand "Screen h:mm" beside it. */
+#define BREAK_PROMPT_MAX_W 86
+#define BREAK_SCREEN_MAX_W (BREAK_COL_W - BREAK_PROMPT_MAX_W)
 
 void display_screens_build_break(const display_state_t *st) {
     lv_obj_t *scr = fresh_screen(true);
@@ -657,23 +686,39 @@ void display_screens_build_break(const display_state_t *st) {
     const bool has_chores = st->chore_count > 0;
     const bool has_swap = st->swap_next_name != NULL;
 
-    make_label(scr, "SCREEN BREAK", &lv_font_montserrat_28, LV_ALIGN_TOP_MID, 0, 4);
+    /* The art is static: white ink on the black screen, drawn at 2x. */
+    build_sprite(scr, &SPRITE_BREAK, BREAK_ART_X, BREAK_ART_Y, 2, lv_color_white());
+
+    /* Right column: title, countdown and bar are centred on it. */
+    lv_obj_t *title =
+        make_label(scr, "SCREEN BREAK", &lv_font_montserrat_18, LV_ALIGN_TOP_LEFT, BREAK_COL_X, BREAK_TITLE_Y);
+    lv_obj_set_width(title, BREAK_COL_W);
+    lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
+
+    display_format_countdown(buf, sizeof(buf), st->break_remaining_sec);
+    lv_obj_t *count = make_label(scr, buf, &lv_font_montserrat_48, LV_ALIGN_TOP_LEFT, BREAK_COL_X, BREAK_COUNTDOWN_Y);
+    lv_obj_set_width(count, BREAK_COL_W);
+    /* CLIP, not the default WRAP: a value too wide for the column must not
+       drop a second line into the bar. Breaks cap at CFG_BOUND_BREAK_DUR_HI
+       ("2:00:00" fits), so this is a backstop. */
+    lv_label_set_long_mode(count, LV_LABEL_LONG_CLIP);
+    lv_obj_set_style_text_align(count, LV_TEXT_ALIGN_CENTER, 0);
 
     /* Break-progress bar: white indicator draining on the black screen */
     lv_obj_t *bar = lv_bar_create(scr);
-    lv_obj_set_size(bar, 284, 16);
-    lv_obj_align(bar, LV_ALIGN_TOP_MID, 0, has_chores ? BREAK_BAR_Y_CHORES : BREAK_BAR_Y);
+    lv_obj_set_size(bar, BREAK_COL_W, BREAK_BAR_H);
+    lv_obj_align(bar, LV_ALIGN_TOP_LEFT, BREAK_COL_X, BREAK_BAR_Y);
+    /* The bar is BREAK_COL_W (192) px wide but display_bar_fill_px() works
+       in the main screen's 0..280 range. The fraction is right (fill/280
+       of the width), so the range is kept rather than rescaled. */
     lv_bar_set_range(bar, 0, 280);
     lv_bar_set_value(bar, display_bar_fill_px(st->break_remaining_sec, st->break_duration_sec), LV_ANIM_OFF);
     style_bar(bar, true);
 
-    display_format_remaining(buf, sizeof(buf), st->break_remaining_sec);
-    make_label(scr, buf, &lv_font_montserrat_48, LV_ALIGN_TOP_MID, 0,
-               has_chores ? BREAK_COUNTDOWN_Y_CHORES : BREAK_COUNTDOWN_Y);
-
     if (has_chores) {
-        /* The chore line, left and right on one band: the prompt at the
-           left margin, then the frozen screen time at the right. The
+        /* The chore line, left and right on one band of the right column:
+           the prompt at the column's left edge, the frozen screen time at
+           its right edge (x 292, the panel's usual 4 px margin). The
            frozen time is on this line rather than in the row below
            because it cannot BE in that row any more — "Screen 1:30" is
            90 px and centred over button B it spans x 46..136, which runs
@@ -691,29 +736,45 @@ void display_screens_build_break(const display_state_t *st) {
            is what the render test reads) over EVERY string either side
            can produce, because the digits of this font do not share one
            advance — '0' is 3 px wider than '1' — so neither side's worst
-           case can be reasoned about from the character count:
-             prompt, widest   "Chores 0 of 2"  x   4..109
-             prompt, finished "Chores <tick>"  x   4.. 81
-             frozen time, widest "Screen 20:00" x 186..292  (h 0..23 swept)
-           77 px apart at the worst pairing.
-           test_the_break_chore_line_items_never_meet holds it.
+           case can be reasoned about from the character count. The
+           column is 192 px (the figure takes the rest of the panel):
+             "Chores 0 of 3"   105 px  + "Screen 20:00" 106 px = 211 > 192
+             "Chores 0/3"       86 px  + "Screen 20:00" 106 px = 192, no gap
+           so the plan's "Chores 1 of 3" does not fit at the widest values
+           and the prompt is "Chores 1/3" (display_format_chore_prompt).
+           Even that leaves a gap only while the hour is one digit: the
+           boxes are at least 9 px apart under 10 h, and from 10 h they
+           abut (0..3 px).
 
-           HEIGHT is the tighter of the two and the reason the prompt
-           reads "2 of 3" rather than "(2/3)". This band is 12 ink rows:
-           the countdown ends at row 88 and the button row starts at 109,
-           and 4 blank rows each side is the gutter the screen already
-           runs at. Letters and digits paint rows 93..104 — exactly 12.
-           Any of '(' ')' '/' '[' ']' paints 91..107, which is 17, and no
-           y fixes that: the panel has 80 rows between the title and the
-           button row, the three bands need 67 of them, and four 4-row
-           gutters need 16 more. 83 does not fit in 80, so a bracketed
-           fraction would have had to be paid for by moving the title. */
+           THE FROZEN TIME IS NOT BOUNDED BY THE ALLOCATION (24 h,
+           CFG_BOUND_ALLOC_HI): remaining_sec is the allocation PLUS
+           grants (a cmd grant is up to GRANT_MAX_MINUTES and they stack,
+           one per network window), and the snapshot accepts up to
+           SNAPSHOT_MAX_HORIZON_SEC (7 days), so "Screen 168:00" is
+           reachable. Uncapped it is 119 px wide and would overstrike the
+           prompt from 40 h (2 px at 2400 min, 8 px at 100 h). So the
+           right-hand label is capped at BREAK_SCREEN_MAX_W — the column
+           less the widest prompt, i.e. exactly the widest time that does
+           not touch it — and clips (cap_width()) instead of growing left.
+           Up to "Screen 20:00" the cap changes nothing, so every
+           ordinary value renders exactly as before; beyond it the label
+           loses its trailing digits, which is the lesser evil next to
+           overprinting the prompt. test_the_break_chore_line_items_never_
+           meet sweeps to the 7-day horizon.
+
+           HEIGHT: the letters and digits are 12 ink rows (91..102) and
+           '/' paints 89..104, between the bar (ends 83) and the button
+           row (starts 109): gutters of 5 and 4 rows. The column's three
+           bands and the row used to be packed into the full-width screen
+           with no room for '/', which is why the prompt used to read
+           "2 of 3"; the column has the rows now. */
         display_format_chore_prompt(buf, sizeof(buf), st->chore_acked, st->chore_count);
-        make_label(scr, buf, &lv_font_montserrat_16, LV_ALIGN_TOP_LEFT, 4, BREAK_CHORE_LINE_Y);
+        make_label(scr, buf, &lv_font_montserrat_16, LV_ALIGN_TOP_LEFT, BREAK_COL_X, BREAK_CHORE_LINE_Y);
 
         display_format_hm(rem_buf, sizeof(rem_buf), st->remaining_sec);
         snprintf(buf, sizeof(buf), "Screen %s", rem_buf);
-        make_label(scr, buf, &lv_font_montserrat_16, LV_ALIGN_TOP_RIGHT, -4, BREAK_CHORE_LINE_Y);
+        cap_width(make_label(scr, buf, &lv_font_montserrat_16, LV_ALIGN_TOP_RIGHT, -4, BREAK_CHORE_LINE_Y),
+                  BREAK_SCREEN_MAX_W);
     }
 
     if (!has_chores && !has_swap) {
@@ -730,6 +791,7 @@ void display_screens_build_break(const display_state_t *st) {
 
     /* Cell A. With a list, the mode toggle finally gets its label; without
        one, the cell carries the frozen screen time as it always has.
+       The art's box ends at row 107, one row above this row (109..124).
        Either way this is NOT one cell's worth of width, and the two
        overrun differently:
          "Chores"      renders x 5..59  — 5 px past the A/B midline (54)
@@ -846,18 +908,45 @@ void display_screens_build_chores(const display_state_t *st) {
     }
 }
 
+/* ---- Time's up -----------------------------------------------------------
+
+   SPRITE_TIMESUP (a 178x124 slot, tools/sprites/timesup.png; the template is
+   a shocked alarm clock) sits at the left, FLUSH WITH THE BOTTOM EDGE
+   (y = 128 - 124 = 4): the template is cropped open at the bottom, so its
+   ink may run off the panel's bottom row (the bleed rule: ink on that row
+   only inside the art's own columns; the template has 12 such pixels).
+   "TIME'S" (28 pt) over "UP!" (48 pt) are centred in the space to its
+   right. The sprite is painted by the same sprite_draw_cb() /
+   build_sprite() the charge lock uses (defined below, with the charge art;
+   build_sprite() is forward-declared at the top of the file), at scale 1
+   in black.
+
+   Not inverted (thin 1-3 px lines, as the charge lock). Full refresh only
+   (display_timesup()), so no CLEAN_BANDS entry.
+   test_the_timesup_screen_fits_the_panel_but_for_the_art_bottom_bleed
+   pins the one edge exception; the bitmap's ink count is the PNG's.
+
+   TIMESUP_COL_X is a literal because SPRITE_TIMESUP.w is an extern field,
+   not a constant expression; the paint test asserts that
+   TIMESUP_ART_X + SPRITE_TIMESUP.w <= TIMESUP_COL_X. */
+#define TIMESUP_ART_X 2
+#define TIMESUP_COL_X 180 /* right column: 180..295 */
+#define TIMESUP_COL_W 116
+#define TIMESUP_TIMES_Y 26
+#define TIMESUP_UP_Y 60
+
 void display_screens_build_timesup(void) {
     lv_obj_t *scr = fresh_screen(false);
+    build_sprite(scr, &SPRITE_TIMESUP, TIMESUP_ART_X, DISP_VER - SPRITE_TIMESUP.h, 1, lv_color_black());
 
-    make_label(scr, "TIME'S UP", &lv_font_montserrat_48, LV_ALIGN_CENTER, 0, -10);
+    lv_obj_t *times =
+        make_label(scr, "TIME'S", &lv_font_montserrat_28, LV_ALIGN_TOP_LEFT, TIMESUP_COL_X, TIMESUP_TIMES_Y);
+    lv_obj_set_width(times, TIMESUP_COL_W);
+    lv_obj_set_style_text_align(times, LV_TEXT_ALIGN_CENTER, 0);
 
-    /* Empty bar underneath, per spec */
-    lv_obj_t *bar = lv_bar_create(scr);
-    lv_obj_set_size(bar, 284, 16);
-    lv_obj_align(bar, LV_ALIGN_BOTTOM_MID, 0, -8);
-    lv_bar_set_range(bar, 0, 280);
-    lv_bar_set_value(bar, 0, LV_ANIM_OFF);
-    style_bar(bar, false);
+    lv_obj_t *up = make_label(scr, "UP!", &lv_font_montserrat_48, LV_ALIGN_TOP_LEFT, TIMESUP_COL_X, TIMESUP_UP_Y);
+    lv_obj_set_width(up, TIMESUP_COL_W);
+    lv_obj_set_style_text_align(up, LV_TEXT_ALIGN_CENTER, 0);
 }
 
 void display_screens_build_sync_failed(void) {
@@ -885,23 +974,175 @@ void display_screens_build_no_clock(void) {
     make_label(scr, "Press D to retry", &lv_font_montserrat_16, LV_ALIGN_BOTTOM_MID, 0, -4);
 }
 
-/* Battery lock (<= 10%): the panel says only this until the pack charges
-   back above the warn band. */
+/* ---- Battery lock (<= 10%): "Charge me!" --------------------------------
+
+   The charge art (SPRITE_CHARGE, a 105x122 slot, tools/sprites/charge.png;
+   the template is a sad battery holding its plug) sits at the left,
+   vertically centred; "Charge me!" and a nearly-empty battery outline (one
+   bar) fill the right column. The panel says only this until the pack
+   charges back above the warn band.
+
+   Not inverted: thin 1-3 px lines, which white-on-black shreds on this
+   panel (the reason no_clock and config_error are not inverted either).
+   Full refresh only, so no CLEAN_BANDS entry, as before. No new font: 48 pt
+   cannot fit two lines plus the battery in 128 px, so the words use the
+   28 pt already enabled.
+
+   Margins: the bitmap is cropped tight to the ink (ink in its first and
+   last row and column), so the 3 px top/bottom and 8 px left gaps come only
+   from the placement; they keep the lines off the panel edge
+   (test_the_charge_me_screen_fits_the_panel). */
+#define CHARGE_ART_X 8
+#define CHARGE_COL_X 124 /* right column: 124..287, centred on x=206 */
+#define CHARGE_COL_W 164
+#define CHARGE_TEXT_Y 14
+#define BATT_W 56 /* body, nub excluded */
+#define BATT_H 24
+#define BATT_BORDER 3
+#define BATT_NUB_W 5
+#define BATT_NUB_H 10
+#define BATT_Y 90
+#define BATT_X (CHARGE_COL_X + (CHARGE_COL_W - (BATT_W + BATT_NUB_W)) / 2)
+
+/* LV_EVENT_DRAW_MAIN handler for the sprites (the four lock-screen art
+   slots: charge, time's up, break and bed time). The same shape as qr_draw_cb(): one lv_draw_rect()
+   per horizontal run of ink, read straight from the RLE in flash by
+   sprite.c, so no scratch bitmap is allocated and no new draw path reaches
+   the I1 side. The sprite comes from the event's user data.
+
+   Two things are per-object rather than per-sprite, so one callback serves
+   black-on-white and white-on-black and 1x and 2x without a second decoder:
+   the ink colour is the object's text colour (set by build_sprite(), so it
+   follows the screen and is never hard-coded here) and the integer scale is
+   the object's user data. Each run of len px at (x, y) becomes a
+   len*scale x scale rect at (x*scale, y*scale). */
+static void sprite_draw_cb(lv_event_t *e) {
+    lv_layer_t *layer = lv_event_get_layer(e);
+    lv_obj_t *obj = lv_event_get_current_target(e);
+    const sprite_t *spr = lv_event_get_user_data(e);
+    const int32_t k = (int32_t)(intptr_t)lv_obj_get_user_data(obj);
+
+    lv_area_t coords;
+    lv_obj_get_coords(obj, &coords);
+
+    lv_draw_rect_dsc_t dsc;
+    lv_draw_rect_dsc_init(&dsc);
+    dsc.bg_color = lv_obj_get_style_text_color(obj, LV_PART_MAIN);
+    dsc.border_width = 0;
+
+    sprite_iter_t it;
+    uint16_t x, y, len;
+    sprite_iter_init(&it, spr);
+    while (sprite_iter_next(&it, &x, &y, &len)) {
+        lv_area_t a = {.x1 = coords.x1 + x * k,
+                       .y1 = coords.y1 + y * k,
+                       .x2 = coords.x1 + (x + len) * k - 1,
+                       .y2 = coords.y1 + (y + 1) * k - 1};
+        lv_draw_rect(layer, &dsc, &a);
+    }
+}
+
+/* A plain lv_obj the size of the sprite times `scale` (an integer >= 1),
+   painted in `ink` by sprite_draw_cb(); the background is transparent, so
+   only the ink is drawn on whatever the screen is (white or inverted). */
+static void build_sprite(lv_obj_t *scr, const sprite_t *spr, int32_t x, int32_t y, int32_t scale, lv_color_t ink) {
+    if (scale < 1)
+        scale = 1; /* callers pass literals; a zero would make a 0x0 box */
+    lv_obj_t *o = lv_obj_create(scr);
+    lv_obj_set_size(o, spr->w * scale, spr->h * scale);
+    lv_obj_align(o, LV_ALIGN_TOP_LEFT, x, y);
+    lv_obj_clear_flag(o, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_pad_all(o, 0, 0);
+    lv_obj_set_style_radius(o, 0, 0);
+    lv_obj_set_style_border_width(o, 0, 0);
+    lv_obj_set_style_bg_opa(o, LV_OPA_TRANSP, 0);
+    lv_obj_set_style_text_color(o, ink, 0);
+    lv_obj_set_user_data(o, (void *)(intptr_t)scale);
+    lv_obj_add_event_cb(o, sprite_draw_cb, LV_EVENT_DRAW_MAIN, (void *)spr);
+}
+
+/* A solid black rectangle, for the battery's nub and its one bar. */
+static void build_block(lv_obj_t *scr, int32_t x, int32_t y, int32_t w, int32_t h) {
+    lv_obj_t *o = lv_obj_create(scr);
+    lv_obj_set_size(o, w, h);
+    lv_obj_align(o, LV_ALIGN_TOP_LEFT, x, y);
+    lv_obj_clear_flag(o, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_pad_all(o, 0, 0);
+    lv_obj_set_style_radius(o, 0, 0);
+    lv_obj_set_style_border_width(o, 0, 0);
+    lv_obj_set_style_bg_color(o, lv_color_black(), 0);
+    lv_obj_set_style_bg_opa(o, LV_OPA_COVER, 0);
+}
+
+/* The empty-ish battery: a hollow body, a nub on its right, and a single
+   bar hugging the left inside edge (the charge that is left). */
+static void build_empty_battery(lv_obj_t *scr, int32_t x, int32_t y) {
+    lv_obj_t *body = lv_obj_create(scr);
+    lv_obj_set_size(body, BATT_W, BATT_H);
+    lv_obj_align(body, LV_ALIGN_TOP_LEFT, x, y);
+    lv_obj_clear_flag(body, LV_OBJ_FLAG_SCROLLABLE);
+    lv_obj_set_style_pad_all(body, 0, 0);
+    lv_obj_set_style_radius(body, 0, 0);
+    lv_obj_set_style_border_width(body, BATT_BORDER, 0);
+    lv_obj_set_style_border_color(body, lv_color_black(), 0);
+    lv_obj_set_style_bg_color(body, lv_color_white(), 0);
+    lv_obj_set_style_bg_opa(body, LV_OPA_COVER, 0);
+
+    build_block(scr, x + BATT_W, y + (BATT_H - BATT_NUB_H) / 2, BATT_NUB_W, BATT_NUB_H);
+    build_block(scr, x + BATT_BORDER + 2, y + BATT_BORDER + 2, 8, BATT_H - 2 * (BATT_BORDER + 2));
+}
+
 void display_screens_build_charge_me(void) {
     lv_obj_t *scr = fresh_screen(false);
-    make_label(scr, "Charge Me!", &lv_font_montserrat_48, LV_ALIGN_CENTER, 0, 0);
+    build_sprite(scr, &SPRITE_CHARGE, CHARGE_ART_X, (DISP_VER - SPRITE_CHARGE.h) / 2, 1, lv_color_black());
+
+    lv_obj_t *words =
+        make_label(scr, "Charge\nme!", &lv_font_montserrat_28, LV_ALIGN_TOP_LEFT, CHARGE_COL_X, CHARGE_TEXT_Y);
+    lv_obj_set_width(words, CHARGE_COL_W);
+    lv_obj_set_style_text_align(words, LV_TEXT_ALIGN_CENTER, 0);
+
+    build_empty_battery(scr, BATT_X, BATT_Y);
 }
 
 /* Bed Time lock: inverted like the break screen (night-appropriate and
-   unmistakably "not in service"); stays until day rollover. */
+   unmistakably "not in service"); stays until day rollover.
+
+   The bed-time art (SPRITE_BEDTIME, a 29x23 slot, tools/sprites/bedtime.png;
+   the template is a bed with zzz) is drawn at BEDTIME_ART_SCALE (4), WHITE
+   on the black screen, at (4, 4): a 116x92 box, x 4..119, y 4..95. The
+   words sit in the space to its right, a 172 px column x 120..291, "Bed Time"
+   over "Goodnight!", both 28 pt (48 pt "Bed Time" beside the art overruns the
+   panel). The brush-teeth line runs along the bottom, below the box. This
+   screen only ever arrives through a full refresh (display_bedtime), so it
+   has no CLEAN_BANDS entry. */
+#define BEDTIME_ART_X 4
+#define BEDTIME_ART_Y 4
+#define BEDTIME_COL_X 120
+#define BEDTIME_COL_W 172
+#define BEDTIME_ART_SCALE 4
+#define BEDTIME_TITLE_Y 10    /* "Bed Time" label top: ink rows 14..34 */
+#define BEDTIME_GREETING_Y 54 /* "Goodnight!" label top: ink rows 58..83 (measured off the golden) */
+#define BEDTIME_LINE_Y -2     /* bottom line: offset from the bottom edge, ink rows 108..125 */
+
 void display_screens_build_bedtime(void) {
     lv_obj_t *scr = fresh_screen(true);
-    make_label(scr, "Bed Time", &lv_font_montserrat_48, LV_ALIGN_TOP_MID, 0, 2);
+    build_sprite(scr, &SPRITE_BEDTIME, BEDTIME_ART_X, BEDTIME_ART_Y, BEDTIME_ART_SCALE, lv_color_white());
+
+    /* Two labels, not one two-line label: the gap between the words is
+       wider than the font's line height. */
+    lv_obj_t *bed =
+        make_label(scr, "Bed Time", &lv_font_montserrat_28, LV_ALIGN_TOP_LEFT, BEDTIME_COL_X, BEDTIME_TITLE_Y);
+    lv_obj_set_width(bed, BEDTIME_COL_W);
+    lv_obj_set_style_text_align(bed, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_t *night =
+        make_label(scr, "Goodnight!", &lv_font_montserrat_28, LV_ALIGN_TOP_LEFT, BEDTIME_COL_X, BEDTIME_GREETING_Y);
+    lv_obj_set_width(night, BEDTIME_COL_W);
+    lv_obj_set_style_text_align(night, LV_TEXT_ALIGN_CENTER, 0);
+
     /* Single centered line, 18 pt: 16 pt strokes shredded into fragments
        by the inverted 1 bpp render (no bold Montserrat exists in LVGL),
        and 20 pt overruns the 296 px panel. */
-    make_label(scr, "Brush teeth | Get water bottles", &lv_font_montserrat_18, LV_ALIGN_CENTER, 0, 4);
-    make_label(scr, "Goodnight!", &lv_font_montserrat_28, LV_ALIGN_BOTTOM_MID, 0, -2);
+    make_label(scr, "Brush teeth | Get water bottles", &lv_font_montserrat_18, LV_ALIGN_BOTTOM_MID, 0, BEDTIME_LINE_Y);
 }
 
 /* Config-error lock (design 5.3, row C11): today's `chore_free_*` is

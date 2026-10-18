@@ -1,3 +1,64 @@
+# Lock-screen art. The committed main/sprite_data.c is generated from the
+# public templates in tools/sprites/ and is what a plain clone compiles, with
+# no Python dependency. When sprites.local/ (gitignored, at the repo root)
+# holds any <slot>.png, the sprite data is instead generated into the build
+# directory from the templates with those files merged over them
+# (tools/gen_sprites.py --override-dir), and the committed copy is not
+# compiled. Slots are fixed in name and size; the generator refuses a
+# mismatch, so a bad override fails the build rather than the screen. See
+# docs/developer_setup.md ("Lock-screen art").
+set(SPRITE_DATA_SRCS "sprite_data.c")
+if(NOT CMAKE_BUILD_EARLY_EXPANSION)
+    set(SPRITE_OVERRIDE_DIR "${PROJECT_DIR}/sprites.local")
+    # CONFIGURE_DEPENDS: adding or removing an override re-runs cmake, so the
+    # choice between the two sources is never stale.
+    # Files only, any letter case of the extension: charge.PNG must still
+    # enter override mode so the generator runs and refuses it by name,
+    # instead of the template shipping unnoticed.
+    file(GLOB SPRITE_OVERRIDE_FILES LIST_DIRECTORIES false CONFIGURE_DEPENDS "${SPRITE_OVERRIDE_DIR}/*")
+    set(SPRITE_OVERRIDE_PNGS "")
+    foreach(f ${SPRITE_OVERRIDE_FILES})
+        if(f MATCHES "\\.[pP][nN][gG]$")
+            list(APPEND SPRITE_OVERRIDE_PNGS "${f}")
+        endif()
+    endforeach()
+    if(SPRITE_OVERRIDE_PNGS)
+        find_program(UV_EXECUTABLE uv HINTS $ENV{HOME}/.local/bin)
+        if(NOT UV_EXECUTABLE)
+            message(FATAL_ERROR
+                "sprites.local/ holds override art but uv was not found. "
+                "Install uv (https://docs.astral.sh/uv/) so tools/gen_sprites.py can "
+                "build it in, or empty sprites.local/ to build the public templates.")
+        endif()
+        set(SPRITE_OVERRIDE_SLOTS "")
+        foreach(png ${SPRITE_OVERRIDE_PNGS})
+            # the generator's slot name: only the final .png is stripped
+            # (NAME_WE would report charge.v2.png as "charge")
+            get_filename_component(slot "${png}" NAME)
+            string(REGEX REPLACE "\\.[pP][nN][gG]$" "" slot "${slot}")
+            list(APPEND SPRITE_OVERRIDE_SLOTS "${slot}")
+        endforeach()
+        list(JOIN SPRITE_OVERRIDE_SLOTS ", " SPRITE_OVERRIDE_SLOTS_TEXT)
+        message(STATUS "Lock-screen art: overriding slots from sprites.local/: ${SPRITE_OVERRIDE_SLOTS_TEXT}")
+
+        file(GLOB SPRITE_TEMPLATE_PNGS CONFIGURE_DEPENDS "${PROJECT_DIR}/tools/sprites/*.png")
+        set(SPRITE_DATA_GEN "${CMAKE_CURRENT_BINARY_DIR}/sprite_data.c")
+        # --no-header: the build never writes include/sprite_data.h in the
+        # source tree. The generator leaves an unchanged C alone; ninja's
+        # custom-command rule restats, so that leaves the step clean (the
+        # Makefile generator would re-run it every build: harmless, and the
+        # project builds with ninja).
+        add_custom_command(
+            OUTPUT "${SPRITE_DATA_GEN}"
+            COMMAND ${UV_EXECUTABLE} run "${PROJECT_DIR}/tools/gen_sprites.py"
+                    --override-dir "${SPRITE_OVERRIDE_DIR}" --c-out "${SPRITE_DATA_GEN}" --no-header
+            DEPENDS "${PROJECT_DIR}/tools/gen_sprites.py" ${SPRITE_TEMPLATE_PNGS} ${SPRITE_OVERRIDE_PNGS}
+            COMMENT "Generating sprite data (overrides: ${SPRITE_OVERRIDE_SLOTS_TEXT})"
+            VERBATIM)
+        set(SPRITE_DATA_SRCS "")
+    endif()
+endif()
+
 idf_component_register(
     SRCS
         "main.c"
@@ -45,6 +106,8 @@ idf_component_register(
         "setup_screens.c"
         "setup_trigger.c"
         "qr_render.c"
+        "sprite.c"
+        ${SPRITE_DATA_SRCS}
         "../lib/cJSON/cJSON.c"
         "../lib/qrcodegen/qrcodegen.c"
         "schedule.c"
@@ -146,3 +209,7 @@ idf_component_register(
 # the alerts_set_extend_awake() install from app_main must make it FAIL. A
 # re-arm that only satisfies the first half is not doing anything.
 target_compile_options(${COMPONENT_LIB} PRIVATE -Werror=unused-function)
+
+if(SPRITE_DATA_GEN)
+    target_sources(${COMPONENT_LIB} PRIVATE "${SPRITE_DATA_GEN}")
+endif()

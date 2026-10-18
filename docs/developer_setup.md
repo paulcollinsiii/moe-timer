@@ -194,6 +194,77 @@ one-way. To raise the limit, edit `set(MAGTAG_MAX_SLOT_PCT 85)` in the root
 bought. `-D MAGTAG_MAX_SLOT_PCT=…` is refused, and nothing above 100 is
 accepted. The comment above that line explains why.
 
+### Lock-screen art
+
+Four lock screens carry a bitmap. Each is a fixed **slot**: a name, a size and
+a place on the panel, with the layout built around it. The repo ships original
+template art for all four in `tools/sprites/`; you can replace any of them with
+your own at build time, without touching tracked files.
+
+| Slot (file) | Size (w x h) | Drawn at | Ink on screen | Shows | Template |
+|---|---|---|---|---|---|
+| `charge.png` | 105x122 | 1x | black on white | the battery lock: `Charge me!` beside it | a sad battery holding its plug |
+| `timesup.png` | 178x124 | 1x, flush with the bottom edge | black on white | the expiry screen: `TIME'S UP!` beside it | a shocked alarm clock, cropped by the bottom edge |
+| `break.png` | 46x52 | 2x (92x104) | white on black | the screen break: countdown and bar beside it | a meditating figure with sparkles |
+| `bedtime.png` | 29x23 | 4x (116x92) | white on black | the Bed Time lock: `Bed Time` and `Goodnight!` beside it | a bed with zzz |
+
+A slot file is a **1-bit PNG, black = ink** (mode `1`; an RGB or greyscale PNG
+is refused). "Ink on screen" is how that ink is painted: the break and bed-time
+screens are inverted, so their black art pixels appear white on the black panel.
+
+**To override a slot,** put a PNG of the same name in `sprites.local/` at the
+repo root (create the directory; it is gitignored, like `include/credentials.local.h`)
+and build. Only the files you provide are replaced; every other slot keeps its
+template.
+
+```bash
+mkdir -p sprites.local
+cp ~/my_clock.png sprites.local/timesup.png   # replaces the time's-up art
+idf.py reconfigure build                      # or just build; see below
+```
+
+The build prints one line naming what it picked up, so the log shows which art
+went in:
+
+```
+-- Lock-screen art: overriding slots from sprites.local/: timesup
+```
+
+**The size is exact.** An override must be the same width and height as its
+template, because the text and the other elements are laid out around that
+box and do not move. `tools/gen_sprites.py` fails the build, naming the file,
+the expected size and the actual size, when a PNG has the wrong size, is not
+1-bit, or has a name that is not one of the four slots. A tracked layout
+change (a new size) is a code change, not an override: it needs new layout
+constants, test numbers and goldens.
+
+**How it works.** With no PNGs in `sprites.local/` the build compiles the
+committed `main/sprite_data.c`, generated from the templates, and needs no
+Python. With one or more, `main/CMakeLists.txt` runs
+`uv run tools/gen_sprites.py --override-dir sprites.local` into the build
+directory and compiles that file instead; **uv is needed only in that case**
+(the build stops with an install message if it is missing). The generator
+needs Pillow, which uv resolves from the script's PEP 723 header, so **the
+first override build needs network access once** (a cold uv cache); later
+builds run offline. The build writes only the C, never
+`include/sprite_data.h`. Adding or removing a file under `sprites.local/`
+re-runs the CMake configure step by itself. Any `.png` there (in any letter
+case) that is not a lower-case `[a-z0-9_]+.png` slot name, such as
+`charge.PNG`, fails the build instead of being skipped.
+
+**To switch back to the templates,** move the PNGs out of `sprites.local/` and
+build: the glob reconfigures automatically, and the build compiles the
+committed C again.
+The committed C, the generated header and the host tests always use the
+templates, so an override never reaches `git` or the test suite;
+`uv run tools/gen_sprites.py --check` compares the committed C with the
+templates only.
+
+Changing a template is different: edit the PNG in `tools/sprites/`, run
+`uv run tools/gen_sprites.py`, commit the regenerated C, and update the pinned
+ink counts in `test/test_gen_sprites/test_gen_sprites.py` (the single source
+the C tests cite) and the screen goldens it names.
+
 ## Flashing and monitoring
 
 1. Put the MagTag in download mode: hold **Boot**, press **Reset**, release
@@ -258,7 +329,7 @@ ctest --test-dir test/build -R '^test_timer$'    # one suite
 Each C suite in `test/test_*/` is a single-file Unity program. It
 `#include`s the module under test and the mocks from `test/mocks/`. Unity is
 vendored at `test/unity/`. The Python tools' suites run in the same sweep, and
-`test_gen_ha_dashboard` runs under `uv`.
+`test_gen_ha_dashboard` and `test_gen_sprites` run under `uv`.
 
 ## Releasing firmware (OTA)
 
@@ -318,6 +389,7 @@ fix formatting, run `clang-format -i <file>`.
 | `tools/push_firmware.sh` | Publish a built image, its ELF and the OTA manifest. |
 | `tools/check_slot_size.py` | The build-size guard. Every build runs it. |
 | `tools/gen_ha_dashboard.py` | Print the HA setup steps, the config-publishing automation and the dashboard YAML. Run with `uv run`. Usage: [Running it](home_assistant/dashboard.md#running-it). |
+| `tools/gen_sprites.py` | Run-length encode `tools/sprites/*.png` into `main/sprite_data.c` and `include/sprite_data.h`. Run with `uv run`; `--check` exits 1 when the committed C is stale; `--override-dir` merges private art over the templates (see [Lock-screen art](#lock-screen-art)). |
 | `tools/ha_devices.example.yaml` | Template for `tools/ha_devices.yaml` (gitignored), the device list `gen_ha_dashboard.py` reads. |
 | `tools/ha/magtag_publish_config.yaml` | The HA automation that publishes each device's config document. Install: [Setup step 4](home_assistant/setup.md#4-install-the-config-publishing-automation). |
 

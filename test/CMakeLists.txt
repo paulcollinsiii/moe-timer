@@ -46,14 +46,20 @@ target_compile_definitions(lvgl_host PUBLIC
 
 # Carries qr_render.c (the setup screen's QR module matrix) and the vendored
 # qrcodegen it wraps: display_screens.c's QR drawing calls straight into it,
-# the same way it calls display_layout.c's pure helpers.
+# the same way it calls display_layout.c's pure helpers. Also carries
+# sprite.c and the committed sprite_data.c (generated from the TEMPLATES in
+# tools/sprites; never from a private sprites.local/): the four lock-screen
+# art slots are painted from them.
 add_host_test(test_display_render
     EXTRA_DEFS GOLDEN_DIR="${CMAKE_CURRENT_SOURCE_DIR}/test_display_render/golden"
     EXTRA_SRCS ${CMAKE_CURRENT_SOURCE_DIR}/../main/qr_render.c
+               ${CMAKE_CURRENT_SOURCE_DIR}/../main/sprite.c
+               ${CMAKE_CURRENT_SOURCE_DIR}/../main/sprite_data.c
                ${CMAKE_CURRENT_SOURCE_DIR}/../lib/qrcodegen/qrcodegen.c
     EXTRA_INCLUDES ${CMAKE_CURRENT_SOURCE_DIR}/../lib/qrcodegen
     EXTRA_LIBS lvgl_host m)
 
+add_host_test(test_sprite)
 add_host_test(test_timer)
 add_host_test(test_button_actions)
 add_host_test(test_schedule)
@@ -311,4 +317,21 @@ else()
   message(WARNING "uv not found: test_gen_ha_dashboard will FAIL. Install uv (~/.local/bin/uv).")
   add_test(NAME test_gen_ha_dashboard
            COMMAND sh -c "echo 'test_gen_ha_dashboard: uv not found; install uv (https://docs.astral.sh/uv/) and re-run cmake' >&2; exit 1")
+endif()
+
+# tools/gen_sprites.py turns tools/sprites/*.png into main/sprite_data.c (the
+# four lock-screen art slots) and --check fails when the committed C is
+# stale; its --override-dir merge is tested here too. Its
+# suite round-trips the PNG through the encoder and compares against the
+# committed data, so it needs pillow, supplied by uv like the dashboard
+# generator's pyyaml. A missing uv FAILS the test instead of dropping it:
+# a skipped check is how an edited PNG ships with the old art in flash.
+if(UV_EXECUTABLE)
+  add_test(NAME test_gen_sprites
+           COMMAND ${UV_EXECUTABLE} run --no-project --with pillow python3
+                   ${CMAKE_CURRENT_SOURCE_DIR}/test_gen_sprites/test_gen_sprites.py)
+else()
+  message(WARNING "uv not found: test_gen_sprites will FAIL. Install uv (~/.local/bin/uv).")
+  add_test(NAME test_gen_sprites
+           COMMAND sh -c "echo 'test_gen_sprites: uv not found; install uv (https://docs.astral.sh/uv/) and re-run cmake' >&2; exit 1")
 endif()

@@ -259,7 +259,7 @@ void display_format_chore_count(char *buf, size_t len, uint8_t acked, uint8_t co
     snprintf(buf, len, "%u of %u", (unsigned)chore_acked_count(acked, count), cfg);
 }
 
-/* The break screen's prompt (§2.6). "Chores 2 of 3" while there is
+/* The break screen's prompt (§2.6). "Chores 2/3" while there is
    anything to do, "Chores" and a tick once there is not.
 
    THE SAME acked/count PAIR AS THE HEADER ABOVE, and the same derived
@@ -271,14 +271,17 @@ void display_format_chore_count(char *buf, size_t len, uint8_t acked, uint8_t co
    choice is pinned by exact strings in both display suites rather than
    left to a pixel compare.
 
-   "n of m" RATHER THAN "(n/m)", and that is a measurement and not a
-   preference. '(' ')' and '/' all ascend two rows above this font's cap
-   height and descend two or three below its baseline: "Chores (2/3)"
-   paints 17 ink rows where "Chores 2 of 3" paints 12, and the band the
-   break screen opens for this line is 12 (see display_screens.c, which
-   has the arithmetic). Letters and digits alone stay inside it. The
-   wording it lands on is also the checklist header's own, which is what
-   the two screens had to agree on in the first place.
+   "n/m" RATHER THAN "n of m", and that is a measurement and not a
+   preference. The break screen's chore line shares the right column
+   (192 px, beside the break art) with the frozen screen time, and
+   "Chores 0 of 3" (105 px) plus "Screen 20:00" (106 px) does not fit;
+   "Chores 0/3" is the shorter form the layout plan named for exactly this
+   case (see display_screens.c, which has the arithmetic, and the cap that
+   keeps even longer frozen times, up to the 7-day snapshot horizon, off
+   the prompt). '/' ascends and descends past this font's cap height:
+   "Chores 2/3" paints 17 ink rows where "Chores 2 of 3" would paint 12,
+   which the old full-width layout could not afford; the column's chore
+   band now has the rows. The checklist header still says "n of 3".
 
    THE TICK IS LAST. Leading, it would shove "Chores" rightwards the
    moment the list was finished, and a word that moves on e-ink reads as
@@ -306,7 +309,7 @@ void display_format_chore_prompt(char *buf, size_t len, uint8_t acked, uint8_t c
     if (count > 0 && done == cfg) {
         snprintf(buf, len, "Chores " DISPLAY_CHORE_TICK);
     } else {
-        snprintf(buf, len, "Chores %u of %u", done, cfg);
+        snprintf(buf, len, "Chores %u/%u", done, cfg);
     }
 }
 
@@ -418,6 +421,18 @@ void display_format_remaining(char *buf, size_t len, int32_t remaining_sec) {
         remaining_sec = 0;
     snprintf(buf, len, "%02ld:%02ld:%02ld", (long)(remaining_sec / 3600), (long)((remaining_sec / 60) % 60),
              (long)(remaining_sec % 60));
+}
+
+void display_format_countdown(char *buf, size_t len, int32_t remaining_sec) {
+    if (remaining_sec < 0)
+        remaining_sec = 0;
+    const long h = (long)(remaining_sec / 3600);
+    const long m = (long)((remaining_sec / 60) % 60);
+    const long s = (long)(remaining_sec % 60);
+    if (h > 0)
+        snprintf(buf, len, "%ld:%02ld:%02ld", h, m, s);
+    else
+        snprintf(buf, len, "%ld:%02ld", m, s);
 }
 
 /* ---- refresh cadence and ghost cleaning (design §2.5) ------------------- */

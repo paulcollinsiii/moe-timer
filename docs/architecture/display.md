@@ -84,6 +84,31 @@ in a 111 px block with the 4-module quiet zone; 3 px is the most a 128 px panel
 allows. `QR_RENDER_MAX_VERSION` is 3 to match, and a longer payload falls back
 to the text lines.
 
+**The four lock-screen art slots (charge, time's up, break, bed time) are drawn
+the same way.**
+`tools/sprites/charge.png` (105x122, 1-bit), `timesup.png` (178x124, 1-bit),
+`break.png` (46x52, 1-bit) and `bedtime.png` (29x23, 1-bit) are the public
+templates; a private copy in `sprites.local/` can replace any of them at build
+time (see [Lock-screen art](../developer_setup.md#lock-screen-art)).
+`tools/gen_sprites.py` run-length encodes them into the committed
+`main/sprite_data.c` (about 0.8 KB, 1.0 KB, 0.2 KB and 0.06 KB of flash),
+`uv run tools/gen_sprites.py --check` fails when the two disagree, and
+`test_gen_sprites` round-trips each template PNG and compares it with its screen golden.
+`sprite.c` walks the runs with no LVGL and no scratch buffer; a draw handler in
+`display_screens.c` paints each ink run with one `lv_draw_rect`, as the QR does.
+The handler takes an integer scale and the ink colour per object: the charge
+and time's-up art draw at 1x in black, the break screen's art at 2x (each art
+pixel a 2x2 block, 92x104 on the panel) in white, because that screen is
+inverted, and the bed-time screen's art at 4x (116x92) in white for the same reason. The
+bed-time screen is a full refresh only, so it needs no `CLEAN_BANDS` entry.
+The break screen partial-refreshes in place, but its layout needs no band of its
+own in `CLEAN_BANDS`: the four bands jointly cover every byte of every row, the
+art is static, and a host test maps each changing element to its band.
+Edit the PNG and regenerate; never edit the generated C. The time's-up art is
+placed flush with the bottom edge and its ink may run off it (the template's
+alarm clock is cropped there on purpose), the one place ink may touch a panel
+edge; a host test pins the exact count for the template.
+
 That is also why `sdkconfig.defaults` trims LVGL to the label and bar widgets
 and the I1 draw path only, mirrored in `test/mocks/lv_conf_host.h`. Re-enabling
 any of it is a flash cost and needs the host config changed with it.

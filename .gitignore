@@ -14,6 +14,10 @@ __pycache__/
 # Local secrets (WiFi credentials etc.) — never committed
 *.local.h
 
+# Private lock-screen art: <slot>.png files here replace the public
+# templates in tools/sprites/ at build time (see docs/developer_setup.md)
+sprites.local/
+
 # The owner's device list for tools/gen_ha_dashboard.py (see
 # tools/ha_devices.example.yaml)
 tools/ha_devices.yaml
