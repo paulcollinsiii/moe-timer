@@ -31,7 +31,12 @@ typedef enum {
    selection_changed = Button C swapped the active slot this wake, so an
    EXPIRED `after` is a different timer's old news, not a transition —
    this is how expiry suppression is expressed WITHOUT clobbering
-   `before`. The expiry alert still outranks break_ended. */
+   `before`. The expiry alert still outranks break_ended.
+
+   `before` == TIMER_BREAK never alerts: a break's end restores slot 0 to
+   the state it went in with, so BREAK -> EXPIRED is a restore, not a
+   transition (the expiry was announced before the break, or by the break
+   itself when it fell due at the same instant). */
 wake_render_t wake_policy_render(timer_state_t before, timer_state_t after, bool button_wake, bool break_ended,
                                  bool selection_changed);
 

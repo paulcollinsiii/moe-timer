@@ -30,6 +30,12 @@
 /* Base timestamp: 2026-01-05 00:00:00 UTC (Monday) */
 #define T0 ((time_t)1767571200)
 
+/* timer_adjust and timer_bonus_reconcile take the wall clock now. These
+   tests pin the arithmetic, not the clock: they go through the two-argument
+   forms at the day's origin T0. */
+#define timer_adjust(slot, sec) (timer_adjust)((slot), (sec), T0)
+#define timer_bonus_reconcile(slot, target) (timer_bonus_reconcile)((slot), (target), T0)
+
 /* Slot 2 left disabled to prove the 0/0 stats rule. */
 static const timer_def_t TEST_DEFS[TIMER_SLOT_COUNT] = {
     {"Screen", 0, false, false}, {"Piano", 900, true, true},

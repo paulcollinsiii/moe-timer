@@ -153,6 +153,10 @@ hours. Any button silences it, and that press does nothing else. The timer
 screen then comes back with the state `TIME'S UP`, and the device goes back to
 sleep.
 
+If a screen break comes due at that same instant, the break takes the alarm
+instead: one alarm, the break's, and Screen stays `TIME'S UP` through and after
+the break ([screen breaks](screen_breaks.md#when-a-break-starts)).
+
 ## Adjusting from Home Assistant
 
 A parent adds or takes away Screen time with **Screen adjust (min) today**, a

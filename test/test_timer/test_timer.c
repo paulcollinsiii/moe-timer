@@ -28,6 +28,17 @@
 /* Base timestamp: 2026-01-05 00:00:00 UTC (Monday) */
 #define T0 ((time_t)1767571200)
 
+/* timer_adjust and timer_bonus_reconcile take the wall clock (a deduction
+   that moves a RUNNING wall to <= now expires the slot at now). The many
+   tests that only care about the arithmetic, not the clock, go through
+   these two-argument forms at the day's origin T0, the earliest instant any
+   test starts a run, so a deduction past zero is "at the start". Tests
+   that pin the clock call the real function through the parentheses,
+   `(timer_adjust)(slot, sec, now)`, which the function-like macro does not
+   expand. */
+#define timer_adjust(slot, sec) (timer_adjust)((slot), (sec), T0)
+#define timer_bonus_reconcile(slot, target) (timer_bonus_reconcile)((slot), (target), T0)
+
 /* Slot table used by the multi-timer tests: slot 0 = Screen (schedule-fed),
    slot 2 left disabled to prove select_next skips holes. */
 static const timer_def_t TEST_DEFS[TIMER_SLOT_COUNT] = {
@@ -382,6 +393,222 @@ void test_row3_expiry_and_a_due_break_in_one_tick(void) {
     TEST_ASSERT_TRUE(timer_break_due(T0 + 1800, 1800));
     timer_start_break(T0 + 1800, 900);
     TEST_ASSERT_EQUAL_INT(SLOT_LAUNDRY, timer_break_interrupted_slot());
+}
+
+/* The exact tie, timer half (break-swallows-expiry): the allocation equals
+   the break interval, so the expiry and the break fall due at the same
+   second. The break starts on the EXPIRED slot 0, a reset mid-break
+   restores BREAK-over-EXPIRED (not the RUNNING snapshot of the final
+   minute), and the break's end hands back EXPIRED, which wake_flow must not
+   treat as a fresh transition. */
+void test_exact_tie_break_over_an_expired_slot_survives_a_reset_and_ends_expired(void) {
+    timer_start(T0, 2700);
+    timer_tick(T0 + 2700);
+    TEST_ASSERT_EQUAL(TIMER_EXPIRED, timer_get_state());
+    TEST_ASSERT_TRUE(timer_break_due(T0 + 2700, 2700));
+    timer_start_break(T0 + 2700, 900);
+    TEST_ASSERT_EQUAL(TIMER_BREAK, timer_get_state());
+    timer_record_date(T0);
+
+    timer_snapshot_t snap;
+    timer_make_snapshot(&snap);
+    timer_reset();
+    TEST_ASSERT_TRUE(timer_restore_snapshot(&snap, T0 + 2800));
+    TEST_ASSERT_EQUAL(TIMER_BREAK, timer_get_state());
+    TEST_ASSERT_EQUAL_UINT8(TIMER_EXPIRED, g_rtc_state.break_prev_state);
+
+    timer_break_tick(T0 + 3600);
+    TEST_ASSERT_EQUAL(TIMER_EXPIRED, timer_get_state());
+    TEST_ASSERT_EQUAL_INT32(0, timer_slot_remaining(0, T0 + 3600, 9999));
+
+    /* and a reset AFTER the break's wall end restores straight to EXPIRED */
+    timer_reset();
+    timer_start(T0, 2700);
+    timer_tick(T0 + 2700);
+    timer_start_break(T0 + 2700, 900);
+    timer_record_date(T0);
+    timer_make_snapshot(&snap);
+    timer_reset();
+    TEST_ASSERT_TRUE(timer_restore_snapshot(&snap, T0 + 4000));
+    TEST_ASSERT_EQUAL(TIMER_EXPIRED, timer_get_state());
+}
+
+/* The tie as a late or button wake sees it: nothing has ticked, so slot 0
+   is still RUNNING past its expiry wall and the break gate (which does not
+   look at the state) already reads the balance as due. The break start must
+   expire the slot AT THE WALL rather than pause it with 0 left: pausing it
+   banked PAUSED 0:00 with no completion, and the next B press then played
+   TIME'S UP, a second alarm for one expiry. */
+void test_start_break_over_a_running_slot_past_its_wall_expires_it_and_returns_expired(void) {
+    timer_start(T0, 2700);
+    TEST_ASSERT_EQUAL(TIMER_RUNNING, timer_get_state()); /* no tick */
+    TEST_ASSERT_TRUE(timer_break_due(T0 + 2700, 2700));
+    TEST_ASSERT_TRUE_MESSAGE(timer_start_break(T0 + 2700, 900), "the start did not report the expiry it swallowed");
+    TEST_ASSERT_EQUAL(TIMER_BREAK, timer_get_state());
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(TIMER_EXPIRED, g_rtc_state.break_prev_state, "paused instead of expired");
+    TEST_ASSERT_EQUAL_UINT16_MESSAGE(1, timer_slot_completions(0), "the completion was not counted");
+
+    timer_break_tick(T0 + 3600);
+    TEST_ASSERT_EQUAL_MESSAGE(TIMER_EXPIRED, timer_get_state(), "the break handed back PAUSED");
+    TEST_ASSERT_EQUAL_INT32(0, timer_slot_remaining(0, T0 + 3600, 9999));
+    TEST_ASSERT_EQUAL_UINT16_MESSAGE(1, timer_slot_completions(0), "counted twice");
+    /* the tick that follows finds nothing to expire */
+    timer_tick(T0 + 3601);
+    TEST_ASSERT_EQUAL_UINT16(1, timer_slot_completions(0));
+}
+
+/* Found late, past the wall: it expires at the wall, whatever the clock says. */
+void test_start_break_over_a_running_slot_found_late_expires_it_at_the_wall(void) {
+    timer_start(T0, 2700);
+    TEST_ASSERT_TRUE(timer_start_break(T0 + 2700 + 600, 900));
+    TEST_ASSERT_EQUAL_UINT8(TIMER_EXPIRED, g_rtc_state.break_prev_state);
+    TEST_ASSERT_EQUAL_UINT16(1, timer_slot_completions(0));
+}
+
+/* The ordinary break over a run that has not reached its wall still pauses
+   it and reports no swallowed expiry. */
+void test_start_break_over_a_running_slot_before_its_wall_still_pauses_it(void) {
+    timer_start(T0, 3600);
+    TEST_ASSERT_FALSE(timer_start_break(T0 + 2700, 900));
+    TEST_ASSERT_EQUAL_UINT8(TIMER_PAUSED, g_rtc_state.break_prev_state);
+    TEST_ASSERT_EQUAL_INT32(900, g_rtc_state.slots[0].remaining_at_pause);
+    TEST_ASSERT_EQUAL_UINT16(0, timer_slot_completions(0));
+}
+
+/* Expiry found late: the run segment folds at the WALL. Folding at the
+   clock credited seconds Screen never ran as break-eligible exposure (a 45
+   min run with a 50 min interval, found 5+ min late, then looked due). */
+void test_a_late_expiry_folds_the_run_at_the_wall_not_at_the_clock(void) {
+    timer_start(T0, 2700);
+    timer_tick(T0 + 2700 + 600); /* discovered ten minutes late */
+    TEST_ASSERT_EQUAL(TIMER_EXPIRED, timer_get_state());
+    TEST_ASSERT_EQUAL_INT32_MESSAGE(2700, timer_run_accum(T0 + 3300), "phantom exposure accrued after the wall");
+    TEST_ASSERT_FALSE_MESSAGE(timer_break_due(T0 + 3300, 3000), "an unearned break is due");
+}
+
+/* The READ side of the same clamp: the break gates run BEFORE the tick, so
+   timer_run_accum must not count the live segment past the wall of the
+   RUNNING slot that armed it. Review probe A: a 45 min run read 3000 s
+   (and a break due) five minutes after its wall, with nothing ticked. */
+void test_run_accum_stops_at_the_wall_of_a_running_slot_before_any_tick(void) {
+    timer_start(T0, 2700);
+    TEST_ASSERT_EQUAL_INT32_MESSAGE(2700, timer_run_accum(T0 + 3000), "the segment past the wall was counted");
+    TEST_ASSERT_FALSE_MESSAGE(timer_break_due(T0 + 3000, 3000), "an unearned break is due before the tick");
+    TEST_ASSERT_EQUAL(TIMER_RUNNING, timer_get_state()); /* nothing ticked */
+}
+
+/* Probe B: an extra past its wall, Screen holding banked exposure. */
+void test_run_accum_clamps_an_extra_past_its_wall(void) {
+    timer_start(T0, 3000);
+    timer_pause(T0 + 1000); /* accum 1000 */
+    select_slot(SLOT_LAUNDRY);
+    timer_start(T0 + 1000, 600); /* wall T0+1600, feeds the balance */
+    TEST_ASSERT_EQUAL_INT32_MESSAGE(1600, timer_run_accum(T0 + 1720), "120 s past the wall were counted");
+}
+
+/* Control: before the wall the live segment still counts in full, and at
+   the wall exactly. */
+void test_run_accum_counts_the_live_segment_up_to_the_wall(void) {
+    timer_start(T0, 2700);
+    TEST_ASSERT_EQUAL_INT32(2000, timer_run_accum(T0 + 2000));
+    TEST_ASSERT_EQUAL_INT32(2700, timer_run_accum(T0 + 2700));
+    TEST_ASSERT_TRUE(timer_break_due(T0 + 2700, 2700)); /* a run that earned it still does */
+}
+
+/* Probe C: a deduction that moves the wall into the PAST of a slot that
+   genuinely ran. The wall was not reached, it was moved: the run ended
+   now, so the segment folds at now (300 s), not at the moved wall. */
+void test_a_deduction_past_zero_expires_the_slot_at_now_and_folds_at_now(void) {
+    select_slot(SLOT_LAUNDRY);
+    timer_start(T0, 600);
+    TEST_ASSERT_TRUE((timer_adjust)(SLOT_LAUNDRY, -500, T0 + 300)); /* wall T0+100, ran 300 s */
+    TEST_ASSERT_EQUAL(TIMER_EXPIRED, timer_get_state());
+    TEST_ASSERT_EQUAL_UINT16(1, timer_slot_completions(SLOT_LAUNDRY));
+    TEST_ASSERT_EQUAL_INT32_MESSAGE(300, timer_run_accum(T0 + 300), "the 300 s that ran were lost");
+}
+
+/* Probe C2: the same on an eligible slot; the rest credit must be spent. */
+void test_a_deduction_past_zero_drains_the_balance_for_the_whole_run(void) {
+    timer_start(T0, 3000);
+    timer_pause(T0 + 1000); /* accum 1000 */
+    select_slot(SLOT_PIANO);
+    timer_start(T0 + 1000, 900);
+    TEST_ASSERT_TRUE((timer_adjust)(SLOT_PIANO, -800, T0 + 1600)); /* wall T0+1100, ran 600 s by now */
+    TEST_ASSERT_EQUAL(TIMER_EXPIRED, timer_get_state());
+    TEST_ASSERT_EQUAL_INT32_MESSAGE(400, timer_run_accum(T0 + 1600), "rest credit lost");
+}
+
+/* A deduction that leaves the wall in the FUTURE only moves it; the later
+   natural expiry, found late, folds at that wall. */
+void test_a_deduction_that_leaves_the_wall_ahead_then_expires_late_at_the_wall(void) {
+    select_slot(SLOT_LAUNDRY);
+    timer_start(T0, 600);
+    TEST_ASSERT_TRUE((timer_adjust)(SLOT_LAUNDRY, -200, T0 + 100)); /* wall T0+400, ran 100 s */
+    TEST_ASSERT_EQUAL(TIMER_RUNNING, timer_get_state());
+    timer_tick(T0 + 1000); /* found 600 s late */
+    TEST_ASSERT_EQUAL(TIMER_EXPIRED, timer_get_state());
+    TEST_ASSERT_EQUAL_UINT16(1, timer_slot_completions(SLOT_LAUNDRY));
+    TEST_ASSERT_EQUAL_INT32(400, timer_run_accum(T0 + 1000));
+}
+
+/* Probe D: a reconcile that shrinks a run below its elapsed time expires
+   it at now, folding the 300 s it ran. */
+void test_a_reconcile_shrink_below_elapsed_folds_at_now(void) {
+    select_slot(SLOT_LAUNDRY);
+    timer_start(T0, 600);
+    timer_def_t shrunk = TEST_DEFS[SLOT_LAUNDRY];
+    shrunk.duration_sec = 100;
+    TEST_ASSERT_EQUAL(TIMER_RECONCILE_EXPIRED,
+                      timer_reconcile_def(SLOT_LAUNDRY, &TEST_DEFS[SLOT_LAUNDRY], &shrunk, T0 + 300, NULL));
+    TEST_ASSERT_EQUAL_INT32_MESSAGE(300, timer_run_accum(T0 + 300), "the 300 s that ran were lost");
+}
+
+/* A swallow where an EXTRA is the RUNNING slot past its wall: it expires
+   (one completion), the break ends back on it EXPIRED, and the next tick
+   does not expire it again. Review probe B. */
+void test_a_swallow_by_an_extra_expires_it_once_and_the_break_returns_to_it_expired(void) {
+    timer_start(T0, 3000);
+    timer_pause(T0 + 1000);
+    select_slot(SLOT_LAUNDRY);
+    timer_start(T0 + 1000, 600); /* wall T0+1600 */
+    const time_t now = T0 + 1720;
+    TEST_ASSERT_TRUE(timer_start_break(now, 900));
+    TEST_ASSERT_EQUAL(TIMER_EXPIRED, timer_slot_state(SLOT_LAUNDRY));
+    TEST_ASSERT_EQUAL_UINT16(1, timer_slot_completions(SLOT_LAUNDRY));
+    TEST_ASSERT_EQUAL(TIMER_BREAK, timer_slot_state(0));
+    timer_tick(now + 900);
+    TEST_ASSERT_TRUE(timer_break_take_ended(now + 900, NULL));
+    TEST_ASSERT_TRUE(timer_select_interrupted());
+    TEST_ASSERT_EQUAL_INT(SLOT_LAUNDRY, timer_active_slot());
+    TEST_ASSERT_EQUAL(TIMER_EXPIRED, timer_get_state());
+    timer_tick(now + 901);
+    TEST_ASSERT_EQUAL(TIMER_EXPIRED, timer_get_state());
+    TEST_ASSERT_EQUAL_UINT16_MESSAGE(1, timer_slot_completions(SLOT_LAUNDRY), "expired a second time");
+}
+
+/* Starting a break twice: the second call is the idempotent refusal and
+   counts nothing. */
+void test_a_second_break_start_does_not_swallow_or_count_again(void) {
+    timer_start(T0, 600);
+    TEST_ASSERT_TRUE(timer_start_break(T0 + 700, 900));
+    TEST_ASSERT_FALSE(timer_start_break(T0 + 701, 900));
+    TEST_ASSERT_EQUAL_UINT16(1, timer_slot_completions(0));
+}
+
+/* A snapshot taken after a swallow restores without counting it twice. */
+void test_a_snapshot_after_a_swallow_restores_without_a_second_completion(void) {
+    select_slot(SLOT_LAUNDRY);
+    timer_start(T0, 600);
+    const time_t now = T0 + 700;
+    TEST_ASSERT_TRUE(timer_start_break(now, 900));
+    strcpy(g_rtc_state.last_date, "2026-01-05");
+    timer_snapshot_t snap;
+    timer_make_snapshot(&snap);
+    timer_reset();
+    TEST_ASSERT_TRUE(timer_restore_snapshot(&snap, now + 10));
+    TEST_ASSERT_EQUAL(TIMER_EXPIRED, timer_slot_state(SLOT_LAUNDRY));
+    TEST_ASSERT_EQUAL_UINT16(1, timer_slot_completions(SLOT_LAUNDRY));
+    TEST_ASSERT_EQUAL(TIMER_BREAK, timer_slot_state(0));
 }
 
 /* Row 4: a break-eligible timer starts normally during a break. */
@@ -2057,12 +2284,14 @@ void test_adjust_running_deducts_expiry_and_allocation(void) {
     TEST_ASSERT_EQUAL_INT32(3000, timer_tick(T0));
 }
 
-void test_adjust_running_past_zero_expires_on_next_tick(void) {
+void test_adjust_running_past_zero_expires_at_once(void) {
     timer_start(T0, 600);
-    timer_adjust(0, -900);                               /* deduction exceeds remaining */
-    TEST_ASSERT_EQUAL(TIMER_RUNNING, timer_get_state()); /* until the tick */
-    timer_tick(T0 + 1);
+    timer_adjust(0, -900); /* deduction exceeds remaining: expires inside the call */
     TEST_ASSERT_EQUAL(TIMER_EXPIRED, timer_get_state());
+    TEST_ASSERT_EQUAL_UINT16(1, timer_slot_completions(0));
+    /* ...and the next tick finds an EXPIRED slot: no second expiry. */
+    timer_tick(T0 + 1);
+    TEST_ASSERT_EQUAL_UINT16(1, timer_slot_completions(0));
 }
 
 void test_adjust_paused_past_zero_expires(void) {
@@ -3572,7 +3801,7 @@ int main(void) {
     RUN_TEST(test_bonus_reconcile_reports_whether_a_delta_landed);
     RUN_TEST(test_adjust_reports_whether_it_moved_anything);
     RUN_TEST(test_adjust_running_deducts_expiry_and_allocation);
-    RUN_TEST(test_adjust_running_past_zero_expires_on_next_tick);
+    RUN_TEST(test_adjust_running_past_zero_expires_at_once);
     RUN_TEST(test_adjust_paused_past_zero_expires);
     RUN_TEST(test_adjust_paused_partial_deduction_stays_paused);
     RUN_TEST(test_adjust_break_clamps_frozen_remaining);
@@ -3637,6 +3866,21 @@ int main(void) {
     RUN_TEST(test_break_due_at_interval_survives_a_pause);
     RUN_TEST(test_row2_a_laundry_run_earns_the_break_and_is_paused_by_it);
     RUN_TEST(test_row3_expiry_and_a_due_break_in_one_tick);
+    RUN_TEST(test_exact_tie_break_over_an_expired_slot_survives_a_reset_and_ends_expired);
+    RUN_TEST(test_start_break_over_a_running_slot_past_its_wall_expires_it_and_returns_expired);
+    RUN_TEST(test_start_break_over_a_running_slot_found_late_expires_it_at_the_wall);
+    RUN_TEST(test_start_break_over_a_running_slot_before_its_wall_still_pauses_it);
+    RUN_TEST(test_a_late_expiry_folds_the_run_at_the_wall_not_at_the_clock);
+    RUN_TEST(test_run_accum_stops_at_the_wall_of_a_running_slot_before_any_tick);
+    RUN_TEST(test_run_accum_clamps_an_extra_past_its_wall);
+    RUN_TEST(test_run_accum_counts_the_live_segment_up_to_the_wall);
+    RUN_TEST(test_a_deduction_past_zero_expires_the_slot_at_now_and_folds_at_now);
+    RUN_TEST(test_a_deduction_past_zero_drains_the_balance_for_the_whole_run);
+    RUN_TEST(test_a_deduction_that_leaves_the_wall_ahead_then_expires_late_at_the_wall);
+    RUN_TEST(test_a_reconcile_shrink_below_elapsed_folds_at_now);
+    RUN_TEST(test_a_swallow_by_an_extra_expires_it_once_and_the_break_returns_to_it_expired);
+    RUN_TEST(test_a_second_break_start_does_not_swallow_or_count_again);
+    RUN_TEST(test_a_snapshot_after_a_swallow_restores_without_a_second_completion);
     RUN_TEST(test_row4_a_break_starts_an_eligible_timer_normally);
     RUN_TEST(test_row5_a_break_refuses_a_non_eligible_timer);
     RUN_TEST(test_row6_a_break_refuses_screen_itself);

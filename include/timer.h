@@ -373,12 +373,16 @@ bool timer_reload(void);
    time, negative takes it back ("chores not done"). IDLE banks the
    adjustment, realized at the next start (clamped at an empty start);
    RUNNING/PAUSED/BREAK adjust in place — a deduction that empties a
-   PAUSED timer expires it (same contract as timer_reconcile_def), an
-   emptied RUNNING timer expires on its next tick, a BREAK keeps its
-   frozen zero until the post-break resume. EXPIRED: a grant becomes
-   PAUSED holding it (press B to use it); a deduction is a no-op. Works
-   on any slot — no now needed (RUNNING adjusts the stored wall expiry;
-   the rest store durations).
+   PAUSED timer expires it (same contract as timer_reconcile_def), a
+   RUNNING timer whose wall the deduction moves to <= now expires
+   IMMEDIATELY, at `now`, with its live segment folded at now (it ran
+   until now; a moved wall is no end of the run, so it must not fold at
+   the moved wall). The caller sees RUNNING -> EXPIRED across the call and
+   raises the one TIME'S UP from it. A deduction that leaves the wall
+   ahead just moves it. A BREAK keeps its frozen zero until the
+   post-break resume. EXPIRED: a grant becomes PAUSED holding it (press B
+   to use it); a deduction is a no-op. Works on any slot; `now` is read
+   only by the RUNNING arm.
 
    A BREAK ENTERED FROM EXPIRED takes the EXPIRED rules, not the BREAK
    ones, and that is not a special case so much as the only reading of
@@ -395,12 +399,13 @@ bool timer_reload(void);
    The orchestrator needs that answer to decide on a repaint — an
    adjustment banked while IDLE changes the panel without changing the
    state, so a state diff cannot see it. */
-bool timer_adjust(int slot, int32_t sec);
+bool timer_adjust(int slot, int32_t sec, time_t now);
 /* Idempotent signed "adjustment seconds today" for a slot (HA number):
    applies only the delta beyond what's already been applied today, in
    either direction, so re-delivering the same retained target every wake
-   is a no-op. bonus_applied resets at timer_reset (day rollover). */
-bool timer_bonus_reconcile(int slot, int32_t target_sec); /* true when a delta landed */
+   is a no-op. bonus_applied resets at timer_reset (day rollover).
+   `now` is timer_adjust's. */
+bool timer_bonus_reconcile(int slot, int32_t target_sec, time_t now); /* true when a delta landed */
 
 /* Release the chore gate's withheld seconds onto the Screen timer (slot 0).
    Runs timer_adjust's STATE MACHINE without its BOOKKEEPING: the seconds
@@ -622,8 +627,15 @@ int32_t timer_run_accum(time_t now); /* balance incl. the live segment; >= 0 */
    allocation is spent. Refused only while a break is already running. */
 bool timer_break_due(time_t now, int32_t interval_sec);
 /* Start a break on slot 0: pauses whatever is RUNNING (I6), records the
-   interrupted slot, resets the balance, snaps the selection to slot 0. */
-void timer_start_break(time_t now, int32_t duration_sec);
+   interrupted slot, resets the balance, snaps the selection to slot 0.
+
+   A RUNNING slot already at or past its expiry wall (nothing has ticked
+   since: a late wake, a button wake) is EXPIRED at the wall instead of
+   paused with nothing left, completion counted exactly as the tick counts
+   it, so the break hands it back EXPIRED. Returns true in that case, so the
+   caller knows the start swallowed an expiry (no TIME'S UP is owed, but the
+   event is still owed to HA); false for every other start. */
+bool timer_start_break(time_t now, int32_t duration_sec);
 bool timer_break_active(void);             /* slot 0 == TIMER_BREAK */
 int32_t timer_break_remaining(time_t now); /* slot 0 BREAK: seconds left, else 0 */
 /* End an elapsed break: slot 0 returns to the state it was in when the

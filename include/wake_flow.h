@@ -285,7 +285,10 @@ bool wake_flow_maybe_start_break(time_t now);
    Exposed rather than wrapped in a main.c thunk because it is
    ADDRESS-TAKEN: net_apply's on_active_expired_alert hook points straight
    at it, so a network window that expires the active timer runs this same
-   sequence.
+   sequence. That hook (also run inside the lock gates' windows) keeps the
+   plain alarm: the wake's own expiry sites go through a static
+   wake_flow_expire_or_break() instead, where a break due at the same instant
+   takes the alarm (see its comment in wake_flow.c).
 
    Ends by marking the wake as owing HA a publish of the expiry. The window
    is NOT opened here: the alarm and the repaint are finished, and the

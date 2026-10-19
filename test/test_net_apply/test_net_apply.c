@@ -141,6 +141,10 @@ static void ops_locate(void) {
 /* Base timestamp: 2026-01-05 00:00:00 UTC (Monday) */
 #define T0 ((time_t)1767571200)
 
+/* timer_bonus_reconcile takes the wall clock now; the one direct call below
+   pins the arithmetic, not the clock. */
+#define timer_bonus_reconcile(slot, target) (timer_bonus_reconcile)((slot), (target), T0)
+
 /* Pre-window table: slot 1 Piano 15 min reloadable, slot 2 disabled,
    slot 3 Meditation 10 min. */
 static const timer_def_t PRE_DEFS[TIMER_SLOT_COUNT] = {
@@ -588,6 +592,52 @@ void test_active_slot_shrunk_below_elapsed_expires_with_alert(void) {
     TEST_ASSERT_EQUAL(TIMER_EXPIRED, timer_get_state());
 }
 
+/* An HA deduction past zero expires the RUNNING active slot INSIDE
+   timer_adjust now (it folds at now), so no later tick sees RUNNING ->
+   EXPIRED. The window announces it the way a reconcile's expiry is:
+   the hook once and ALERTED, never zero alarms and never two. */
+void test_grant_deduction_past_zero_on_the_active_slot_alerts_once(void) {
+    select_slot(1);
+    timer_start(T0, 900);
+    mock_time_set(T0 + 300);
+    TEST_ASSERT_TRUE(net_apply_open());
+    mock_ha_grant_pending = true;
+    mock_ha_grant_slot = 1;
+    mock_ha_grant_sec = -800; /* wall T0+100, already behind now */
+    TEST_ASSERT_EQUAL(NET_FINISH_ALERTED, net_apply_finish());
+    TEST_ASSERT_EQUAL_INT(1, n_expiry_alert);
+    TEST_ASSERT_EQUAL(TIMER_EXPIRED, timer_get_state());
+    TEST_ASSERT_EQUAL_UINT16(1, timer_slot_completions(1));
+    /* It ran 300 s, eligible: folded at now, not at the moved wall. */
+    TEST_ASSERT_EQUAL_INT32(0, timer_run_accum(T0 + 300)); /* floored: no credit banked */
+}
+
+void test_grant_deduction_that_leaves_time_does_not_alert(void) {
+    select_slot(1);
+    timer_start(T0, 900);
+    mock_time_set(T0 + 300);
+    TEST_ASSERT_TRUE(net_apply_open());
+    mock_ha_grant_pending = true;
+    mock_ha_grant_slot = 1;
+    mock_ha_grant_sec = -300; /* wall T0+600, still ahead */
+    TEST_ASSERT_EQUAL(NET_FINISH_CHANGED, net_apply_finish());
+    TEST_ASSERT_EQUAL_INT(0, n_expiry_alert);
+    TEST_ASSERT_EQUAL(TIMER_RUNNING, timer_get_state());
+}
+
+void test_bonus_deduction_past_zero_on_a_running_screen_alerts_once(void) {
+    timer_start(T0, 600); /* Screen, slot 0, active */
+    mock_time_set(T0 + 300);
+    TEST_ASSERT_TRUE(net_apply_open());
+    mock_ha_bonus_pending = true;
+    mock_ha_bonus_target = -500;
+    TEST_ASSERT_EQUAL(NET_FINISH_ALERTED, net_apply_finish());
+    TEST_ASSERT_EQUAL_INT(1, n_expiry_alert);
+    TEST_ASSERT_EQUAL(TIMER_EXPIRED, timer_get_state());
+    /* Screen ran 300 s: the balance holds all 300 (folded at now). */
+    TEST_ASSERT_EQUAL_INT32(300, timer_run_accum(T0 + 300));
+}
+
 void test_bonus_must_not_downgrade_an_alerted_reconcile(void) {
     /* ALERTED means the alert path already owns the display; a bonus
        landing in the same window must not turn that into an ordinary
@@ -737,6 +787,9 @@ int main(void) {
     RUN_TEST(test_invisible_grant_never_masks_a_visible_screen_bonus);
     RUN_TEST(test_screen_adjust_behind_a_break_leaves_the_chip_alone);
     RUN_TEST(test_screen_grant_that_unexpires_slot_zero_is_still_invisible);
+    RUN_TEST(test_grant_deduction_past_zero_on_the_active_slot_alerts_once);
+    RUN_TEST(test_grant_deduction_that_leaves_time_does_not_alert);
+    RUN_TEST(test_bonus_deduction_past_zero_on_a_running_screen_alerts_once);
     RUN_TEST(test_bonus_must_not_downgrade_an_alerted_reconcile);
     RUN_TEST(test_locate_pending_fires_locate_after_apply);
     RUN_TEST(test_no_locate_when_not_pending);

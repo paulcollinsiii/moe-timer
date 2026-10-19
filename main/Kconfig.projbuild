@@ -176,11 +176,12 @@ menu "MagTag Timer"
             firmware bug), the device saves the timer snapshot and forces
             deep sleep. The longest legitimate wake is the final minute:
             the pre-event lead and render-grid wait (95 s), the expiry
-            alarm (15.1 s at 5 cycles), two full refreshes, and the stats
+            alarm (16.0 s at 5 cycles) or the break or bed-time alarm that
+            can take its place, with their full refreshes, and the stats
             window the expiry publishes in. That window is budgeted at its
             worst case, a working AP with SNTP unreachable: wifi connect
             15 s + SNTP 15 s + MQTT connect 5 s + two publish drains 3 s
-            each + retained wait 1.5 s = 42.5 s. The total is 160.6 s at
+            each + retained wait 1.5 s = 42.5 s. The total is 161.5 s at
             the defaults, and wake_flow.c _Static_asserts it stays under
             this value, so the build refuses an alarm length or failsafe
             that cannot hold it. A follow-up window (for a button press

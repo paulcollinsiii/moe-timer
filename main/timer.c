@@ -458,7 +458,7 @@ void timer_start(time_t now, int32_t allocation_sec) {
 }
 
 static void mark_expired(timer_slot_state_t *sl);
-static void expire_slot(int slot, time_t now);
+static void expire_slot_at(int slot, time_t fold_at);
 
 /* The adjustment state machine, shared by the two bookkeeping policies
    below. `record` is their ONLY difference and it gates exactly one line
@@ -466,7 +466,7 @@ static void expire_slot(int slot, time_t now);
    duplicated deliberately: a second copy of these arms would drift, and
    the EXPIRED and BREAK contracts here are subtle enough that the drift
    would be silent. */
-static bool adjust_core(int slot, int32_t sec, bool record) {
+static bool adjust_core(int slot, int32_t sec, time_t now, bool record) {
     if (slot < 0 || slot >= TIMER_SLOT_COUNT || sec == 0)
         return false;
     timer_slot_state_t *sl = &g_rtc_state.slots[slot];
@@ -493,12 +493,18 @@ static bool adjust_core(int slot, int32_t sec, bool record) {
     const bool parked_expired = (sl->state == TIMER_BREAK && g_rtc_state.break_prev_state == (uint8_t)TIMER_EXPIRED);
     switch (parked_expired ? (int)TIMER_EXPIRED : (int)sl->state) {
         case TIMER_RUNNING:
-            /* A deduction past zero expires on the next tick — the normal
-               expiry path, alert included. */
+            /* A deduction that leaves the wall ahead just moves it (the
+               later natural expiry folds at that wall). One that moves it
+               to <= now is not a wall the run REACHED: the slot ran until
+               now, so it expires HERE, folding at now (see expire_slot).
+               The caller's repaint sees RUNNING -> EXPIRED across the call
+               and raises the one alert, as the next tick used to. */
             sl->expiry_wall_time += sec;
             sl->allocation_sec += sec;
             if (sl->allocation_sec < 0)
                 sl->allocation_sec = 0;
+            if (sl->expiry_wall_time <= (int64_t)now)
+                expire_slot_at(slot, now);
             break;
         case TIMER_PAUSED:
         case TIMER_BREAK:
@@ -559,8 +565,8 @@ static bool adjust_core(int slot, int32_t sec, bool record) {
     return true;
 }
 
-bool timer_adjust(int slot, int32_t sec) {
-    return adjust_core(slot, sec, true);
+bool timer_adjust(int slot, int32_t sec, time_t now) {
+    return adjust_core(slot, sec, now, true);
 }
 
 bool timer_release_gated(int32_t sec) {
@@ -591,17 +597,22 @@ bool timer_release_gated(int32_t sec) {
        block, so it has no repaint to ask for. */
     if (sec != 0 && g_rtc_state.slots[0].state == TIMER_IDLE)
         return true;
-    return adjust_core(0, sec, false);
+    /* now = 0: the release is a GRANT (chores_withheld_sec is unsigned), and
+       a grant moves a RUNNING wall forward, never to <= now, so it owes no
+       clock. Epoch 0 is below every real wall, so even a hypothetical
+       negative sec could not take adjust_core's immediate-expiry branch;
+       it would fall to the next tick like the pre-change path. */
+    return adjust_core(0, sec, 0, false);
 }
 
-bool timer_bonus_reconcile(int slot, int32_t target_sec) {
+bool timer_bonus_reconcile(int slot, int32_t target_sec, time_t now) {
     if (slot < 0 || slot >= TIMER_SLOT_COUNT)
         return false;
     timer_slot_state_t *sl = &g_rtc_state.slots[slot];
     int32_t delta = target_sec - sl->bonus_applied;
     if (delta == 0)
         return false; /* target met — idempotent across wakes and replays */
-    bool moved = timer_adjust(slot, delta);
+    bool moved = timer_adjust(slot, delta, now);
     sl->bonus_applied = target_sec;
     return moved;
 }
@@ -622,11 +633,33 @@ static void mark_expired(timer_slot_state_t *sl) {
         sl->completions++; /* the run reached 00:00; saturate, never wrap */
 }
 
-static void expire_slot(int slot, time_t now) {
+/* Expire a RUNNING slot, folding its live segment at `fold_at`. */
+static void expire_slot_at(int slot, time_t fold_at) {
     timer_slot_state_t *sl = &g_rtc_state.slots[slot];
     if (sl->state == TIMER_RUNNING)
-        fold_run_segment(now);
+        fold_run_segment(fold_at);
     mark_expired(sl);
+}
+
+/* A wall REACHED NATURALLY, however late it was found: the run ENDED at
+   the wall, so the live segment folds there and not at `now`. Seconds past
+   it were never run, and folding them would credit break-eligible exposure
+   Screen never had (a 45 min run against a 50 min interval, found 5 min
+   late, would look due). Same rule as the snapshot-restore path and as
+   timer_run_accum's read-side clamp.
+
+   THAT READING HOLDS ONLY BECAUSE NO OTHER PATH LEAVES A RUNNING SLOT'S
+   WALL IN THE PAST. The two that can move a wall (adjust_core's deduction,
+   timer_reconcile_def's shrink) expire the slot at `now` themselves when
+   the new wall is <= now, folding at now: the slot genuinely ran until
+   then, and a moved wall is no end of the run. So a RUNNING slot with a
+   past wall means the wall was reached, and min(now, wall) is the answer. */
+static void expire_slot(int slot, time_t now) {
+    const timer_slot_state_t *sl = &g_rtc_state.slots[slot];
+    time_t at = now;
+    if (sl->expiry_wall_time != 0 && sl->expiry_wall_time < (int64_t)now)
+        at = (time_t)sl->expiry_wall_time;
+    expire_slot_at(slot, at);
 }
 
 timer_reconcile_t timer_reconcile_def(int slot, const timer_def_t *old_def, const timer_def_t *new_def, time_t now,
@@ -691,7 +724,9 @@ timer_reconcile_t timer_reconcile_def(int slot, const timer_def_t *old_def, cons
     if (running) {
         sl->expiry_wall_time += delta;
         if (sl->expiry_wall_time <= (int64_t)now) {
-            expire_slot(slot, now);
+            /* A wall the edit MOVED, not one the run reached: it ran until
+               now, so fold at now (see expire_slot). */
+            expire_slot_at(slot, now);
             return TIMER_RECONCILE_EXPIRED;
         }
     } else {
@@ -761,7 +796,17 @@ int32_t timer_run_accum(time_t now) {
     const timer_slot_state_t *s0 = screen_slot();
     int64_t accum = s0->run_accum_sec;
     if (s0->run_started_wall != 0) {
-        int64_t seg = (int64_t)now - s0->run_started_wall;
+        /* The segment ENDS at the wall of the RUNNING slot that armed it
+           when that wall is already behind `now`: the break gates read this
+           BEFORE the tick, and seconds past the wall were never run (see
+           expire_slot, which folds the same way once the tick lands). */
+        int64_t end = (int64_t)now;
+        if (g_rtc_state.run_segment_slot < TIMER_SLOT_COUNT) {
+            const timer_slot_state_t *runner = &g_rtc_state.slots[g_rtc_state.run_segment_slot];
+            if (runner->state == TIMER_RUNNING && runner->expiry_wall_time != 0 && runner->expiry_wall_time < end)
+                end = runner->expiry_wall_time;
+        }
+        int64_t seg = end - s0->run_started_wall;
         if (seg > 0)
             accum += timer_slot_break_eligible(g_rtc_state.run_segment_slot) ? -seg : seg;
     }
@@ -784,14 +829,14 @@ bool timer_break_due(time_t now, int32_t interval_sec) {
     return timer_run_accum(now) >= interval_sec;
 }
 
-void timer_start_break(time_t now, int32_t duration_sec) {
+bool timer_start_break(time_t now, int32_t duration_sec) {
     /* Slot 0 explicitly: the break lives there whichever slot is
        selected. Unlike the predecessor it no longer requires a RUNNING
        Screen — the break may have been earned entirely by a non-eligible
        extra while Screen was never started. */
     timer_slot_state_t *s0 = screen_slot();
     if (s0->state == TIMER_BREAK)
-        return; /* idempotent */
+        return false; /* idempotent */
 
     /* Recorded BEFORE the selection snaps: nothing else remembers what
        the break interrupted (rule 8). */
@@ -806,8 +851,19 @@ void timer_start_break(time_t now, int32_t duration_sec) {
        break is G3: recomputing unconditionally would read a PAUSED slot
        0's expiry_wall_time of 0 as a large negative remaining, clamp it
        to zero, and destroy the kid's banked screen time. */
-    if (active()->state == TIMER_RUNNING)
-        timer_pause(now);
+    bool swallowed_expiry = false;
+    if (active()->state == TIMER_RUNNING) {
+        if (active()->expiry_wall_time <= (int64_t)now) {
+            /* Already past its wall and nothing ticked (a late or button
+               wake: the break gate runs before the tick). Pausing it would
+               bank PAUSED 0:00 with no completion and owe a second TIME'S
+               UP at the next B press. It expired at the wall: say so. */
+            expire_slot(g_rtc_state.active_slot, now);
+            swallowed_expiry = true;
+        } else {
+            timer_pause(now);
+        }
+    }
 
     /* Captured AFTER the pause: a break must never resume the screen
        timer by itself, so a RUNNING slot 0 is remembered as PAUSED. */
@@ -819,6 +875,7 @@ void timer_start_break(time_t now, int32_t duration_sec) {
     s0->break_expiry_wall = (int64_t)now + duration_sec;
     s0->state = TIMER_BREAK;
     g_rtc_state.active_slot = 0; /* selection snaps to the break screen */
+    return swallowed_expiry;
 }
 
 bool timer_break_active(void) {

@@ -13,7 +13,14 @@ wake_render_t wake_policy_render(timer_state_t before, timer_state_t after, bool
                                  bool selection_changed) {
     /* A swap onto an already-expired slot is a selection change, not a
        transition — the alarm was heard when that timer actually ran. */
-    if (after == TIMER_EXPIRED && before != TIMER_EXPIRED && !selection_changed)
+    /* Nor is a break's end one. The break hands slot 0 back in the state it
+       went in with (timer.c I7), and a break pauses a RUNNING slot as it
+       starts, so BREAK -> EXPIRED can only be a restore of a slot that was
+       already expired when the break began. Its alarm was the expiry's own,
+       or - when a break fell due at the very instant the timer ran out and
+       swallowed that alarm - the break's. Alerting here would play TIME'S UP
+       for an expiry that has already been announced. */
+    if (after == TIMER_EXPIRED && before != TIMER_EXPIRED && before != TIMER_BREAK && !selection_changed)
         return WAKE_RENDER_EXPIRY_ALERT; /* TIME'S UP outranks a repaint */
     if (break_ended) {
         /* A break can end behind another selected timer, changing the
