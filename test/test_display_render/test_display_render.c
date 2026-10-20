@@ -16,6 +16,7 @@
    test_setup_screens_own_test_host_matches_the_real_softap_address
    below). display_screens.c itself never includes this: display.c must
    not depend on setup_session.h, and display_screens.c follows it. */
+#include "config_validate.h" /* CFG_BOUND_ALLOC_HI: the longest legal frozen screen time */
 #include "setup_session.h"
 #include "setup_trigger.h" /* SETUP_TRIGGER_WIFI_FAILING_HINT_TEXT */
 
@@ -401,45 +402,69 @@ void test_break_screen_with_every_chore_done(void) {
 /* Painted rows on the INVERTED break screen. LVGL I1 has 1 = white, so
    here ink is the set bits — the mirror image of assert_rows_blank above,
    which reads the upright layouts. */
+static bool white_px(int x, int y) {
+    return ((s_captured[y * (HOR / 8) + x / 8] >> (7 - (x & 7))) & 1) != 0;
+}
+
+/* Does row y paint anything in the right column (x >= BREAK_COL_X)? The
+   art owns the columns to its left, so the column's bands are read on
+   their own. */
 static bool break_row_has_ink(int y) {
-    for (int b = 0; b < HOR / 8; b++) {
-        if (s_captured[y * (HOR / 8) + b] != 0x00)
+    for (int x = BREAK_COL_X; x < HOR; x++) {
+        if (white_px(x, y))
             return true;
     }
     return false;
 }
 
-/* Runs of consecutive painted rows, top to bottom; returns how many. */
+/* Runs of painted rows in the right column, top to bottom; returns how
+   many. A run of fewer than 3 blank rows does not end a band: '/' paints
+   only its tips two rows above and below the cap height of the chore line
+   ("Chores 0/3"), and those tips belong to that line, not to a band of
+   their own. Every real gutter on this screen is 4 rows or more. */
+#define BREAK_BAND_MIN_GAP 3
 static int break_ink_bands(int *tops, int *bots, int max) {
     int n = 0;
     bool in = false;
+    int blank = 0;
     for (int y = 0; y < VER; y++) {
         bool ink = break_row_has_ink(y);
         if (ink && !in) {
             TEST_ASSERT_TRUE_MESSAGE(n < max, "more ink bands than the break screen can hold");
             tops[n] = y;
             in = true;
-        } else if (!ink && in) {
-            bots[n++] = y - 1;
+            blank = 0;
+        } else if (ink) {
+            blank = 0;
+        } else if (in && ++blank == BREAK_BAND_MIN_GAP) {
+            bots[n++] = y - blank;
             in = false;
         }
     }
     if (in)
-        bots[n++] = VER - 1;
+        bots[n++] = VER - 1 - blank;
     return n;
 }
 
-/* THE trap this layout had to clear. On the unchanged break screen the
-   48 pt countdown ends at row 104 and the button row starts at row 109:
-   four blank rows, where a 16 pt line needs twelve. So there is no band
-   free for a chore line where the countdown stands, and a list lifts the
-   bar and the countdown to open one.
+/* The right column's stack: title, countdown, bar, chore line, button row,
+   MEASURED off the framebuffer (ink rows, inclusive) rather than from LVGL
+   box extents, which overstate a 48 pt label by 9 rows each end. The
+   failure mode is silent — overlapping white-on-black text is unreadable on
+   e-ink and MAGTAG_WRITE_GOLDEN would record the overlap as the new
+   correct answer — so the bands are pinned exactly and the gutters are
+   asserted separately. The same rows are what display.c's CLEAN_BANDS
+   cut up (notes file: which band covers which element). */
+#define BREAK_BAND_TITLE_TOP 4
+#define BREAK_BAND_TITLE_BOT 16
+#define BREAK_BAND_COUNT_TOP 26
+#define BREAK_BAND_COUNT_BOT 59
+#define BREAK_BAND_BAR_TOP 68
+#define BREAK_BAND_BAR_BOT 83
+#define BREAK_BAND_CHORE_TOP 89 /* the '/' tip; the letters and digits are 91..102 */
+#define BREAK_BAND_CHORE_BOT 104
+#define BREAK_BAND_ROW_TOP 109
+#define BREAK_BAND_ROW_BOT 124
 
-   Measured on the glass rather than in the arithmetic, because the
-   failure mode is silent: overlapping white-on-black text is unreadable
-   on e-ink, and MAGTAG_WRITE_GOLDEN would happily record the overlap as
-   the new correct answer. Five bands with a gutter each is the property;
-   the goldens pin which pixels are in them. */
 void test_the_break_chore_line_clears_the_countdown_and_the_row(void) {
     display_state_t st = break_chore_state(3, 2);
     st.swap_next_name = "Piano";
@@ -450,16 +475,222 @@ void test_the_break_chore_line_clears_the_countdown_and_the_row(void) {
     int n = break_ink_bands(tops, bots, 8);
     for (int i = 0; i < n; i++)
         printf("break band %d: rows %d..%d\n", i, tops[i], bots[i]);
-    TEST_ASSERT_EQUAL_INT_MESSAGE(5, n, "the break screen is not title / bar / countdown / chore line / button row");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(5, n, "the break screen is not title / countdown / bar / chore line / button row");
 
-    /* 4 is not a target plucked out of the air: it is the gutter the
-       unchanged screen already runs at between its countdown and its
-       row, so it is the floor a new band has to clear as well. */
+    const int want[5][2] = {{BREAK_BAND_TITLE_TOP, BREAK_BAND_TITLE_BOT},
+                            {BREAK_BAND_COUNT_TOP, BREAK_BAND_COUNT_BOT},
+                            {BREAK_BAND_BAR_TOP, BREAK_BAND_BAR_BOT},
+                            {BREAK_BAND_CHORE_TOP, BREAK_BAND_CHORE_BOT},
+                            {BREAK_BAND_ROW_TOP, BREAK_BAND_ROW_BOT}};
+    for (int i = 0; i < 5; i++) {
+        char msg[96];
+        snprintf(msg, sizeof(msg), "band %d is rows %d..%d, expected %d..%d", i, tops[i], bots[i], want[i][0],
+                 want[i][1]);
+        TEST_ASSERT_TRUE_MESSAGE(tops[i] == want[i][0] && bots[i] == want[i][1], msg);
+    }
+
+    /* 4 is the gutter the screen has always run at between its countdown
+       and its row, so it is the floor every pair of bands has to clear. */
     for (int i = 1; i < n; i++) {
         char msg[112];
         snprintf(msg, sizeof(msg), "band %d ends at row %d and band %d starts at row %d - %d blank rows between", i - 1,
                  bots[i - 1], i, tops[i], (int)(tops[i] - bots[i - 1] - 1));
         TEST_ASSERT_TRUE_MESSAGE(tops[i] - bots[i - 1] - 1 >= 4, msg);
+    }
+}
+
+/* The no-chore-list stack is the same stack with the chore band empty:
+   title, countdown, bar at the same rows, then the bottom row (or the
+   centred footer) and nothing between. */
+void test_the_break_screen_without_chores_keeps_the_same_bands_minus_the_chore_line(void) {
+    display_state_t st = base_state();
+    st.timer_state = TIMER_BREAK;
+    st.remaining_sec = 5400;
+    st.break_remaining_sec = 700;
+    st.swap_next_name = "Piano";
+    display_screens_build_break(&st);
+    lv_refr_now(s_disp);
+
+    int tops[8], bots[8];
+    int n = break_ink_bands(tops, bots, 8);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(4, n, "no chore list: title / countdown / bar / button row");
+    TEST_ASSERT_EQUAL_INT(BREAK_BAND_TITLE_TOP, tops[0]);
+    TEST_ASSERT_EQUAL_INT(BREAK_BAND_TITLE_BOT, bots[0]);
+    TEST_ASSERT_EQUAL_INT(BREAK_BAND_COUNT_TOP, tops[1]);
+    TEST_ASSERT_EQUAL_INT(BREAK_BAND_COUNT_BOT, bots[1]);
+    TEST_ASSERT_EQUAL_INT(BREAK_BAND_BAR_TOP, tops[2]);
+    TEST_ASSERT_EQUAL_INT(BREAK_BAND_BAR_BOT, bots[2]);
+    TEST_ASSERT_EQUAL_INT(BREAK_BAND_ROW_TOP, tops[3]);
+    TEST_ASSERT_EQUAL_INT(BREAK_BAND_ROW_BOT, bots[3]);
+}
+
+/* The countdown at its widest, in both formats, stays inside the column:
+   "mm:ss" at its widest digits and "h:mm:ss" at 1:59:59 / 2:00:00. The
+   label box is the column wide and centred, so what is measured is the
+   INK, which must keep clear of both column edges and of the art. */
+static void break_count_ink_span(int32_t break_sec, int *lo, int *hi) {
+    display_state_t st = base_state();
+    st.timer_state = TIMER_BREAK;
+    st.remaining_sec = 5400;
+    st.break_remaining_sec = break_sec;
+    st.swap_next_name = "Piano";
+    display_screens_build_break(&st);
+    lv_refr_now(s_disp);
+    *lo = HOR;
+    *hi = -1;
+    for (int y = BREAK_BAND_COUNT_TOP; y <= BREAK_BAND_COUNT_BOT; y++) {
+        for (int x = BREAK_COL_X; x < HOR; x++) {
+            if (white_px(x, y)) {
+                if (x < *lo)
+                    *lo = x;
+                if (x > *hi)
+                    *hi = x;
+            }
+        }
+    }
+}
+
+void test_the_break_countdown_fits_the_column_in_every_format(void) {
+    const int32_t secs[] = {0, 5, 599, 600, 3599, 3600, 3661, 7199, 7200};
+    for (size_t i = 0; i < sizeof secs / sizeof secs[0]; i++) {
+        int lo, hi;
+        break_count_ink_span(secs[i], &lo, &hi);
+        char msg[96];
+        snprintf(msg, sizeof(msg), "countdown %d s paints x=%d..%d, column is %d..%d", (int)secs[i], lo, hi,
+                 BREAK_COL_X, BREAK_COL_X + BREAK_COL_W - 1);
+        TEST_ASSERT_TRUE_MESSAGE(lo >= BREAK_COL_X + 2, msg);
+        TEST_ASSERT_TRUE_MESSAGE(hi <= BREAK_COL_X + BREAK_COL_W - 3, msg);
+    }
+    /* the format boundary is visible on the glass: an hour is wider */
+    int lo59, hi59, lo60, hi60;
+    break_count_ink_span(3599, &lo59, &hi59);
+    break_count_ink_span(3600, &lo60, &hi60);
+    TEST_ASSERT_TRUE_MESSAGE(hi60 - lo60 > hi59 - lo59, "1:00:00 is not wider than 59:59");
+}
+
+/* WHICH CLEAN_BANDS BAND COVERS WHICH BREAK ELEMENT, read from the real
+   table. display.c is firmware-only (it needs the driver), so this reads
+   its source text, the way test_gen_sprites reads display_screens.c: the
+   {y0, y1} rows of CLEAN_BANDS[], widened to framebuffer bytes (y / 8),
+   which is how invert_clean_bands() applies them.
+
+   The break screen repaints its countdown, bar and chore line in place and
+   its partials ghost-clean through these bands. The table is the MAIN
+   screen's geometry and jointly covers every byte of every row (see the
+   comment above it), so the break layout needs no band of its own; what
+   this pins is that this stays true: the bands are contiguous, share no
+   byte, cover bytes 0..15, and each element that changes between partials
+   sits inside the band the notes say covers it:
+     band 0  rows  0..23   title (static: never dirty, never inverted)
+     band 1  rows 24..55   top of the countdown
+     band 2  rows 56..87   bottom of the countdown, the draining bar
+     band 3  rows 88..127  chore line, bottom button row / footer
+   The art is static between partials (never dirty), so it needs none. */
+static int read_clean_bands(int bands[][2], int max) {
+    char path[600];
+    snprintf(path, sizeof(path), "%s/../../../main/display.c", GOLDEN_DIR);
+    FILE *f = fopen(path, "r");
+    TEST_ASSERT_NOT_NULL_MESSAGE(f, "cannot open main/display.c to read CLEAN_BANDS");
+    char line[256];
+    bool in = false;
+    int n = 0;
+    while (fgets(line, sizeof line, f)) {
+        if (strstr(line, "CLEAN_BANDS[] = {")) {
+            in = true;
+            continue;
+        }
+        if (in && line[0] == '}')
+            break;
+        int y0, y1;
+        /* a space in a scanf format matches any run of whitespace, or none */
+        if (in && sscanf(line, " { %d , %d }", &y0, &y1) == 2) {
+            TEST_ASSERT_TRUE_MESSAGE(n < max, "more CLEAN_BANDS rows than this test expects");
+            bands[n][0] = y0 / 8; /* first framebuffer byte row of the band */
+            bands[n][1] = y1 / 8; /* last */
+            n++;
+        }
+    }
+    fclose(f);
+    return n;
+}
+
+void test_the_break_elements_sit_inside_the_clean_bands_that_cover_them(void) {
+    int bands[8][2];
+    int n = read_clean_bands(bands, 8);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(4, n, "CLEAN_BANDS no longer has four bands: re-derive the break mapping");
+    /* contiguous, no shared byte, jointly 0..15 */
+    TEST_ASSERT_EQUAL_INT(0, bands[0][0]);
+    for (int i = 1; i < n; i++)
+        TEST_ASSERT_EQUAL_INT_MESSAGE(bands[i - 1][1] + 1, bands[i][0], "bands share a byte or leave a gap");
+    TEST_ASSERT_EQUAL_INT(VER / 8 - 1, bands[n - 1][1]);
+
+    /* DOCUMENTATION, not an independent check. Given the coverage above
+       (contiguous, no shared byte, bytes 0..15), every row lies in exactly
+       one band, so this per-element table cannot fail on its own unless
+       the BREAK_BAND_* rows are edited out of step with the notes. It
+       records which band covers which element:
+       element -> the band index that holds its ink rows, or two adjacent
+       bands when it straddles (the countdown) */
+    const struct {
+        const char *name;
+        int top, bot, band_a, band_b;
+    } el[] = {
+        {"title", BREAK_BAND_TITLE_TOP, BREAK_BAND_TITLE_BOT, 0, 0},
+        {"countdown", BREAK_BAND_COUNT_TOP, BREAK_BAND_COUNT_BOT, 1, 2},
+        {"bar", BREAK_BAND_BAR_TOP, BREAK_BAND_BAR_BOT, 2, 2},
+        {"chore line", BREAK_BAND_CHORE_TOP, BREAK_BAND_CHORE_BOT, 3, 3},
+        {"button row", BREAK_BAND_ROW_TOP, BREAK_BAND_ROW_BOT, 3, 3},
+    };
+    for (size_t i = 0; i < sizeof el / sizeof el[0]; i++) {
+        const int first = el[i].top / 8, last = el[i].bot / 8;
+        char msg[96];
+        snprintf(msg, sizeof(msg), "%s rows %d..%d start outside band %d (bytes %d..%d)", el[i].name, el[i].top,
+                 el[i].bot, el[i].band_a, bands[el[i].band_a][0], bands[el[i].band_a][1]);
+        TEST_ASSERT_TRUE_MESSAGE(first >= bands[el[i].band_a][0] && first <= bands[el[i].band_a][1], msg);
+        snprintf(msg, sizeof(msg), "%s rows %d..%d end outside band %d (bytes %d..%d)", el[i].name, el[i].top,
+                 el[i].bot, el[i].band_b, bands[el[i].band_b][0], bands[el[i].band_b][1]);
+        TEST_ASSERT_TRUE_MESSAGE(last >= bands[el[i].band_b][0] && last <= bands[el[i].band_b][1], msg);
+    }
+}
+
+/* The break art: BREAK_INK (1105, the ink count of tools/sprites/break.png;
+   test_gen_sprites.py TestBreak.INK is the single source) art pixels at 2x =
+   4 * BREAK_INK white pixels, exactly, inside its 92x104 box, in every cell
+   of §2.6's matrix — so the labels never paint over it — and nothing else
+   is ever drawn above the box's bottom edge left of the column. (The bottom
+   row's cell A and the centred footer start at row 109, one row below the
+   box.) */
+#define BREAK_INK 1105
+void test_the_break_screen_paints_the_art_at_the_left_at_twice_its_size(void) {
+    TEST_ASSERT_TRUE_MESSAGE(BREAK_ART_X + 2 * (int)SPRITE_BREAK.w <= BREAK_COL_X,
+                             "the right column overlaps the art's box");
+    /* the matrix of §2.6: {chore_count, outstanding, swap hint} */
+    const struct {
+        uint8_t count, outstanding;
+        const char *swap;
+    } cells[] = {{3, 2, "Piano"}, {3, 2, NULL}, {3, 0, "Woodwind lesson"}, {0, 0, "Piano"}, {0, 0, NULL}};
+    for (size_t v = 0; v < sizeof cells / sizeof cells[0]; v++) {
+        display_state_t st = break_chore_state(cells[v].count, cells[v].outstanding);
+        st.swap_next_name = cells[v].swap;
+        display_screens_build_break(&st);
+        lv_refr_now(s_disp);
+        const int box_w = 2 * SPRITE_BREAK.w, box_h = 2 * SPRITE_BREAK.h;
+        int in_box = 0, stray = 0;
+        for (int y = 0; y < VER; y++) {
+            for (int x = 0; x < BREAK_COL_X; x++) {
+                if (!white_px(x, y))
+                    continue;
+                if (x >= BREAK_ART_X && x < BREAK_ART_X + box_w && y >= BREAK_ART_Y && y < BREAK_ART_Y + box_h)
+                    in_box++;
+                else if (y < BREAK_ART_Y + box_h)
+                    stray++; /* above the box's bottom edge, outside it */
+            }
+        }
+        char msg[96];
+        snprintf(msg, sizeof(msg), "variant %d: art ink %d, expected %d", (int)v, in_box, 4 * BREAK_INK);
+        TEST_ASSERT_EQUAL_INT_MESSAGE(4 * BREAK_INK, in_box, msg);
+        snprintf(msg, sizeof(msg), "variant %d: %d stray ink pixels beside the art", (int)v, stray);
+        TEST_ASSERT_EQUAL_INT_MESSAGE(0, stray, msg);
     }
 }
 
@@ -576,8 +807,6 @@ static int break_chore_line(int32_t *left, int32_t *right, const char **text, in
         if (!lv_obj_check_type(o, &lv_label_class) || lv_obj_get_y(o) != BREAK_CHORE_LINE_Y)
             continue;
         TEST_ASSERT_TRUE_MESSAGE(found < max, "more items on the chore line than it holds");
-        printf("break chore line '%s' x=%d..%d\n", lv_label_get_text(o), (int)lv_obj_get_x(o),
-               (int)(lv_obj_get_x(o) + lv_obj_get_width(o)));
         text[found] = lv_label_get_text(o);
         left[found] = lv_obj_get_x(o);
         right[found] = lv_obj_get_x(o) + lv_obj_get_width(o);
@@ -586,8 +815,22 @@ static int break_chore_line(int32_t *left, int32_t *right, const char **text, in
     return found;
 }
 
-/* The line above the row carries two items — the chore prompt at the left
-   margin, the frozen screen time at the right — and nothing truncates
+/* The chore line shares a 192 px column. With a one-digit hour the worst
+   pairing ("Chores 0/3" + "Screen 9:59"-ish, found by sweep) leaves
+   BREAK_CHORE_GAP_MIN px or more between the two boxes. From 10 h the time
+   gains a digit (~13 px) and the box gap shrinks to 0..3 px. Frozen time
+   is NOT bounded by CFG_BOUND_ALLOC_HI (24 h): grants stack on the
+   allocation and a snapshot may carry 7 days. Uncapped, the time would
+   overstrike the prompt from 40 h (-2 px at 2400 min); the painter caps
+   the label's width (BREAK_SCREEN_MAX_W), so out to the 7-day horizon the
+   boxes abut at worst (gap >= 0) and never overlap. The test pins both
+   tiers so a change to either shows. */
+#define BREAK_CHORE_GAP_MIN 8
+#define BREAK_CHORE_ONE_DIGIT_HOURS_MIN 600
+#define BREAK_CHORE_HORIZON_MIN (7 * 24 * 60)
+
+/* The line below the bar carries two items — the chore prompt at the
+   column's left edge, the frozen screen time at its right — and nothing truncates
    either, so the only thing keeping them apart is the panel being wide
    enough. MEASURED, not assumed: M2-T5 shipped a label clipped mid-number
    one band below this one because a width was arrived at by counting
@@ -596,50 +839,80 @@ static int break_chore_line(int32_t *left, int32_t *right, const char **text, in
    NEITHER SIDE'S WORST CASE IS THE OBVIOUS ONE, and both were found by
    sweeping rather than by reading the strings. The digits of this font do
    not share an advance — '0' is 3 px wider than '1' — so "Screen 12:30"
-   is NOT the widest frozen time ("Screen 20:00" is, by 7 px) and the
+   is NOT the widest frozen time below the cap ("Screen 20:00" is, by 7 px;
+   longer ones are clipped to the same width) and the
    widest prompt is the one with the most zeros in it. Both prompt forms
    are rendered too, because the tick form is the shorter and it is the
    count form that decides the worst case. */
 void test_the_break_chore_line_items_never_meet(void) {
-    /* outstanding = 3 -> nothing done -> "Chores 0 of 3", the widest the
-       prompt gets at this count; outstanding = 0 -> the tick form. */
+    /* outstanding = 3 -> nothing done -> "Chores 0/3", the widest the
+       prompt gets at this count; outstanding = 0 -> the tick form. The
+       frozen time is swept to the 7-day snapshot horizon, not to the
+       allocation (CFG_BOUND_ALLOC_HI = 24 h): grants stack on top of the
+       allocation and a snapshot may carry that much, so the worst frozen
+       time is found rather than guessed. */
     const uint8_t outstanding[2] = {3, 0};
+    int worst_gap = 1000, worst_gap_long = 1000;
     for (int pass = 0; pass < 2; pass++) {
-        display_state_t st = break_chore_state(3, outstanding[pass]);
-        st.remaining_sec = 20 * 3600; /* "Screen 20:00", the widest */
-        st.swap_next_name = "Piano";
-        display_screens_build_break(&st);
+        /* Every whole minute up to 100 h (which holds 599/600, 2399/2400
+           and 5999/6000, the digit and overlap boundaries), then every
+           97th, then the horizon itself. */
+        for (int minutes = 0; minutes <= BREAK_CHORE_HORIZON_MIN;
+             minutes = (minutes < 6100)                           ? minutes + 1
+                       : (minutes == BREAK_CHORE_HORIZON_MIN)     ? minutes + 1
+                       : (minutes + 97 > BREAK_CHORE_HORIZON_MIN) ? BREAK_CHORE_HORIZON_MIN
+                                                                  : minutes + 97) {
+            display_state_t st = break_chore_state(3, outstanding[pass]);
+            st.remaining_sec = minutes * 60;
+            st.swap_next_name = "Piano";
+            display_screens_build_break(&st);
 
-        int32_t left[4], right[4];
-        const char *text[4];
-        int found = break_chore_line(left, right, text, 4);
-        TEST_ASSERT_EQUAL_INT_MESSAGE(2, found, "the chore line is the chore prompt and the frozen screen time");
-        /* THE MARGINS ARE PINNED, not bounded, and the difference is the
-           whole point. "inside the panel" (left >= 0, right <= HOR) is
-           satisfied BETTER by deleting the padding — zeroing either
-           margin moves the glyphs AWAY from the edge the bound watches,
-           so the mutant reads as an improvement and only the golden
-           notices. That exact shape shipped one band down in M2-T5 and
-           the button row's equivalent is pinned for the same reason (see
-           the Chores cell above). Equalities, so the padding cannot
-           quietly go missing.
+            int32_t left[4], right[4];
+            const char *text[4];
+            int found = break_chore_line(left, right, text, 4);
+            TEST_ASSERT_EQUAL_INT_MESSAGE(2, found, "the chore line is the chore prompt and the frozen screen time");
+            /* THE MARGINS ARE PINNED, not bounded, and the difference is the
+               whole point. "inside the panel" (left >= 0, right <= HOR) is
+               satisfied BETTER by deleting the padding — zeroing either
+               margin moves the glyphs AWAY from the edge the bound watches,
+               so the mutant reads as an improvement and only the golden
+               notices. That exact shape shipped one band down in M2-T5 and
+               the button row's equivalent is pinned for the same reason (see
+               the Chores cell above). Equalities, so the padding cannot
+               quietly go missing.
 
-           WHICH ITEM each anchor pins is asserted and not assumed. The
-           two swapped sides in M2-T6a, and an index-only anchor survives
-           that swap intact: left[0] == 4 was true of the old layout as
-           well, because the old left-hand item was the frozen time. So
-           the identity of each item is checked first, and only then its
-           margin. */
-        TEST_ASSERT_EQUAL_INT_MESSAGE(0, strncmp(text[0], "Chores", 6), "the line's left-hand item is not the prompt");
-        TEST_ASSERT_EQUAL_INT_MESSAGE(0, strncmp(text[1], "Screen ", 7),
-                                      "the line's right-hand item is not the frozen screen time");
-        TEST_ASSERT_EQUAL_INT_MESSAGE(4, left[0], "the chore prompt is not at the line's left margin");
-        TEST_ASSERT_EQUAL_INT_MESSAGE(HOR - 4, right[1], "the frozen screen time is not at the line's right margin");
-        char msg[128];
-        snprintf(msg, sizeof(msg), "'%s' ends at x=%d and '%s' starts at x=%d - they touch", text[0], (int)right[0],
-                 text[1], (int)left[1]);
-        TEST_ASSERT_TRUE_MESSAGE(right[0] < left[1], msg);
+               WHICH ITEM each anchor pins is asserted and not assumed. The
+               two swapped sides in M2-T6a, and an index-only anchor survives
+               that swap intact: left[0] == 4 was true of the old layout as
+               well, because the old left-hand item was the frozen time. So
+               the identity of each item is checked first, and only then its
+               margin. */
+            TEST_ASSERT_EQUAL_INT_MESSAGE(0, strncmp(text[0], "Chores", 6),
+                                          "the line's left-hand item is not the prompt");
+            TEST_ASSERT_EQUAL_INT_MESSAGE(0, strncmp(text[1], "Screen ", 7),
+                                          "the line's right-hand item is not the frozen screen time");
+            TEST_ASSERT_EQUAL_INT_MESSAGE(BREAK_COL_X, left[0], "the chore prompt is not at the column's left edge");
+            TEST_ASSERT_EQUAL_INT_MESSAGE(BREAK_COL_X + BREAK_COL_W, right[1],
+                                          "the frozen screen time is not at the column's right edge");
+            const int gap = left[1] - right[0];
+            char msg[128];
+            TEST_ASSERT_TRUE_MESSAGE(right[0] - left[0] <= BREAK_PROMPT_MAX_W,
+                                     "the prompt is wider than BREAK_PROMPT_MAX_W, which the time's cap assumes");
+            snprintf(msg, sizeof(msg), "'%s' ends at x=%d and '%s' starts at x=%d (%d min) - they overlap", text[0],
+                     (int)right[0], text[1], (int)left[1], minutes);
+            TEST_ASSERT_TRUE_MESSAGE(gap >= 0, msg);
+            if (minutes < BREAK_CHORE_ONE_DIGIT_HOURS_MIN) {
+                snprintf(msg, sizeof(msg), "'%s' ends at x=%d and '%s' starts at x=%d - under %d px apart", text[0],
+                         (int)right[0], text[1], (int)left[1], BREAK_CHORE_GAP_MIN);
+                TEST_ASSERT_TRUE_MESSAGE(gap >= BREAK_CHORE_GAP_MIN, msg);
+                if (gap < worst_gap)
+                    worst_gap = gap;
+            } else if (gap < worst_gap_long) {
+                worst_gap_long = gap;
+            }
+        }
     }
+    printf("break chore line: worst gap under 10 h = %d px, from 10 h = %d px\n", worst_gap, worst_gap_long);
 }
 
 /* WHICH FIELD the prompt is fed, and WHICH WAY the fraction runs. Both
@@ -667,7 +940,7 @@ void test_the_break_chore_prompt_counts_what_is_done(void) {
     st.swap_next_name = "Piano";
     display_screens_build_break(&st);
     TEST_ASSERT_EQUAL_INT_MESSAGE(2, break_chore_line(left, right, text, 4), "the chore line is not drawn");
-    TEST_ASSERT_EQUAL_STRING_MESSAGE("Chores 2 of 3", text[0],
+    TEST_ASSERT_EQUAL_STRING_MESSAGE("Chores 2/3", text[0],
                                      "the prompt at 2 done of 3 is wrong - it is reading the outstanding count, or "
                                      "counting what is left rather than what is done");
     /* Copied because the next build deletes the label that owns it. */
@@ -678,7 +951,7 @@ void test_the_break_chore_prompt_counts_what_is_done(void) {
     st.swap_next_name = "Piano";
     display_screens_build_break(&st);
     TEST_ASSERT_EQUAL_INT_MESSAGE(2, break_chore_line(left, right, text, 4), "the chore line is not drawn");
-    TEST_ASSERT_EQUAL_STRING_MESSAGE("Chores 1 of 3", text[0], "the prompt at 1 done of 3 is wrong");
+    TEST_ASSERT_EQUAL_STRING_MESSAGE("Chores 1/3", text[0], "the prompt at 1 done of 3 is wrong");
     TEST_ASSERT_TRUE_MESSAGE(strcmp(first, text[0]) != 0,
                              "the chore prompt says the same thing at 1 done as at 2 - it is reading the list's "
                              "size, not how much of it is finished");
@@ -732,9 +1005,9 @@ void test_the_break_chore_tick_matches_the_checklist_glyph(void) {
    from count 3 only in the prompt's wording.
 
    It is also the only place a denominator other than 3 is rendered end
-   to end rather than unit-tested on the formatter: "Chores 0 of 1" is
+   to end rather than unit-tested on the formatter: "Chores 0/1" is
    the whole of what a one-chore family sees, and a prompt that hard-coded
-   CHORE_MAX as its denominator would read "0 of 3" beside a checklist
+   CHORE_MAX as its denominator would read "0/3" beside a checklist
    with one row on it. */
 void test_a_single_chore_still_earns_the_break_screen_layout(void) {
     display_state_t st = break_chore_state(1, 1);
@@ -749,8 +1022,7 @@ void test_a_single_chore_still_earns_the_break_screen_layout(void) {
     int32_t left[4], right[4];
     const char *text[4];
     TEST_ASSERT_EQUAL_INT_MESSAGE(2, break_chore_line(left, right, text, 4), "one chore draws no chore line");
-    TEST_ASSERT_EQUAL_STRING_MESSAGE("Chores 0 of 1", text[0],
-                                     "a one-chore list is not counted against its own length");
+    TEST_ASSERT_EQUAL_STRING_MESSAGE("Chores 0/1", text[0], "a one-chore list is not counted against its own length");
 
     int32_t row_left[8], row_right[8];
     const char *row_text[8];
@@ -1775,14 +2047,254 @@ void test_ota_screen_lines_fit_the_panel(void) {
 }
 
 void test_charge_me_screen(void) {
-    /* <= 10%: full stop — the panel says only Charge Me! */
+    /* <= 10%: full stop — the panel says only Charge me!, with the charge
+       art and a nearly-empty battery */
     display_screens_build_charge_me();
     assert_matches_golden("charge_me");
+}
+
+/* The charge art is a 105x122 bitmap on a 128 px panel, so unlike a label it can
+   touch an edge by arithmetic alone. Same margins as the no-clock screen's
+   fit test on the sides, and the same 2 px clear on the top and bottom. */
+void test_the_charge_me_screen_fits_the_panel(void) {
+    display_screens_build_charge_me();
+    lv_refr_now(s_disp);
+    int left, right;
+    ink_columns(&left, &right);
+    int top = VER, bottom = -1;
+    for (int y = 0; y < VER; y++) {
+        for (int b = 0; b < HOR / 8; b++) {
+            if (s_captured[y * (HOR / 8) + b] != 0xFF) {
+                if (y < top)
+                    top = y;
+                if (y > bottom)
+                    bottom = y;
+            }
+        }
+    }
+    char msg[96];
+    snprintf(msg, sizeof(msg), "ink spans x=%d..%d y=%d..%d on a %dx%d panel", left, right, top, bottom, HOR, VER);
+    TEST_ASSERT_TRUE_MESSAGE(left >= 2, msg);
+    TEST_ASSERT_TRUE_MESSAGE(right <= HOR - 3, msg);
+    TEST_ASSERT_TRUE_MESSAGE(top >= 2, msg);
+    TEST_ASSERT_TRUE_MESSAGE(bottom <= VER - 3, msg);
+}
+
+/* A golden alone would freeze a screen with a missing sprite as correct. The
+   art's ink must fill its box exactly (x 8..112, y 3..124: CHARGE_ART_X,
+   centred in 128 px, 105x122) and nothing else may be left of the right
+   column (x 124). 3034 is the ink count of tools/sprites/charge.png;
+   test_gen_sprites.py (TestCharge.INK) is the single source and asserts the
+   PNG still has it, so a PNG edit fails there first and names every place
+   to update. */
+void test_the_charge_me_screen_paints_the_art_at_the_left(void) {
+    /* CHARGE_COL_X is a literal (an extern struct field is no constant
+       expression), so the art's right edge is checked against it here */
+    TEST_ASSERT_TRUE_MESSAGE(CHARGE_ART_X + (int)SPRITE_CHARGE.w <= CHARGE_COL_X,
+                             "the right column overlaps the art's box");
+    display_screens_build_charge_me();
+    lv_refr_now(s_disp);
+    int art_ink = 0, stray_ink = 0, right_ink = 0;
+    for (int y = 0; y < VER; y++) {
+        for (int x = 0; x < HOR; x++) {
+            if (((s_captured[y * (HOR / 8) + x / 8] >> (7 - (x & 7))) & 1) == 0) {
+                if (x >= 124)
+                    right_ink++;
+                else if (x >= 8 && x <= 112 && y >= 3 && y <= 124)
+                    art_ink++;
+                else
+                    stray_ink++;
+            }
+        }
+    }
+    TEST_ASSERT_EQUAL_INT_MESSAGE(3034, art_ink, "the art's ink is not exactly its PNG's inside its box");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(0, stray_ink, "ink left of the right column outside the art's box");
+    TEST_ASSERT_TRUE_MESSAGE(right_ink > 0, "no words or battery on the right");
 }
 
 void test_timesup_screen(void) {
     display_screens_build_timesup();
     assert_matches_golden("timesup");
+}
+
+static bool captured_ink(int x, int y) {
+    return ((s_captured[y * (HOR / 8) + x / 8] >> (7 - (x & 7))) & 1) == 0; /* LVGL I1: 1 = white */
+}
+
+/* ---- the sprite draw path's scale and colour --------------------------
+   build_sprite() takes an integer scale and the ink colour, so the break
+   screen's 2x white-on-black art and the charge / time's up 1x black share
+   one decoder and one callback. A hand-built 3x2 sprite pins both, because
+   the real art cannot say which of "scale" and "colour" a defect is in:
+       . # #
+       # . .          (one ink run that wraps across the row end)
+   Ink must be exactly the art pixels, each a scale x scale block at
+   (x + art_x * scale, y + art_y * scale), and nothing else. */
+static const uint8_t TINY_RLE[] = {1, 3, 2};
+static const sprite_t TINY = {3, 2, TINY_RLE, sizeof TINY_RLE};
+
+static bool tiny_art_ink(int ax, int ay) {
+    return (ay == 0 && ax >= 1) || (ay == 1 && ax == 0);
+}
+
+/* want_white: the ink bit value in the capture (1 on the inverted screen) */
+static void assert_tiny_painted_exactly(int x0, int y0, int scale, int want_ink_bit) {
+    int ink = 0;
+    for (int y = 0; y < VER; y++) {
+        for (int x = 0; x < HOR; x++) {
+            const int bit = (s_captured[y * (HOR / 8) + x / 8] >> (7 - (x & 7))) & 1;
+            const int ax = (x - x0) / scale, ay = (y - y0) / scale;
+            const bool inside = x >= x0 && y >= y0 && ax < TINY.w && ay < TINY.h;
+            const bool want = inside && tiny_art_ink(ax, ay);
+            char msg[80];
+            snprintf(msg, sizeof(msg), "pixel (%d,%d) at scale %d is %s", x, y, scale, want ? "missing" : "stray");
+            TEST_ASSERT_EQUAL_INT_MESSAGE(want ? want_ink_bit : !want_ink_bit, bit, msg);
+            ink += (bit == want_ink_bit);
+        }
+    }
+    TEST_ASSERT_EQUAL_INT_MESSAGE(3 * scale * scale, ink, "wrong total ink for the scaled sprite");
+}
+
+void test_a_sprite_drawn_at_scale_2_paints_each_art_pixel_as_a_2x2_block(void) {
+    lv_obj_t *scr = fresh_screen(false);
+    build_sprite(scr, &TINY, 10, 20, 2, lv_color_black());
+    lv_refr_now(s_disp);
+    assert_tiny_painted_exactly(10, 20, 2, 0);
+}
+
+void test_a_sprite_drawn_at_scale_1_is_unscaled(void) {
+    lv_obj_t *scr = fresh_screen(false);
+    build_sprite(scr, &TINY, 10, 20, 1, lv_color_black());
+    lv_refr_now(s_disp);
+    assert_tiny_painted_exactly(10, 20, 1, 0);
+}
+
+void test_a_sprite_takes_its_ink_colour_from_the_caller(void) {
+    /* The inverted break screen: white ink on black. A callback with the
+       colour hard-coded black would paint nothing visible here. */
+    lv_obj_t *scr = fresh_screen(true);
+    build_sprite(scr, &TINY, 10, 20, 2, lv_color_white());
+    lv_refr_now(s_disp);
+    assert_tiny_painted_exactly(10, 20, 2, 1);
+}
+
+/* The one screen where ink MAY reach an edge, and only one edge: the
+   time's-up art is cropped open at the bottom, so its ink may run off the
+   panel on purpose (the template's alarm clock does, in 12 pixels). That is
+   the stated exception to the fit rule, so it is asserted rather than
+   tolerated: ink IS on the bottom row, inside the sprite's columns
+   (x 2..179), and nowhere else on it. Everything else keeps the charge
+   lock's rule: no ink on the left, right or top edge (2 px clear), and the
+   words, which start at x 180, stay 2 px off every edge including the
+   bottom. */
+void test_the_timesup_screen_fits_the_panel_but_for_the_art_bottom_bleed(void) {
+    display_screens_build_timesup();
+    lv_refr_now(s_disp);
+    int text_left = HOR, text_right = -1, text_top = VER, text_bottom = -1;
+    int edge_ink = 0, bottom_sprite_ink = 0, bottom_text_ink = 0;
+    for (int y = 0; y < VER; y++) {
+        for (int x = 0; x < HOR; x++) {
+            if (!captured_ink(x, y))
+                continue;
+            if (x < 2 || x > HOR - 3 || y < 2)
+                edge_ink++;
+            if (y == VER - 1) {
+                if (x >= TIMESUP_ART_X && x < TIMESUP_COL_X)
+                    bottom_sprite_ink++;
+                else
+                    bottom_text_ink++;
+            }
+            if (x >= TIMESUP_COL_X) {
+                if (x < text_left)
+                    text_left = x;
+                if (x > text_right)
+                    text_right = x;
+                if (y < text_top)
+                    text_top = y;
+                if (y > text_bottom)
+                    text_bottom = y;
+            }
+        }
+    }
+    char msg[96];
+    snprintf(msg, sizeof(msg), "words span x=%d..%d y=%d..%d on a %dx%d panel", text_left, text_right, text_top,
+             text_bottom, HOR, VER);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(0, edge_ink, "ink within 2 px of the left, right or top edge");
+    TEST_ASSERT_TRUE_MESSAGE(text_left >= 182, msg);
+    TEST_ASSERT_TRUE_MESSAGE(text_right <= HOR - 3, msg);
+    TEST_ASSERT_TRUE_MESSAGE(text_top >= 2, msg);
+    TEST_ASSERT_TRUE_MESSAGE(text_bottom <= VER - 3, msg);
+    /* 12 is the PNG's last-row ink; test_gen_sprites
+       (TestTimesUp.test_the_last_row_bleed_is_the_pinned_pixel_count, BLEED)
+       asserts the PNG still has it */
+    TEST_ASSERT_EQUAL_INT_MESSAGE(12, bottom_sprite_ink,
+                                  "the bottom-edge bleed is not exactly the PNG's 12 ink pixels on its last row "
+                                  "(see test_gen_sprites: test_the_last_row_bleed_is_the_pinned_pixel_count)");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(0, bottom_text_ink, "ink on the bottom row outside the art's columns");
+}
+
+/* A golden alone would freeze a screen with a missing sprite as correct.
+   The art's ink must fill its box exactly (x 2..179, y 4..127: TIMESUP_ART_X,
+   flush with the bottom, 178x124) and nothing else may be left of x 180.
+   5048 is the ink count of tools/sprites/timesup.png; test_gen_sprites.py
+   (TestTimesUp.INK) is the single source and asserts the PNG still has it,
+   so a PNG edit fails there first and names every place to update. The words must be two bands, TIME'S above UP!, both
+   centred in the space right of the sprite (the column TIMESUP_COL_X wide
+   TIMESUP_COL_W; measured bands y 31..50 and y 69..102). The column constants
+   are literals in display_screens.c (an extern struct field is no constant
+   expression), so the sprite's right edge is checked against them here. */
+void test_the_timesup_screen_paints_the_art_at_the_left_and_the_words_at_the_right(void) {
+    TEST_ASSERT_TRUE_MESSAGE(TIMESUP_ART_X + (int)SPRITE_TIMESUP.w <= TIMESUP_COL_X,
+                             "the words' column overlaps the art's box");
+    TEST_ASSERT_TRUE_MESSAGE(TIMESUP_COL_X + TIMESUP_COL_W <= HOR, "the words' column runs off the panel");
+    display_screens_build_timesup();
+    lv_refr_now(s_disp);
+    int art_ink = 0, stray_ink = 0, right_ink = 0;
+    /* per row of the column: its ink extent, for the two-band centring check */
+    int band_min[2] = {HOR, HOR}, band_max[2] = {-1, -1}, bands = 0;
+    bool in_band = false;
+    for (int y = 0; y < VER; y++) {
+        int row_min = HOR, row_max = -1;
+        for (int x = 0; x < HOR; x++) {
+            if (!captured_ink(x, y))
+                continue;
+            if (x >= TIMESUP_COL_X) {
+                right_ink++;
+                if (x < row_min)
+                    row_min = x;
+                if (x > row_max)
+                    row_max = x;
+            } else if (x >= TIMESUP_ART_X && y >= DISP_VER - (int)SPRITE_TIMESUP.h)
+                art_ink++;
+            else
+                stray_ink++;
+        }
+        if (row_max < 0) {
+            in_band = false;
+            continue;
+        }
+        if (!in_band) {
+            bands++;
+            in_band = true;
+        }
+        if (bands <= 2) {
+            if (row_min < band_min[bands - 1])
+                band_min[bands - 1] = row_min;
+            if (row_max > band_max[bands - 1])
+                band_max[bands - 1] = row_max;
+        }
+    }
+    TEST_ASSERT_EQUAL_INT_MESSAGE(5048, art_ink, "the art's ink is not exactly its PNG's inside its box");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(0, stray_ink, "ink left of the right column outside the art's box");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(2, bands, "the words are not exactly two bands (TIME'S above UP!)");
+    /* ink centre within 1 px of the column midpoint: compare doubled values,
+       |(min+max) - (2*COL_X + COL_W - 1)| <= 2 */
+    for (int b = 0; b < 2; b++) {
+        int off = (band_min[b] + band_max[b]) - (2 * TIMESUP_COL_X + TIMESUP_COL_W - 1);
+        char msg[96];
+        snprintf(msg, sizeof(msg), "band %d ink x=%d..%d is off the column centre", b, band_min[b], band_max[b]);
+        TEST_ASSERT_TRUE_MESSAGE(off >= -2 && off <= 2, msg);
+    }
 }
 
 void test_sync_failed_screen(void) {
@@ -1824,6 +2336,183 @@ void test_bedtime_screen(void) {
     /* Bed Time lock: inverted, non-dismissable until day rollover */
     display_screens_build_bedtime();
     assert_matches_golden("bedtime");
+}
+
+/* The bed-time screen is inverted (ink is the set bits, white_px()) and has
+   no bleed exception: nothing may come within 2 px of any edge. */
+void test_the_bedtime_screen_fits_the_panel(void) {
+    display_screens_build_bedtime();
+    lv_refr_now(s_disp);
+    int edge_ink = 0, ink = 0;
+    for (int y = 0; y < VER; y++) {
+        for (int x = 0; x < HOR; x++) {
+            if (!white_px(x, y))
+                continue;
+            ink++;
+            if (x < 2 || x > HOR - 3 || y < 2 || y > VER - 3)
+                edge_ink++;
+        }
+    }
+    TEST_ASSERT_TRUE_MESSAGE(ink > 0, "the bed-time screen painted nothing");
+    char msg[64];
+    snprintf(msg, sizeof(msg), "%d ink pixels within 2 px of an edge", edge_ink);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(0, edge_ink, msg);
+}
+
+/* The bed-time art: BEDTIME_INK (222, the ink count of
+   tools/sprites/bedtime.png; test_gen_sprites.py TestBedtime.INK is the
+   single source and asserts the PNG still has it) art pixels at 4x = 16 *
+   BEDTIME_INK white pixels, exactly, inside its 116x92 box at
+   (BEDTIME_ART_X, BEDTIME_ART_Y). */
+#define BEDTIME_INK 222
+void test_the_bedtime_screen_paints_the_art_at_the_left_at_four_times_its_size(void) {
+    TEST_ASSERT_TRUE_MESSAGE(BEDTIME_ART_X + BEDTIME_ART_SCALE * (int)SPRITE_BEDTIME.w <= BEDTIME_COL_X,
+                             "the words' column overlaps the art's box");
+    TEST_ASSERT_TRUE_MESSAGE(BEDTIME_COL_X + BEDTIME_COL_W <= HOR, "the words' column runs off the panel");
+    display_screens_build_bedtime();
+    lv_refr_now(s_disp);
+    const int box_w = BEDTIME_ART_SCALE * SPRITE_BEDTIME.w, box_h = BEDTIME_ART_SCALE * SPRITE_BEDTIME.h;
+    int in_box = 0, left_stray = 0;
+    for (int y = 0; y < VER; y++) {
+        for (int x = 0; x < BEDTIME_COL_X; x++) {
+            if (!white_px(x, y))
+                continue;
+            if (x >= BEDTIME_ART_X && x < BEDTIME_ART_X + box_w && y >= BEDTIME_ART_Y && y < BEDTIME_ART_Y + box_h)
+                in_box++;
+            else if (y < BEDTIME_ART_Y + box_h)
+                left_stray++; /* above the box's bottom edge, outside it */
+        }
+    }
+    TEST_ASSERT_EQUAL_INT_MESSAGE(BEDTIME_ART_SCALE * BEDTIME_ART_SCALE * BEDTIME_INK, in_box,
+                                  "the art's ink is not exactly its PNG at 4x inside its box");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(0, left_stray, "stray ink left of the words' column outside the art's box");
+}
+
+/* The art and the words never overlap. Render the art alone, then the whole
+   screen: inside the art's box the two must be pixel-identical (a word
+   crossing the box would add ink there), the two words must be exactly two
+   bands that sit entirely right of the box and centre on the column, and the
+   bottom line must start at least 2 rows below the box. */
+static uint8_t s_art_alone[FB_BYTES];
+
+void test_the_bedtime_words_never_overlap_the_art(void) {
+    lv_obj_t *scr = fresh_screen(true);
+    build_sprite(scr, &SPRITE_BEDTIME, BEDTIME_ART_X, BEDTIME_ART_Y, BEDTIME_ART_SCALE, lv_color_white());
+    lv_refr_now(s_disp);
+    memcpy(s_art_alone, s_captured, FB_BYTES);
+
+    display_screens_build_bedtime();
+    lv_refr_now(s_disp);
+    const int box_r = BEDTIME_ART_X + BEDTIME_ART_SCALE * (int)SPRITE_BEDTIME.w,
+              box_b = BEDTIME_ART_Y + BEDTIME_ART_SCALE * (int)SPRITE_BEDTIME.h;
+    for (int y = BEDTIME_ART_Y; y < box_b; y++) {
+        for (int x = BEDTIME_ART_X; x < box_r; x++) {
+            bool alone = ((s_art_alone[y * (HOR / 8) + x / 8] >> (7 - (x & 7))) & 1) != 0;
+            char msg[64];
+            snprintf(msg, sizeof(msg), "ink inside the art's box differs from the art alone at (%d, %d)", x, y);
+            TEST_ASSERT_EQUAL_INT_MESSAGE(alone, white_px(x, y), msg);
+        }
+    }
+    int bands = 0, band_min[2] = {HOR, HOR}, band_max[2] = {-1, -1}, bottom_top = VER;
+    bool in_band = false;
+    for (int y = 0; y < VER; y++) {
+        int row_min = HOR, row_max = -1;
+        for (int x = box_r; x < HOR; x++) {
+            if (!white_px(x, y))
+                continue;
+            if (x < row_min)
+                row_min = x;
+            if (x > row_max)
+                row_max = x;
+        }
+        /* the bottom line spans the full width, so it also paints left of
+           the box's right edge: find its top over every column */
+        if (y >= box_b) {
+            for (int x = 0; x < HOR && bottom_top == VER; x++) {
+                if (white_px(x, y))
+                    bottom_top = y;
+            }
+        }
+        if (y >= box_b || row_max < 0) {
+            in_band = false;
+            continue;
+        }
+        if (!in_band) {
+            bands++;
+            in_band = true;
+        }
+        if (bands <= 2) {
+            if (row_min < band_min[bands - 1])
+                band_min[bands - 1] = row_min;
+            if (row_max > band_max[bands - 1])
+                band_max[bands - 1] = row_max;
+        }
+    }
+    TEST_ASSERT_EQUAL_INT_MESSAGE(2, bands, "the words are not exactly two bands (Bed Time above Goodnight!)");
+    for (int b = 0; b < 2; b++) {
+        char msg[96];
+        snprintf(msg, sizeof(msg), "band %d ink x=%d..%d overlaps the art's box or is off the column centre", b,
+                 band_min[b], band_max[b]);
+        /* the column starts at the box's right edge, so the words' ink must
+           clear the box by 2 px (box right edge x = box_r - 1) */
+        TEST_ASSERT_TRUE_MESSAGE(band_min[b] >= box_r - 1 + 2, msg);
+        int off = (band_min[b] + band_max[b]) - (2 * BEDTIME_COL_X + BEDTIME_COL_W - 1);
+        TEST_ASSERT_TRUE_MESSAGE(off >= -2 && off <= 2, msg);
+    }
+    char msg[64];
+    snprintf(msg, sizeof(msg), "the bottom line starts at row %d, box ends at %d", bottom_top, box_b - 1);
+    TEST_ASSERT_TRUE_MESSAGE(bottom_top >= box_b + 2, msg);
+}
+
+/* The ink rows of the three text lines, as laid out and approved (white ink
+   on black): "Bed Time" 14..34, "Goodnight!" 58..84, the bottom line
+   110..125. The golden measures 58..83 for "Goodnight!" (the mockup's
+   extra descender row), inside the one-row MOCK_TOL. They do not depend on
+   the art. The golden alone guards them blindly; this pins each within
+   MOCK_TOL rows. The bottom line's top is
+   looser: the layout was drawn with 16-row 18 pt glyphs, LVGL's Montserrat 18
+   are 18, so the bottom edge is matched and the top sits 2 rows higher. */
+#define MOCK_BEDTIME_TOP 14
+#define MOCK_BEDTIME_BOT 34
+#define MOCK_GOODNIGHT_TOP 58
+#define MOCK_GOODNIGHT_BOT 84
+#define MOCK_LINE_TOP 110
+#define MOCK_LINE_BOT 125
+#define MOCK_TOL 1
+
+static void ink_rows(int x0, int y0, int y1, int *top, int *bot) {
+    *top = -1;
+    *bot = -1;
+    for (int y = y0; y <= y1; y++) {
+        for (int x = x0; x < HOR; x++) {
+            if (white_px(x, y)) {
+                if (*top < 0)
+                    *top = y;
+                *bot = y;
+                break;
+            }
+        }
+    }
+}
+
+static void assert_rows_near(const char *what, int top, int bot, int want_top, int want_bot, int top_tol) {
+    char msg[96];
+    snprintf(msg, sizeof(msg), "%s ink rows %d..%d, approved %d..%d", what, top, bot, want_top, want_bot);
+    TEST_ASSERT_TRUE_MESSAGE(top >= want_top - top_tol && top <= want_top + top_tol, msg);
+    TEST_ASSERT_TRUE_MESSAGE(bot >= want_bot - MOCK_TOL && bot <= want_bot + MOCK_TOL, msg);
+}
+
+void test_the_bedtime_text_rows_match_the_approved_layout(void) {
+    display_screens_build_bedtime();
+    lv_refr_now(s_disp);
+    int top, bot;
+    /* the words live right of the art, above the bottom line (rows < 100) */
+    ink_rows(BEDTIME_COL_X, 0, 40, &top, &bot);
+    assert_rows_near("Bed Time", top, bot, MOCK_BEDTIME_TOP, MOCK_BEDTIME_BOT, MOCK_TOL);
+    ink_rows(BEDTIME_COL_X, 41, 99, &top, &bot);
+    assert_rows_near("Goodnight!", top, bot, MOCK_GOODNIGHT_TOP, MOCK_GOODNIGHT_BOT, MOCK_TOL);
+    ink_rows(0, 100, VER - 1, &top, &bot);
+    assert_rows_near("bottom line", top, bot, MOCK_LINE_TOP, MOCK_LINE_BOT, 2);
 }
 
 /* ---- the chore checklist (design §2.4) ---------------------------------- */
@@ -2639,6 +3328,10 @@ int main(void) {
     RUN_TEST(test_break_screen_with_chores_no_eligible);
     RUN_TEST(test_break_screen_with_every_chore_done);
     RUN_TEST(test_the_break_chore_line_clears_the_countdown_and_the_row);
+    RUN_TEST(test_the_break_screen_without_chores_keeps_the_same_bands_minus_the_chore_line);
+    RUN_TEST(test_the_break_countdown_fits_the_column_in_every_format);
+    RUN_TEST(test_the_break_elements_sit_inside_the_clean_bands_that_cover_them);
+    RUN_TEST(test_the_break_screen_paints_the_art_at_the_left_at_twice_its_size);
     RUN_TEST(test_the_break_chore_row_fits_its_cells);
     RUN_TEST(test_the_break_row_without_a_swap_keeps_its_chore_cell);
     RUN_TEST(test_the_break_chore_line_items_never_meet);
@@ -2676,11 +3369,22 @@ int main(void) {
     RUN_TEST(test_ota_screen);
     RUN_TEST(test_ota_screen_lines_fit_the_panel);
     RUN_TEST(test_charge_me_screen);
+    RUN_TEST(test_the_charge_me_screen_fits_the_panel);
+    RUN_TEST(test_the_charge_me_screen_paints_the_art_at_the_left);
     RUN_TEST(test_timesup_screen);
+    RUN_TEST(test_the_timesup_screen_fits_the_panel_but_for_the_art_bottom_bleed);
+    RUN_TEST(test_the_timesup_screen_paints_the_art_at_the_left_and_the_words_at_the_right);
+    RUN_TEST(test_a_sprite_drawn_at_scale_2_paints_each_art_pixel_as_a_2x2_block);
+    RUN_TEST(test_a_sprite_drawn_at_scale_1_is_unscaled);
+    RUN_TEST(test_a_sprite_takes_its_ink_colour_from_the_caller);
     RUN_TEST(test_sync_failed_screen);
     RUN_TEST(test_no_clock_screen);
     RUN_TEST(test_the_no_clock_screen_fits_the_panel);
     RUN_TEST(test_bedtime_screen);
+    RUN_TEST(test_the_bedtime_screen_fits_the_panel);
+    RUN_TEST(test_the_bedtime_screen_paints_the_art_at_the_left_at_four_times_its_size);
+    RUN_TEST(test_the_bedtime_words_never_overlap_the_art);
+    RUN_TEST(test_the_bedtime_text_rows_match_the_approved_layout);
     RUN_TEST(test_chore_screen_one_acked);
     RUN_TEST(test_chore_screen_all_acked);
     RUN_TEST(test_chore_screen_two_chores);

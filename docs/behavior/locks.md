@@ -31,8 +31,9 @@ exceptions to the table above.
 
 ## Charge Me!
 
-At 10 % battery or lower, the device pauses a running timer, paints
-`Charge Me!` once, and sends one last report to Home Assistant. It then leaves
+At 10 % battery or lower, the device pauses a running timer, paints the
+charge screen once (the charge art, `Charge me!`, and a
+nearly empty battery; the shipped template art is a sad battery holding its plug), and sends one last report to Home Assistant. It then leaves
 the panel alone, because refreshing e-ink while the battery is browning out can
 leave marks on the panel that do not go away. No button wakes it. Every 10
 minutes it rechecks the battery and nothing else; it does not sync, so "Find my
@@ -45,8 +46,9 @@ badge on the bar ([Power and sync](power_and_sync.md#battery)).
 ## Bed Time
 
 At the bed time a parent sets in Home Assistant, the device pauses a running
-timer and shows the inverted **Bed Time** screen:
-`Brush teeth | Get water bottles`, `Goodnight!`. The default bed time is 22:00.
+timer and shows the inverted **Bed Time** screen: the bed-time art at the left (a bed with zzz, in the shipped template),
+**Bed Time** and `Goodnight!` beside it, and
+`Brush teeth | Get water bottles` along the bottom. The default bed time is 22:00.
 Any value from 18:00 to 23:59 is accepted, 0 turns Bed Time off, and any other
 value counts as 22:00, so a mistyped daytime bed time can never lock the device
 for the day.

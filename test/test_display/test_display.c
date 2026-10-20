@@ -77,6 +77,51 @@ void test_format_1_min_30_sec(void) {
     TEST_ASSERT_EQUAL_STRING("00:01:30", buf);
 }
 
+/* ---- display_format_countdown: the break screen's big number ----
+   m:ss / mm:ss under an hour, h:mm:ss from an hour, no leading zero on the
+   leading unit. Breaks run to CFG_BOUND_BREAK_DUR_HI = 120 min. */
+
+void test_countdown_under_an_hour_is_minutes_and_seconds(void) {
+    char buf[16];
+    display_format_countdown(buf, sizeof(buf), 700);
+    TEST_ASSERT_EQUAL_STRING("11:40", buf);
+    display_format_countdown(buf, sizeof(buf), 599);
+    TEST_ASSERT_EQUAL_STRING("9:59", buf);
+    display_format_countdown(buf, sizeof(buf), 60);
+    TEST_ASSERT_EQUAL_STRING("1:00", buf);
+    display_format_countdown(buf, sizeof(buf), 5);
+    TEST_ASSERT_EQUAL_STRING("0:05", buf);
+}
+
+void test_countdown_switches_to_hours_exactly_at_one_hour(void) {
+    char buf[16];
+    display_format_countdown(buf, sizeof(buf), 3599);
+    TEST_ASSERT_EQUAL_STRING("59:59", buf);
+    display_format_countdown(buf, sizeof(buf), 3600);
+    TEST_ASSERT_EQUAL_STRING("1:00:00", buf);
+    display_format_countdown(buf, sizeof(buf), 3661);
+    TEST_ASSERT_EQUAL_STRING("1:01:01", buf);
+}
+
+void test_countdown_covers_the_longest_break(void) {
+    char buf[16];
+    display_format_countdown(buf, sizeof(buf), 7199);
+    TEST_ASSERT_EQUAL_STRING("1:59:59", buf);
+    display_format_countdown(buf, sizeof(buf), 7200); /* 120 min */
+    TEST_ASSERT_EQUAL_STRING("2:00:00", buf);
+}
+
+void test_countdown_clamps_at_zero_and_truncates_to_the_buffer(void) {
+    char buf[16];
+    display_format_countdown(buf, sizeof(buf), 0);
+    TEST_ASSERT_EQUAL_STRING("0:00", buf);
+    display_format_countdown(buf, sizeof(buf), -1);
+    TEST_ASSERT_EQUAL_STRING("0:00", buf);
+    char small[4];
+    display_format_countdown(small, sizeof(small), 7200);
+    TEST_ASSERT_EQUAL_STRING("2:0", small);
+}
+
 /* display_fb_invert_byte_cols: inverts byte columns [b0..b1] of every row —
    used to build the inverse pass of the ghost-cleaning double partial. */
 
@@ -625,12 +670,12 @@ void test_chore_count_with_a_zero_length_buffer_touches_nothing(void) {
 void test_chore_prompt_counts_what_is_done_not_what_is_left(void) {
     char buf[16];
     display_format_chore_prompt(buf, sizeof(buf), 0x00, 3);
-    TEST_ASSERT_EQUAL_STRING("Chores 0 of 3", buf);
+    TEST_ASSERT_EQUAL_STRING("Chores 0/3", buf);
     display_format_chore_prompt(buf, sizeof(buf), 0x01, 3);
-    TEST_ASSERT_EQUAL_STRING("Chores 1 of 3", buf);
+    TEST_ASSERT_EQUAL_STRING("Chores 1/3", buf);
     /* §2.6's own sketch, and the asymmetric one: 2 done, 1 left. */
     display_format_chore_prompt(buf, sizeof(buf), 0x03, 3);
-    TEST_ASSERT_EQUAL_STRING("Chores 2 of 3", buf);
+    TEST_ASSERT_EQUAL_STRING("Chores 2/3", buf);
 }
 
 /* The tick, and where it goes. It is LAST because a leading one would
@@ -650,21 +695,21 @@ void test_chore_prompt_ticks_after_the_word_when_the_list_is_finished(void) {
 }
 
 /* A shorter list counts against its own length. A two-chore family sees
-   "1 of 2", never "1 of 3" — the denominator is the configured count,
+   "1/2", never "1/3" — the denominator is the configured count,
    the same one the checklist's own header uses. */
 void test_chore_prompt_follows_a_shorter_list(void) {
     char buf[16];
     display_format_chore_prompt(buf, sizeof(buf), 0x01, 2);
-    TEST_ASSERT_EQUAL_STRING("Chores 1 of 2", buf);
+    TEST_ASSERT_EQUAL_STRING("Chores 1/2", buf);
     /* A single chore, the boundary the display-side gate is written on. */
     display_format_chore_prompt(buf, sizeof(buf), 0x00, 1);
-    TEST_ASSERT_EQUAL_STRING("Chores 0 of 1", buf);
+    TEST_ASSERT_EQUAL_STRING("Chores 0/1", buf);
     display_format_chore_prompt(buf, sizeof(buf), 0x01, 1);
     TEST_ASSERT_EQUAL_STRING("Chores " DISPLAY_CHORE_TICK, buf);
     /* A stale bit from a longer list is masked off, exactly as the ticks
        beside it are, so the fraction can never exceed its denominator. */
     display_format_chore_prompt(buf, sizeof(buf), 0x05, 2);
-    TEST_ASSERT_EQUAL_STRING("Chores 1 of 2", buf);
+    TEST_ASSERT_EQUAL_STRING("Chores 1/2", buf);
 }
 
 /* AN EMPTY LIST IS NOT A FINISHED ONE. "done == configured" is true at
@@ -672,14 +717,13 @@ void test_chore_prompt_follows_a_shorter_list(void) {
    no chores configured would claim a finished list. The break screen
    never calls it this way — the line is drawn only when chore_count > 0 —
    so nothing downstream would catch it; this is the formatter refusing to
-   invent the state on its own. "0 of 0" is also what
-   display_format_chore_count says at the same input. */
+   invent the state on its own. */
 void test_chore_prompt_never_ticks_an_empty_list(void) {
     char buf[16];
     display_format_chore_prompt(buf, sizeof(buf), 0x00, 0);
-    TEST_ASSERT_EQUAL_STRING("Chores 0 of 0", buf);
+    TEST_ASSERT_EQUAL_STRING("Chores 0/0", buf);
     display_format_chore_prompt(buf, sizeof(buf), 0x07, 0);
-    TEST_ASSERT_EQUAL_STRING("Chores 0 of 0", buf);
+    TEST_ASSERT_EQUAL_STRING("Chores 0/0", buf);
 }
 
 /* chore_count is clamped by its store, so a larger figure is already a
@@ -690,14 +734,14 @@ void test_chore_prompt_never_ticks_an_empty_list(void) {
 void test_chore_prompt_clamps_a_list_the_checklist_could_not_show(void) {
     char buf[16];
     display_format_chore_prompt(buf, sizeof(buf), 0x01, CHORE_MAX + 1);
-    TEST_ASSERT_EQUAL_STRING("Chores 1 of 3", buf);
+    TEST_ASSERT_EQUAL_STRING("Chores 1/3", buf);
     display_format_chore_prompt(buf, sizeof(buf), 0x00, 0xFF);
-    TEST_ASSERT_EQUAL_STRING("Chores 0 of 3", buf);
+    TEST_ASSERT_EQUAL_STRING("Chores 0/3", buf);
     display_format_chore_prompt(buf, sizeof(buf), 0xFF, 0xFF);
     TEST_ASSERT_EQUAL_STRING("Chores " DISPLAY_CHORE_TICK, buf);
 }
 
-/* The longest output is "Chores 0 of 3" at 13 characters; the tick form
+/* The longest output is "Chores 0/3" at 10 characters; the tick form
    is 10 bytes, its tick being 3 bytes of UTF-8 rather than 1. A 16-byte
    buffer holds either whole, and that is the size the screen builder must
    give it. Measured here rather than asserted as a comment, because the
@@ -706,8 +750,8 @@ void test_chore_prompt_longest_output_fits_sixteen_bytes(void) {
     char buf[16];
     memset(buf, (char)0xAA, sizeof(buf));
     display_format_chore_prompt(buf, sizeof(buf), 0x00, 3);
-    TEST_ASSERT_EQUAL_size_t(13, strlen(buf));
-    TEST_ASSERT_EQUAL_HEX8('\0', buf[13]);
+    TEST_ASSERT_EQUAL_size_t(10, strlen(buf));
+    TEST_ASSERT_EQUAL_HEX8('\0', buf[10]);
 
     memset(buf, (char)0xAA, sizeof(buf));
     display_format_chore_prompt(buf, sizeof(buf), 0x07, 3);
@@ -1109,6 +1153,10 @@ int main(void) {
     RUN_TEST(test_format_minutes_and_seconds);
     RUN_TEST(test_format_shows_zero_when_expired);
     RUN_TEST(test_format_1_min_30_sec);
+    RUN_TEST(test_countdown_under_an_hour_is_minutes_and_seconds);
+    RUN_TEST(test_countdown_switches_to_hours_exactly_at_one_hour);
+    RUN_TEST(test_countdown_covers_the_longest_break);
+    RUN_TEST(test_countdown_clamps_at_zero_and_truncates_to_the_buffer);
     RUN_TEST(test_invert_byte_cols_middle_column);
     RUN_TEST(test_invert_byte_cols_full_width);
     RUN_TEST(test_invert_byte_cols_clamps_out_of_range);

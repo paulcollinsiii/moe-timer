@@ -64,22 +64,26 @@ button press. When one is due:
 
 ## The break screen
 
-The break screen appears while Screen is selected. It shows the break's own
+The break screen appears while Screen is selected. White on black, it shows a
+break art at the left (a meditating figure, in the shipped template) and, in the column beside it, the break's own
 countdown and a bar that drains as the break runs:
 
 ```
 ┌──────────────────────────────────────────────────┐
-│                  SCREEN BREAK                    │
-│ ████████████████████░░░░░░░░░░░░░░░░░░░░░░░░░░░░ │  break bar
-│                     12:34                        │  break countdown
-│ Chores 2 of 3                       Screen 1:30  │  only with a chore list
+│   (break              SCREEN BREAK               │
+│    art)                  12:34                   │  break countdown
+│                    ██████████████░░░░░░░░░       │  break bar
+│                    Chores 2/3     Screen 1:30    │  only with a chore list
 │ Chores                    → Piano          ⟳     │  button labels: A _ C D
 └──────────────────────────────────────────────────┘
 ```
 
+The countdown reads `m:ss` or `mm:ss` under an hour and `h:mm:ss` from one hour
+(breaks can run up to 120 minutes).
+
 | Button | Label | During a break, with Screen selected |
 |--------|-------|--------------------------------------|
-| A | `Chores` | Opens the chore checklist. A break is the time the checklist is meant for, so the line above shows the chores left, for example `Chores 2 of 3`, or a tick when they are all done ([Chores](chores.md)). |
+| A | `Chores` | Opens the chore checklist. A break is the time the checklist is meant for, so the line above shows the chores done, for example `Chores 2/3`, or a tick when they are all done ([Chores](chores.md)). |
 | B | none | Does nothing. Screen cannot be resumed early. |
 | C | `→ Piano` | Switches to the next timer. The hint names that timer and appears only when at least one extra timer is break eligible, since otherwise there is nothing to run. C still switches without the hint. |
 | D | ⟳ | Sync now, as on the timer screen. |
@@ -87,8 +91,8 @@ countdown and a bar that drains as the break runs:
 Without a chore list, cell A shows the frozen Screen time (`Screen 1:30`) in
 place of `Chores`. That is information only: A does nothing. When there are
 neither break-eligible extra timers nor a chore list, the screen has no button
-row at all. It ends with `Timer paused - 01:30:00 left` instead, but C and D
-still work.
+row at all. It ends with `Timer paused - 01:30:00 left` under the figure
+instead, but C and D still work.
 
 ## Other timers during a break
 

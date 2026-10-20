@@ -52,10 +52,14 @@ or quiet hours from HA instead of rebuilding. Never erase NVS.
 
 ## Sound and lights
 
-- [ ] **Expiry alarm.** Let a timer expire. → The speaker sounds with a red
-  LED pulse, and any button silences it.
+- [ ] **Expiry alarm.** Let a timer expire. → The panel shows the time's-up art at
+  the left, flush with the bottom edge (the shipped template's alarm clock is
+  cropped by it), and TIME'S UP! at the right. The speaker sounds with a red LED pulse, and any button silences it.
 - [ ] **Break alerts.** Let a break start, then end. → The start sounds with
-  a cyan LED pulse, and any button silences it. With no extra timer running,
+  a cyan LED pulse, and any button silences it. The panel is white on black
+  with the break art at the left and the countdown, bar and (with a
+  chore list) `Chores n/m` line in the column beside it; after a partial
+  refresh the countdown shows no ghost digits. With no extra timer running,
   the end plays a short chime.
 - [ ] **Locate (HA).** Turn on **Find my timer** in HA, then press D on the
   timer screen so a network window picks it up. → The speaker sounds with a
@@ -86,7 +90,8 @@ or quiet hours from HA instead of rebuilding. Never erase NVS.
   100 %. On a LiPo 3300–4200 mV, with a percentage that tracks it.
 - [ ] **Low battery (cell, HA).** Run a cell down past 15 % and then 10 %,
   then charge it. → At 15 % the bar shows a **Charge Me!!!** badge. At 10 %
-  the panel shows only **Charge Me!**, a running timer pauses, the buttons
+  the panel shows only the charge art, **Charge me!** on two lines and a
+  nearly-empty battery, a running timer pauses, the buttons
   do nothing, and HA's **Charge lock** turns on. Once charged above 15 %,
   the normal screen returns within 10 min.
 - [ ] **Light sensor (HA).** Cover the sensor, then shine a light on it. →

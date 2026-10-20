@@ -294,6 +294,12 @@ typedef struct {
 } display_bar_split_t;
 display_bar_split_t display_bar_split(int32_t remaining_sec, uint32_t allocation_sec, uint32_t withheld_sec);
 void display_format_remaining(char *buf, size_t len, int32_t remaining_sec);
+/* The break screen's big countdown: "m:ss" / "mm:ss" under an hour,
+   "h:mm:ss" from one hour (breaks run to CFG_BOUND_BREAK_DUR_HI = 120 min,
+   so "2:00:00" is the longest). No leading zero on the leading unit, so it
+   fits the 192 px right column at 48 pt (test_the_break_countdown_fits_
+   the_column_in_every_format). Clamps at zero. */
+void display_format_countdown(char *buf, size_t len, int32_t remaining_sec);
 /* Coarse duration, "1:30" (h:mm, truncated). Used for the frozen screen
    time on the break screen, and the reason it is coarse is TRUTH, not
    width: the Screen timer is paused for the whole break, so the value
@@ -301,15 +307,17 @@ void display_format_remaining(char *buf, size_t len, int32_t remaining_sec);
    that is not moving would be a lie the panel cannot take back until the
    next refresh.
 
-   Width bites in one band only, and the claim is worth scoping because
-   the other band looks like it should bite and does not. With no chore
-   list the figure sits in cell A of the button row: "Screen 12:30:00" is
-   a 125 px box from a left margin at x=4, so it runs to x=129 and over
-   the swap hint, whose box starts at x=114 — it genuinely does not fit.
-   With a list the figure moves to the line above (§2.6), where the
-   widest prompt is right-aligned at x=168 and the same 125 px box clears
-   it by 39 px. There IS room for the seconds there; they are still not
-   drawn, for the reason above. Clamps at zero. */
+   Width bites in both places. With no chore list the figure sits in cell
+   A of the button row: "Screen 12:30:00" is a 125 px box from a left
+   margin at x=4, so it runs to x=129 and over the swap hint, whose box
+   starts at x=114 — it genuinely does not fit. With a list the figure
+   moves to the chore line under the bar (§2.6), right-aligned in the
+   192 px right column beside "Chores 0/3"; "Screen 20:00" already
+   leaves 0 px there, so the seconds would not fit either. The value is
+   not bounded by the 24 h allocation (grants stack on it, and a snapshot
+   may carry up to 7 days): the painter caps the label's width so it
+   cannot reach the prompt, clipping the trailing digits. Clamps at
+   zero. */
 void display_format_hm(char *buf, size_t len, int32_t sec);
 /* Header chip while a break runs behind another timer: "BREAK 12:34".
    Always M:SS, never H:MM:SS — break durations are bounded (minutes) and
@@ -466,7 +474,7 @@ void display_format_chore_count(char *buf, size_t len, uint8_t acked, uint8_t co
    rather than painting a wrong glyph. */
 #define DISPLAY_CHORE_TICK "\xEF\x80\x8C" /* LV_SYMBOL_OK, U+F00C */
 
-/* The break screen's chore prompt (§2.6), "Chores 2 of 3" or, with every
+/* The break screen's chore prompt (§2.6), "Chores 2/3" or, with every
    row done, "Chores " and a tick. A break is the natural moment to do
    chores, so the device says where the list stands — a PROMPT and never
    the gate (§3), which is why it states a figure and offers nothing.
@@ -478,12 +486,12 @@ void display_format_chore_count(char *buf, size_t len, uint8_t acked, uint8_t co
    opposite meanings. Feeding this chore_outstanding would produce a
    fraction that reads correctly and means the reverse.
 
-   IT IS SPELLED THE SAME WAY AS THAT HEADER, "2 of 3" and not "(2/3)",
-   because of what the glyphs measure rather than because the two ought
-   to rhyme: '(' ')' and '/' rise above this font's cap height and fall
-   below its baseline, which paints 17 ink rows where letters and digits
-   paint 12, and the band the break screen opens for this line is 12 —
-   display_screens.c carries that arithmetic.
+   IT IS "2/3" AND NOT "2 of 3" (the checklist header's wording) because
+   of what the widths measure: the break screen's chore line shares a
+   192 px column with the frozen screen time, and "Chores 0 of 3" (105 px)
+   plus "Screen 20:00" (106 px) does not fit. '/' paints 17 ink
+   rows where letters and digits paint 12; the column's chore band has the
+   rows — display_screens.c carries that arithmetic.
 
    THE TICK GOES LAST. A leading tick would shift "Chores" rightwards the
    instant the list was finished, and on e-ink a word that moves reads as
@@ -492,13 +500,12 @@ void display_format_chore_count(char *buf, size_t len, uint8_t acked, uint8_t co
    font has none — the device's existing vocabulary is already "tick =
    done, nothing = not done", which is what the checklist rows draw.
 
-   count == 0 yields "Chores 0 of 0" rather than a tick: an empty list has
-   nothing done, and this matches display_format_chore_count at the same
-   input. The break screen never calls it that way (the line is drawn only
+   count == 0 yields "Chores 0/0" rather than a tick: an empty list has
+   nothing done. The break screen never calls it that way (the line is drawn only
    when chore_count > 0), so this is the formatter refusing to invent a
    finished list rather than a case the screen relies on.
 
-   The longest output is "Chores 0 of 3" at 13 characters; the tick form
+   The longest output is "Chores 0/3" at 10 characters; the tick form
    is 10 bytes (7 characters, the tick being 3 bytes of UTF-8). 16 bytes
    hold either. A shorter buffer truncates the way snprintf does; a zero
    length writes nothing at all. */

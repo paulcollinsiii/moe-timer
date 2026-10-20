@@ -125,7 +125,10 @@ static uint32_t tick_ms(void) {
    them just as the break screen's do, and display_fb_invert_dirty_rows()
    limits the flash to (column, band) segments that actually changed. The
    extents are the MAIN screen's widget geometry and always were; no
-   screen needs its own table. */
+   screen needs its own table. The break screen's figure-and-column layout
+   (display_screens.c) is mapped onto these bands element by element, and
+   test_the_break_elements_sit_inside_the_clean_bands_that_cover_them reads
+   this table's source to hold the mapping. */
 static const struct {
     int y0, y1; /* inclusive landscape rows */
 } CLEAN_BANDS[] = {
