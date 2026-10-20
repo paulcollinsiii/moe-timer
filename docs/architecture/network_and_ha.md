@@ -75,9 +75,9 @@ timeouts that bound it: wifi connect 15 s, SNTP 15 s, MQTT connect 5 s, two
 publish drains of 3 s, the 1.5 s retained wait: 42.5 s, a working AP with SNTP
 unreachable. The chore gesture's bound (`CHORE_WORST_GESTURE_MS`) includes one
 such window, 84.3 s of its 90 s (half the failsafe); the final-minute wake
-(`WAKE_FLOW_FINAL_MINUTE_WORST_MS`: lead and grid wait 95 s, the alarm 15.1 s,
-one window, two refreshes) is 160.6 s of the 180 s failsafe. Both are
-`_Static_assert`ed. A follow-up window is not charged to either. With WiFi down
+(`WAKE_FLOW_FINAL_MINUTE_WORST_MS`: lead and grid wait 95 s, the longest of the
+expiry, break and bed-time paths with their refreshes, 24 s at the defaults, one
+window) is 161.5 s of the 180 s failsafe. Both are `_Static_assert`ed. A follow-up window is not charged to either. With WiFi down
 each event costs the 15 s connect attempt and counts toward
 `wifi_join_failures` (see [State](state.md)), so the setup hint comes sooner;
 there is no back-off.

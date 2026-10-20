@@ -171,18 +171,29 @@ net_finish_t net_apply_finish(void) {
        that flips an EXPIRED slot 0 to PAUSED moves a state only
        break_banner reads, and only for BREAK. */
     uint32_t moved_slots = 0;
+    const time_t now = hal_time_now();
+    /* A deduction past zero expires a RUNNING slot INSIDE the adjust (it
+       needs the clock to fold at now), so the RUNNING -> EXPIRED edge
+       happens here, in the window, and no later tick sees it. It is
+       announced exactly like a reconcile's expiry below: the hook, once. */
+    const bool active_was_running = (timer_get_state() == TIMER_RUNNING);
     int32_t bonus_target;
     if (mqtt_ha_take_bonus_target(&bonus_target)) {
-        if (timer_bonus_reconcile(0, bonus_target))
+        if (timer_bonus_reconcile(0, bonus_target, now))
             moved_slots |= 1u;
     }
     int grant_slot;
     int32_t grant_sec;
     if (mqtt_ha_take_grant(&grant_slot, &grant_sec)) {
-        if (timer_adjust(grant_slot, grant_sec) && grant_slot >= 0 && grant_slot < TIMER_SLOT_COUNT)
+        if (timer_adjust(grant_slot, grant_sec, now) && grant_slot >= 0 && grant_slot < TIMER_SLOT_COUNT)
             moved_slots |= 1u << grant_slot;
     }
+    const bool adjust_expired_active = active_was_running && timer_get_state() == TIMER_EXPIRED;
     net_finish_t nf = reconcile_defs();
+    if (adjust_expired_active) {
+        s_ops.on_active_expired_alert(); /* owns the display: TIME'S UP + alert + repaint */
+        nf = NET_FINISH_ALERTED;
+    }
     /* Read the selection AFTER the reconcile: that is the slot the paint
        will render. (A reconcile that moves the selection has already
        answered CHANGED or ALERTED, so this only ever reads a settled

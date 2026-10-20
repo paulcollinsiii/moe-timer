@@ -33,6 +33,20 @@ The panel does not show the balance. Home Assistant shows it as the **Screen
 exposure** sensor. Read it against the break interval to see why a break has or
 has not fired yet.
 
+When a timer runs out at the very moment a break comes due (for example a
+45-minute Screen allowance with a 45-minute interval, or an extra that the
+break clock is counting), the break takes the alarm: the break screen and the
+break tone play, and the TIME'S UP alarm does not. The timer is TIME'S UP
+underneath and the run counts as completed, and when the break ends it is
+still TIME'S UP, with no second alarm. This holds when the device wakes a
+little late, or a button press lands just after the time ran out: the run
+still ends at its allotted time, and only the time it actually ran counts
+toward the break balance. A break that comes due earlier in the final minute
+starts at once as usual. One that would come due only after the time has run
+out is not pulled forward: a 45-minute allowance against a 50-minute interval
+plays TIME'S UP and starts no break, even if the device finds the expiry
+several minutes late.
+
 A break that would still be running at bed time is skipped. The device goes to
 Bed Time at once, with the bed-time alarm ([Locks](locks.md#bed-time)).
 

@@ -76,7 +76,16 @@ setup route ─▶ day rollover ─▶ lock gates ─▶ break-end drain ─▶ 
   now, through the same rules as a wake press ([peripherals.md](peripherals.md)).
 - **Awake watch.** With 75 s or less to an expiry or a chiming break end, the
   wake stays up and fires the event within a second of its wall time instead
-  of sleeping through it.
+  of sleeping through it. A break that falls due at the expiry instant takes
+  the alarm: every site that finds a transition into EXPIRED asks
+  `wake_flow_maybe_start_break()` first (`wake_flow_expire_or_break()`) and
+  plays the expiry alarm only if it declines. The gates that run before the
+  tick (the fast path, the post-action gate) meet such a slot still RUNNING
+  past its wall: `timer_start_break()` expires it at the wall and reports it,
+  and `wake_flow_maybe_start_break()` owes the expiry publish. The break's end restores
+  EXPIRED, which `wake_policy_render()` does not read as a transition. The
+  `net_apply` expiry hook keeps the plain alarm: it also runs inside the lock
+  gates' windows, where a break must not start.
 
 A lock gate that engages paints its own screen and ends the wake in
 `enter_deep_sleep()`. One that releases lets the wake carry on, owes the

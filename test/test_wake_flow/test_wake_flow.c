@@ -771,6 +771,19 @@ static bool flow_break_due_ret;
 static time_t flow_break_due_from; /* 0 = use flow_break_due_ret, see below */
 static time_t flow_break_due_now;
 static int32_t flow_break_due_interval; /* SECONDS, as passed */
+/* NOT A MODEL OF THE REAL TIMER, and only here for the tick handler's
+   post-render expiry site. The real timer_break_due() is keyed on slot 0's
+   run segment, not on the state, so for a tie it is due BEFORE the tick, at
+   the wall: the gate that runs ahead of the tick sees it, which is what
+   flow_break_due_from models (the cases that matter drive the fast path and
+   finish_or_break with that, plus flow_start_break_swallows). This one says
+   "no until this wake has ticked" to reach the post-render site, which the
+   real timer leaves unreachable for a tie and which stays as a defensive
+   second look. Wins over the two answers above. */
+static bool flow_break_due_after_tick;
+/* What timer_start_break reports: the start expired a RUNNING slot that
+   was already past its wall (the real timer does so for the tie). */
+static bool flow_start_break_swallows;
 
 static int flow_bed_min; /* what the bed-time cache answers */
 static time_t flow_start_break_now;
@@ -815,6 +828,8 @@ bool timer_break_due(time_t now, int32_t interval_sec) {
     flow_log_push(EV_BREAK_DUE);
     flow_break_due_now = now;
     flow_break_due_interval = interval_sec;
+    if (flow_break_due_after_tick)
+        return flow_log_count(EV_START_BREAK) == 0 && flow_log_count(EV_TIMER_TICK) > 0; /* none while one runs */
     if (flow_break_due_from != 0)
         return now >= flow_break_due_from;
     return flow_break_due_ret;
@@ -829,11 +844,12 @@ int32_t timer_run_accum(time_t now) {
     return 0;
 }
 
-void timer_start_break(time_t now, int32_t duration_sec) {
+bool timer_start_break(time_t now, int32_t duration_sec) {
     flow_log_push(EV_START_BREAK);
     flow_start_break_now = now;
     flow_start_break_dur = duration_sec;
     flow_state = TIMER_BREAK;
+    return flow_start_break_swallows;
 }
 
 int config_cache_bedtime_minutes(void) {
@@ -2140,7 +2156,9 @@ void setUp(void) {
     flow_duration_min = 15;
     flow_break_due_ret = false;
     flow_break_due_from = 0; /* the plain injected answer, at every instant */
-    flow_bed_min = -1;       /* disabled: bedtime_* treat negative as off */
+    flow_break_due_after_tick = false;
+    flow_start_break_swallows = false;
+    flow_bed_min = -1; /* disabled: bedtime_* treat negative as off */
     flow_alert_dismissed = false;
     flow_alert_seconds = 0;
     flow_bed_engaged = false;
@@ -2940,7 +2958,9 @@ void test_row4_a_break_end_forces_every_later_render_full(void) {
         for (int a = 0; a < n_states; a++) {
             for (int btn = 0; btn < 2; btn++) {
                 for (int sel = 0; sel < 2; sel++) {
-                    bool alerting = (states[a] == TIMER_EXPIRED && states[b] != TIMER_EXPIRED && sel == 0);
+                    /* BREAK -> EXPIRED is the break's restore, not a transition */
+                    bool alerting = (states[a] == TIMER_EXPIRED && states[b] != TIMER_EXPIRED &&
+                                     states[b] != TIMER_BREAK && sel == 0);
                     wake_render_t wr =
                         wake_policy_render(states[b], states[a], btn != 0, wake_flow_break_ended_this_wake(), sel != 0);
                     if (alerting) {
@@ -5710,7 +5730,9 @@ void test_row9_the_balance_is_asked_on_every_poll_not_only_at_entry(void) {
     flow_state = TIMER_RUNNING;
     flow_expiry_wall = (int64_t)now + 20;
     wake_flow_watch_final_minute();
-    TEST_ASSERT_EQUAL_INT(80, flow_log_count(EV_BREAK_DUE)); /* 20 s at 250 ms */
+    /* 20 s at 250 ms, plus the one question the expiry itself asks (a break
+       due AT the expiry takes the alarm) */
+    TEST_ASSERT_EQUAL_INT(81, flow_log_count(EV_BREAK_DUE));
     TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_START_BREAK));
     /* nothing due: the expiry is still the thing that happens */
     TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_ALERT_EXPIRY));
@@ -5722,8 +5744,11 @@ void test_row9_the_break_interval_is_read_once_before_the_loop(void) {
     flow_state = TIMER_RUNNING;
     flow_expiry_wall = (int64_t)now + 20;
     wake_flow_watch_final_minute();
-    TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_CFG_INTERVAL));
+    /* Read once for the loop, and once more by the expiry's own question
+       (wake_flow_maybe_start_break reads for itself): never per poll. */
+    TEST_ASSERT_EQUAL_INT(2, flow_log_count(EV_CFG_INTERVAL));
     TEST_ASSERT_TRUE(flow_log_at(EV_CFG_INTERVAL) < flow_log_at(EV_BREAK_DUE));
+    TEST_ASSERT_TRUE(flow_log_at_nth(EV_CFG_INTERVAL, 2) > flow_log_at_nth(EV_BREAK_DUE, 80));
     /* in seconds, from the stored minutes */
     TEST_ASSERT_EQUAL_INT32(30 * 60, flow_break_due_interval);
 }
@@ -5753,6 +5778,333 @@ void test_the_watch_falls_back_to_the_compile_time_break_interval(void) {
     wake_flow_watch_final_minute();
     TEST_ASSERT_EQUAL_UINT16(NVS_DEFAULT_BREAK_INTERVAL_MIN, flow_seen_interval_default);
     TEST_ASSERT_EQUAL_INT32((int32_t)NVS_DEFAULT_BREAK_INTERVAL_MIN * 60, flow_break_due_interval);
+}
+
+/* ---- a break due AT the expiry swallows the expiry alarm ------------------
+
+   Owner decision 2026-10-19 (docs/planning/20261019.break-swallows-expiry.
+   plan.md): when the timer runs out at the very instant a screen break
+   falls due (allocation == break interval), the device played the expiry
+   alarm and then, a minute later, the break alarm. Now it plays one, the
+   break's. Exact ties only: a break due EARLIER in the final minute is
+   started by the watch's loop as before, and one due only AFTER the expiry
+   is not pulled forward.
+
+   The choice is wake_flow_expire_or_break(), shared by every expiry site
+   in this file, and these cases drive it through each of them. */
+
+/* Asserts what an exact tie must look like on the log, wherever it came
+   from: the break alarm is the only alarm, nothing painted TIME'S UP, the
+   break was persisted before its alarm, and the owed publish came after the
+   alarm. */
+static void flow_assert_the_break_swallowed_the_expiry(void) {
+    TEST_ASSERT_EQUAL_INT_MESSAGE(0, flow_log_count(EV_ALERT_EXPIRY), "the expiry alarm played as well");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(0, flow_log_count(EV_TIMESUP), "TIME'S UP was painted as well");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(1, flow_log_count(EV_START_BREAK), "the break did not start");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(1, flow_log_count(EV_ALERT_BREAK), "the break alarm did not play (once)");
+    TEST_ASSERT_EQUAL_INT(ALERT_BREAK, flow_last_alert);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(1, flow_break_paint_count(), "the break screen was not painted once");
+    /* BREAK (over an EXPIRED slot 0) is on flash before the alarm, so a
+       reset mid-alarm cannot replay the final minute. */
+    TEST_ASSERT_TRUE_MESSAGE(flow_log_at(EV_START_BREAK) < flow_log_at(EV_PERSIST_SAVE),
+                             "saved before the break began");
+    TEST_ASSERT_TRUE_MESSAGE(flow_log_at(EV_PERSIST_SAVE) < flow_log_at(EV_ALERT_BREAK), "not saved before the alarm");
+    /* The timer did expire, so HA is owed the event: one window, after the
+       break's paint and alarm (the radio never overlaps the amp). */
+    TEST_ASSERT_EQUAL_INT_MESSAGE(1, flow_log_count(EV_NET_OPEN), "the expiry's publish was lost or doubled");
+    TEST_ASSERT_TRUE(flow_log_at(EV_ALERT_BREAK) < flow_log_at(EV_NET_OPEN));
+    TEST_ASSERT_TRUE(flow_break_paint_at() < flow_log_at(EV_NET_OPEN));
+}
+
+void test_tie_final_minute_the_break_swallows_the_expiry_alarm(void) {
+    time_t now = flow_at(14, 0);
+    mock_time_set(now);
+    flow_state = TIMER_RUNNING;
+    flow_expiry_wall = (int64_t)now + 5;
+    flow_break_due_from = now + 5; /* the balance reaches the interval AT the expiry */
+
+    wake_flow_watch_final_minute();
+
+    flow_assert_the_break_swallowed_the_expiry();
+    TEST_ASSERT_EQUAL_INT(TIMER_BREAK, flow_state);
+    TEST_ASSERT_EQUAL_INT64(now + 5, flow_start_break_now); /* at the expiry instant */
+    TEST_ASSERT_EQUAL_UINT32(5000, mock_delay_total_ms());
+    TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_CFG_DURATION)); /* the break's own length was read */
+}
+
+void test_tie_final_minute_with_breaks_disabled_plays_the_expiry_alarm(void) {
+    time_t now = flow_at(14, 0);
+    mock_time_set(now);
+    flow_state = TIMER_RUNNING;
+    flow_expiry_wall = (int64_t)now + 5;
+    flow_state_after_tick = TIMER_EXPIRED;
+    flow_interval_min = 0;
+    flow_break_due_ret = true;
+
+    wake_flow_watch_final_minute();
+
+    TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_ALERT_EXPIRY));
+    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_START_BREAK));
+    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_ALERT_BREAK));
+}
+
+void test_tie_final_minute_a_break_due_only_after_the_expiry_is_not_pulled_forward(void) {
+    time_t now = flow_at(14, 0);
+    mock_time_set(now);
+    flow_state = TIMER_RUNNING;
+    flow_expiry_wall = (int64_t)now + 5;
+    flow_state_after_tick = TIMER_EXPIRED;
+    flow_break_due_from = now + 6; /* one second short at the expiry */
+
+    wake_flow_watch_final_minute();
+
+    TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_ALERT_EXPIRY));
+    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_START_BREAK));
+    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_ALERT_BREAK));
+    TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_TIMESUP));
+}
+
+/* The near miss: due earlier in the final minute, the loop starts it and
+   the watch ends there, exactly as before; the expiry never plays (the
+   timer was paused by the break). */
+void test_tie_final_minute_a_break_due_earlier_keeps_todays_behaviour(void) {
+    time_t now = flow_at(14, 0);
+    mock_time_set(now);
+    flow_state = TIMER_RUNNING;
+    flow_expiry_wall = (int64_t)now + 5;
+    flow_state_after_tick = TIMER_EXPIRED;
+    flow_break_due_from = now + 2;
+
+    wake_flow_watch_final_minute();
+
+    TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_START_BREAK));
+    TEST_ASSERT_EQUAL_INT64(now + 2, flow_start_break_now);
+    TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_ALERT_BREAK));
+    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_ALERT_EXPIRY));
+    TEST_ASSERT_EQUAL_UINT32(2000, mock_delay_total_ms());
+}
+
+/* Bed time: a break that would cross it engages the lock instead of
+   starting (no return). It swallows the expiry too; the plan accepts that. */
+void test_tie_final_minute_the_bedtime_branch_also_swallows_the_expiry(void) {
+    time_t now = flow_at(19, 50);
+    mock_time_set(now);
+    flow_state = TIMER_RUNNING;
+    flow_expiry_wall = (int64_t)now + 5;
+    flow_state_after_tick = TIMER_EXPIRED;
+    flow_break_due_from = now + 5;
+    flow_duration_min = 15;
+    flow_bed_min = flow_bed_at(20, 0);
+
+    if (setjmp(flow_bed_jmp) == 0) {
+        wake_flow_watch_final_minute();
+        TEST_FAIL_MESSAGE("the watch returned instead of going to bed");
+    }
+
+    TEST_ASSERT_TRUE(flow_bed_engaged);
+    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_ALERT_EXPIRY));
+    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_START_BREAK));
+}
+
+/* The button wake's render: the press (a resume with the allocation
+   already spent) lands on an expiry and a due break together. */
+void test_tie_button_wake_render_the_break_swallows_the_expiry_alarm(void) {
+    mock_time_set(flow_at(15, 0));
+    flow_state = TIMER_EXPIRED;
+    flow_break_due_ret = true;
+    flow_window_active = false;
+
+    finish_action_and_render(BTN_B, TIMER_RUNNING, flow_at(15, 0), false);
+
+    flow_assert_the_break_swallowed_the_expiry();
+}
+
+void test_tie_button_wake_render_without_a_due_break_plays_the_expiry_alarm(void) {
+    mock_time_set(flow_at(15, 0));
+    flow_state = TIMER_EXPIRED;
+    flow_break_due_ret = false;
+    flow_window_active = false;
+
+    finish_action_and_render(BTN_B, TIMER_RUNNING, flow_at(15, 0), false);
+
+    TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_ALERT_EXPIRY));
+    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_START_BREAK));
+}
+
+/* The post-window reconcile: the join expired the slot under the press. */
+void test_tie_post_join_reconcile_the_break_swallows_the_expiry_alarm(void) {
+    mock_time_set(flow_at(15, 0));
+    flow_state = TIMER_RUNNING;
+    flow_window_active = true;
+    flow_state_after_finish = TIMER_EXPIRED;
+    flow_break_due_ret = true;
+
+    finish_action_and_render(BTN_B, TIMER_RUNNING, flow_at(15, 0), false);
+
+    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_ALERT_EXPIRY));
+    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_TIMESUP));
+    TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_START_BREAK));
+    TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_ALERT_BREAK));
+    TEST_ASSERT_TRUE(flow_log_at(EV_PERSIST_SAVE) < flow_log_at(EV_ALERT_BREAK));
+    /* the join was the window; the swallowed expiry still owes its own */
+    TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_NET_OPEN));
+    TEST_ASSERT_TRUE(flow_log_at(EV_ALERT_BREAK) < flow_log_at(EV_NET_OPEN));
+}
+
+/* The tick handler's post-render expiry site, reached the one way the real
+   timer cannot reach it for a tie (see flow_break_due_after_tick): the
+   fast-path gate says no and the site's own question says yes. A defensive
+   second look, covered so the site cannot rot. */
+void test_tie_tick_wake_the_break_swallows_the_expiry_alarm(void) {
+    time_t now = flow_at(15, 0);
+    flow_tick_clock(now);
+    flow_reset_reason = ESP_RST_DEEPSLEEP;
+    flow_state = TIMER_RUNNING;
+    flow_expiry_wall = (int64_t)now;
+    flow_state_after_tick = TIMER_EXPIRED;
+    flow_break_due_after_tick = true;
+
+    TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_tick());
+
+    flow_assert_the_break_swallowed_the_expiry();
+    /* the fast-path gate was asked first and said no: the swallow is the
+       expiry site's doing, not the earlier gate's */
+    TEST_ASSERT_TRUE(flow_log_at(EV_BREAK_DUE) < flow_log_at(EV_TIMER_TICK));
+}
+
+void test_tie_tick_wake_without_a_due_break_plays_the_expiry_alarm(void) {
+    time_t now = flow_at(15, 0);
+    flow_tick_clock(now);
+    flow_reset_reason = ESP_RST_DEEPSLEEP;
+    flow_state = TIMER_RUNNING;
+    flow_expiry_wall = (int64_t)now;
+    flow_state_after_tick = TIMER_EXPIRED;
+
+    TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_tick());
+
+    TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_ALERT_EXPIRY));
+    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_ALERT_BREAK));
+}
+
+/* THE LATE WAKE'S TIE, which is the real one: nothing has ticked, slot 0 is
+   RUNNING past its wall, and the real timer_break_due() already says due
+   (it is keyed on the run segment, not the state). The FAST-PATH gate,
+   which runs before the tick, therefore starts the break, and
+   timer_start_break expires the slot at the wall and says so. The break
+   takes the alarm, no TIME'S UP is painted, and HA is owed the expiry. */
+void test_tie_late_wake_fast_path_gate_swallows_the_expiry_and_owes_the_publish(void) {
+    time_t now = flow_at(15, 0);
+    flow_tick_clock(now);
+    flow_reset_reason = ESP_RST_DEEPSLEEP;
+    flow_state = TIMER_RUNNING;
+    flow_expiry_wall = (int64_t)now - 30; /* found 30 s past the wall */
+    flow_break_due_from = now - 30;       /* due at the wall, so due now, with no tick */
+    flow_start_break_swallows = true;
+
+    TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_tick());
+
+    TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_START_BREAK));
+    TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_ALERT_BREAK));
+    TEST_ASSERT_EQUAL_INT_MESSAGE(0, flow_log_count(EV_ALERT_EXPIRY), "two alarms for one expiry");
+    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_TIMESUP));
+    TEST_ASSERT_TRUE_MESSAGE(s_event_publish_owed, "the swallowed expiry owes HA nothing");
+    /* the gate was the first thing to ask: nothing ticked before it */
+    TEST_ASSERT_TRUE(flow_log_at(EV_BREAK_DUE) < flow_log_at(EV_TIMER_TICK));
+}
+
+/* Control: an ordinary break start (nothing swallowed) owes no publish. */
+void test_a_break_that_swallowed_nothing_owes_no_publish(void) {
+    time_t now = flow_at(15, 0);
+    flow_tick_clock(now);
+    flow_reset_reason = ESP_RST_DEEPSLEEP;
+    flow_state = TIMER_RUNNING;
+    flow_expiry_wall = (int64_t)now + 600;
+    flow_break_due_ret = true;
+
+    TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_tick());
+
+    TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_START_BREAK));
+    TEST_ASSERT_FALSE(s_event_publish_owed);
+}
+
+/* The post-action gate (finish_or_break), a press after the wall: same
+   swallow, and here the owed window IS opened (it sleeps after serving
+   it), after the break's alarm. */
+void test_tie_button_wake_finish_or_break_gate_swallows_the_expiry_and_serves_the_publish(void) {
+    time_t now = flow_at(15, 0);
+    mock_time_set(now);
+    flow_state = TIMER_RUNNING;
+    flow_expiry_wall = (int64_t)now - 5;
+    flow_break_due_from = now - 5;
+    flow_start_break_swallows = true;
+    flow_window_active = false;
+
+    TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_finish_or_break(BTN_B, TIMER_RUNNING, now, false));
+
+    TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_START_BREAK));
+    TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_ALERT_BREAK));
+    TEST_ASSERT_EQUAL_INT_MESSAGE(0, flow_log_count(EV_ALERT_EXPIRY), "two alarms for one expiry");
+    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_TIMESUP));
+    TEST_ASSERT_EQUAL_INT_MESSAGE(1, flow_log_count(EV_NET_OPEN), "the expiry's publish was not served");
+    TEST_ASSERT_TRUE(flow_log_at(EV_ALERT_BREAK) < flow_log_at(EV_NET_OPEN));
+}
+
+/* The 45 min run against a 50 min interval found 10 minutes late: the
+   timer folds at the wall (test_timer), so the balance is short and no
+   break is due; the flow plays the one TIME'S UP and starts nothing. */
+void test_a_late_found_expiry_short_of_the_interval_plays_the_expiry_alarm(void) {
+    time_t now = flow_at(15, 0);
+    flow_tick_clock(now);
+    flow_reset_reason = ESP_RST_DEEPSLEEP;
+    flow_state = TIMER_RUNNING;
+    flow_expiry_wall = (int64_t)now - 600;
+    flow_state_after_tick = TIMER_EXPIRED;
+    /* A phantom fold would have the balance reach the interval 5 min past
+       the wall, seconds Screen never ran; folded at the wall it is short,
+       so not due at any instant of this wake. */
+    flow_break_due_from = now + 3600;
+
+    TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_tick());
+
+    TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_ALERT_EXPIRY));
+    TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_TIMESUP));
+    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_START_BREAK));
+    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_ALERT_BREAK));
+}
+
+/* The final-minute watch's swallow leaves no binary-countdown pixel lit
+   through the break's refresh: the in-loop break path clears them, and so
+   does this one. */
+void test_tie_final_minute_swallow_clears_the_countdown_pixels_before_the_break(void) {
+    time_t now = flow_at(14, 0);
+    mock_time_set(now);
+    flow_state = TIMER_RUNNING;
+    flow_expiry_wall = (int64_t)now + 5;
+    flow_break_due_from = now + 5;
+
+    wake_flow_watch_final_minute();
+
+    TEST_ASSERT_TRUE_MESSAGE(flow_log_count(EV_PIXELS_BINARY) > 0, "the countdown never lit a pixel");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(1, flow_log_count(EV_PIXELS_OFF), "the countdown pixels were left lit");
+    TEST_ASSERT_TRUE(flow_log_at(EV_PIXELS_OFF) < flow_log_at(EV_START_BREAK));
+}
+
+/* The swallowed break's end. Slot 0 comes back EXPIRED, and it WAS expired
+   when the break began: no TIME'S UP, a full repaint of the main screen. */
+void test_tie_the_swallowed_breaks_end_does_not_alarm(void) {
+    time_t now = flow_at(15, 0);
+    flow_tick_clock(now);
+    flow_reset_reason = ESP_RST_DEEPSLEEP;
+    flow_state = TIMER_BREAK; /* the inverted layout is what is on the glass */
+    flow_arm_break(now - 5, FLOW_SCREEN, FLOW_SCREEN);
+    flow_state_after_tick = TIMER_EXPIRED; /* the break's end restores EXPIRED */
+
+    TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_tick());
+
+    TEST_ASSERT_TRUE(wake_flow_break_ended_this_wake());
+    TEST_ASSERT_EQUAL_INT_MESSAGE(0, flow_log_count(EV_ALERT_EXPIRY), "the break's end played TIME'S UP");
+    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_TIMESUP));
+    TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_FULL_REFRESH));
 }
 
 /* ---- CYCLE 11: the post-action render -----------------------------------
@@ -13207,6 +13559,22 @@ int main(void) {
     RUN_TEST(test_row9_the_break_interval_is_read_once_before_the_loop);
     RUN_TEST(test_row9_a_zero_break_interval_is_never_asked_of_the_balance);
     RUN_TEST(test_the_watch_falls_back_to_the_compile_time_break_interval);
+    RUN_TEST(test_tie_final_minute_the_break_swallows_the_expiry_alarm);
+    RUN_TEST(test_tie_final_minute_with_breaks_disabled_plays_the_expiry_alarm);
+    RUN_TEST(test_tie_final_minute_a_break_due_only_after_the_expiry_is_not_pulled_forward);
+    RUN_TEST(test_tie_final_minute_a_break_due_earlier_keeps_todays_behaviour);
+    RUN_TEST(test_tie_final_minute_the_bedtime_branch_also_swallows_the_expiry);
+    RUN_TEST(test_tie_button_wake_render_the_break_swallows_the_expiry_alarm);
+    RUN_TEST(test_tie_button_wake_render_without_a_due_break_plays_the_expiry_alarm);
+    RUN_TEST(test_tie_post_join_reconcile_the_break_swallows_the_expiry_alarm);
+    RUN_TEST(test_tie_tick_wake_the_break_swallows_the_expiry_alarm);
+    RUN_TEST(test_tie_tick_wake_without_a_due_break_plays_the_expiry_alarm);
+    RUN_TEST(test_tie_late_wake_fast_path_gate_swallows_the_expiry_and_owes_the_publish);
+    RUN_TEST(test_a_break_that_swallowed_nothing_owes_no_publish);
+    RUN_TEST(test_tie_button_wake_finish_or_break_gate_swallows_the_expiry_and_serves_the_publish);
+    RUN_TEST(test_a_late_found_expiry_short_of_the_interval_plays_the_expiry_alarm);
+    RUN_TEST(test_tie_final_minute_swallow_clears_the_countdown_pixels_before_the_break);
+    RUN_TEST(test_tie_the_swallowed_breaks_end_does_not_alarm);
     RUN_TEST(test_the_post_action_render_drains_the_break_before_the_tick);
     RUN_TEST(test_the_post_action_render_ticks_at_the_clock_it_was_handed);
     RUN_TEST(test_button_d_forces_a_full_refresh_the_policy_made_partial);

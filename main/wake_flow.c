@@ -1098,16 +1098,47 @@ _Static_assert(CHORE_WORST_GESTURE_MS <= (uint32_t)CONFIG_MAGTAG_MAX_AWAKE_SEC *
    alerts.c sets it), and the expiry then owes one event window and the
    repaint its join may owe. Two paints are charged (the alert's own
    repaint and the join's), each as a full refresh. A follow-up window is
-   NOT charged: at the defaults this leaves ~19 s, less than a window, so the
+   NOT charged: at the defaults this leaves ~18 s, less than a window, so the
    follow-up's headroom test refuses it in exactly the worst case. All
-   against the whole failsafe, not half: nothing else shares this wake. */
+   against the whole failsafe, not half: nothing else shares this wake.
+
+   THE ALARM-AND-PAINT TERM IS THE LONGEST OF THREE PATHS, because a break
+   due at the expiry instant takes the alarm (wake_flow_expire_or_break) and
+   wake_flow_maybe_start_break then has two ways to go:
+     expiry   - the expiry alert (CONFIG_MAGTAG_EXPIRY_ALARM_CYCLES * 30 + 10
+                iterations of 100 ms) and its two paints;
+     break    - the break alarm (CONFIG_MAGTAG_BREAK_ALARM_CYCLES * 22 + 10)
+                and the one paint of the break screen;
+     bed time - a break that would cross bed time engages the lock instead
+                (lock_gate_bedtime_engage): two display_bedtime() paints
+                around ALERT_BEDTIME, whose bound is (BREAK_ALARM_CYCLES * 50
+                + 10) * 100 ms (alerts.c), then lock_window()'s event window,
+                which is the one window charged below.
+   All three alarm lengths are Kconfig ranges 1..20, so none is always the
+   longest. At the defaults (5 and 3 cycles) the expiry and bed-time alarms
+   are both 16.0 s (160 iterations of 100 ms), so with two paints each the
+   term is 24.0 s and the total 161.5 s of the 180 s failsafe (earlier
+   prose said 15.1 s and 160.6 s: 5 * 30 + 10 is 160 iterations, 16.0 s).
+   At 7 break cycles the bed-time path alone is 36.0 s + 8 s and the total
+   181.5 s, which the assert now refuses; charging only the expiry and break
+   alarms reads 161.5 s there (the break path is 16.4 s + one 4 s paint =
+   20.4 s, under the expiry's 24.0 s, so the term does not move) and lets it
+   through. */
+#define WAKE_FLOW_MAX_U32(a, b) ((a) > (b) ? (a) : (b))
 #define WAKE_FLOW_EXPIRY_ALERT_MS (((uint32_t)CONFIG_MAGTAG_EXPIRY_ALARM_CYCLES * 30u + 10u) * 100u)
-#define WAKE_FLOW_FINAL_MINUTE_WORST_MS                                                      \
-    (((uint32_t)SLEEP_PLAN_EVENT_LEAD_SEC + (uint32_t)WAKE_FLOW_GRID_WAIT_MAX_SEC) * 1000u + \
-     WAKE_FLOW_EXPIRY_ALERT_MS + WAKE_FLOW_EVENT_WINDOW_MS + 2u * WAKE_FLOW_WORST_PAINT_MS)
+#define WAKE_FLOW_BREAK_ALERT_MS (((uint32_t)CONFIG_MAGTAG_BREAK_ALARM_CYCLES * 22u + 10u) * 100u)
+#define WAKE_FLOW_BEDTIME_ALERT_MS (((uint32_t)CONFIG_MAGTAG_BREAK_ALARM_CYCLES * 50u + 10u) * 100u)
+#define WAKE_FLOW_FINAL_PATH_MS                                                                    \
+    WAKE_FLOW_MAX_U32(WAKE_FLOW_MAX_U32(WAKE_FLOW_EXPIRY_ALERT_MS + 2u * WAKE_FLOW_WORST_PAINT_MS, \
+                                        WAKE_FLOW_BREAK_ALERT_MS + 1u * WAKE_FLOW_WORST_PAINT_MS), \
+                      WAKE_FLOW_BEDTIME_ALERT_MS + 2u * WAKE_FLOW_WORST_PAINT_MS)
+#define WAKE_FLOW_FINAL_MINUTE_WORST_MS                                                                                \
+    (((uint32_t)SLEEP_PLAN_EVENT_LEAD_SEC + (uint32_t)WAKE_FLOW_GRID_WAIT_MAX_SEC) * 1000u + WAKE_FLOW_FINAL_PATH_MS + \
+     WAKE_FLOW_EVENT_WINDOW_MS)
 _Static_assert(WAKE_FLOW_FINAL_MINUTE_WORST_MS <= (uint32_t)CONFIG_MAGTAG_MAX_AWAKE_SEC * 1000u,
-               "the final-minute wake (lead + grid wait, the expiry alert, the expiry's event window and its "
-               "repaints) exceeds the awake failsafe: raise MAGTAG_MAX_AWAKE_SEC or shorten the expiry alarm");
+               "the final-minute wake (lead + grid wait, the longest of the expiry, break and bed-time paths "
+               "with their paints, and the event window) exceeds the awake failsafe: raise MAGTAG_MAX_AWAKE_SEC "
+               "or shorten the expiry or break alarm");
 
 /* The three ack buttons and the rows they tick, as a table rather than as
    `btn - BTN_B`: the arithmetic happens to work today only because the
@@ -2106,9 +2137,20 @@ static void paint_break_started(time_t now) {
     display_full_refresh(&st);    /* inverted SCREEN BREAK layout */
 }
 
-/* Returns true when a break was started (caller should go straight to
-   sleep). Persists BREAK before the alarm, same rationale as the EXPIRED
-   at-transition save. */
+/* Returns true when a break was started, painted and alarmed. Persists BREAK
+   before the alarm, same rationale as the EXPIRED at-transition save.
+
+   WHAT THE CALLER DOES NEXT IS ITS OWN: the per-wake and post-action gates
+   go straight to sleep through the break, but the final-minute watch
+   returns to its caller and the expiry sites (wake_flow_expire_or_break)
+   carry on with the wake. All that holds on every path is that the break
+   screen is on the glass and its alarm has finished. The bed-time branch
+   never returns.
+
+   A break started over a RUNNING slot already past its expiry wall expires
+   that slot at the wall (timer_start_break reports it): the expiry is then
+   swallowed here, no TIME'S UP is owed now or at the break's end, and HA is
+   owed the event, marked here for whichever consumer the caller has. */
 bool wake_flow_maybe_start_break(time_t now) {
     uint16_t interval_min = NVS_DEFAULT_BREAK_INTERVAL_MIN, duration_min = NVS_DEFAULT_BREAK_DURATION_MIN;
     nvs_config_get_break_interval_min(&interval_min);
@@ -2136,7 +2178,7 @@ bool wake_flow_maybe_start_break(time_t now) {
     const int32_t accum = timer_run_accum(now);
     (void)accum;
     ESP_LOGI(TAG, "Screen break due (accum %ld s)", (long)accum);
-    timer_start_break(now, (int32_t)duration_min * 60);
+    const bool swallowed_expiry = timer_start_break(now, (int32_t)duration_min * 60);
     /* C16's revert, break-START half, and it is the same argument
        wake_flow_break_end() makes a few hundred lines up, applied to the
        other edge of the same event: the kid did not press anything, the
@@ -2169,7 +2211,9 @@ bool wake_flow_maybe_start_break(time_t now) {
     timer_persist_save();
     paint_break_started(now); /* blue LED through the inverted SCREEN BREAK refresh */
     alert_run(ALERT_BREAK);   /* pulse end darkens the pixels */
-    return true;              /* caller sleeps; stop_sync guards the gate */
+    if (swallowed_expiry)
+        wake_flow_owe_publish(); /* the slot expired under the break: HA is owed it, after the alarm */
+    return true;                 /* the caller decides what follows (see above) */
 }
 
 /* ---- the expiry alert --------------------------------------------------- */
@@ -2212,6 +2256,55 @@ void wake_flow_fire_expiry_alert(void) {
        consumer the calling path has: the tail's window, the tick
        handler's post-render publish, or the final-minute watch's own. */
     wake_flow_owe_publish();
+}
+
+/* THE EXPIRY SITES' ENTRY: one alarm when the timer runs out and a screen
+   break falls due at that same instant, and it is the break's.
+
+   Owner decision 2026-10-19 (docs/planning/20261019.break-swallows-expiry.
+   plan.md). With the allocation equal to the break interval, run_accum
+   reaches the interval in the very second the expiry wall is reached, so
+   the final-minute loop (which only asks while the expiry is still ahead)
+   exits first and the expiry alarm played; timer_break_due() does not
+   require RUNNING, so the break stayed owed and the NEXT wake played its
+   alarm a minute later. Two alarms for one moment.
+
+   The decision is simply whether wake_flow_maybe_start_break() accepts the
+   instant: it declines when breaks are disabled and when the balance is
+   short of the interval, which are exactly the cases that keep today's
+   behaviour (the near misses: a break due EARLIER in the final minute was
+   already started by the watch's loop, one due only AFTER the expiry is not
+   pulled forward). It is the single place the choice is made, called by the
+   four sites that find a RUNNING -> EXPIRED transition; the tests drive each.
+
+   WHAT A SWALLOW LEAVES BEHIND, and why none of it needs more code:
+     - Slot 0 is EXPIRED underneath and the break returns it there
+       (timer.c I7), so no TIME'S UP is owed afterwards; wake_policy_render
+       does not read that return (BREAK -> EXPIRED) as a transition.
+     - BREAK is on flash before the alarm (wake_flow_maybe_start_break
+       persists it), and a snapshot of it restores BREAK over EXPIRED, so a
+       reset mid-alarm replays neither the final minute nor the alarm.
+     - The bed-time branch inside maybe_start_break (a break that would
+       cross bed time engages the lock and never returns) swallows the
+       expiry as well. Accepted: the device goes to bed audibly either way.
+     - The timer did expire, so HA is owed the event exactly as the alert
+       owes it, and by the same marker: served by the caller's own consumer
+       after the break's paint and alarm (the amp is off by then).
+
+   The caller carries on afterwards exactly as it does after the expiry
+   alert; a break just started is a BREAK state the tails already handle.
+
+   NOT THE net_apply HOOK. main.c points on_active_expired_alert straight at
+   wake_flow_fire_expiry_alert (and main.c takes no line), and that hook also
+   runs inside the lock gates' windows, where a break must never start. A
+   config edit that expires the active timer mid-window is a different
+   moment from the tie this serves, and keeps the plain alert. */
+static void wake_flow_expire_or_break(void) {
+    if (wake_flow_maybe_start_break(hal_time_now())) {
+        wake_flow_owe_publish();
+        return;
+    }
+    wake_flow_fire_expiry_alert();
 }
 
 /* ---- day rollover ------------------------------------------------------- */
@@ -2492,7 +2585,13 @@ void wake_flow_watch_final_minute(void) {
         hal_delay_ms(250);
     }
     timer_tick(hal_time_now()); /* RUNNING -> EXPIRED */
-    wake_flow_fire_expiry_alert();
+    /* The loop's last write may have left a binary-countdown pixel lit. The
+       expiry alert takes the strip over, but a break started below paints
+       with it still on: the in-loop break path clears it, so this does too. */
+    neopixel_stop();
+    /* A break due at this very instant (allocation == interval) takes the
+       alarm; the loop above only asks while the expiry is still ahead. */
+    wake_flow_expire_or_break();
     wake_flow_publish_owed_window(); /* the expiry, after the alarm and the repaint */
 }
 
@@ -2623,8 +2722,15 @@ static display_screen_t render_action_result_as(button_id_t btn, timer_state_t b
                       screen_kind_changed || lock_screen_on_glass;
     const bool break_end_promotes = wake_flow_break_ended_this_wake() && !break_end_on_glass;
     wake_render_t bwr = wake_policy_render(before, after, true, break_end_promotes, selection_changed);
+    display_screen_t on_glass_kind = display_screen_for(after, st.app_mode, st.chore_count);
     if (bwr == WAKE_RENDER_EXPIRY_ALERT) {
-        wake_flow_fire_expiry_alert(); /* alert owns the NeoPixels (red pulse) */
+        wake_flow_expire_or_break(); /* alert owns the NeoPixels (red pulse) */
+        /* A swallowing break repainted: the glass now shows the break
+           screen (and the start put the mode back to Timers), not the
+           screen for `after`. Returning the stale kind made the post-join
+           repaint see a screen-kind change and promote to a full refresh. */
+        if (timer_get_state() != after)
+            on_glass_kind = display_screen_for(timer_get_state(), timer_mode(), st.chore_count);
     } else {
         /* Includes EXPIRED: any button returns the display to the main
            layout (empty bar, TIME'S UP state). */
@@ -2637,7 +2743,7 @@ static display_screen_t render_action_result_as(button_id_t btn, timer_state_t b
             display_update(&st); /* partial cadence: every Nth is promoted */
         }
     }
-    return display_screen_for(after, st.app_mode, st.chore_count);
+    return on_glass_kind;
 }
 
 /* Post-action tail shared by both wake handlers and the tick-wake latch
@@ -2708,7 +2814,7 @@ static void wake_flow_repaint_after_join(timer_state_t painted, net_finish_t nf,
         wake_render_t rwr =
             wake_policy_render(painted, timer_get_state(), true, wake_flow_break_ended_this_wake(), false);
         if (rwr == WAKE_RENDER_EXPIRY_ALERT) {
-            wake_flow_fire_expiry_alert();
+            wake_flow_expire_or_break();
         } else {
             display_state_t rst = make_display_state(rrem, rnow);
             /* THE SCREEN KIND CAN CHANGE ACROSS THE JOIN, and this term is
@@ -2770,12 +2876,10 @@ static void wake_flow_repaint_after_join(timer_state_t painted, net_finish_t nf,
    window. */
 static void finish_or_break(button_id_t btn, timer_state_t before, time_t now, bool selection_changed) {
     /* Note the ordering: this runs BEFORE finish_action_and_render, whose
-       tick is what would detect an expiry. So a break due here wins over
-       a colliding expiry alert, which is the opposite of the tick
-       handler's post-render check. Not shown to be reachable — the press
-       that got here has just been dispatched, and the final minute
-       belongs to wake_flow_watch_final_minute — but it is not a
-       guarantee. */
+       tick is what would detect an expiry. A RUNNING slot past its wall
+       (a press that landed after it) is expired at the wall by the break's
+       start, which swallows the expiry alarm exactly as the tick-side sites
+       do, and owes HA the event (served by the window opened below). */
     if (wake_flow_maybe_start_break(now)) {
         /* This branch sleeps straight after the join, so it cannot repaint
            what the join changed (a B press in its poll) or serve the debt
@@ -3160,19 +3264,24 @@ void wake_flow_handle_timer_tick(void) {
        the paint — so the panel isn't refreshed with a main layout we are
        about to replace with the break screen.
 
-       This runs BEFORE this wake's timer_tick, so it cannot see an expiry
-       that the tick is about to detect; with both pending the break would
-       win here and the expiry alert would be skipped entirely
-       (enter_deep_sleep does not return). The post-render call below is
-       what actually provides the expiry-then-break ordering. An expiry
-       reaching this point unprocessed has not been shown to be reachable
-       — the planner's 70 s event lead plus wake_flow_watch_final_minute
-       own the final minute — but this call carries no such guarantee, so
-       do not add one to this comment. */
+       This runs BEFORE this wake's timer_tick, so it can meet a RUNNING
+       slot already past its expiry wall (a late wake: the break gate does
+       not look at the state, and the balance reads due at the wall when the
+       allocation equals the interval). That is the tie, and it is served
+       HERE: timer_start_break expires such a slot at its wall instead of
+       pausing it, the break takes the alarm, and the expiry is owed to HA
+       (enter_deep_sleep does not return). A break due with the expiry
+       still ahead is not an expiry at all and pauses the run as before. */
     if (wake_flow_maybe_start_break(now)) {
         /* No window precedes this sleep except the sync above, so what that
-           sync's own join raised (a B press in its poll) is left to the
-           next sync. */
+           sync's own join raised (a B press in its poll), and the expiry a
+           swallowed tie owes, are left to the next sync, whose snapshot
+           carries the state (completions included). That is a RELAXATION of
+           "the swallow still owes the publish": s_event_publish_owed is a
+           plain static and dies with this sleep, accepted on the precedent
+           of docs/planning/20261016.stats-publish-events (a path that
+           sleeps immediately leaves its publish to the next scheduled
+           sync; the late-wake tie is rare and the data is not lost). */
         enter_deep_sleep(lock_gate_sleep_mode()); /* break just started; sleep through it */
     }
 
@@ -3214,7 +3323,7 @@ void wake_flow_handle_timer_tick(void) {
     wr = lock_gate_promote_render(wr); /* a lock released this wake owes the panel a full one */
     switch (wr) {
         case WAKE_RENDER_EXPIRY_ALERT:
-            wake_flow_fire_expiry_alert();
+            wake_flow_expire_or_break();
             break;
         case WAKE_RENDER_FULL:
             display_full_refresh(&st);

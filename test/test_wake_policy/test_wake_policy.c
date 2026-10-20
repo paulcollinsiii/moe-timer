@@ -139,6 +139,23 @@ void test_render_break_ended_does_not_outrank_the_expiry_alert(void) {
     TEST_ASSERT_EQUAL(WAKE_RENDER_EXPIRY_ALERT, wake_policy_render(TIMER_RUNNING, TIMER_EXPIRED, true, true, false));
 }
 
+/* A break that ends on an EXPIRED slot 0 hands the slot back in the state
+   it went in with (timer.c I7). That is a restore, not a RUNNING->EXPIRED
+   transition: the alarm was heard when the timer actually ran out (or was
+   swallowed by this very break, which played its own). Playing TIME'S UP at
+   the break's end would be a second alarm for one expiry. */
+void test_render_a_break_ending_on_an_expired_slot_never_alerts(void) {
+    for (int button = 0; button <= 1; button++) {
+        for (int ended = 0; ended <= 1; ended++) {
+            TEST_ASSERT_NOT_EQUAL(WAKE_RENDER_EXPIRY_ALERT,
+                                  wake_policy_render(TIMER_BREAK, TIMER_EXPIRED, button, ended, false));
+        }
+    }
+    /* and the panel did change (the inverted layout is gone): full */
+    TEST_ASSERT_EQUAL(WAKE_RENDER_FULL, wake_policy_render(TIMER_BREAK, TIMER_EXPIRED, false, true, false));
+    TEST_ASSERT_EQUAL(WAKE_RENDER_FULL, wake_policy_render(TIMER_BREAK, TIMER_EXPIRED, false, false, false));
+}
+
 void test_render_without_break_ended_is_unchanged(void) {
     TEST_ASSERT_EQUAL(WAKE_RENDER_PARTIAL, wake_policy_render(TIMER_PAUSED, TIMER_PAUSED, false, false, false));
     TEST_ASSERT_EQUAL(WAKE_RENDER_PARTIAL, wake_policy_render(TIMER_IDLE, TIMER_IDLE, true, false, false));
@@ -269,6 +286,7 @@ void test_first_countdown_step_none_left_inside_led_window(void) {
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_render_expiry_transition_fires_alert);
+    RUN_TEST(test_render_a_break_ending_on_an_expired_slot_never_alerts);
     RUN_TEST(test_render_already_expired_never_refires_alert);
     RUN_TEST(test_render_tick_state_change_promotes_to_full);
     RUN_TEST(test_render_button_wake_is_partial_within_main_layout);
