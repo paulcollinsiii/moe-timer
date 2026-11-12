@@ -440,8 +440,10 @@ menu "MagTag Timer"
 
             This is only the routine cadence. A mode switch (Timers and
             Chores), a change of screen kind, the edges of a screen break, a
-            lock screen on the glass and Button D each force a full refresh
-            whatever N is, and a forced full restarts the count.
+            lock screen on the glass each force a full refresh whatever N
+            is, and so does Button D, except on a wake where a chore was
+            already acked (then the paint follows the ordinary rules). A
+            forced full restarts the count.
 
             The count is held in RTC memory and survives deep sleep; it is
             not a stored setting, so changing N needs a rebuild and a

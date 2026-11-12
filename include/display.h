@@ -578,8 +578,8 @@ int display_fb_invert_dirty_rows(uint8_t *fb, const uint8_t *prev, int rows, int
    choice, CONFIG_MAGTAG_FULL_REFRESH_EVERY_N (main/Kconfig.projbuild,
    default 10, 1..100; 1 makes every paint full). The host build has no
    sdkconfig.h, so it falls back to the same 10 (the setup_trigger.h
-   pattern); nothing but the test pinning the host fallback keeps the two
-   equal. Named here rather than left a literal in display.c so a test can
+   pattern); nothing keeps the Kconfig default and that fallback equal, and a
+   test pins only the fallback. Named here rather than left a literal in display.c so a test can
    assert the cadence without restating the number. */
 #ifdef CONFIG_MAGTAG_FULL_REFRESH_EVERY_N
 #define DISPLAY_FULL_REFRESH_EVERY_N CONFIG_MAGTAG_FULL_REFRESH_EVERY_N
