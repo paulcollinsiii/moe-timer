@@ -15,24 +15,29 @@ target_include_directories(unity PUBLIC unity)
 #   EXTRA_INCLUDES  additional include directories
 #   EXTRA_DEFS      additional compile definitions
 #   EXTRA_LIBS      additional link libraries
+#   TARGET          target/test name when the same suite is registered a
+#                   second time with different EXTRA_DEFS (default: the suite)
 function(add_host_test name)
-  cmake_parse_arguments(HT "" "" "EXTRA_SRCS;EXTRA_INCLUDES;EXTRA_DEFS;EXTRA_LIBS" ${ARGN})
-  add_executable(${name} ${name}/${name}.c ${HT_EXTRA_SRCS})
-  target_include_directories(${name} PRIVATE
+  cmake_parse_arguments(HT "" "TARGET" "EXTRA_SRCS;EXTRA_INCLUDES;EXTRA_DEFS;EXTRA_LIBS" ${ARGN})
+  if(NOT HT_TARGET)
+    set(HT_TARGET ${name})
+  endif()
+  add_executable(${HT_TARGET} ${name}/${name}.c ${HT_EXTRA_SRCS})
+  target_include_directories(${HT_TARGET} PRIVATE
       ${CMAKE_CURRENT_SOURCE_DIR}/mocks
       ${CMAKE_CURRENT_SOURCE_DIR}/../include
       ${HT_EXTRA_INCLUDES})
-  target_compile_definitions(${name} PRIVATE NATIVE ${HT_EXTRA_DEFS})
+  target_compile_definitions(${HT_TARGET} PRIVATE NATIVE ${HT_EXTRA_DEFS})
   # Sanitizers give the negative-input tests (corrupt snapshots, malformed
   # NVS blobs) real teeth: an out-of-bounds read fails the suite instead of
   # silently returning garbage.
-  target_compile_options(${name} PRIVATE
+  target_compile_options(${HT_TARGET} PRIVATE
       -include ${CMAKE_CURRENT_SOURCE_DIR}/mocks/esp_compat.h
       -Wall -Wextra
       -fsanitize=address,undefined -fno-omit-frame-pointer)
-  target_link_options(${name} PRIVATE -fsanitize=address,undefined)
-  target_link_libraries(${name} unity ${HT_EXTRA_LIBS})
-  add_test(NAME ${name} COMMAND ${name})
+  target_link_options(${HT_TARGET} PRIVATE -fsanitize=address,undefined)
+  target_link_libraries(${HT_TARGET} unity ${HT_EXTRA_LIBS})
+  add_test(NAME ${HT_TARGET} COMMAND ${HT_TARGET})
 endfunction()
 
 # ---- display golden-render suite: real LVGL compiled for the host ----
@@ -65,6 +70,17 @@ add_host_test(test_button_actions)
 add_host_test(test_schedule)
 add_host_test(test_nvs_config)
 add_host_test(test_display)
+# The same suite again at N = 7, NOT the Kconfig default of 10: the first
+# target runs on the header's fallback, so a display_refresh_plan() that passed
+# a literal 10 instead of the macro would stay green there. Here it fails. The
+# suite touches no golden files, so the two targets share nothing. Skipped when
+# the build already forces N with -DCMAKE_C_FLAGS=-DCONFIG_MAGTAG_FULL_REFRESH_
+# EVERY_N=..., which would otherwise redefine it; that run is its own N.
+if(NOT CMAKE_C_FLAGS MATCHES "CONFIG_MAGTAG_FULL_REFRESH_EVERY_N")
+  add_host_test(test_display
+      TARGET test_display_every_7
+      EXTRA_DEFS CONFIG_MAGTAG_FULL_REFRESH_EVERY_N=7)
+endif()
 add_host_test(test_ssd1680)
 add_host_test(test_battery)
 add_host_test(test_quiet_hours)
