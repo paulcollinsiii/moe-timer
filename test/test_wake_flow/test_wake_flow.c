@@ -2949,7 +2949,7 @@ void test_the_flag_survives_a_later_drain_that_found_nothing(void) {
 /* Regression 1520486, defect 1. The break screen is a full-screen
    INVERSION of the main layout, so any render that crosses it with a
    partial diff ghosts the whole panel — and display.c promotes only every
-   fifth partial, so four presses in five ghosted. After a break end every
+   Nth partial, so most presses would ghost. After a break end every
    render this wake crosses that boundary: the chip has gone, and a
    chiming end has also changed which timer's layout is showing.
 
@@ -3001,7 +3001,7 @@ void test_row4_a_break_end_forces_every_later_render_full(void) {
 
    The row-4 defect proper — 1520486 defect 1: dispatch_button_action
    (as it was then named, before this cycle moved it here)
-   rewriting *before on a successful swap, so four presses in five
+   rewriting *before on a successful swap, so most presses
    ghosted — is pinned END TO END further down, by driving the real
    wake_flow_dispatch_button_action and handing ITS outputs to the real
    wake_policy_render (test_row4_a_swap_during_a_break_renders_full_end_to_end
@@ -3708,7 +3708,7 @@ void test_row20_the_reported_swap_suppresses_the_expiry_alert(void) {
 
 /* ROW 4, end to end, and the gap cycle 7 could not close: the break
    screen is a full-screen INVERSION of the main layout, and display.c
-   promotes only every fifth partial, so four presses in five ghosted the
+   promotes only every Nth partial, so most presses ghosted the
    whole panel. `before` is by value precisely so it still names the
    inverted layout after the swap has moved the active slot; the dispatch
    is driven for real here and ITS outputs go to the real render policy. */

@@ -438,12 +438,19 @@ void display_format_countdown(char *buf, size_t len, int32_t remaining_sec) {
 /* ---- refresh cadence and ghost cleaning (design §2.5) ------------------- */
 
 display_refresh_plan_t display_refresh_plan(uint8_t *partial_count) {
+    return display_refresh_plan_every(partial_count, DISPLAY_FULL_REFRESH_EVERY_N);
+}
+
+display_refresh_plan_t display_refresh_plan_every(uint8_t *partial_count, uint8_t every_n) {
     display_refresh_plan_t plan = {.full = false, .ghost_clean = false};
 
-    /* `>=` and not `==` so a counter that came back from RTC memory above
-       the threshold still lands here instead of wrapping. */
-    (*partial_count)++;
-    if (*partial_count >= DISPLAY_FULL_REFRESH_EVERY_N) {
+    /* `>=` and not `==` so a counter that came back from RTC memory at or
+       above the threshold still lands here instead of wrapping. The
+       increment saturates: a uint8_t already at 255 would wrap to 0 and
+       read as a fresh cycle, 255 partials from the next full. */
+    if (*partial_count < UINT8_MAX)
+        (*partial_count)++;
+    if (*partial_count >= every_n) {
         *partial_count = 0;
         plan.full = true;
         return plan; /* a full refresh drives every pixel; no double pass */

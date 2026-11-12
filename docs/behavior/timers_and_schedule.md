@@ -100,7 +100,8 @@ clock changes on the minute, like a real clock. While a timer runs, the
 countdown steps by whole minutes: a fresh start shows one exact figure and then
 `01:12:00`, `01:11:00`, and so on
 ([Power and sync](power_and_sync.md#sleeping-between-minutes)). Most repaints are quiet partial updates. A change of state, and every
-fifth update, is a full refresh, which makes the panel flash.
+tenth update, is a full refresh, which makes the panel flash. (Ten is the
+build default; `CONFIG_MAGTAG_FULL_REFRESH_EVERY_N` changes it.)
 
 ### Buttons on the timer screen
 

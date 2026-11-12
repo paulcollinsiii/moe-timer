@@ -99,7 +99,7 @@ static uint32_t tick_ms(void) {
 
 /* Landscape row bands holding per-wake content. Partial refreshes drive
    them inverse->true — a localized flash — so the content does not
-   accumulate ghosting between the every-5th-wake full refreshes. Extents
+   accumulate ghosting between the every-Nth full refreshes. Extents
    are the exact widget geometry from display_screens.c (align y + font
    line_height / bar height); byte alignment then widens each edge outward
    by up to 7 rows — that slop is the packed-framebuffer format, not

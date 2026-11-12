@@ -33,9 +33,10 @@ the driver holds the protection.
 **Policy.** `wake_policy_render()` asks for a full refresh when the timer
 state changed or a break ended; `lock_gate_promote_render()` asks for one
 after a lock released, since a lock screen is still on the glass. Every
-other paint goes through the cadence in `display_refresh_plan()`: every fifth
-paint is full, and the counter lives in RTC memory so the cadence runs
-across sleeps. After the update screen, the next paint is full too.
+other paint goes through the cadence in `display_refresh_plan()`: every Nth
+paint is full (`CONFIG_MAGTAG_FULL_REFRESH_EVERY_N`, default 10, range 1 to
+100, build-time only), and the counter lives in RTC memory so the cadence runs
+across sleeps. A forced full restarts the count. After the update screen, the next paint is full too.
 
 **Protection.** The SSD1680 driver enforces three rules whatever the policy
 asks (S25, S26):

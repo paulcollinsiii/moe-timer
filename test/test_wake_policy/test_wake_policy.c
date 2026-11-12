@@ -110,7 +110,7 @@ void test_render_selection_change_across_the_break_screen_is_full(void) {
     /* Button C during a break is the feature's headline interaction, and
        both directions cross the full-screen inversion. A partial diff
        across it ghosts the whole panel; display_update only promotes
-       every 5th, so four presses in five would ghost. */
+       every Nth, so most presses would ghost. */
     TEST_ASSERT_EQUAL(WAKE_RENDER_FULL, wake_policy_render(TIMER_BREAK, TIMER_IDLE, true, false, true));
     TEST_ASSERT_EQUAL(WAKE_RENDER_FULL, wake_policy_render(TIMER_IDLE, TIMER_BREAK, true, false, true));
     /* Onto an EXPIRED slot: alert suppressed AND still a full refresh */
@@ -154,6 +154,22 @@ void test_render_a_break_ending_on_an_expired_slot_never_alerts(void) {
     /* and the panel did change (the inverted layout is gone): full */
     TEST_ASSERT_EQUAL(WAKE_RENDER_FULL, wake_policy_render(TIMER_BREAK, TIMER_EXPIRED, false, true, false));
     TEST_ASSERT_EQUAL(WAKE_RENDER_FULL, wake_policy_render(TIMER_BREAK, TIMER_EXPIRED, false, false, false));
+}
+
+/* THE FORCED FULLS ARE INDEPENDENT OF THE EVERY-Nth COUNT BY SIGNATURE.
+   wake_policy_render takes two timer states and three flags: no counter and
+   no cadence, so what it answers FULL to (the break boundary, a break end, a
+   state change) it answers whatever CONFIG_MAGTAG_FULL_REFRESH_EVERY_N is
+   and wherever the RTC counter stands. The forced fulls that sit above it
+   in wake_flow.c (mode toggle, screen-kind change, lock screen on the
+   glass, Button D) are pinned in test_wake_flow by name, and display_update
+   (the only caller of the cadence) is not on their path. If a count were
+   threaded in here, this stops compiling. */
+void test_render_decision_takes_no_cadence_input(void) {
+    _Static_assert(_Generic(&wake_policy_render, wake_render_t(*)(timer_state_t, timer_state_t, bool, bool, bool) : 1,
+                            default : 0),
+                   "wake_policy_render must not see the refresh counter or N");
+    TEST_PASS();
 }
 
 void test_render_without_break_ended_is_unchanged(void) {
@@ -300,6 +316,7 @@ int main(void) {
     RUN_TEST(test_render_selection_change_suppresses_the_expiry_alert);
     RUN_TEST(test_render_selection_change_across_the_break_screen_is_full);
     RUN_TEST(test_render_break_ended_promotes_partial_to_full);
+    RUN_TEST(test_render_decision_takes_no_cadence_input);
     RUN_TEST(test_render_break_ended_does_not_outrank_the_expiry_alert);
     RUN_TEST(test_render_without_break_ended_is_unchanged);
     RUN_TEST(test_snap_absorbs_positive_jitter);

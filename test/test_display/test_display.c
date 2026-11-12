@@ -1074,15 +1074,144 @@ void test_every_partial_gets_the_ghost_clean_pass(void) {
     TEST_ASSERT_EQUAL_UINT8_MESSAGE(0, count, "and it rearms the cadence");
 }
 
-/* The cadence, pinned to the number and not only to the macro: a suite
-   written entirely against DISPLAY_FULL_REFRESH_EVERY_N moves with it. Four
-   partials, then a full. */
-void test_the_fifth_paint_is_the_full_refresh(void) {
+/* The default, pinned to the number and not only to the macro: a suite
+   written entirely against DISPLAY_FULL_REFRESH_EVERY_N moves with it. Nine
+   partials, then a full. Guarded, because a build that sets
+   CONFIG_MAGTAG_FULL_REFRESH_EVERY_N (the firmware, or a host run with
+   -D) legitimately has another figure; the host build sets nothing, so the
+   header's fallback is what this reads. The firmware's Kconfig default is
+   the same 10, and the two have no script keeping them equal. */
+#ifndef CONFIG_MAGTAG_FULL_REFRESH_EVERY_N
+void test_the_host_fallback_cadence_is_every_tenth_paint(void) {
+    TEST_ASSERT_EQUAL_INT(10, DISPLAY_FULL_REFRESH_EVERY_N);
     uint8_t count = 0;
-    for (int i = 0; i < 4; i++) {
+    for (int i = 0; i < 9; i++) {
         TEST_ASSERT_FALSE(display_refresh_plan(&count).full);
     }
     TEST_ASSERT_TRUE(display_refresh_plan(&count).full);
+}
+#endif
+
+/* The wrapper display.c calls is the explicit-N plan fed the macro, and
+   nothing else: the cadence follows the macro, not a literal. Two whole
+   cycles, so the rearm is exercised and not only the first run. */
+void test_the_plan_display_c_calls_follows_the_macro(void) {
+    uint8_t count = 0;
+    for (int cycle = 0; cycle < 2; cycle++) {
+        for (int i = 1; i < DISPLAY_FULL_REFRESH_EVERY_N; i++) {
+            TEST_ASSERT_FALSE(display_refresh_plan(&count).full);
+        }
+        TEST_ASSERT_TRUE(display_refresh_plan(&count).full);
+        TEST_ASSERT_EQUAL_UINT8(0, count);
+    }
+}
+
+/* The explicit-N plan at several figures, including both ends of the
+   Kconfig range: N - 1 partials then a full, repeating, for any N. */
+void test_the_cadence_is_n_minus_one_partials_then_a_full_for_any_n(void) {
+    const uint8_t figures[] = {2, 3, 5, 10, 37, 100};
+    for (size_t f = 0; f < sizeof figures; f++) {
+        const uint8_t n = figures[f];
+        uint8_t count = 0;
+        for (int cycle = 0; cycle < 3; cycle++) {
+            for (int i = 1; i < n; i++) {
+                display_refresh_plan_t p = display_refresh_plan_every(&count, n);
+                TEST_ASSERT_FALSE_MESSAGE(p.full, "a partial before the Nth");
+                TEST_ASSERT_TRUE_MESSAGE(p.ghost_clean, "every partial cleans, at every N");
+            }
+            display_refresh_plan_t nth = display_refresh_plan_every(&count, n);
+            TEST_ASSERT_TRUE_MESSAGE(nth.full, "the Nth paint is full");
+            TEST_ASSERT_FALSE_MESSAGE(nth.ghost_clean, "and a full never also cleans");
+            TEST_ASSERT_EQUAL_UINT8_MESSAGE(0, count, "and rearms to zero");
+        }
+    }
+}
+
+/* N = 1 is "every paint is full": no partial ever, no ghost-clean pass,
+   and the counter never leaves zero. */
+void test_n_of_one_makes_every_paint_full(void) {
+    uint8_t count = 0;
+    for (int i = 0; i < 5; i++) {
+        display_refresh_plan_t p = display_refresh_plan_every(&count, 1);
+        TEST_ASSERT_TRUE(p.full);
+        TEST_ASSERT_FALSE(p.ghost_clean);
+        TEST_ASSERT_EQUAL_UINT8(0, count);
+    }
+}
+
+/* N = 0 is outside the Kconfig range and the header refuses it at compile
+   time, but the function must not depend on that: it reads as 1, never as
+   "a partial forever". */
+void test_n_of_zero_reads_as_every_paint_full(void) {
+    uint8_t count = 0;
+    TEST_ASSERT_TRUE(display_refresh_plan_every(&count, 0).full);
+    TEST_ASSERT_EQUAL_UINT8(0, count);
+}
+
+/* THE STALE-COUNTER EDGE. The counter is RTC_DATA_ATTR: it survives deep
+   sleep, so a firmware whose N is smaller than the one that wrote the
+   counter can wake with the counter mid-cycle and already at or past the
+   new N. (In practice an update reboots, and a reboot zeroes RTC memory,
+   so this is the function being total rather than a path seen on the
+   device.) A counter at or above N-1
+   must take the very next paint to a full refresh and rearm, for every N,
+   at every value a uint8_t can hold. */
+void test_a_counter_at_or_past_n_lands_on_a_full_and_rearms(void) {
+    const uint8_t figures[] = {1, 2, 5, 10, 100};
+    for (size_t f = 0; f < sizeof figures; f++) {
+        const uint8_t n = figures[f];
+        for (int start = (int)n - 1; start <= 254; start++) {
+            uint8_t count = (uint8_t)start;
+            display_refresh_plan_t p = display_refresh_plan_every(&count, n);
+            TEST_ASSERT_TRUE_MESSAGE(p.full, "a counter at/after N must refresh, not wrap");
+            TEST_ASSERT_EQUAL_UINT8_MESSAGE(0, count, "and rearm");
+        }
+    }
+}
+
+/* The edge at the top of the range: 255 increments to 0 in a uint8_t. A
+   counter already saturated must still not wrap into "partial for another
+   256 paints". */
+void test_a_saturated_counter_does_not_wrap_past_the_full(void) {
+    uint8_t count = 255;
+    display_refresh_plan_t p = display_refresh_plan_every(&count, 10);
+    TEST_ASSERT_TRUE_MESSAGE(p.full, "255 + 1 wraps to 0 in a uint8_t: that must still be a full");
+    TEST_ASSERT_EQUAL_UINT8(0, count);
+}
+
+/* A forced full (display_full_refresh and the takeover painters) zeroes
+   the counter in display.c, which no host suite compiles. What this pins
+   is the half that IS testable: from zero the next full is exactly N paints
+   away, so a forced full restarts a whole cycle. */
+void test_a_cadence_restarted_from_zero_runs_a_whole_cycle(void) {
+    for (uint8_t n = 2; n <= 12; n++) {
+        uint8_t count = 0;
+        int paints = 0;
+        bool full = false;
+        while (!full && paints < 300) {
+            full = display_refresh_plan_every(&count, n).full;
+            paints++;
+        }
+        TEST_ASSERT_EQUAL_INT(n, paints);
+    }
+}
+
+/* THE FORCED-FULL PATHS ARE NOT IN THIS FUNCTION'S REACH, and that is how
+   they are independent of N. The plan takes a counter and an N and nothing
+   else: no screen, no mode, no break flag, no lock flag, no button. The
+   mode switch, the screen-kind change, the break boundary, the lock
+   screen on the glass and Button D are decided above it (wake_policy_render
+   and render_action_result) and go to display_full_refresh(), which never
+   asks the plan. Pin the shape: if a screen or a flag is ever threaded
+   into the plan, this stops compiling and the forced paths need
+   re-examining against N. */
+void test_the_plan_takes_a_counter_and_an_n_and_nothing_else(void) {
+    _Static_assert(
+        _Generic(&display_refresh_plan_every, display_refresh_plan_t(*)(uint8_t *, uint8_t) : 1, default : 0),
+        "the plan must not grow a screen or a flag parameter");
+    _Static_assert(_Generic(&display_refresh_plan, display_refresh_plan_t(*)(uint8_t *) : 1, default : 0),
+                   "the cadence entry display.c calls takes the counter only");
+    TEST_PASS();
 }
 
 /* A full refresh drives every pixel both ways by itself, so it never also
@@ -1216,7 +1345,17 @@ int main(void) {
     RUN_TEST(test_the_locked_label_counts_only_configured_acks);
     RUN_TEST(test_the_locked_label_respects_a_small_buffer);
     RUN_TEST(test_every_partial_gets_the_ghost_clean_pass);
-    RUN_TEST(test_the_fifth_paint_is_the_full_refresh);
+#ifndef CONFIG_MAGTAG_FULL_REFRESH_EVERY_N
+    RUN_TEST(test_the_host_fallback_cadence_is_every_tenth_paint);
+#endif
+    RUN_TEST(test_the_plan_display_c_calls_follows_the_macro);
+    RUN_TEST(test_the_cadence_is_n_minus_one_partials_then_a_full_for_any_n);
+    RUN_TEST(test_n_of_one_makes_every_paint_full);
+    RUN_TEST(test_n_of_zero_reads_as_every_paint_full);
+    RUN_TEST(test_a_counter_at_or_past_n_lands_on_a_full_and_rearms);
+    RUN_TEST(test_a_saturated_counter_does_not_wrap_past_the_full);
+    RUN_TEST(test_a_cadence_restarted_from_zero_runs_a_whole_cycle);
+    RUN_TEST(test_the_plan_takes_a_counter_and_an_n_and_nothing_else);
     RUN_TEST(test_the_cadence_full_refresh_never_also_asks_to_ghost_clean);
     RUN_TEST(test_the_plan_resumes_a_cadence_already_part_way_through);
     RUN_TEST(test_a_counter_already_past_the_threshold_refreshes_and_rearms);

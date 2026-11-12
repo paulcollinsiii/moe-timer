@@ -574,10 +574,22 @@ int display_fb_invert_dirty_rows(uint8_t *fb, const uint8_t *prev, int rows, int
 /* ---- the refresh plan: cadence and cleaning (design §2.5) ---------------
 
    Anti-ghosting cadence: one paint in every N is promoted to a full
-   refresh. Named here rather than left a literal in display.c so a test
-   can assert the cadence without restating the number — a suite written
-   against a hard-coded 5 keeps passing after the figure moves. */
-#define DISPLAY_FULL_REFRESH_EVERY_N 5
+   refresh, so N - 1 partials sit between two fulls. N is a build-time
+   choice, CONFIG_MAGTAG_FULL_REFRESH_EVERY_N (main/Kconfig.projbuild,
+   default 10, 1..100; 1 makes every paint full). The host build has no
+   sdkconfig.h, so it falls back to the same 10 (the setup_trigger.h
+   pattern); nothing but the test pinning the host fallback keeps the two
+   equal. Named here rather than left a literal in display.c so a test can
+   assert the cadence without restating the number. */
+#ifdef CONFIG_MAGTAG_FULL_REFRESH_EVERY_N
+#define DISPLAY_FULL_REFRESH_EVERY_N CONFIG_MAGTAG_FULL_REFRESH_EVERY_N
+#else
+#define DISPLAY_FULL_REFRESH_EVERY_N 10
+#endif
+/* The counter is a uint8_t in RTC memory, so N has to fit it with room for
+   the increment; the Kconfig range is the same bound. */
+_Static_assert(DISPLAY_FULL_REFRESH_EVERY_N >= 1 && DISPLAY_FULL_REFRESH_EVERY_N <= 100,
+               "CONFIG_MAGTAG_FULL_REFRESH_EVERY_N must be 1..100");
 
 /* display_update()'s refresh policy, lifted out of display.c so it can be
    tested at all: display.c is not compiled by any host suite (it pulls in
@@ -615,6 +627,13 @@ typedef struct {
    advanced IN PLACE — every paint that reaches here counts toward the next
    full refresh, whichever screen it drew. */
 display_refresh_plan_t display_refresh_plan(uint8_t *partial_count);
+
+/* The same plan with the cadence passed in, so a host test can drive any N
+   without a rebuild. display_refresh_plan() is this fed
+   DISPLAY_FULL_REFRESH_EVERY_N and nothing else. A counter that reaches
+   `every_n` or beyond (RTC memory carried across a smaller N) is a full
+   refresh and rearms to zero; `every_n` 0 reads as 1, every paint full. */
+display_refresh_plan_t display_refresh_plan_every(uint8_t *partial_count, uint8_t every_n);
 
 #ifdef __cplusplus
 }
