@@ -85,8 +85,7 @@ add_host_test(test_qr_render
     EXTRA_INCLUDES ${CMAKE_CURRENT_SOURCE_DIR}/../lib/qrcodegen)
 # The chore-ack knobs are built at values that are NOT the Kconfig defaults, so
 # a literal left at a call site fails the suite instead of passing every
-# relative assertion. (A third knob, the pre-press ack hold, and the 170 it was
-# built at are gone with the hold itself.)
+# relative assertion.
 #
 # 610 FOR THE QUIET WINDOW (default 1200): not a multiple of the 50 ms poll (so
 # the idle-window clamp takes a 10 ms last step and is load bearing), and not

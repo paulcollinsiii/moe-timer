@@ -23,6 +23,7 @@
    lands in a high phase of the bounce train reports "up" while the contact is
    still ringing, which for a hold under BUTTON_LATCH_REFRACTORY_US is still
    inside that window. */
+/* Only the ack coalescer's poll cadence, whatever the name suggests. */
 #define BUTTON_LATCH_DEBOUNCE_US 50000
 
 /* And ignore edges this close to the moment the button was observed back UP.
@@ -88,8 +89,7 @@
    faster than this is lost. A different button is never affected. Not a
    Kconfig knob: it is a property of the pads plus the people pressing them,
    not of the board's wiring, and a build-time figure nobody can tune on a
-   device is a place for the check script that guarded the hold's knob to
-   come back. */
+   device would only need a guard script to keep it honest. */
 #define BUTTON_LATCH_REFRACTORY_US 300000
 
 #ifdef __cplusplus

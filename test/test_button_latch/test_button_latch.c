@@ -57,10 +57,9 @@ void test_edge_beyond_debounce_window_and_past_a_release_is_accepted(void) {
     TEST_ASSERT_EQUAL_UINT8(1u << 1, button_latch_take());
 }
 
-/* THE SAME-BUTTON REFRACTORY WINDOW (stream B). The 400 ms ack hold used to
-   keep every level sample away from the wake button's release, so its bounce
-   was never seen as a second press; with the hold gone the window below is
-   what says so, explicitly. It is measured from the last ACCEPTED press of
+/* THE SAME-BUTTON REFRACTORY WINDOW. Level samples can land anywhere in the
+   wake button's release bounce, so this window is what says one physical tap
+   is one press. It is measured from the last ACCEPTED press of
    that button, so it holds even when the release gate is already open — which
    is exactly the case a sample landing in a high phase of the bounce train
    creates. Here the gate IS open (released at +20 ms, settle long over) and

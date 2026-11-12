@@ -89,16 +89,11 @@ extern "C" {
    status-paint wrapper, because it is not a status paint. */
 #define NP_STATE_PIXEL 0
 
-/* THERE IS NO PRE-PRESS HOLD. The chore ack and Button B's start/resume used
-   to sleep STATUS_LED_ACK_HOLD_MS (400 ms) after the first press so the old
-   colour was seen before the acknowledging pixel changed; the owner felt it
-   as lag before the other buttons answered, and the hold, its Kconfig knob,
-   this macro, its fallback check script and that script's test were all
-   removed (stream B, 2026-11-12). The strip now flips straight after the
-   apply, on both paths. What the hold did by accident — keeping the wake
-   button's release bounce out of the press latch — is the explicit
-   BUTTON_LATCH_REFRACTORY_US (button_latch.h). Do not reintroduce a delay
-   here: the acknowledgement is the transition, and it is fast on purpose. */
+/* THERE IS NO PRE-PRESS HOLD. The chore ack and Button B's start/resume flip
+   the strip straight after the apply, on both paths: the acknowledgement is
+   the transition, and it is fast on purpose, so nothing may sleep between the
+   press and the flip. Keeping the wake button's release bounce out of the
+   press latch is BUTTON_LATCH_REFRACTORY_US's job (button_latch.h). */
 
 typedef struct {
     uint8_t r;
@@ -280,17 +275,11 @@ chores_led_t chores_led_for(uint8_t mask, uint8_t n, bool released);
      function bursts four posts with a zero timeout; a queue already
      carrying other traffic drops the overflow with only an ESP_LOGW.
 
-     BURSTS PAST THE DEPTH ARE REACHABLE TODAY, which is the correction an
-     earlier version of this note needed: it credited a pre-press hold
-     (since removed outright, and which only the FIRST ack of a wake ever
-     paid) with separating the frames and concluded that
-     only "a FUTURE caller that paints twice with nothing in between" could
-     reach eight. A SECOND ack paid no hold at all (§2.5 clause 4), so that
-     caller already existed on the break tail — the dispatch's flip and the
-     poll's own status paint are adjacent — and, with the hold gone, the
-     first ack's pre-press frame and its flip are adjacent as well; wake_flow.c's coalescing
-     drain can now apply two or three latched acks in one pass, which is 8
-     or 12 posts with nothing between them. The LED task's priority (5,
+     BURSTS PAST THE DEPTH ARE REACHABLE: nothing separates the frames of one
+     ack. On the break tail the dispatch's flip and the poll's own status paint
+     are adjacent, the first ack's pre-press frame and its flip are adjacent as
+     well, and wake_flow.c's coalescing drain can apply two or three latched
+     acks in one pass, which is 8 or 12 posts with nothing between them. The LED task's priority (5,
      above the main task) does not save it either: the task preempts on the
      first post, but flush_pixels() then blocks in
      rmt_tx_wait_all_done(portMAX_DELAY), and the main task can issue the

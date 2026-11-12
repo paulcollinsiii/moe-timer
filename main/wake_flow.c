@@ -826,14 +826,10 @@ static bool wake_flow_apply_chore_ack(uint8_t idx, time_t now) {
        which is the latency the pixels are here to cover, so this must stay AHEAD
        of the caller's render tail and not be folded into it.
 
-       THERE IS NO PRE-PRESS HOLD, and there used to be one: the first ack of
-       a wake slept 400 ms (STATUS_LED_ACK_HOLD_MS) so the old colour was
-       seen before it changed. The owner experienced that as lag before the
-       other buttons answered, and it is gone, for every ack alike; the flip
-       is the frame straight after the apply. The release-bounce rejection it
-       provided by accident is now BUTTON_LATCH_REFRACTORY_US's job
-       (button_latch.h), which is why this path may poll for the next press
-       at once.
+       THERE IS NO PRE-PRESS HOLD: the flip is the frame straight after the
+       apply, for every ack alike. The wake button's release bounce is
+       rejected by BUTTON_LATCH_REFRACTORY_US (button_latch.h), which is why
+       this path may poll for the next press at once.
 
        ONLY WHEN THE STRIP IS OURS. Row C17: a latched ack drained on an
        RTC-alarm wake applies, repaints the panel, and lights nothing — the
@@ -891,7 +887,7 @@ static bool wake_flow_apply_chore_ack(uint8_t idx, time_t now) {
    wake_flow_wait_for_render_grid() polls the PAUSE button,
    wake_flow_watch_break_end() returns at its own `!timer_break_active()`
    guard, and button_latch's mask is plain BSS that deep sleep discards. So
-   a press during the (since removed) pre-press hold was eaten by that bare take, and a
+   a press right after the first ack was eaten by that bare take, and a
    press during the panel refresh sat in the latch until sleep threw
    it away. Either way the box was never ticked and the child saw nothing:
    released before sleep there is no EXT1 level left to re-trigger on, and
@@ -912,20 +908,14 @@ static bool wake_flow_apply_chore_ack(uint8_t idx, time_t now) {
    every press grants another full one and the gesture ends when the
    pressing does.
 
-   IT USED TO SHARE ITS FIGURE WITH A PRE-PRESS HOLD (STATUS_LED_ACK_HOLD_MS,
-   400 ms of dead time in front of the first pixel flip), and M2-T15 split
-   them because one number was doing two jobs that pull in opposite
-   directions: the hold wanted to be short, this window is how long the panel
-   waits for the gesture to settle and wants to be long. At the shared 400 ms,
-   a natural press-pause-press rhythm outlasted the window, so the panel began
-   painting mid-gesture and the next press landed during that paint and cost
-   a second refresh (board, 2026-09-23). The hold itself has since been
-   removed outright (stream B, 2026-11-12: the owner felt it as lag before
-   the other buttons answered). THE NEOPIXELS ARE THE FAST CHANNEL AND THE
-   PANEL IS THE SLOW ONE: every press already gets its flip within a poll,
-   so the panel can afford to wait — it needs to be settled, not quick. What
-   that costs is stated plainly: a lone press reaches the glass one quiet
-   window after it, and the wake is that much longer.
+   It is how long the panel waits for the gesture to settle, so it wants to
+   be long: a natural press-pause-press rhythm that outlasts it makes the panel
+   paint mid-gesture, and the next press then lands during that paint and
+   costs a second refresh (board, 2026-09-23). THE NEOPIXELS ARE THE FAST
+   CHANNEL AND THE PANEL IS THE SLOW ONE: every press already gets its flip
+   within a poll, so the panel can afford to wait — it needs to be settled,
+   not quick. What that costs is stated plainly: a lone press reaches the
+   glass one quiet window after it, and the wake is that much longer.
 
    POLLED AT THE DEBOUNCE WINDOW rather than taken once per idle window, and
    M2-T12 moved it there for two reasons that are not about feel.
@@ -989,9 +979,8 @@ static bool wake_flow_apply_chore_ack(uint8_t idx, time_t now) {
    that are not the Kconfig defaults, so a literal left at the call site
    fails the suite rather than passing every relative assertion.
 
-   (There was a third knob, the pre-press ack hold, and a header fallback for
-   it; both are gone with the hold. The quiet window never had a fallback, and
-   that is still what stops it being written against some other figure.) */
+   The quiet window has no header fallback, and that is what stops it being
+   written against some other figure. */
 #define CHORE_ACK_COALESCE_BUDGET_MS CONFIG_MAGTAG_CHORE_ACK_BURST_MS
 #define CHORE_PAINT_QUIET_MS CONFIG_MAGTAG_CHORE_PAINT_QUIET_MS
 
@@ -1032,7 +1021,7 @@ _Static_assert(CHORE_ACK_COALESCE_POLL_MS > 0,
    driver enforces between refreshes; a partial is cheaper, and the
    every-5th cadence and a break end can each make one full, so full is the
    figure that cannot be undercut. The budget is charged whole. There is no
-   pre-press hold term any more: the strip flips straight after the apply.
+   pre-press hold term: the strip flips straight after the apply.
 
    HALF THE FAILSAFE, not all of it: the gesture shares its wake with a
    network window (the wake's own sync, or the rollover's) and possibly an
@@ -1754,14 +1743,11 @@ bool wake_flow_dispatch_button_action(button_id_t btn, time_t *now, timer_state_
                 case BTN_B_STARTED:
                 case BTN_B_RESUMED:
                     /* The strip flips straight after the apply, with NO
-                       pre-press hold: it used to sleep 400 ms here (the
-                       chore ack paid the same) so the old colour was seen
-                       before it changed, and the owner felt that as lag.
-                       The WHITE/AMBER -> GREEN transition is still the
-                       acknowledgement; it just is not delayed.
+                       pre-press hold. The WHITE/AMBER -> GREEN transition
+                       is the acknowledgement, and it is not delayed.
                        test_t8_neither_the_chore_ack_nor_button_bs_start_waits_before_the_strip
-                       pins both paths. The release bounce the hold used to
-                       hide is BUTTON_LATCH_REFRACTORY_US's (button_latch.h). */
+                       pins both paths. The wake button's release bounce is
+                       BUTTON_LATCH_REFRACTORY_US's (button_latch.h). */
                     wake_flow_show_status_leds();
 
                     /* NTP-gated paint: wait only for the sync (seconds) so the
@@ -3485,8 +3471,7 @@ void wake_flow_handle_button_wake(void) {
        In chore mode this is §2.5's PRE-PRESS FRAME instead: the strip as
        it stood before the press, so the flip that follows is a change
        rather than a colour that simply appears. (There is no hold between
-       the two any more; the frame is only visible for as long as the apply
-       takes.)
+       the two; the frame is only visible for as long as the apply takes.)
        Which of the two it paints is the claim above, so the ordering is
        claim, then paint, and they cannot be swapped. */
     wake_flow_show_status_leds();
