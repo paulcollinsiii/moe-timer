@@ -156,15 +156,15 @@ void test_render_a_break_ending_on_an_expired_slot_never_alerts(void) {
     TEST_ASSERT_EQUAL(WAKE_RENDER_FULL, wake_policy_render(TIMER_BREAK, TIMER_EXPIRED, false, false, false));
 }
 
-/* THE FORCED FULLS ARE INDEPENDENT OF THE EVERY-Nth COUNT BY SIGNATURE.
-   wake_policy_render takes two timer states and three flags: no counter and
-   no cadence, so what it answers FULL to (the break boundary, a break end, a
-   state change) it answers whatever CONFIG_MAGTAG_FULL_REFRESH_EVERY_N is
-   and wherever the RTC counter stands. The forced fulls that sit above it
-   in wake_flow.c (mode toggle, screen-kind change, lock screen on the
-   glass, Button D) are pinned in test_wake_flow by name, and display_update
-   (the only caller of the cadence) is not on their path. If a count were
-   threaded in here, this stops compiling. */
+/* A SHAPE CHECK, NOT THE PIN FOR N-INDEPENDENCE. wake_policy_render takes two
+   timer states and three flags: no counter and no cadence, so if a count were
+   threaded in here this stops compiling and the decision needs re-reading.
+   That a forced full really is full at every N and from every counter is
+   pinned behaviourally by display_refresh_decide's cases in test_display
+   (test_a_forced_full_is_full_zeroes_the_count_and_clears_the_flag_at_any_n);
+   the forced fulls above this function in wake_flow.c (mode toggle,
+   screen-kind change, lock screen on the glass, Button D) are pinned in
+   test_wake_flow by name. */
 void test_render_decision_takes_no_cadence_input(void) {
     _Static_assert(_Generic(&wake_policy_render, wake_render_t(*)(timer_state_t, timer_state_t, bool, bool, bool) : 1,
                             default : 0),

@@ -40,18 +40,19 @@ static ssd1680_refresh_mode_t s_pending_mode = SSD1680_REFRESH_FULL;
 static bool s_pending_clean;
 /* Partial/full cadence counter (policy, distinct from the driver's
    protection guard). Display-owned RTC state — the cadence survives deep
-   sleep without living in the timer module's rtc_state_t. The arithmetic
-   over it is display_refresh_plan()'s, in display_layout.c, because this
-   file is not compiled by any host suite. */
+   sleep without living in the timer module's rtc_state_t. Every read and
+   write of it is display_refresh_decide()'s, in display_layout.c, because
+   this file is not compiled by any host suite: nothing here assigns it. */
 static RTC_DATA_ATTR uint8_t s_partial_count;
 
 /* "The panel is showing a full-screen takeover." Set by display_ota(),
    consumed by the next display_update().
 
-   Zeroing s_partial_count is NOT enough on its own: the next
-   display_update() increments it to 1, and 1 < DISPLAY_FULL_REFRESH_EVERY_N,
+   Zeroing s_partial_count is NOT enough on its own: for any N above 1 the
+   next display_update() steps it to 1, and 1 < DISPLAY_FULL_REFRESH_EVERY_N,
    so the paint that lands on top of a 28 pt full-panel headline is a
-   PARTIAL — the worst case for ghosting. lock_gate_promote_render()
+   PARTIAL — the worst case for ghosting. (At N = 1 every paint is full
+   anyway and the flag changes nothing.) lock_gate_promote_render()
    solves exactly this for the lock screens, one layer up; this is the
    same idea expressed where the takeover is painted, so no caller has to
    remember.
@@ -295,6 +296,15 @@ static void render(ssd1680_refresh_mode_t mode, bool ghost_clean) {
     panic_diag_exit(PANIC_PHASE_RENDER, prev);
 }
 
+/* Every painter below ends here. WHAT a paint does to the two RTC bytes
+   (counter, takeover flag) and whether it is full is display_layout.c's
+   display_refresh_decide(); this only hands it the bytes and renders the
+   answer. */
+static void paint(display_paint_t kind) {
+    const display_refresh_plan_t plan = display_refresh_decide(kind, &s_partial_count, &s_takeover_on_panel);
+    render(plan.full ? SSD1680_REFRESH_FULL : SSD1680_REFRESH_PARTIAL, plan.ghost_clean);
+}
+
 /* A plain switch over display_screen_for() and nothing else: the
    precedence between the three layouts — in particular that chore mode
    outranks the break screen, so §2.6's "A -> Chores" prompt leads
@@ -339,76 +349,63 @@ void display_update(const display_state_t *st) {
        failed, bedtime, the config error) fall through to the cadence
        below, so the paint after them is whatever the cadence says: a
        partial WITH the cleaning pass, as every partial now is — or a full
-       refresh, when the every-Nth count happens to land on it. */
-    if (s_takeover_on_panel) {
-        s_takeover_on_panel = false;
-        s_partial_count = 0;
-        render(SSD1680_REFRESH_FULL, false);
-        return;
-    }
-    /* Policy: full refresh every Nth partial (anti-ghosting), and which
-       partials get the ghost-cleaning double pass. Both answers come from
-       display_layout.c so they can be host-tested; the counter lives in
-       RTC memory so the cadence survives deep sleep. */
-    const display_refresh_plan_t plan = display_refresh_plan(&s_partial_count);
-    render(plan.full ? SSD1680_REFRESH_FULL : SSD1680_REFRESH_PARTIAL, plan.ghost_clean);
+       refresh, when the every-Nth count happens to land on it.
+
+       Both that promotion and the full refresh every Nth partial
+       (anti-ghosting), and which partials get the ghost-cleaning double
+       pass, are decided by display_refresh_decide() in display_layout.c so
+       they can be host-tested; the counter lives in RTC memory so the
+       cadence survives deep sleep. */
+    paint(DISPLAY_PAINT_CADENCE);
 }
 
 void display_full_refresh(const display_state_t *st) {
     if (!s_initialized)
         display_init();
-    build_for_state(st);         /* a full refresh asks the plan nothing */
-    s_takeover_on_panel = false; /* this paint is already the full one */
-    s_partial_count = 0;
-    render(SSD1680_REFRESH_FULL, false);
+    build_for_state(st); /* a full refresh asks the cadence nothing */
+    paint(DISPLAY_PAINT_FORCED_FULL);
 }
 
 void display_timesup(void) {
     if (!s_initialized)
         display_init();
     display_screens_build_timesup();
-    s_partial_count = 0;
-    render(SSD1680_REFRESH_FULL, false);
+    paint(DISPLAY_PAINT_TAKEOVER);
 }
 
 void display_charge_me(void) {
     if (!s_initialized)
         display_init();
     display_screens_build_charge_me();
-    s_partial_count = 0;
-    render(SSD1680_REFRESH_FULL, false);
+    paint(DISPLAY_PAINT_TAKEOVER);
 }
 
 void display_sync_failed(void) {
     if (!s_initialized)
         display_init();
     display_screens_build_sync_failed();
-    s_partial_count = 0;
-    render(SSD1680_REFRESH_FULL, false);
+    paint(DISPLAY_PAINT_TAKEOVER);
 }
 
 void display_no_clock(void) {
     if (!s_initialized)
         display_init();
     display_screens_build_no_clock();
-    s_partial_count = 0;
-    render(SSD1680_REFRESH_FULL, false);
+    paint(DISPLAY_PAINT_TAKEOVER);
 }
 
 void display_bedtime(void) {
     if (!s_initialized)
         display_init();
     display_screens_build_bedtime();
-    s_partial_count = 0;
-    render(SSD1680_REFRESH_FULL, false);
+    paint(DISPLAY_PAINT_TAKEOVER);
 }
 
 void display_config_error(day_type_t day_type, uint16_t chore_free_min, uint16_t alloc_min) {
     if (!s_initialized)
         display_init();
     display_screens_build_config_error(day_type, chore_free_min, alloc_min);
-    s_partial_count = 0;
-    render(SSD1680_REFRESH_FULL, false);
+    paint(DISPLAY_PAINT_TAKEOVER);
 }
 
 /* Painted between the OTA check window and the download window, with the
@@ -419,12 +416,11 @@ void display_ota(const char *from_version, const char *to_version) {
     if (!s_initialized)
         display_init();
     display_screens_build_ota(from_version, to_version);
+    paint(DISPLAY_PAINT_TAKEOVER);
     /* Whatever paints next — the failure-path repaint, or the first paint
        of the new firmware after the reboot — must be full, not a partial
        over a full-panel 28 pt headline. See s_takeover_on_panel. */
     s_takeover_on_panel = true;
-    s_partial_count = 0;
-    render(SSD1680_REFRESH_FULL, false);
 }
 
 /* WiFi + MQTT provisioning plan: the setup screens. Each is a one-shot
@@ -441,8 +437,7 @@ void display_setup(const char *ap_ssid, const char *ap_password, const char *qr_
     if (!s_initialized)
         display_init();
     display_screens_build_setup(ap_ssid, ap_password, qr_payload, page_host);
-    s_partial_count = 0;
-    render(SSD1680_REFRESH_FULL, false);
+    paint(DISPLAY_PAINT_TAKEOVER);
     /* The draw callback (display_screens.c's qr_draw_cb) reads the QR
        buffer synchronously inside render() above — lv_refr_now() runs the
        whole layout-and-draw pass before returning, and nothing else
@@ -455,14 +450,12 @@ void display_setup_release(void) {
     if (!s_initialized)
         display_init();
     display_screens_build_setup_release();
-    s_partial_count = 0;
-    render(SSD1680_REFRESH_FULL, false);
+    paint(DISPLAY_PAINT_TAKEOVER);
 }
 
 void display_setup_end(display_setup_end_t kind, bool has_wifi_ssid) {
     if (!s_initialized)
         display_init();
     display_screens_build_setup_end(kind, has_wifi_ssid);
-    s_partial_count = 0;
-    render(SSD1680_REFRESH_FULL, false);
+    paint(DISPLAY_PAINT_TAKEOVER);
 }

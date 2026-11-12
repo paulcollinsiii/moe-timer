@@ -635,6 +635,43 @@ display_refresh_plan_t display_refresh_plan(uint8_t *partial_count);
    refresh and rearms to zero; `every_n` 0 reads as 1, every paint full. */
 display_refresh_plan_t display_refresh_plan_every(uint8_t *partial_count, uint8_t every_n);
 
+/* ---- what a paint does to display.c's two RTC bytes ---------------------
+   display.c keeps a cadence counter and a "takeover on the glass" flag in RTC
+   memory. Every painter used to touch them inline, in a file no host suite
+   compiles, so a deleted reset passed everything. The whole decision is here
+   now and each painter in display.c is `plan = decide(kind, ...); render(...)`.
+
+   DISPLAY_PAINT_CADENCE     display_update(): a takeover on the glass makes
+                             it full (and is consumed); otherwise it is
+                             display_refresh_plan() exactly.
+   DISPLAY_PAINT_FORCED_FULL display_full_refresh(): full, no cleaning pass,
+                             counter zeroed, takeover flag CLEARED (this paint
+                             is already the full one).
+   DISPLAY_PAINT_TAKEOVER    the full-screen takeover painters (TIME'S UP,
+                             Charge Me, sync failed, no clock, bedtime, config
+                             error, the three setup screens, OTA): full, no
+                             cleaning pass, counter zeroed, takeover flag left
+                             as it was. display_ota() sets the flag itself
+                             after the call; the others deliberately do not
+                             (see s_takeover_on_panel in display.c).
+
+   A full refresh never also asks for the ghost-cleaning pass, so every kind
+   but a partial cadence paint answers {full, !ghost_clean}. */
+typedef enum {
+    DISPLAY_PAINT_CADENCE,
+    DISPLAY_PAINT_FORCED_FULL,
+    DISPLAY_PAINT_TAKEOVER,
+} display_paint_t;
+
+/* `partial_count` and `takeover_on_panel` are display.c's RTC bytes, updated
+   in place. The cadence is DISPLAY_FULL_REFRESH_EVERY_N. */
+display_refresh_plan_t display_refresh_decide(display_paint_t kind, uint8_t *partial_count, bool *takeover_on_panel);
+
+/* The same with N passed in, so a host test can drive any N without a rebuild.
+   display_refresh_decide() is this fed DISPLAY_FULL_REFRESH_EVERY_N. */
+display_refresh_plan_t display_refresh_decide_every(display_paint_t kind, uint8_t *partial_count,
+                                                    bool *takeover_on_panel, uint8_t every_n);
+
 #ifdef __cplusplus
 }
 #endif

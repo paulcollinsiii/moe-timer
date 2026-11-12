@@ -1179,10 +1179,8 @@ void test_a_saturated_counter_does_not_wrap_past_the_full(void) {
     TEST_ASSERT_EQUAL_UINT8(0, count);
 }
 
-/* A forced full (display_full_refresh and the takeover painters) zeroes
-   the counter in display.c, which no host suite compiles. What this pins
-   is the half that IS testable: from zero the next full is exactly N paints
-   away, so a forced full restarts a whole cycle. */
+/* From zero the next full is exactly N paints away, so a forced full (which
+   display_refresh_decide zeroes the counter for) restarts a whole cycle. */
 void test_a_cadence_restarted_from_zero_runs_a_whole_cycle(void) {
     for (uint8_t n = 2; n <= 12; n++) {
         uint8_t count = 0;
@@ -1196,22 +1194,104 @@ void test_a_cadence_restarted_from_zero_runs_a_whole_cycle(void) {
     }
 }
 
-/* THE FORCED-FULL PATHS ARE NOT IN THIS FUNCTION'S REACH, and that is how
-   they are independent of N. The plan takes a counter and an N and nothing
-   else: no screen, no mode, no break flag, no lock flag, no button. The
-   mode switch, the screen-kind change, the break boundary, the lock
-   screen on the glass and Button D are decided above it (wake_policy_render
-   and render_action_result) and go to display_full_refresh(), which never
-   asks the plan. Pin the shape: if a screen or a flag is ever threaded
-   into the plan, this stops compiling and the forced paths need
-   re-examining against N. */
-void test_the_plan_takes_a_counter_and_an_n_and_nothing_else(void) {
-    _Static_assert(
-        _Generic(&display_refresh_plan_every, display_refresh_plan_t(*)(uint8_t *, uint8_t) : 1, default : 0),
-        "the plan must not grow a screen or a flag parameter");
-    _Static_assert(_Generic(&display_refresh_plan, display_refresh_plan_t(*)(uint8_t *) : 1, default : 0),
-                   "the cadence entry display.c calls takes the counter only");
-    TEST_PASS();
+/* ---- display_refresh_decide: what display.c does with its two RTC bytes ----
+
+   THE PIN FOR "A FORCED FULL IS INDEPENDENT OF N". display.c's counter and
+   takeover flag used to be handled inline in each painter, which no host
+   suite compiles, so deleting a reset there was invisible. The decision now
+   lives here and display.c only calls it. Driven across every counter value
+   at several N, because "whatever N is" is the claim. */
+
+static const uint8_t DECIDE_FIGURES[] = {1, 2, 10, 100};
+
+/* A forced full (display_full_refresh: mode toggle, screen-kind change,
+   break boundary, lock screen on glass, Button D) is full with no cleaning
+   pass, rearms the cadence and clears the takeover flag, at every N and
+   from every counter. */
+void test_a_forced_full_is_full_zeroes_the_count_and_clears_the_flag_at_any_n(void) {
+    for (size_t f = 0; f < sizeof DECIDE_FIGURES; f++) {
+        for (int start = 0; start <= 255; start++) {
+            for (int flag = 0; flag <= 1; flag++) {
+                uint8_t count = (uint8_t)start;
+                bool takeover = flag != 0;
+                display_refresh_plan_t p =
+                    display_refresh_decide_every(DISPLAY_PAINT_FORCED_FULL, &count, &takeover, DECIDE_FIGURES[f]);
+                TEST_ASSERT_TRUE_MESSAGE(p.full, "a forced full is full");
+                TEST_ASSERT_FALSE_MESSAGE(p.ghost_clean, "and never also cleans");
+                TEST_ASSERT_EQUAL_UINT8_MESSAGE(0, count, "and restarts the cadence");
+                TEST_ASSERT_FALSE_MESSAGE(takeover, "and clears the takeover flag");
+            }
+        }
+    }
+}
+
+/* The takeover painters (TIME'S UP, Charge Me, sync failed, no clock,
+   bedtime, config error, setup x3, OTA) rearm the cadence and leave the flag
+   exactly as it was: display_ota() sets it itself, the rest never do. */
+void test_a_takeover_paint_is_full_zeroes_the_count_and_leaves_the_flag_alone(void) {
+    for (size_t f = 0; f < sizeof DECIDE_FIGURES; f++) {
+        for (int start = 0; start <= 255; start++) {
+            for (int flag = 0; flag <= 1; flag++) {
+                uint8_t count = (uint8_t)start;
+                bool takeover = flag != 0;
+                display_refresh_plan_t p =
+                    display_refresh_decide_every(DISPLAY_PAINT_TAKEOVER, &count, &takeover, DECIDE_FIGURES[f]);
+                TEST_ASSERT_TRUE_MESSAGE(p.full, "a takeover is painted full");
+                TEST_ASSERT_FALSE_MESSAGE(p.ghost_clean, "with no cleaning pass");
+                TEST_ASSERT_EQUAL_UINT8_MESSAGE(0, count, "and restarts the cadence");
+                TEST_ASSERT_EQUAL_MESSAGE(flag != 0, takeover, "but does not touch the takeover flag");
+            }
+        }
+    }
+}
+
+/* A cadence paint with a takeover on the glass is promoted to full whatever
+   the counter says, and consumes the flag. */
+void test_a_cadence_paint_over_a_takeover_is_full_and_consumes_the_flag(void) {
+    for (size_t f = 0; f < sizeof DECIDE_FIGURES; f++) {
+        for (int start = 0; start <= 255; start++) {
+            uint8_t count = (uint8_t)start;
+            bool takeover = true;
+            display_refresh_plan_t p =
+                display_refresh_decide_every(DISPLAY_PAINT_CADENCE, &count, &takeover, DECIDE_FIGURES[f]);
+            TEST_ASSERT_TRUE_MESSAGE(p.full, "the paint over a takeover is full");
+            TEST_ASSERT_FALSE_MESSAGE(p.ghost_clean, "with no cleaning pass");
+            TEST_ASSERT_EQUAL_UINT8_MESSAGE(0, count, "and restarts the cadence");
+            TEST_ASSERT_FALSE_MESSAGE(takeover, "and the flag is consumed");
+        }
+    }
+}
+
+/* With no takeover on the glass a cadence paint is exactly the plan, and the
+   flag stays clear. */
+void test_a_cadence_paint_with_no_takeover_is_exactly_the_plan(void) {
+    for (size_t f = 0; f < sizeof DECIDE_FIGURES; f++) {
+        for (int start = 0; start <= 255; start++) {
+            uint8_t count = (uint8_t)start;
+            uint8_t want_count = (uint8_t)start;
+            bool takeover = false;
+            display_refresh_plan_t p =
+                display_refresh_decide_every(DISPLAY_PAINT_CADENCE, &count, &takeover, DECIDE_FIGURES[f]);
+            display_refresh_plan_t want = display_refresh_plan_every(&want_count, DECIDE_FIGURES[f]);
+            TEST_ASSERT_EQUAL_MESSAGE(want.full, p.full, "same full answer as the plan");
+            TEST_ASSERT_EQUAL_MESSAGE(want.ghost_clean, p.ghost_clean, "same cleaning answer as the plan");
+            TEST_ASSERT_EQUAL_UINT8_MESSAGE(want_count, count, "same counter as the plan");
+            TEST_ASSERT_FALSE_MESSAGE(takeover, "and the flag stays clear");
+        }
+    }
+}
+
+/* The macro-fed entry display.c calls is the explicit-N one fed the macro
+   (the same wiring test_the_plan_display_c_calls_follows_the_macro checks for
+   the plan, which the N = 7 build of this suite makes able to fail). */
+void test_the_decision_display_c_calls_follows_the_macro(void) {
+    uint8_t count = 0;
+    bool takeover = false;
+    for (int i = 1; i < DISPLAY_FULL_REFRESH_EVERY_N; i++) {
+        TEST_ASSERT_FALSE(display_refresh_decide(DISPLAY_PAINT_CADENCE, &count, &takeover).full);
+    }
+    TEST_ASSERT_TRUE(display_refresh_decide(DISPLAY_PAINT_CADENCE, &count, &takeover).full);
+    TEST_ASSERT_EQUAL_UINT8(0, count);
 }
 
 /* A full refresh drives every pixel both ways by itself, so it never also
@@ -1355,7 +1435,11 @@ int main(void) {
     RUN_TEST(test_a_counter_at_or_past_n_lands_on_a_full_and_rearms);
     RUN_TEST(test_a_saturated_counter_does_not_wrap_past_the_full);
     RUN_TEST(test_a_cadence_restarted_from_zero_runs_a_whole_cycle);
-    RUN_TEST(test_the_plan_takes_a_counter_and_an_n_and_nothing_else);
+    RUN_TEST(test_a_forced_full_is_full_zeroes_the_count_and_clears_the_flag_at_any_n);
+    RUN_TEST(test_a_takeover_paint_is_full_zeroes_the_count_and_leaves_the_flag_alone);
+    RUN_TEST(test_a_cadence_paint_over_a_takeover_is_full_and_consumes_the_flag);
+    RUN_TEST(test_a_cadence_paint_with_no_takeover_is_exactly_the_plan);
+    RUN_TEST(test_the_decision_display_c_calls_follows_the_macro);
     RUN_TEST(test_the_cadence_full_refresh_never_also_asks_to_ghost_clean);
     RUN_TEST(test_the_plan_resumes_a_cadence_already_part_way_through);
     RUN_TEST(test_a_counter_already_past_the_threshold_refreshes_and_rearms);
