@@ -1062,16 +1062,22 @@ void test_the_locked_label_respects_a_small_buffer(void) {
    what M2-T9's exemption did for a checklist that was already up — fails
    on the first paint. */
 void test_every_partial_gets_the_ghost_clean_pass(void) {
-    uint8_t count = 0;
-    for (int i = 1; i < DISPLAY_FULL_REFRESH_EVERY_N; i++) {
-        display_refresh_plan_t plan = display_refresh_plan(&count);
-        TEST_ASSERT_FALSE_MESSAGE(plan.full, "only the Nth paint is full");
-        TEST_ASSERT_TRUE_MESSAGE(plan.ghost_clean, "every partial, the checklist's included, gets the double pass");
-        TEST_ASSERT_EQUAL_UINT8_MESSAGE(i, count, "and every partial counts toward the full refresh");
+    /* Explicit N, never the macro: at N = 1 there is no partial and a loop
+       bounded by the macro would run zero times and pass on nothing. */
+    const uint8_t figures[] = {2, 3, 10};
+    for (size_t f = 0; f < sizeof figures; f++) {
+        const uint8_t n = figures[f];
+        uint8_t count = 0;
+        for (int i = 1; i < n; i++) {
+            display_refresh_plan_t plan = display_refresh_plan_every(&count, n);
+            TEST_ASSERT_FALSE_MESSAGE(plan.full, "only the Nth paint is full");
+            TEST_ASSERT_TRUE_MESSAGE(plan.ghost_clean, "every partial, the checklist's included, gets the double pass");
+            TEST_ASSERT_EQUAL_UINT8_MESSAGE(i, count, "and every partial counts toward the full refresh");
+        }
+        display_refresh_plan_t nth = display_refresh_plan_every(&count, n);
+        TEST_ASSERT_TRUE_MESSAGE(nth.full, "the Nth paint is the anti-ghosting full refresh");
+        TEST_ASSERT_EQUAL_UINT8_MESSAGE(0, count, "and it rearms the cadence");
     }
-    display_refresh_plan_t nth = display_refresh_plan(&count);
-    TEST_ASSERT_TRUE_MESSAGE(nth.full, "the Nth paint is the anti-ghosting full refresh");
-    TEST_ASSERT_EQUAL_UINT8_MESSAGE(0, count, "and it rearms the cadence");
 }
 
 /* The default, pinned to the number and not only to the macro: a suite
@@ -1306,9 +1312,11 @@ void test_the_cadence_full_refresh_never_also_asks_to_ghost_clean(void) {
    part-way through a cadence, so the function must be entered at an
    arbitrary count and not only at zero. */
 void test_the_plan_resumes_a_cadence_already_part_way_through(void) {
-    uint8_t count = (uint8_t)(DISPLAY_FULL_REFRESH_EVERY_N - 2);
-    TEST_ASSERT_FALSE_MESSAGE(display_refresh_plan(&count).full, "one paint short of the Nth");
-    TEST_ASSERT_TRUE_MESSAGE(display_refresh_plan(&count).full, "and this is the Nth");
+    /* Explicit N: N - 2 is not a counter value at N = 1 (the Kconfig range
+       allows it), so this is not written against the macro. */
+    uint8_t count = 8;
+    TEST_ASSERT_FALSE_MESSAGE(display_refresh_plan_every(&count, 10).full, "one paint short of the Nth");
+    TEST_ASSERT_TRUE_MESSAGE(display_refresh_plan_every(&count, 10).full, "and this is the Nth");
     TEST_ASSERT_EQUAL_UINT8(0, count);
 }
 
