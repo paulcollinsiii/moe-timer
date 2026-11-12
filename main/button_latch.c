@@ -42,6 +42,15 @@ void button_latch_reset(void) {
     }
 }
 
+void button_latch_seed_press(int btn, int64_t t_us) {
+    if (btn < 0 || btn >= BUTTON_LATCH_COUNT)
+        return;
+    /* Zero is the "no anchor" sentinel; a seed at exactly 0 would be no seed. */
+    s_last_edge_us[btn] = t_us != 0 ? t_us : 1;
+    s_released_seen[btn] = false;
+    s_released_us[btn] = 0;
+}
+
 void button_latch_record(int btn, int64_t t_us) {
     if (btn < 0 || btn >= BUTTON_LATCH_COUNT)
         return;
@@ -49,7 +58,9 @@ void button_latch_record(int btn, int64_t t_us) {
        press already counted — not a new one. */
     if (!s_released_seen[btn])
         return;
-    if (s_last_edge_us[btn] != 0 && t_us - s_last_edge_us[btn] < BUTTON_LATCH_DEBOUNCE_US)
+    /* The same-button refractory window. It subsumes the 50 ms chatter window
+       (same anchor, shorter), which is why that one is no longer checked. */
+    if (s_last_edge_us[btn] != 0 && t_us - s_last_edge_us[btn] < BUTTON_LATCH_REFRACTORY_US)
         return;
     if (s_released_us[btn] != 0 && t_us - s_released_us[btn] < BUTTON_LATCH_RELEASE_SETTLE_US)
         return;

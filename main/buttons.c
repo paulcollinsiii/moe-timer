@@ -74,8 +74,15 @@ static void buttons_watch_begin(void) {
         ESP_LOGE(TAG, "isr service install failed: %s", esp_err_to_name(ret));
         return;
     }
+    /* The wake press never passes through the latch (wake handling consumes
+       it directly), so seed its refractory window here or its release bounce
+       meets an empty one. Resolved BEFORE the critical section: the lookup
+       logs, and on its fallback path delays 10 ms. BTN_NONE (timer wake, cold
+       boot) seeds nothing. */
+    const button_id_t wake_btn = buttons_get_wakeup_button();
     portENTER_CRITICAL(&s_latch_mux);
     button_latch_reset();
+    button_latch_seed_press(wake_btn == BTN_NONE ? -1 : (int)wake_btn, esp_timer_get_time());
     portEXIT_CRITICAL(&s_latch_mux);
     buttons_note_levels();
     for (int i = 0; i < 4; i++) {

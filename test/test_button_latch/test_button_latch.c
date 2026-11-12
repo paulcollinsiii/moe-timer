@@ -53,8 +53,92 @@ void test_edge_beyond_debounce_window_and_past_a_release_is_accepted(void) {
     button_latch_record(1, T0_US);
     button_latch_take();
     button_latch_note_levels(0, T0_US + BUTTON_LATCH_DEBOUNCE_US);
-    button_latch_record(1, T0_US + 2 * BUTTON_LATCH_DEBOUNCE_US);
+    button_latch_record(1, T0_US + 2 * BUTTON_LATCH_REFRACTORY_US);
     TEST_ASSERT_EQUAL_UINT8(1u << 1, button_latch_take());
+}
+
+/* THE SAME-BUTTON REFRACTORY WINDOW (stream B). The 400 ms ack hold used to
+   keep every level sample away from the wake button's release, so its bounce
+   was never seen as a second press; with the hold gone the window below is
+   what says so, explicitly. It is measured from the last ACCEPTED press of
+   that button, so it holds even when the release gate is already open — which
+   is exactly the case a sample landing in a high phase of the bounce train
+   creates. Here the gate IS open (released at +20 ms, settle long over) and
+   the edge is still refused. */
+void test_a_same_button_edge_inside_the_refractory_window_is_ignored(void) {
+    button_latch_record(1, T0_US);
+    button_latch_take();
+    button_latch_note_levels(0, T0_US + 20000);
+    button_latch_record(1, T0_US + BUTTON_LATCH_REFRACTORY_US - 1);
+    TEST_ASSERT_EQUAL_UINT8(0, button_latch_take());
+}
+
+void test_a_same_button_edge_past_the_refractory_window_is_accepted(void) {
+    button_latch_record(1, T0_US);
+    button_latch_take();
+    button_latch_note_levels(0, T0_US + 20000);
+    button_latch_record(1, T0_US + BUTTON_LATCH_REFRACTORY_US);
+    TEST_ASSERT_EQUAL_UINT8(1u << 1, button_latch_take());
+}
+
+/* The lag being removed: a different button right after the first is
+   accepted at once, with no window of its own in the way. */
+void test_a_different_button_is_accepted_immediately_after_a_press(void) {
+    button_latch_record(1, T0_US);
+    button_latch_take();
+    button_latch_note_levels(0, T0_US + 5000);
+    button_latch_record(2, T0_US + 20000);
+    TEST_ASSERT_EQUAL_UINT8(1u << 2, button_latch_take());
+}
+
+/* The window is a per-button fact: press C, then B, and B's window does not
+   start until B is accepted, nor does C's end early because B arrived. */
+void test_each_buttons_refractory_window_is_its_own(void) {
+    button_latch_record(2, T0_US);
+    button_latch_record(1, T0_US + 100000);
+    button_latch_take();
+    button_latch_note_levels(0, T0_US + 150000);
+    button_latch_record(2, T0_US + 250000); /* inside C's window */
+    button_latch_record(1, T0_US + 350000); /* inside B's window */
+    TEST_ASSERT_EQUAL_UINT8(0, button_latch_take());
+    button_latch_record(2, T0_US + BUTTON_LATCH_REFRACTORY_US + 1000);
+    TEST_ASSERT_EQUAL_UINT8(1u << 2, button_latch_take());
+}
+
+/* THE WAKE PRESS IS SEEDED. It is consumed by wake handling and never passes
+   through button_latch_record, so without a seed its own release bounce
+   meets an empty window. The seed starts the window and arms nothing: no
+   bit is latched, since the wake press is acted on elsewhere. */
+void test_a_seeded_wake_press_opens_a_refractory_window_without_latching(void) {
+    button_latch_seed_press(1, T0_US);
+    TEST_ASSERT_EQUAL_UINT8(0, button_latch_take());
+    button_latch_note_levels(0, T0_US + 1000); /* the tap was already over at boot */
+    button_latch_record(1, T0_US + 100000);    /* its release bounce */
+    TEST_ASSERT_EQUAL_UINT8(0, button_latch_take());
+    button_latch_record(1, T0_US + BUTTON_LATCH_REFRACTORY_US + 1000);
+    TEST_ASSERT_EQUAL_UINT8(1u << 1, button_latch_take());
+}
+
+void test_a_seeded_wake_press_does_not_delay_other_buttons(void) {
+    button_latch_seed_press(1, T0_US);
+    button_latch_note_levels(0, T0_US + 1000);
+    button_latch_record(2, T0_US + 20000);
+    TEST_ASSERT_EQUAL_UINT8(1u << 2, button_latch_take());
+}
+
+void test_seeding_no_button_or_a_bad_one_is_a_no_op(void) {
+    button_latch_seed_press(-1, T0_US);
+    button_latch_seed_press(4, T0_US);
+    button_latch_note_levels(0, T0_US + 1000);
+    button_latch_record(0, T0_US + 20000);
+    TEST_ASSERT_EQUAL_UINT8(1u << 0, button_latch_take());
+}
+
+void test_reset_forgets_a_seeded_window(void) {
+    button_latch_seed_press(3, T0_US);
+    button_latch_reset();
+    button_latch_record(3, T0_US + 1000);
+    TEST_ASSERT_EQUAL_UINT8(1u << 3, button_latch_take());
 }
 
 /* THE RELEASE GATE, and the field defect it closes (M2-T12 finding 3). One
@@ -238,9 +322,9 @@ void test_debounce_windows_are_per_button(void) {
 }
 
 void test_debounce_window_anchors_on_accepted_edge_only(void) {
-    /* A rejected edge must not extend the window: T0 accepted, T0+40ms
-       rejected, T0+60ms is beyond T0+50ms and must be accepted even
-       though it is within 50ms of the REJECTED edge.
+    /* A rejected edge must not extend the window: T0 accepted, T0+0.8 W
+       rejected, T0+1.2 W is beyond T0+W and must be accepted even though it
+       is within W of the REJECTED edge (W = BUTTON_LATCH_REFRACTORY_US).
        The release sample sits at T0+5ms so the gate is armed for all of
        this and the only thing under test is the press-edge anchor — early
        enough that its own anchor (BUTTON_LATCH_RELEASE_SETTLE_US, 10 ms, so
@@ -248,8 +332,8 @@ void test_debounce_window_anchors_on_accepted_edge_only(void) {
     button_latch_record(1, T0_US);
     button_latch_take();
     button_latch_note_levels(0, T0_US + BUTTON_LATCH_DEBOUNCE_US / 10);
-    button_latch_record(1, T0_US + (BUTTON_LATCH_DEBOUNCE_US * 4) / 5);
-    button_latch_record(1, T0_US + (BUTTON_LATCH_DEBOUNCE_US * 6) / 5);
+    button_latch_record(1, T0_US + (BUTTON_LATCH_REFRACTORY_US * 4) / 5);
+    button_latch_record(1, T0_US + (BUTTON_LATCH_REFRACTORY_US * 6) / 5);
     TEST_ASSERT_EQUAL_UINT8(1u << 1, button_latch_take());
 }
 
@@ -393,6 +477,14 @@ int main(void) {
     RUN_TEST(test_an_edge_right_after_the_release_sample_is_still_bounce);
     RUN_TEST(test_a_press_past_the_settle_window_is_accepted_inside_the_chatter_window);
     RUN_TEST(test_the_seeding_sample_anchors_a_button_it_finds_already_up);
+    RUN_TEST(test_a_same_button_edge_inside_the_refractory_window_is_ignored);
+    RUN_TEST(test_a_same_button_edge_past_the_refractory_window_is_accepted);
+    RUN_TEST(test_a_different_button_is_accepted_immediately_after_a_press);
+    RUN_TEST(test_each_buttons_refractory_window_is_its_own);
+    RUN_TEST(test_a_seeded_wake_press_opens_a_refractory_window_without_latching);
+    RUN_TEST(test_a_seeded_wake_press_does_not_delay_other_buttons);
+    RUN_TEST(test_seeding_no_button_or_a_bad_one_is_a_no_op);
+    RUN_TEST(test_reset_forgets_a_seeded_window);
     RUN_TEST(test_the_release_gate_is_per_button);
     RUN_TEST(test_a_button_seeded_as_held_rejects_its_release_bounce);
     RUN_TEST(test_a_button_seeded_as_up_accepts_its_first_press);
