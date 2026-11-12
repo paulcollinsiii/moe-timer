@@ -242,23 +242,23 @@ void test_an_edge_right_after_the_release_sample_is_still_bounce(void) {
     TEST_ASSERT_EQUAL_UINT8(0, button_latch_take());
 }
 
-/* THE OTHER SIDE OF THAT BRACKET, and the case M2-T12 came back a second
-   time for: a GENUINE press landing past the settle window but still inside
-   the chatter window of a release observation.
+/* THE OTHER SIDE OF THAT BRACKET: a GENUINE press landing past the settle
+   window but within a poll interval (BUTTON_LATCH_DEBOUNCE_US) of a release
+   observation.
    The gate reopens at a POLL, so the poll that admits the press is also the
-   anchor it is measured against. While that anchor was a whole
-   BUTTON_LATCH_DEBOUNCE_US wide, a press within 50 ms of the poll was
-   rejected here as bounce — and then LOST outright, because the next poll
-   read the pad as held and closed the gate again for the rest of the press.
-   No toggle, no pixel, and not even a reset of the coalescer's idle window.
-   With R the release, P the first poll at or after it and g the
-   RELEASE-to-press gap, every g below (P - R) + 50 ms went that way: all of
-   0-50 ms and much of 50-100 ms. A double tap correcting a mis-press lives
-   in that band, which is design §2.5 clause 5 and the field report this
-   whole task exists for. */
+   anchor it is measured against. Were that anchor a whole poll interval wide,
+   a press within 50 ms of the poll would be rejected as bounce — and then
+   LOST outright, because the next poll reads the pad as held and closes the
+   gate again for the rest of the press. With R the release, P the first poll
+   at or after it and g the RELEASE-to-press gap, every g below
+   (P - R) + window would go that way. The settle window is 10 ms so that
+   only the narrow band it covers is at risk. This applies to a re-press at or
+   beyond the refractory window (BUTTON_LATCH_REFRACTORY_US) press-to-press,
+   the only kind the refractory window admits; the probe sits 500 ms after
+   the first press for that reason. */
 void test_a_press_past_the_settle_window_is_accepted_inside_the_chatter_window(void) {
     /* 30 ms, WRITTEN AS A DURATION rather than derived from the two windows,
-       so that widening the settle anchor back to the chatter window fails the
+       so that widening the settle anchor to a whole poll interval fails the
        BEHAVIOUR below and not merely an arithmetic guard. A guard tripping
        says "these constants no longer differ"; the assertion says "the press
        was eaten", and it is the second sentence a future reader needs. */
@@ -278,8 +278,8 @@ void test_a_press_past_the_settle_window_is_accepted_inside_the_chatter_window(v
     TEST_ASSERT_TRUE_MESSAGE(probe_gap_us > BUTTON_LATCH_RELEASE_SETTLE_US,
                              "the probe gap no longer clears the settle anchor");
     TEST_ASSERT_TRUE_MESSAGE(probe_gap_us < BUTTON_LATCH_DEBOUNCE_US,
-                             "the probe gap no longer lands inside the chatter window, so this case passes "
-                             "without distinguishing the two anchors");
+                             "the probe gap no longer lands inside one poll interval, so this case passes "
+                             "without distinguishing the settle anchor from a poll-wide one");
 }
 
 /* THE SEEDING SAMPLE ANCHORS TOO, for a button it finds already UP.

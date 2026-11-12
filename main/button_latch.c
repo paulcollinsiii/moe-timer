@@ -27,9 +27,8 @@ static bool s_released_seen[BUTTON_LATCH_COUNT];
    contact is still chattering; anchoring here rejects the falling edge that
    follows it a millisecond later, which the press-edge anchor above cannot
    (it is a whole hold duration away by then). Its window is
-   BUTTON_LATCH_RELEASE_SETTLE_US and NOT the chatter window — see
-   button_latch.h, where reusing the chatter window is written up as the
-   defect that cost a real press for every one it saved. Zero means "no
+   BUTTON_LATCH_RELEASE_SETTLE_US, kept short on purpose — see
+   button_latch.h for the press a wider one would cost. Zero means "no
    observation to anchor on", exactly as it does for s_last_edge_us. */
 static int64_t s_released_us[BUTTON_LATCH_COUNT];
 
@@ -68,8 +67,8 @@ void button_latch_record(int btn, int64_t t_us) {
        press already counted — not a new one. */
     if (!s_released_seen[btn])
         return;
-    /* The same-button refractory window. It subsumes the 50 ms chatter window
-       (same anchor, shorter), which is why that one is no longer checked. */
+    /* The same-button refractory window, measured from the last accepted
+       press; it also rejects any chatter on the press itself. */
     if (s_last_edge_us[btn] != 0 && t_us - s_last_edge_us[btn] < BUTTON_LATCH_REFRACTORY_US)
         return;
     if (s_released_us[btn] != 0 && t_us - s_released_us[btn] < BUTTON_LATCH_RELEASE_SETTLE_US)

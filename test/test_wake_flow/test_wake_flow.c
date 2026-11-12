@@ -9526,17 +9526,16 @@ void test_t12_a_mis_press_on_a_full_list_can_be_corrected_in_the_same_wake(void)
    On hardware the level sample that reopens the gate is taken by the same
    take that then consumes presses, so a press made while the panel waits
    lands 0-50 ms after a sample — never the 500 ms the default clock step
-   above manufactures. The anchor on that sample was BUTTON_LATCH_DEBOUNCE_US
-   wide to begin with, so every one of those presses was rejected as bounce
-   and then lost outright at the next poll: the coarse step is the reason no
-   case in this file could see it (see button_latch.h for the arithmetic).
-   The gap below is seven tenths of a chatter window, which is the one place a
-   press can sit and be unambiguous: past the settle anchor so the gate must
-   accept it, inside the chatter window so the first anchor rejected it, and
-   far enough apart that two presses of one button do not collapse into one
-   latched bit on the press-edge window instead. All three are asserted,
-   because a case that silently stops distinguishing them is how this defect
-   got here. */
+   above manufactures. A settle anchor as wide as a poll interval
+   (BUTTON_LATCH_DEBOUNCE_US) would reject every one of those presses as
+   bounce and then lose it outright at the next poll: the coarse step is why
+   no case in this file could see that (see button_latch.h for the arithmetic).
+   The gap below is seven tenths of a poll interval, the one place a press can
+   sit and be unambiguous: past the settle anchor so the gate must accept it,
+   inside a poll interval so a poll-wide anchor would reject it, and shorter
+   than BUTTON_LATCH_REFRACTORY_US so the same-button window, not the gap, is
+   what separates two presses of one button. All are asserted, because a case
+   that silently stops distinguishing them stops testing the defect. */
 #define FLOW_EDGE_GAP_TIGHT_US ((int64_t)30000) /* 30 ms */
 
 /* flow_tick_then_correct() with ONE change: the correction waits until the
@@ -9581,11 +9580,16 @@ void test_t12_a_correction_press_is_accepted_at_a_real_poll_cadence(void) {
                              "the probe gap no longer clears the settle anchor, so a failure here would be the "
                              "one rejection the gate is RIGHT to make");
     TEST_ASSERT_TRUE_MESSAGE(FLOW_EDGE_GAP_TIGHT_US < BUTTON_LATCH_DEBOUNCE_US,
-                             "the probe gap no longer lands inside the chatter window, so this case passes "
-                             "without distinguishing the two anchors");
-    TEST_ASSERT_TRUE_MESSAGE(2 * FLOW_EDGE_GAP_TIGHT_US > BUTTON_LATCH_DEBOUNCE_US,
-                             "two presses of one button are now closer together than the chatter window, so "
-                             "they would collapse in the latch for a reason that is not the gate");
+                             "the probe gap no longer lands inside one poll interval, so this case passes "
+                             "without distinguishing the settle anchor from a poll-wide one");
+    /* The binding window between two presses of one button is
+       BUTTON_LATCH_REFRACTORY_US, not a chatter window: the hook above waits
+       it out before the second D, so the gap has to be shorter than it for
+       that wait to be what separates them (and for the case to run at the
+       tight cadence it is about). */
+    TEST_ASSERT_TRUE_MESSAGE(FLOW_EDGE_GAP_TIGHT_US < BUTTON_LATCH_REFRACTORY_US,
+                             "the probe gap is no longer shorter than the same-button refractory window "
+                             "(BUTTON_LATCH_REFRACTORY_US), so the hook's wait for it is moot");
 }
 
 /* THE ACCEPTED COST, pinned so it is a decision and not an accident: a

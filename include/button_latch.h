@@ -10,46 +10,41 @@
    ISR context, take in task context). Plain RAM: unconsumed presses
    evaporate at deep sleep and can never fire on a later wake. */
 
-/* The ack coalescer's poll cadence, and the figure for contact chatter on the
-   PRESS: edges this close to the last ACCEPTED edge of the same button are
-   chatter. button_latch.c no longer applies it as a separate check —
-   BUTTON_LATCH_REFRACTORY_US below is longer and anchors on the same edge, so
-   it rejects everything this would — but the figure still means what it says,
-   and it is why the coalescer polls this often (wake_flow.c).
+/* NOW ONLY THE ACK COALESCER'S POLL CADENCE (wake_flow.c); button_latch.c does
+   not use it. It is not a debounce window any more: BUTTON_LATCH_REFRACTORY_US
+   below is longer and anchors on the same accepted edge, so it rejects
+   everything a 50 ms chatter check would.
 
-   IT IS NOT, ON ITS OWN, ENOUGH TO REJECT RELEASE BOUNCE, and the version of
-   this comment that claimed it was is what M2-T12 came back to fix. Release
-   bounce happens at press + HOLD DURATION, and a hold is as long as the
-   person holding it: 100-300 ms for a deliberate press, longer for a child
-   leaning on a pad. So it falls OUTSIDE any fixed window measured from the
-   press edge, no matter how wide, and the edge was accepted as a second
-   press. Harmless while the only consumer was the EXT1 tail's bare take,
-   which discarded it; a spurious extra chore toggle from M2-T8 onward, when
-   the coalescing drain above that take started reading every latched bit as
-   a press. What actually rejects it is the RELEASE GATE below — the window
-   only has to cover chatter, which is milliseconds. */
+   RELEASE BOUNCE comes at press + HOLD DURATION, however long the person
+   holds the pad, so no fixed window measured from the press edge covers it
+   for every hold. Two things do together. The RELEASE GATE (below) rejects
+   every edge until a sample has seen the pad back up, whatever the hold
+   length. The refractory window covers the remaining case: a sample that
+   lands in a high phase of the bounce train reports "up" while the contact is
+   still ringing, which for a hold under BUTTON_LATCH_REFRACTORY_US is still
+   inside that window. */
 #define BUTTON_LATCH_DEBOUNCE_US 50000
 
 /* And ignore edges this close to the moment the button was observed back UP.
    A SEPARATE AND MUCH SHORTER WINDOW, for a different job: a level sample
    can land in a HIGH phase of a bounce train and report "up" while the
    contact is still ringing, and this rejects the falling edge that follows
-   it a millisecond or two later. Nothing else can — the press-edge window
-   above is a whole hold duration in the past by then.
+   it a millisecond or two later. For a hold LONGER than the refractory
+   window the press-edge anchor is already out of reach by then, so this
+   settle window is what rejects it; for a shorter hold the refractory window
+   does it first.
 
-   IT WAS BUTTON_LATCH_DEBOUNCE_US, and reusing the chatter window for this
-   is what brought M2-T12 back a second time. The gate reopens at a POLL, so
-   that poll became the anchor, and a genuine press within 50 ms of it was
-   dropped ENTIRELY — no toggle, no pixel, not even a reset of the ack
-   coalescer's idle window, because the next poll then read the pad as held
-   and closed the gate again for the rest of that press. With R the release,
-   P the first poll at or after it and g the RELEASE-TO-PRESS gap, a press
-   was lost whenever g < (P - R) + 50 ms: every gap up to 50 ms always, and
-   one up to 100 ms with probability (100 - g)/50 at the coalescer's
-   cadence. A double tap correcting a mis-press lands squarely in that band,
-   which is the one gesture this task exists to deliver (design 2.5 clause
-   5). Note the measure is RELEASE-to-press and not press-to-press: the hold
-   in between is the person's, so a 250 ms double tap can carry a 50 ms gap.
+   It only decides anything for a re-press of the same button at or beyond
+   BUTTON_LATCH_REFRACTORY_US press-to-press, which is the only re-press the
+   refractory window lets through. It must stay short: the gate reopens at a
+   POLL, so that poll is the anchor, and a genuine press within this window of
+   it is dropped ENTIRELY — no toggle, no pixel — because the next poll then
+   reads the pad as held and closes the gate again for the rest of that press.
+   With R the release, P the first poll at or after it and g the
+   RELEASE-TO-PRESS gap, a press is lost whenever g < (P - R) + this window.
+   The measure is RELEASE-to-press, not press-to-press: the hold in between is
+   the person's. A window as wide as the 50 ms poll cadence loses every gap up
+   to 50 ms and some up to 100 ms; 10 ms keeps that loss small.
 
    10 ms BECAUSE THAT IS THE FIGURE THIS BOARD ALREADY TRUSTS FOR THESE
    PADS, not because it is a round number: buttons.c waits exactly it
@@ -60,9 +55,8 @@
    needs the other.
 
    AND NOT A KCONFIG KNOB, unlike CONFIG_MAGTAG_CHORE_PAINT_QUIET_MS (the
-   coalescer's idle window, split off STATUS_LED_ACK_HOLD_MS by M2-T15),
-   which is the comparison worth drawing because from a distance they look
-   alike. How long a child needs to get the next press in is a question
+   coalescer's idle window), which is the comparison worth drawing because
+   from a distance they look alike. How long a child needs to get the next press in is a question
    about people and belongs to a board; how long a dome contact rings is a property of
    the contact. Nor is shorter the safe direction: at zero this re-admits
    the release bounce the gate exists to reject, which is the phantom chore
@@ -76,24 +70,19 @@
    seeded wake press, button_latch_seed_press), and it holds even when the
    release gate is open.
 
-   WHAT IT REPLACED. The chore ack and Button B's start/resume used to sleep
-   400 ms (STATUS_LED_ACK_HOLD_MS, now gone) right after the first press, and
-   nothing took a level sample in that time, so the wake button's release and
-   its bounce happened unobserved and were rejected by the gate for want of a
-   sample that said "up". With the hold gone the coalescer samples every
-   BUTTON_LATCH_DEBOUNCE_US from the start, and a sample can land in a high
-   phase of the release bounce: the gate opens, the settle anchor expires 10
-   ms later, and the next bounce edge would be a second press — a phantom
-   un-tick on a chore, a phantom re-pause on B. This window is the explicit
-   statement of what the hold did by accident: one physical tap is one press.
+   WHAT IT IS FOR. The ack coalescer samples the pads every
+   BUTTON_LATCH_DEBOUNCE_US from the first poll, and a sample can land in a
+   high phase of the wake button's release bounce: the gate opens, the settle
+   anchor expires 10 ms later, and the next bounce edge would be a second
+   press — a phantom un-tick on a chore, a phantom re-pause on B. This window
+   states it outright: one physical tap is one press.
 
    300 ms BECAUSE it has to outlast a release bounce measured from the PRESS
    edge, which is hold-length plus ringing, and a deliberate tap holds the pad
    100-300 ms; it is a starting figure, to be settled by the bench check (20
-   single taps per chore button, none may double-toggle). It also subsumes
-   the 50 ms chatter window (BUTTON_LATCH_DEBOUNCE_US), which anchors on the
-   same accepted edge and is shorter, so button_latch.c checks only this one;
-   DEBOUNCE_US survives as the poll cadence the ack coalescer runs at.
+   single taps per chore button, none may double-toggle). Its anchor is the
+   same accepted edge a shorter chatter check would use, so it is the only
+   press-edge check button_latch.c makes.
 
    THE COST, accepted by the owner: a deliberate re-press of the SAME button
    faster than this is lost. A different button is never affected. Not a
@@ -115,8 +104,8 @@ void button_latch_reset(void);
    began a boot earlier; anchoring at reset makes the window end later than
    strictly needed, which errs towards rejecting bounce). It latches nothing,
    and it closes the release gate like an accepted press does, so until a
-   sample sees the pad up its edges are bounce. btn < 0 (BTN_NONE: a timer
-   wake or cold boot) and out-of-range values are a no-op. Nothing survives
+   sample sees the pad up its edges are bounce. Out-of-range values (<0, or
+   BTN_NONE for a timer wake or cold boot) are a no-op. Nothing survives
    deep sleep: every wake reseeds from its own EXT1 status. */
 void button_latch_seed_press(int btn, int64_t t_us);
 /* Arm the latch for a wake, in the only order that works: reset, seed the
@@ -165,12 +154,9 @@ void button_latch_record(int btn, int64_t t_us);
    window (wake_flow.c), and it is the real reason the cadence matters — not
    the bitmask claim below, which holds at any cadence.
 
-   THE WINDOW WITH NO SAMPLE IN IT USED TO BE THE ACK HOLD, which slept
-   400 ms between the boot seeding sample and the coalescer's first take
-   (STATUS_LED_ACK_HOLD_MS, removed). It is gone, so the coalescer now
-   samples from the start, and the job the hold did by accident — keeping the
-   wake button's release bounce out of the latch — is done explicitly by
-   BUTTON_LATCH_REFRACTORY_US above.
+   NO SAMPLE-FREE WINDOW FOLLOWS THE WAKE PRESS: the coalescer samples from
+   its first poll, and keeping the wake button's release bounce out of the
+   latch is BUTTON_LATCH_REFRACTORY_US's job (above).
 
    WHY A SAMPLE AND NOT AN INTERRUPT: reading the level in the ISR would
    mean either GPIO_INTR_ANYEDGE plus a level read from a flash-resident
