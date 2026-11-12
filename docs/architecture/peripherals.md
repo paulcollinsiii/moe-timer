@@ -63,6 +63,13 @@ press into `button_latch.c`, and the wake's checkpoints consume the latch
 later:
 - A falling edge counts as a press only after the button was seen released,
   so the bounce of a release is never a second press (S23).
+- After a press is accepted, edges on **the same button** are ignored for
+  `BUTTON_LATCH_REFRACTORY_US` (300 ms); other buttons are unaffected. This
+  makes one physical tap one press: a quick tap's release bounce can land
+  after a level sample has reopened the gate. The wake press never passes
+  through the latch, so `buttons_watch_begin()` seeds its window
+  (`button_latch_begin()`) from the EXT1 status. A deliberate re-press of the same button faster than that is
+  lost, by design.
 - When several presses are waiting, `button_latch_pick()` takes them in the
   order B > C > D > A, so the time-sensitive action wins and a mode toggle
   can never swallow a start (S22). That order is the only guard against the

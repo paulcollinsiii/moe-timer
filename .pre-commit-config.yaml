@@ -84,24 +84,6 @@ repos:
         files: ^main/wake_flow\.c$
         pass_filenames: false
 
-  # ── The ack hold's two homes ──────────────────────────────────────────────────
-  # STATUS_LED_ACK_HOLD_MS is one figure the firmware reads from sdkconfig.h and
-  # the host build reads from a literal in status_led.h's #else arm. That header
-  # asserted the two "MUST AGREE" as though something enforced it; review proved
-  # nothing did, and that the stated consequence could not even occur — the only
-  # host suite expanding the macro is built with the CONFIG symbol defined, so
-  # mutating the fallback to 250 or 0 changed no host binary and failed no test.
-  # The hazard is the NEXT suite to measure the figure without an override. The
-  # scanner carries the reasoning and both files' parse rules.
-  - repo: local
-    hooks:
-      - id: ack-hold-default
-        name: ack hold Kconfig default == status_led.h host fallback
-        language: script
-        entry: scripts/check-ack-hold-default.py
-        files: ^(main/Kconfig\.projbuild|include/status_led\.h)$
-        pass_filenames: false
-
   # ── Commit message format ─────────────────────────────────────────────────────
   - repo: local
     hooks:

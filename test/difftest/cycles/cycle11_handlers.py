@@ -834,7 +834,7 @@ bool wake_flow_dispatch_button_action(button_id_t btn, time_t *now, timer_state_
     tr(E_DISPATCH, btn, before, allow_net_window);
     *selection_changed = P.dispatch_swapped != 0;
     if (P.dispatch_state >= 0) m_state = P.dispatch_state;
-    *now = *now + 1; /* the action leaves a clock behind (the 250 ms ack hold) */
+    *now = *now + 1; /* the action leaves a clock behind (an action takes wall time) */
     return P.dispatch_ok != 0;
 }
 bool net_apply_open(void) { tr(E_NET_OPEN, P.net_open, 0, 0); return P.net_open != 0; }

@@ -75,7 +75,8 @@ repeated failed syncs it shows a setup hint
   the exception: it is dropped unless the chore checklist is up.
 - **When your press woke it**, further presses are dropped until it has
   answered, so a double tap does not undo itself. B still pauses during the
-  sync that follows a start, and chore ticks all count
+  sync that follows a start, and chore ticks all count, except the same
+  button again within about 0.3 s
   ([Chores](behavior/chores.md#ticking-a-chore)). A press made during the
   wake-up itself is not seen at all ([below](#known-limitations)).
 - **Holding a button does not repeat it.**

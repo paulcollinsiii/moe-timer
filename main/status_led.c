@@ -133,7 +133,7 @@ void chores_led_show(uint8_t mask, uint8_t n, bool released) {
        HIGHPRI CLASS, AND IT IS THE ONLY HIGHPRI PAINT IN THE TREE. Design
        §2.5 deliberately stopped making the panel the ack channel, so these
        four pixels are the ONLY feedback a press gets until the panel
-       paints — the hold, a quiet window and a partial later: ~2.4 s from
+       paints — a quiet window and a partial later: ~2.0 s from
        the press at the defaults, plus the boot, the partial's ~0.8 s being
        an estimate (M2-T15). Status class drops every post while the quiet-hours
        callback is true, which made a night-time ack produce nothing at

@@ -74,10 +74,18 @@ static void buttons_watch_begin(void) {
         ESP_LOGE(TAG, "isr service install failed: %s", esp_err_to_name(ret));
         return;
     }
+    /* The wake press never passes through the latch (wake handling consumes
+       it directly), so button_latch_begin seeds its refractory window or its
+       release bounce meets an empty one. The wake button is resolved (and
+       cached, buttons_get_wakeup_button) and the pads scanned BEFORE the
+       critical section: the lookup logs, and on its fallback path delays 10
+       ms. BTN_NONE (timer wake, cold boot) seeds nothing. */
+    const button_id_t wake_btn = buttons_get_wakeup_button();
+    const uint8_t held = buttons_scan_held();
+    const int64_t t_us = esp_timer_get_time();
     portENTER_CRITICAL(&s_latch_mux);
-    button_latch_reset();
+    button_latch_begin((int)wake_btn, held, t_us);
     portEXIT_CRITICAL(&s_latch_mux);
-    buttons_note_levels();
     for (int i = 0; i < 4; i++) {
         gpio_set_intr_type(BTN_GPIOS[i], GPIO_INTR_NEGEDGE);
         gpio_isr_handler_add(BTN_GPIOS[i], button_isr, (void *)(intptr_t)i);
@@ -173,13 +181,14 @@ void buttons_init(void) {
    which is a bigger move than the policy carve.
 
    A FIFTH SEAM LIVES ABOVE, added by M2-T12 and the same shape: that every
-   take feeds buttons_note_levels() and that the seeding sample in
-   buttons_watch_begin() happens before gpio_isr_handler_add(). The DECISION
-   those two feed — what a level sample means for the release gate — is
-   host-tested in button_latch.c, so again what rests on review is only
-   whether the samples are taken. test_wake_flow's take stubs mirror both
-   calls, which puts the gate itself under the coalescer; what they cannot
-   mirror is this file forgetting one. */
+   take feeds buttons_note_levels() and that buttons_watch_begin() calls
+   button_latch_begin() before gpio_isr_handler_add(). The DECISION those two
+   feed — what a level sample means for the release gate, and the order of
+   reset, seed and first sample (button_latch_begin) — is host-tested in
+   button_latch.c, so what rests on review is only whether the calls are
+   made. test_wake_flow's take stubs and its button-wake arming mirror both,
+   which puts the gate itself under the coalescer; what they cannot mirror is
+   this file forgetting one. */
 void buttons_configure_wakeup_if(bool enable) {
     /* A locked sleep arms nothing: leave the RTC domain exactly as the
        last sleep left it, on a battery that cannot spare the work. */
@@ -364,7 +373,15 @@ void buttons_configure_wakeup_if(bool enable) {
     }
 }
 
-button_id_t buttons_get_wakeup_button(void) {
+/* The wake is resolved ONCE per boot and the answer kept: the fallback path
+   waits 10 ms and scans the pads, so a second resolution would log twice and
+   could disagree with the first. buttons_watch_begin() makes the first call
+   (buttons_init runs before the wake handler); a caller that gets here
+   first resolves it itself, so the getter never returns an unset value. */
+static button_id_t s_wake_btn = BTN_NONE;
+static bool s_wake_resolved;
+
+static button_id_t resolve_wakeup_button(void) {
     if (!(esp_sleep_get_wakeup_causes() & BIT(ESP_SLEEP_WAKEUP_EXT1))) {
         return BTN_NONE;
     }
@@ -462,6 +479,14 @@ button_id_t buttons_get_wakeup_button(void) {
     }
     ESP_LOGW(TAG, "EXT1 wakeup but no button identified");
     return BTN_NONE;
+}
+
+button_id_t buttons_get_wakeup_button(void) {
+    if (!s_wake_resolved) {
+        s_wake_btn = resolve_wakeup_button();
+        s_wake_resolved = true;
+    }
+    return s_wake_btn;
 }
 
 bool buttons_is_pressed(button_id_t btn) {

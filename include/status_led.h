@@ -89,84 +89,11 @@ extern "C" {
    status-paint wrapper, because it is not a status paint. */
 #define NP_STATE_PIXEL 0
 
-/* How long a PRE-PRESS colour is held before the pixel that acknowledges
-   the press changes. The acknowledgement is the TRANSITION, not the
-   destination colour, so there has to be a frame of the old state for the
-   new one to be a change from — repaint with no hold and a user sees one
-   colour appear, which is indistinguishable from a device that was
-   already showing it.
-
-   ONE constant for two call sites, which is the whole reason it is here
-   rather than a literal at either: Button B's start/resume (wake_flow.c)
-   and the chore ack (design §2.5) are the same gesture — hold the old
-   colour, then change it — read by the same person on the same device.
-   Two figures for that would be an inconsistency nobody could interpret,
-   and nothing but a shared constant and a test across both paths stops
-   them drifting.
-
-   400 IS NOT A SWEPT VALUE, and since M2-T15 nothing measured bears on it
-   at all. The history, because it is the lesson: until M2-T15 this one
-   figure was ALSO the chore-ack coalescing window — how long the panel
-   waits for the next press before it paints. The 2026-09-22 board session
-   found 250 too short, and that was a finding about the WINDOW: a child
-   could not get the second chore pressed before the refresh began. 400
-   (§2.5's prose estimate) was adopted on the strength of it, and the hold
-   moved with it because they were one number.
-
-   On 2026-09-23 a board showed 400 too short for the window as well — a
-   natural press-pause-press rhythm painted mid-gesture and then again —
-   and the two jobs want opposite things: the hold is dead time in front of
-   the first ack and wants to be SHORT, the window is the panel waiting for
-   the gesture to settle and wants to be LONG. So they were split. The
-   window is CONFIG_MAGTAG_CHORE_PAINT_QUIET_MS (wake_flow.c's
-   CHORE_PAINT_QUIET_MS) and this figure is the hold alone. It stays at 400
-   only because nothing has measured the hold on its own; the lower bound
-   that moved it off 250 was never about the hold.
-
-   IT IS A MENUCONFIG KNOB, because that is how a board says so:
-   CONFIG_MAGTAG_STATUS_LED_ACK_HOLD_MS, so a sweep is a rebuild rather
-   than a patch. The host build has no sdkconfig.h, so it takes the
-   literal below — the same #ifdef shape nvs_defaults.h uses for every
-   other Kconfig-backed constant, and for the same reason: the tests must
-   not need a generated header to compile.
-
-   THE FALLBACK AND THE KCONFIG DEFAULT MUST AGREE, and what holds that is
-   scripts/check-ack-hold-default.py, a pre-commit gate that reads the
-   `default` out of the Kconfig block and the literal out of the #else
-   below and fails when they differ. It is named here rather than left as
-   an exhortation because an earlier version of this comment asserted the
-   MUST as though a mechanism carried it, and review found the assertion
-   was doing all the work AND that its stated consequence was unreachable:
-   the ONLY host suite that expands STATUS_LED_ACK_HOLD_MS is
-   test_wake_flow, which is built with CONFIG_MAGTAG_STATUS_LED_ACK_HOLD_MS
-   defined (=170) and so takes the #ifdef arm. Every other suite compiles
-   the #else and never mentions the macro. Mutating the literal below to
-   250 or to 0 therefore changed no host binary and failed no test.
-
-   So the reason to keep the two in step is NOT "the host suites would
-   time a different device" — today none of them would notice. It is that
-   the next suite to measure this figure without an EXTRA_DEFS override
-   would silently be timing the fallback while the firmware timed the
-   Kconfig default, and it would pass. The gate makes the divergence
-   impossible to commit instead of waiting for that suite to exist.
-
-   test_wake_flow is deliberately built at NEITHER value
-   (test/CMakeLists.txt overrides it to 170) so that no case there can
-   quietly encode today's figure as a literal; the gate does not look at
-   that override and must not, since disagreeing with both is its point.
-
-   THE HOLD IS NO LONGER THE COALESCING WINDOW (M2-T15, above). The window
-   has no #else fallback anywhere — wake_flow.c reads its CONFIG symbol
-   directly — so a future edit that writes the window against THIS macro
-   would compile in every suite and quietly restore the one-knob design.
-   test_wake_flow builds the two at different values (170 and 610), and
-   test_t15_a_lone_ack_waits_the_quiet_window_not_the_hold fails if they
-   are collapsed. */
-#ifdef CONFIG_MAGTAG_STATUS_LED_ACK_HOLD_MS
-#define STATUS_LED_ACK_HOLD_MS CONFIG_MAGTAG_STATUS_LED_ACK_HOLD_MS
-#else
-#define STATUS_LED_ACK_HOLD_MS 400
-#endif
+/* THERE IS NO PRE-PRESS HOLD. The chore ack and Button B's start/resume flip
+   the strip straight after the apply, on both paths: the acknowledgement is
+   the transition, and it is fast on purpose, so nothing may sleep between the
+   press and the flip. Keeping the wake button's release bounce out of the
+   press latch is BUTTON_LATCH_REFRACTORY_US's job (button_latch.h). */
 
 typedef struct {
     uint8_t r;
@@ -332,8 +259,8 @@ chores_led_t chores_led_for(uint8_t mask, uint8_t n, bool released);
      while the quiet callback returns true (status_muted()). Design §2.5
      made these pixels the ONLY ack feedback — it deliberately stopped
      making the panel the feedback channel — so during quiet hours an ack
-     produced no feedback at ALL: no pixel, no panel until the hold, a
-     quiet window and a partial had passed (~2.4 s from the press at the
+     produced no feedback at ALL: no pixel, no panel until a
+     quiet window and a partial had passed (~2.0 s from the press at the
      defaults, plus the boot — the partial's share an estimate), no sound.
      The user chose to let acks through the mute, so this function posts
      HIGHPRI class (status_led.c says it at the loop). Quiet hours are for
@@ -348,15 +275,11 @@ chores_led_t chores_led_for(uint8_t mask, uint8_t n, bool released);
      function bursts four posts with a zero timeout; a queue already
      carrying other traffic drops the overflow with only an ESP_LOGW.
 
-     BURSTS PAST THE DEPTH ARE REACHABLE TODAY, which is the correction an
-     earlier version of this note needed: it credited
-     STATUS_LED_ACK_HOLD_MS with separating the frames and concluded that
-     only "a FUTURE caller that paints twice with nothing in between" could
-     reach eight. A SECOND ack pays no hold at all (§2.5 clause 4), so that
-     caller already existed on the break tail — the dispatch's flip and the
-     poll's own status paint are adjacent — and wake_flow.c's coalescing
-     drain can now apply two or three latched acks in one pass, which is 8
-     or 12 posts with nothing between them. The LED task's priority (5,
+     BURSTS PAST THE DEPTH ARE REACHABLE: nothing separates the frames of one
+     ack. On the break tail the dispatch's flip and the poll's own status paint
+     are adjacent, the first ack's pre-press frame and its flip are adjacent as
+     well, and wake_flow.c's coalescing drain can apply two or three latched
+     acks in one pass, which is 8 or 12 posts with nothing between them. The LED task's priority (5,
      above the main task) does not save it either: the task preempts on the
      first post, but flush_pixels() then blocks in
      rmt_tx_wait_all_done(portMAX_DELAY), and the main task can issue the
