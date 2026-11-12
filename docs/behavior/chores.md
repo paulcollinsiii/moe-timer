@@ -86,7 +86,10 @@ instead. The panel goes back to the timer screen by itself only in these cases:
 ## Ticking a chore
 
 On the checklist, **B, C and D tick chores 1, 2 and 3**. Every press
-**toggles**, so pressing the same button again undoes a mis-press. The rows never
+**toggles**, so pressing the same button again undoes a mis-press, as long as
+it is a deliberate second press: the same button pressed again within about
+0.3 s is ignored, which is what stops one tap counting twice. A different
+button is never held off. The rows never
 move. With two chores there is no `✓ 3`, and D does nothing. On the checklist D
 is not a sync button. Press A to get back to the timer screen to sync.
 

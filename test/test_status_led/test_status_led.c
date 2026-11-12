@@ -458,8 +458,8 @@ void test_the_painter_reads_no_timer_state(void) {
 /* Quiet hours would otherwise remove the ONLY acknowledgement a press gets.
    Design §2.5 stopped making the panel the ack channel on purpose, so
    during the mute a status-class strip means a child presses a button and
-   nothing happens anywhere until the panel paints, ~2.4 s later at the
-   defaults (hold + quiet window + an estimated ~0.8 s partial, plus the
+   nothing happens anywhere until the panel paints, ~2.0 s later at the
+   defaults (quiet window + an estimated ~0.8 s partial, plus the
    boot). The user's decision was to let acks
    through the mute, and HIGHPRI is how neopixel.c spells that — so the
    class is the behaviour and belongs in a test, not in a comment. */

@@ -125,9 +125,9 @@ What B does:
 
 **The state light.** While the device is awake after a press, the LED above D
 shows the selected timer's state: white for IDLE, green for RUNNING, amber for
-PAUSED, red for TIME'S UP and cyan for BREAK. On a start, the old color stays
-for about 0.4 s before it turns green, so the change itself acknowledges the
-press. It also lights while the device watches a timer's final minute or a
+PAUSED, red for TIME'S UP and cyan for BREAK. On a start, it turns green
+straight away, with no pause, so the change itself acknowledges the press. It
+also lights while the device watches a timer's final minute or a
 break's end. It is dark during sleep, during routine minute wakes, and in quiet
 hours ([product overview](../product_overview.md#quiet-hours)). The LED above A
 is the sync light: blue while a sync runs, then green when the clock is set or

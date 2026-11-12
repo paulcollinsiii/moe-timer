@@ -73,8 +73,9 @@ repeated failed syncs it shows a setup hint
   scheduled sync, a press is held and acted on once it is free. If several pile
   up, one is acted on, in the order B, C, D, A, so a start or a pause wins. D is
   the exception: it is dropped unless the chore checklist is up.
-- **When your press woke it**, further presses are dropped until it has
-  answered, so a double tap does not undo itself. B still pauses during the
+- **When your press woke it**, a second press of the same
+  button within about 0.3 s is dropped, so a double tap does not undo itself;
+  a different button counts at once. B still pauses during the
   sync that follows a start, and chore ticks all count
   ([Chores](behavior/chores.md#ticking-a-chore)). A press made during the
   wake-up itself is not seen at all ([below](#known-limitations)).

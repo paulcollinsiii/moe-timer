@@ -243,39 +243,6 @@ menu "MagTag Timer"
             feedback, final-countdown binary display). Alert pulses (expiry
             red, break cyan) are NOT scaled — they accompany alarms.
 
-    config MAGTAG_STATUS_LED_ACK_HOLD_MS
-        int "NeoPixel ack hold (ms)"
-        default 400
-        range 0 3000
-        help
-            The PRE-PRESS HOLD: how long the old colour stays up before
-            the pixel that acknowledges a press changes. The
-            acknowledgement is the transition, so there has to be a frame
-            of the old state for the new one to be a change from. Shared
-            by Button B's start/resume and the chore ack, which are the
-            same gesture read by the same person. Wants to be SHORT: it is
-            dead time in front of the first ack.
-
-            THIS USED TO BE ONE FIGURE WITH TWO JOBS, and M2-T15 split it.
-            It was also the chore-ack coalescing window — how long the
-            panel waits for the next press before it paints — and the two
-            pull in opposite directions: the hold wants to be short, the
-            window long. Tied together, a natural pause between two
-            presses outlasted the window, the panel started painting
-            mid-gesture, and the press that landed during that paint cost
-            a second refresh. The window is now
-            MAGTAG_CHORE_PAINT_QUIET_MS, below.
-
-            400 IS NOT A SWEPT VALUE — NOBODY HAS SWEPT THIS YET. What a
-            board established on 2026-09-22 is a LOWER BOUND for the
-            WINDOW, not for the hold: at the 250 this shipped with, a
-            person could not get the second chore pressed before the
-            refresh began. 400 was adopted then because design §2.5 had
-            already estimated ~400 in prose. Now that the window has its
-            own knob, that finding no longer says anything about this
-            figure in either direction; it stays at 400 because nothing
-            has been measured that would move it. See design §8 Q-C.
-
     config MAGTAG_CHORE_PAINT_QUIET_MS
         int "Chore-ack paint quiet window (ms)"
         default 1200
@@ -302,9 +269,9 @@ menu "MagTag Timer"
             1200 IS NOT A SWEPT VALUE. It is chosen to sit above a natural
             press-pause-press rhythm (the 400 this replaced was too short
             for one on the board, 2026-09-23) while keeping a lone press's
-            paint about 2.4 s after the press at the defaults (400 ms
-            hold + 1200 ms window + a ghost-cleaned partial ESTIMATED at
-            ~0.8 s, not measured), plus the boot. Raise it if a board still
+            paint about 2.0 s after the press at the defaults (1200 ms
+            window + a ghost-cleaned partial ESTIMATED at ~0.8 s, not
+            measured), plus the boot. Raise it if a board still
             sees a paint land mid-gesture; lower it if the lone-press
             latency reads as sluggish.
 
@@ -317,11 +284,11 @@ menu "MagTag Timer"
             NOT EVERY COMBINATION WITH THE BUDGET BUILDS, and that is
             deliberate: the number of repaints grows as budget / window,
             which no range can express. wake_flow.c _Static_asserts that
-            the worst case the two allow (hold + budget + every repaint
+            the worst case the two allow (budget + every repaint
             they permit, each charged as a full refresh plus the driver's
             1 s minimum interval, then the reward chime and the one
             wifi+MQTT window the release publishes in, charged at its
-            42.5 s worst case: 84.3 s of 90 s at the defaults) stays under
+            42.5 s worst case: 83.9 s of 90 s at the defaults) stays under
             half of
             MAGTAG_MAX_AWAKE_SEC, so a short window with a long budget is
             refused at build time rather than forcing a failsafe sleep in
@@ -367,8 +334,7 @@ menu "MagTag Timer"
             8000, RAISED FROM 4000 WITH THE QUIET WINDOW, and it is sized
             against that window rather than against a guess at pace. A
             gesture paints once only if no gap between its presses
-            outlasts the quiet window (the first gap may also run the
-            pre-press hold, which the budget does not count), so the
+            outlasts the quiet window, so the
             longest single-paint gesture of N presses spends at most N
             windows: one after each press. That is 4.8 s for three ticks
             and a correction at 1200, and 7.2 s for three ticks and three

@@ -813,12 +813,6 @@ static bool wake_flow_apply_chore_ack(uint8_t idx, time_t now) {
         ESP_LOGI(TAG, "chore ack %u refused", (unsigned)idx);
         return false;
     }
-    /* Read BEFORE the flag is set, because it is the flag: "an ack has
-       already landed this wake" is exactly "the pre-press state has
-       already been seen". Reusing s_chore_acked rather than adding a
-       second flag is deliberate — two records of the same fact can
-       disagree, and this one is already wake-sticky and already set here. */
-    const bool first_ack_this_wake = !s_chore_acked;
     s_chore_acked = true;
     (void)wake_flow_break_end();
     timer_set_mode(APP_MODE_CHORES);
@@ -832,28 +826,19 @@ static bool wake_flow_apply_chore_ack(uint8_t idx, time_t now) {
        which is the latency the pixels are here to cover, so this must stay AHEAD
        of the caller's render tail and not be folded into it.
 
-       Below the log line on purpose: the hold is real time, and the
-       serial record of the press should not wait for it.
+       THERE IS NO PRE-PRESS HOLD, and there used to be one: the first ack of
+       a wake slept 400 ms (STATUS_LED_ACK_HOLD_MS) so the old colour was
+       seen before it changed. The owner experienced that as lag before the
+       other buttons answered, and it is gone, for every ack alike; the flip
+       is the frame straight after the apply. The release-bounce rejection it
+       provided by accident is now BUTTON_LATCH_REFRACTORY_US's job
+       (button_latch.h), which is why this path may poll for the next press
+       at once.
 
-       THE HOLD IS PAID ONCE PER WAKE. §2.5: "subsequent presses in the
-       same awake window flip instantly — no pre-state pause. You already
-       saw the starting state." Two chores ticked in one go ("no homework
-       today, and I just did the dishes") is the case it names, and a
-       second pause there is dead time in front of an ack nobody is
-       waiting to interpret.
-
-       AND ONLY WHEN THE STRIP IS OURS. Row C17: a latched ack drained on
-       an RTC-alarm wake applies, repaints the panel, and lights nothing —
-       the wake was not a press, there is nobody in the room, and the
-       hold would be STATUS_LED_ACK_HOLD_MS of dead wake spent for them.
-       Named rather than spelled as a duration on purpose: this read "a
-       quarter-second" while the knob said 250, and stayed saying it after
-       a board raised the knob to 400. Both halves matter: without the
-       guard this would also pay the delay. */
+       ONLY WHEN THE STRIP IS OURS. Row C17: a latched ack drained on an
+       RTC-alarm wake applies, repaints the panel, and lights nothing — the
+       wake was not a press and there is nobody in the room to show it to. */
     if (s_chore_strip_lit) {
-        if (first_ack_this_wake) {
-            hal_delay_ms(STATUS_LED_ACK_HOLD_MS);
-        }
         wake_flow_paint_chore_strip();
     }
 
@@ -906,7 +891,7 @@ static bool wake_flow_apply_chore_ack(uint8_t idx, time_t now) {
    wake_flow_wait_for_render_grid() polls the PAUSE button,
    wake_flow_watch_break_end() returns at its own `!timer_break_active()`
    guard, and button_latch's mask is plain BSS that deep sleep discards. So
-   a press during the pre-press hold was eaten by that bare take, and a
+   a press during the (since removed) pre-press hold was eaten by that bare take, and a
    press during the panel refresh sat in the latch until sleep threw
    it away. Either way the box was never ticked and the child saw nothing:
    released before sleep there is no EXT1 level left to re-trigger on, and
@@ -927,18 +912,20 @@ static bool wake_flow_apply_chore_ack(uint8_t idx, time_t now) {
    every press grants another full one and the gesture ends when the
    pressing does.
 
-   IT USED TO BE STATUS_LED_ACK_HOLD_MS, and M2-T15 split them because one
-   number was doing two jobs that pull in opposite directions. The hold is
-   dead time in front of the first pixel flip and wants to be short; this
-   window is how long the panel waits for the gesture to settle and wants
-   to be long. At the shared 400 ms, a natural press-pause-press rhythm
-   outlasted the window, so the panel began painting mid-gesture and the
-   next press landed during that paint and cost a second refresh (board,
-   2026-09-23). THE NEOPIXELS ARE THE FAST CHANNEL AND THE PANEL IS THE
-   SLOW ONE: every press already gets its flip within a poll, so the panel
-   can afford to wait — it needs to be settled, not quick. What that costs
-   is stated plainly: a lone press reaches the glass one quiet window after
-   it, rather than one hold after it, and the wake is that much longer.
+   IT USED TO SHARE ITS FIGURE WITH A PRE-PRESS HOLD (STATUS_LED_ACK_HOLD_MS,
+   400 ms of dead time in front of the first pixel flip), and M2-T15 split
+   them because one number was doing two jobs that pull in opposite
+   directions: the hold wanted to be short, this window is how long the panel
+   waits for the gesture to settle and wants to be long. At the shared 400 ms,
+   a natural press-pause-press rhythm outlasted the window, so the panel began
+   painting mid-gesture and the next press landed during that paint and cost
+   a second refresh (board, 2026-09-23). The hold itself has since been
+   removed outright (stream B, 2026-11-12: the owner felt it as lag before
+   the other buttons answered). THE NEOPIXELS ARE THE FAST CHANNEL AND THE
+   PANEL IS THE SLOW ONE: every press already gets its flip within a poll,
+   so the panel can afford to wait — it needs to be settled, not quick. What
+   that costs is stated plainly: a lone press reaches the glass one quiet
+   window after it, and the wake is that much longer.
 
    POLLED AT THE DEBOUNCE WINDOW rather than taken once per idle window, and
    M2-T12 moved it there for two reasons that are not about feel.
@@ -1002,12 +989,9 @@ static bool wake_flow_apply_chore_ack(uint8_t idx, time_t now) {
    that are not the Kconfig defaults, so a literal left at the call site
    fails the suite rather than passing every relative assertion.
 
-   THE QUIET WINDOW IS NOT STATUS_LED_ACK_HOLD_MS, and the absence of a
-   fallback is what keeps it that way: status_led.h's hold has one (it must
-   compile in suites with no sdkconfig), so a window written against the
-   hold would build everywhere and silently be the old one-knob design.
-   test_wake_flow builds the two at different values, so collapsing them
-   fails there. */
+   (There was a third knob, the pre-press ack hold, and a header fallback for
+   it; both are gone with the hold. The quiet window never had a fallback, and
+   that is still what stops it being written against some other figure.) */
 #define CHORE_ACK_COALESCE_BUDGET_MS CONFIG_MAGTAG_CHORE_ACK_BURST_MS
 #define CHORE_PAINT_QUIET_MS CONFIG_MAGTAG_CHORE_PAINT_QUIET_MS
 
@@ -1028,7 +1012,7 @@ _Static_assert(CHORE_PAINT_QUIET_MS > 0, "a zero quiet window lets the tail repa
 _Static_assert(CHORE_ACK_COALESCE_POLL_MS > 0,
                "a sub-millisecond debounce makes the coalescer's poll step zero, and the quiet window never closes");
 
-/* THE WORST CASE THE THREE KNOBS ALLOW, held under the wake's failsafe.
+/* THE WORST CASE THE TWO KNOBS ALLOW, held under the wake's failsafe.
 
    Kconfig's ranges cannot say this, because the danger is a RATIO: the
    paint count grows as budget / window, and every range is legal on its own.
@@ -1047,14 +1031,16 @@ _Static_assert(CHORE_ACK_COALESCE_POLL_MS > 0,
    measurement) plus SSD1680_MIN_REFRESH_INTERVAL_SEC's 1 s, the gap the
    driver enforces between refreshes; a partial is cheaper, and the
    every-5th cadence and a break end can each make one full, so full is the
-   figure that cannot be undercut. The hold is paid once, the budget whole.
+   figure that cannot be undercut. The budget is charged whole. There is no
+   pre-press hold term any more: the strip flips straight after the apply.
 
    HALF THE FAILSAFE, not all of it: the gesture shares its wake with a
    network window (the wake's own sync, or the rollover's) and possibly an
    expiry alert (~15 s), and a coalescer that could spend the whole ceiling
    on its own leaves them none. Half is a judgment, not a measurement. At
-   the defaults (400 / 1200 / 8000) the worst case is 400 + 8000 + 8 x 4000
-   + 1100 + 256 + 42500 = 84.256 s against 90 s.
+   the defaults (window 1200 / budget 8000) the worst case is 8000 + 8 x 4000
+   + 1100 + 256 + 42500 = 83.856 s against 90 s, half the default 180 s
+   failsafe (it was 84.256 s while the 400 ms hold was charged).
 
    The reward chime is the second-to-last term: audio_chores_done_chime()
    BLOCKS this task while it plays, after the final paint, so it is part of
@@ -1081,13 +1067,12 @@ _Static_assert(CHORE_ACK_COALESCE_POLL_MS > 0,
 #define CHORE_BUDGET_WINDOWS \
     (((uint32_t)CHORE_ACK_COALESCE_BUDGET_MS + (uint32_t)CHORE_PAINT_QUIET_MS - 1u) / (uint32_t)CHORE_PAINT_QUIET_MS)
 #define CHORE_WORST_PAINTS ((CHORE_BUDGET_WINDOWS > 2u ? CHORE_BUDGET_WINDOWS : 2u) + 1u)
-#define CHORE_WORST_GESTURE_MS                                                                                   \
-    ((uint32_t)STATUS_LED_ACK_HOLD_MS + (uint32_t)CHORE_ACK_COALESCE_BUDGET_MS +                                 \
-     CHORE_WORST_PAINTS * CHORE_WORST_PAINT_MS + (uint32_t)REWARD_TONE_MAX_MS + (uint32_t)REWARD_TONE_DRAIN_MS + \
-     CHORE_WORST_EVENT_WINDOW_MS)
+#define CHORE_WORST_GESTURE_MS                                                            \
+    ((uint32_t)CHORE_ACK_COALESCE_BUDGET_MS + CHORE_WORST_PAINTS * CHORE_WORST_PAINT_MS + \
+     (uint32_t)REWARD_TONE_MAX_MS + (uint32_t)REWARD_TONE_DRAIN_MS + CHORE_WORST_EVENT_WINDOW_MS)
 _Static_assert(CHORE_WORST_GESTURE_MS <= (uint32_t)CONFIG_MAGTAG_MAX_AWAKE_SEC * 1000u / 2u,
                "MAGTAG_CHORE_ACK_BURST_MS / MAGTAG_CHORE_PAINT_QUIET_MS allow a chore gesture whose worst case "
-               "(hold + budget + every repaint it permits, each as a full refresh, the reward chime and the "
+               "(budget + every repaint it permits, each as a full refresh, the reward chime and the "
                "release's event window) exceeds half the awake failsafe");
 
 /* THE FINAL-MINUTE WAKE, held under the same failsafe. It is the longest
@@ -1368,13 +1353,13 @@ static void wake_flow_wait_for_chore_quiet(time_t *now, uint32_t *spent_ms) {
    below the render, where every further refresh hangs on it — is still a
    bool.
 
-   THE FIRST TAKE PAYS NO WAIT, deliberately: it collects the press made
-   during the pre-press hold, which already happened, so waiting first would
-   only delay its flip. The OTHER first take — the one that collects a press
+   THE FIRST TAKE PAYS NO WAIT, deliberately: it collects whatever was
+   latched while the apply and the strip paint ran, so waiting first would
+   only delay that press's flip. The OTHER first take — the one that collects a press
    made during the panel refresh — is wake_flow_repaint_chore_acks_until_-
    quiet()'s, below the render. */
 static void wake_flow_coalesce_chore_acks(time_t *now, uint32_t *spent_ms) {
-    (void)wake_flow_take_chore_gesture(now); /* an A made during the hold ends it here */
+    (void)wake_flow_take_chore_gesture(now); /* an A made since the apply ends it here */
     if (!wake_flow_chore_acks_are_ours()) {
         return; /* not our strip, not our wake: no window to grant */
     }
@@ -1768,16 +1753,15 @@ bool wake_flow_dispatch_button_action(button_id_t btn, time_t *now, timer_state_
             switch (button_b_apply(*now)) {
                 case BTN_B_STARTED:
                 case BTN_B_RESUMED:
-                    /* Hold the pre-press colour briefly so the WHITE/AMBER ->
-                       GREEN transition is visible as an acknowledgement.
-                       THE SAME CONSTANT the chore ack holds for, and the
-                       same gesture: hold the old colour, then change it.
-                       Two figures for that on one device would be an
-                       inconsistency nobody could interpret — status_led.h
-                       carries the argument and
-                       test_t8_the_ack_hold_is_one_figure_shared_with_button_bs_start
-                       measures both paths rather than either literal. */
-                    hal_delay_ms(STATUS_LED_ACK_HOLD_MS);
+                    /* The strip flips straight after the apply, with NO
+                       pre-press hold: it used to sleep 400 ms here (the
+                       chore ack paid the same) so the old colour was seen
+                       before it changed, and the owner felt that as lag.
+                       The WHITE/AMBER -> GREEN transition is still the
+                       acknowledgement; it just is not delayed.
+                       test_t8_neither_the_chore_ack_nor_button_bs_start_waits_before_the_strip
+                       pins both paths. The release bounce the hold used to
+                       hide is BUTTON_LATCH_REFRACTORY_US's (button_latch.h). */
                     wake_flow_show_status_leds();
 
                     /* NTP-gated paint: wait only for the sync (seconds) so the
@@ -3499,8 +3483,10 @@ void wake_flow_handle_button_wake(void) {
        resulting state below once the action has run.
 
        In chore mode this is §2.5's PRE-PRESS FRAME instead: the strip as
-       it stood before the press, so the flip STATUS_LED_ACK_HOLD_MS later
-       is a change you can see rather than a colour that simply appears.
+       it stood before the press, so the flip that follows is a change
+       rather than a colour that simply appears. (There is no hold between
+       the two any more; the frame is only visible for as long as the apply
+       takes.)
        Which of the two it paints is the claim above, so the ordering is
        claim, then paint, and they cannot be swapped. */
     wake_flow_show_status_leds();
@@ -3653,7 +3639,7 @@ void wake_flow_handle_button_wake(void) {
        interrupted. A no-op on every wake that is not a chore ack (the
        helper's three-term guard).
        BUTTON A IS TAKEN HERE TOO, for the same reason and against the same
-       drain: an A made during the hold or this window would otherwise be
+       drain: an A made during this window would otherwise be
        eaten by that bare take. An applied A ends the window, and the render
        below paints the Timers screen full (wake_flow_take_gesture_toggle).
        `chore_spent_ms` is the wake's ONE burst budget, carried from this
