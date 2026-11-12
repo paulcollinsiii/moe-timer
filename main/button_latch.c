@@ -51,6 +51,16 @@ void button_latch_seed_press(int btn, int64_t t_us) {
     s_released_us[btn] = 0;
 }
 
+void button_latch_begin(int wake_btn, uint8_t held_mask, int64_t t_us) {
+    /* The order is the contract: the seed closes the wake button's gate, and
+       the sample that follows either keeps it closed (pad still down) or
+       opens it and anchors the settle window (pad already up). Sampling first
+       would let the seed close a gate no later sample reopens. */
+    button_latch_reset();
+    button_latch_seed_press(wake_btn, t_us);
+    button_latch_note_levels(held_mask, t_us);
+}
+
 void button_latch_record(int btn, int64_t t_us) {
     if (btn < 0 || btn >= BUTTON_LATCH_COUNT)
         return;

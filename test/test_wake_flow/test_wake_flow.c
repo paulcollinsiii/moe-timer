@@ -2031,13 +2031,28 @@ typedef enum {
 } flow_wake_result_t;
 
 static flow_wake_result_t flow_run_wake(void (*handler)(void)) {
-    /* buttons_init()'s seeding level sample, which runs before either
-       handler on device (main.c calls it at boot) and is what tells the
-       release gate that the WAKE button is still held — so its own release
-       bounce cannot read as a second press. A case that wants that models
-       it by setting flow_held_now before the run, exactly as the pads
-       would. */
-    flow_note_levels();
+    /* buttons_init()'s arming of the latch, which runs before either handler
+       on device (main.c calls it at boot): button_latch_begin, the same call
+       buttons.c makes, with the wake button the case set (flow_wakeup_btn;
+       BTN_NONE for a timer wake seeds nothing) and the pads as the case left
+       them. That seeds the wake press's refractory window and tells the
+       release gate whether the WAKE button is still held, so its own release
+       bounce cannot read as a second press. A case that wants a held pad
+       models it by setting flow_held_now before the run, exactly as the pads
+       would.
+
+       PRESSES A CASE STAGED BEFORE THE RUN are ones that land during the
+       wake, which on device is after the arming (the ISRs are armed last).
+       Arming resets the latch, so they are lifted out first and recorded
+       again, in button order, once it is done. They go through the latch's
+       own gates, so a staged press of the wake button itself meets the
+       seeded refractory window, as it would on the device. */
+    const uint8_t staged = button_latch_take();
+    button_latch_begin((int)flow_wakeup_btn, flow_held_now, flow_edge_step());
+    for (int b = 0; b < 4; b++) {
+        if (staged & (1u << b))
+            button_latch_record(b, flow_edge_step());
+    }
     if (setjmp(flow_bed_jmp) != 0)
         return FLOW_WAKE_BEDTIME;
     if (setjmp(flow_sleep_jmp) != 0)
@@ -9653,8 +9668,8 @@ void test_t12_release_bounce_on_a_held_button_is_not_a_second_press(void) {
    that bounce; with it gone the coalescer samples from the first poll, so
    button_latch.c's BUTTON_LATCH_REFRACTORY_US has to be what rejects it.
 
-   The harness does not run buttons.c, so the wake press is seeded here the way
-   buttons_watch_begin() seeds it. The edge clock is set well inside the window
+   The harness does not run buttons.c, so flow_run_wake arms the latch with the
+   same button_latch_begin call, seeding the wake press. The edge clock is set well inside the window
    (10 ms a touch, so a poll is ~20-30 ms of edge time) and six bounce edges span
    under ~200 ms, all past the settle anchor and all inside the refractory
    window.
@@ -9665,18 +9680,19 @@ void test_t12_release_bounce_on_a_released_wake_button_is_not_a_second_press(voi
     flow_arm_chore_wake(BTN_B);
     flow_held_now = 0; /* the tap was over before boot sampled the pads */
     flow_edge_gap_us = 10000;
-    button_latch_seed_press((int)BTN_B, flow_edge_step());
     flow_bounce_edges = 0;
     mock_delay_set_hook(flow_bounce_a_few_times);
-    /* Six edges only, at up to ~3 touches of the latch clock a poll: more
-       would run past the window and be a second tap, not a bounce. */
-    TEST_ASSERT_TRUE(6 * 3 * flow_edge_gap_us < BUTTON_LATCH_REFRACTORY_US);
 
     TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_button());
 
     TEST_ASSERT_GREATER_THAN_INT_MESSAGE(0, flow_bounce_edges, "the harness never bounced the pad");
     TEST_ASSERT_EQUAL_INT_MESSAGE(1, flow_log_count(EV_CHORE_ACK),
                                   "the release bounce of a released wake press was applied as a second ack");
+    /* Precondition, after the behaviour assert so that a shrunken window
+       fails THAT, with its message. Six edges only, at up to ~3 touches of
+       the latch clock a poll: more would run past the window and be a second
+       tap, not a bounce. */
+    TEST_ASSERT_TRUE(6 * 3 * flow_edge_gap_us < BUTTON_LATCH_REFRACTORY_US);
 }
 
 /* The other half of the refractory window, through the coalescer: a DIFFERENT
@@ -9687,7 +9703,6 @@ void test_a_different_button_right_after_the_wake_press_is_applied_at_once(void)
     flow_arm_chore_wake(BTN_B);
     flow_held_now = 0;
     flow_edge_gap_us = 10000;
-    button_latch_seed_press((int)BTN_B, flow_edge_step());
     flow_deferred_press_btn = BTN_C;
     flow_deferred_press_ms = 50; /* the first poll */
 

@@ -119,6 +119,11 @@ void button_latch_reset(void);
    wake or cold boot) and out-of-range values are a no-op. Nothing survives
    deep sleep: every wake reseeds from its own EXT1 status. */
 void button_latch_seed_press(int btn, int64_t t_us);
+/* Arm the latch for a wake, in the only order that works: reset, seed the
+   wake press (wake_btn, or <0 for none), then the first level sample
+   (held_mask, as buttons_scan_held() returns it) — all stamped t_us. Call it
+   once, before the ISRs are armed; buttons.c calls nothing else to do so. */
+void button_latch_begin(int wake_btn, uint8_t held_mask, int64_t t_us);
 /* Record a falling edge on button `btn` (0..3) at time t_us; out-of-range
    buttons, edges inside the refractory or settle window, and edges on a button that
    has not been observed RELEASED since its last accepted press, are ignored.

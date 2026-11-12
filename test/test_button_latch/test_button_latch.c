@@ -141,6 +141,52 @@ void test_reset_forgets_a_seeded_window(void) {
     TEST_ASSERT_EQUAL_UINT8(1u << 3, button_latch_take());
 }
 
+/* button_latch_begin IS THE WAKE'S ARMING SEQUENCE: reset, seed the wake
+   press, take the first level sample, in that order. buttons.c calls only it,
+   so these cases are the host coverage for the order and for the seed being
+   there at all. */
+void test_begin_seeds_the_wake_buttons_refractory_window(void) {
+    /* Dropping the seed leaves only the settle anchor from the sample, which
+       a bounce edge 100 ms later clears. */
+    button_latch_begin(1, 0, T0_US);
+    button_latch_record(1, T0_US + 100000);
+    TEST_ASSERT_EQUAL_UINT8(0, button_latch_take());
+    button_latch_record(1, T0_US + BUTTON_LATCH_REFRACTORY_US + 1000);
+    TEST_ASSERT_EQUAL_UINT8(1u << 1, button_latch_take());
+}
+
+void test_begin_samples_after_seeding_not_before(void) {
+    /* Seeding AFTER the sample would close the gate on a pad the sample saw
+       up, and nothing later would reopen it: the first real press past the
+       window would be lost. */
+    button_latch_begin(1, 0, T0_US);
+    button_latch_record(1, T0_US + 2 * BUTTON_LATCH_REFRACTORY_US);
+    TEST_ASSERT_EQUAL_UINT8(1u << 1, button_latch_take());
+}
+
+void test_begin_with_the_wake_button_still_held_keeps_its_gate_closed(void) {
+    button_latch_begin(1, 1u << 1, T0_US);
+    button_latch_record(1, T0_US + 2 * BUTTON_LATCH_REFRACTORY_US);
+    TEST_ASSERT_EQUAL_UINT8(0, button_latch_take()); /* still down: bounce */
+    button_latch_note_levels(0, T0_US + 3 * BUTTON_LATCH_REFRACTORY_US);
+    button_latch_record(1, T0_US + 4 * BUTTON_LATCH_REFRACTORY_US);
+    TEST_ASSERT_EQUAL_UINT8(1u << 1, button_latch_take());
+}
+
+void test_begin_resets_whatever_an_earlier_wake_left(void) {
+    button_latch_record(2, T0_US);
+    button_latch_begin(1, 0, T0_US + 1000);
+    TEST_ASSERT_EQUAL_UINT8(0, button_latch_take());
+    button_latch_record(2, T0_US + 20000); /* the old window is gone */
+    TEST_ASSERT_EQUAL_UINT8(1u << 2, button_latch_take());
+}
+
+void test_begin_with_no_wake_button_seeds_nothing(void) {
+    button_latch_begin(-1, 0, T0_US);
+    button_latch_record(1, T0_US + 20000);
+    TEST_ASSERT_EQUAL_UINT8(1u << 1, button_latch_take());
+}
+
 /* THE RELEASE GATE, and the field defect it closes (M2-T12 finding 3). One
    physical press is a falling edge going down and, on a bouncing contact,
    another coming back up — and the second is separated from the first by
@@ -485,6 +531,11 @@ int main(void) {
     RUN_TEST(test_a_seeded_wake_press_does_not_delay_other_buttons);
     RUN_TEST(test_seeding_no_button_or_a_bad_one_is_a_no_op);
     RUN_TEST(test_reset_forgets_a_seeded_window);
+    RUN_TEST(test_begin_seeds_the_wake_buttons_refractory_window);
+    RUN_TEST(test_begin_samples_after_seeding_not_before);
+    RUN_TEST(test_begin_with_the_wake_button_still_held_keeps_its_gate_closed);
+    RUN_TEST(test_begin_resets_whatever_an_earlier_wake_left);
+    RUN_TEST(test_begin_with_no_wake_button_seeds_nothing);
     RUN_TEST(test_the_release_gate_is_per_button);
     RUN_TEST(test_a_button_seeded_as_held_rejects_its_release_bounce);
     RUN_TEST(test_a_button_seeded_as_up_accepts_its_first_press);
