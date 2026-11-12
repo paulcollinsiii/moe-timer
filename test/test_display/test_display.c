@@ -1176,8 +1176,9 @@ void test_a_counter_at_or_past_n_lands_on_a_full_and_rearms(void) {
 }
 
 /* The edge at the top of the range: 255 increments to 0 in a uint8_t. A
-   counter already saturated must still not wrap into "partial for another
-   256 paints". */
+   counter already saturated must still land on a full, not wrap to 0 and
+   start a fresh N-paint cycle that skips it. Unreachable on the device (the
+   counter stays at or below N - 1); this keeps the function total. */
 void test_a_saturated_counter_does_not_wrap_past_the_full(void) {
     uint8_t count = 255;
     display_refresh_plan_t p = display_refresh_plan_every(&count, 10);

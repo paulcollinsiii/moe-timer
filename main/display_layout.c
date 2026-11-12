@@ -446,8 +446,13 @@ display_refresh_plan_t display_refresh_plan_every(uint8_t *partial_count, uint8_
 
     /* `>=` and not `==` so a counter that came back from RTC memory at or
        above the threshold still lands here instead of wrapping. The
-       increment saturates: a uint8_t already at 255 would wrap to 0 and
-       read as a fresh cycle, 255 partials from the next full. */
+       increment saturates: a uint8_t already at 255 would wrap to 0, which
+       starts a fresh N-paint cycle and skips the full that was due.
+
+       255 IS UNREACHABLE ON THE DEVICE. The counter is only ever zeroed or
+       stepped by this function, and it is zeroed whenever it reaches N, so it
+       stays at or below N - 1 (99 at most); a reflash zeroes RTC memory. The
+       saturation is defensive totality, not a fix for a live path. */
     if (*partial_count < UINT8_MAX)
         (*partial_count)++;
     if (*partial_count >= every_n) {
