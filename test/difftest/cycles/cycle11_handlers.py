@@ -521,7 +521,7 @@ MUTANTS = {
          "    wake_render_t wr = wake_policy_render(before, timer_get_state(), false, false, false);")],
     "tick_full_and_partial_swapped": [
         ("        case WAKE_RENDER_FULL:\n            display_full_refresh(&st);\n            break;\n"
-         "        default:\n            display_update(&st); /* partial; policy promotes every 5th to full */\n"
+         "        default:\n            display_update(&st); /* partial; the cadence promotes every Nth to full */\n"
          "            break;",
          "        case WAKE_RENDER_FULL:\n            display_update(&st);\n            break;\n"
          "        default:\n            display_full_refresh(&st);\n            break;")],

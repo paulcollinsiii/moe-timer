@@ -316,9 +316,10 @@ menu "MagTag Timer"
             Button A press that ends the gesture can add one more, once.
             At the defaults that is 8 s of waiting and at most 7 paints
             (8 with A). Each is an estimated ~0.8 s ghost-cleaned partial
-            unless something makes it full (~3 s): the every-5th cadence
-            WILL land on at least one of 7, and a break end or a mode
-            toggle makes its paint full too. The build refuses any budget
+            unless something makes it full (~3 s): the every-Nth cadence
+            (CONFIG_MAGTAG_FULL_REFRESH_EVERY_N) can land on one of them,
+            and a break end or a mode toggle makes its paint full too.
+            The build refuses any budget
             and window whose worst case would crowd
             CONFIG_MAGTAG_MAX_AWAKE_SEC (see the window's help above).
 
@@ -426,6 +427,28 @@ menu "MagTag Timer"
             shows "Release to enter setup" and a release starts the setup
             session. A shorter press, or a release before this elapses,
             does nothing.
+
+    config MAGTAG_FULL_REFRESH_EVERY_N
+        int "Full panel refresh every Nth update"
+        default 10
+        range 1 100
+        help
+            Anti-ghosting cadence: one display update in every N is a full
+            refresh (the panel flashes, ~3 s), and the N - 1 between are
+            partial refreshes with the ghost-cleaning double pass. 1 makes
+            every update full.
+
+            This is only the routine cadence. A mode switch (Timers and
+            Chores), a change of screen kind, the edges of a screen break, a
+            lock screen on the glass each force a full refresh whatever N
+            is, and so does Button D, except on a wake where a chore was
+            already acked (then the paint follows the ordinary rules). A
+            forced full restarts the count.
+
+            The count is held in RTC memory and survives deep sleep; it is
+            not a stored setting, so changing N needs a rebuild and a
+            reflash, like any other Kconfig option. include/display.h falls
+            back to 10 for the host tests; keep the two in step.
 
     config MAGTAG_SETUP_MAX_SEC
         int "Setup session budget (seconds)"

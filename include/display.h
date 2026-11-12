@@ -574,10 +574,22 @@ int display_fb_invert_dirty_rows(uint8_t *fb, const uint8_t *prev, int rows, int
 /* ---- the refresh plan: cadence and cleaning (design §2.5) ---------------
 
    Anti-ghosting cadence: one paint in every N is promoted to a full
-   refresh. Named here rather than left a literal in display.c so a test
-   can assert the cadence without restating the number — a suite written
-   against a hard-coded 5 keeps passing after the figure moves. */
-#define DISPLAY_FULL_REFRESH_EVERY_N 5
+   refresh, so N - 1 partials sit between two fulls. N is a build-time
+   choice, CONFIG_MAGTAG_FULL_REFRESH_EVERY_N (main/Kconfig.projbuild,
+   default 10, 1..100; 1 makes every paint full). The host build has no
+   sdkconfig.h, so it falls back to the same 10 (the setup_trigger.h
+   pattern); nothing keeps the Kconfig default and that fallback equal, and a
+   test pins only the fallback. Named here rather than left a literal in display.c so a test can
+   assert the cadence without restating the number. */
+#ifdef CONFIG_MAGTAG_FULL_REFRESH_EVERY_N
+#define DISPLAY_FULL_REFRESH_EVERY_N CONFIG_MAGTAG_FULL_REFRESH_EVERY_N
+#else
+#define DISPLAY_FULL_REFRESH_EVERY_N 10
+#endif
+/* The counter is a uint8_t in RTC memory, so N has to fit it with room for
+   the increment; the Kconfig range is the same bound. */
+_Static_assert(DISPLAY_FULL_REFRESH_EVERY_N >= 1 && DISPLAY_FULL_REFRESH_EVERY_N <= 100,
+               "CONFIG_MAGTAG_FULL_REFRESH_EVERY_N must be 1..100");
 
 /* display_update()'s refresh policy, lifted out of display.c so it can be
    tested at all: display.c is not compiled by any host suite (it pulls in
@@ -615,6 +627,50 @@ typedef struct {
    advanced IN PLACE — every paint that reaches here counts toward the next
    full refresh, whichever screen it drew. */
 display_refresh_plan_t display_refresh_plan(uint8_t *partial_count);
+
+/* The same plan with the cadence passed in, so a host test can drive any N
+   without a rebuild. display_refresh_plan() is this fed
+   DISPLAY_FULL_REFRESH_EVERY_N and nothing else. A counter that reaches
+   `every_n` or beyond (RTC memory carried across a smaller N) is a full
+   refresh and rearms to zero; `every_n` 0 reads as 1, every paint full. */
+display_refresh_plan_t display_refresh_plan_every(uint8_t *partial_count, uint8_t every_n);
+
+/* ---- what a paint does to display.c's two RTC bytes ---------------------
+   display.c keeps a cadence counter and a "takeover on the glass" flag in RTC
+   memory. Every painter used to touch them inline, in a file no host suite
+   compiles, so a deleted reset passed everything. The whole decision is here
+   now and each painter in display.c is `plan = decide(kind, ...); render(...)`.
+
+   DISPLAY_PAINT_CADENCE     display_update(): a takeover on the glass makes
+                             it full (and is consumed); otherwise it is
+                             display_refresh_plan() exactly.
+   DISPLAY_PAINT_FORCED_FULL display_full_refresh(): full, no cleaning pass,
+                             counter zeroed, takeover flag CLEARED (this paint
+                             is already the full one).
+   DISPLAY_PAINT_TAKEOVER    the full-screen takeover painters (TIME'S UP,
+                             Charge Me, sync failed, no clock, bedtime, config
+                             error, the three setup screens, OTA): full, no
+                             cleaning pass, counter zeroed, takeover flag left
+                             as it was. display_ota() sets the flag itself
+                             after the call; the others deliberately do not
+                             (see s_takeover_on_panel in display.c).
+
+   A full refresh never also asks for the ghost-cleaning pass, so every kind
+   but a partial cadence paint answers {full, !ghost_clean}. */
+typedef enum {
+    DISPLAY_PAINT_CADENCE,
+    DISPLAY_PAINT_FORCED_FULL,
+    DISPLAY_PAINT_TAKEOVER,
+} display_paint_t;
+
+/* `partial_count` and `takeover_on_panel` are display.c's RTC bytes, updated
+   in place. The cadence is DISPLAY_FULL_REFRESH_EVERY_N. */
+display_refresh_plan_t display_refresh_decide(display_paint_t kind, uint8_t *partial_count, bool *takeover_on_panel);
+
+/* The same with N passed in, so a host test can drive any N without a rebuild.
+   display_refresh_decide() is this fed DISPLAY_FULL_REFRESH_EVERY_N. */
+display_refresh_plan_t display_refresh_decide_every(display_paint_t kind, uint8_t *partial_count,
+                                                    bool *takeover_on_panel, uint8_t every_n);
 
 #ifdef __cplusplus
 }

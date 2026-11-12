@@ -1019,7 +1019,7 @@ _Static_assert(CHORE_ACK_COALESCE_POLL_MS > 0,
    (~3 s — an estimate, as every panel figure here is, not a board
    measurement) plus SSD1680_MIN_REFRESH_INTERVAL_SEC's 1 s, the gap the
    driver enforces between refreshes; a partial is cheaper, and the
-   every-5th cadence and a break end can each make one full, so full is the
+   every-Nth cadence and a break end can each make one full, so full is the
    figure that cannot be undercut. The budget is charged whole. There is no
    pre-press hold term: the strip flips straight after the apply.
 
@@ -3299,7 +3299,7 @@ void wake_flow_handle_timer_tick(void) {
             display_full_refresh(&st);
             break;
         default:
-            display_update(&st); /* partial; policy promotes every 5th to full */
+            display_update(&st); /* partial; the cadence promotes every Nth to full */
             break;
     }
     /* THE LOCK SCREEN HAS LEFT THE GLASS, so its claim on the buttons ends

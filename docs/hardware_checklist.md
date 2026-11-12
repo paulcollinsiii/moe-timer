@@ -27,8 +27,9 @@ or quiet hours from HA instead of rebuilding. Never erase NVS.
   upright, not mirrored, not inverted, not shifted, at full contrast. If
   not, see the bring-up comment above `ROT_FLIP_X` in `main/display.c`.
 - [ ] **Sleep cadence.** Leave it idle for a few minutes. → It wakes on each
-  minute and updates with a partial refresh (no flash). Every 5th paint is a
-  visible full refresh.
+  minute and updates with a partial refresh (no flash). Every 10th paint
+  (the default `CONFIG_MAGTAG_FULL_REFRESH_EVERY_N`) is a visible full
+  refresh.
 - [ ] **Panel protection.** Mash the buttons. → No crash. Refreshes
   serialize, and the log shows `refresh rejected` for any refresh less than
   1 s after the last.

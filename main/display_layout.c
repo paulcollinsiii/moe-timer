@@ -438,12 +438,24 @@ void display_format_countdown(char *buf, size_t len, int32_t remaining_sec) {
 /* ---- refresh cadence and ghost cleaning (design §2.5) ------------------- */
 
 display_refresh_plan_t display_refresh_plan(uint8_t *partial_count) {
+    return display_refresh_plan_every(partial_count, DISPLAY_FULL_REFRESH_EVERY_N);
+}
+
+display_refresh_plan_t display_refresh_plan_every(uint8_t *partial_count, uint8_t every_n) {
     display_refresh_plan_t plan = {.full = false, .ghost_clean = false};
 
-    /* `>=` and not `==` so a counter that came back from RTC memory above
-       the threshold still lands here instead of wrapping. */
-    (*partial_count)++;
-    if (*partial_count >= DISPLAY_FULL_REFRESH_EVERY_N) {
+    /* `>=` and not `==` so a counter that came back from RTC memory at or
+       above the threshold still lands here instead of wrapping. The
+       increment saturates: a uint8_t already at 255 would wrap to 0, which
+       starts a fresh N-paint cycle and skips the full that was due.
+
+       255 IS UNREACHABLE ON THE DEVICE. The counter is only ever zeroed or
+       stepped by this function, and it is zeroed whenever it reaches N, so it
+       stays at or below N - 1 (99 at most); a reflash zeroes RTC memory. The
+       saturation is defensive totality, not a fix for a live path. */
+    if (*partial_count < UINT8_MAX)
+        (*partial_count)++;
+    if (*partial_count >= every_n) {
         *partial_count = 0;
         plan.full = true;
         return plan; /* a full refresh drives every pixel; no double pass */
@@ -482,4 +494,35 @@ display_refresh_plan_t display_refresh_plan(uint8_t *partial_count) {
        every-Nth full refresh above is unchanged. */
     plan.ghost_clean = true;
     return plan;
+}
+
+/* ---- what a paint does to display.c's two RTC bytes --------------------- */
+
+display_refresh_plan_t display_refresh_decide(display_paint_t kind, uint8_t *partial_count, bool *takeover_on_panel) {
+    return display_refresh_decide_every(kind, partial_count, takeover_on_panel, DISPLAY_FULL_REFRESH_EVERY_N);
+}
+
+display_refresh_plan_t display_refresh_decide_every(display_paint_t kind, uint8_t *partial_count,
+                                                    bool *takeover_on_panel, uint8_t every_n) {
+    const display_refresh_plan_t full_no_clean = {.full = true, .ghost_clean = false};
+
+    switch (kind) {
+        case DISPLAY_PAINT_FORCED_FULL:
+            *takeover_on_panel = false; /* this paint is already the full one */
+            *partial_count = 0;
+            return full_no_clean;
+        case DISPLAY_PAINT_TAKEOVER:
+            *partial_count = 0; /* the flag is deliberately left as it was */
+            return full_no_clean;
+        case DISPLAY_PAINT_CADENCE:
+            break;
+    }
+    /* A takeover screen is still on the glass: a full refresh over a 28 pt
+       headline is not something the cadence gets a say in. */
+    if (*takeover_on_panel) {
+        *takeover_on_panel = false;
+        *partial_count = 0;
+        return full_no_clean;
+    }
+    return display_refresh_plan_every(partial_count, every_n);
 }
