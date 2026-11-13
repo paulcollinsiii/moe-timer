@@ -623,5 +623,239 @@ class TestOverride(unittest.TestCase):
         self.assertIn("overridden slots: beta", out.getvalue())
 
 
+class TestVariants(unittest.TestCase):
+    """<slot>.<n>.png variants, in the templates and in the override directory.
+
+    Rules pinned here: a variant must have exactly its slot's base size; the
+    numbering is 1, 2, ... without a gap (variant 0 is <slot>.png); an
+    override file REPLACES the template file of the same slot and number, and
+    an override number the template lacks EXTENDS the slot; the emitted
+    table's order is the number; the header never depends on overrides.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.sprites = os.path.join(self.tmp, "sprites")
+        self.over = os.path.join(self.tmp, "over")
+        os.mkdir(self.sprites)
+        os.mkdir(self.over)
+        self.c = os.path.join(self.tmp, "sprite_data.c")
+        self.h = os.path.join(self.tmp, "sprite_data.h")
+        self.args = ["--sprites-dir", self.sprites, "--c-out", self.c, "--h-out", self.h]
+        self.save(self.sprites, "alpha.png", (8, 4), [(1, 1)])
+        self.save(self.sprites, "beta.png", (6, 6), [(0, 0)])
+
+    @staticmethod
+    def save(d, fname, size, ink):
+        im = Image.new("1", size, 1)
+        for p in ink:
+            im.putpixel(p, 0)
+        im.save(os.path.join(d, fname))
+
+    def text(self, path):
+        with open(path) as f:
+            return f.read()
+
+    def run_main(self, extra=()):
+        with contextlib.redirect_stderr(io.StringIO()), contextlib.redirect_stdout(io.StringIO()):
+            return g.main(self.args + list(extra))
+
+    def refuse(self, extra=()):
+        with self.assertRaises(SystemExit) as cm:
+            self.run_main(extra)
+        return str(cm.exception.code)
+
+    def rle_of(self, name, w, h, ink):
+        return g.encode(w, h, [1 if (x, y) in ink else 0 for y in range(h) for x in range(w)])
+
+    def stream(self, c, ident):
+        m = re.search(r"static const uint8_t %s_rle\[\] = \{(.*?)\};" % ident, c, re.S)
+        self.assertIsNotNone(m, "%s_rle not emitted" % ident)
+        return [int(t) for t in re.findall(r"\d+", m.group(1))]
+
+    def table(self, c, slot):
+        m = re.search(r"const sprite_t \*const SPRITE_%s_VARIANTS\[\] = \{(.*?)\};" % slot.upper(), c, re.S)
+        self.assertIsNotNone(m, "SPRITE_%s_VARIANTS not emitted" % slot.upper())
+        return [t.strip() for t in m.group(1).split(",") if t.strip()]
+
+    def count(self, c, slot):
+        m = re.search(r"const unsigned SPRITE_%s_VARIANT_COUNT = (\d+);" % slot.upper(), c)
+        self.assertIsNotNone(m, "SPRITE_%s_VARIANT_COUNT not emitted" % slot.upper())
+        return int(m.group(1))
+
+    def test_a_slot_with_no_variants_has_a_one_entry_table_holding_the_base(self):
+        self.assertEqual(self.run_main(), 0)
+        c = self.text(self.c)
+        self.assertEqual(self.table(c, "alpha"), ["&SPRITE_ALPHA"])
+        self.assertEqual(self.count(c, "alpha"), 1)
+        self.assertEqual(self.count(c, "beta"), 1)
+
+    def test_the_header_declares_the_table_and_the_count_for_every_slot(self):
+        self.run_main()
+        h = self.text(self.h)
+        for slot in ("ALPHA", "BETA"):
+            self.assertIn("extern const sprite_t *const SPRITE_%s_VARIANTS[];" % slot, h)
+            self.assertIn("extern const unsigned SPRITE_%s_VARIANT_COUNT;" % slot, h)
+            self.assertIn("extern const sprite_t SPRITE_%s;" % slot, h)
+
+    def test_template_variants_are_emitted_in_number_order_after_the_base(self):
+        self.save(self.sprites, "alpha.2.png", (8, 4), [(2, 2)])
+        self.save(self.sprites, "alpha.1.png", (8, 4), [(3, 3)])
+        self.assertEqual(self.run_main(), 0)
+        c = self.text(self.c)
+        self.assertEqual(self.table(c, "alpha"), ["&SPRITE_ALPHA", "&SPRITE_ALPHA_VARIANT_1", "&SPRITE_ALPHA_VARIANT_2"])
+        self.assertEqual(self.count(c, "alpha"), 3)
+        self.assertEqual(self.stream(c, "alpha_1"), self.rle_of("alpha", 8, 4, {(3, 3)}))
+        self.assertEqual(self.stream(c, "alpha_2"), self.rle_of("alpha", 8, 4, {(2, 2)}))
+        self.assertIn("const sprite_t SPRITE_ALPHA_VARIANT_1 = {8, 4, alpha_1_rle,", c)
+
+    def test_numbers_are_numeric_not_lexical(self):
+        for n in range(1, 11):
+            self.save(self.sprites, "alpha.%d.png" % n, (8, 4), [(n % 8, 0)])
+        self.run_main()
+        c = self.text(self.c)
+        self.assertEqual(self.count(c, "alpha"), 11)
+        self.assertEqual(self.table(c, "alpha")[10], "&SPRITE_ALPHA_VARIANT_10")
+        self.assertEqual(self.table(c, "alpha")[2], "&SPRITE_ALPHA_VARIANT_2")
+
+    def test_variant_symbols_are_not_in_the_header(self):
+        self.save(self.sprites, "alpha.1.png", (8, 4), [(3, 3)])
+        self.run_main()
+        self.assertNotIn("VARIANT_1", self.text(self.h))
+
+    def test_a_variant_of_another_size_is_refused_naming_the_file_and_both_sizes(self):
+        self.save(self.sprites, "alpha.1.png", (9, 4), [])
+        msg = self.refuse()
+        self.assertIn(os.path.join(self.sprites, "alpha.1.png"), msg)
+        self.assertIn("8x4", msg)
+        self.assertIn("9x4", msg)
+        self.assertFalse(os.path.exists(self.c))
+
+    def test_an_override_variant_of_another_size_is_refused_too(self):
+        self.save(self.over, "beta.1.png", (6, 7), [])
+        msg = self.refuse(["--override-dir", self.over])
+        self.assertIn(os.path.join(self.over, "beta.1.png"), msg)
+        self.assertIn("6x6", msg)
+        self.assertIn("6x7", msg)
+
+    def test_a_gap_in_the_numbering_is_refused_naming_the_slot_and_the_missing_number(self):
+        self.save(self.sprites, "alpha.1.png", (8, 4), [])
+        self.save(self.sprites, "alpha.3.png", (8, 4), [])
+        msg = self.refuse()
+        self.assertIn("alpha", msg)
+        self.assertIn("alpha.2.png", msg)
+
+    def test_a_variant_numbered_from_2_is_a_gap_at_1(self):
+        self.save(self.sprites, "alpha.2.png", (8, 4), [])
+        self.assertIn("alpha.1.png", self.refuse())
+
+    def test_a_gap_is_judged_after_the_merge_so_an_override_can_fill_it(self):
+        self.save(self.sprites, "alpha.2.png", (8, 4), [(2, 2)])
+        self.save(self.over, "alpha.1.png", (8, 4), [(3, 3)])
+        self.assertEqual(self.run_main(["--override-dir", self.over]), 0)
+        self.assertEqual(self.count(self.text(self.c), "alpha"), 3)
+
+    def test_variant_numbers_that_are_not_plain_positive_integers_are_refused(self):
+        for bad in ("alpha.0.png", "alpha.01.png", "alpha.-1.png", "alpha.x.png", "alpha.1.1.png"):
+            path = os.path.join(self.sprites, bad)
+            self.save(self.sprites, bad, (8, 4), [])
+            msg = self.refuse()
+            self.assertIn(bad, msg, bad)
+            os.remove(path)
+
+    def test_a_variant_of_a_slot_that_does_not_exist_is_refused(self):
+        self.save(self.over, "gamma.1.png", (8, 4), [])
+        msg = self.refuse(["--override-dir", self.over])
+        self.assertIn("gamma.1.png", msg)
+        self.assertIn("alpha", msg)
+
+    def test_an_override_variant_extends_the_templates_variants(self):
+        self.save(self.sprites, "alpha.1.png", (8, 4), [(3, 3)])
+        self.save(self.over, "alpha.2.png", (8, 4), [(4, 2)])
+        self.assertEqual(self.run_main(["--override-dir", self.over]), 0)
+        c = self.text(self.c)
+        self.assertEqual(self.count(c, "alpha"), 3)
+        self.assertEqual(self.stream(c, "alpha"), self.rle_of("alpha", 8, 4, {(1, 1)}))
+        self.assertEqual(self.stream(c, "alpha_1"), self.rle_of("alpha", 8, 4, {(3, 3)}))
+        self.assertEqual(self.stream(c, "alpha_2"), self.rle_of("alpha", 8, 4, {(4, 2)}))
+
+    def test_an_override_variant_replaces_the_template_variant_of_the_same_number(self):
+        self.save(self.sprites, "alpha.1.png", (8, 4), [(3, 3)])
+        self.save(self.over, "alpha.1.png", (8, 4), [(5, 0)])
+        self.run_main(["--override-dir", self.over])
+        c = self.text(self.c)
+        self.assertEqual(self.count(c, "alpha"), 2)
+        self.assertEqual(self.stream(c, "alpha_1"), self.rle_of("alpha", 8, 4, {(5, 0)}))
+
+    def test_an_override_variant_alone_adds_a_second_sprite_beside_the_template(self):
+        # the owner's case: drop <slot>.1.png into sprites.local/ and the
+        # template stays variant 0
+        self.save(self.over, "alpha.1.png", (8, 4), [(5, 0)])
+        self.run_main(["--override-dir", self.over])
+        c = self.text(self.c)
+        self.assertEqual(self.count(c, "alpha"), 2)
+        self.assertEqual(self.stream(c, "alpha"), self.rle_of("alpha", 8, 4, {(1, 1)}))
+        self.assertEqual(self.count(c, "beta"), 1)
+
+    def test_an_override_base_replaces_only_variant_0(self):
+        self.save(self.sprites, "alpha.1.png", (8, 4), [(3, 3)])
+        self.save(self.over, "alpha.png", (8, 4), [(6, 2)])
+        self.run_main(["--override-dir", self.over])
+        c = self.text(self.c)
+        self.assertEqual(self.count(c, "alpha"), 2)
+        self.assertEqual(self.stream(c, "alpha"), self.rle_of("alpha", 8, 4, {(6, 2)}))
+        self.assertEqual(self.stream(c, "alpha_1"), self.rle_of("alpha", 8, 4, {(3, 3)}))
+
+    def test_the_header_is_identical_with_and_without_variants_in_the_override_dir(self):
+        self.run_main()
+        plain = self.text(self.h)
+        self.save(self.over, "alpha.1.png", (8, 4), [(5, 0)])
+        self.run_main(["--override-dir", self.over])
+        self.assertEqual(self.text(self.h), plain)
+
+    def test_the_overridden_slots_list_includes_a_slot_that_only_gained_a_variant(self):
+        self.save(self.over, "beta.1.png", (6, 6), [(2, 2)])
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            g.main(self.args + ["--override-dir", self.over])
+        self.assertIn("overridden slots: beta", out.getvalue())
+
+    def test_the_banner_names_the_override_dir_when_only_a_variant_is_merged(self):
+        self.save(self.over, "beta.1.png", (6, 6), [(2, 2)])
+        self.run_main(["--override-dir", self.over])
+        self.assertIn("overrides", self.text(self.c).splitlines()[0])
+
+    def test_check_ignores_override_variants(self):
+        self.run_main()
+        self.save(self.over, "alpha.1.png", (8, 4), [(5, 0)])
+        self.assertEqual(self.run_main(["--check", "--override-dir", self.over]), 0)
+
+    def test_a_template_variant_makes_check_fail_until_regenerated(self):
+        self.run_main()
+        self.save(self.sprites, "alpha.1.png", (8, 4), [(5, 0)])
+        self.assertNotEqual(self.run_main(["--check"]), 0)
+        self.run_main()
+        self.assertEqual(self.run_main(["--check"]), 0)
+
+    def test_upper_case_variant_files_are_refused_not_skipped(self):
+        path = os.path.join(self.over, "alpha.1.PNG")
+        Image.new("1", (8, 4), 1).save(path, format="PNG")
+        self.assertIn(path, self.refuse(["--override-dir", self.over]))
+
+    def test_a_generated_name_that_collides_is_refused(self):
+        # slot "alpha_variant_1" would emit the same SPRITE_ALPHA_VARIANT_1
+        self.save(self.sprites, "alpha.1.png", (8, 4), [])
+        self.save(self.sprites, "alpha_variant_1.png", (8, 4), [])
+        msg = self.refuse()
+        self.assertIn("SPRITE_ALPHA_VARIANT_1", msg)
+
+    def test_the_committed_c_has_one_variant_per_slot(self):
+        c = self.text(os.path.join(ROOT, "main", "sprite_data.c"))
+        for slot in ("charge", "timesup", "break", "bedtime"):
+            self.assertEqual(self.count(c, slot), 1, slot)
+            self.assertEqual(self.table(c, slot), ["&SPRITE_%s" % slot.upper()])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

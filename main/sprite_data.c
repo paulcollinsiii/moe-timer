@@ -12,6 +12,9 @@ static const uint8_t bedtime_rle[] = {
 
 const sprite_t SPRITE_BEDTIME = {29, 23, bedtime_rle, 60};
 
+const sprite_t *const SPRITE_BEDTIME_VARIANTS[] = {&SPRITE_BEDTIME};
+const unsigned SPRITE_BEDTIME_VARIANT_COUNT = 1;
+
 // clang-format off
 static const uint8_t break_rle[] = {
     113, 4, 40, 8, 37, 10, 36, 10, 35, 12, 34, 12, 22, 1, 11, 12,
@@ -31,6 +34,9 @@ static const uint8_t break_rle[] = {
 // clang-format on
 
 const sprite_t SPRITE_BREAK = {46, 52, break_rle, 205};
+
+const sprite_t *const SPRITE_BREAK_VARIANTS[] = {&SPRITE_BREAK};
+const unsigned SPRITE_BREAK_VARIANT_COUNT = 1;
 
 // clang-format off
 static const uint8_t charge_rle[] = {
@@ -88,6 +94,9 @@ static const uint8_t charge_rle[] = {
 // clang-format on
 
 const sprite_t SPRITE_CHARGE = {105, 122, charge_rle, 787};
+
+const sprite_t *const SPRITE_CHARGE_VARIANTS[] = {&SPRITE_CHARGE};
+const unsigned SPRITE_CHARGE_VARIANT_COUNT = 1;
 
 // clang-format off
 static const uint8_t timesup_rle[] = {
@@ -157,3 +166,6 @@ static const uint8_t timesup_rle[] = {
 // clang-format on
 
 const sprite_t SPRITE_TIMESUP = {178, 124, timesup_rle, 981};
+
+const sprite_t *const SPRITE_TIMESUP_VARIANTS[] = {&SPRITE_TIMESUP};
+const unsigned SPRITE_TIMESUP_VARIANT_COUNT = 1;

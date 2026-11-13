@@ -3,6 +3,14 @@
 #include "sprite.h"
 
 extern const sprite_t SPRITE_BEDTIME;
+extern const sprite_t *const SPRITE_BEDTIME_VARIANTS[];
+extern const unsigned SPRITE_BEDTIME_VARIANT_COUNT;
 extern const sprite_t SPRITE_BREAK;
+extern const sprite_t *const SPRITE_BREAK_VARIANTS[];
+extern const unsigned SPRITE_BREAK_VARIANT_COUNT;
 extern const sprite_t SPRITE_CHARGE;
+extern const sprite_t *const SPRITE_CHARGE_VARIANTS[];
+extern const unsigned SPRITE_CHARGE_VARIANT_COUNT;
 extern const sprite_t SPRITE_TIMESUP;
+extern const sprite_t *const SPRITE_TIMESUP_VARIANTS[];
+extern const unsigned SPRITE_TIMESUP_VARIANT_COUNT;
