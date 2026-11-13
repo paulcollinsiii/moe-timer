@@ -233,3 +233,12 @@ CONFIG_LV_DRAW_SW_SUPPORT_I1=y
 A checkout whose sdkconfig has CONFIG_LWIP_IPV6 under a "# default:" marker
 picks this up on idf.py reconfigure; see docs/planning/20261112.firmware-diet.notes.md.
 CONFIG_LWIP_IPV6=n
+
+# esp_err_to_name() lookup table off. Every call site in main/ (and
+# managed_components/) feeds an ESP_LOGx %s; none sends the name over MQTT or
+# compares it. What the logs lose: "ESP_ERR_NVS_NOT_FOUND" becomes the
+# C-library strerror text or "UNKNOWN ERROR 0x1102(4354)", so a log line needs
+# its code looked up in esp_err.h by hand. ESP_ERROR_CHECK aborts print the
+# same way. Measured: 1,508,752 -> 1,500,976 B (-7,776 B). A sdkconfig line
+# under a "# default:" marker takes this on idf.py reconfigure.
+CONFIG_ESP_ERR_TO_NAME_LOOKUP=n
