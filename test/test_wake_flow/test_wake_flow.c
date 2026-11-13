@@ -2045,6 +2045,8 @@ uint8_t timer_wifi_join_failures(void) {
    ordinary always-paint tail. */
 #define finish_action_and_render(btn, before, now, selection_changed) \
     finish_action_and_render_painting((btn), (before), (now), (selection_changed), true)
+#define finish_or_break(btn, before, now, selection_changed) \
+    finish_or_break_painting((btn), (before), (now), (selection_changed), true)
 
 /* ---- harness ------------------------------------------------------------ */
 
@@ -14011,6 +14013,160 @@ void test_swap19_a_held_tap_whose_release_rings_past_the_default_settle_counts_o
     TEST_ASSERT_EQUAL_INT(2, flow_active_slot);
 }
 
+/* ---- the SAME gesture on a tick wake --------------------------------------
+
+   A C that was latched while the device was awake (a minute tick's sync, its
+   grid wait, its render) is taken by the tick wake's latch drain and opens the
+   same gesture, under the same conditions as the wake press: Timers mode, the
+   active timer not RUNNING, at least one extra timer. It is the one
+   implementation (wake_flow_counted_swap), so these cases pin the entry and
+   the differences: the minute's own render has already painted the glass, so
+   nothing else is owed by a lap home, and a refusal does nothing at all (no
+   strip, no wait, no repaint) as a refused latched press always did. Presses
+   made BEFORE the drain collapse into the one the latch holds; only presses
+   made after the gesture opens are counted. */
+
+static void flow_arm_swap_tick(void) {
+    flow_tick_clock(flow_at(15, 0));
+    flow_wakeup_btn = BTN_NONE;
+    flow_select_ok = true;
+    flow_state = TIMER_IDLE;
+    flow_state_at_select = TIMER_IDLE;
+    flow_press(BTN_C); /* made while the wake was awake: latched before the drain */
+}
+
+void test_swap20_a_latched_c_on_a_tick_wake_opens_the_gesture_and_commits_once(void) {
+    flow_arm_swap_tick();
+    flow_enable_all_timers();
+    flow_burst_add(BTN_C, 100);
+    flow_burst_add(BTN_C, 240);
+
+    TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_tick());
+
+    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_SELECT_NEXT));
+    TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_SELECT_SLOT));
+    TEST_ASSERT_EQUAL_INT(3, flow_count_n);
+    TEST_ASSERT_EQUAL_UINT8(2, flow_count_seen[0]);
+    TEST_ASSERT_EQUAL_UINT8(4, flow_count_seen[2]);
+    TEST_ASSERT_EQUAL_INT(3, flow_active_slot);
+    TEST_ASSERT_EQUAL_UINT32(240 + SWAP_Q, flow_select_slot_at_ms);
+    /* the minute's own render, and the one commit paint */
+    TEST_ASSERT_EQUAL_INT(2, FLOW_RENDERS());
+    TEST_ASSERT_EQUAL_INT(2, flow_log_count(EV_PARTIAL) + flow_log_count(EV_FULL_REFRESH));
+    flow_assert_swap_guard_put_back_before_the_commit();
+}
+
+void test_swap21_a_lap_home_on_a_tick_wake_paints_nothing_beyond_the_minute(void) {
+    flow_arm_swap_tick(); /* three timers: the latched press, then two more, is a lap */
+    flow_burst_add(BTN_C, 100);
+    flow_burst_add(BTN_C, 200);
+
+    TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_tick());
+
+    TEST_ASSERT_EQUAL_INT(3, flow_count_n);
+    TEST_ASSERT_EQUAL_INT(FLOW_SCREEN, flow_active_slot);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(1, FLOW_RENDERS(), "a lap home painted again after the minute's own render");
+    TEST_ASSERT_GREATER_THAN_INT(0, flow_log_count(EV_PIXELS_OFF)); /* the strip is put back */
+    flow_assert_swap_guard_put_back_before_the_commit();
+}
+
+/* A break that ended, or a day that rolled, earlier in a TICK wake was carried
+   by the minute's render (it ran after both), so neither re-owes a paint. */
+void test_swap22_a_lap_home_on_a_tick_wake_after_a_break_end_or_a_rollover_paints_nothing_more(void) {
+    flow_arm_swap_tick();
+    s_break_ended = true;
+    s_day_rolled = true;
+    flow_burst_add(BTN_C, 100);
+    flow_burst_add(BTN_C, 200);
+
+    TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_tick());
+
+    TEST_ASSERT_EQUAL_INT(FLOW_SCREEN, flow_active_slot);
+    TEST_ASSERT_EQUAL_INT(1, FLOW_RENDERS());
+}
+
+void test_swap23_a_latched_c_on_a_tick_wake_with_no_extra_timer_does_nothing(void) {
+    flow_arm_swap_tick();
+    flow_slot_enabled[1] = false;
+    flow_slot_enabled[2] = false;
+
+    TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_tick());
+
+    TEST_ASSERT_EQUAL_INT(0, flow_count_n);
+    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_SELECT_SLOT));
+    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_SELECT_NEXT));
+    TEST_ASSERT_EQUAL_INT(0, flow_refractory_n);
+    TEST_ASSERT_EQUAL_INT(FLOW_SCREEN, flow_active_slot);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(1, FLOW_RENDERS(), "a refused latched press repainted");
+}
+
+void test_swap24_a_latched_c_on_a_tick_wake_is_refused_while_the_active_timer_runs(void) {
+    flow_arm_swap_tick();
+    flow_state = TIMER_RUNNING;
+    flow_expiry_wall = flow_at(18, 0);
+
+    TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_tick());
+
+    TEST_ASSERT_EQUAL_INT(0, flow_count_n);
+    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_SELECT_SLOT));
+    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_SELECT_NEXT));
+    TEST_ASSERT_EQUAL_INT(0, flow_refractory_n);
+    TEST_ASSERT_EQUAL_INT(FLOW_SCREEN, flow_active_slot);
+}
+
+void test_swap25_a_latched_c_in_chores_mode_on_a_tick_wake_is_a_tick_and_opens_no_gesture(void) {
+    flow_tick_clock(flow_at(15, 0));
+    flow_arm_chore_wake(BTN_NONE);
+    flow_select_ok = true;
+    flow_press(BTN_C);
+
+    TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_tick());
+
+    TEST_ASSERT_EQUAL_INT(0, flow_count_n);
+    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_SELECT_SLOT));
+    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_SELECT_NEXT));
+    TEST_ASSERT_EQUAL_INT(0, flow_refractory_n);
+}
+
+/* THE CLOCK THE COMMIT PAINTS is the one at the end of the gesture on this
+   path too. The paints are the minute's own (at 15:00:00) and the commit's,
+   1.21 s later. */
+void test_swap26_a_tick_wake_gesture_paints_the_clock_it_ended_with(void) {
+    flow_arm_swap_tick();
+    flow_enable_all_timers();
+    flow_burst_add(BTN_C, 400);
+    flow_burst_add(BTN_C, 800);
+
+    TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_tick());
+
+    TEST_ASSERT_EQUAL_INT(2, flow_partial_n);
+    TEST_ASSERT_EQUAL_INT64(flow_at(15, 0), flow_partial_at[0]);
+    TEST_ASSERT_EQUAL_INT64_MESSAGE(flow_at(15, 0) + 1, flow_partial_at[1],
+                                    "the commit's paint carried the clock from before the gesture");
+}
+
+/* A C made in the render-grid wait: the pause poll takes B only, so it sits in
+   the latch until the drain, which opens the gesture there. */
+void test_swap27_a_c_pressed_in_the_grid_wait_opens_the_gesture_at_the_drain(void) {
+    flow_tick_clock(flow_at(14, 59) + 40); /* 20 s of grid wait to the :00 */
+    flow_wakeup_btn = BTN_NONE;
+    flow_select_ok = true;
+    flow_state = TIMER_IDLE;
+    flow_state_at_select = TIMER_IDLE;
+    flow_enable_all_timers();
+    flow_deferred_press_btn = BTN_C;
+    flow_deferred_press_ms = 5000;
+    flow_burst_add(BTN_C, 20100); /* the grid wait is 20000 ms; this lands in the gesture */
+
+    TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_tick());
+
+    TEST_ASSERT_EQUAL_INT(1, flow_deferred_delivered);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(2, flow_count_n, "the grid-wait press did not open a counted gesture");
+    TEST_ASSERT_EQUAL_INT(2, flow_active_slot);
+    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_SELECT_NEXT));
+    TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_SELECT_SLOT));
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_ev_a_b_press_in_the_final_minute_expiry_window_is_repainted_and_published);
@@ -14642,5 +14798,13 @@ int main(void) {
     RUN_TEST(test_swap17_a_wake_press_release_bounce_after_a_reopening_sample_never_counts);
     RUN_TEST(test_swap18_a_bounce_one_poll_after_a_counted_tap_never_counts);
     RUN_TEST(test_swap19_a_held_tap_whose_release_rings_past_the_default_settle_counts_once);
+    RUN_TEST(test_swap20_a_latched_c_on_a_tick_wake_opens_the_gesture_and_commits_once);
+    RUN_TEST(test_swap21_a_lap_home_on_a_tick_wake_paints_nothing_beyond_the_minute);
+    RUN_TEST(test_swap22_a_lap_home_on_a_tick_wake_after_a_break_end_or_a_rollover_paints_nothing_more);
+    RUN_TEST(test_swap23_a_latched_c_on_a_tick_wake_with_no_extra_timer_does_nothing);
+    RUN_TEST(test_swap24_a_latched_c_on_a_tick_wake_is_refused_while_the_active_timer_runs);
+    RUN_TEST(test_swap25_a_latched_c_in_chores_mode_on_a_tick_wake_is_a_tick_and_opens_no_gesture);
+    RUN_TEST(test_swap26_a_tick_wake_gesture_paints_the_clock_it_ended_with);
+    RUN_TEST(test_swap27_a_c_pressed_in_the_grid_wait_opens_the_gesture_at_the_drain);
     return UNITY_END();
 }

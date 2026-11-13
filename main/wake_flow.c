@@ -2072,6 +2072,32 @@ static bool wake_flow_presses_are_the_locks(void) {
     return s_lock_screen_on_glass || lock_gate_sleep_mode() != WAKE_SLEEP_NORMAL;
 }
 
+/* THE ONE ENTRY INTO BUTTON C'S COUNTED CLICKS, for every path that opens the
+   gesture: the EXT1 wake press (wake_flow_handle_button_wake) and a C latched
+   while a tick wake was awake, taken by that wake's latch drain
+   (wake_flow_handle_timer_tick). Callers have already established Timers mode;
+   the gesture itself decides the rest (active timer not RUNNING, an extra
+   timer to go to) and answers REFUSED when it does not open.
+
+   `now` is re-read HERE, after the gesture, and is what the caller must paint
+   with: the gesture waited 0.7 to 6 s, and a paint that carried the clock from
+   before it would show the minute the press arrived in.
+
+   `glass_current` is the tick wake: its minute render ran after the rollover
+   and the break-end drain, so the glass already shows both and a lap home owes
+   it nothing. On the button wake no render has happened yet, so a break that
+   ended or a day that rolled is still owed a paint, which the swap's paint
+   would have carried. `*paint` false is the only way a gesture owes the panel
+   nothing. */
+static swap_gesture_t wake_flow_counted_swap(time_t *now, bool glass_current, bool *paint) {
+    const swap_gesture_t gesture = wake_flow_swap_count_gesture();
+    *now = hal_time_now();
+    *paint =
+        wake_policy_swap_paint_owed(gesture == SWAP_GESTURE_HOME, !glass_current && wake_flow_break_ended_this_wake(),
+                                    !glass_current && s_day_rolled);
+    return gesture;
+}
+
 bool wake_flow_poll_pause_button(void) {
     /* Masked take: only the B bit is consumed — a latched C press stays in
        the latch for the tick-wake drain (a poll during the grid wait must
@@ -3054,13 +3080,6 @@ static void finish_or_break_painting(button_id_t btn, timer_state_t before, time
     finish_action_and_render_painting(btn, before, now, selection_changed, paint);
 }
 
-/* The tail every caller but one uses: it always paints. The exception is the
-   button wake after a counted-clicks gesture that owes the panel nothing, and
-   it says so through finish_or_break_painting(). */
-static void finish_or_break(button_id_t btn, timer_state_t before, time_t now, bool selection_changed) {
-    finish_or_break_painting(btn, before, now, selection_changed, true);
-}
-
 /* ---- the pre-sleep event watch ------------------------------------------ */
 
 /* Both watches live above (what each one guarantees is on its declaration
@@ -3548,14 +3567,32 @@ void wake_flow_handle_timer_tick(void) {
        priority keeps it from swallowing the press next to it, and D joins
        it only while the mode says CHORES, where it is ✓3 rather than the
        sync button. Must run BEFORE maybe_wait_for_event: the final-minute
-       watch discards pre-watch latched presses at entry. */
+       watch discards pre-watch latched presses at entry.
+
+       A C in Timers mode is not a single swap here but the first press of
+       Button C's counted clicks (wake_flow_counted_swap), exactly as the EXT1
+       wake press is: a press made in the grid wait or the sync lands in this
+       drain, and the presses that follow it are counted. Presses made BEFORE
+       this point are one bit in the latch and count once. A refused gesture
+       (RUNNING, no extra timer) does nothing, as a refused latched press
+       always has. The minute's render has already painted the glass, so a lap
+       home owes it nothing (`glass_current`). */
     int pick = wake_flow_pick_latched_press();
     if (pick >= 0) {
         timer_state_t painted = timer_get_state();
         bool swapped = false;
-        if (wake_flow_dispatch_latched_press((button_id_t)pick, &now, painted, !synced_this_wake, &swapped)) {
+        bool paint = true;
+        bool acted;
+        if ((button_id_t)pick == BTN_C && timer_mode() != APP_MODE_CHORES) {
+            const swap_gesture_t gesture = wake_flow_counted_swap(&now, true, &paint);
+            swapped = (gesture == SWAP_GESTURE_COMMITTED);
+            acted = (gesture != SWAP_GESTURE_REFUSED);
+        } else {
+            acted = wake_flow_dispatch_latched_press((button_id_t)pick, &now, painted, !synced_this_wake, &swapped);
+        }
+        if (acted) {
             wake_flow_show_status_leds();
-            finish_or_break((button_id_t)pick, painted, now, swapped);
+            finish_or_break_painting((button_id_t)pick, painted, now, swapped, paint);
         }
     }
     maybe_wait_for_event();
@@ -3770,11 +3807,7 @@ void wake_flow_handle_button_wake(void) {
                 wake_flow_dispatch_button_action(btn, &now, before, true, &swapped);
                 break;
             }
-            const swap_gesture_t gesture = wake_flow_swap_count_gesture();
-            swapped = (gesture == SWAP_GESTURE_COMMITTED);
-            now = hal_time_now(); /* the gesture waited: a paint must carry the clock as it is now */
-            paint = wake_policy_swap_paint_owed(gesture == SWAP_GESTURE_HOME, wake_flow_break_ended_this_wake(),
-                                                s_lock_screen_on_glass, s_day_rolled);
+            swapped = (wake_flow_counted_swap(&now, false, &paint) == SWAP_GESTURE_COMMITTED);
             break;
         }
         case BTN_D:

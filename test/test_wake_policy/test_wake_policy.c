@@ -303,25 +303,21 @@ void test_first_countdown_step_none_left_inside_led_window(void) {
 
 /* A gesture that COMMITTED always paints: the selection moved. */
 void test_a_committed_swap_always_paints(void) {
-    TEST_ASSERT_TRUE(wake_policy_swap_paint_owed(false, false, false, false));
+    TEST_ASSERT_TRUE(wake_policy_swap_paint_owed(false, false, false));
 }
 
 /* One that landed back where it started paints nothing — unless something
    else this wake already owes the glass a paint. */
 void test_a_full_lap_with_nothing_else_owed_paints_nothing(void) {
-    TEST_ASSERT_FALSE(wake_policy_swap_paint_owed(true, false, false, false));
+    TEST_ASSERT_FALSE(wake_policy_swap_paint_owed(true, false, false));
 }
 
 void test_a_full_lap_still_paints_a_break_end_the_glass_has_not_seen(void) {
-    TEST_ASSERT_TRUE(wake_policy_swap_paint_owed(true, true, false, false));
-}
-
-void test_a_full_lap_still_paints_over_a_lock_screen_on_the_glass(void) {
-    TEST_ASSERT_TRUE(wake_policy_swap_paint_owed(true, false, true, false));
+    TEST_ASSERT_TRUE(wake_policy_swap_paint_owed(true, true, false));
 }
 
 void test_a_full_lap_still_paints_a_day_that_rolled_over(void) {
-    TEST_ASSERT_TRUE(wake_policy_swap_paint_owed(true, false, false, true));
+    TEST_ASSERT_TRUE(wake_policy_swap_paint_owed(true, false, true));
 }
 
 int main(void) {
@@ -329,7 +325,6 @@ int main(void) {
     RUN_TEST(test_a_committed_swap_always_paints);
     RUN_TEST(test_a_full_lap_with_nothing_else_owed_paints_nothing);
     RUN_TEST(test_a_full_lap_still_paints_a_break_end_the_glass_has_not_seen);
-    RUN_TEST(test_a_full_lap_still_paints_over_a_lock_screen_on_the_glass);
     RUN_TEST(test_a_full_lap_still_paints_a_day_that_rolled_over);
     RUN_TEST(test_render_expiry_transition_fires_alert);
     RUN_TEST(test_render_a_break_ending_on_an_expired_slot_never_alerts);

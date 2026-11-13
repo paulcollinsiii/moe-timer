@@ -47,10 +47,12 @@ wake_render_t wake_policy_render(timer_state_t before, timer_state_t after, bool
    a single swap uses, so the three full-refresh promotions apply unchanged.
    One that landed home paints NOTHING, unless something else this wake already
    owes the glass a paint that the swap would otherwise have carried:
-   `break_ended` (a Screen Break ended and the panel has not shown it),
-   `lock_on_glass` (a released lock's screen is still on the panel), or
-   `day_rolled` (the day rolled over and reset the timers under the glass). */
-bool wake_policy_swap_paint_owed(bool landed_home, bool break_ended, bool lock_on_glass, bool day_rolled);
+   `break_ended` (a Screen Break ended and the panel has not shown it) or
+   `day_rolled` (the day rolled over and reset the timers under the glass).
+   There is no lock-screen term: a lock screen can be on the glass only in a
+   wake whose lock gate let go, and such a wake takes no press (the press is the
+   lock's), so no counted swap can run with one up. */
+bool wake_policy_swap_paint_owed(bool landed_home, bool break_ended, bool day_rolled);
 
 /* Break-over chime policy: fire only when nothing else is RUNNING (rule
    4 — the kid mid-activity gets that timer's own alert) and the
