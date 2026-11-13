@@ -43,15 +43,28 @@ or quiet hours from HA instead of rebuilding. Never erase NVS.
   or tick chore 2 on the checklist. Where A or C should not wake it, press
   B from the same state as a control.
 - [ ] **Counted clicks on C (needs two or more extra timers).** From sleep on
-  the timer screen with nothing running, tap C once. → The leftmost LED lights
-  magenta (Screen is 1, so the next timer shows 2: the LED beside it), and
-  about 0.7 s later the panel repaints once on the next timer. Then tap C
-  three to four times at a natural pace (150-250 ms apart). → Each tap
-  advances the binary count (3 is two LEDs, 4 is the third from the left), the
+  the timer screen with nothing running, with Screen selected, tap C once. →
+  The second LED from the left lights magenta (the count is in binary with the
+  least significant bit on the leftmost LED, and Screen is 1, so the next timer
+  is 2, which is the second LED and not the leftmost), and about 0.7 s later
+  the panel repaints once on the next timer. Then tap C three to four times at
+  a natural pace (150-250 ms apart). **Start counting once the strip lights:**
+  taps made while the device is still booting are not counted, and neither is a
+  second tap in the first 300 ms after the buttons arm. → Each tap advances the
+  binary count (3 is the two leftmost LEDs, 4 is the third from the left), the
   panel repaints once, 0.7 s after the last tap, on the timer you counted to.
   Tap C once per timer to go all the way round. → No selection change and no
-  repaint, and the LEDs go back to the state pixel only. Twenty single taps:
-  none may skip two timers.
+  repaint, and the LEDs go back to the state pixel only. Twenty single taps,
+  each held 150-250 ms: none may skip two timers (this is where the 120 ms
+  window and 30 ms settle are settled; see `button_latch.h`). Then a rapid run:
+  every tap should count.
+- [ ] **Counted clicks, C pressed while the device is already awake.** Wait
+  for a minute wake with nothing running, and tap C while its render is
+  happening (or, on a sync wake, during the sync). → When the wake finishes its
+  repaint the strip lights magenta with the count and counting starts there:
+  further taps are added, and the panel repaints once at the end. Taps you made
+  before the strip lit are a single press, however many there were. A C pressed
+  during a break's last seconds still moves exactly one timer.
 - [ ] **Held-button dismissal.** Dismiss a sounding alarm with one button
   and keep holding it past the next sleep. Repeat with two buttons held
   together. → The held button's action never fires. The log shows
