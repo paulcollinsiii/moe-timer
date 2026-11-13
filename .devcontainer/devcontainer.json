@@ -29,7 +29,10 @@
       "settings": {
         "editor.formatOnSave": true,
         "C_Cpp.default.compilerPath": "/usr/bin/gcc",
-        "git.openRepositoryInParentFolders": "always"
+        "git.openRepositoryInParentFolders": "always",
+        "cmake.configureOnOpen": false,
+        "cmake.configureOnEdit": false,
+        "cmake.automaticReconfigure": false
       }
     }
   }

@@ -162,12 +162,9 @@ CONFIG_LV_FONT_DEFAULT_MONTSERRAT_12=y
 # lv_label and lv_bar widgets (display_screens.c) — no LV_SYMBOL, no flex/grid
 # layout, no shadow/transform. Every other widget, layout engine and the
 # observer/examples/demos code is dead weight; LVGL is the single largest
-# archive in the image (415 KB) so trimming it is the main lever against the
-# 85 % slot guard. LV_DRAW_SW_COMPLEX stays enabled, unmeasured: the only
-# `radius` calls in the UI (display_screens.c:129, :134, in style_bar) set it
-# to 0, overriding the mono theme's radius of 2, which suggests COMPLEX may
-# be removable — but that needs an actual build plus byte-identical goldens
-# to confirm, not assumed here.
+# archive in the image (about 258 KB of text and rodata at -Os, 181 KB of it
+# rodata, mostly the five Montserrat fonts; map of 2026-11-13) so trimming it is the main lever against the
+# 85 % slot guard. LV_DRAW_SW_COMPLEX is turned off, see its line below.
 # CONFIG_LV_USE_ANIMIMG is not set
 # CONFIG_LV_USE_ARC is not set
 # CONFIG_LV_USE_ARCLABEL is not set
@@ -225,3 +222,79 @@ CONFIG_LV_FONT_DEFAULT_MONTSERRAT_12=y
 # CONFIG_LV_DRAW_SW_SUPPORT_AL88 is not set
 # CONFIG_LV_DRAW_SW_SUPPORT_A8 is not set
 CONFIG_LV_DRAW_SW_SUPPORT_I1=y
+
+# IPv6 off. Every address the firmware handles is IPv4: AF_INET only (the
+# captive-portal DNS socket), esp_ip4addr_aton, ip4 DNS info; MQTT, SNTP and
+# the OTA HTTPS fetch resolve through lwIP's IPv4 path. Measured: 1,541,584 ->
+# 1,508,752 B (-32,832 B); ip6/nd6/icmp6/mld6/ethip6 are gone from the link map.
+# A checkout whose sdkconfig has CONFIG_LWIP_IPV6 under a "# default:" marker
+# picks this up on idf.py reconfigure; see docs/planning/20261112.firmware-diet.notes.md.
+CONFIG_LWIP_IPV6=n
+
+# esp_err_to_name() lookup table off. Every call site in main/ (and
+# managed_components/) feeds an ESP_LOGx %s; none sends the name over MQTT or
+# compares it. What the logs lose: "ESP_ERR_NVS_NOT_FOUND" becomes the
+# C-library strerror text or "UNKNOWN ERROR 0x1102(4354)", so a log line needs
+# its code looked up in esp_err.h by hand. ESP_ERROR_CHECK aborts print the
+# same way. Measured: 1,508,752 -> 1,500,976 B (-7,776 B). A sdkconfig line
+# under a "# default:" marker takes this on idf.py reconfigure.
+CONFIG_ESP_ERR_TO_NAME_LOOKUP=n
+
+# LV_DRAW_SW_COMPLEX off: radius masks, box shadow, arcs, skewed lines, image
+# transforms. Every radius in the UI is set to 0 (style_bar() for the three
+# bars, each plain lv_obj in display_screens.c), which overrides the mono
+# theme's card radius of 2; nothing sets shadow, transform, arc or outline.
+# Trap: with LV_USE_LOG off, a rounded rect or shadow added later draws
+# silently square/not at all instead of failing loudly. Re-enable this before
+# adding a style with radius > 0, shadow, transform or an arc/line widget.
+# Mirrored in test/mocks/lv_conf_host.h, so the display goldens (byte
+# identical, not regenerated) do exercise it, with the one host/firmware
+# theme divergence that file documents.
+CONFIG_LV_DRAW_SW_COMPLEX=n
+
+# No PSRAM memory test at boot. cpu_start.c runs esp_psram_extram_test() on
+# EVERY boot, deep-sleep wakes included: it writes then reads one word per
+# 32-byte line of the whole 2 MB through the cache at 40 MHz, which IDF's own
+# comment sizes at "about a second for 4 MiB", so on the order of 0.5 s before
+# app_main for this 2 MB part (an estimate from that comment, not a
+# measurement of this board: the owner times it, see
+# docs/planning/20261112.firmware-diet.notes.md). Nothing in main/ requests
+# PSRAM (no MALLOC_CAP_SPIRAM, mbedTLS is MBEDTLS_INTERNAL_MEM_ALLOC, LVGL's
+# buffers are far below SPIRAM_MALLOC_ALWAYSINTERNAL); only the heap pool
+# carries it. Plain malloc() (heap_caps_malloc_default) goes to PSRAM for any
+# size above 16 KB, and for ANY size once internal RAM is exhausted. What is
+# given up: PSRAM detection and the ID read still run, but a chip that
+# identifies correctly and then corrupts data no longer aborts the boot; its
+# heap would be handed out to those mallocs.
+CONFIG_SPIRAM_MEMTEST=n
+
+# Compile the app and every IDF component for size (-Os) instead of the
+# debug-friendly -Og. The image budget is the binding constraint (85 % slot
+# guard) and nothing in this firmware is CPU-bound: the long waits are the
+# panel's BUSY line, WiFi/TLS, and the sleep. What -Os changes that
+# matters: stack use per frame (see the task list in
+# docs/planning/20261112.firmware-diet.notes.md for the high-water marks to
+# re-read), slower tight loops (tone render, LVGL blit) and more inlining in
+# coredump backtraces. Separate commit, soaked on the bench before it is
+# relied on; to revert, follow the recipe in the notes (a value an earlier
+# configure wrote is unmarked in sdkconfig and wins over this file).
+# mbedTLS keeps the IDF default (MBEDTLS_COMPILER_OPTIMIZATION_SIZE, -Os), no
+# override. An earlier commit here added MBEDTLS_COMPILER_OPTIMIZATION_PERF on
+# the claim that IDF builds with CMAKE_BUILD_TYPE=Debug; that was false: IDF
+# leaves the build type empty, and the Debug came from an editor extension
+# configuring build/. CMakeLists.txt now pins the build type to empty.
+CONFIG_COMPILER_OPTIMIZATION_SIZE=y
+
+# PROVISIONAL, its own commit so it reverts alone: mbedTLS client only (no TLS
+# server). The only TLS the device speaks is as a client: the OTA HTTPS fetch
+# (ota_ca.pem) and optional MQTT over TLS. Setup mode serves plain HTTP: protocomm
+# security 2 (SRP6a) over protocomm_httpd, ESP_HTTPS_SERVER_ENABLE is off, no
+# source in main/ or managed_components/ touches esp_https_server, httpd_ssl or
+# esp_tls_cfg_server_t, and the WPA supplicant is built TLS-client-only
+# (WPA_MBEDTLS_TLS_CLIENT). NOT YET PROVEN ON THE DEVICE: the owner must run
+# setup mode on an erased-NVS board (AP + QR, phone provisioning, MQTT form,
+# first connect) before this is relied on. If anything in that run fails to
+# bring up TLS, undo it with the per-candidate recipe in the notes
+# (git revert alone does NOT work on a checkout whose sdkconfig already holds
+# the new value: an unmarked sdkconfig line beats this file).
+CONFIG_MBEDTLS_TLS_CLIENT_ONLY=y

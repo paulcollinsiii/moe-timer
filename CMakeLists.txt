@@ -1,4 +1,14 @@
 cmake_minimum_required(VERSION 3.16)
+
+# Optimisation comes from Kconfig (CONFIG_COMPILER_OPTIMIZATION_*), never from
+# a CMake build type. IDF itself leaves CMAKE_BUILD_TYPE empty, but an editor
+# extension (VS Code CMake Tools) can configure build/ with
+# -DCMAKE_BUILD_TYPE=Debug; mbedTLS's own CMake then appends "-O0 -g3" to its
+# targets and silently changes codegen for the whole TLS stack. FORCE pins the
+# value whatever the command line or an old cache says. The bootloader is a
+# separate ExternalProject with its own cache and is unaffected.
+set(CMAKE_BUILD_TYPE "" CACHE STRING "optimisation comes from Kconfig" FORCE)
+
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 project(magtag_timer)
 
