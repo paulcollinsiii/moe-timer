@@ -293,6 +293,8 @@ CONFIG_COMPILER_OPTIMIZATION_SIZE=y
 # esp_tls_cfg_server_t, and the WPA supplicant is built TLS-client-only
 # (WPA_MBEDTLS_TLS_CLIENT). NOT YET PROVEN ON THE DEVICE: the owner must run
 # setup mode on an erased-NVS board (AP + QR, phone provisioning, MQTT form,
-# first connect) before this is relied on; if anything in that run fails to
-# bring up TLS, revert this commit.
+# first connect) before this is relied on. If anything in that run fails to
+# bring up TLS, undo it with the per-candidate recipe in the notes
+# (git revert alone does NOT work on a checkout whose sdkconfig already holds
+# the new value: an unmarked sdkconfig line beats this file).
 CONFIG_MBEDTLS_TLS_CLIENT_ONLY=y
