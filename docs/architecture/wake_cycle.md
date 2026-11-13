@@ -64,8 +64,10 @@ setup route ─▶ day rollover ─▶ lock gates ─▶ break-end drain ─▶ 
   (`CONFIG_MAGTAG_RUNNING_SYNC_INTERVAL_MIN`,
   `CONFIG_MAGTAG_IDLE_SYNC_INTERVAL_MIN`), never during a break. It then
   waits up to 25 s so the render lands on the minute. A button wake runs the
-  press: B, A and C through one dispatch; D syncs on the timer screen and
-  ticks chore 3 on the checklist. A start, a resume or a D sync paints
+  press: B, A and C through one dispatch, except that C on the timer screen
+  opens the counted-clicks gesture instead (a count of presses, one commit, one
+  paint; [timers](../behavior/timers_and_schedule.md#switching-timers-with-c));
+  D syncs on the timer screen and ticks chore 3 on the checklist. A start, a resume or a D sync paints
   early ([network_and_ha.md](network_and_ha.md#one-window-in-order)). A
   pause, an expiry and the chore-release edge each owe HA a window of their
   own, opened after the paint and after any audio
@@ -74,6 +76,9 @@ setup route ─▶ day rollover ─▶ lock gates ─▶ break-end drain ─▶ 
   the expiry alert ([display.md](display.md)).
 - **Latched presses.** A press made while the device was awake is acted on
   now, through the same rules as a wake press ([peripherals.md](peripherals.md)).
+  A latched C on the timer screen opens the same counted-clicks gesture
+  (`wake_flow_counted_swap()`, the one entry both wakes use); the break tail's
+  press poll keeps a single swap.
 - **Awake watch.** With 75 s or less to an expiry or a chiming break end, the
   wake stays up and fires the event within a second of its wall time instead
   of sleeping through it. A break that falls due at the expiry instant takes

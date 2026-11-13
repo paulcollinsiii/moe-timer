@@ -31,6 +31,16 @@ uint8_t buttons_take_pressed(void);
 /* Consume only the latched presses in `mask`, leaving the rest latched
    for a later checkpoint (e.g. the tick-wake drain). */
 uint8_t buttons_take_pressed_mask(uint8_t mask);
+/* Set ONE button's same-button refractory window (button_latch.h): the window
+   the next accepted press of `btn` opens, in microseconds. Pass
+   BUTTON_LATCH_REFRACTORY_US to put the default back. Takes the same critical
+   section the other latch calls take, because the ISR reads the window. Used
+   by the counted-clicks gesture on Button C (wake_flow.c) and nothing else. */
+void buttons_set_refractory(button_id_t btn, int64_t us);
+/* Set ONE button's release settle (button_latch.h) the same way; pass
+   BUTTON_LATCH_RELEASE_SETTLE_US to put the default back. Installed and put
+   back with the refractory window, by the same caller and for the same reason. */
+void buttons_set_settle(button_id_t btn, int64_t us);
 
 /* ---- BOOT (GPIO0) — deliberately NOT a fifth button_id_t ----------------
 

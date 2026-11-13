@@ -70,6 +70,24 @@ later:
   through the latch, so `buttons_watch_begin()` seeds its window
   (`button_latch_begin()`) from the EXT1 status. A deliberate re-press of the same button faster than that is
   lost, by design.
+- The window, and the release **settle** (the short anchor on the moment a
+  level sample first sees the pad up, default `BUTTON_LATCH_RELEASE_SETTLE_US`,
+  10 ms), are **per button**. Every button defaults to 300 ms and 10 ms, and
+  `buttons_set_refractory()` and `buttons_set_settle()` change one button's. The
+  only caller is Button C's counted-clicks gesture: while it runs C uses
+  `BUTTON_LATCH_SWAP_REFRACTORY_US` (120 ms) so a person can tap at 150-250 ms,
+  and `BUTTON_LATCH_SWAP_SETTLE_US` (30 ms), because a tap held past 120 ms has
+  left the window behind by the time it is released and its release bounce is
+  then judged by the settle alone. Both are put back when the gesture ends. In
+  Chores mode C is the second chore tick and keeps 300 ms and 10 ms. The
+  figures in force are stamped when a press is accepted, so a change never
+  reaches into a press already counted. The seeded wake press always carries
+  the defaults: its 300 ms window covers its own release bounce for a hold of
+  up to about 300 ms after the buttons arm, and a longer hold is judged by the
+  10 ms settle alone. The price of the longer settle is that the shortest
+  release-to-press gap that still counts becomes the 20 ms poll plus 30 ms,
+  against 20 plus 10. All four figures are starting values, to be settled on
+  the bench.
 - When several presses are waiting, `button_latch_pick()` takes them in the
   order B > C > D > A, so the time-sensitive action wins and a mode toggle
   can never swallow a start (S22). That order is the only guard against the
@@ -98,6 +116,24 @@ Who may light which pixel depends on the mode, and `include/status_led.h`
 is the authority: on the timer screen pixel 0 shows the timer state and
 pixel 3 the network window; on the chore checklist all four belong to the
 chores. Quiet hours and the status brightness are applied inside the driver.
+
+A sixth claimant takes all four for a moment: Button C's count display. While
+the counted-clicks gesture runs, the strip shows the candidate timer's place in
+binary, least significant bit on the leftmost pixel (driver index 3, because the
+strip runs opposite the buttons). The bit-to-pixel mapping is
+`neopixel_binary4_pixel_lit()`, the same one the last-15-seconds countdown
+draws with, so the two read alike. The count is magenta (25, 0, 25), the one
+colour nothing else on the strip uses, and it is HIGHPRI like the chore strip:
+the pixels are the only feedback until the panel paints, so quiet hours do not
+mute it (the brightness setting still applies). When the gesture ends,
+`wake_flow_swap_count_gesture()` wipes the strip (`neopixel_stop()`) and repaints
+the state pixel through the one status wrapper. `scripts/check-status-led-wrapper.py`
+checks the shape of that release: after the last count frame, the wipe and then
+the wrapper are unconditional statements of that function, in that order, with
+no `return` before them. It does not follow a `goto` or prove that every path
+reaches them; the host test pins the behaviour. Nothing can compete for the strip meanwhile: the gesture only
+opens when the selected timer is not running, so there is no countdown or expiry
+to run, and no network window opens inside it.
 
 ## Audio
 

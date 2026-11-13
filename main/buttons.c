@@ -103,6 +103,18 @@ static void buttons_watch_end(void) {
    act of consuming presses and no consumer can forget to do it. The gate's
    resolution is therefore exactly how often somebody takes: the chore-ack
    coalescer polls at the debounce window for that reason. */
+void buttons_set_refractory(button_id_t btn, int64_t us) {
+    portENTER_CRITICAL(&s_latch_mux);
+    button_latch_set_refractory((int)btn, us);
+    portEXIT_CRITICAL(&s_latch_mux);
+}
+
+void buttons_set_settle(button_id_t btn, int64_t us) {
+    portENTER_CRITICAL(&s_latch_mux);
+    button_latch_set_settle((int)btn, us);
+    portEXIT_CRITICAL(&s_latch_mux);
+}
+
 uint8_t buttons_take_pressed(void) {
     buttons_note_levels();
     portENTER_CRITICAL(&s_latch_mux);

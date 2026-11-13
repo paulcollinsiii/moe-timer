@@ -106,6 +106,38 @@ chores_led_t chores_led_for(uint8_t mask, uint8_t n, bool released) {
     return out;
 }
 
+/* ---- Button C's count display (status_led.h, the sixth claimant) --------- */
+
+/* MAGENTA, and chosen by elimination. Every colour already on this strip: the
+   timer states are green (0,20,0), amber (25,15,0), red (25,0,0), cyan-blue
+   (0,10,25) and white (10,10,10); the chore strip is that green and red; the
+   last-15-seconds countdown is light green (20,60,20); net_window's sync pixel
+   is blue (0,0,20), green and red (30,0,0). Red and blue together with no
+   green is none of them, and it stays distinguishable from the blue ones
+   because it carries as much red as blue. test_status_led holds the list. */
+#define SWAP_COUNT_LED_ON ((status_led_rgb_t){25, 0, 25})
+
+status_led_strip_t status_led_swap_count_for(uint8_t ordinal) {
+    status_led_strip_t out = {0}; /* dark by default: a pixel must be claimed to light */
+    for (int i = 0; i < NEOPIXEL_COUNT; i++) {
+        if (neopixel_binary4_pixel_lit(i, ordinal))
+            out.px[i] = SWAP_COUNT_LED_ON;
+    }
+    return out;
+}
+
+void status_led_swap_count_show(uint8_t ordinal) {
+    status_led_strip_t t = status_led_swap_count_for(ordinal);
+    /* Every pixel, dark ones included, so nothing keeps another claimant's
+       colour; HIGHPRI for the reason chores_led_show() gives at its loop (a
+       deliberate press, and the strip is its only feedback until the panel
+       paints), which is why it is the second HIGHPRI paint in the tree and
+       not a status one. */
+    for (int p = 0; p < NEOPIXEL_COUNT; p++) {
+        neopixel_highpri_pixel(p, t.px[p].r, t.px[p].g, t.px[p].b);
+    }
+}
+
 void chores_led_show(uint8_t mask, uint8_t n, bool released) {
     chores_led_t t = chores_led_for(mask, n, released);
     /* Every pixel, including the dark ones: this takes over a strip with
@@ -130,7 +162,8 @@ void chores_led_show(uint8_t mask, uint8_t n, bool released) {
        makes repainting after an alarm the caller's job rather than
        something this function could defend against.
 
-       HIGHPRI CLASS, AND IT IS THE ONLY HIGHPRI PAINT IN THE TREE. Design
+       HIGHPRI CLASS, AND ONE OF TWO HIGHPRI PAINTS IN THE TREE (the other is
+       status_led_swap_count_show(), above, which cites this reasoning). Design
        §2.5 deliberately stopped making the panel the ack channel, so these
        four pixels are the ONLY feedback a press gets until the panel
        paints — a quiet window and a partial later: ~2.0 s from

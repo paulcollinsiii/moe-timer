@@ -109,8 +109,57 @@ build default; `CONFIG_MAGTAG_FULL_REFRESH_EVERY_N` changes it.)
 |--------|-------|-------------------|
 | A | `Chores` | Opens the chore checklist ([Chores](chores.md)). Only works when a chore list is configured and nothing is running. Otherwise the label is blank and the press does not even wake the device. |
 | B | ▶, ⏸, `Reload` or blank | Start, pause or reload; see the list below the table. B always wakes the device, even when it will do nothing. |
-| C | → | **Next timer**, cycling Screen → extra timers → Screen. Only works when extra timers exist and nothing is running. A break does not block it. |
+| C | → | **Next timer**, cycling Screen → extra timers → Screen. Press it several times quickly to skip that many timers ([below](#switching-timers-with-c)). Only works when extra timers exist and nothing is running. A break does not block it. |
 | D | ⟳ | **Sync now:** set the clock, exchange news with Home Assistant, and repaint the whole panel ([Power and sync](power_and_sync.md#d-sync-now)). Under the Config Error and No Clock locks, D is the only button that works ([Locks](locks.md)). |
+
+### Switching timers with C
+
+C counts. The press that wakes the device starts a count, and each further
+press within a short pause (700 ms by default,
+`CONFIG_MAGTAG_SWAP_COUNT_QUIET_MS`) moves on one more timer, wrapping through
+Screen. The four LEDs show where you have got to as a binary number: the
+timer's place among the enabled timers, Screen = 1, with the least significant
+bit on the **leftmost** LED. So Screen is the leftmost LED, the second timer is
+the one beside it, the third is both, and so on up to 15. The count is magenta,
+which no other light on the strip uses, and it shows even in quiet hours.
+
+When the pause passes, the timer you counted to is selected and the panel
+repaints **once**. That is the ordinary partial refresh, the same as before:
+it only becomes a full refresh when the swap crosses the break layout, changes
+the kind of screen, or happens to be the Nth paint
+(`CONFIG_MAGTAG_FULL_REFRESH_EVERY_N`). Counting all the way round to the
+timer you started on changes nothing and repaints nothing.
+
+Things to know:
+
+- **A single press now waits out the pause before the panel repaints.** The
+  device cannot tell one press from the first of several until the pause has
+  passed, so the repaint comes about 0.7 s after the press instead of
+  straight away. The LEDs answer at once.
+- **The count ends after 6 s at most**
+  (`CONFIG_MAGTAG_SWAP_COUNT_BUDGET_MS`), whatever you are still pressing, and
+  selects the timer it has reached.
+- **Two kinds of press start a count:** the press that wakes the device, and
+  a press made while a minute wake is already awake (during its sync, its wait
+  for the minute, or its repaint), which the wake acts on when it has finished.
+  Presses made before the count starts are not counted one by one: however many
+  you made, they are a single press, so the count begins from the timer after
+  the selected one and only taps made once the LEDs show the count are added.
+- **Taps made while the device is waking are not counted,** and neither is a
+  second tap within 300 ms of the device arming its buttons (the wake press
+  keeps the ordinary 300 ms). Start counting once the LEDs light.
+- **A press during a break's last seconds still moves exactly one timer.** That
+  wait ends at the first press it acts on, so it does not count.
+- **C taps are accepted closer together** while counting: 120 ms between two
+  presses of C, against 300 ms for every button the rest of the time, and a tap
+  must be released for about 50 ms (20 ms poll plus a 30 ms settle) before the
+  next one counts, against 30 ms otherwise. In Chores mode C ticks chore 2 and
+  keeps the 300 ms.
+- **Other buttons pressed during the count are ignored.** They neither end it
+  nor join it, and they are dropped when it finishes, as a press made during
+  any other wake's action is.
+- C still does nothing while the selected timer is running, and landing on an
+  expired timer does not sound its alarm again.
 
 What B does:
 

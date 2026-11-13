@@ -126,14 +126,14 @@ static const char *TAG = "wake_flow";
    reaches it after a dispatched press, and the tail in turn calls the
    expiry alert and the break-end drain that are declared further down.
    Returns the screen kind it built the frame for, which only the post-join
-   re-render reads (finish_action_and_render says why); the _as form is the
+   re-render reads (finish_action_and_render_painting says why); the _as form is the
    chore tail's, which alone can know that a break end is already on the
    glass (wake_flow_repaint_chore_acks_until_quiet says why). */
 static display_screen_t render_action_result(button_id_t btn, timer_state_t before, time_t now, bool selection_changed);
 static display_screen_t render_action_result_as(button_id_t btn, timer_state_t before, time_t now,
                                                 bool selection_changed, bool break_end_on_glass);
 
-/* The post-join repaint, shared by finish_action_and_render and the owed
+/* The post-join repaint, shared by finish_action_and_render_painting and the owed
    publish window (both defined below). `shown` is the screen the paint
    before the join built its frame for, meaningful only when `have_shown`. */
 static void wake_flow_repaint_after_join(timer_state_t painted, net_finish_t nf, bool have_shown,
@@ -184,7 +184,7 @@ static bool s_release_publish_deferred;
 
 /* End the deferral and owe what it held. Called by the gesture's last act
    and by the one path that sleeps before reaching it (the break branch of
-   finish_or_break). */
+   finish_or_break_painting). */
 static void wake_flow_release_deferred_publish(void) {
     s_gesture_defers_release_publish = false;
     if (s_release_publish_deferred) {
@@ -251,8 +251,8 @@ static bool wake_flow_open_event_window(void) {
     return true;
 }
 
-/* For a tail that posts the snapshot itself (finish_action_and_render, the
-   break-start branch of finish_or_break): open the owed window, if any, so
+/* For a tail that posts the snapshot itself (finish_action_and_render_painting,
+   the break-start branch of finish_or_break_painting): open the owed window, if any, so
    the tail's own post_stats / join serve it. */
 static void wake_flow_open_owed_window(void) {
     if (!s_event_publish_owed) {
@@ -564,6 +564,14 @@ bool wake_flow_break_ended_this_wake(void) {
     return s_break_ended;
 }
 
+/* The day rolled over (or a same-day snapshot replaced the day) in THIS
+   wake's prologue, so the timers under the glass are not the ones it was
+   painted from. Only the counted-swap gesture reads it, to know that a
+   lap which commits nothing still owes the panel a paint
+   (wake_policy_swap_paint_owed). Set in wake_flow_handle_day_rollover, a
+   plain static for the same reason as s_break_ended. */
+static bool s_day_rolled;
+
 /* The Timers/Chores toggle landed this wake, so the panel is about to swap
    one FULL-SCREEN LAYOUT for another (display_screen_for, display.h).
 
@@ -719,8 +727,8 @@ static void wake_flow_paint_chore_strip(void) {
    chore mode" arguments is not, and those arguments rot. The grep is a
    pre-commit hook (scripts/check-status-led-wrapper.py), so the claim in
    the sentence above is enforced rather than merely made: reverting any
-   one of the twelve call sites to a raw call fails the commit. Before that
-   hook existed ten of the twelve were unpinned — the wrapper was correct
+   one of the thirteen call sites to a raw call fails the commit. Before that
+   hook existed ten of the twelve then in the file were unpinned — the wrapper was correct
    and nothing would have noticed it becoming incorrect.
 
    It exists because THE TWO PAINTERS COLLIDE ON PIXEL 0. status_led.c
@@ -1114,6 +1122,103 @@ _Static_assert(WAKE_FLOW_FINAL_MINUTE_WORST_MS <= (uint32_t)CONFIG_MAGTAG_MAX_AW
                "with their paints, and the event window) exceeds the awake failsafe: raise MAGTAG_MAX_AWAKE_SEC "
                "or shorten the expiry or break alarm");
 
+/* ---- Button C's counted clicks: the knobs and the worst case --------------
+
+   QUIET WINDOW AND BUDGET are Kconfig (MAGTAG_SWAP_COUNT_QUIET_MS,
+   MAGTAG_SWAP_COUNT_BUDGET_MS) with NO #ifndef fallback, exactly as the chore
+   gesture's two are: a renamed or deleted symbol then breaks the firmware
+   build instead of compiling against a figure nobody can see, and
+   test/CMakeLists.txt supplies non-default values so a literal left at a call
+   site fails test_wake_flow.
+
+   THE POLL is not a knob. 20 ms, finer than the chore coalescer's 50: the
+   release gate (button_latch.h) learns a pad came back up only from a level
+   sample, and every take is one, so the poll is the gate's resolution — a
+   press made before the sample that sees the release is LOST. Counting taps
+   at 150-250 ms cannot afford the 50 ms that costs the checklist. It is
+   cheap: one masked take (a critical section and four pad reads) per 20 ms,
+   for at most the budget. */
+#define SWAP_COUNT_POLL_MS 20u
+#define SWAP_COUNT_QUIET_MS CONFIG_MAGTAG_SWAP_COUNT_QUIET_MS
+#define SWAP_COUNT_BUDGET_MS CONFIG_MAGTAG_SWAP_COUNT_BUDGET_MS
+_Static_assert(SWAP_COUNT_QUIET_MS > 0, "a zero quiet window commits before the second press can land");
+_Static_assert(SWAP_COUNT_BUDGET_MS > 0, "a zero budget makes every swap commit without waiting for a count");
+_Static_assert(SWAP_COUNT_POLL_MS * 1000u < BUTTON_LATCH_SWAP_REFRACTORY_US,
+               "a poll as long as the short window would sample a pad less often than C may legally repeat");
+
+/* THE WORST CASE THE BUDGET ALLOWS, in two layers. Every term is a bound and
+   not an estimate of a typical wake, and the figures below are at the Kconfig
+   defaults (quiet 700 ms, budget 6000 ms, break alarm 3 cycles, one event
+   window 42.5 s, one full paint 4 s). The test build overrides the swap knobs
+   (410 / 1750), so it exercises the arithmetic but not these figures.
+
+   LAYER ONE, THE GESTURE'S OWN COST, held under HALF the awake failsafe for the
+   reason the chore gesture's is (the wake shares its ceiling with whatever
+   came before it):
+     budget          the gesture's WAITING, summed over every quiet window; the
+                     loop leaves on whichever of window and budget comes first
+                     and never overshoots either (the step is clamped), so the
+                     last quiet window after the final press is INSIDE it;
+     paints          the commit's paint and the repaint a network join can owe,
+                     each as a FULL refresh plus the driver's 1 s gap
+                     (WAKE_FLOW_WORST_PAINT_MS, 4 s) — a partial is cheaper and
+                     full is the figure that cannot be undercut. The commit's
+                     paint is the FINAL one, so this includes it. The other
+                     shape the tail can take is the break START path, which
+                     replaces the paints with the break alarm and its one paint,
+                     so the term is the longer of the two;
+     event window    the ONE window the tail serves (WAKE_FLOW_EVENT_WINDOW_MS,
+                     the worst case of its timeouts); a swap raises no debt of
+                     its own, but a B press in an earlier join poll can have.
+   No chime term: a swap plays no sound. 6000 + 11600 + 42500 = 60.1 s against
+   the 90 s half-failsafe.
+
+   LAYER TWO, EACH ENTRY PATH WITH WHAT PRECEDES THE GESTURE ON IT, held under
+   the WHOLE failsafe (nothing is left to share it with, because the terms are
+   named):
+     the EXT1 wake press   the rollover's own network window, which runs ahead
+                           of it on the first press after midnight
+                           (wake_flow_handle_day_rollover): 42.5 + 60.1 =
+                           102.6 s;
+     a latched C on a tick wake   the rollover's window and the wake's own sync
+                           window (the rollover resets next_ntp_sync, so the
+                           sync follows it), the render-grid wait
+                           (WAKE_FLOW_GRID_WAIT_MAX_SEC) and the minute's own
+                           paint, then the gesture: 42.5 + 42.5 + 25 + 4 + 60.1
+                           = 174.1 s.
+   WHAT NEITHER LAYER CHARGES, stated so that nobody reads more into the assert
+   than it says: the follow-up window of an owed-window chain (WAKE_FLOW_OWED_-
+   WINDOWS_MAX is 2) is admitted by wake_flow_headroom_for_window() against the
+   failsafe itself, so it cannot be the one that overruns; an expiry alert or a
+   second owed window ahead of the drain on a tick wake (a timer that expired
+   in this very tick, a B pressed in the sync's join poll), whose own worst
+   case is the final-minute assert's above; an update check or download the
+   rollover's window arms (ota_flow.c arms its own failsafe for it, ota_timing.h);
+   and the event watch that follows
+   the gesture (maybe_wait_for_event), bounded by SLEEP_PLAN_WATCH_SEC and the
+   failsafe. A tick wake that stacks all of those is over the failsafe with or
+   without a gesture — the failsafe is the arbiter there, and the gesture adds
+   only its 6 s of waiting to it. */
+#define SWAP_COUNT_WORST_TAIL_MS \
+    WAKE_FLOW_MAX_U32(2u * WAKE_FLOW_WORST_PAINT_MS, WAKE_FLOW_BREAK_ALERT_MS + 1u * WAKE_FLOW_WORST_PAINT_MS)
+#define SWAP_COUNT_WORST_GESTURE_MS \
+    ((uint32_t)SWAP_COUNT_BUDGET_MS + SWAP_COUNT_WORST_TAIL_MS + (uint32_t)WAKE_FLOW_EVENT_WINDOW_MS)
+#define SWAP_COUNT_WORST_EXT1_MS ((uint32_t)WAKE_FLOW_EVENT_WINDOW_MS + SWAP_COUNT_WORST_GESTURE_MS)
+#define SWAP_COUNT_WORST_TICK_MS                                                                \
+    (2u * (uint32_t)WAKE_FLOW_EVENT_WINDOW_MS + (uint32_t)WAKE_FLOW_GRID_WAIT_MAX_SEC * 1000u + \
+     WAKE_FLOW_WORST_PAINT_MS + SWAP_COUNT_WORST_GESTURE_MS)
+_Static_assert(SWAP_COUNT_WORST_GESTURE_MS <= (uint32_t)CONFIG_MAGTAG_MAX_AWAKE_SEC * 1000u / 2u,
+               "MAGTAG_SWAP_COUNT_BUDGET_MS allows a counted-swap gesture whose own worst case (the budget, the "
+               "commit's paint and the join's repaint or the break alarm, and one event window) exceeds half the "
+               "awake failsafe");
+_Static_assert(SWAP_COUNT_WORST_EXT1_MS <= (uint32_t)CONFIG_MAGTAG_MAX_AWAKE_SEC * 1000u,
+               "MAGTAG_SWAP_COUNT_BUDGET_MS allows a counted swap on the EXT1 wake press whose worst case (the "
+               "rollover's network window, then the gesture) exceeds the awake failsafe");
+_Static_assert(SWAP_COUNT_WORST_TICK_MS <= (uint32_t)CONFIG_MAGTAG_MAX_AWAKE_SEC * 1000u,
+               "MAGTAG_SWAP_COUNT_BUDGET_MS allows a counted swap on a tick wake whose worst case (the rollover's and "
+               "the sync's network windows, the grid wait, the minute's paint, then the gesture) exceeds the awake "
+               "failsafe");
+
 /* The three ack buttons and the rows they tick, as a table rather than as
    `btn - BTN_B`: the arithmetic happens to work today only because the
    enum and BUTTON_CHORE_IDX_* run in step, which is a coincidence of two
@@ -1412,7 +1517,7 @@ static void wake_flow_coalesce_chore_acks(time_t *now, uint32_t *spent_ms) {
    promotion exists to put the break end ON the glass; once a render has
    painted it, a later tick of a box is an ordinary partial. A break end
    drained BEFORE this loop has already been painted by the handler's render
-   (finish_or_break), and one drained inside it — by an ack, which re-asserts
+   (finish_or_break_painting), and one drained inside it — by an ack, which re-asserts
    chore mode — is painted by the very next render, which is still promoted.
    Scoped to this loop because it is the only caller that paints the same
    layout repeatedly in one wake; the other callers keep the wake-sticky
@@ -1445,6 +1550,123 @@ static void wake_flow_repaint_chore_acks_until_quiet(time_t *now, uint32_t *spen
        admitted by awake headroom and not charged to the budget. */
     wake_flow_release_deferred_publish();
     wake_flow_publish_owed_window();
+}
+
+/* ---- BUTTON C'S COUNTED CLICKS ------------------------------------------
+
+   The wake press on C, in Timers mode, opens a gesture instead of swapping
+   once. The CANDIDATE starts at the timer after the one that is selected
+   (timer_slot_after); every further C press inside a sliding quiet window
+   moves it one more, wrapping through Screen, and each step shows the
+   candidate's number on the strip in binary (status_led_swap_count_show:
+   ordinal among enabled timers, Screen = 1, least significant bit on the
+   leftmost pixel). When the window lapses — or the budget is spent — the
+   candidate is committed ONCE (timer_select_slot) and the panel paints ONCE,
+   through the render decision a single swap has always used, so the
+   promotions to a full refresh (the break layout, a screen-kind change, a
+   lock screen on the glass, the Nth paint) apply unchanged and nothing here
+   forces one. The state is two locals and a counter: nothing is written, and
+   no rtc_state_t field exists for it, until the commit.
+
+   WHAT IS DECIDED WHERE. The step, the ordinal, the commit-or-nothing
+   decision (a lap that lands home writes nothing: timer_select_slot refuses
+   it), the strip's picture and whether a no-commit lap still owes a paint are
+   all pure and tested where they live (test_timer, test_status_led,
+   test_wake_policy). This function is the loop around them and the two
+   strip/window side effects; test_wake_flow pins what the loop does.
+
+   TWO PATHS OPEN ONE, through the one wake_flow_counted_swap: the EXT1 wake
+   press, and a C latched while a tick wake was awake (a press in its sync,
+   grid wait or render), which that wake's latch drain takes. Presses made
+   before the drain are one bit in the latch and count once; the ones after it
+   are counted. A C made in the break tail's poll is still one swap through
+   wake_flow_dispatch_button_action: the tail ends its watch on the first
+   applied press by design, and what the press repaints has already been
+   joined. In Chores mode C is the second chore tick and the gesture is not
+   consulted at all.
+
+   THE SHORT REFRACTORY WINDOW belongs to the gesture and nothing else: it is
+   installed here, after the mode is final for this wake (the break-end drain
+   has run; the mode cannot change inside the gesture, because the only
+   mode button, A, is not acted on while it runs), and put back before the
+   commit on EVERY exit. The wake press that opened it was seeded into the latch
+   at the default window, and stays there (button_latch_seed_press says why), so
+   its own release bounce can never read as a second count.
+
+   WHAT HAPPENS TO OTHER BUTTONS: they are not taken here (the take is masked
+   to C), so a B, D or A pressed mid-gesture stays latched for its whole
+   length, does not end it, does not join it and does not stretch the window.
+   Afterwards the handler's stale-edge drain (buttons_take_pressed, just below
+   the dispatch) drops it, exactly as it drops a B made during any other
+   Timers-mode button wake. Nothing acts on it.
+
+   THE STRIP. The count owns all four pixels for the length of the gesture
+   (status_led.h, the sixth claimant). Nothing else can claim it meanwhile: the
+   gesture is entered only when the active timer is not RUNNING, so no
+   countdown or expiry can be live, and no window opens inside it. On EVERY
+   exit of a gesture that opened (a commit, a lap home, a spent budget) the
+   strip is released the way the countdown releases it: wipe
+   (neopixel_stop), then the state pixel through the one status wrapper.
+   test_swap4 pins the order.
+
+   ENDS ON WHICHEVER COMES FIRST of the quiet window and the budget, and the
+   step is clamped to the nearer so neither overshoots (the chore coalescer's
+   rule). The budget is waiting only, which is all that costs here: the paint
+   that follows is charged by SWAP_COUNT_WORST_GESTURE_MS. */
+typedef enum {
+    SWAP_GESTURE_REFUSED = 0, /* a swap is not allowed (RUNNING, or no extras): no gesture opened */
+    SWAP_GESTURE_COMMITTED,   /* the selection moved, once */
+    SWAP_GESTURE_HOME,        /* the count came round to the timer it started on: nothing written */
+} swap_gesture_t;
+
+/* C's press guard for the gesture: the short refractory window AND the longer
+   release settle, installed together when the gesture opens and put back
+   together on the way out (button_latch.h says what each is for). One helper
+   so the two can never be separated. */
+static void wake_flow_swap_press_guard(bool counting) {
+    buttons_set_refractory(BTN_C, counting ? BUTTON_LATCH_SWAP_REFRACTORY_US : BUTTON_LATCH_REFRACTORY_US);
+    buttons_set_settle(BTN_C, counting ? BUTTON_LATCH_SWAP_SETTLE_US : BUTTON_LATCH_RELEASE_SETTLE_US);
+}
+
+static swap_gesture_t wake_flow_swap_count_gesture(void) {
+    if (!timer_swap_allowed()) {
+        /* Today's refusal, with today's feedback: no strip, no wait, and the
+           handler still paints once. */
+        const timer_state_t state = timer_get_state();
+        (void)state; /* only the log reads it, and the host build's log macro drops its arguments */
+        ESP_LOGI(TAG, "button C swap unavailable (state %d)", (int)state);
+        return SWAP_GESTURE_REFUSED;
+    }
+    int candidate = timer_slot_after(timer_active_slot());
+    wake_flow_swap_press_guard(true);
+    status_led_swap_count_show((uint8_t)timer_slot_ordinal(candidate));
+
+    uint32_t idle_ms = 0;  /* since the last press counted: the sliding window */
+    uint32_t spent_ms = 0; /* all of it: the hard bound */
+    while (idle_ms < SWAP_COUNT_QUIET_MS && spent_ms < SWAP_COUNT_BUDGET_MS) {
+        uint32_t step = SWAP_COUNT_POLL_MS;
+        if (step > (uint32_t)SWAP_COUNT_QUIET_MS - idle_ms) {
+            step = (uint32_t)SWAP_COUNT_QUIET_MS - idle_ms;
+        }
+        if (step > (uint32_t)SWAP_COUNT_BUDGET_MS - spent_ms) {
+            step = (uint32_t)SWAP_COUNT_BUDGET_MS - spent_ms;
+        }
+        hal_delay_ms(step);
+        idle_ms += step;
+        spent_ms += step;
+        if (buttons_take_pressed_mask((uint8_t)(1u << BTN_C)) != 0) {
+            candidate = timer_slot_after(candidate);
+            status_led_swap_count_show((uint8_t)timer_slot_ordinal(candidate));
+            idle_ms = 0;
+        }
+    }
+
+    wake_flow_swap_press_guard(false);
+    const bool committed = timer_select_slot(candidate);
+    neopixel_stop(); /* wipe the count; pixels 1-3 have no state painter to overwrite them */
+    wake_flow_show_status_leds();
+    ESP_LOGI(TAG, "button C: counted to slot %d, %s", candidate, committed ? "selected" : "back where it started");
+    return committed ? SWAP_GESTURE_COMMITTED : SWAP_GESTURE_HOME;
 }
 
 bool wake_flow_break_end(void) {
@@ -1894,6 +2116,32 @@ static bool wake_flow_presses_are_the_locks(void) {
     return s_lock_screen_on_glass || lock_gate_sleep_mode() != WAKE_SLEEP_NORMAL;
 }
 
+/* THE ONE ENTRY INTO BUTTON C'S COUNTED CLICKS, for every path that opens the
+   gesture: the EXT1 wake press (wake_flow_handle_button_wake) and a C latched
+   while a tick wake was awake, taken by that wake's latch drain
+   (wake_flow_handle_timer_tick). Callers have already established Timers mode;
+   the gesture itself decides the rest (active timer not RUNNING, an extra
+   timer to go to) and answers REFUSED when it does not open.
+
+   `now` is re-read HERE, after the gesture, and is what the caller must paint
+   with: the gesture waited 0.7 to 6 s, and a paint that carried the clock from
+   before it would show the minute the press arrived in.
+
+   `glass_current` is the tick wake: its minute render ran after the rollover
+   and the break-end drain, so the glass already shows both and a lap home owes
+   it nothing. On the button wake no render has happened yet, so a break that
+   ended or a day that rolled is still owed a paint, which the swap's paint
+   would have carried. `*paint` false is the only way a gesture owes the panel
+   nothing. */
+static swap_gesture_t wake_flow_counted_swap(time_t *now, bool glass_current, bool *paint) {
+    const swap_gesture_t gesture = wake_flow_swap_count_gesture();
+    *now = hal_time_now();
+    *paint =
+        wake_policy_swap_paint_owed(gesture == SWAP_GESTURE_HOME, !glass_current && wake_flow_break_ended_this_wake(),
+                                    !glass_current && s_day_rolled);
+    return gesture;
+}
+
 bool wake_flow_poll_pause_button(void) {
     /* Masked take: only the B bit is consumed — a latched C press stays in
        the latch for the tick-wake drain (a poll during the grid wait must
@@ -2164,7 +2412,7 @@ bool wake_flow_maybe_start_break(time_t now) {
        APP_MODE_CHORES after the break-end drain, so the checklist now
        survives a break end as well as a mode toggle — this site is after
        every one of those re-asserts, because the dispatch that performs
-       them has returned by the time finish_or_break() gets here.
+       them has returned by the time finish_or_break_painting() gets here.
 
        Fixing it HERE and not by reordering display_screen_for(): design
        4.2 wants chore mode reachable throughout a break ("BREAK is not
@@ -2390,6 +2638,7 @@ void wake_flow_handle_day_rollover(time_t *now) {
        syncs after a power-on without NTP (BUG-14): the day RAM holds was
        dated by the unset clock, try_restore does not count it as intact,
        and today's snapshot comes back. */
+    s_day_rolled = true; /* either way the timers changed under the glass */
     if (timer_persist_try_restore(*now)) {
         return;
     }
@@ -2718,9 +2967,19 @@ static display_screen_t render_action_result_as(button_id_t btn, timer_state_t b
 
 /* Post-action tail shared by both wake handlers and the tick-wake latch
    drain: render the resulting state, release the MQTT phase, join the
-   window, and re-render when the join changed what the panel shows. */
-static void finish_action_and_render(button_id_t btn, timer_state_t before, time_t now, bool selection_changed) {
-    const display_screen_t shown = render_action_result(btn, before, now, selection_changed);
+   window, and re-render when the join changed what the panel shows.
+
+   `paint` false is the one caller that owes the panel NOTHING: Button C's
+   counted-clicks gesture that came round to where it started and found no
+   other reason for a paint (wake_policy_swap_paint_owed). The first render is
+   skipped and everything after it still runs — the snapshot, the join, the
+   owed window — and the post-join repaint judges the screen kind from the
+   timer state alone, the way the owed-window caller does (it has no frame of
+   its own either). */
+static void finish_action_and_render_painting(button_id_t btn, timer_state_t before, time_t now, bool selection_changed,
+                                              bool paint) {
+    const display_screen_t shown =
+        paint ? render_action_result(btn, before, now, selection_changed) : (display_screen_t)0;
     /* The toggle latch carries into the RE-render too, and not merely for
        symmetry: the join can empty the chore list, and make_display_state's
        emptied-list guard then reverts the mode and paints the OTHER layout
@@ -2754,7 +3013,7 @@ static void finish_action_and_render(button_id_t btn, timer_state_t before, time
     wake_flow_post_stats_snapshot();
     timer_state_t painted = timer_get_state();
     net_finish_t nf = net_apply_finish();
-    wake_flow_repaint_after_join(painted, nf, true, shown, force_full);
+    wake_flow_repaint_after_join(painted, nf, paint, shown, force_full);
     /* What the window itself or the re-render owes: an expiry alert fired
        by the reconcile or by the post-join re-render, or a B press made in
        the join poll. The first window's snapshot predates both, and no
@@ -2763,7 +3022,7 @@ static void finish_action_and_render(button_id_t btn, timer_state_t before, time
 }
 
 /* Re-render when the join changed what the panel shows (see the comment in
-   finish_action_and_render above, which is where the cases are listed). An
+   finish_action_and_render_painting above, which is where the cases are listed). An
    ALERTED join already repainted the whole display and is never painted
    again. `have_shown` false is the owed-window caller, which has no frame
    of its own to compare against: the screen kind is then judged from the
@@ -2844,8 +3103,9 @@ static void wake_flow_repaint_after_join(timer_state_t painted, net_finish_t nf,
    break interval (e.g. a resume landing after it), paint the break and
    sleep through it; otherwise render the action's result and drain the
    window. */
-static void finish_or_break(button_id_t btn, timer_state_t before, time_t now, bool selection_changed) {
-    /* Note the ordering: this runs BEFORE finish_action_and_render, whose
+static void finish_or_break_painting(button_id_t btn, timer_state_t before, time_t now, bool selection_changed,
+                                     bool paint) {
+    /* Note the ordering: this runs BEFORE finish_action_and_render_painting, whose
        tick is what would detect an expiry. A RUNNING slot past its wall
        (a press that landed after it) is expired at the wall by the break's
        start, which swallows the expiry alarm exactly as the tick-side sites
@@ -2861,7 +3121,7 @@ static void finish_or_break(button_id_t btn, timer_state_t before, time_t now, b
         net_apply_finish();                   /* drain + apply deferred before sleeping */
         enter_deep_sleep(lock_gate_sleep_mode());
     }
-    finish_action_and_render(btn, before, now, selection_changed);
+    finish_action_and_render_painting(btn, before, now, selection_changed, paint);
 }
 
 /* ---- the pre-sleep event watch ------------------------------------------ */
@@ -3330,8 +3590,8 @@ void wake_flow_handle_timer_tick(void) {
        so re-checking HERE — after the render switch — is what yields
        expiry-then-break in one wake, which is the order the alerts have
        to arrive in. This is the only call site that provides that
-       ordering: finish_or_break has the opposite shape, its break gate
-       running before the tick in finish_action_and_render. A no-op unless
+       ordering: finish_or_break_painting has the opposite shape, its break
+       gate running before the tick in finish_action_and_render_painting. A no-op unless
        the balance is genuinely over, so it costs nothing on every other
        path.
 
@@ -3351,14 +3611,32 @@ void wake_flow_handle_timer_tick(void) {
        priority keeps it from swallowing the press next to it, and D joins
        it only while the mode says CHORES, where it is ✓3 rather than the
        sync button. Must run BEFORE maybe_wait_for_event: the final-minute
-       watch discards pre-watch latched presses at entry. */
+       watch discards pre-watch latched presses at entry.
+
+       A C in Timers mode is not a single swap here but the first press of
+       Button C's counted clicks (wake_flow_counted_swap), exactly as the EXT1
+       wake press is: a press made in the grid wait or the sync lands in this
+       drain, and the presses that follow it are counted. Presses made BEFORE
+       this point are one bit in the latch and count once. A refused gesture
+       (RUNNING, no extra timer) does nothing, as a refused latched press
+       always has. The minute's render has already painted the glass, so a lap
+       home owes it nothing (`glass_current`). */
     int pick = wake_flow_pick_latched_press();
     if (pick >= 0) {
         timer_state_t painted = timer_get_state();
         bool swapped = false;
-        if (wake_flow_dispatch_latched_press((button_id_t)pick, &now, painted, !synced_this_wake, &swapped)) {
+        bool paint = true;
+        bool acted;
+        if ((button_id_t)pick == BTN_C && timer_mode() != APP_MODE_CHORES) {
+            const swap_gesture_t gesture = wake_flow_counted_swap(&now, true, &paint);
+            swapped = (gesture == SWAP_GESTURE_COMMITTED);
+            acted = (gesture != SWAP_GESTURE_REFUSED);
+        } else {
+            acted = wake_flow_dispatch_latched_press((button_id_t)pick, &now, painted, !synced_this_wake, &swapped);
+        }
+        if (acted) {
             wake_flow_show_status_leds();
-            finish_or_break((button_id_t)pick, painted, now, swapped);
+            finish_or_break_painting((button_id_t)pick, painted, now, swapped, paint);
         }
     }
     maybe_wait_for_event();
@@ -3525,12 +3803,14 @@ void wake_flow_handle_button_wake(void) {
     wake_flow_break_end();
     timer_state_t before = timer_get_state();
     bool swapped = false;
+    bool paint = true; /* false only after a counted swap that came home and owes nothing */
     /* A release made by this wake's acks is published once, after the
        gesture's last paint (wake_flow_repaint_chore_acks_until_quiet). */
     s_gesture_defers_release_publish = true;
 
     switch (btn) {
-        /* A rides with B and C: same dispatch, same tail. It shares their
+        /* A rides with B (and with C in Chores mode, below): same dispatch,
+           same tail. It shares their
            arm rather than getting one of its own because there is nothing
            of the wake to special-case — the mode is a render selector, so
            a toggle owes the panel the same repaint a swap does and
@@ -3556,9 +3836,24 @@ void wake_flow_handle_button_wake(void) {
            evidence correcting an earlier mistake into a dead pointer. */
         case BTN_A:
         case BTN_B:
-        case BTN_C:
             wake_flow_dispatch_button_action(btn, &now, before, true, &swapped);
             break;
+        case BTN_C: {
+            /* IN CHORES MODE C IS ✓2 and goes through the dispatch like B
+               and A. In Timers mode it opens Button C's counted clicks
+               instead of a single swap (wake_flow_swap_count_gesture says
+               what that is, and what it does with other buttons' presses).
+               `paint` is the gesture's answer to whether the panel owes a
+               paint at all: only a lap that came home, with nothing else
+               this wake owing the glass one, says no. A refused swap keeps
+               today's single repaint. */
+            if (timer_mode() == APP_MODE_CHORES) {
+                wake_flow_dispatch_button_action(btn, &now, before, true, &swapped);
+                break;
+            }
+            swapped = (wake_flow_counted_swap(&now, false, &paint) == SWAP_GESTURE_COMMITTED);
+            break;
+        }
         case BTN_D:
             /* CHORE MODE REBINDS D TO ✓3 (design 2.4). An update check and
                a network window are not what that row promises, so the
@@ -3656,7 +3951,7 @@ void wake_flow_handle_button_wake(void) {
        took A itself, and that was the dead mode button. */
     buttons_take_pressed();
 
-    finish_or_break(btn, before, now, swapped); /* e.g. resume with accrual already past the interval */
+    finish_or_break_painting(btn, before, now, swapped, paint); /* e.g. resume with accrual already past the interval */
 
     /* THE PRESS MADE DURING THE PANEL WORK, which is the other half of the
        same defect: the refresh above holds the CPU with nothing polling, so
@@ -3666,7 +3961,7 @@ void wake_flow_handle_button_wake(void) {
        where nobody pressed anything; only a take that APPLIES opens a quiet
        window, and M2-T15 made that window come BEFORE the repaint rather
        than the repaint following at once — see the helper.
-       The repaint is render_action_result and NOT finish_action_and_render:
+       The repaint is render_action_result and NOT finish_action_and_render_painting:
        the MQTT phase was released and joined by the tail above, and doing
        that twice would post the stat snapshot twice. */
     wake_flow_repaint_chore_acks_until_quiet(&now, &chore_spent_ms);

@@ -123,6 +123,96 @@ class TestWhatDoesNotCount(GateCase):
         self.assertClean(WRAPPER + "void (*fp)(void) = status_led_show_timer_state;\n")
 
 
+GESTURE = """\
+static swap_gesture_t wake_flow_swap_count_gesture(void) {
+    status_led_swap_count_show(2);
+    while (more()) {
+        status_led_swap_count_show(3);
+    }
+    neopixel_stop();
+    wake_flow_show_status_leds();
+    return SWAP_GESTURE_HOME;
+}
+"""
+
+
+class TestTheCountDisplayClaimant(GateCase):
+    """The sixth claimant: Button C's count display (status_led.h)."""
+
+    def test_a_gesture_that_releases_the_strip_passes(self):
+        self.assertClean(WRAPPER + GESTURE)
+
+    def test_the_count_display_outside_the_gesture_fails(self):
+        out = self.assertFails(
+            WRAPPER + GESTURE + "void elsewhere(void) { status_led_swap_count_show(1); }\n",
+            "outside wake_flow_swap_count_gesture",
+        )
+        self.assertIn("line", out)
+
+    def test_a_gesture_that_never_wipes_the_strip_fails(self):
+        self.assertFails(WRAPPER + GESTURE.replace("    neopixel_stop();\n", ""), "neopixel_stop", "never released")
+
+    def test_a_gesture_that_never_repaints_the_state_pixel_fails(self):
+        self.assertFails(
+            WRAPPER + GESTURE.replace("    wake_flow_show_status_leds();\n", ""),
+            "wake_flow_show_status_leds",
+            "never released",
+        )
+
+    def test_a_release_before_the_last_show_does_not_count(self):
+        """The release has to come AFTER the last frame, or it wipes nothing."""
+        body = GESTURE.replace(
+            "    neopixel_stop();\n    wake_flow_show_status_leds();\n    return",
+            "    return",
+        ).replace(
+            "    status_led_swap_count_show(2);\n",
+            "    neopixel_stop();\n    wake_flow_show_status_leds();\n    status_led_swap_count_show(2);\n",
+        )
+        self.assertFails(WRAPPER + body, "never released")
+
+    def test_an_early_return_between_the_last_show_and_the_release_fails(self):
+        """The release names appear after the last show, so a name-presence
+        check passes; the path that returns before them leaves magenta lit."""
+        body = GESTURE.replace(
+            "    neopixel_stop();\n",
+            "    if (bail()) {\n        return SWAP_GESTURE_HOME;\n    }\n    neopixel_stop();\n",
+        )
+        self.assertFails(WRAPPER + body, "a return between the last", "leaves the strip lit")
+
+    def test_the_wrapper_before_the_wipe_fails(self):
+        """The wipe clears pixels the wrapper has just painted, so the state
+        pixel is dark: the order is part of the contract."""
+        body = GESTURE.replace(
+            "    neopixel_stop();\n    wake_flow_show_status_leds();\n",
+            "    wake_flow_show_status_leds();\n    neopixel_stop();\n",
+        )
+        self.assertFails(WRAPPER + body, "wake_flow_show_status_leds", "before neopixel_stop")
+
+    def test_a_release_inside_a_dead_branch_fails(self):
+        body = GESTURE.replace(
+            "    neopixel_stop();\n    wake_flow_show_status_leds();\n",
+            "    if (0) {\n        neopixel_stop();\n        wake_flow_show_status_leds();\n    }\n",
+        )
+        self.assertFails(WRAPPER + body, "not an unconditional statement")
+
+    def test_a_release_guarded_without_braces_fails(self):
+        body = GESTURE.replace("    neopixel_stop();\n", "    if (committed) neopixel_stop();\n")
+        self.assertFails(WRAPPER + body, "neopixel_stop", "not an unconditional statement")
+
+    def test_a_return_after_the_release_is_fine(self):
+        """The ordinary tail: release, log, return."""
+        self.assertClean(WRAPPER + GESTURE.replace("    return", "    ESP_LOGI(TAG, \"done\");\n    return"))
+
+    def test_a_show_with_no_gesture_function_at_all_fails(self):
+        self.assertFails(WRAPPER + "void f(void) { status_led_swap_count_show(1); }\n", "has no owner")
+
+    def test_a_prose_mention_is_not_a_show(self):
+        self.assertClean(WRAPPER + "/* status_led_swap_count_show() paints the count */\n")
+
+    def test_a_file_that_never_shows_the_count_is_fine(self):
+        self.assertClean(WRAPPER)
+
+
 class TestSpellings(GateCase):
     def test_whitespace_before_the_paren_still_counts(self):
         self.assertFails(WRAPPER + "void f(void) { status_led_show_timer_state (); }\n", "found 2")

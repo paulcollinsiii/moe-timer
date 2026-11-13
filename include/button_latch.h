@@ -45,7 +45,10 @@
    RELEASE-TO-PRESS gap, a press is lost whenever g < (P - R) + this window.
    The measure is RELEASE-to-press, not press-to-press: the hold in between is
    the person's. A window as wide as the 50 ms poll cadence loses every gap up
-   to 50 ms and some up to 100 ms; 10 ms keeps that loss small.
+   to 50 ms and some up to 100 ms; 10 ms keeps that loss small. This is the
+   DEFAULT: one button's can be changed (button_latch_set_settle; today only
+   C's, BUTTON_LATCH_SWAP_SETTLE_US, while its counted-clicks gesture runs), and
+   "this window" above is then that button's.
 
    10 ms BECAUSE THAT IS THE FIGURE THIS BOARD ALREADY TRUSTS FOR THESE
    PADS, not because it is a round number: buttons.c waits exactly it
@@ -64,7 +67,10 @@
    toggle of field finding 3. */
 #define BUTTON_LATCH_RELEASE_SETTLE_US 10000
 
-/* THE SAME-BUTTON REFRACTORY WINDOW: after a press of button X is accepted,
+/* THE SAME-BUTTON REFRACTORY WINDOW — THE DEFAULT FOR EVERY BUTTON (one
+   button's can be changed: button_latch_set_refractory, below; today only C's,
+   while its counted-clicks gesture runs, BUTTON_LATCH_SWAP_REFRACTORY_US).
+   After a press of button X is accepted,
    every further edge on X is ignored until this long after it. Edges on the
    OTHER buttons are untouched, so tapping a second chore right after the
    first is instant. It is measured from the last ACCEPTED press (and from the
@@ -92,11 +98,68 @@
    device would only need a guard script to keep it honest. */
 #define BUTTON_LATCH_REFRACTORY_US 300000
 
+/* THE SHORTER WINDOW FOR BUTTON C WHILE C IS THE TIMER-SWAP BUTTON, and only
+   then. The counted-clicks gesture (wake_flow.c) wants a person to be able to
+   tap C at 150-250 ms, and the 300 ms window above would register about every
+   other tap. wake_flow installs it with button_latch_set_refractory() when
+   the gesture opens (the wake press is C, and the mode is Timers — in Chores
+   mode C is the second chore tick and keeps 300 ms), and puts the default back
+   when the gesture closes. Every other button, and C at any other time, keeps
+   BUTTON_LATCH_REFRACTORY_US.
+
+   120 ms IS A STARTING FIGURE, and so is the 300 ms it shortens: BOTH ARE TO
+   BE SETTLED ON THE BENCH (20 single taps of C in Timers mode, none may count
+   as two; then a rapid run of taps, each of which should count). Too long
+   loses deliberate fast taps; too short lets the release bounce of a
+   slow tap through, which in the gesture is skipping two timers instead of
+   one. Not a Kconfig knob, for the reason the default is not one.
+
+   WHAT 120 ms DOES NOT COVER, which is why it travels with a longer settle
+   (below): a tap held longer than the window has left it behind by the time
+   the pad is released, so its release bounce is judged by the release gate
+   and the settle anchor alone, and the 10 ms default is shorter than a dome's
+   ringing can run. The 300 ms window covered that for every hold up to 300 ms;
+   the shorter one covers it only up to 120 ms. */
+#define BUTTON_LATCH_SWAP_REFRACTORY_US 120000
+
+/* THE SETTLE THAT GOES WITH IT: button C's, while the counted-clicks gesture
+   runs, and installed and put back with BUTTON_LATCH_SWAP_REFRACTORY_US
+   (button_latch_set_settle, below). Every other button, and C at any other
+   time, keeps BUTTON_LATCH_RELEASE_SETTLE_US.
+
+   30 ms IS A STARTING FIGURE, TO BE SETTLED ON THE BENCH, and the trade is
+   stated rather than hidden: the shortest release-to-press gap that still
+   counts becomes the poll (20 ms) plus this (30 ms), against 20 + 10 at the
+   default. Wider closes more of the ringing and costs a faster tap; the bench
+   check is 20 single taps held 150-250 ms (none may count as two), then a
+   rapid run (each should count). */
+#define BUTTON_LATCH_SWAP_SETTLE_US 30000
+
 #ifdef __cplusplus
 extern "C" {
 #endif
 
 void button_latch_reset(void);
+/* Change ONE button's refractory window: the window the NEXT accepted press
+   of `btn` will open. Pass BUTTON_LATCH_REFRACTORY_US to put the default back.
+   A window already running keeps the figure it was opened with, and the EXT1
+   wake press seeded by button_latch_seed_press ALWAYS opens the default
+   whatever this has set, because its release can ring at any moment relative
+   to the boot. button_latch_reset restores every button's default, so a
+   wake starts from 300 ms everywhere. An out-of-range button or a window of
+   zero or less is ignored (a zero would turn the guard off). Task context:
+   record reads the window from the ISR, so the caller holds the same critical
+   section it holds for the other latch calls. */
+void button_latch_set_refractory(int btn, int64_t us);
+/* The same for the release settle (BUTTON_LATCH_RELEASE_SETTLE_US is the
+   default): the settle the NEXT accepted press of `btn` will be judged by once
+   it is released. Stamped at acceptance exactly like the window, so a change
+   never reaches into a press already accepted, and the EXT1 wake press seeded
+   by button_latch_seed_press always carries the default. Pass
+   BUTTON_LATCH_RELEASE_SETTLE_US to put the default back; button_latch_reset
+   does too. An out-of-range button or a figure of zero or less is ignored.
+   Same context rules as button_latch_set_refractory. */
+void button_latch_set_settle(int btn, int64_t us);
 /* Open the refractory window for a press that was accepted WITHOUT passing
    through button_latch_record: the EXT1 wake press, which wake handling
    consumes directly. Call it after button_latch_reset and before the ISRs are

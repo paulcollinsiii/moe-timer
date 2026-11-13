@@ -60,6 +60,16 @@ void neopixel_status_pixel(int idx, uint8_t r, uint8_t g, uint8_t b);
    button is now right, and the presentation is recorded as verified
    rather than left to look like a defect somebody should tidy up. */
 void neopixel_status_binary4(uint8_t value, uint8_t r, uint8_t g, uint8_t b);
+/* THE ONE BIT-TO-PIXEL MAPPING, as a pure predicate: is driver pixel `idx`
+   (0..3) lit when the 4-bit `value` is displayed? Pixel 0 = bit3 ... pixel 3 =
+   bit0, i.e. the least significant bit on the physically LEFTMOST pixel — the
+   convention above, verified on hardware. neopixel.c's binary4 post draws with
+   it, and so does status_led_swap_count_for() (Button C's count display, which
+   needs the same picture in HIGHPRI class and as a host-testable function), so
+   there is exactly one place the shift lives. Do not "fix" it. */
+static inline bool neopixel_binary4_pixel_lit(int idx, uint8_t value) {
+    return idx >= 0 && idx < 4 && ((value >> (3 - idx)) & 1u) != 0;
+}
 
 /* HIGHPRI class — ignores quiet hours, and ONLY quiet hours: the status
    brightness still applies, because that is the user's dimmer rather than a
