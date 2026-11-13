@@ -76,6 +76,9 @@ setup route ─▶ day rollover ─▶ lock gates ─▶ break-end drain ─▶ 
   the expiry alert ([display.md](display.md)).
 - **Latched presses.** A press made while the device was awake is acted on
   now, through the same rules as a wake press ([peripherals.md](peripherals.md)).
+  A latched C on the timer screen opens the same counted-clicks gesture
+  (`wake_flow_counted_swap()`, the one entry both wakes use); the break tail's
+  press poll keeps a single swap.
 - **Awake watch.** With 75 s or less to an expiry or a chiming break end, the
   wake stays up and fires the event within a second of its wall time instead
   of sleeping through it. A break that falls due at the expiry instant takes

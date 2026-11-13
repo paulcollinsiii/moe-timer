@@ -91,8 +91,9 @@ extern "C" {
 
    THE SIXTH CLAIMANT: BUTTON C'S COUNT DISPLAY — status_led_swap_count_show(),
    below. It takes the WHOLE strip (all four pixels written, dark ones
-   included) for the length of one counted-clicks gesture on a Button C wake
-   in Timers mode, and nowhere else. It is a Timers-mode claimant, so it
+   included) for the length of one counted-clicks gesture (a Button C press in
+   Timers mode: the EXT1 wake press, or one latched on a tick wake), and
+   nowhere else. It is a Timers-mode claimant, so it
    never meets the chore strip: C in Chores mode is the second chore tick and
    opens no gesture. Who it can meet, and what happens:
 
@@ -110,26 +111,35 @@ extern "C" {
                            when the active slot is not RUNNING, and at most
                            one slot RUNNING means nothing is counting down or
                            about to expire (S2). A background Screen Break
-                           can END inside it; that drain happens in the
-                           commit's render, after the strip is released.
+                           can END inside it and nothing inside the gesture
+                           drains the edge: the commit's paint does, or, on a
+                           lap home that paints nothing, maybe_wait_for_event's
+                           guaranteed drain (a repaint with the chime). Either
+                           way it is after the strip has been released.
      quiet hours           the count is HIGHPRI, like the chore strip, and for
                            the same reason: the strip is the only feedback
                            until the panel paints. It bypasses the mute and
                            not the dimmer.
-     the power gate        a HIGHPRI post raises the gate (neopixel.c). The
-                           release below drops it again, so a gesture that
-                           ends in quiet hours leaves the gate HIGH with a
-                           dark strip, and sleep entry drops it regardless
-                           (neopixel_stop_sync, system invariant S42).
+     the power gate        GPIO 21 is active LOW: a paint drives it LOW, which
+                           powers the strip, and neopixel_stop() drives it
+                           HIGH, which is off (neopixel.c). The count's
+                           HIGHPRI post therefore powers the strip, and the
+                           release below switches it off again, so a gesture
+                           that ends in quiet hours leaves the gate HIGH with
+                           a dark strip, and sleep entry drives it HIGH
+                           regardless (neopixel_stop_sync, system invariant
+                           S42).
 
-   WHAT THE STRIP RETURNS TO. wake_flow_swap_release_strip() posts
-   neopixel_stop() (everything off, gate HIGH — the same wipe the countdown
-   does before a state repaint) and then goes through the one status-paint
-   wrapper, so pixel 0 shows the state of the timer now selected and pixels
-   1-3 are dark. That happens on every exit: a commit, a full lap that lands
-   home, and a budget that runs out. It is also the only way back: the count
-   writes pixels 1-3 which no state painter owns. The colour is magenta
-   (25,0,25), which is no other claimant's (test_status_led pins it). */
+   WHAT THE STRIP RETURNS TO. On every exit of a gesture that opened (a commit,
+   a full lap that lands home, a budget that runs out) wake_flow.c's
+   wake_flow_swap_count_gesture posts neopixel_stop() (everything off, gate
+   HIGH — the same wipe the countdown does before a state repaint) and then
+   goes through the one status-paint wrapper, wake_flow_show_status_leds(), so
+   pixel 0 shows the state of the timer now selected and pixels 1-3 are dark.
+   It is also the only way back: the count writes pixels 1-3 which no state
+   painter owns. scripts/check-status-led-wrapper.py checks that order. The
+   colour is magenta (25,0,25), which is no other claimant's (test_status_led
+   pins it). */
 #define NP_STATE_PIXEL 0
 
 /* THERE IS NO PRE-PRESS HOLD. The chore ack and Button B's start/resume flip
@@ -362,9 +372,10 @@ status_led_strip_t status_led_swap_count_for(uint8_t ordinal);
    HIGHPRI class (quiet hours do not mute it; the dimmer applies). See the
    sixth-claimant paragraph at the top of this header for who it can meet and
    what the strip returns to. CALLER CONTRACT: wake_flow.c's counted-clicks
-   gesture only, on a Button C wake in Timers mode; it does not repaint the
-   state pixel itself and must be followed by the release
-   (wake_flow_swap_release_strip) on every path out. */
+   gesture only (a Button C press in Timers mode, on the EXT1 wake or latched
+   on a tick wake); it does not repaint the state pixel itself and must be
+   followed by the release (neopixel_stop(), then wake_flow_show_status_leds())
+   on every path out. */
 void status_led_swap_count_show(uint8_t ordinal);
 
 #ifdef __cplusplus

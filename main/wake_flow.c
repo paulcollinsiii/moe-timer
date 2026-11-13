@@ -1146,10 +1146,15 @@ _Static_assert(SWAP_COUNT_BUDGET_MS > 0, "a zero budget makes every swap commit 
 _Static_assert(SWAP_COUNT_POLL_MS * 1000u < BUTTON_LATCH_SWAP_REFRACTORY_US,
                "a poll as long as the short window would sample a pad less often than C may legally repeat");
 
-/* THE WORST CASE THE TWO KNOBS ALLOW, held under half the awake failsafe —
-   half for the reason the chore gesture's is (the wake shares its ceiling
-   with the network window and any alert). The terms, and every one of them a
-   bound and not an estimate of a typical wake:
+/* THE WORST CASE THE BUDGET ALLOWS, in two layers. Every term is a bound and
+   not an estimate of a typical wake, and the figures below are at the Kconfig
+   defaults (quiet 700 ms, budget 6000 ms, break alarm 3 cycles, one event
+   window 42.5 s, one full paint 4 s). The test build overrides the swap knobs
+   (410 / 1750), so it exercises the arithmetic but not these figures.
+
+   LAYER ONE, THE GESTURE'S OWN COST, held under HALF the awake failsafe for the
+   reason the chore gesture's is (the wake shares its ceiling with whatever
+   came before it):
      budget          the gesture's WAITING, summed over every quiet window; the
                      loop leaves on whichever of window and budget comes first
                      and never overshoots either (the step is clamped), so the
@@ -1162,20 +1167,56 @@ _Static_assert(SWAP_COUNT_POLL_MS * 1000u < BUTTON_LATCH_SWAP_REFRACTORY_US,
                      shape the tail can take is the break START path, which
                      replaces the paints with the break alarm and its one paint,
                      so the term is the longer of the two;
-     event window    the one window the wake may owe (WAKE_FLOW_EVENT_WINDOW_MS,
+     event window    the ONE window the tail serves (WAKE_FLOW_EVENT_WINDOW_MS,
                      the worst case of its timeouts); a swap raises no debt of
-                     its own, but a rollover or an earlier press in this wake
-                     can leave one.
-   No chime term: a swap plays no sound. At the test build's figures and at the
-   Kconfig defaults (700 / 6000) this is 6000 + 11600 + 42500 = 60.1 s against
-   the 90 s half-failsafe. */
+                     its own, but a B press in an earlier join poll can have.
+   No chime term: a swap plays no sound. 6000 + 11600 + 42500 = 60.1 s against
+   the 90 s half-failsafe.
+
+   LAYER TWO, EACH ENTRY PATH WITH WHAT PRECEDES THE GESTURE ON IT, held under
+   the WHOLE failsafe (nothing is left to share it with, because the terms are
+   named):
+     the EXT1 wake press   the rollover's own network window, which runs ahead
+                           of it on the first press after midnight
+                           (wake_flow_handle_day_rollover): 42.5 + 60.1 =
+                           102.6 s;
+     a latched C on a tick wake   the rollover's window and the wake's own sync
+                           window (the rollover resets next_ntp_sync, so the
+                           sync follows it), the render-grid wait
+                           (WAKE_FLOW_GRID_WAIT_MAX_SEC) and the minute's own
+                           paint, then the gesture: 42.5 + 42.5 + 25 + 4 + 60.1
+                           = 174.1 s.
+   WHAT NEITHER LAYER CHARGES, stated so that nobody reads more into the assert
+   than it says: the follow-up window of an owed-window chain (WAKE_FLOW_OWED_-
+   WINDOWS_MAX is 2) is admitted by wake_flow_headroom_for_window() against the
+   failsafe itself, so it cannot be the one that overruns; an expiry alert or a
+   second owed window ahead of the drain on a tick wake (a timer that expired
+   in this very tick, a B pressed in the sync's join poll), whose own worst
+   case is the final-minute assert's above; an update check or download the
+   rollover's window arms (ota_flow.c arms its own failsafe for it, ota_timing.h);
+   and the event watch that follows
+   the gesture (maybe_wait_for_event), bounded by SLEEP_PLAN_WATCH_SEC and the
+   failsafe. A tick wake that stacks all of those is over the failsafe with or
+   without a gesture — the failsafe is the arbiter there, and the gesture adds
+   only its 6 s of waiting to it. */
 #define SWAP_COUNT_WORST_TAIL_MS \
     WAKE_FLOW_MAX_U32(2u * WAKE_FLOW_WORST_PAINT_MS, WAKE_FLOW_BREAK_ALERT_MS + 1u * WAKE_FLOW_WORST_PAINT_MS)
 #define SWAP_COUNT_WORST_GESTURE_MS \
     ((uint32_t)SWAP_COUNT_BUDGET_MS + SWAP_COUNT_WORST_TAIL_MS + (uint32_t)WAKE_FLOW_EVENT_WINDOW_MS)
+#define SWAP_COUNT_WORST_EXT1_MS ((uint32_t)WAKE_FLOW_EVENT_WINDOW_MS + SWAP_COUNT_WORST_GESTURE_MS)
+#define SWAP_COUNT_WORST_TICK_MS                                                                \
+    (2u * (uint32_t)WAKE_FLOW_EVENT_WINDOW_MS + (uint32_t)WAKE_FLOW_GRID_WAIT_MAX_SEC * 1000u + \
+     WAKE_FLOW_WORST_PAINT_MS + SWAP_COUNT_WORST_GESTURE_MS)
 _Static_assert(SWAP_COUNT_WORST_GESTURE_MS <= (uint32_t)CONFIG_MAGTAG_MAX_AWAKE_SEC * 1000u / 2u,
-               "MAGTAG_SWAP_COUNT_BUDGET_MS allows a counted-swap gesture whose worst case (the budget, the commit's "
-               "paint and the join's repaint or the break alarm, and one event window) exceeds half the awake "
+               "MAGTAG_SWAP_COUNT_BUDGET_MS allows a counted-swap gesture whose own worst case (the budget, the "
+               "commit's paint and the join's repaint or the break alarm, and one event window) exceeds half the "
+               "awake failsafe");
+_Static_assert(SWAP_COUNT_WORST_EXT1_MS <= (uint32_t)CONFIG_MAGTAG_MAX_AWAKE_SEC * 1000u,
+               "MAGTAG_SWAP_COUNT_BUDGET_MS allows a counted swap on the EXT1 wake press whose worst case (the "
+               "rollover's network window, then the gesture) exceeds the awake failsafe");
+_Static_assert(SWAP_COUNT_WORST_TICK_MS <= (uint32_t)CONFIG_MAGTAG_MAX_AWAKE_SEC * 1000u,
+               "MAGTAG_SWAP_COUNT_BUDGET_MS allows a counted swap on a tick wake whose worst case (the rollover's and "
+               "the sync's network windows, the grid wait, the minute's paint, then the gesture) exceeds the awake "
                "failsafe");
 
 /* The three ack buttons and the rows they tick, as a table rather than as
@@ -1534,11 +1575,14 @@ static void wake_flow_repaint_chore_acks_until_quiet(time_t *now, uint32_t *spen
    test_wake_policy). This function is the loop around them and the two
    strip/window side effects; test_wake_flow pins what the loop does.
 
-   ONLY THE EXT1 WAKE PRESS opens one. A C latched on a tick wake, or made in
-   the break tail's poll, is still one swap through
-   wake_flow_dispatch_button_action: it has no run of presses following it to
-   count, and the break tail ends its watch on the first applied press by
-   design. In Chores mode C is the second chore tick and the gesture is not
+   TWO PATHS OPEN ONE, through the one wake_flow_counted_swap: the EXT1 wake
+   press, and a C latched while a tick wake was awake (a press in its sync,
+   grid wait or render), which that wake's latch drain takes. Presses made
+   before the drain are one bit in the latch and count once; the ones after it
+   are counted. A C made in the break tail's poll is still one swap through
+   wake_flow_dispatch_button_action: the tail ends its watch on the first
+   applied press by design, and what the press repaints has already been
+   joined. In Chores mode C is the second chore tick and the gesture is not
    consulted at all.
 
    THE SHORT REFRACTORY WINDOW belongs to the gesture and nothing else: it is
