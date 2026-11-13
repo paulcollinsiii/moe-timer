@@ -23,7 +23,7 @@ RUN usermod -aG dialout vscode \
     && usermod -aG plugdev vscode \
     && mkdir -p /home/vscode/.claude && chown vscode:vscode /home/vscode/.claude
 
-# Bake ESP-IDF v6.0.1 + ESP32-S2 toolchain into the image so container
+# Bake ESP-IDF v6.0.3 + ESP32-S2 toolchain into the image so container
 # rebuilds start with a working environment (~3 GB layer, docker-cached).
 # Activate in a shell with: source ~/esp/esp-idf/export.sh
 USER vscode
@@ -44,7 +44,7 @@ RUN curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.5/install.sh | P
     && curl -LsSf https://astral.sh/uv/install.sh | sh
 
 RUN mkdir -p /home/vscode/esp \
-    && git clone --branch v6.0.1 --depth 1 --recursive --shallow-submodules \
+    && git clone --branch v6.0.3 --depth 1 --recursive --shallow-submodules \
        https://github.com/espressif/esp-idf.git /home/vscode/esp/esp-idf \
     && /home/vscode/esp/esp-idf/install.sh esp32s2 \
     && rm -rf /home/vscode/.espressif/dist
