@@ -250,3 +250,16 @@ CONFIG_ESP_ERR_TO_NAME_LOOKUP=n
 # identical, not regenerated) do exercise it, with the one host/firmware
 # theme divergence that file documents.
 CONFIG_LV_DRAW_SW_COMPLEX=n
+
+# No PSRAM memory test at boot. cpu_start.c runs esp_psram_extram_test() on
+# EVERY boot, deep-sleep wakes included: it writes then reads one word per
+# 32-byte line of the whole 2 MB through the cache at 40 MHz, which IDF's own
+# comment sizes at "about a second for 4 MiB", so on the order of 0.5 s before
+# app_main for this 2 MB part (an estimate from that comment, not a
+# measurement of this board: the owner times it, see
+# docs/planning/20261112.firmware-diet.notes.md). Nothing in main/ requests
+# PSRAM (no MALLOC_CAP_SPIRAM, mbedTLS is MBEDTLS_INTERNAL_MEM_ALLOC, LVGL's
+# buffers are far below SPIRAM_MALLOC_ALWAYSINTERNAL); only the heap pool
+# carries it. What is given up: a PSRAM that fails the test no longer aborts
+# the boot, it just hands bad memory to malloc() of more than 16 KB.
+CONFIG_SPIRAM_MEMTEST=n
