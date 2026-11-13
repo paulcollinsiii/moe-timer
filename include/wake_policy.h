@@ -40,6 +40,18 @@ typedef enum {
 wake_render_t wake_policy_render(timer_state_t before, timer_state_t after, bool button_wake, bool break_ended,
                                  bool selection_changed);
 
+/* Does the panel owe a paint after Button C's counted-clicks gesture?
+   `landed_home`: the gesture's candidate came round to the timer that was
+   already selected, so nothing was committed (timer_select_slot refused it).
+   A gesture that committed always paints — through the same render decision
+   a single swap uses, so the three full-refresh promotions apply unchanged.
+   One that landed home paints NOTHING, unless something else this wake already
+   owes the glass a paint that the swap would otherwise have carried:
+   `break_ended` (a Screen Break ended and the panel has not shown it),
+   `lock_on_glass` (a released lock's screen is still on the panel), or
+   `day_rolled` (the day rolled over and reset the timers under the glass). */
+bool wake_policy_swap_paint_owed(bool landed_home, bool break_ended, bool lock_on_glass, bool day_rolled);
+
 /* Break-over chime policy: fire only when nothing else is RUNNING (rule
    4 — the kid mid-activity gets that timer's own alert) and the
    transition is being acted on within BREAK_CHIME_GRACE_SEC of its wall

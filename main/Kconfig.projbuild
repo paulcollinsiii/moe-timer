@@ -351,6 +351,51 @@ menu "MagTag Timer"
             still paints, and a press made during that paint still gets
             the one repaint the tail owes it — nothing after that.
 
+    config MAGTAG_SWAP_COUNT_QUIET_MS
+        int "Button C counted-clicks quiet window (ms)"
+        default 700
+        range 200 3000
+        help
+            Button C switches timers by COUNTED CLICKS: the first press
+            opens a gesture whose candidate is the next timer, every
+            further press within this window moves the candidate on one
+            more, and when the window lapses with no press the candidate
+            is committed ONCE and the panel paints ONCE. The four
+            NeoPixels show the candidate's number in binary as the person
+            presses (Screen = 1, least significant bit on the leftmost
+            pixel).
+
+            SLIDING: every press grants another full window, so the
+            gesture ends this long after its last press. It is also what a
+            LONE press now costs: a single swap used to paint straight
+            after the press and now waits this long first, because the
+            firmware cannot tell one press from the first of several until
+            the window has passed. Longer tolerates a slower rhythm and
+            makes every swap wait longer; shorter is quicker and splits a
+            slow count into two paints. 700 is a starting figure, to be
+            settled on the bench.
+
+            Bounded by MAGTAG_SWAP_COUNT_BUDGET_MS below and, together with
+            it, by MAGTAG_MAX_AWAKE_SEC: the build refuses a combination
+            whose worst case (the budget plus the commit's paint and the
+            join's repaint, both as full refreshes, plus one network
+            window) exceeds half the failsafe.
+
+    config MAGTAG_SWAP_COUNT_BUDGET_MS
+        int "Button C counted-clicks burst budget (ms)"
+        default 6000
+        range 500 20000
+        help
+            The HARD BOUND on one counted-clicks gesture, in milliseconds
+            spent WAITING for presses after the first. The quiet window
+            above slides, so something has to stop a pad that keeps
+            producing edges, or someone leaning on the button, from
+            holding a battery device awake. When the budget is spent the
+            gesture commits whatever candidate it has reached and paints
+            once; it does not wait for the window. 6000 ms is eight
+            presses at a 700 ms cadence, more than the four extra timers
+            plus Screen need for a full lap.
+
     config MAGTAG_QUIET_START_HHMM
         int "NeoPixel quiet hours start (HHMM, 24h)"
         default 2230

@@ -3,6 +3,10 @@
 
 #include "sleep_plan.h" /* BREAK_CHIME_GRACE_SEC */
 
+bool wake_policy_swap_paint_owed(bool landed_home, bool break_ended, bool lock_on_glass, bool day_rolled) {
+    return !landed_home || break_ended || lock_on_glass || day_rolled;
+}
+
 bool wake_policy_break_chime(bool extra_running, int32_t overdue_sec) {
     if (extra_running)
         return false; /* that timer's own alert is the one that matters */
