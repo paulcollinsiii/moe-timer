@@ -163,11 +163,7 @@ CONFIG_LV_FONT_DEFAULT_MONTSERRAT_12=y
 # layout, no shadow/transform. Every other widget, layout engine and the
 # observer/examples/demos code is dead weight; LVGL is the single largest
 # archive in the image (415 KB) so trimming it is the main lever against the
-# 85 % slot guard. LV_DRAW_SW_COMPLEX stays enabled, unmeasured: the only
-# `radius` calls in the UI (display_screens.c:129, :134, in style_bar) set it
-# to 0, overriding the mono theme's radius of 2, which suggests COMPLEX may
-# be removable — but that needs an actual build plus byte-identical goldens
-# to confirm, not assumed here.
+# 85 % slot guard. LV_DRAW_SW_COMPLEX is turned off, see its line below.
 # CONFIG_LV_USE_ANIMIMG is not set
 # CONFIG_LV_USE_ARC is not set
 # CONFIG_LV_USE_ARCLABEL is not set
@@ -229,9 +225,9 @@ CONFIG_LV_DRAW_SW_SUPPORT_I1=y
 # IPv6 off. Every address the firmware handles is IPv4: AF_INET only (the
 # captive-portal DNS socket), esp_ip4addr_aton, ip4 DNS info; MQTT, SNTP and
 # the OTA HTTPS fetch resolve through lwIP's IPv4 path. Measured: 1,541,584 ->
-1,508,752 B (-32,832 B); ip6/nd6/icmp6/mld6/ethip6 are gone from the link map.
-A checkout whose sdkconfig has CONFIG_LWIP_IPV6 under a "# default:" marker
-picks this up on idf.py reconfigure; see docs/planning/20261112.firmware-diet.notes.md.
+# 1,508,752 B (-32,832 B); ip6/nd6/icmp6/mld6/ethip6 are gone from the link map.
+# A checkout whose sdkconfig has CONFIG_LWIP_IPV6 under a "# default:" marker
+# picks this up on idf.py reconfigure; see docs/planning/20261112.firmware-diet.notes.md.
 CONFIG_LWIP_IPV6=n
 
 # esp_err_to_name() lookup table off. Every call site in main/ (and
@@ -242,3 +238,15 @@ CONFIG_LWIP_IPV6=n
 # same way. Measured: 1,508,752 -> 1,500,976 B (-7,776 B). A sdkconfig line
 # under a "# default:" marker takes this on idf.py reconfigure.
 CONFIG_ESP_ERR_TO_NAME_LOOKUP=n
+
+# LV_DRAW_SW_COMPLEX off: radius masks, box shadow, arcs, skewed lines, image
+# transforms. Every radius in the UI is set to 0 (style_bar() for the three
+# bars, each plain lv_obj in display_screens.c), which overrides the mono
+# theme's card radius of 2; nothing sets shadow, transform, arc or outline.
+# Trap: with LV_USE_LOG off, a rounded rect or shadow added later draws
+# silently square/not at all instead of failing loudly. Re-enable this before
+# adding a style with radius > 0, shadow, transform or an arc/line widget.
+# Mirrored in test/mocks/lv_conf_host.h, so the display goldens (byte
+# identical, not regenerated) do exercise it, with the one host/firmware
+# theme divergence that file documents.
+CONFIG_LV_DRAW_SW_COMPLEX=n

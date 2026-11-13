@@ -89,6 +89,12 @@
 #define LV_DRAW_SW_SUPPORT_AL88 0
 #define LV_DRAW_SW_SUPPORT_A8 0
 
+/* Mirror of firmware CONFIG_LV_DRAW_SW_COMPLEX=n (stream A diet): no radius
+   masks, shadow, arcs, skewed lines or transformed images. The goldens are
+   what proves the UI draws none of them: a rounded corner or shadow would
+   draw silently wrong here, so any golden diff means COMPLEX is in use. */
+#define LV_DRAW_SW_COMPLEX 0
+
 /* Known host/firmware divergence, left as-is (do not "fix" by matching the
    firmware — either change below could move goldens):
    - Theme: this file sets no LV_USE_THEME_*, so the host falls back to
