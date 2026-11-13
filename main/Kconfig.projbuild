@@ -390,7 +390,7 @@ menu "MagTag Timer"
     config MAGTAG_SWAP_COUNT_BUDGET_MS
         int "Button C counted-clicks burst budget (ms)"
         default 6000
-        range 500 20000
+        range 500 10000
         help
             The HARD BOUND on one counted-clicks gesture, in milliseconds
             spent WAITING for presses after the first. The quiet window
