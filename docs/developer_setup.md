@@ -240,7 +240,9 @@ constants, test numbers and goldens.
 
 **More than one picture per slot.** `<slot>.png` is variant 0; add
 `<slot>.1.png`, `<slot>.2.png` and so on for more. The device shows one
-variant per lock episode, chosen at random (see
+variant per lock episode, chosen at random when the lock first paints and kept
+until the lock ends (a break's end, a charge or bed-time release, the next
+time's-up alert; an OTA or panic restart is the one thing that redraws it) (see
 [Display](architecture/display.md)). The rules, in `tools/sprites/` and
 `sprites.local/` alike:
 
@@ -262,10 +264,18 @@ cp ~/second_battery.png sprites.local/charge.1.png   # a 105x122 1-bit PNG
 idf.py build        # "overriding slots from sprites.local/: charge"
 ```
 
+The message lists slot names: `charge.1.png` and `charge.png` both show as
+`charge`, once.
+
 The template set has one picture per slot, so a plain clone behaves as before.
 To ship a second template picture, add `tools/sprites/<slot>.1.png`, run
-`uv run tools/gen_sprites.py` and commit the regenerated C and header; no other
-file changes.
+`uv run tools/gen_sprites.py` and commit the regenerated C. The header does not
+change when a variant is added, since the count is a `const` the C defines; no
+other file changes.
+
+`SPRITE_<SLOT>_VARIANT_COUNT` is an `extern const unsigned`, not a constant
+expression: it cannot size an array, sit in a `_Static_assert` or initialise a
+static. Read it at run time (`include/sprite_data.h` says so too).
 
 **How it works.** With no PNGs in `sprites.local/` the build compiles the
 committed `main/sprite_data.c`, generated from the templates, and needs no

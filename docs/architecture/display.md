@@ -119,20 +119,28 @@ file rules are in [Lock-screen art](../developer_setup.md#lock-screen-art)).
 The generator emits, per slot, `SPRITE_<SLOT>` (variant 0), a table
 `SPRITE_<SLOT>_VARIANTS[]` and `SPRITE_<SLOT>_VARIANT_COUNT`. The count is a
 `const` the C defines, not a macro, so an override that adds a variant changes
-the C and never the header. Which variant shows is decided per **lock
-episode**, the stretch during which the same lock screen stays up:
+the C and never the header. The count is also not a constant expression, so it
+cannot size an array or sit in a `_Static_assert`; the header says so. Which
+variant shows is decided per **lock episode**, the stretch during which one
+lock (time's up, charge, bed time, a screen break) stays in force:
 
 - `display.c` is the one place every lock paint goes through, so it holds the
-  pick: a 2-byte `RTC_DATA_ATTR` state (`sprite_pick_t`), and the draw from
-  `esp_random()`. `sprite_pick.c` is the pure logic over that state and an injected random
-  source, host-tested in `test_sprite_pick`.
-- The pick is drawn when the lock changes into that screen (break, time's up,
-  charge, bed time) and kept until it changes into another lock or into an
-  ordinary screen (`build_for_state` painting main or chores). Every repaint in
-  between, including the one after each deep sleep, shows the same art. The
-  other takeovers (OTA, setup, sync failed, no clock, config error) neither start
-  nor end an episode. A break that chore mode interrupts ends there, and the next
-  break draws again.
+  pick: a small `RTC_DATA_ATTR` state (`sprite_pick_t`, one byte per lock), and
+  the draw from `esp_random()`. `sprite_pick.c` is the pure logic over that
+  state and an injected random source, host-tested in `test_sprite_pick`.
+- Each lock has its own pick, so an open episode is not disturbed by a paint of
+  another lock. An episode **starts at the lock's first paint**, which draws
+  and stores the variant, and **ends only when the lock's owner says so**, via
+  `display_lock_art_end()`: `lock_gate.c` on the charge release and on both
+  bed-time releases, `wake_flow.c` when a break ends (and when a new break
+  starts, so a break the day rollover wiped cannot leave its pick behind), and
+  `wake_flow.c` again once the time's-up screen has been replaced, so each
+  expiry alert is its own episode. Painting never ends one. Repaints, chores
+  detours, timer switches, the paint after each deep sleep and a network window
+  that repaints in between all show the same art. The other takeovers (OTA,
+  setup, sync failed, no clock, config error) neither start nor end an episode.
+- The one exception is an `esp_restart` (an OTA commit, a panic): RTC data is
+  zeroed, the episode has no pick, and the next paint of the lock draws again.
 - The state is not in `rtc_state_t`: it describes what is on the panel, like
   the refresh counter beside it, and `timer_reset` would wipe it at midnight. It
   needs no version, because `sprite_pick()` checks it on every call. RTC data is
@@ -147,9 +155,10 @@ episode**, the stretch during which the same lock screen stays up:
   no state and call no random source, so the host render tests hand them a
   second, test-only variant built in memory.
 
-Drawing the QR and the sprites with plain rectangle fills is also why `sdkconfig.defaults` trims LVGL to the label and bar widgets
-and the I1 draw path only, mirrored in `test/mocks/lv_conf_host.h`. Re-enabling
-any of it is a flash cost and needs the host config changed with it.
+Drawing the QR and the sprites with plain rectangle fills is also why
+`sdkconfig.defaults` trims LVGL to the label and bar widgets and the I1 draw
+path only, mirrored in `test/mocks/lv_conf_host.h`. Re-enabling any of it is a
+flash cost and needs the host config changed with it.
 
 ## Golden tests
 
