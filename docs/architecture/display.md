@@ -114,7 +114,40 @@ placed flush with the bottom edge and its ink may run off it (the template's
 alarm clock is cropped there on purpose), the one place ink may touch a panel
 edge; a host test pins the exact count for the template.
 
-That is also why `sdkconfig.defaults` trims LVGL to the label and bar widgets
+**A slot can hold several pictures** (`<slot>.png`, `<slot>.1.png`, ...; the
+file rules are in [Lock-screen art](../developer_setup.md#lock-screen-art)).
+The generator emits, per slot, `SPRITE_<SLOT>` (variant 0), a table
+`SPRITE_<SLOT>_VARIANTS[]` and `SPRITE_<SLOT>_VARIANT_COUNT`. The count is a
+`const` the C defines, not a macro, so an override that adds a variant changes
+the C and never the header. Which variant shows is decided per **lock
+episode**, the stretch during which the same lock screen stays up:
+
+- `display.c` is the one place every lock paint goes through, so it holds the
+  pick: a 2-byte `RTC_DATA_ATTR` state (`sprite_pick_t`), and the draw from
+  `esp_random()`. `sprite_pick.c` is the pure logic over that state and an injected random
+  source, host-tested in `test_sprite_pick`.
+- The pick is drawn when the lock changes into that screen (break, time's up,
+  charge, bed time) and kept until it changes into another lock or into an
+  ordinary screen (`build_for_state` painting main or chores). Every repaint in
+  between, including the one after each deep sleep, shows the same art. The
+  other takeovers (OTA, setup, sync failed, no clock, config error) neither start
+  nor end an episode. A break that chore mode interrupts ends there, and the next
+  break draws again.
+- The state is not in `rtc_state_t`: it describes what is on the panel, like
+  the refresh counter beside it, and `timer_reset` would wipe it at midnight. It
+  needs no version, because `sprite_pick()` checks it on every call. RTC data is
+  zeroed by `esp_restart` (an OTA reboot), so the next lock simply draws, and an
+  OTA failsafe sleep can leave another image's bytes there. A stored variant at
+  or above the current count, from a firmware that shipped more pictures, is
+  redrawn. The index is always below the count.
+- A count of 1 returns 0 without calling the random source, so a build with one
+  picture per slot renders the same bytes as before and every golden is
+  unchanged.
+- The screen builders take the sprite to paint (`NULL` is the base). They read
+  no state and call no random source, so the host render tests hand them a
+  second, test-only variant built in memory.
+
+Drawing the QR and the sprites with plain rectangle fills is also why `sdkconfig.defaults` trims LVGL to the label and bar widgets
 and the I1 draw path only, mirrored in `test/mocks/lv_conf_host.h`. Re-enabling
 any of it is a flash cost and needs the host config changed with it.
 

@@ -238,6 +238,35 @@ the expected size and the actual size, when a PNG has the wrong size, is not
 change (a new size) is a code change, not an override: it needs new layout
 constants, test numbers and goldens.
 
+**More than one picture per slot.** `<slot>.png` is variant 0; add
+`<slot>.1.png`, `<slot>.2.png` and so on for more. The device shows one
+variant per lock episode, chosen at random (see
+[Display](architecture/display.md)). The rules, in `tools/sprites/` and
+`sprites.local/` alike:
+
+- The numbers start at 1 and have no gap, no leading zeros and no `.0`;
+  `charge.3.png` without `charge.2.png` fails the build, naming the missing
+  file. The highest number is 254.
+- Every variant has exactly the size of the slot's base image (the table above),
+  for the same reason as the base. A mismatch fails the build with the file and
+  both sizes.
+- A file in `sprites.local/` is merged over the template file by file, by number:
+  `charge.png` replaces variant 0, `charge.2.png` replaces the template's variant
+  2 if it has one and adds variant 2 if it does not. A template variant you do not
+  name stays. So dropping one `charge.1.png` into `sprites.local/` gives the
+  charge screen the template art plus your picture; to show only your own art on a
+  slot, override every variant the template has.
+
+```bash
+cp ~/second_battery.png sprites.local/charge.1.png   # a 105x122 1-bit PNG
+idf.py build        # "overriding slots from sprites.local/: charge"
+```
+
+The template set has one picture per slot, so a plain clone behaves as before.
+To ship a second template picture, add `tools/sprites/<slot>.1.png`, run
+`uv run tools/gen_sprites.py` and commit the regenerated C and header; no other
+file changes.
+
 **How it works.** With no PNGs in `sprites.local/` the build compiles the
 committed `main/sprite_data.c`, generated from the templates, and needs no
 Python. With one or more, `main/CMakeLists.txt` runs
@@ -249,7 +278,7 @@ first override build needs network access once** (a cold uv cache); later
 builds run offline. The build writes only the C, never
 `include/sprite_data.h`. Adding or removing a file under `sprites.local/`
 re-runs the CMake configure step by itself. Any `.png` there (in any letter
-case) that is not a lower-case `[a-z0-9_]+.png` slot name, such as
+case) that is not a lower-case `<slot>.png` or `<slot>.<n>.png`, such as
 `charge.PNG`, fails the build instead of being skipped.
 
 **To switch back to the templates,** move the PNGs out of `sprites.local/` and
