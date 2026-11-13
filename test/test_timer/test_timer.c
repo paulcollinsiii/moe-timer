@@ -1357,6 +1357,126 @@ void test_select_next_allowed_when_paused_or_expired(void) {
     TEST_ASSERT_EQUAL_INT(3, timer_active_slot());
 }
 
+/* ---- Button C's counted clicks: the pure pieces (no state write) ---- */
+
+void test_slot_after_steps_to_the_next_enabled_slot_wrapping_through_screen(void) {
+    TEST_ASSERT_EQUAL_INT(1, timer_slot_after(0));
+    TEST_ASSERT_EQUAL_INT(3, timer_slot_after(1)); /* slot 2 is a hole */
+    TEST_ASSERT_EQUAL_INT(4, timer_slot_after(3));
+    TEST_ASSERT_EQUAL_INT(0, timer_slot_after(4)); /* wrap */
+}
+
+void test_slot_after_agrees_with_timer_next_slot_from_the_active_slot(void) {
+    for (int i = 0; i < 5; i++) {
+        TEST_ASSERT_EQUAL_INT(timer_slot_after(timer_active_slot()), timer_next_slot());
+        timer_select_next();
+    }
+}
+
+void test_slot_after_writes_nothing(void) {
+    timer_select_next(); /* active = 1 */
+    (void)timer_slot_after(1);
+    (void)timer_slot_after(4);
+    TEST_ASSERT_EQUAL_INT(1, timer_active_slot());
+}
+
+void test_a_full_lap_of_slot_after_is_the_enabled_count_and_lands_on_the_start(void) {
+    int at = 0;
+    for (int i = 0; i < 3; i++) { /* Screen + three extras: three steps are not yet home */
+        at = timer_slot_after(at);
+        TEST_ASSERT_NOT_EQUAL_INT(0, at);
+    }
+    at = timer_slot_after(at); /* the fourth is */
+    TEST_ASSERT_EQUAL_INT(0, at);
+}
+
+void test_slot_after_from_a_disabled_or_out_of_range_slot(void) {
+    TEST_ASSERT_EQUAL_INT(3, timer_slot_after(2)); /* a hole still steps on */
+    TEST_ASSERT_EQUAL_INT(-1, timer_slot_after(-1));
+    TEST_ASSERT_EQUAL_INT(-1, timer_slot_after(TIMER_SLOT_COUNT));
+}
+
+void test_slot_after_is_minus_one_without_extras(void) {
+    timer_set_defs(NULL, 0);
+    TEST_ASSERT_EQUAL_INT(-1, timer_slot_after(0));
+}
+
+void test_slot_after_with_a_single_extra_toggles_between_it_and_screen(void) {
+    static const timer_def_t ONE[TIMER_SLOT_COUNT] = {
+        {"Screen", 0, false, false},   {"", 0, false, false}, {"", 0, false, false},
+        {"Laundry", 600, true, false}, {"", 0, false, false},
+    };
+    timer_set_defs(ONE, TIMER_SLOT_COUNT);
+    TEST_ASSERT_EQUAL_INT(3, timer_slot_after(0));
+    TEST_ASSERT_EQUAL_INT(0, timer_slot_after(3));
+}
+
+void test_slot_ordinal_counts_enabled_timers_with_screen_as_one(void) {
+    TEST_ASSERT_EQUAL_INT(1, timer_slot_ordinal(0)); /* Screen */
+    TEST_ASSERT_EQUAL_INT(2, timer_slot_ordinal(1)); /* Piano */
+    TEST_ASSERT_EQUAL_INT(3, timer_slot_ordinal(3)); /* Laundry: the hole at 2 is not counted */
+    TEST_ASSERT_EQUAL_INT(4, timer_slot_ordinal(4)); /* Violin */
+}
+
+void test_slot_ordinal_is_zero_for_a_slot_that_is_not_a_timer(void) {
+    TEST_ASSERT_EQUAL_INT(0, timer_slot_ordinal(2)); /* disabled */
+    TEST_ASSERT_EQUAL_INT(0, timer_slot_ordinal(-1));
+    TEST_ASSERT_EQUAL_INT(0, timer_slot_ordinal(TIMER_SLOT_COUNT));
+}
+
+void test_slot_ordinal_fits_the_four_pixels_for_every_slot(void) {
+    for (int s = 0; s < TIMER_SLOT_COUNT; s++) {
+        TEST_ASSERT_LESS_OR_EQUAL_INT(15, timer_slot_ordinal(s));
+    }
+}
+
+void test_select_slot_commits_once_to_the_named_slot(void) {
+    TEST_ASSERT_TRUE(timer_select_slot(3));
+    TEST_ASSERT_EQUAL_INT(3, timer_active_slot());
+}
+
+void test_select_slot_on_the_start_is_not_a_commit(void) {
+    /* A full lap lands back on the active slot: nothing is written. */
+    TEST_ASSERT_FALSE(timer_select_slot(0));
+    TEST_ASSERT_EQUAL_INT(0, timer_active_slot());
+    timer_select_next();
+    TEST_ASSERT_FALSE(timer_select_slot(1));
+    TEST_ASSERT_EQUAL_INT(1, timer_active_slot());
+}
+
+void test_select_slot_refuses_a_disabled_or_out_of_range_slot(void) {
+    TEST_ASSERT_FALSE(timer_select_slot(2));
+    TEST_ASSERT_FALSE(timer_select_slot(-1));
+    TEST_ASSERT_FALSE(timer_select_slot(TIMER_SLOT_COUNT));
+    TEST_ASSERT_EQUAL_INT(0, timer_active_slot());
+}
+
+void test_select_slot_refused_while_the_active_slot_is_running(void) {
+    timer_start(T0, 3600);
+    TEST_ASSERT_FALSE(timer_select_slot(1));
+    TEST_ASSERT_EQUAL_INT(0, timer_active_slot());
+    TEST_ASSERT_EQUAL(TIMER_RUNNING, timer_get_state());
+}
+
+void test_select_slot_is_allowed_during_a_screen_break(void) {
+    timer_start(T0, 3600);
+    timer_start_break(T0 + 1800, 900);
+    TEST_ASSERT_TRUE(timer_select_slot(4));
+    TEST_ASSERT_EQUAL_INT(4, timer_active_slot());
+    TEST_ASSERT_EQUAL(TIMER_BREAK, timer_slot_state(0)); /* the break is untouched */
+}
+
+void test_select_slot_onto_an_expired_slot_changes_no_state(void) {
+    /* Landing on an EXPIRED timer is a selection, nothing more: the alert is
+       the render policy's call and selection_changed suppresses it. */
+    timer_select_next(); /* Piano */
+    timer_start(T0 + 200, 900);
+    timer_tick(T0 + 2000); /* Piano EXPIRED */
+    timer_select_screen();
+    TEST_ASSERT_TRUE(timer_select_slot(1));
+    TEST_ASSERT_EQUAL(TIMER_EXPIRED, timer_get_state());
+}
+
 void test_select_next_noop_without_extras(void) {
     timer_set_defs(NULL, 0);
     TEST_ASSERT_FALSE(timer_select_next());
@@ -3935,6 +4055,22 @@ int main(void) {
     RUN_TEST(test_select_next_allowed_during_break);
     RUN_TEST(test_select_next_allowed_when_paused_or_expired);
     RUN_TEST(test_select_next_noop_without_extras);
+    RUN_TEST(test_slot_after_steps_to_the_next_enabled_slot_wrapping_through_screen);
+    RUN_TEST(test_slot_after_agrees_with_timer_next_slot_from_the_active_slot);
+    RUN_TEST(test_slot_after_writes_nothing);
+    RUN_TEST(test_a_full_lap_of_slot_after_is_the_enabled_count_and_lands_on_the_start);
+    RUN_TEST(test_slot_after_from_a_disabled_or_out_of_range_slot);
+    RUN_TEST(test_slot_after_is_minus_one_without_extras);
+    RUN_TEST(test_slot_after_with_a_single_extra_toggles_between_it_and_screen);
+    RUN_TEST(test_slot_ordinal_counts_enabled_timers_with_screen_as_one);
+    RUN_TEST(test_slot_ordinal_is_zero_for_a_slot_that_is_not_a_timer);
+    RUN_TEST(test_slot_ordinal_fits_the_four_pixels_for_every_slot);
+    RUN_TEST(test_select_slot_commits_once_to_the_named_slot);
+    RUN_TEST(test_select_slot_on_the_start_is_not_a_commit);
+    RUN_TEST(test_select_slot_refuses_a_disabled_or_out_of_range_slot);
+    RUN_TEST(test_select_slot_refused_while_the_active_slot_is_running);
+    RUN_TEST(test_select_slot_is_allowed_during_a_screen_break);
+    RUN_TEST(test_select_slot_onto_an_expired_slot_changes_no_state);
     RUN_TEST(test_slot_def_accessor);
     RUN_TEST(test_slot_by_name);
     RUN_TEST(test_swap_allowed_tracks_state_and_extras);

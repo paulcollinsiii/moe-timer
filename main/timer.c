@@ -190,13 +190,41 @@ bool timer_swap_allowed(void) {
     return timer_extra_count() > 0;
 }
 
-int timer_next_slot(void) {
+int timer_slot_after(int slot) {
+    if (slot < 0 || slot >= TIMER_SLOT_COUNT)
+        return -1;
     for (int i = 1; i < TIMER_SLOT_COUNT; i++) {
-        int cand = (g_rtc_state.active_slot + i) % TIMER_SLOT_COUNT;
+        int cand = (slot + i) % TIMER_SLOT_COUNT;
         if (slot_enabled(cand))
             return cand;
     }
     return -1; /* no other enabled slot */
+}
+
+int timer_slot_ordinal(int slot) {
+    if (slot < 0 || slot >= TIMER_SLOT_COUNT || !slot_enabled(slot))
+        return 0;
+    int ordinal = 1; /* Screen is always 1, and is always enabled */
+    for (int i = 1; i <= slot; i++) {
+        if (slot_enabled(i))
+            ordinal++;
+    }
+    return ordinal;
+}
+
+int timer_next_slot(void) {
+    return timer_slot_after(g_rtc_state.active_slot);
+}
+
+bool timer_select_slot(int slot) {
+    if (!timer_swap_allowed())
+        return false;
+    if (slot < 0 || slot >= TIMER_SLOT_COUNT || !slot_enabled(slot))
+        return false;
+    if (slot == g_rtc_state.active_slot)
+        return false; /* a lap that lands home is not a swap: nothing to write */
+    g_rtc_state.active_slot = (uint8_t)slot;
+    return true;
 }
 
 bool timer_select_next(void) {

@@ -346,6 +346,27 @@ bool timer_select_next(void);
    0 = Screen); -1 when no other slot is enabled. Answers "which one",
    not "may I" — pair with timer_swap_allowed() for the latter. */
 int timer_next_slot(void);
+/* The enabled slot after `slot`, wrapping through 0 = Screen; -1 when no
+   other slot is enabled or `slot` is out of range. The step Button C's
+   counted clicks takes once per press: a candidate in, the next candidate
+   out, and NOTHING WRITTEN — the gesture walks a local candidate and commits
+   once at the end. `slot` need not itself be enabled. timer_next_slot() is
+   this applied to the active slot. */
+int timer_slot_after(int slot);
+/* `slot`'s 1-based place among the enabled timers, Screen = 1, counting
+   only slots that are enabled (a disabled hole is not counted); 0 when `slot`
+   is disabled or out of range. This is the number the strip shows in binary
+   while Button C counts (status_led_swap_count_for); at most TIMER_SLOT_COUNT,
+   so it fits the four pixels (15) with room for more timers. */
+int timer_slot_ordinal(int slot);
+/* Commit a counted swap: make `slot` the active slot. Refused (false, nothing
+   written) when a swap is not allowed (timer_swap_allowed: the active slot is
+   RUNNING, or no extras exist), when `slot` is not an enabled slot, and when
+   it IS the active slot — a lap that lands back where it started is not a
+   swap, so there is nothing to commit and nothing to paint. Like
+   timer_select_next it moves the selection and no timer's state, so landing
+   on an EXPIRED slot re-fires nothing. */
+bool timer_select_slot(int slot);
 /* Put the selection back on slot 0 (Screen). Refused (false) only while
    the active extra slot is RUNNING — stealing the selection mid-run
    would be hostile. Already on Screen: true, no change. */
