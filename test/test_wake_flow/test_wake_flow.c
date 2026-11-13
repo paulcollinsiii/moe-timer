@@ -13745,7 +13745,11 @@ void test_swap4_a_full_lap_commits_nothing_paints_nothing_and_puts_the_strip_bac
 /* ...unless something else this wake owes the glass a paint. */
 void test_swap5_a_full_lap_still_paints_when_the_day_rolled_over(void) {
     flow_arm_swap_wake();
-    s_day_rolled = true; /* what wake_flow_handle_day_rollover records */
+    /* The REAL rollover handler records the roll: a snapshot that does not
+       restore means a genuine date change, which resets the day. Setting the
+       flag by hand here is what let deleting the production assignment pass. */
+    flow_new_day = true;
+    flow_restore_ok = false;
     flow_burst_add(BTN_C, 100);
     flow_burst_add(BTN_C, 200);
 
@@ -13753,6 +13757,52 @@ void test_swap5_a_full_lap_still_paints_when_the_day_rolled_over(void) {
 
     TEST_ASSERT_EQUAL_INT(FLOW_SCREEN, flow_active_slot);
     TEST_ASSERT_EQUAL_INT(1, FLOW_RENDERS());
+}
+
+/* A LAP HOME THAT PAINTS NOTHING, THEN A JOIN THAT CHANGES THE PANEL: the
+   repaint is the wake's ONE paint, and its kind is judged from the timer state
+   (no frame of the gesture's own exists to compare against), not from a screen
+   the skipped render never built. Passing the gesture's `paint` as the
+   post-join repaint's `have_shown` is what this pins: the repaint would then
+   compare against a screen kind that was never painted and promote to a full
+   refresh. Two cases, because on the ordinary screen the never-painted value
+   happens to equal the real one; a break's inverted layout does not. */
+void test_swap5a_a_lap_home_then_a_join_that_changes_the_panel_paints_once_and_partial(void) {
+    flow_arm_swap_wake();
+    flow_net_open = true;
+    flow_net_finish = NET_FINISH_CHANGED;
+    s_event_publish_owed = true; /* a window is owed, so the tail opens one */
+    flow_burst_add(BTN_C, 100);
+    flow_burst_add(BTN_C, 200);
+
+    TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_button());
+
+    TEST_ASSERT_EQUAL_INT(FLOW_SCREEN, flow_active_slot); /* it was a lap */
+    TEST_ASSERT_EQUAL_INT_MESSAGE(1, flow_log_count(EV_MAKE_STATE), "only the join's repaint assembled a frame");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(1, flow_log_count(EV_PARTIAL) + flow_log_count(EV_FULL_REFRESH),
+                                  "exactly one paint: the join's repaint");
+    TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_PARTIAL));
+    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_FULL_REFRESH));
+}
+
+void test_swap5b_the_same_during_a_break_repaints_partial_not_full(void) {
+    flow_arm_swap_wake();
+    flow_state = TIMER_BREAK;
+    flow_state_at_select = TIMER_BREAK;
+    flow_net_open = true;
+    flow_net_finish = NET_FINISH_CHANGED;
+    s_event_publish_owed = true;
+    flow_burst_add(BTN_C, 100);
+    flow_burst_add(BTN_C, 200);
+
+    TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_button());
+
+    TEST_ASSERT_EQUAL_INT(FLOW_SCREEN, flow_active_slot);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(1, flow_log_count(EV_MAKE_STATE), "only the join's repaint assembled a frame");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(1, flow_log_count(EV_PARTIAL) + flow_log_count(EV_FULL_REFRESH),
+                                  "exactly one paint: the join's repaint");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(0, flow_log_count(EV_FULL_REFRESH),
+                                  "the repaint compared against a screen the skipped render never built");
 }
 
 void test_swap6_a_full_lap_still_paints_a_break_end_the_glass_has_not_shown(void) {
@@ -14779,6 +14829,8 @@ int main(void) {
     RUN_TEST(test_chime_never_fires_from_a_non_chore_button_wake);
     RUN_TEST(test_swap1_a_lone_c_press_commits_once_after_the_quiet_window_and_paints_once);
     RUN_TEST(test_swap3a_a_gesture_that_crosses_a_minute_paints_the_minute_it_ended_in);
+    RUN_TEST(test_swap5a_a_lap_home_then_a_join_that_changes_the_panel_paints_once_and_partial);
+    RUN_TEST(test_swap5b_the_same_during_a_break_repaints_partial_not_full);
     RUN_TEST(test_swap2_n_presses_are_one_commit_and_one_partial_paint);
     RUN_TEST(test_swap3_the_candidate_wraps_through_screen);
     RUN_TEST(test_swap4_a_full_lap_commits_nothing_paints_nothing_and_puts_the_strip_back);
