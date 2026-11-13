@@ -31,6 +31,15 @@ static bool s_released_seen[BUTTON_LATCH_COUNT];
    button_latch.h for the press a wider one would cost. Zero means "no
    observation to anchor on", exactly as it does for s_last_edge_us. */
 static int64_t s_released_us[BUTTON_LATCH_COUNT];
+/* THE PER-BUTTON REFRACTORY WINDOW, two arrays because they answer two
+   questions. s_cfg_window_us is what button_latch_set_refractory last
+   asked for: the window the NEXT accepted press will open. s_window_us is
+   the window the LAST accepted press opened, stamped at acceptance, which is
+   the figure button_latch_record compares against. Stamping is what keeps a
+   change from reaching into a window already running, and it is what lets a
+   SEEDED press (below) open the default window whatever the setter says. */
+static int64_t s_cfg_window_us[BUTTON_LATCH_COUNT];
+static int64_t s_window_us[BUTTON_LATCH_COUNT];
 
 void button_latch_reset(void) {
     s_mask = 0;
@@ -38,7 +47,17 @@ void button_latch_reset(void) {
     memset(s_released_us, 0, sizeof(s_released_us));
     for (int i = 0; i < BUTTON_LATCH_COUNT; i++) {
         s_released_seen[i] = true;
+        s_cfg_window_us[i] = BUTTON_LATCH_REFRACTORY_US;
+        s_window_us[i] = BUTTON_LATCH_REFRACTORY_US;
     }
+}
+
+void button_latch_set_refractory(int btn, int64_t us) {
+    /* Zero or less would switch the guard off for that button, which is the
+       phantom-toggle defect this window exists to close; ignore it. */
+    if (btn < 0 || btn >= BUTTON_LATCH_COUNT || us <= 0)
+        return;
+    s_cfg_window_us[btn] = us;
 }
 
 void button_latch_seed_press(int btn, int64_t t_us) {
@@ -48,6 +67,10 @@ void button_latch_seed_press(int btn, int64_t t_us) {
     s_last_edge_us[btn] = t_us != 0 ? t_us : 1;
     s_released_seen[btn] = false;
     s_released_us[btn] = 0;
+    /* ALWAYS the default window, never the configured one. The wake press
+       began a boot earlier and anchors at reset, so nothing here knows when
+       its release will ring; the long window is the one that covers it. */
+    s_window_us[btn] = BUTTON_LATCH_REFRACTORY_US;
 }
 
 void button_latch_begin(int wake_btn, uint8_t held_mask, int64_t t_us) {
@@ -69,11 +92,12 @@ void button_latch_record(int btn, int64_t t_us) {
         return;
     /* The same-button refractory window, measured from the last accepted
        press; it also rejects any chatter on the press itself. */
-    if (s_last_edge_us[btn] != 0 && t_us - s_last_edge_us[btn] < BUTTON_LATCH_REFRACTORY_US)
+    if (s_last_edge_us[btn] != 0 && t_us - s_last_edge_us[btn] < s_window_us[btn])
         return;
     if (s_released_us[btn] != 0 && t_us - s_released_us[btn] < BUTTON_LATCH_RELEASE_SETTLE_US)
         return;
     s_last_edge_us[btn] = t_us;
+    s_window_us[btn] = s_cfg_window_us[btn]; /* the window THIS press opens */
     s_released_seen[btn] = false;
     s_released_us[btn] = 0;
     s_mask |= (uint8_t)(1u << btn);

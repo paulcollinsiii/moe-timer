@@ -92,11 +92,39 @@
    device would only need a guard script to keep it honest. */
 #define BUTTON_LATCH_REFRACTORY_US 300000
 
+/* THE SHORTER WINDOW FOR BUTTON C WHILE C IS THE TIMER-SWAP BUTTON, and only
+   then. The counted-clicks gesture (wake_flow.c) wants a person to be able to
+   tap C at 150-250 ms, and the 300 ms window above would register about every
+   other tap. wake_flow installs it with button_latch_set_refractory() when
+   the gesture opens (the wake press is C, and the mode is Timers — in Chores
+   mode C is the second chore tick and keeps 300 ms), and puts the default back
+   when the gesture closes. Every other button, and C at any other time, keeps
+   BUTTON_LATCH_REFRACTORY_US.
+
+   120 ms IS A STARTING FIGURE, and so is the 300 ms it shortens: BOTH ARE TO
+   BE SETTLED ON THE BENCH (20 single taps of C in Timers mode, none may count
+   as two; then a rapid run of taps, each of which should count). Too long
+   loses deliberate fast taps; too short lets the release bounce of a
+   slow tap through, which in the gesture is skipping two timers instead of
+   one. Not a Kconfig knob, for the reason the default is not one. */
+#define BUTTON_LATCH_SWAP_REFRACTORY_US 120000
+
 #ifdef __cplusplus
 extern "C" {
 #endif
 
 void button_latch_reset(void);
+/* Change ONE button's refractory window: the window the NEXT accepted press
+   of `btn` will open. Pass BUTTON_LATCH_REFRACTORY_US to put the default back.
+   A window already running keeps the figure it was opened with, and the EXT1
+   wake press seeded by button_latch_seed_press ALWAYS opens the default
+   whatever this has set, because its release can ring at any moment relative
+   to the boot. button_latch_reset restores every button's default, so a
+   wake starts from 300 ms everywhere. An out-of-range button or a window of
+   zero or less is ignored (a zero would turn the guard off). Task context:
+   record reads the window from the ISR, so the caller holds the same critical
+   section it holds for the other latch calls. */
+void button_latch_set_refractory(int btn, int64_t us);
 /* Open the refractory window for a press that was accepted WITHOUT passing
    through button_latch_record: the EXT1 wake press, which wake handling
    consumes directly. Call it after button_latch_reset and before the ISRs are

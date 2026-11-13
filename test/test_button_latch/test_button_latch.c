@@ -186,6 +186,148 @@ void test_begin_with_no_wake_button_seeds_nothing(void) {
     TEST_ASSERT_EQUAL_UINT8(1u << 1, button_latch_take());
 }
 
+/* THE PER-BUTTON REFRACTORY WINDOW (Button C's counted clicks). A button's
+   window defaults to BUTTON_LATCH_REFRACTORY_US, and button_latch_set_refractory
+   changes ONE button's. The figure in force is stamped when a press is
+   ACCEPTED, so a change never reaches back into a window already running. */
+#define SHORT_WINDOW_US BUTTON_LATCH_SWAP_REFRACTORY_US
+
+void test_every_button_defaults_to_the_long_refractory_window(void) {
+    for (int b = 0; b < 4; b++) {
+        button_latch_reset();
+        button_latch_record(b, T0_US);
+        button_latch_take();
+        button_latch_note_levels(0, T0_US + 20000);
+        button_latch_record(b, T0_US + BUTTON_LATCH_REFRACTORY_US - 1);
+        TEST_ASSERT_EQUAL_UINT8(0, button_latch_take());
+        button_latch_record(b, T0_US + BUTTON_LATCH_REFRACTORY_US);
+        TEST_ASSERT_EQUAL_UINT8(1u << b, button_latch_take());
+    }
+}
+
+void test_a_shorter_window_lets_a_faster_same_button_press_through(void) {
+    button_latch_set_refractory(2, SHORT_WINDOW_US);
+    button_latch_record(2, T0_US); /* accepted under the short window */
+    button_latch_take();
+    button_latch_note_levels(0, T0_US + 60000); /* released, and seen */
+    button_latch_record(2, T0_US + SHORT_WINDOW_US - 1);
+    TEST_ASSERT_EQUAL_UINT8(0, button_latch_take()); /* still inside it */
+    button_latch_record(2, T0_US + SHORT_WINDOW_US + 1000);
+    TEST_ASSERT_EQUAL_UINT8(1u << 2, button_latch_take()); /* a 300 ms window would have refused this */
+}
+
+void test_a_window_change_touches_only_the_named_button(void) {
+    button_latch_set_refractory(2, SHORT_WINDOW_US);
+    for (int b = 0; b < 4; b++) {
+        if (b == 2)
+            continue;
+        button_latch_reset();
+        button_latch_set_refractory(2, SHORT_WINDOW_US);
+        button_latch_record(b, T0_US);
+        button_latch_take();
+        button_latch_note_levels(0, T0_US + 20000);
+        button_latch_record(b, T0_US + SHORT_WINDOW_US + 1000);
+        TEST_ASSERT_EQUAL_UINT8(0, button_latch_take()); /* still the 300 ms window */
+        button_latch_record(b, T0_US + BUTTON_LATCH_REFRACTORY_US);
+        TEST_ASSERT_EQUAL_UINT8(1u << b, button_latch_take());
+    }
+}
+
+void test_a_window_change_does_not_reach_into_a_window_already_running(void) {
+    button_latch_record(2, T0_US); /* accepted under the long window */
+    button_latch_take();
+    button_latch_note_levels(0, T0_US + 20000);
+    button_latch_set_refractory(2, SHORT_WINDOW_US);
+    button_latch_record(2, T0_US + SHORT_WINDOW_US + 1000);
+    TEST_ASSERT_EQUAL_UINT8(0, button_latch_take());
+}
+
+void test_restoring_the_default_puts_the_long_window_back_for_the_next_press(void) {
+    button_latch_set_refractory(2, SHORT_WINDOW_US);
+    button_latch_set_refractory(2, BUTTON_LATCH_REFRACTORY_US);
+    button_latch_record(2, T0_US);
+    button_latch_take();
+    button_latch_note_levels(0, T0_US + 20000);
+    button_latch_record(2, T0_US + SHORT_WINDOW_US + 1000);
+    TEST_ASSERT_EQUAL_UINT8(0, button_latch_take());
+}
+
+void test_a_nonsense_window_or_button_is_ignored(void) {
+    button_latch_set_refractory(-1, SHORT_WINDOW_US);
+    button_latch_set_refractory(4, SHORT_WINDOW_US);
+    button_latch_set_refractory(2, 0);  /* zero would switch the guard off */
+    button_latch_set_refractory(2, -5); /* so would a negative */
+    button_latch_record(2, T0_US);
+    button_latch_take();
+    button_latch_note_levels(0, T0_US + 20000);
+    button_latch_record(2, T0_US + 50000);
+    TEST_ASSERT_EQUAL_UINT8(0, button_latch_take()); /* the default is still there */
+}
+
+void test_reset_restores_every_default_window(void) {
+    button_latch_set_refractory(2, SHORT_WINDOW_US);
+    button_latch_begin(-1, 0, T0_US); /* a new wake */
+    button_latch_record(2, T0_US + 20000);
+    TEST_ASSERT_EQUAL_UINT8(1u << 2, button_latch_take()); /* accepted: the test is live */
+    button_latch_note_levels(0, T0_US + 40000);
+    button_latch_record(2, T0_US + 20000 + SHORT_WINDOW_US + 5000);
+    TEST_ASSERT_EQUAL_UINT8(0, button_latch_take()); /* the long window, not the short one */
+}
+
+/* THE FAILURE THE SHORT WINDOW MUST NOT BUY: ONE TAP OF C COUNTED AS TWO,
+   which in the gesture is skipping two timers instead of one.
+
+   The wake press is SEEDED, and a seed always opens the DEFAULT window,
+   whatever the setter says — so the case below sets the short window FIRST
+   (the worst order) and checks the release bounce is still refused. The
+   bounce comes after a level sample reopened the gate (the pad read up in a
+   high phase of the ringing), past the short window and past the 10 ms
+   settle anchor of that sample: only the seeded long window rejects it. */
+void test_a_seeded_wake_press_keeps_the_long_window_when_the_short_one_is_set(void) {
+    button_latch_begin(2, 0, T0_US);
+    button_latch_set_refractory(2, SHORT_WINDOW_US);
+    button_latch_note_levels(0, T0_US + SHORT_WINDOW_US + 10000); /* up, mid-ring: the gate reopens */
+    button_latch_record(2, T0_US + SHORT_WINDOW_US + 25000);      /* 15 ms on: past the settle AND the short window */
+    TEST_ASSERT_EQUAL_UINT8(0, button_latch_take());              /* one tap is one press */
+    button_latch_record(2, T0_US + BUTTON_LATCH_REFRACTORY_US);   /* a real second tap, past the long window */
+    TEST_ASSERT_EQUAL_UINT8(1u << 2, button_latch_take());
+}
+
+/* The same shape for a press the latch ACCEPTED (not the seed), as far as a
+   10 ms settle goes: a sample in a high phase of the ringing is followed by
+   an edge inside the settle window, which is refused at either figure. What
+   the short window cannot cover is ringing that outlasts the settle AND the
+   window, and neither can the long one for a longer hold; that residual is
+   the bench check's, and is recorded in the notes. */
+void test_an_accepted_press_under_the_short_window_still_has_the_settle_backstop(void) {
+    button_latch_set_refractory(2, SHORT_WINDOW_US);
+    button_latch_record(2, T0_US);
+    button_latch_take();
+    button_latch_note_levels(0, T0_US + 200000);   /* a 200 ms hold: sample mid-ring */
+    button_latch_record(2, T0_US + 200000 + 5000); /* its bounce, 5 ms later */
+    TEST_ASSERT_EQUAL_UINT8(0, button_latch_take());
+}
+
+/* The release gate and the settle anchor run BEFORE the window in effect
+   matters: a press the gate refuses is refused at any window. */
+void test_the_release_gate_still_refuses_under_the_short_window(void) {
+    button_latch_set_refractory(2, SHORT_WINDOW_US);
+    button_latch_record(2, T0_US);
+    button_latch_take();
+    button_latch_record(2, T0_US + 10 * SHORT_WINDOW_US); /* never seen released */
+    TEST_ASSERT_EQUAL_UINT8(0, button_latch_take());
+}
+
+void test_a_rejected_edge_does_not_extend_the_short_window(void) {
+    button_latch_set_refractory(2, SHORT_WINDOW_US);
+    button_latch_record(2, T0_US);
+    button_latch_take();
+    button_latch_note_levels(0, T0_US + 30000);
+    button_latch_record(2, T0_US + 100000); /* refused, inside the window */
+    button_latch_record(2, T0_US + SHORT_WINDOW_US + 1000);
+    TEST_ASSERT_EQUAL_UINT8(1u << 2, button_latch_take());
+}
+
 /* THE RELEASE GATE, and the field defect it closes (M2-T12 finding 3). One
    physical press is a falling edge going down and, on a bouncing contact,
    another coming back up — and the second is separated from the first by
@@ -535,6 +677,17 @@ int main(void) {
     RUN_TEST(test_begin_with_the_wake_button_still_held_keeps_its_gate_closed);
     RUN_TEST(test_begin_resets_whatever_an_earlier_wake_left);
     RUN_TEST(test_begin_with_no_wake_button_seeds_nothing);
+    RUN_TEST(test_every_button_defaults_to_the_long_refractory_window);
+    RUN_TEST(test_a_shorter_window_lets_a_faster_same_button_press_through);
+    RUN_TEST(test_a_window_change_touches_only_the_named_button);
+    RUN_TEST(test_a_window_change_does_not_reach_into_a_window_already_running);
+    RUN_TEST(test_restoring_the_default_puts_the_long_window_back_for_the_next_press);
+    RUN_TEST(test_a_nonsense_window_or_button_is_ignored);
+    RUN_TEST(test_reset_restores_every_default_window);
+    RUN_TEST(test_a_seeded_wake_press_keeps_the_long_window_when_the_short_one_is_set);
+    RUN_TEST(test_an_accepted_press_under_the_short_window_still_has_the_settle_backstop);
+    RUN_TEST(test_the_release_gate_still_refuses_under_the_short_window);
+    RUN_TEST(test_a_rejected_edge_does_not_extend_the_short_window);
     RUN_TEST(test_the_release_gate_is_per_button);
     RUN_TEST(test_a_button_seeded_as_held_rejects_its_release_bounce);
     RUN_TEST(test_a_button_seeded_as_up_accepts_its_first_press);
