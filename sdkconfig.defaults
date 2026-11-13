@@ -271,27 +271,19 @@ CONFIG_SPIRAM_MEMTEST=n
 # Compile the app and every IDF component for size (-Os) instead of the
 # debug-friendly -Og. The image budget is the binding constraint (85 % slot
 # guard) and nothing in this firmware is CPU-bound: the long waits are the
-# panel's BUSY line, WiFi/TLS, and the sleep. Measured: 1,484,176 -> 1,394,128 B
-# (-90,048 B) together with the mbedTLS line below. What -Os changes that
+# panel's BUSY line, WiFi/TLS, and the sleep. What -Os changes that
 # matters: stack use per frame (see the task list in
 # docs/planning/20261112.firmware-diet.notes.md for the high-water marks to
 # re-read), slower tight loops (tone render, LVGL blit) and more inlining in
 # coredump backtraces. Separate commit, soaked on the bench before it is
-# relied on; revert both lines together and set the two symbols back by hand
-# in sdkconfig (a value an earlier configure wrote is unmarked and wins).
+# relied on; to revert, follow the recipe in the notes (a value an earlier
+# configure wrote is unmarked in sdkconfig and wins over this file).
+# mbedTLS keeps the IDF default (MBEDTLS_COMPILER_OPTIMIZATION_SIZE, -Os), no
+# override. An earlier commit here added MBEDTLS_COMPILER_OPTIMIZATION_PERF on
+# the claim that IDF builds with CMAKE_BUILD_TYPE=Debug; that was false: IDF
+# leaves the build type empty, and the Debug came from an editor extension
+# configuring build/. CMakeLists.txt now pins the build type to empty.
 CONFIG_COMPILER_OPTIMIZATION_SIZE=y
-
-# Required companion to -Os, do not drop it. IDF 6.0.1 builds mbedTLS with
-# CMAKE_BUILD_TYPE=Debug, and mbedtls/CMakeLists.txt then adds "-O0 -g3" to
-# the target; the component's own "-Os" (MBEDTLS_COMPILER_OPTIMIZATION_SIZE)
-# is a duplicate of the global -Os, CMake drops the duplicate, and -O0 is
-# left as the last -O flag, so mbedTLS compiled UNOPTIMISED: +139 KB image
-# and a slow TLS handshake. With the global flag at -Og the same two lines
-# end "-Og -O0 -Os" and -Os wins, which is why the symptom only appears with
-# -Os. Asking mbedTLS for -O2 puts a differing flag last. Against mbedTLS at
-# -Os that grows libmbed-builtin by 10.7 KB and libtfpsacrypto by 6.4 KB
-# (map, before/after), and makes the TLS handshake faster.
-CONFIG_MBEDTLS_COMPILER_OPTIMIZATION_PERF=y
 
 # PROVISIONAL, its own commit so it reverts alone: mbedTLS client only (no TLS
 # server). The only TLS the device speaks is as a client: the OTA HTTPS fetch
