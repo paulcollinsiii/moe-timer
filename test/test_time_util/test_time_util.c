@@ -187,6 +187,15 @@ void test_date_fmt_iso_truncates_exactly_as_snprintf_does(void) {
     TEST_ASSERT_EQUAL_STRING(want, buf);
 }
 
+void test_date_fmt_iso_wide_year_in_a_roomy_buffer_is_not_cut(void) {
+    /* The scratch buffer inside date_fmt_iso must hold the whole 11-character
+       output; a destination with room for it must receive every character. */
+    struct tm tm = {.tm_year = 10000 - 1900, .tm_mon = 0, .tm_mday = 5};
+    char buf[16];
+    date_fmt_iso(buf, sizeof buf, &tm);
+    TEST_ASSERT_EQUAL_STRING("10000-01-05", buf);
+}
+
 void test_date_fmt_iso_keeps_a_negative_field_like_snprintf(void) {
     struct tm tm = {.tm_year = -1 - 1900, .tm_mon = 11, .tm_mday = 31};
     char buf[11];
@@ -215,6 +224,7 @@ int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_date_fmt_iso_formats_an_ordinary_date);
     RUN_TEST(test_date_fmt_iso_truncates_exactly_as_snprintf_does);
+    RUN_TEST(test_date_fmt_iso_wide_year_in_a_roomy_buffer_is_not_cut);
     RUN_TEST(test_date_fmt_iso_keeps_a_negative_field_like_snprintf);
     RUN_TEST(test_date_fmt_iso_into_a_short_buffer_truncates_and_terminates);
     RUN_TEST(test_date_fmt_iso_with_zero_length_writes_nothing);
