@@ -240,7 +240,7 @@ class TestCharge(SpriteChecks, unittest.TestCase):
         x = int(re.search(r"#define CHARGE_ART_X (\d+)", src).group(1))
         self.assertRegex(
             src,
-            r"build_sprite\(\s*scr,\s*&SPRITE_CHARGE,\s*CHARGE_ART_X,\s*\(DISP_VER\s*-\s*SPRITE_CHARGE\.h\)\s*/\s*2,\s*1,\s*lv_color_black\(\)\s*\)",
+            r"build_sprite\(\s*scr,\s*art\s*\?\s*art\s*:\s*&SPRITE_CHARGE,\s*CHARGE_ART_X,\s*\(DISP_VER\s*-\s*SPRITE_CHARGE\.h\)\s*/\s*2,\s*1,\s*lv_color_black\(\)\s*\)",
         )
         return x, (128 - self.DIMS[1]) // 2
 
@@ -267,7 +267,7 @@ class TestTimesUp(SpriteChecks, unittest.TestCase):
         x = int(re.search(r"#define TIMESUP_ART_X (\d+)", src).group(1))
         self.assertRegex(
             src,
-            r"build_sprite\(\s*scr,\s*&SPRITE_TIMESUP,\s*TIMESUP_ART_X,\s*"
+            r"build_sprite\(\s*scr,\s*art\s*\?\s*art\s*:\s*&SPRITE_TIMESUP,\s*TIMESUP_ART_X,\s*"
             r"DISP_VER\s*-\s*SPRITE_TIMESUP\.h,\s*1,\s*lv_color_black\(\)\s*\)",
         )
         return x, 128 - self.DIMS[1]
@@ -306,7 +306,7 @@ class TestBreak(SpriteChecks, unittest.TestCase):
         y = int(re.search(r"#define BREAK_ART_Y (\d+)", src).group(1))
         self.assertRegex(
             src,
-            r"build_sprite\(\s*scr,\s*&SPRITE_BREAK,\s*BREAK_ART_X,\s*BREAK_ART_Y,\s*2,\s*lv_color_white\(\)\s*\)",
+            r"build_sprite\(\s*scr,\s*art\s*\?\s*art\s*:\s*&SPRITE_BREAK,\s*BREAK_ART_X,\s*BREAK_ART_Y,\s*2,\s*lv_color_white\(\)\s*\)",
         )
         return x, y
 
@@ -336,7 +336,7 @@ class TestBedtime(SpriteChecks, unittest.TestCase):
         self.assertEqual(4, int(re.search(r"#define BEDTIME_ART_SCALE (\d+)", src).group(1)))
         self.assertRegex(
             src,
-            r"build_sprite\(\s*scr,\s*&SPRITE_BEDTIME,\s*BEDTIME_ART_X,\s*BEDTIME_ART_Y,\s*BEDTIME_ART_SCALE,\s*lv_color_white\(\)\s*\)",
+            r"build_sprite\(\s*scr,\s*art\s*\?\s*art\s*:\s*&SPRITE_BEDTIME,\s*BEDTIME_ART_X,\s*BEDTIME_ART_Y,\s*BEDTIME_ART_SCALE,\s*lv_color_white\(\)\s*\)",
         )
         return x, y
 

@@ -190,7 +190,7 @@ void test_break_screen(void) {
     st.remaining_sec = 5400; /* 1:30:00 of screen time frozen */
     st.break_remaining_sec = 700;
     st.swap_next_name = "Piano";
-    display_screens_build_break(&st);
+    display_screens_build_break(&st, NULL);
     assert_matches_golden("break_screen");
 }
 
@@ -202,7 +202,7 @@ void test_break_screen_no_extras(void) {
     st.remaining_sec = 5400;
     st.break_remaining_sec = 700;
     st.swap_next_name = NULL;
-    display_screens_build_break(&st);
+    display_screens_build_break(&st, NULL);
     assert_matches_golden("break_screen_no_extras");
 }
 
@@ -326,7 +326,7 @@ void test_break_screen_no_eligible(void) {
     st.remaining_sec = 5400;
     st.break_remaining_sec = 700;
     st.swap_next_name = NULL;
-    display_screens_build_break(&st);
+    display_screens_build_break(&st, NULL);
     assert_matches_golden("break_screen_no_eligible");
 }
 
@@ -369,7 +369,7 @@ static display_state_t break_chore_state(uint8_t count, uint8_t outstanding) {
 void test_break_screen_with_chores(void) {
     display_state_t st = break_chore_state(3, 2);
     st.swap_next_name = "Piano";
-    display_screens_build_break(&st);
+    display_screens_build_break(&st, NULL);
     assert_matches_golden("break_screen_chores");
 }
 
@@ -379,7 +379,7 @@ void test_break_screen_with_chores(void) {
 void test_break_screen_with_chores_no_eligible(void) {
     display_state_t st = break_chore_state(3, 2);
     st.swap_next_name = NULL;
-    display_screens_build_break(&st);
+    display_screens_build_break(&st, NULL);
     assert_matches_golden("break_screen_chores_no_eligible");
 }
 
@@ -395,7 +395,7 @@ void test_break_screen_with_every_chore_done(void) {
     display_state_t st = break_chore_state(3, 0);
     st.remaining_sec = 45000; /* "Screen 12:30" */
     st.swap_next_name = "Woodwind lesson";
-    display_screens_build_break(&st);
+    display_screens_build_break(&st, NULL);
     assert_matches_golden("break_screen_chores_all_done");
 }
 
@@ -468,7 +468,7 @@ static int break_ink_bands(int *tops, int *bots, int max) {
 void test_the_break_chore_line_clears_the_countdown_and_the_row(void) {
     display_state_t st = break_chore_state(3, 2);
     st.swap_next_name = "Piano";
-    display_screens_build_break(&st);
+    display_screens_build_break(&st, NULL);
     lv_refr_now(s_disp);
 
     int tops[8], bots[8];
@@ -508,7 +508,7 @@ void test_the_break_screen_without_chores_keeps_the_same_bands_minus_the_chore_l
     st.remaining_sec = 5400;
     st.break_remaining_sec = 700;
     st.swap_next_name = "Piano";
-    display_screens_build_break(&st);
+    display_screens_build_break(&st, NULL);
     lv_refr_now(s_disp);
 
     int tops[8], bots[8];
@@ -534,7 +534,7 @@ static void break_count_ink_span(int32_t break_sec, int *lo, int *hi) {
     st.remaining_sec = 5400;
     st.break_remaining_sec = break_sec;
     st.swap_next_name = "Piano";
-    display_screens_build_break(&st);
+    display_screens_build_break(&st, NULL);
     lv_refr_now(s_disp);
     *lo = HOR;
     *hi = -1;
@@ -672,7 +672,7 @@ void test_the_break_screen_paints_the_art_at_the_left_at_twice_its_size(void) {
     for (size_t v = 0; v < sizeof cells / sizeof cells[0]; v++) {
         display_state_t st = break_chore_state(cells[v].count, cells[v].outstanding);
         st.swap_next_name = cells[v].swap;
-        display_screens_build_break(&st);
+        display_screens_build_break(&st, NULL);
         lv_refr_now(s_disp);
         const int box_w = 2 * SPRITE_BREAK.w, box_h = 2 * SPRITE_BREAK.h;
         int in_box = 0, stray = 0;
@@ -756,7 +756,7 @@ static int break_bottom_row(int32_t *left, int32_t *right, const char **text, in
 void test_the_break_chore_row_fits_its_cells(void) {
     display_state_t st = break_chore_state(3, 2);
     st.swap_next_name = "Woodwind lesson"; /* the widest hint the budget allows */
-    display_screens_build_break(&st);
+    display_screens_build_break(&st, NULL);
 
     int32_t left[8], right[8];
     const char *text[8];
@@ -783,7 +783,7 @@ void test_the_break_chore_row_fits_its_cells(void) {
 void test_the_break_row_without_a_swap_keeps_its_chore_cell(void) {
     display_state_t st = break_chore_state(3, 2);
     st.swap_next_name = NULL;
-    display_screens_build_break(&st);
+    display_screens_build_break(&st, NULL);
 
     int32_t left[8], right[8];
     const char *text[8];
@@ -865,7 +865,7 @@ void test_the_break_chore_line_items_never_meet(void) {
             display_state_t st = break_chore_state(3, outstanding[pass]);
             st.remaining_sec = minutes * 60;
             st.swap_next_name = "Piano";
-            display_screens_build_break(&st);
+            display_screens_build_break(&st, NULL);
 
             int32_t left[4], right[4];
             const char *text[4];
@@ -938,7 +938,7 @@ void test_the_break_chore_prompt_counts_what_is_done(void) {
     /* 3 configured, 1 outstanding -> acked 0x03, two rows done. */
     display_state_t st = break_chore_state(3, 1);
     st.swap_next_name = "Piano";
-    display_screens_build_break(&st);
+    display_screens_build_break(&st, NULL);
     TEST_ASSERT_EQUAL_INT_MESSAGE(2, break_chore_line(left, right, text, 4), "the chore line is not drawn");
     TEST_ASSERT_EQUAL_STRING_MESSAGE("Chores 2/3", text[0],
                                      "the prompt at 2 done of 3 is wrong - it is reading the outstanding count, or "
@@ -949,7 +949,7 @@ void test_the_break_chore_prompt_counts_what_is_done(void) {
     /* The same list one ack earlier. Only the ack bits move. */
     st = break_chore_state(3, 2);
     st.swap_next_name = "Piano";
-    display_screens_build_break(&st);
+    display_screens_build_break(&st, NULL);
     TEST_ASSERT_EQUAL_INT_MESSAGE(2, break_chore_line(left, right, text, 4), "the chore line is not drawn");
     TEST_ASSERT_EQUAL_STRING_MESSAGE("Chores 1/3", text[0], "the prompt at 1 done of 3 is wrong");
     TEST_ASSERT_TRUE_MESSAGE(strcmp(first, text[0]) != 0,
@@ -979,13 +979,13 @@ void test_the_break_chore_tick_matches_the_checklist_glyph(void) {
 
     display_state_t st = break_chore_state(3, 1);
     st.swap_next_name = "Piano";
-    display_screens_build_break(&st);
+    display_screens_build_break(&st, NULL);
     TEST_ASSERT_EQUAL_INT_MESSAGE(2, break_chore_line(left, right, text, 4), "the chore line is not drawn");
     const int32_t unfinished_left = left[0];
 
     st = break_chore_state(3, 0);
     st.swap_next_name = "Piano";
-    display_screens_build_break(&st);
+    display_screens_build_break(&st, NULL);
     TEST_ASSERT_EQUAL_INT_MESSAGE(2, break_chore_line(left, right, text, 4), "the chore line is not drawn");
     TEST_ASSERT_EQUAL_STRING_MESSAGE("Chores " LV_SYMBOL_OK, text[0],
                                      "the finished prompt is not the word then the tick - a leading tick is the same "
@@ -1012,7 +1012,7 @@ void test_the_break_chore_tick_matches_the_checklist_glyph(void) {
 void test_a_single_chore_still_earns_the_break_screen_layout(void) {
     display_state_t st = break_chore_state(1, 1);
     st.swap_next_name = "Piano";
-    display_screens_build_break(&st);
+    display_screens_build_break(&st, NULL);
     lv_refr_now(s_disp);
 
     int tops[8], bots[8];
@@ -1062,7 +1062,7 @@ void test_the_break_screen_offers_chores_exactly_when_the_list_is_non_empty(void
         /* A swap is available throughout, so the bottom row exists in
            both layouts and the only thing moving is the chore cell. */
         st.swap_next_name = "Piano";
-        display_screens_build_break(&st);
+        display_screens_build_break(&st, NULL);
 
         int32_t row_left[8], row_right[8];
         const char *row_text[8];
@@ -2049,7 +2049,7 @@ void test_ota_screen_lines_fit_the_panel(void) {
 void test_charge_me_screen(void) {
     /* <= 10%: full stop — the panel says only Charge me!, with the charge
        art and a nearly-empty battery */
-    display_screens_build_charge_me();
+    display_screens_build_charge_me(NULL);
     assert_matches_golden("charge_me");
 }
 
@@ -2057,7 +2057,7 @@ void test_charge_me_screen(void) {
    touch an edge by arithmetic alone. Same margins as the no-clock screen's
    fit test on the sides, and the same 2 px clear on the top and bottom. */
 void test_the_charge_me_screen_fits_the_panel(void) {
-    display_screens_build_charge_me();
+    display_screens_build_charge_me(NULL);
     lv_refr_now(s_disp);
     int left, right;
     ink_columns(&left, &right);
@@ -2092,7 +2092,7 @@ void test_the_charge_me_screen_paints_the_art_at_the_left(void) {
        expression), so the art's right edge is checked against it here */
     TEST_ASSERT_TRUE_MESSAGE(CHARGE_ART_X + (int)SPRITE_CHARGE.w <= CHARGE_COL_X,
                              "the right column overlaps the art's box");
-    display_screens_build_charge_me();
+    display_screens_build_charge_me(NULL);
     lv_refr_now(s_disp);
     int art_ink = 0, stray_ink = 0, right_ink = 0;
     for (int y = 0; y < VER; y++) {
@@ -2113,7 +2113,7 @@ void test_the_charge_me_screen_paints_the_art_at_the_left(void) {
 }
 
 void test_timesup_screen(void) {
-    display_screens_build_timesup();
+    display_screens_build_timesup(NULL);
     assert_matches_golden("timesup");
 }
 
@@ -2188,7 +2188,7 @@ void test_a_sprite_takes_its_ink_colour_from_the_caller(void) {
    words, which start at x 180, stay 2 px off every edge including the
    bottom. */
 void test_the_timesup_screen_fits_the_panel_but_for_the_art_bottom_bleed(void) {
-    display_screens_build_timesup();
+    display_screens_build_timesup(NULL);
     lv_refr_now(s_disp);
     int text_left = HOR, text_right = -1, text_top = VER, text_bottom = -1;
     int edge_ink = 0, bottom_sprite_ink = 0, bottom_text_ink = 0;
@@ -2247,7 +2247,7 @@ void test_the_timesup_screen_paints_the_art_at_the_left_and_the_words_at_the_rig
     TEST_ASSERT_TRUE_MESSAGE(TIMESUP_ART_X + (int)SPRITE_TIMESUP.w <= TIMESUP_COL_X,
                              "the words' column overlaps the art's box");
     TEST_ASSERT_TRUE_MESSAGE(TIMESUP_COL_X + TIMESUP_COL_W <= HOR, "the words' column runs off the panel");
-    display_screens_build_timesup();
+    display_screens_build_timesup(NULL);
     lv_refr_now(s_disp);
     int art_ink = 0, stray_ink = 0, right_ink = 0;
     /* per row of the column: its ink extent, for the two-band centring check */
@@ -2334,14 +2334,14 @@ void test_the_no_clock_screen_fits_the_panel(void) {
 
 void test_bedtime_screen(void) {
     /* Bed Time lock: inverted, non-dismissable until day rollover */
-    display_screens_build_bedtime();
+    display_screens_build_bedtime(NULL);
     assert_matches_golden("bedtime");
 }
 
 /* The bed-time screen is inverted (ink is the set bits, white_px()) and has
    no bleed exception: nothing may come within 2 px of any edge. */
 void test_the_bedtime_screen_fits_the_panel(void) {
-    display_screens_build_bedtime();
+    display_screens_build_bedtime(NULL);
     lv_refr_now(s_disp);
     int edge_ink = 0, ink = 0;
     for (int y = 0; y < VER; y++) {
@@ -2369,7 +2369,7 @@ void test_the_bedtime_screen_paints_the_art_at_the_left_at_four_times_its_size(v
     TEST_ASSERT_TRUE_MESSAGE(BEDTIME_ART_X + BEDTIME_ART_SCALE * (int)SPRITE_BEDTIME.w <= BEDTIME_COL_X,
                              "the words' column overlaps the art's box");
     TEST_ASSERT_TRUE_MESSAGE(BEDTIME_COL_X + BEDTIME_COL_W <= HOR, "the words' column runs off the panel");
-    display_screens_build_bedtime();
+    display_screens_build_bedtime(NULL);
     lv_refr_now(s_disp);
     const int box_w = BEDTIME_ART_SCALE * SPRITE_BEDTIME.w, box_h = BEDTIME_ART_SCALE * SPRITE_BEDTIME.h;
     int in_box = 0, left_stray = 0;
@@ -2401,7 +2401,7 @@ void test_the_bedtime_words_never_overlap_the_art(void) {
     lv_refr_now(s_disp);
     memcpy(s_art_alone, s_captured, FB_BYTES);
 
-    display_screens_build_bedtime();
+    display_screens_build_bedtime(NULL);
     lv_refr_now(s_disp);
     const int box_r = BEDTIME_ART_X + BEDTIME_ART_SCALE * (int)SPRITE_BEDTIME.w,
               box_b = BEDTIME_ART_Y + BEDTIME_ART_SCALE * (int)SPRITE_BEDTIME.h;
@@ -2503,7 +2503,7 @@ static void assert_rows_near(const char *what, int top, int bot, int want_top, i
 }
 
 void test_the_bedtime_text_rows_match_the_approved_layout(void) {
-    display_screens_build_bedtime();
+    display_screens_build_bedtime(NULL);
     lv_refr_now(s_disp);
     int top, bot;
     /* the words live right of the art, above the bottom line (rows < 100) */
@@ -3298,6 +3298,106 @@ void test_the_locked_block_stays_inside_the_progress_bar_band(void) {
     assert_rows_blank(50, 57);
 }
 
+/* ---- sprite variants ------------------------------------------------------
+   Each lock screen takes the sprite it paints. NULL is the slot's base
+   sprite (every test above, every golden); a picked variant is any other
+   sprite of the slot's size. The second variant here is built in memory (no
+   file in tools/sprites or sprites.local): a full-width band across the
+   middle half of the box, so its ink count is plain arithmetic. */
+
+/* RLE of a w x h image whose rows [y0, y1) are all ink, written the way
+   tools/gen_sprites.py does (a run over 255 as 255, 0, rest). */
+static uint16_t band_rle(uint8_t *out, uint16_t w, uint16_t h, uint16_t y0, uint16_t y1) {
+    const uint32_t runs[3] = {(uint32_t)y0 * w, (uint32_t)(y1 - y0) * w, (uint32_t)(h - y1) * w};
+    uint16_t n = 0;
+    for (int r = 0; r < 3; r++) {
+        uint32_t left = runs[r];
+        while (left > 255) {
+            out[n++] = 255;
+            out[n++] = 0;
+            left -= 255;
+        }
+        out[n++] = (uint8_t)left;
+    }
+    return n;
+}
+
+typedef void (*variant_builder_t)(const sprite_t *art);
+static void vb_charge(const sprite_t *a) {
+    display_screens_build_charge_me(a);
+}
+static void vb_timesup(const sprite_t *a) {
+    display_screens_build_timesup(a);
+}
+static void vb_bedtime(const sprite_t *a) {
+    display_screens_build_bedtime(a);
+}
+static void vb_break(const sprite_t *a) {
+    display_state_t st = break_chore_state(0, 0);
+    display_screens_build_break(&st, a);
+}
+
+/* Paints the slot's base sprite (explicitly, and as NULL) and a band
+   variant, and checks: NULL is byte-identical to naming the base; the band
+   variant puts exactly its own ink inside the art's box; and everything
+   outside the box is byte-identical to the base paint, so a variant changes
+   the art and nothing else. `white_ink`: the screen is inverted. */
+static void check_variant_paints_in_its_box(variant_builder_t build, const sprite_t *base, int bx, int by, int scale,
+                                            bool white_ink) {
+    static uint8_t base_fb[FB_BYTES], null_fb[FB_BYTES];
+    uint8_t rle[512]; /* the largest slot (timesup) needs ~140 bytes of continuations */
+    const uint16_t y0 = base->h / 4, y1 = (uint16_t)(base->h - base->h / 4);
+    const sprite_t variant = {base->w, base->h, rle, band_rle(rle, base->w, base->h, y0, y1)};
+
+    build(NULL);
+    lv_refr_now(s_disp);
+    memcpy(null_fb, s_captured, FB_BYTES);
+    build(base);
+    lv_refr_now(s_disp);
+    memcpy(base_fb, s_captured, FB_BYTES);
+    TEST_ASSERT_EQUAL_MEMORY_MESSAGE(null_fb, base_fb, FB_BYTES, "NULL is not the base sprite");
+
+    build(&variant);
+    lv_refr_now(s_disp);
+    int in_box = 0, outside_diff = 0, in_box_diff = 0;
+    for (int y = 0; y < VER; y++) {
+        for (int x = 0; x < HOR; x++) {
+            const bool now = (((s_captured[y * (HOR / 8) + x / 8] >> (7 - (x & 7))) & 1) != 0) == white_ink;
+            const bool was = (((base_fb[y * (HOR / 8) + x / 8] >> (7 - (x & 7))) & 1) != 0) == white_ink;
+            const bool inside = x >= bx && x < bx + scale * base->w && y >= by && y < by + scale * base->h;
+            if (inside) {
+                in_box += now;
+                in_box_diff += now != was;
+            } else if (now != was) {
+                outside_diff++;
+            }
+        }
+    }
+    const int expected = scale * scale * base->w * (y1 - y0);
+    char msg[96];
+    snprintf(msg, sizeof msg, "variant ink in its box: %d, expected %d", in_box, expected);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(expected, in_box, msg);
+    TEST_ASSERT_TRUE_MESSAGE(in_box_diff > 0, "the variant paints the same art as the base");
+    snprintf(msg, sizeof msg, "%d pixels outside the art's box changed", outside_diff);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(0, outside_diff, msg);
+}
+
+void test_the_charge_me_screen_paints_the_variant_it_is_given(void) {
+    check_variant_paints_in_its_box(vb_charge, &SPRITE_CHARGE, CHARGE_ART_X, (VER - SPRITE_CHARGE.h) / 2, 1, false);
+}
+
+void test_the_timesup_screen_paints_the_variant_it_is_given(void) {
+    check_variant_paints_in_its_box(vb_timesup, &SPRITE_TIMESUP, TIMESUP_ART_X, VER - SPRITE_TIMESUP.h, 1, false);
+}
+
+void test_the_break_screen_paints_the_variant_it_is_given(void) {
+    check_variant_paints_in_its_box(vb_break, &SPRITE_BREAK, BREAK_ART_X, BREAK_ART_Y, 2, true);
+}
+
+void test_the_bedtime_screen_paints_the_variant_it_is_given(void) {
+    check_variant_paints_in_its_box(vb_bedtime, &SPRITE_BEDTIME, BEDTIME_ART_X, BEDTIME_ART_Y, BEDTIME_ART_SCALE, true);
+}
+
 int main(void) {
     lv_init();
     lv_tick_set_cb(tick_cb);
@@ -3404,5 +3504,9 @@ int main(void) {
     RUN_TEST(test_the_locked_label_cannot_overstrike_the_free_tranche);
     RUN_TEST(test_no_block_width_can_truncate_the_locked_label);
     RUN_TEST(test_the_locked_block_stays_inside_the_progress_bar_band);
+    RUN_TEST(test_the_charge_me_screen_paints_the_variant_it_is_given);
+    RUN_TEST(test_the_timesup_screen_paints_the_variant_it_is_given);
+    RUN_TEST(test_the_break_screen_paints_the_variant_it_is_given);
+    RUN_TEST(test_the_bedtime_screen_paints_the_variant_it_is_given);
     return UNITY_END();
 }

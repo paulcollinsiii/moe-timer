@@ -605,7 +605,7 @@ void display_screens_build_main(const display_state_t *st) {
 #define BREAK_PROMPT_MAX_W 86
 #define BREAK_SCREEN_MAX_W (BREAK_COL_W - BREAK_PROMPT_MAX_W)
 
-void display_screens_build_break(const display_state_t *st) {
+void display_screens_build_break(const display_state_t *st, const sprite_t *art) {
     lv_obj_t *scr = fresh_screen(true);
     char buf[64];
     char rem_buf[16];
@@ -687,7 +687,7 @@ void display_screens_build_break(const display_state_t *st) {
     const bool has_swap = st->swap_next_name != NULL;
 
     /* The art is static: white ink on the black screen, drawn at 2x. */
-    build_sprite(scr, &SPRITE_BREAK, BREAK_ART_X, BREAK_ART_Y, 2, lv_color_white());
+    build_sprite(scr, art ? art : &SPRITE_BREAK, BREAK_ART_X, BREAK_ART_Y, 2, lv_color_white());
 
     /* Right column: title, countdown and bar are centred on it. */
     lv_obj_t *title =
@@ -935,9 +935,9 @@ void display_screens_build_chores(const display_state_t *st) {
 #define TIMESUP_TIMES_Y 26
 #define TIMESUP_UP_Y 60
 
-void display_screens_build_timesup(void) {
+void display_screens_build_timesup(const sprite_t *art) {
     lv_obj_t *scr = fresh_screen(false);
-    build_sprite(scr, &SPRITE_TIMESUP, TIMESUP_ART_X, DISP_VER - SPRITE_TIMESUP.h, 1, lv_color_black());
+    build_sprite(scr, art ? art : &SPRITE_TIMESUP, TIMESUP_ART_X, DISP_VER - SPRITE_TIMESUP.h, 1, lv_color_black());
 
     lv_obj_t *times =
         make_label(scr, "TIME'S", &lv_font_montserrat_28, LV_ALIGN_TOP_LEFT, TIMESUP_COL_X, TIMESUP_TIMES_Y);
@@ -1092,9 +1092,9 @@ static void build_empty_battery(lv_obj_t *scr, int32_t x, int32_t y) {
     build_block(scr, x + BATT_BORDER + 2, y + BATT_BORDER + 2, 8, BATT_H - 2 * (BATT_BORDER + 2));
 }
 
-void display_screens_build_charge_me(void) {
+void display_screens_build_charge_me(const sprite_t *art) {
     lv_obj_t *scr = fresh_screen(false);
-    build_sprite(scr, &SPRITE_CHARGE, CHARGE_ART_X, (DISP_VER - SPRITE_CHARGE.h) / 2, 1, lv_color_black());
+    build_sprite(scr, art ? art : &SPRITE_CHARGE, CHARGE_ART_X, (DISP_VER - SPRITE_CHARGE.h) / 2, 1, lv_color_black());
 
     lv_obj_t *words =
         make_label(scr, "Charge\nme!", &lv_font_montserrat_28, LV_ALIGN_TOP_LEFT, CHARGE_COL_X, CHARGE_TEXT_Y);
@@ -1124,9 +1124,9 @@ void display_screens_build_charge_me(void) {
 #define BEDTIME_GREETING_Y 54 /* "Goodnight!" label top: ink rows 58..83 (measured off the golden) */
 #define BEDTIME_LINE_Y -2     /* bottom line: offset from the bottom edge, ink rows 108..125 */
 
-void display_screens_build_bedtime(void) {
+void display_screens_build_bedtime(const sprite_t *art) {
     lv_obj_t *scr = fresh_screen(true);
-    build_sprite(scr, &SPRITE_BEDTIME, BEDTIME_ART_X, BEDTIME_ART_Y, BEDTIME_ART_SCALE, lv_color_white());
+    build_sprite(scr, art ? art : &SPRITE_BEDTIME, BEDTIME_ART_X, BEDTIME_ART_Y, BEDTIME_ART_SCALE, lv_color_white());
 
     /* Two labels, not one two-line label: the gap between the words is
        wider than the font's line height. */
