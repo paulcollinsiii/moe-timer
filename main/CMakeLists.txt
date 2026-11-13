@@ -230,3 +230,9 @@ target_compile_options(${COMPONENT_LIB} PRIVATE -Werror=unused-function)
 if(SPRITE_DATA_GEN)
     target_sources(${COMPONENT_LIB} PRIVATE "${SPRITE_DATA_GEN}")
 endif()
+
+# lv_font_conv's output includes "lvgl/lvgl.h" unless told lvgl.h is on the
+# include path directly, which it is for every component that requires lvgl.
+if(UI_FONT_SRCS)
+    set_source_files_properties(${UI_FONT_SRCS} PROPERTIES COMPILE_DEFINITIONS LV_LVGL_H_INCLUDE_SIMPLE)
+endif()
