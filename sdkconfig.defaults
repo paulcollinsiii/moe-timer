@@ -261,8 +261,11 @@ CONFIG_LV_DRAW_SW_COMPLEX=n
 # docs/planning/20261112.firmware-diet.notes.md). Nothing in main/ requests
 # PSRAM (no MALLOC_CAP_SPIRAM, mbedTLS is MBEDTLS_INTERNAL_MEM_ALLOC, LVGL's
 # buffers are far below SPIRAM_MALLOC_ALWAYSINTERNAL); only the heap pool
-# carries it. What is given up: a PSRAM that fails the test no longer aborts
-# the boot, it just hands bad memory to malloc() of more than 16 KB.
+# carries it. Plain malloc() (heap_caps_malloc_default) goes to PSRAM for any
+# size above 16 KB, and for ANY size once internal RAM is exhausted. What is
+# given up: PSRAM detection and the ID read still run, but a chip that
+# identifies correctly and then corrupts data no longer aborts the boot; its
+# heap would be handed out to those mallocs.
 CONFIG_SPIRAM_MEMTEST=n
 
 # Compile the app and every IDF component for size (-Os) instead of the
