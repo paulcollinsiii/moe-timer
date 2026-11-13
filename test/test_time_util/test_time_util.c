@@ -164,8 +164,60 @@ void test_a_day_is_plausible_exactly_when_one_of_its_instants_is(void) {
     }
 }
 
+/* date_fmt_iso() is rewritten so GCC at -Os can prove an 11-byte buffer is
+   enough (it could not, for an unbounded int, and the build is -Werror). The
+   rewrite must leave every output exactly as snprintf produced it, including
+   the truncated output for a field that does not fit. These pin that. */
+void test_date_fmt_iso_formats_an_ordinary_date(void) {
+    struct tm tm = {.tm_year = 126, .tm_mon = 0, .tm_mday = 5};
+    char buf[11];
+    date_fmt_iso(buf, sizeof buf, &tm);
+    TEST_ASSERT_EQUAL_STRING("2026-01-05", buf);
+}
+
+void test_date_fmt_iso_truncates_exactly_as_snprintf_does(void) {
+    /* Year 10000 needs 11 characters plus the NUL; 11 bytes cut the last digit. */
+    struct tm tm = {.tm_year = 10000 - 1900, .tm_mon = 0, .tm_mday = 5};
+    char buf[11];
+    date_fmt_iso(buf, sizeof buf, &tm);
+    TEST_ASSERT_EQUAL_STRING("10000-01-0", buf);
+
+    char want[11];
+    snprintf(want, sizeof want, "%04d-%02d-%02d", 10000, 1, 5);
+    TEST_ASSERT_EQUAL_STRING(want, buf);
+}
+
+void test_date_fmt_iso_keeps_a_negative_field_like_snprintf(void) {
+    struct tm tm = {.tm_year = -1 - 1900, .tm_mon = 11, .tm_mday = 31};
+    char buf[11];
+    char want[11];
+    date_fmt_iso(buf, sizeof buf, &tm);
+    snprintf(want, sizeof want, "%04d-%02d-%02d", -1, 12, 31);
+    TEST_ASSERT_EQUAL_STRING(want, buf);
+}
+
+void test_date_fmt_iso_into_a_short_buffer_truncates_and_terminates(void) {
+    struct tm tm = {.tm_year = 126, .tm_mon = 0, .tm_mday = 5};
+    char buf[6];
+    memset(buf, 'x', sizeof buf);
+    date_fmt_iso(buf, sizeof buf, &tm);
+    TEST_ASSERT_EQUAL_STRING("2026-", buf);
+}
+
+void test_date_fmt_iso_with_zero_length_writes_nothing(void) {
+    struct tm tm = {.tm_year = 126, .tm_mon = 0, .tm_mday = 5};
+    char buf[4] = {'a', 'b', 'c', 'd'};
+    date_fmt_iso(buf, 0, &tm);
+    TEST_ASSERT_EQUAL_MEMORY("abcd", buf, 4);
+}
+
 int main(void) {
     UNITY_BEGIN();
+    RUN_TEST(test_date_fmt_iso_formats_an_ordinary_date);
+    RUN_TEST(test_date_fmt_iso_truncates_exactly_as_snprintf_does);
+    RUN_TEST(test_date_fmt_iso_keeps_a_negative_field_like_snprintf);
+    RUN_TEST(test_date_fmt_iso_into_a_short_buffer_truncates_and_terminates);
+    RUN_TEST(test_date_fmt_iso_with_zero_length_writes_nothing);
     RUN_TEST(test_midnight_is_zero);
     RUN_TEST(test_hour_and_minute_fields_combine);
     RUN_TEST(test_seconds_truncate_rather_than_round);
