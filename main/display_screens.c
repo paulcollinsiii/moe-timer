@@ -10,6 +10,7 @@
 #include "setup_trigger.h" /* SETUP_TRIGGER_BOOT_HOLD_MS: the timeout screen's retry hint */
 #include "sprite.h"
 #include "sprite_data.h"
+#include "ui_fonts.h"
 
 /* Bottom edge: labels centred over the physical buttons. Calibrated on
    hardware (2026-07): button D's centre lands at screen x=239 and the
@@ -156,7 +157,7 @@ static void build_main_header(lv_obj_t *scr, const display_state_t *st) {
     char date_buf[24];
     strftime(date_buf, sizeof(date_buf), "%a %b %d", &tm);
     snprintf(buf, sizeof(buf), "%s  %s", date_buf, time_buf);
-    lv_obj_t *hdr = make_label(scr, buf, &lv_font_montserrat_12, LV_ALIGN_TOP_LEFT, 4, 3);
+    lv_obj_t *hdr = make_label(scr, buf, UI_FONT_12, LV_ALIGN_TOP_LEFT, 4, 3);
     /* At 12 pt the ':' hugs the preceding digit — open it up slightly */
     lv_obj_set_style_text_letter_space(hdr, 1, 0);
 
@@ -172,7 +173,7 @@ static void build_main_header(lv_obj_t *scr, const display_state_t *st) {
            double partial would invert it twice and cancel; the render
            test asserts rows 24..25 stay blank. */
         display_format_break_chip(buf, sizeof(buf), st->break_remaining_sec);
-        lv_obj_t *chip = make_label(scr, buf, &lv_font_montserrat_16, LV_ALIGN_TOP_RIGHT, -4, 3);
+        lv_obj_t *chip = make_label(scr, buf, UI_FONT_16, LV_ALIGN_TOP_RIGHT, -4, 3);
         lv_obj_set_style_text_color(chip, lv_color_white(), 0);
         lv_obj_set_style_bg_color(chip, lv_color_black(), 0);
         lv_obj_set_style_bg_opa(chip, LV_OPA_COVER, 0);
@@ -184,7 +185,7 @@ static void build_main_header(lv_obj_t *scr, const display_state_t *st) {
         /* Same slot, same font: it is the Last-sync line's replacement, so
            it inherits that line's clean-band rows and nothing new has to be
            added to display.c's refresh tables. */
-        lv_obj_t *hint = make_label(scr, st->status_hint, &lv_font_montserrat_12, LV_ALIGN_TOP_RIGHT, -4, 3);
+        lv_obj_t *hint = make_label(scr, st->status_hint, UI_FONT_12, LV_ALIGN_TOP_RIGHT, -4, 3);
         lv_obj_set_style_text_letter_space(hint, 1, 0);
         return;
     }
@@ -197,7 +198,7 @@ static void build_main_header(lv_obj_t *scr, const display_state_t *st) {
     } else {
         snprintf(buf, sizeof(buf), "Last sync: --:--");
     }
-    lv_obj_t *sync = make_label(scr, buf, &lv_font_montserrat_12, LV_ALIGN_TOP_RIGHT, -4, 3);
+    lv_obj_t *sync = make_label(scr, buf, UI_FONT_12, LV_ALIGN_TOP_RIGHT, -4, 3);
     lv_obj_set_style_text_letter_space(sync, 1, 0);
 }
 
@@ -327,7 +328,7 @@ static void build_locked_block(lv_obj_t *scr, const display_state_t *st, uint16_
        one per rung: lv_obj_update_layout() re-measures it in place, and
        the loser rungs never exist as objects. */
     char buf[48];
-    lv_obj_t *lbl = make_label(blk, "", &lv_font_montserrat_12, LV_ALIGN_LEFT_MID, LOCKED_LABEL_PAD, 0);
+    lv_obj_t *lbl = make_label(blk, "", UI_FONT_12, LV_ALIGN_LEFT_MID, LOCKED_LABEL_PAD, 0);
     for (int form = 0; form < DISPLAY_LOCKED_FORM_COUNT; form++) {
         display_format_locked_block(buf, sizeof(buf), (display_locked_form_t)form, st->chore_acked, st->chore_count,
                                     st->chore_withheld_sec, st->allocation_sec);
@@ -380,7 +381,7 @@ static void build_main_bar(lv_obj_t *scr, const display_state_t *st) {
        Built last, so it rides over the locked block too rather than
        disappearing under it. */
     if (st->charge_warn) {
-        lv_obj_t *warn = make_label(scr, "Charge Me!!!", &lv_font_montserrat_16, LV_ALIGN_TOP_MID, 0, 29);
+        lv_obj_t *warn = make_label(scr, "Charge Me!!!", UI_FONT_16, LV_ALIGN_TOP_MID, 0, 29);
         lv_obj_set_style_text_color(warn, lv_color_black(), 0);
         lv_obj_set_style_bg_color(warn, lv_color_white(), 0);
         lv_obj_set_style_bg_opa(warn, LV_OPA_COVER, 0);
@@ -412,11 +413,11 @@ static void build_main_status(lv_obj_t *scr, const display_state_t *st) {
     display_format_version(ver, sizeof(ver), st->fw_version);
     snprintf(buf, sizeof(buf), "%s %u%%%s%s", BATT_SYMS[display_battery_icon_level(st->battery_pct)],
              (unsigned)st->battery_pct, (ver[0] != '\0') ? "   v" : "", ver);
-    lv_obj_t *batt = make_label(scr, buf, &lv_font_montserrat_12, LV_ALIGN_TOP_LEFT, 4, 66);
+    lv_obj_t *batt = make_label(scr, buf, UI_FONT_12, LV_ALIGN_TOP_LEFT, 4, 66);
     cap_width(batt, BATT_ROW_MAX_W);
 
     display_format_remaining(buf, sizeof(buf), st->remaining_sec);
-    make_label(scr, buf, &lv_font_montserrat_28, LV_ALIGN_TOP_RIGHT, -4, 58);
+    make_label(scr, buf, UI_FONT_28, LV_ALIGN_TOP_RIGHT, -4, 58);
 
     /* Status row (moved up to make room for button labels): mode line
        (left: day-type + allocation, or the extra timer's name/counter),
@@ -427,10 +428,10 @@ static void build_main_status(lv_obj_t *scr, const display_state_t *st) {
     } else {
         display_format_day_line(buf, sizeof(buf), day_type_str(st->day_type), st->allocation_sec, st->adjust_sec);
     }
-    lv_obj_t *mode = make_label(scr, buf, &lv_font_montserrat_12, LV_ALIGN_BOTTOM_LEFT, 4, -18);
+    lv_obj_t *mode = make_label(scr, buf, UI_FONT_12, LV_ALIGN_BOTTOM_LEFT, 4, -18);
     cap_width(mode, MODE_ROW_MAX_W);
 
-    make_label(scr, state_str(st->timer_state), &lv_font_montserrat_12, LV_ALIGN_BOTTOM_RIGHT, -4, -18);
+    make_label(scr, state_str(st->timer_state), UI_FONT_12, LV_ALIGN_BOTTOM_RIGHT, -4, -18);
 }
 
 /* Button-label row along the bottom edge (geometry: see BTN_X0/BTN_PITCH).
@@ -505,7 +506,7 @@ static void build_button_row(lv_obj_t *scr, const display_state_t *st) {
     /* Built first so the row's children are left to right in build order,
        which is what the render suite's adjacency sweeps read. */
     if (st->timer_state != TIMER_RUNNING && st->chore_count > 0) {
-        make_label(scr, "Chores", &lv_font_montserrat_12, LV_ALIGN_BOTTOM_LEFT, 4, -2);
+        make_label(scr, "Chores", UI_FONT_12, LV_ALIGN_BOTTOM_LEFT, 4, -2);
     }
 
     const char *b_text = NULL;
@@ -526,13 +527,12 @@ static void build_button_row(lv_obj_t *scr, const display_state_t *st) {
        IDF's -Wall -Werror) then catches a new label that nobody wired up
        here, rather than letting it render as a blank cell. */
     if (b_text) {
-        make_label(scr, b_text, &lv_font_montserrat_12, LV_ALIGN_BOTTOM_MID, BTN_MID_OFS(1), -2);
+        make_label(scr, b_text, UI_FONT_12, LV_ALIGN_BOTTOM_MID, BTN_MID_OFS(1), -2);
     }
     if (st->swap_available) {
-        make_label(scr, LV_SYMBOL_RIGHT /* swap timer type */, &lv_font_montserrat_12, LV_ALIGN_BOTTOM_MID,
-                   BTN_MID_OFS(2), -2);
+        make_label(scr, LV_SYMBOL_RIGHT /* swap timer type */, UI_FONT_12, LV_ALIGN_BOTTOM_MID, BTN_MID_OFS(2), -2);
     }
-    make_label(scr, LV_SYMBOL_REFRESH, &lv_font_montserrat_12, LV_ALIGN_BOTTOM_MID, BTN_MID_OFS(3), -2);
+    make_label(scr, LV_SYMBOL_REFRESH, UI_FONT_12, LV_ALIGN_BOTTOM_MID, BTN_MID_OFS(3), -2);
 }
 
 void display_screens_build_main(const display_state_t *st) {
@@ -690,13 +690,12 @@ void display_screens_build_break(const display_state_t *st, const sprite_t *art)
     build_sprite(scr, art ? art : &SPRITE_BREAK, BREAK_ART_X, BREAK_ART_Y, 2, lv_color_white());
 
     /* Right column: title, countdown and bar are centred on it. */
-    lv_obj_t *title =
-        make_label(scr, "SCREEN BREAK", &lv_font_montserrat_18, LV_ALIGN_TOP_LEFT, BREAK_COL_X, BREAK_TITLE_Y);
+    lv_obj_t *title = make_label(scr, "SCREEN BREAK", UI_FONT_18, LV_ALIGN_TOP_LEFT, BREAK_COL_X, BREAK_TITLE_Y);
     lv_obj_set_width(title, BREAK_COL_W);
     lv_obj_set_style_text_align(title, LV_TEXT_ALIGN_CENTER, 0);
 
     display_format_countdown(buf, sizeof(buf), st->break_remaining_sec);
-    lv_obj_t *count = make_label(scr, buf, &lv_font_montserrat_48, LV_ALIGN_TOP_LEFT, BREAK_COL_X, BREAK_COUNTDOWN_Y);
+    lv_obj_t *count = make_label(scr, buf, UI_FONT_48, LV_ALIGN_TOP_LEFT, BREAK_COL_X, BREAK_COUNTDOWN_Y);
     lv_obj_set_width(count, BREAK_COL_W);
     /* CLIP, not the default WRAP: a value too wide for the column must not
        drop a second line into the bar. Breaks cap at CFG_BOUND_BREAK_DUR_HI
@@ -769,12 +768,11 @@ void display_screens_build_break(const display_state_t *st, const sprite_t *art)
            with no room for '/', which is why the prompt used to read
            "2 of 3"; the column has the rows now. */
         display_format_chore_prompt(buf, sizeof(buf), st->chore_acked, st->chore_count);
-        make_label(scr, buf, &lv_font_montserrat_16, LV_ALIGN_TOP_LEFT, BREAK_COL_X, BREAK_CHORE_LINE_Y);
+        make_label(scr, buf, UI_FONT_16, LV_ALIGN_TOP_LEFT, BREAK_COL_X, BREAK_CHORE_LINE_Y);
 
         display_format_hm(rem_buf, sizeof(rem_buf), st->remaining_sec);
         snprintf(buf, sizeof(buf), "Screen %s", rem_buf);
-        cap_width(make_label(scr, buf, &lv_font_montserrat_16, LV_ALIGN_TOP_RIGHT, -4, BREAK_CHORE_LINE_Y),
-                  BREAK_SCREEN_MAX_W);
+        cap_width(make_label(scr, buf, UI_FONT_16, LV_ALIGN_TOP_RIGHT, -4, BREAK_CHORE_LINE_Y), BREAK_SCREEN_MAX_W);
     }
 
     if (!has_chores && !has_swap) {
@@ -785,7 +783,7 @@ void display_screens_build_break(const display_state_t *st, const sprite_t *art)
            h:mm:ss remaining is spelled out. */
         display_format_remaining(rem_buf, sizeof(rem_buf), st->remaining_sec);
         snprintf(buf, sizeof(buf), "Timer paused - %s left", rem_buf);
-        make_label(scr, buf, &lv_font_montserrat_16, LV_ALIGN_BOTTOM_MID, 0, -4);
+        make_label(scr, buf, UI_FONT_16, LV_ALIGN_BOTTOM_MID, 0, -4);
         return;
     }
 
@@ -803,11 +801,11 @@ void display_screens_build_break(const display_state_t *st, const sprite_t *art)
        Anything that ever puts a label over B has to move this one first.
        test_the_break_chore_row_fits_its_cells measures it. */
     if (has_chores) {
-        make_label(scr, "Chores", &lv_font_montserrat_16, LV_ALIGN_BOTTOM_LEFT, 4, -2);
+        make_label(scr, "Chores", UI_FONT_16, LV_ALIGN_BOTTOM_LEFT, 4, -2);
     } else {
         display_format_hm(rem_buf, sizeof(rem_buf), st->remaining_sec);
         snprintf(buf, sizeof(buf), "Screen %s", rem_buf);
-        make_label(scr, buf, &lv_font_montserrat_16, LV_ALIGN_BOTTOM_LEFT, 4, -2);
+        make_label(scr, buf, UI_FONT_16, LV_ALIGN_BOTTOM_LEFT, 4, -2);
     }
 
     /* Cell C: the swap affordance, only when there is somewhere to swap
@@ -817,13 +815,13 @@ void display_screens_build_break(const display_state_t *st, const sprite_t *art)
         char hint[DISPLAY_SWAP_HINT_MAX + 1];
         display_format_swap_hint(hint, sizeof(hint), st->swap_next_name);
         snprintf(buf, sizeof(buf), "%s %s", LV_SYMBOL_RIGHT, hint);
-        make_label(scr, buf, &lv_font_montserrat_16, LV_ALIGN_BOTTOM_MID, BTN_MID_OFS(2), -2);
+        make_label(scr, buf, UI_FONT_16, LV_ALIGN_BOTTOM_MID, BTN_MID_OFS(2), -2);
     }
 
     /* Cell D: sync, the same refresh symbol as the main layout. Present
        whenever the row is, which is what "D = sync, always" means on a
        screen that can have no row at all. */
-    make_label(scr, LV_SYMBOL_REFRESH, &lv_font_montserrat_16, LV_ALIGN_BOTTOM_MID, BTN_MID_OFS(3), -2);
+    make_label(scr, LV_SYMBOL_REFRESH, UI_FONT_16, LV_ALIGN_BOTTOM_MID, BTN_MID_OFS(3), -2);
 }
 
 /* ---- the chore checklist (design §2.4) ----------------------------------
@@ -862,29 +860,29 @@ void display_screens_build_chores(const display_state_t *st) {
        withholding something" takeover; 12 pt white-on-black is illegible
        on this panel (see the break chip), and the tick column needs the
        small font to stay in its cell. */
-    make_label(scr, "CHORES", &lv_font_montserrat_16, LV_ALIGN_TOP_LEFT, 4, 2);
+    make_label(scr, "CHORES", UI_FONT_16, LV_ALIGN_TOP_LEFT, 4, 2);
 
     display_format_chore_count(buf, sizeof(buf), st->chore_acked, st->chore_count);
-    lv_obj_t *count = make_label(scr, buf, &lv_font_montserrat_12, LV_ALIGN_TOP_RIGHT, -4, 5);
+    lv_obj_t *count = make_label(scr, buf, UI_FONT_12, LV_ALIGN_TOP_RIGHT, -4, 5);
     lv_obj_set_style_text_letter_space(count, 1, 0); /* as the main header */
 
     /* §2.4: the mode does not bounce you out on the last ack, so the
        screen has to say that something happened. Absent otherwise — the
        row is blank in the design's own sketch. */
     if (display_chore_unlocked(st->chore_acked, st->chore_count, st->chore_released)) {
-        make_label(scr, "Screen time unlocked", &lv_font_montserrat_16, LV_ALIGN_TOP_MID, 0, 24);
+        make_label(scr, "Screen time unlocked", UI_FONT_16, LV_ALIGN_TOP_MID, 0, 24);
     }
 
     for (uint8_t i = 0; i < CHORE_MAX; i++) {
         if (i >= st->chore_count)
             break; /* a spare row stays blank; the rows below do not move up */
         if (display_chore_row_ticked(st->chore_acked, st->chore_count, i)) {
-            make_label(scr, LV_SYMBOL_OK, &lv_font_montserrat_16, LV_ALIGN_TOP_LEFT, CHORE_TICK_X, CHORE_ROW_Y[i]);
+            make_label(scr, LV_SYMBOL_OK, UI_FONT_16, LV_ALIGN_TOP_LEFT, CHORE_TICK_X, CHORE_ROW_Y[i]);
         }
         /* chore_names rows are always NUL-terminated (display.h), so this
            needs no length check of its own — only the width cap. */
-        lv_obj_t *name = make_label(scr, st->chore_names[i], &lv_font_montserrat_16, LV_ALIGN_TOP_LEFT, CHORE_NAME_X,
-                                    CHORE_ROW_Y[i]);
+        lv_obj_t *name =
+            make_label(scr, st->chore_names[i], UI_FONT_16, LV_ALIGN_TOP_LEFT, CHORE_NAME_X, CHORE_ROW_Y[i]);
         cap_width(name, CHORE_NAME_MAX_W);
     }
 
@@ -899,12 +897,12 @@ void display_screens_build_chores(const display_state_t *st) {
        before this line read BOTTOM_LEFT. The break screen's bottom row
        already anchors its cell-A item at x=4 for the same reason, and
        §2.4's own sketch draws "Timers" flush left. */
-    make_label(scr, "Timers", &lv_font_montserrat_12, LV_ALIGN_BOTTOM_LEFT, 4, -2);
+    make_label(scr, "Timers", UI_FONT_12, LV_ALIGN_BOTTOM_LEFT, 4, -2);
     for (uint8_t i = 0; i < CHORE_MAX; i++) {
         if (i >= st->chore_count)
             break; /* an unconfigured ack button is not a chore button (C1) */
         snprintf(buf, sizeof(buf), "%s %u", LV_SYMBOL_OK, (unsigned)(i + 1));
-        make_label(scr, buf, &lv_font_montserrat_12, LV_ALIGN_BOTTOM_MID, BTN_MID_OFS(i + 1), -2);
+        make_label(scr, buf, UI_FONT_12, LV_ALIGN_BOTTOM_MID, BTN_MID_OFS(i + 1), -2);
     }
 }
 
@@ -939,19 +937,18 @@ void display_screens_build_timesup(const sprite_t *art) {
     lv_obj_t *scr = fresh_screen(false);
     build_sprite(scr, art ? art : &SPRITE_TIMESUP, TIMESUP_ART_X, DISP_VER - SPRITE_TIMESUP.h, 1, lv_color_black());
 
-    lv_obj_t *times =
-        make_label(scr, "TIME'S", &lv_font_montserrat_28, LV_ALIGN_TOP_LEFT, TIMESUP_COL_X, TIMESUP_TIMES_Y);
+    lv_obj_t *times = make_label(scr, "TIME'S", UI_FONT_28, LV_ALIGN_TOP_LEFT, TIMESUP_COL_X, TIMESUP_TIMES_Y);
     lv_obj_set_width(times, TIMESUP_COL_W);
     lv_obj_set_style_text_align(times, LV_TEXT_ALIGN_CENTER, 0);
 
-    lv_obj_t *up = make_label(scr, "UP!", &lv_font_montserrat_48, LV_ALIGN_TOP_LEFT, TIMESUP_COL_X, TIMESUP_UP_Y);
+    lv_obj_t *up = make_label(scr, "UP!", UI_FONT_48, LV_ALIGN_TOP_LEFT, TIMESUP_COL_X, TIMESUP_UP_Y);
     lv_obj_set_width(up, TIMESUP_COL_W);
     lv_obj_set_style_text_align(up, LV_TEXT_ALIGN_CENTER, 0);
 }
 
 void display_screens_build_sync_failed(void) {
     lv_obj_t *scr = fresh_screen(false);
-    make_label(scr, "No sync - check WiFi", &lv_font_montserrat_28, LV_ALIGN_CENTER, 0, 0);
+    make_label(scr, "No sync - check WiFi", UI_FONT_28, LV_ALIGN_CENTER, 0, 0);
 }
 
 /* No-clock lock (BUG-14): a power-on whose NTP attempt failed does not
@@ -968,10 +965,10 @@ void display_screens_build_sync_failed(void) {
    off the edges, since LVGL clips rather than wraps. */
 void display_screens_build_no_clock(void) {
     lv_obj_t *scr = fresh_screen(false);
-    make_label(scr, "No Clock", &lv_font_montserrat_28, LV_ALIGN_TOP_MID, 0, 2);
-    make_label(scr, "Time not synced - check WiFi", &lv_font_montserrat_16, LV_ALIGN_TOP_MID, 0, 44);
-    make_label(scr, "No screen time until it syncs", &lv_font_montserrat_12, LV_ALIGN_TOP_MID, 0, 70);
-    make_label(scr, "Press D to retry", &lv_font_montserrat_16, LV_ALIGN_BOTTOM_MID, 0, -4);
+    make_label(scr, "No Clock", UI_FONT_28, LV_ALIGN_TOP_MID, 0, 2);
+    make_label(scr, "Time not synced - check WiFi", UI_FONT_16, LV_ALIGN_TOP_MID, 0, 44);
+    make_label(scr, "No screen time until it syncs", UI_FONT_12, LV_ALIGN_TOP_MID, 0, 70);
+    make_label(scr, "Press D to retry", UI_FONT_16, LV_ALIGN_BOTTOM_MID, 0, -4);
 }
 
 /* ---- Battery lock (<= 10%): "Charge me!" --------------------------------
@@ -1096,8 +1093,7 @@ void display_screens_build_charge_me(const sprite_t *art) {
     lv_obj_t *scr = fresh_screen(false);
     build_sprite(scr, art ? art : &SPRITE_CHARGE, CHARGE_ART_X, (DISP_VER - SPRITE_CHARGE.h) / 2, 1, lv_color_black());
 
-    lv_obj_t *words =
-        make_label(scr, "Charge\nme!", &lv_font_montserrat_28, LV_ALIGN_TOP_LEFT, CHARGE_COL_X, CHARGE_TEXT_Y);
+    lv_obj_t *words = make_label(scr, "Charge\nme!", UI_FONT_28, LV_ALIGN_TOP_LEFT, CHARGE_COL_X, CHARGE_TEXT_Y);
     lv_obj_set_width(words, CHARGE_COL_W);
     lv_obj_set_style_text_align(words, LV_TEXT_ALIGN_CENTER, 0);
 
@@ -1130,19 +1126,17 @@ void display_screens_build_bedtime(const sprite_t *art) {
 
     /* Two labels, not one two-line label: the gap between the words is
        wider than the font's line height. */
-    lv_obj_t *bed =
-        make_label(scr, "Bed Time", &lv_font_montserrat_28, LV_ALIGN_TOP_LEFT, BEDTIME_COL_X, BEDTIME_TITLE_Y);
+    lv_obj_t *bed = make_label(scr, "Bed Time", UI_FONT_28, LV_ALIGN_TOP_LEFT, BEDTIME_COL_X, BEDTIME_TITLE_Y);
     lv_obj_set_width(bed, BEDTIME_COL_W);
     lv_obj_set_style_text_align(bed, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_t *night =
-        make_label(scr, "Goodnight!", &lv_font_montserrat_28, LV_ALIGN_TOP_LEFT, BEDTIME_COL_X, BEDTIME_GREETING_Y);
+    lv_obj_t *night = make_label(scr, "Goodnight!", UI_FONT_28, LV_ALIGN_TOP_LEFT, BEDTIME_COL_X, BEDTIME_GREETING_Y);
     lv_obj_set_width(night, BEDTIME_COL_W);
     lv_obj_set_style_text_align(night, LV_TEXT_ALIGN_CENTER, 0);
 
     /* Single centered line, 18 pt: 16 pt strokes shredded into fragments
        by the inverted 1 bpp render (no bold Montserrat exists in LVGL),
        and 20 pt overruns the 296 px panel. */
-    make_label(scr, "Brush teeth | Get water bottles", &lv_font_montserrat_18, LV_ALIGN_BOTTOM_MID, 0, BEDTIME_LINE_Y);
+    make_label(scr, "Brush teeth | Get water bottles", UI_FONT_18, LV_ALIGN_BOTTOM_MID, 0, BEDTIME_LINE_Y);
 }
 
 /* Config-error lock (design 5.3, row C11): today's `chore_free_*` is
@@ -1174,7 +1168,7 @@ void display_screens_build_config_error(day_type_t day_type, uint16_t chore_free
     lv_obj_t *scr = fresh_screen(false);
     char buf[64];
 
-    make_label(scr, "Config Error", &lv_font_montserrat_28, LV_ALIGN_TOP_MID, 0, 2);
+    make_label(scr, "Config Error", UI_FONT_28, LV_ALIGN_TOP_MID, 0, 2);
 
     /* NAMES THE PAIR, which is what makes the fix possible without a
        laptop and is the one thing distinguishing this from the
@@ -1182,14 +1176,14 @@ void display_screens_build_config_error(day_type_t day_type, uint16_t chore_free
        tells a parent which of the four settings to open. */
     snprintf(buf, sizeof(buf), "%s: free %u > %u min", day_type_str(day_type), (unsigned)chore_free_min,
              (unsigned)alloc_min);
-    cap_width(make_label(scr, buf, &lv_font_montserrat_16, LV_ALIGN_TOP_MID, 0, 44), CONFIG_ERR_LINE_MAX_W);
+    cap_width(make_label(scr, buf, UI_FONT_16, LV_ALIGN_TOP_MID, 0, 44), CONFIG_ERR_LINE_MAX_W);
 
     /* The rule, in the words of the setting rather than the code: a
        parent who has never read design 3.3 still needs to know which way
        to move which number. */
-    make_label(scr, "chore_free exceeds the allocation", &lv_font_montserrat_12, LV_ALIGN_TOP_MID, 0, 70);
+    make_label(scr, "chore_free exceeds the allocation", UI_FONT_12, LV_ALIGN_TOP_MID, 0, 70);
 
-    make_label(scr, "Fix in Home Assistant, press D", &lv_font_montserrat_16, LV_ALIGN_BOTTOM_MID, 0, -4);
+    make_label(scr, "Fix in Home Assistant, press D", UI_FONT_16, LV_ALIGN_BOTTOM_MID, 0, -4);
 }
 
 /* Firmware update, full refresh only (display_ota): static, no progress
@@ -1212,11 +1206,11 @@ void display_screens_build_ota(const char *from_version, const char *to_version)
        279 px — 8 px of margin each side — and matches the other big
        headlines in this tree ("Charge Me!", "Bed Time"). The render test
        pins the width. */
-    make_label(scr, "Updating Firmware", &lv_font_montserrat_28, LV_ALIGN_TOP_MID, 0, 6);
+    make_label(scr, "Updating Firmware", UI_FONT_28, LV_ALIGN_TOP_MID, 0, 6);
 
     display_format_version(ver, sizeof(ver), from_version);
     snprintf(buf, sizeof(buf), "Current: v%s", (ver[0] != '\0') ? ver : "?");
-    cap_width(make_label(scr, buf, &lv_font_montserrat_12, LV_ALIGN_TOP_MID, 0, 46), OTA_LINE_MAX_W);
+    cap_width(make_label(scr, buf, UI_FONT_12, LV_ALIGN_TOP_MID, 0, 46), OTA_LINE_MAX_W);
 
     /* "Installing", not "Upgrading to": the OTA policy deliberately
        treats a *different* published version as an update, downgrades
@@ -1227,12 +1221,12 @@ void display_screens_build_ota(const char *from_version, const char *to_version)
     snprintf(buf, sizeof(buf), "Installing v%s", (ver[0] != '\0') ? ver : "?");
     /* 18 pt is the binding line: untruncated it clips off the panel at 21
        characters (measured 303 px against 296). */
-    cap_width(make_label(scr, buf, &lv_font_montserrat_18, LV_ALIGN_TOP_MID, 0, 66), OTA_LINE_MAX_W);
+    cap_width(make_label(scr, buf, UI_FONT_18, LV_ALIGN_TOP_MID, 0, 66), OTA_LINE_MAX_W);
 
     /* Honest rather than strictly necessary — the write goes to the
        inactive slot and the boot partition only flips after the image
        verifies — but a yanked cable still wastes the download. */
-    make_label(scr, "Do not remove power", &lv_font_montserrat_12, LV_ALIGN_TOP_MID, 0, 98);
+    make_label(scr, "Do not remove power", UI_FONT_12, LV_ALIGN_TOP_MID, 0, 98);
 }
 
 /* ---- WiFi + MQTT provisioning plan: the setup screens --------------------
@@ -1338,22 +1332,20 @@ void display_screens_build_setup(const char *ap_ssid, const char *ap_password, c
 
     build_setup_qr(scr, qr_payload);
 
-    make_label(scr, "Scan to join, then open", &lv_font_montserrat_12, LV_ALIGN_TOP_LEFT, SETUP_TEXT_X, SETUP_SCAN_Y);
+    make_label(scr, "Scan to join, then open", UI_FONT_12, LV_ALIGN_TOP_LEFT, SETUP_TEXT_X, SETUP_SCAN_Y);
 
     /* Larger than the lines around it: this is the one thing a phone that
        does not open the page by itself needs typed into its browser. The
        caller supplies it, so it gets the same cap_width() backstop as every
        other caller-supplied line in this tree. */
-    cap_width(make_label(scr, page_host, &lv_font_montserrat_18, LV_ALIGN_TOP_LEFT, SETUP_TEXT_X, SETUP_HOST_Y),
-              SETUP_TEXT_MAX_W);
+    cap_width(make_label(scr, page_host, UI_FONT_18, LV_ALIGN_TOP_LEFT, SETUP_TEXT_X, SETUP_HOST_Y), SETUP_TEXT_MAX_W);
 
     snprintf(buf, sizeof(buf), "AP: %s", ap_ssid);
-    cap_width(make_label(scr, buf, &lv_font_montserrat_12, LV_ALIGN_TOP_LEFT, SETUP_TEXT_X, SETUP_AP_Y),
-              SETUP_TEXT_MAX_W);
+    cap_width(make_label(scr, buf, UI_FONT_12, LV_ALIGN_TOP_LEFT, SETUP_TEXT_X, SETUP_AP_Y), SETUP_TEXT_MAX_W);
 
     /* The AP name and password stay as text for a phone that will not scan
        the code: join by hand, then open the address above. */
-    make_label(scr, "Password:", &lv_font_montserrat_12, LV_ALIGN_TOP_LEFT, SETUP_TEXT_X, SETUP_PW_LABEL_Y);
+    make_label(scr, "Password:", UI_FONT_12, LV_ALIGN_TOP_LEFT, SETUP_TEXT_X, SETUP_PW_LABEL_Y);
 
     /* The largest compiled size that fits the column for a typical draw —
        measured, not assumed: 28 pt already clips a sample password (201 px
@@ -1368,10 +1360,9 @@ void display_screens_build_setup(const char *ap_ssid, const char *ap_password, c
        sampled passwords measured zero clips, which is the sort of margin a
        geometric cap exists to hold rather than a font size to chase (see
        the OTA screen's own all-'W' case for the same trade-off). */
-    cap_width(make_label(scr, ap_password, &lv_font_montserrat_18, LV_ALIGN_TOP_LEFT, SETUP_TEXT_X, SETUP_PW_Y),
-              SETUP_TEXT_MAX_W);
+    cap_width(make_label(scr, ap_password, UI_FONT_18, LV_ALIGN_TOP_LEFT, SETUP_TEXT_X, SETUP_PW_Y), SETUP_TEXT_MAX_W);
 
-    make_label(scr, "It may open by itself", &lv_font_montserrat_12, LV_ALIGN_TOP_LEFT, SETUP_TEXT_X, SETUP_HINT_Y);
+    make_label(scr, "It may open by itself", UI_FONT_12, LV_ALIGN_TOP_LEFT, SETUP_TEXT_X, SETUP_HINT_Y);
 }
 
 /* Shown while the BOOT hold is armed; releasing now enters setup
@@ -1380,8 +1371,8 @@ void display_screens_build_setup(const char *ap_ssid, const char *ap_password, c
    least frequent paint on the panel, so the cadence has no say over it. */
 void display_screens_build_setup_release(void) {
     lv_obj_t *scr = fresh_screen(false);
-    make_label(scr, "Release to", &lv_font_montserrat_28, LV_ALIGN_TOP_MID, 0, 24);
-    make_label(scr, "enter setup", &lv_font_montserrat_28, LV_ALIGN_TOP_MID, 0, 64);
+    make_label(scr, "Release to", UI_FONT_28, LV_ALIGN_TOP_MID, 0, 24);
+    make_label(scr, "enter setup", UI_FONT_28, LV_ALIGN_TOP_MID, 0, 64);
 }
 
 /* ---- the end-of-session screens: what will actually retry setup -------- */
@@ -1455,7 +1446,7 @@ static void format_setup_retry_line(bool has_wifi_ssid, bool boot_wakes, char *o
    the three phrasings still fits on one line; WRAP leaves a one-line
    label exactly as centred as it already was. */
 static void make_retry_line(lv_obj_t *scr, const char *text) {
-    lv_obj_t *lbl = make_label(scr, text, &lv_font_montserrat_18, LV_ALIGN_BOTTOM_MID, 0, -8);
+    lv_obj_t *lbl = make_label(scr, text, UI_FONT_18, LV_ALIGN_BOTTOM_MID, 0, -8);
     lv_obj_set_width(lbl, OTA_LINE_MAX_W);
     lv_label_set_long_mode(lbl, LV_LABEL_LONG_WRAP);
     lv_obj_set_style_text_align(lbl, LV_TEXT_ALIGN_CENTER, 0);
@@ -1486,21 +1477,21 @@ void display_screens_build_setup_end(display_setup_end_t kind, bool has_wifi_ssi
 
     switch (kind) {
         case DISPLAY_SETUP_END_WIFI_SAVED:
-            make_label(scr, "Setup complete", &lv_font_montserrat_28, LV_ALIGN_TOP_MID, 0, 30);
-            make_label(scr, "Connecting to WiFi...", &lv_font_montserrat_18, LV_ALIGN_TOP_MID, 0, 72);
+            make_label(scr, "Setup complete", UI_FONT_28, LV_ALIGN_TOP_MID, 0, 30);
+            make_label(scr, "Connecting to WiFi...", UI_FONT_18, LV_ALIGN_TOP_MID, 0, 72);
             break;
         case DISPLAY_SETUP_END_MQTT_SAVED:
-            make_label(scr, "Setup complete", &lv_font_montserrat_28, LV_ALIGN_TOP_MID, 0, 30);
-            make_label(scr, "MQTT broker saved", &lv_font_montserrat_18, LV_ALIGN_TOP_MID, 0, 72);
+            make_label(scr, "Setup complete", UI_FONT_28, LV_ALIGN_TOP_MID, 0, 30);
+            make_label(scr, "MQTT broker saved", UI_FONT_18, LV_ALIGN_TOP_MID, 0, 72);
             break;
         case DISPLAY_SETUP_END_TIMED_OUT:
-            make_label(scr, "Setup timed out", &lv_font_montserrat_28, LV_ALIGN_TOP_MID, 0, 20);
+            make_label(scr, "Setup timed out", UI_FONT_28, LV_ALIGN_TOP_MID, 0, 20);
             format_setup_retry_line(has_wifi_ssid, boot_wakes_enabled(), line, sizeof(line));
             make_retry_line(scr, line);
             break;
         case DISPLAY_SETUP_END_FAILED:
         default:
-            make_label(scr, "Setup failed", &lv_font_montserrat_28, LV_ALIGN_TOP_MID, 0, 20);
+            make_label(scr, "Setup failed", UI_FONT_28, LV_ALIGN_TOP_MID, 0, 20);
             format_setup_retry_line(has_wifi_ssid, boot_wakes_enabled(), line, sizeof(line));
             make_retry_line(scr, line);
             break;

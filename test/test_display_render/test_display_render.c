@@ -85,6 +85,24 @@ static display_state_t base_state(void) {
     };
 }
 
+/* MAGTAG_DUMP_DIR: write the captured frame to <dir>/<name>.bin and report
+   true; unset, do nothing and report false. This is how tools/font_sheets.py
+   gets the screens rendered under another font set (-DMAGTAG_FONT_SET=...),
+   whose frames differ from the goldens by design. The goldens are never
+   touched on this path. */
+static bool dump_frame(const char *name) {
+    const char *dump_dir = getenv("MAGTAG_DUMP_DIR");
+    if (dump_dir == NULL)
+        return false;
+    char path[512];
+    snprintf(path, sizeof(path), "%s/%s.bin", dump_dir, name);
+    FILE *f = fopen(path, "wb");
+    TEST_ASSERT_NOT_NULL_MESSAGE(f, "cannot open MAGTAG_DUMP_DIR file for writing");
+    fwrite(s_captured, 1, FB_BYTES, f);
+    fclose(f);
+    return true;
+}
+
 static void assert_matches_golden(const char *name) {
     lv_refr_now(s_disp); /* render + flush into s_captured */
 
@@ -94,6 +112,9 @@ static void assert_matches_golden(const char *name) {
     for (size_t i = 0; i < FB_BYTES && blank; i++)
         blank = (s_captured[i] == s_captured[0]);
     TEST_ASSERT_FALSE_MESSAGE(blank, "captured framebuffer is uniform - render produced nothing");
+
+    if (dump_frame(name))
+        return;
 
     char path[512];
     snprintf(path, sizeof(path), "%s/%s.bin", GOLDEN_DIR, name);
@@ -1855,7 +1876,7 @@ void test_the_setup_screen_clips_a_31_byte_ssid_without_overflowing_its_column(v
     snprintf(buf, sizeof(buf), "AP: %s", ssid31);
     lv_obj_t *uncapped = lv_label_create(scr);
     lv_label_set_text(uncapped, buf);
-    lv_obj_set_style_text_font(uncapped, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_font(uncapped, UI_FONT_12, 0);
     lv_obj_update_layout(scr);
     int32_t natural_w = lv_obj_get_width(uncapped);
     TEST_ASSERT_TRUE_MESSAGE(natural_w > SETUP_TEXT_MAX_W,
@@ -3224,7 +3245,7 @@ void test_the_locked_label_cannot_overstrike_the_free_tranche(void) {
 static int32_t text_w_12(const char *txt) {
     lv_obj_t *probe = lv_label_create(lv_screen_active());
     lv_label_set_text(probe, txt);
-    lv_obj_set_style_text_font(probe, &lv_font_montserrat_12, 0);
+    lv_obj_set_style_text_font(probe, UI_FONT_12, 0);
     lv_obj_update_layout(probe);
     int32_t w = lv_obj_get_width(probe);
     lv_obj_delete(probe);
@@ -3398,6 +3419,50 @@ void test_the_bedtime_screen_paints_the_variant_it_is_given(void) {
     check_variant_paints_in_its_box(vb_bedtime, &SPRITE_BEDTIME, BEDTIME_ART_X, BEDTIME_ART_Y, BEDTIME_ART_SCALE, true);
 }
 
+/* ---- sheet-only frames (MAGTAG_DUMP_DIR) -------------------------------
+   Worst-case text for judging a font set by eye. They have no golden: with
+   MAGTAG_DUMP_DIR unset they render and pass, with it set they dump. */
+
+static void render_for_the_sheet(const char *name) {
+    lv_refr_now(s_disp);
+    (void)dump_frame(name);
+}
+
+void test_sheet_main_long_timer_name(void) {
+    display_state_t st = base_state();
+    st.timer_state = TIMER_RUNNING;
+    st.timer_name = "WWWWWWWWWWWWWWWWWWWWWWWWWWWWWWWW";
+    st.completions = 12;
+    st.reloadable = true;
+    st.allocation_sec = 5400;
+    st.remaining_sec = 3 * 3600 + 28 * 60 + 48;
+    st.adjust_sec = -2400;
+    st.swap_available = false;
+    st.reload_available = false;
+    display_screens_build_main(&st);
+    render_for_the_sheet("sheet_main_long_timer_name");
+}
+
+void test_sheet_main_widest_digits(void) {
+    display_state_t st = base_state();
+    st.timer_state = TIMER_RUNNING;
+    st.remaining_sec = 20 * 3600 + 48 * 60 + 28;
+    st.allocation_sec = 24 * 3600;
+    st.battery_pct = 100;
+    st.fw_version = "10.28.481";
+    display_screens_build_main(&st);
+    render_for_the_sheet("sheet_main_widest_digits");
+}
+
+void test_sheet_chores_long_names(void) {
+    display_state_t st = chore_state(3, 0x02);
+    snprintf(st.chore_names[0], CHORE_NAME_BUF, "%s", "WWWWWWWWWWWWWWWWWWWW");
+    snprintf(st.chore_names[1], CHORE_NAME_BUF, "%s", "Mmmmmmmmmmmmmmmmmmmm");
+    snprintf(st.chore_names[2], CHORE_NAME_BUF, "%s", "Quick brown fox, (j)");
+    display_screens_build_chores(&st);
+    render_for_the_sheet("sheet_chores_long_names");
+}
+
 int main(void) {
     lv_init();
     lv_tick_set_cb(tick_cb);
@@ -3508,5 +3573,8 @@ int main(void) {
     RUN_TEST(test_the_timesup_screen_paints_the_variant_it_is_given);
     RUN_TEST(test_the_break_screen_paints_the_variant_it_is_given);
     RUN_TEST(test_the_bedtime_screen_paints_the_variant_it_is_given);
+    RUN_TEST(test_sheet_main_long_timer_name);
+    RUN_TEST(test_sheet_main_widest_digits);
+    RUN_TEST(test_sheet_chores_long_names);
     return UNITY_END();
 }

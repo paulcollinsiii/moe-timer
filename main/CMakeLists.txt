@@ -62,6 +62,18 @@ if(NOT CMAKE_BUILD_EARLY_EXPANSION)
     endif()
 endif()
 
+# UI fonts: the generated 1 bpp sources of the selected set only
+# (CONFIG_MAGTAG_FONT_SET_<SET>; the default set is LVGL's stock font and
+# adds nothing). Regenerate with tools/gen_fonts.py.
+set(UI_FONT_SRCS "")
+foreach(font_set mont1 term lib)
+    string(TOUPPER "${font_set}" font_set_upper)
+    if(CONFIG_MAGTAG_FONT_SET_${font_set_upper})
+        file(GLOB UI_FONT_SRCS CONFIGURE_DEPENDS RELATIVE "${CMAKE_CURRENT_SOURCE_DIR}"
+             "${CMAKE_CURRENT_SOURCE_DIR}/fonts/${font_set}/*.c")
+    endif()
+endforeach()
+
 idf_component_register(
     SRCS
         "main.c"
@@ -112,6 +124,7 @@ idf_component_register(
         "sprite.c"
         "sprite_pick.c"
         ${SPRITE_DATA_SRCS}
+        ${UI_FONT_SRCS}
         "../lib/cJSON/cJSON.c"
         "../lib/qrcodegen/qrcodegen.c"
         "schedule.c"

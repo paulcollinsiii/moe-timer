@@ -7,6 +7,8 @@ sdkconfig.bak
 build/
 managed_components/
 test/build/
+test/build-fonts-*/
+build-fonts-*/
 
 # Bytecode from tools/check_slot_size.py, imported by its host test suite
 __pycache__/
