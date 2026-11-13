@@ -2942,11 +2942,6 @@ static void finish_action_and_render_painting(button_id_t btn, timer_state_t bef
     wake_flow_publish_owed_window();
 }
 
-/* The tail every caller but one uses: the first render always happens. */
-static void finish_action_and_render(button_id_t btn, timer_state_t before, time_t now, bool selection_changed) {
-    finish_action_and_render_painting(btn, before, now, selection_changed, true);
-}
-
 /* Re-render when the join changed what the panel shows (see the comment in
    finish_action_and_render above, which is where the cases are listed). An
    ALERTED join already repainted the whole display and is never painted

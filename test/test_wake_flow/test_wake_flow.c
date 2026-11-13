@@ -2014,6 +2014,12 @@ uint8_t timer_wifi_join_failures(void) {
 #include "../../main/wake_flow.c"
 // clang-format on
 
+/* The tail's production callers pass `paint` themselves (the counted-swap
+   gesture can owe the panel nothing); the dozens of cases below drive the
+   ordinary always-paint tail. */
+#define finish_action_and_render(btn, before, now, selection_changed) \
+    finish_action_and_render_painting((btn), (before), (now), (selection_changed), true)
+
 /* ---- harness ------------------------------------------------------------ */
 
 /* Every case pins the clock to a fixed UTC day so the wall-time
