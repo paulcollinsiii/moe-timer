@@ -246,6 +246,21 @@ void display_bedtime(void) {
     gate_log_push(EV_BEDTIME_SCREEN);
 }
 
+/* The art-episode end hook. NOT in gate_log: that log is sized and counted
+   by dozens of older cases, and an extra event type would shift them. Each
+   lock keeps how many times it was ended and how many log events had
+   happened by the first such end, so "ended after the last paint" and "never
+   ended between engage and release" are both assertable. */
+static int gate_art_ends[SPRITE_LOCK_COUNT_];
+static int gate_art_end_log_pos[SPRITE_LOCK_COUNT_];
+
+void display_lock_art_end(sprite_lock_t lock) {
+    if ((unsigned)lock >= SPRITE_LOCK_COUNT_)
+        return;
+    if (gate_art_ends[lock]++ == 0)
+        gate_art_end_log_pos[lock] = gate_log_n;
+}
+
 void display_sync_failed(void) {
     gate_log_push(EV_SYNC_FAILED_SCREEN);
 }
@@ -478,6 +493,8 @@ void setUp(void) {
     tzset();
     mock_time_reset();
     gate_log_n = 0;
+    memset(gate_art_ends, 0, sizeof gate_art_ends);
+    memset(gate_art_end_log_pos, 0, sizeof gate_art_end_log_pos);
     gate_sleep_calls = 0;
     gate_sleep_mode = WAKE_SLEEP_NORMAL;
     gate_batt_pct = 80;
@@ -2197,8 +2214,145 @@ void test_bug14_the_charge_lock_outranks_the_no_clock_sleep(void) {
     TEST_ASSERT_EQUAL_INT(WAKE_SLEEP_CHARGE_LOCK, lock_gate_sleep_mode());
 }
 
+/* ---- lock art episodes -------------------------------------------------- */
+
+/* A lock's art holds from its engage until its release. The gate ends the
+   episode on the release edges only: the paint, the window (which can paint
+   over the lock) and the repaint after it all belong to one episode. */
+
+static int gate_art_ends_total(void) {
+    int n = 0;
+    for (unsigned k = 0; k < SPRITE_LOCK_COUNT_; k++)
+        n += gate_art_ends[k];
+    return n;
+}
+
+void test_the_charge_engage_and_its_window_never_end_the_art_episode(void) {
+    gate_batt_pct = 5;
+    gate_timer_state = TIMER_RUNNING;
+    gate_window_paints = true; /* the window repaints, as an expiry alert does */
+    mock_time_set(gate_at(14, 30));
+
+    TEST_ASSERT_TRUE(gate_run(gate_body_check_charge));
+    TEST_ASSERT_EQUAL_INT(1, gate_log_count(EV_WINDOW_PAINT));
+    TEST_ASSERT_EQUAL_INT(2, gate_log_count(EV_CHARGE_ME));
+    TEST_ASSERT_EQUAL_INT(0, gate_art_ends_total());
+}
+
+void test_a_charge_locked_rewake_does_not_end_the_art_episode(void) {
+    s_charge_locked = true;
+    gate_batt_pct = 5;
+    TEST_ASSERT_TRUE(gate_run(gate_body_check_charge));
+    TEST_ASSERT_EQUAL_INT(0, gate_art_ends_total());
+}
+
+void test_the_charge_release_ends_the_charge_episode_once_and_no_other(void) {
+    s_charge_locked = true;
+    gate_batt_pct = 80;
+    TEST_ASSERT_FALSE(gate_run(gate_body_check_charge));
+    TEST_ASSERT_FALSE(s_charge_locked);
+    TEST_ASSERT_EQUAL_INT(1, gate_art_ends[SPRITE_LOCK_CHARGE]);
+    TEST_ASSERT_EQUAL_INT(1, gate_art_ends_total());
+    /* a healthy battery that was never locked ends nothing more */
+    TEST_ASSERT_FALSE(gate_run(gate_body_check_charge));
+    TEST_ASSERT_EQUAL_INT(1, gate_art_ends_total());
+}
+
+void test_a_charge_lock_engaged_again_after_release_ends_nothing_until_it_releases(void) {
+    s_charge_locked = true;
+    gate_batt_pct = 80;
+    TEST_ASSERT_FALSE(gate_run(gate_body_check_charge));
+    TEST_ASSERT_EQUAL_INT(1, gate_art_ends[SPRITE_LOCK_CHARGE]);
+
+    gate_batt_pct = 5;
+    TEST_ASSERT_TRUE(gate_run(gate_body_check_charge)); /* engages anew */
+    TEST_ASSERT_TRUE(s_charge_locked);
+    TEST_ASSERT_EQUAL_INT(1, gate_art_ends[SPRITE_LOCK_CHARGE]);
+
+    gate_batt_pct = 80;
+    TEST_ASSERT_FALSE(gate_run(gate_body_check_charge));
+    TEST_ASSERT_EQUAL_INT(2, gate_art_ends[SPRITE_LOCK_CHARGE]);
+}
+
+void test_the_bedtime_engage_and_its_window_never_end_the_art_episode(void) {
+    gate_set_bedtime(GATE_BEDTIME_2000);
+    gate_timer_state = TIMER_RUNNING;
+    gate_window_paints = true;
+    gate_set_now(gate_at(20, 0));
+
+    TEST_ASSERT_TRUE(gate_run(gate_body_check_bedtime));
+    TEST_ASSERT_EQUAL_INT(2, gate_log_count(EV_BEDTIME_SCREEN));
+    TEST_ASSERT_EQUAL_INT(1, gate_log_count(EV_WINDOW_PAINT));
+    TEST_ASSERT_EQUAL_INT(0, gate_art_ends_total());
+}
+
+void test_the_direct_bedtime_engage_never_ends_the_art_episode(void) {
+    gate_set_now(gate_at(19, 40));
+    gate_body_alert = true;
+    TEST_ASSERT_TRUE(gate_run(gate_body_engage));
+    TEST_ASSERT_EQUAL_INT(0, gate_art_ends_total());
+}
+
+void test_a_bedtime_locked_rewake_that_stays_locked_does_not_end_the_art_episode(void) {
+    s_bedtime_locked = true;
+    gate_set_bedtime(GATE_BEDTIME_2000);
+    gate_window_paints = true;
+    gate_set_now(gate_at(23, 0));
+    TEST_ASSERT_TRUE(gate_run(gate_body_check_bedtime));
+    TEST_ASSERT_EQUAL_INT(0, gate_art_ends_total());
+}
+
+void test_the_morning_bedtime_release_ends_the_bedtime_episode_once_and_no_other(void) {
+    s_bedtime_locked = true;
+    gate_set_bedtime(GATE_BEDTIME_2000);
+    gate_set_now(gate_at(7, 0));
+
+    TEST_ASSERT_FALSE(gate_run(gate_body_check_bedtime));
+    TEST_ASSERT_EQUAL_INT(1, gate_body_released);
+    TEST_ASSERT_FALSE(s_bedtime_locked);
+    TEST_ASSERT_EQUAL_INT(1, gate_art_ends[SPRITE_LOCK_BEDTIME]);
+    TEST_ASSERT_EQUAL_INT(1, gate_art_ends_total());
+}
+
+void test_a_bedtime_release_by_edit_in_the_window_ends_the_bedtime_episode_once(void) {
+    s_bedtime_locked = true;
+    gate_set_bedtime(GATE_BEDTIME_2000);
+    gate_bedtime_min_after_window = -1;
+    gate_set_now(gate_at(23, 0));
+
+    TEST_ASSERT_FALSE(gate_run(gate_body_check_bedtime));
+    TEST_ASSERT_FALSE(s_bedtime_locked);
+    TEST_ASSERT_EQUAL_INT(1, gate_art_ends[SPRITE_LOCK_BEDTIME]);
+    TEST_ASSERT_EQUAL_INT(1, gate_art_ends_total());
+    TEST_ASSERT_EQUAL_INT(1, gate_log_count(EV_NET_WINDOW)); /* the end came after the window */
+    TEST_ASSERT_EQUAL_INT(1, gate_art_end_log_pos[SPRITE_LOCK_BEDTIME]);
+}
+
+void test_a_bedtime_engaged_again_after_release_ends_nothing_until_it_releases(void) {
+    s_bedtime_locked = true;
+    gate_set_bedtime(GATE_BEDTIME_2000);
+    gate_set_now(gate_at(7, 0));
+    TEST_ASSERT_FALSE(gate_run(gate_body_check_bedtime));
+    TEST_ASSERT_EQUAL_INT(1, gate_art_ends[SPRITE_LOCK_BEDTIME]);
+
+    gate_set_now(gate_at(20, 30));
+    TEST_ASSERT_TRUE(gate_run(gate_body_check_bedtime)); /* engages anew */
+    TEST_ASSERT_TRUE(s_bedtime_locked);
+    TEST_ASSERT_EQUAL_INT(1, gate_art_ends[SPRITE_LOCK_BEDTIME]);
+}
+
 int main(void) {
     UNITY_BEGIN();
+    RUN_TEST(test_the_charge_engage_and_its_window_never_end_the_art_episode);
+    RUN_TEST(test_a_charge_locked_rewake_does_not_end_the_art_episode);
+    RUN_TEST(test_the_charge_release_ends_the_charge_episode_once_and_no_other);
+    RUN_TEST(test_a_charge_lock_engaged_again_after_release_ends_nothing_until_it_releases);
+    RUN_TEST(test_the_bedtime_engage_and_its_window_never_end_the_art_episode);
+    RUN_TEST(test_the_direct_bedtime_engage_never_ends_the_art_episode);
+    RUN_TEST(test_a_bedtime_locked_rewake_that_stays_locked_does_not_end_the_art_episode);
+    RUN_TEST(test_the_morning_bedtime_release_ends_the_bedtime_episode_once_and_no_other);
+    RUN_TEST(test_a_bedtime_release_by_edit_in_the_window_ends_the_bedtime_episode_once);
+    RUN_TEST(test_a_bedtime_engaged_again_after_release_ends_nothing_until_it_releases);
     RUN_TEST(test_healthy_battery_leaves_the_wake_alone);
     RUN_TEST(test_warn_band_does_not_lock);
     RUN_TEST(test_lock_band_engages_and_ends_the_wake);

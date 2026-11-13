@@ -1677,6 +1677,7 @@ bool wake_flow_break_end(void) {
         return false;
     }
     s_break_ended = true;
+    display_lock_art_end(SPRITE_LOCK_BREAK); /* the break's art episode is over */
     /* Design row C16's break-end revert, and it belongs HERE — inside the
        take, above the chime decision — for two separate reasons.
        INSIDE THE TAKE, because the take is what makes this a break END
@@ -1777,6 +1778,7 @@ bool wake_flow_report_undrained_break_end(void) {
        this function already refuses is not: a single-byte store into RTC
        memory takes no lock and allocates nothing. */
     timer_set_mode(APP_MODE_TIMERS);
+    display_lock_art_end(SPRITE_LOCK_BREAK); /* same RTC-state reasoning: the NEXT wake's paint reads it */
     ESP_LOGW(TAG, "break end reached sleep undrained (%ld s late)", (long)overdue);
     return true;
 }
@@ -2426,6 +2428,9 @@ bool wake_flow_maybe_start_break(time_t now) {
        is a site a break start gates, so the write cannot reach a paint
        path the whole fleet runs. */
     timer_set_mode(APP_MODE_TIMERS);
+    /* A new break is a new art episode, whatever became of the last one: a
+       day rollover wipes a break without an end edge. */
+    display_lock_art_end(SPRITE_LOCK_BREAK);
     timer_persist_save();
     paint_break_started(now); /* blue LED through the inverted SCREEN BREAK refresh */
     alert_run(ALERT_BREAK);   /* pulse end darkens the pixels */
@@ -2468,6 +2473,9 @@ void wake_flow_fire_expiry_alert(void) {
        refresh — so it reaches the panel through that same seam instead of
        carrying a second copy of it. */
     paint_current_state_full();
+    /* The TIME'S UP screen is replaced: each expiry alert is its own art
+       episode, so the next one draws afresh. */
+    display_lock_art_end(SPRITE_LOCK_TIMESUP);
     /* The last publish HA saw says RUNNING with N seconds left; the chart
        is owed the expiry. Marked here, after the alarm and the repaint
        (the amp is off and the panel is done), and served by whichever

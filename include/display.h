@@ -5,6 +5,7 @@
 
 #include "chores.h" /* CHORE_MAX, CHORE_NAME_BUF for the checklist block below */
 #include "schedule.h"
+#include "sprite_pick.h" /* sprite_lock_t, for display_lock_art_end */
 #include "timer.h"
 
 /* Landscape panel geometry (shared by display.c and the screen builders). */
@@ -215,6 +216,12 @@ void display_sync_failed(void);                          /* "No sync - check WiF
 void display_no_clock(void);                             /* no-clock lock (BUG-14), full refresh */
 void display_charge_me(void);                            /* battery lock layout, full refresh */
 void display_bedtime(void);                              /* bed-time lock layout, full refresh */
+/* A lock's art episode is over (sprite_pick.h): the next paint of that lock
+   draws its variant afresh. Called by the owner of the edge that ends the
+   lock -- the charge release and the two bed-time releases (lock_gate.c),
+   a break's start and end and the time's-up alert once its screen has been
+   replaced (wake_flow.c). The paints themselves never end an episode. */
+void display_lock_art_end(sprite_lock_t lock);
 /* Config-error lock layout, full refresh (design 5.3). Names the day type
    whose `chore_free_*` exceeds its paired allocation and both figures, in
    MINUTES as stored — the point of the screen is that the fix needs no

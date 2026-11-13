@@ -199,6 +199,7 @@ void lock_gate_check_charge(void) {
         if (s_charge_locked) {
             s_charge_locked = false;
             s_charge_lock_released = true; /* repaint over the Charge Me! screen */
+            display_lock_art_end(SPRITE_LOCK_CHARGE);
             ESP_LOGW(TAG, "Charge lock released (%d%%)", pct);
         }
         return;
@@ -450,6 +451,7 @@ static bool check_bedtime(time_t *now) {
         if (s_bedtime_locked) {
             s_bedtime_locked = false;
             s_bedtime_released = true; /* repaint over the Bed Time screen */
+            display_lock_art_end(SPRITE_LOCK_BEDTIME);
             ESP_LOGW(TAG, "Bed time released");
             return true;
         }
@@ -466,6 +468,7 @@ static bool check_bedtime(time_t *now) {
     if (!bedtime_active(time_util_minutes_of_day(*now), config_cache_bedtime_minutes())) {
         s_bedtime_locked = false;
         s_bedtime_released = true;
+        display_lock_art_end(SPRITE_LOCK_BEDTIME);
         ESP_LOGW(TAG, "Bed time released (config edit or clock step)");
         /* Fall through to the normal wake, which repaints; the true is
            what tells it the presses made so far were the lock's. */

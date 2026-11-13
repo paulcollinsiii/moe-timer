@@ -48,20 +48,25 @@ static bool s_pending_clean;
    this file is not compiled by any host suite: nothing here assigns it. */
 static RTC_DATA_ATTR uint8_t s_partial_count;
 
-/* Which lock screen's art episode is in progress and the variant picked for
-   it (sprite_pick.h). Display-owned RTC state, like the counter above, and
-   for the same reason: it is about what is on the panel, so it does not
-   belong in the timer module's rtc_state_t (which timer_reset memsets every
-   midnight). sprite_pick() validates it on every call, so the zeroed value
-   esp_restart leaves, another image's bytes after an OTA failsafe sleep and
-   a variant count that shrank all end in a fresh draw, never an
-   out-of-range index. */
+/* The variant picked for each lock's art episode (sprite_pick.h).
+   Display-owned RTC state, like the counter above, and for the same reason:
+   it is about what is on the panel, so it does not belong in the timer
+   module's rtc_state_t (which timer_reset memsets every midnight).
+   sprite_pick() validates it on every call, so the zeroed value esp_restart
+   leaves, another image's bytes after an OTA failsafe sleep and a variant
+   count that shrank all end in a fresh draw, never an out-of-range index.
+   An episode starts at the lock's first paint and ends only through
+   display_lock_art_end(): painting another screen does not touch it. */
 static RTC_DATA_ATTR sprite_pick_t s_sprite_pick;
 
 /* The art for the lock screen being painted: the episode's variant of the
    slot's table. The one place that draws from esp_random(). */
 static const sprite_t *lock_art(sprite_lock_t lock, const sprite_t *const *table, unsigned count) {
     return sprite_variant(table, count, sprite_pick(&s_sprite_pick, lock, count, esp_random));
+}
+
+void display_lock_art_end(sprite_lock_t lock) {
+    sprite_pick_end(&s_sprite_pick, lock);
 }
 
 /* "The panel is showing a full-screen takeover." Set by display_ota(),
@@ -339,10 +344,6 @@ static void paint(display_paint_t kind) {
    pass; M2-T15 removed the exemption, and with it the only reader. */
 static void build_for_state(const display_state_t *st) {
     const display_screen_t screen = display_screen_for(st->timer_state, st->app_mode, st->chore_count);
-    /* Painting an ordinary screen ends any lock-art episode, so the next
-       lock draws its art afresh. */
-    if (screen != DISPLAY_SCREEN_BREAK)
-        sprite_pick_leave(&s_sprite_pick);
     switch (screen) {
         case DISPLAY_SCREEN_CHORES:
             display_screens_build_chores(st);
