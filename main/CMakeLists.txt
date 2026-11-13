@@ -32,12 +32,15 @@ if(NOT CMAKE_BUILD_EARLY_EXPANSION)
         endif()
         set(SPRITE_OVERRIDE_SLOTS "")
         foreach(png ${SPRITE_OVERRIDE_PNGS})
-            # the generator's slot name: only the final .png is stripped
-            # (NAME_WE would report charge.v2.png as "charge")
+            # the slot name the generator uses: the final .png and an
+            # optional variant number are stripped, so charge.1.png and
+            # charge.png both name "charge" (NAME_WE would also eat the
+            # middle of charge.v2.png)
             get_filename_component(slot "${png}" NAME)
-            string(REGEX REPLACE "\\.[pP][nN][gG]$" "" slot "${slot}")
+            string(REGEX REPLACE "(\\.[0-9]+)?\\.[pP][nN][gG]$" "" slot "${slot}")
             list(APPEND SPRITE_OVERRIDE_SLOTS "${slot}")
         endforeach()
+        list(REMOVE_DUPLICATES SPRITE_OVERRIDE_SLOTS)
         list(JOIN SPRITE_OVERRIDE_SLOTS ", " SPRITE_OVERRIDE_SLOTS_TEXT)
         message(STATUS "Lock-screen art: overriding slots from sprites.local/: ${SPRITE_OVERRIDE_SLOTS_TEXT}")
 
@@ -107,6 +110,7 @@ idf_component_register(
         "setup_trigger.c"
         "qr_render.c"
         "sprite.c"
+        "sprite_pick.c"
         ${SPRITE_DATA_SRCS}
         "../lib/cJSON/cJSON.c"
         "../lib/qrcodegen/qrcodegen.c"

@@ -238,8 +238,23 @@ void test_the_generated_bedtime_art_decodes_to_the_png_dimensions_and_ink_count(
     TEST_ASSERT_EQUAL_UINT16(60, SPRITE_BEDTIME.rle_len);
 }
 
+/* The committed (template) data has one picture per slot: the table holds
+   exactly the base sprite, so a single-variant build paints what it always
+   did. tools/gen_sprites.py's test pins the same from the Python side. */
+void test_each_generated_slot_has_a_one_entry_variant_table_holding_its_base(void) {
+    TEST_ASSERT_EQUAL_UINT(1, SPRITE_CHARGE_VARIANT_COUNT);
+    TEST_ASSERT_EQUAL_PTR(&SPRITE_CHARGE, SPRITE_CHARGE_VARIANTS[0]);
+    TEST_ASSERT_EQUAL_UINT(1, SPRITE_TIMESUP_VARIANT_COUNT);
+    TEST_ASSERT_EQUAL_PTR(&SPRITE_TIMESUP, SPRITE_TIMESUP_VARIANTS[0]);
+    TEST_ASSERT_EQUAL_UINT(1, SPRITE_BREAK_VARIANT_COUNT);
+    TEST_ASSERT_EQUAL_PTR(&SPRITE_BREAK, SPRITE_BREAK_VARIANTS[0]);
+    TEST_ASSERT_EQUAL_UINT(1, SPRITE_BEDTIME_VARIANT_COUNT);
+    TEST_ASSERT_EQUAL_PTR(&SPRITE_BEDTIME, SPRITE_BEDTIME_VARIANTS[0]);
+}
+
 int main(void) {
     UNITY_BEGIN();
+    RUN_TEST(test_each_generated_slot_has_a_one_entry_variant_table_holding_its_base);
     RUN_TEST(test_a_simple_image_decodes_to_the_bitmap);
     RUN_TEST(test_a_run_wraps_across_rows_and_is_split_at_the_row_end);
     RUN_TEST(test_a_255_0_continuation_keeps_the_same_colour);

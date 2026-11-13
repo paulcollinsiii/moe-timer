@@ -6,6 +6,7 @@
 
 #include "display_screens.h"
 #include "esp_log.h"
+#include "esp_random.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -13,6 +14,8 @@
 #include "panic_diag.h"
 #include "qr_render.h"
 #include "sdkconfig.h"
+#include "sprite_data.h"
+#include "sprite_pick.h"
 #include "ssd1680.h"
 
 static const char *TAG = "display";
@@ -44,6 +47,27 @@ static bool s_pending_clean;
    write of it is display_refresh_decide()'s, in display_layout.c, because
    this file is not compiled by any host suite: nothing here assigns it. */
 static RTC_DATA_ATTR uint8_t s_partial_count;
+
+/* The variant picked for each lock's art episode (sprite_pick.h).
+   Display-owned RTC state, like the counter above, and for the same reason:
+   it is about what is on the panel, so it does not belong in the timer
+   module's rtc_state_t (which timer_reset memsets every midnight).
+   sprite_pick() validates it on every call, so the zeroed value esp_restart
+   leaves, another image's bytes after an OTA failsafe sleep and a variant
+   count that shrank all end in a fresh draw, never an out-of-range index.
+   An episode starts at the lock's first paint and ends only through
+   display_lock_art_end(): painting another screen does not touch it. */
+static RTC_DATA_ATTR sprite_pick_t s_sprite_pick;
+
+/* The art for the lock screen being painted: the episode's variant of the
+   slot's table. The one place that draws from esp_random(). */
+static const sprite_t *lock_art(sprite_lock_t lock, const sprite_t *const *table, unsigned count) {
+    return sprite_variant(table, count, sprite_pick(&s_sprite_pick, lock, count, esp_random));
+}
+
+void display_lock_art_end(sprite_lock_t lock) {
+    sprite_pick_end(&s_sprite_pick, lock);
+}
 
 /* "The panel is showing a full-screen takeover." Set by display_ota(),
    consumed by the next display_update().
@@ -325,7 +349,8 @@ static void build_for_state(const display_state_t *st) {
             display_screens_build_chores(st);
             break;
         case DISPLAY_SCREEN_BREAK:
-            display_screens_build_break(st);
+            display_screens_build_break(st,
+                                        lock_art(SPRITE_LOCK_BREAK, SPRITE_BREAK_VARIANTS, SPRITE_BREAK_VARIANT_COUNT));
             break;
         case DISPLAY_SCREEN_MAIN:
             display_screens_build_main(st);
@@ -369,14 +394,14 @@ void display_full_refresh(const display_state_t *st) {
 void display_timesup(void) {
     if (!s_initialized)
         display_init();
-    display_screens_build_timesup();
+    display_screens_build_timesup(lock_art(SPRITE_LOCK_TIMESUP, SPRITE_TIMESUP_VARIANTS, SPRITE_TIMESUP_VARIANT_COUNT));
     paint(DISPLAY_PAINT_TAKEOVER);
 }
 
 void display_charge_me(void) {
     if (!s_initialized)
         display_init();
-    display_screens_build_charge_me();
+    display_screens_build_charge_me(lock_art(SPRITE_LOCK_CHARGE, SPRITE_CHARGE_VARIANTS, SPRITE_CHARGE_VARIANT_COUNT));
     paint(DISPLAY_PAINT_TAKEOVER);
 }
 
@@ -397,7 +422,7 @@ void display_no_clock(void) {
 void display_bedtime(void) {
     if (!s_initialized)
         display_init();
-    display_screens_build_bedtime();
+    display_screens_build_bedtime(lock_art(SPRITE_LOCK_BEDTIME, SPRITE_BEDTIME_VARIANTS, SPRITE_BEDTIME_VARIANT_COUNT));
     paint(DISPLAY_PAINT_TAKEOVER);
 }
 

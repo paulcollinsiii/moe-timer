@@ -984,6 +984,20 @@ void display_timesup(void) {
     flow_log_push(EV_TIMESUP);
 }
 
+/* The art-episode end hook. NOT in flow_log: several cases pin that log's
+   exact length and order. Each lock keeps how many times it was ended and
+   how many log events had happened by the first such end, so "after the
+   paint that superseded the screen" is an assertion on a position. */
+static int flow_art_ends[SPRITE_LOCK_COUNT_];
+static int flow_art_end_log_pos[SPRITE_LOCK_COUNT_];
+
+void display_lock_art_end(sprite_lock_t lock) {
+    if ((unsigned)lock >= SPRITE_LOCK_COUNT_)
+        return;
+    if (flow_art_ends[lock]++ == 0)
+        flow_art_end_log_pos[lock] = flow_log_n;
+}
+
 /* ---- the injected day-rollover model ------------------------------------ */
 
 static bool flow_new_day;
@@ -2279,6 +2293,8 @@ void setUp(void) {
     tzset();
     mock_time_reset();
     flow_log_n = 0;
+    memset(flow_art_ends, 0, sizeof flow_art_ends);
+    memset(flow_art_end_log_pos, 0, sizeof flow_art_end_log_pos);
     flow_break_running = false;
     flow_break_wall_end = 0;
     flow_latched = false;
@@ -4747,6 +4763,105 @@ void test_the_expiry_alert_returns_to_its_caller(void) {
     wake_flow_fire_expiry_alert();
     flow_log_push(EV_LED); /* only reachable if the call above came back */
     TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_LED));
+}
+
+/* ---- lock art episodes -------------------------------------------------- */
+
+static int flow_art_ends_total(void) {
+    int n = 0;
+    for (unsigned k = 0; k < SPRITE_LOCK_COUNT_; k++)
+        n += flow_art_ends[k];
+    return n;
+}
+
+/* Each expiry alert is its own episode of the time's-up art: it ends once
+   the alert's screen has been replaced, so the next alert draws afresh, and
+   not before, so a repaint inside the alert cannot change the art. */
+void test_the_expiry_alert_ends_the_timesup_episode_after_its_screen_is_replaced(void) {
+    wake_flow_fire_expiry_alert();
+    TEST_ASSERT_EQUAL_INT(1, flow_art_ends[SPRITE_LOCK_TIMESUP]);
+    TEST_ASSERT_EQUAL_INT(1, flow_art_ends_total());
+    TEST_ASSERT_TRUE(flow_art_end_log_pos[SPRITE_LOCK_TIMESUP] > flow_log_at(EV_TIMESUP));
+    TEST_ASSERT_TRUE(flow_art_end_log_pos[SPRITE_LOCK_TIMESUP] > flow_log_at(EV_ALERT_EXPIRY));
+    TEST_ASSERT_TRUE(flow_art_end_log_pos[SPRITE_LOCK_TIMESUP] > flow_log_at(EV_FULL_REFRESH));
+}
+
+void test_each_expiry_alert_ends_the_timesup_episode_again(void) {
+    wake_flow_fire_expiry_alert();
+    wake_flow_fire_expiry_alert();
+    TEST_ASSERT_EQUAL_INT(2, flow_art_ends[SPRITE_LOCK_TIMESUP]);
+}
+
+void test_a_break_end_ends_the_break_episode_once_and_no_other(void) {
+    flow_arm_break(flow_at(16, 0), FLOW_SCREEN, FLOW_SCREEN);
+    mock_time_set(flow_at(16, 0) + 2);
+    TEST_ASSERT_TRUE(wake_flow_break_end());
+    TEST_ASSERT_EQUAL_INT(1, flow_art_ends[SPRITE_LOCK_BREAK]);
+    TEST_ASSERT_EQUAL_INT(1, flow_art_ends_total());
+    /* the take is consumed: a second drain is no edge and ends nothing */
+    TEST_ASSERT_FALSE(wake_flow_break_end());
+    TEST_ASSERT_EQUAL_INT(1, flow_art_ends[SPRITE_LOCK_BREAK]);
+}
+
+void test_a_break_that_ends_silently_still_ends_its_episode(void) {
+    flow_arm_break(flow_at(16, 0), FLOW_SCREEN, FLOW_SCREEN);
+    flow_extra_running = true; /* the chime is refused: the break is over all the same */
+    mock_time_set(flow_at(16, 0) + 2);
+    TEST_ASSERT_TRUE(wake_flow_break_end());
+    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_CHIME));
+    TEST_ASSERT_EQUAL_INT(1, flow_art_ends[SPRITE_LOCK_BREAK]);
+}
+
+void test_the_break_end_repaint_ends_the_break_episode_before_it_paints(void) {
+    flow_arm_break(flow_at(16, 0), FLOW_SCREEN, FLOW_PIANO);
+    mock_time_set(flow_at(16, 0) + 3);
+    TEST_ASSERT_TRUE(wake_flow_break_end_repaint());
+    TEST_ASSERT_EQUAL_INT(1, flow_art_ends[SPRITE_LOCK_BREAK]);
+    TEST_ASSERT_TRUE(flow_art_end_log_pos[SPRITE_LOCK_BREAK] <= flow_repaint_at());
+}
+
+/* A break still running ends nothing, however often a wake drains it: the
+   chores screen and the timer screens come and go over the same episode,
+   and none of that is an edge. */
+void test_a_break_still_running_does_not_end_its_episode(void) {
+    flow_arm_break(flow_at(16, 0), FLOW_SCREEN, FLOW_SCREEN);
+    mock_time_set(flow_at(15, 55));
+    TEST_ASSERT_FALSE(wake_flow_break_end());
+    TEST_ASSERT_FALSE(wake_flow_break_end_repaint());
+    TEST_ASSERT_EQUAL_INT(0, flow_art_ends_total());
+}
+
+void test_a_wake_with_no_break_ends_no_episode(void) {
+    mock_time_set(flow_at(14, 0));
+    TEST_ASSERT_FALSE(wake_flow_break_end());
+    TEST_ASSERT_EQUAL_INT(0, flow_art_ends_total());
+}
+
+/* The undrained break end is consumed by the safety net, which is another
+   way a break ends. */
+void test_a_break_end_consumed_undrained_still_ends_its_episode(void) {
+    mock_time_set(flow_at(15, 0));
+    flow_latched = true; /* an edge nothing serviced this wake */
+    flow_latched_wall = flow_at(14, 59);
+    TEST_ASSERT_TRUE(wake_flow_report_undrained_break_end());
+    TEST_ASSERT_EQUAL_INT(1, flow_art_ends[SPRITE_LOCK_BREAK]);
+    TEST_ASSERT_EQUAL_INT(1, flow_art_ends_total());
+}
+
+/* A new break starts a new episode, whatever became of the last one (a
+   day rollover wipes a break with no end edge). */
+void test_a_break_start_ends_any_stale_break_episode_before_painting(void) {
+    flow_break_due_ret = true;
+    TEST_ASSERT_EQUAL_INT(FLOW_GATE_STARTED, flow_run_break_gate(flow_at(14, 0)));
+    TEST_ASSERT_EQUAL_INT(1, flow_art_ends[SPRITE_LOCK_BREAK]);
+    TEST_ASSERT_EQUAL_INT(1, flow_art_ends_total());
+    TEST_ASSERT_TRUE(flow_art_end_log_pos[SPRITE_LOCK_BREAK] <= flow_log_at(EV_ALERT_BREAK));
+}
+
+void test_a_break_that_is_not_due_ends_no_episode(void) {
+    flow_break_due_ret = false;
+    TEST_ASSERT_EQUAL_INT(FLOW_GATE_NO_BREAK, flow_run_break_gate(flow_at(14, 0)));
+    TEST_ASSERT_EQUAL_INT(0, flow_art_ends_total());
 }
 
 /* ---- the day rollover: the no-op path ----------------------------------- */
@@ -14388,6 +14503,16 @@ int main(void) {
     RUN_TEST(test_the_expiry_alert_runs_the_expiry_alarm_not_the_break_one);
     RUN_TEST(test_the_expiry_alert_effect_order_is_pinned_end_to_end);
     RUN_TEST(test_the_expiry_alert_returns_to_its_caller);
+    RUN_TEST(test_the_expiry_alert_ends_the_timesup_episode_after_its_screen_is_replaced);
+    RUN_TEST(test_each_expiry_alert_ends_the_timesup_episode_again);
+    RUN_TEST(test_a_break_end_ends_the_break_episode_once_and_no_other);
+    RUN_TEST(test_a_break_that_ends_silently_still_ends_its_episode);
+    RUN_TEST(test_the_break_end_repaint_ends_the_break_episode_before_it_paints);
+    RUN_TEST(test_a_break_still_running_does_not_end_its_episode);
+    RUN_TEST(test_a_wake_with_no_break_ends_no_episode);
+    RUN_TEST(test_a_break_end_consumed_undrained_still_ends_its_episode);
+    RUN_TEST(test_a_break_start_ends_any_stale_break_episode_before_painting);
+    RUN_TEST(test_a_break_that_is_not_due_ends_no_episode);
     RUN_TEST(test_a_wake_on_the_same_day_rolls_nothing_over);
     RUN_TEST(test_the_new_day_check_reads_the_clock_it_was_handed);
     RUN_TEST(test_row13_a_valid_same_day_snapshot_beats_the_reset);

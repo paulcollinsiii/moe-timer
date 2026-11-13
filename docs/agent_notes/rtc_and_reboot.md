@@ -22,6 +22,7 @@ Re-grep before trusting this: `grep -rn 'RTC_DATA_ATTR\|RTC_NOINIT_ATTR' main co
 | `s_charge_locked`, `s_bedtime_locked`, `s_config_locked`, `s_clock_locked` | `main/lock_gate.c` | Which locks are engaged | Cleared. The next gate run re-engages any lock that still applies, as after any hard reset. The engage is idempotent: it costs one more paint. |
 | `s_prev_fb`, `s_prev_fb_valid` | `main/display.c` | The last frame painted, for the ghost-clean diff | Invalid, so the next partial skips the clean pass. |
 | `s_partial_count` | `main/display.c` | Refresh cadence counter | Restarts at 0. |
+| `s_sprite_pick` | `main/display.c` | The picked variant of each lock's open art episode (one byte per lock) | No episode for any lock: the next paint of each lock draws a variant, so an `esp_restart` mid-episode redraws. It is validated on every use, so another image's bytes or a shrunken variant count also just redraw. |
 | `s_takeover_on_panel` | `main/display.c` | "A full-screen takeover is on the glass" | False. The post-OTA first paint is still full, but through the driver flag below, not this one. |
 | `s_last_refresh_sec` | `components/ssd1680/ssd1680.c` | The 1 s rate guard's last refresh | Zero, so the guard allows the first refresh. |
 | `s_prev_frame_valid` | `components/ssd1680/ssd1680.c` | Controller RAM holds a valid previous frame | False, so `ssd1680_resolve_refresh_mode()` promotes the first partial to full. This is what makes the post-reboot paint full. |

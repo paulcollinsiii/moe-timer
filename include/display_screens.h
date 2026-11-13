@@ -1,5 +1,6 @@
 #pragma once
 #include "display.h"
+#include "sprite.h"
 
 /* LVGL screen builders — pure widget construction on the active screen,
    no ESP/panel dependencies, so the layouts render on the host too
@@ -10,8 +11,15 @@
 extern "C" {
 #endif
 
+/* The four lock screens that carry art (break, time's up, charge, bed time)
+   take the sprite to paint: one of the slot's variants, which display.c
+   picked once for the lock episode (sprite_pick.h). NULL is the slot's base
+   sprite, SPRITE_<SLOT>. A builder reads no state to choose it and calls no
+   random source, so the same arguments always render the same bytes. A
+   variant has the slot's size (tools/gen_sprites.py refuses any other), so
+   the layouts need not know which one they got. */
 void display_screens_build_main(const display_state_t *st);
-void display_screens_build_break(const display_state_t *st);
+void display_screens_build_break(const display_state_t *st, const sprite_t *art);
 /* The chore checklist (design §2.4). Reads chore_names / chore_acked /
    chore_count / chore_released and nothing else about the timer, because
    display_screen_for() has already decided this screen is the right one —
@@ -19,11 +27,11 @@ void display_screens_build_break(const display_state_t *st);
    "Timers" label honest without re-deriving button_a_toggle_allowed()
    here. Never call it directly: go through display.c's build_for_state(). */
 void display_screens_build_chores(const display_state_t *st);
-void display_screens_build_timesup(void);
+void display_screens_build_timesup(const sprite_t *art);
 void display_screens_build_sync_failed(void);
 void display_screens_build_no_clock(void);
-void display_screens_build_charge_me(void);
-void display_screens_build_bedtime(void);
+void display_screens_build_charge_me(const sprite_t *art);
+void display_screens_build_bedtime(const sprite_t *art);
 /* The config-error lock screen (design 5.3). Both numbers are MINUTES, as
    stored, and are rendered as given — this screen is the report of a pair
    that is already wrong, so nothing here clamps, reorders or "corrects"
