@@ -225,3 +225,11 @@ CONFIG_LV_FONT_DEFAULT_MONTSERRAT_12=y
 # CONFIG_LV_DRAW_SW_SUPPORT_AL88 is not set
 # CONFIG_LV_DRAW_SW_SUPPORT_A8 is not set
 CONFIG_LV_DRAW_SW_SUPPORT_I1=y
+
+# IPv6 off. Every address the firmware handles is IPv4: AF_INET only (the
+# captive-portal DNS socket), esp_ip4addr_aton, ip4 DNS info; MQTT, SNTP and
+# the OTA HTTPS fetch resolve through lwIP's IPv4 path. Measured: 1,541,584 ->
+1,508,752 B (-32,832 B); ip6/nd6/icmp6/mld6/ethip6 are gone from the link map.
+A checkout whose sdkconfig has CONFIG_LWIP_IPV6 under a "# default:" marker
+picks this up on idf.py reconfigure; see docs/planning/20261112.firmware-diet.notes.md.
+CONFIG_LWIP_IPV6=n
