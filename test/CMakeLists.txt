@@ -65,6 +65,7 @@ add_host_test(test_display_render
     EXTRA_LIBS lvgl_host m)
 
 add_host_test(test_sprite)
+add_host_test(test_sprite_pick)
 add_host_test(test_timer)
 add_host_test(test_button_actions)
 add_host_test(test_schedule)

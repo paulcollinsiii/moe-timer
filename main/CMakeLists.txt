@@ -107,6 +107,7 @@ idf_component_register(
         "setup_trigger.c"
         "qr_render.c"
         "sprite.c"
+        "sprite_pick.c"
         ${SPRITE_DATA_SRCS}
         "../lib/cJSON/cJSON.c"
         "../lib/qrcodegen/qrcodegen.c"
