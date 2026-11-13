@@ -3772,6 +3772,7 @@ void wake_flow_handle_button_wake(void) {
             }
             const swap_gesture_t gesture = wake_flow_swap_count_gesture();
             swapped = (gesture == SWAP_GESTURE_COMMITTED);
+            now = hal_time_now(); /* the gesture waited: a paint must carry the clock as it is now */
             paint = wake_policy_swap_paint_owed(gesture == SWAP_GESTURE_HOME, wake_flow_break_ended_this_wake(),
                                                 s_lock_screen_on_glass, s_day_rolled);
             break;

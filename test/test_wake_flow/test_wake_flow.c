@@ -13683,6 +13683,26 @@ void test_swap2_n_presses_are_one_commit_and_one_partial_paint(void) {
     TEST_ASSERT_EQUAL_INT_MESSAGE(0, flow_log_count(EV_FULL_REFRESH), "nothing here promotes it to full");
 }
 
+/* THE COMMIT PAINTS THE CLOCK AS IT IS WHEN THE GESTURE ENDS, not as it was
+   when the press arrived. The wake read the clock before the gesture, and the
+   gesture then waits 0.7 to 6 s: a count that crosses a minute boundary must
+   paint the new minute (the chore coalescer and the D arm re-read for the
+   same reason). The harness clock advances with the gesture's delays. */
+void test_swap3a_a_gesture_that_crosses_a_minute_paints_the_minute_it_ended_in(void) {
+    flow_arm_swap_wake();
+    flow_enable_all_timers();
+    mock_time_set(flow_at(15, 0) - 1); /* 14:59:59, with the delay carry cleared */
+    flow_burst_add(BTN_C, 400);
+    flow_burst_add(BTN_C, 800);
+
+    TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_button());
+
+    TEST_ASSERT_EQUAL_INT(1, FLOW_RENDERS());
+    TEST_ASSERT_EQUAL_INT(1, flow_partial_n);
+    TEST_ASSERT_EQUAL_INT64_MESSAGE(flow_at(15, 0), flow_partial_at[0],
+                                    "the commit's paint carried the clock from before the gesture");
+}
+
 void test_swap3_the_candidate_wraps_through_screen(void) {
     flow_arm_swap_wake();
     flow_active_slot = FLOW_PIANO; /* the last enabled timer */
@@ -14602,6 +14622,7 @@ int main(void) {
     RUN_TEST(test_chime_never_fires_from_a_tick_wake_in_chore_mode);
     RUN_TEST(test_chime_never_fires_from_a_non_chore_button_wake);
     RUN_TEST(test_swap1_a_lone_c_press_commits_once_after_the_quiet_window_and_paints_once);
+    RUN_TEST(test_swap3a_a_gesture_that_crosses_a_minute_paints_the_minute_it_ended_in);
     RUN_TEST(test_swap2_n_presses_are_one_commit_and_one_partial_paint);
     RUN_TEST(test_swap3_the_candidate_wraps_through_screen);
     RUN_TEST(test_swap4_a_full_lap_commits_nothing_paints_nothing_and_puts_the_strip_back);
