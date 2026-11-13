@@ -111,6 +111,10 @@ typedef enum {
     EV_RELOAD_ALLOWED,
     EV_RELOAD,
     EV_SELECT_NEXT,
+    /* Button C's counted clicks */
+    EV_SELECT_SLOT,     /* timer_select_slot(): the gesture's one commit */
+    EV_SWAP_COUNT,      /* status_led_swap_count_show(): a count frame on the strip */
+    EV_SWAP_REFRACTORY, /* buttons_set_refractory() */
     /* the break gate */
     EV_CFG_INTERVAL,
     EV_CFG_DURATION,
@@ -650,6 +654,67 @@ bool timer_select_next(void) {
     return true;
 }
 
+/* ---- Button C's counted clicks: the timer module's calls the gesture makes.
+
+   test_timer owns the real ones; this is a faithful small model over an
+   ENABLED table (Screen plus Piano plus slot 2 by default, so a lap is three
+   timers), because the gesture's loop is what is under test here and a stub
+   that returned canned answers would hide a wrong step. The swap is refused on
+   the same two terms the real one is: flow_select_ok false, or the active
+   slot RUNNING. */
+static bool flow_slot_enabled[TIMER_SLOT_COUNT];
+
+static bool flow_swap_allowed(void) {
+    /* The real one's two terms: the active slot is not RUNNING, and there is
+       another enabled slot to go to (timer_extra_count() > 0). */
+    return flow_select_ok && flow_state != TIMER_RUNNING && timer_slot_after(flow_active_slot) >= 0;
+}
+
+bool timer_swap_allowed(void) {
+    return flow_swap_allowed();
+}
+
+int timer_slot_after(int slot) {
+    if (slot < 0 || slot >= TIMER_SLOT_COUNT)
+        return -1;
+    for (int i = 1; i < TIMER_SLOT_COUNT; i++) {
+        const int cand = (slot + i) % TIMER_SLOT_COUNT;
+        if (flow_slot_enabled[cand])
+            return cand;
+    }
+    return -1;
+}
+
+int timer_slot_ordinal(int slot) {
+    if (slot < 0 || slot >= TIMER_SLOT_COUNT || !flow_slot_enabled[slot])
+        return 0;
+    int n = 1;
+    for (int i = 1; i <= slot; i++) {
+        if (flow_slot_enabled[i])
+            n++;
+    }
+    return n;
+}
+
+/* When the commit happened (the suite's delay total — what the gesture waited
+   before painting) and what was still sitting in the latch at that instant:
+   the evidence that other buttons' presses stay latched through the gesture
+   and are neither consumed by it nor extend it. */
+static uint32_t flow_select_slot_at_ms;
+static uint8_t flow_latch_mask_at_select;
+
+bool timer_select_slot(int slot) {
+    flow_log_push(EV_SELECT_SLOT);
+    flow_select_slot_at_ms = mock_delay_total_ms();
+    flow_latch_mask_at_select = s_mask;
+    if (!flow_swap_allowed() || slot < 0 || slot >= TIMER_SLOT_COUNT || !flow_slot_enabled[slot] ||
+        slot == flow_active_slot)
+        return false;
+    flow_active_slot = slot;
+    flow_state = flow_state_at_select; /* the slot we landed on */
+    return true;
+}
+
 void timer_shift_expiry(int64_t delta_sec) {
     flow_shift_arg = delta_sec;
     flow_log_push(EV_SHIFT_EXPIRY);
@@ -714,6 +779,21 @@ static int32_t flow_deferred_press_ms;
 static button_id_t flow_deferred_press_btn;
 static int flow_deferred_delivered;        /* how many armed presses actually landed */
 static void flow_deferred_press_due(void); /* defined with the harness below */
+/* The script version, for a counted-clicks gesture: up to FLOW_BURST_MAX
+   presses, each at its own delay total. flow_burst_delivered is the same
+   proof-of-delivery the single-press arm has. */
+#define FLOW_BURST_MAX 16
+static int32_t flow_burst_at_ms[FLOW_BURST_MAX];
+static button_id_t flow_burst_btn[FLOW_BURST_MAX];
+static int flow_burst_n;
+static int flow_burst_next;
+static int flow_burst_delivered;
+
+static void flow_burst_add(button_id_t btn, int32_t at_ms) {
+    flow_burst_btn[flow_burst_n] = btn;
+    flow_burst_at_ms[flow_burst_n] = at_ms;
+    flow_burst_n++;
+}
 
 /* How many times each take ran — the polling cadence of a loop is part of
    its contract (100 ms in the grid wait, 250 ms in both watches) and a
@@ -1033,6 +1113,43 @@ void chores_led_show(uint8_t mask, uint8_t n, bool released) {
         flow_strip_at[flow_strip_n] = mock_delay_total_ms();
         flow_strip_n++;
     }
+}
+
+/* Button C's count frames, in order, with the delay total each one was
+   painted at: "the strip showed 2, then 3" is the observable, and the instant
+   is what says a frame landed on the press that made it and not a quiet
+   window later. */
+#define FLOW_COUNT_MAX 24
+static uint8_t flow_count_seen[FLOW_COUNT_MAX];
+static uint32_t flow_count_at[FLOW_COUNT_MAX];
+static int flow_count_n;
+
+void status_led_swap_count_show(uint8_t ordinal) {
+    flow_log_push(EV_SWAP_COUNT);
+    if (flow_count_n < FLOW_COUNT_MAX) {
+        flow_count_seen[flow_count_n] = ordinal;
+        flow_count_at[flow_count_n] = mock_delay_total_ms();
+        flow_count_n++;
+    }
+}
+
+/* buttons.c's buttons_set_refractory(): the critical section around the
+   latch's setter, which is the REAL one compiled in above. Recorded in order,
+   because WHEN the short window is installed and WHEN it is put back is the
+   whole of the mode question. */
+#define FLOW_REFRACTORY_MAX 16
+static int flow_refractory_btn[FLOW_REFRACTORY_MAX];
+static int64_t flow_refractory_us[FLOW_REFRACTORY_MAX];
+static int flow_refractory_n;
+
+void buttons_set_refractory(button_id_t btn, int64_t us) {
+    flow_log_push(EV_SWAP_REFRACTORY);
+    if (flow_refractory_n < FLOW_REFRACTORY_MAX) {
+        flow_refractory_btn[flow_refractory_n] = (int)btn;
+        flow_refractory_us[flow_refractory_n] = us;
+        flow_refractory_n++;
+    }
+    button_latch_set_refractory((int)btn, us);
 }
 
 /* net_window.c's "the checklist owns the strip this wake, drop the sync
@@ -1945,7 +2062,21 @@ static int64_t flow_edge_gap_us;
 
 #define FLOW_EDGE_GAP_DEFAULT_US (10 * (int64_t)BUTTON_LATCH_DEBOUNCE_US)
 
+/* THE REAL-CLOCK EDGE MODEL, for the cases whose subject is a refractory
+   window or a tap rhythm. The default steps the edge clock by a fixed gap per
+   latch operation (ten debounce windows, so nothing is ever "too soon"),
+   which says nothing about 120 ms against 300 ms. Here an edge is stamped
+   with the SUITE'S wall time — the delay total, in microseconds — plus one
+   microsecond per operation so the order of same-instant operations holds. */
+static bool flow_edge_clock_is_real;
+#define FLOW_REAL_EDGE_BASE_US ((int64_t)1000000000)
+
 static int64_t flow_edge_step(void) {
+    if (flow_edge_clock_is_real) {
+        const int64_t at = FLOW_REAL_EDGE_BASE_US + (int64_t)mock_delay_total_ms() * 1000;
+        flow_edge_us = (at > flow_edge_us) ? at : flow_edge_us + 1;
+        return flow_edge_us;
+    }
     flow_edge_us += flow_edge_gap_us;
     return flow_edge_us;
 }
@@ -1963,6 +2094,15 @@ static void flow_note_levels(void) {
    so it fires on the passage of wall time and not on anything the code
    under test does or stops doing. Fires once. */
 static void flow_deferred_press_due(void) {
+    /* A SCRIPT of presses, for a gesture: flow_burst_at_ms[i] is the delay
+       total at which press i lands. In order, any number of them may fall due
+       in one delay (a paint burns a long one), exactly as the ISR would have
+       latched each at its own instant. */
+    while (flow_burst_next < flow_burst_n && (int32_t)mock_delay_total_ms() >= flow_burst_at_ms[flow_burst_next]) {
+        flow_burst_delivered++;
+        flow_press(flow_burst_btn[flow_burst_next]);
+        flow_burst_next++;
+    }
     if (flow_deferred_press_ms < 0 || (int32_t)mock_delay_total_ms() < flow_deferred_press_ms)
         return;
     flow_deferred_press_ms = -1; /* one press, not one per delay */
@@ -2228,6 +2368,18 @@ void setUp(void) {
     flow_deferred_press_ms = -1;
     flow_deferred_press_btn = BTN_NONE;
     flow_deferred_delivered = 0;
+    flow_burst_n = 0;
+    flow_burst_next = 0;
+    flow_burst_delivered = 0;
+    flow_edge_clock_is_real = false;
+    flow_count_n = 0;
+    flow_select_slot_at_ms = 0;
+    flow_latch_mask_at_select = 0;
+    flow_refractory_n = 0;
+    for (int i = 0; i < TIMER_SLOT_COUNT; i++) {
+        flow_slot_enabled[i] = (i < 3); /* Screen, slot 1, Piano (2): a lap is three timers */
+    }
+    s_day_rolled = false; /* wake-sticky on device, like s_break_ended */
     /* After mock_time_reset() above, which does not clear it. */
     mock_delay_set_hook(flow_deferred_press_due);
     flow_mask_takes = 0;
@@ -7345,8 +7497,13 @@ void test_a_wake_press_is_dispatched_through_the_shared_guard_matrix(void) {
 
     TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_button());
 
-    TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_SELECT_NEXT));
-    TEST_ASSERT_EQUAL_INT(FLOW_PIANO, flow_active_slot);
+    /* The wake press on C opens the counted-clicks gesture (the C section
+       below owns its cases): one candidate step, ONE commit, one paint. The
+       dispatch's own swap (timer_select_next) is not what the wake press
+       goes through any more. */
+    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_SELECT_NEXT));
+    TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_SELECT_SLOT));
+    TEST_ASSERT_EQUAL_INT(1, flow_active_slot); /* the next enabled timer from Screen */
     TEST_ASSERT_EQUAL_INT(1, FLOW_RENDERS());
 }
 
@@ -13389,6 +13546,349 @@ void test_ev_the_release_window_follows_the_whole_chore_gesture(void) {
     TEST_ASSERT_TRUE(flow_log_at(EV_CHORES_CHIME) < flow_log_at(EV_NET_OPEN));
 }
 
+/* ==== BUTTON C'S COUNTED CLICKS ===========================================
+
+   The gesture (wake_flow_swap_count_gesture) opens on the EXT1 wake press when
+   it is C in Timers mode. Each further C press in a sliding quiet window moves
+   a LOCAL candidate on one timer and shows its binary ordinal on the strip;
+   when the window lapses (or the budget is spent) the candidate is committed
+   once and the panel paints once, through the same render decision a single
+   swap used. The pure pieces (candidate step, ordinal, commit, the strip's
+   picture, the paint-owed policy) are tested where they live; these cases pin
+   what the LOOP does with them. Quiet window and budget are the test build's
+   own figures (test/CMakeLists.txt), which are not the Kconfig defaults, so a
+   literal at a call site fails here. */
+
+#define SWAP_Q ((uint32_t)CONFIG_MAGTAG_SWAP_COUNT_QUIET_MS)
+#define SWAP_BUDGET ((uint32_t)CONFIG_MAGTAG_SWAP_COUNT_BUDGET_MS)
+
+static void flow_arm_swap_wake(void) {
+    flow_tick_clock(flow_at(15, 0));
+    flow_wakeup_btn = BTN_C;
+    flow_select_ok = true;
+    flow_state = TIMER_IDLE;
+    flow_state_at_select = TIMER_IDLE;
+}
+
+static void flow_enable_all_timers(void) {
+    for (int i = 0; i < TIMER_SLOT_COUNT; i++)
+        flow_slot_enabled[i] = true;
+}
+
+/* BEFORE / AFTER for the owner, pinned. A lone C press used to paint straight
+   after the dispatch (0 ms between the press and the commit; test_a_swap_
+   lights_nothing_opens_nothing_and_leaves_the_clock_alone pins the dispatch
+   it still has for latched presses). It now waits one quiet window, because
+   one press cannot be told from the first of several until it has passed. */
+void test_swap1_a_lone_c_press_commits_once_after_the_quiet_window_and_paints_once(void) {
+    flow_arm_swap_wake();
+
+    TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_button());
+
+    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_SELECT_NEXT));
+    TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_SELECT_SLOT));
+    TEST_ASSERT_EQUAL_INT(1, flow_active_slot); /* the next enabled timer from Screen */
+    TEST_ASSERT_EQUAL_INT(1, flow_count_n);
+    TEST_ASSERT_EQUAL_UINT8(2, flow_count_seen[0]); /* Screen = 1, so the next is 2 */
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE(0, flow_count_at[0], "the count frame waited for something");
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE(SWAP_Q, flow_select_slot_at_ms, "a lone press must wait exactly one quiet window");
+    TEST_ASSERT_EQUAL_INT(1, FLOW_RENDERS());
+    TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_PARTIAL) + flow_log_count(EV_FULL_REFRESH));
+}
+
+/* The plan's central bullet, and decision 9: N presses are ONE commit and ONE
+   paint, and in the ordinary case that paint is a PARTIAL. The window slides,
+   so the commit lands one window after the LAST press. */
+void test_swap2_n_presses_are_one_commit_and_one_partial_paint(void) {
+    flow_arm_swap_wake();
+    flow_enable_all_timers();
+    flow_burst_add(BTN_C, 100);
+    flow_burst_add(BTN_C, 240);
+    flow_burst_add(BTN_C, 400);
+
+    TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_button());
+
+    TEST_ASSERT_EQUAL_INT_MESSAGE(3, flow_burst_delivered, "a press was never delivered");
+    TEST_ASSERT_EQUAL_INT(4, flow_count_n);
+    const uint8_t want[4] = {2, 3, 4, 5}; /* the ordinal after the wake press and each of three more */
+    const uint32_t at[4] = {0, 100, 240, 400};
+    for (int i = 0; i < 4; i++) {
+        TEST_ASSERT_EQUAL_UINT8(want[i], flow_count_seen[i]);
+        TEST_ASSERT_EQUAL_UINT32_MESSAGE(at[i], flow_count_at[i], "a frame did not land on its own press");
+    }
+    TEST_ASSERT_EQUAL_INT(4, flow_active_slot); /* moved once, to where the count ended */
+    TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_SELECT_SLOT));
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE(400 + SWAP_Q, flow_select_slot_at_ms, "the window did not slide on each press");
+    TEST_ASSERT_EQUAL_INT(1, FLOW_RENDERS());
+    TEST_ASSERT_EQUAL_INT_MESSAGE(1, flow_log_count(EV_PARTIAL), "an ordinary swap gesture was not a partial");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(0, flow_log_count(EV_FULL_REFRESH), "nothing here promotes it to full");
+}
+
+void test_swap3_the_candidate_wraps_through_screen(void) {
+    flow_arm_swap_wake();
+    flow_active_slot = FLOW_PIANO; /* the last enabled timer */
+    flow_burst_add(BTN_C, 100);
+
+    TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_button());
+
+    TEST_ASSERT_EQUAL_INT(2, flow_count_n);
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(1, flow_count_seen[0], "the first step off the last timer is Screen, ordinal 1");
+    TEST_ASSERT_EQUAL_UINT8(2, flow_count_seen[1]);
+    TEST_ASSERT_EQUAL_INT(1, flow_active_slot);
+}
+
+/* A full lap lands on the start: no state write, no paint, strip put back. */
+void test_swap4_a_full_lap_commits_nothing_paints_nothing_and_puts_the_strip_back(void) {
+    flow_arm_swap_wake(); /* three timers: wake press, then two more, is a lap */
+    flow_burst_add(BTN_C, 100);
+    flow_burst_add(BTN_C, 200);
+
+    TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_button());
+
+    TEST_ASSERT_EQUAL_INT(3, flow_count_n);
+    TEST_ASSERT_EQUAL_UINT8(1, flow_count_seen[2]); /* home: Screen's own number */
+    TEST_ASSERT_EQUAL_INT_MESSAGE(FLOW_SCREEN, flow_active_slot, "a lap changed the selection");
+    TEST_ASSERT_EQUAL_INT(0, FLOW_RENDERS());
+    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_PARTIAL));
+    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_FULL_REFRESH));
+    /* THE STRIP IS PUT BACK, in this order: the last count frame, then the
+       wipe, then the state pixel again. */
+    const int last_count = flow_log_at_nth(EV_SWAP_COUNT, flow_log_count(EV_SWAP_COUNT));
+    TEST_ASSERT_GREATER_THAN_INT(0, flow_log_count(EV_PIXELS_OFF));
+    TEST_ASSERT_TRUE(last_count < flow_log_at(EV_PIXELS_OFF));
+    TEST_ASSERT_TRUE_MESSAGE(flow_log_at(EV_PIXELS_OFF) < flow_log_at_nth(EV_LED, 2),
+                             "the state pixel was not repainted after the count was wiped");
+}
+
+/* ...unless something else this wake owes the glass a paint. */
+void test_swap5_a_full_lap_still_paints_when_the_day_rolled_over(void) {
+    flow_arm_swap_wake();
+    s_day_rolled = true; /* what wake_flow_handle_day_rollover records */
+    flow_burst_add(BTN_C, 100);
+    flow_burst_add(BTN_C, 200);
+
+    TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_button());
+
+    TEST_ASSERT_EQUAL_INT(FLOW_SCREEN, flow_active_slot);
+    TEST_ASSERT_EQUAL_INT(1, FLOW_RENDERS());
+}
+
+void test_swap6_a_full_lap_still_paints_a_break_end_the_glass_has_not_shown(void) {
+    flow_arm_swap_wake();
+    s_break_ended = true;
+    flow_burst_add(BTN_C, 100);
+    flow_burst_add(BTN_C, 200);
+
+    TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_button());
+
+    TEST_ASSERT_EQUAL_INT(FLOW_SCREEN, flow_active_slot);
+    TEST_ASSERT_EQUAL_INT(1, FLOW_RENDERS());
+}
+
+/* Budget exhaustion commits what it has, and does not wait out the window. */
+void test_swap7_budget_exhaustion_commits_the_candidate_it_has_reached(void) {
+    flow_arm_swap_wake();
+    flow_enable_all_timers();
+    for (int i = 1; i <= 16; i++)
+        flow_burst_add(BTN_C, i * 100);
+
+    TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_button());
+
+    /* presses every 100 ms never let a 410 ms window lapse, so only the
+       budget ends it — exactly at the budget, not a window past it. */
+    TEST_ASSERT_EQUAL_UINT32(SWAP_BUDGET, flow_select_slot_at_ms);
+    TEST_ASSERT_EQUAL_INT(17, flow_count_n);                        /* the wake press and sixteen more */
+    TEST_ASSERT_EQUAL_INT(17 % TIMER_SLOT_COUNT, flow_active_slot); /* lap of five */
+    TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_SELECT_SLOT));
+    TEST_ASSERT_EQUAL_INT(1, FLOW_RENDERS());
+}
+
+/* Refused while the active timer is RUNNING: today's feedback, no gesture. */
+void test_swap8_c_is_refused_while_the_active_timer_is_running(void) {
+    flow_arm_swap_wake();
+    flow_state = TIMER_RUNNING;
+    flow_burst_add(BTN_C, 100);
+
+    TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_button());
+
+    TEST_ASSERT_EQUAL_INT(0, flow_count_n);
+    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_SELECT_SLOT));
+    TEST_ASSERT_EQUAL_INT_MESSAGE(0, flow_refractory_n, "the short window was installed for a refused press");
+    TEST_ASSERT_EQUAL_INT(FLOW_SCREEN, flow_active_slot);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(1, FLOW_RENDERS(), "a refused press keeps today's single repaint");
+}
+
+void test_swap9_with_no_extra_timers_c_behaves_as_it_did(void) {
+    flow_arm_swap_wake();
+    flow_slot_enabled[1] = false;
+    flow_slot_enabled[2] = false;
+
+    TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_button());
+
+    TEST_ASSERT_EQUAL_INT(0, flow_count_n);
+    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_SELECT_SLOT));
+    TEST_ASSERT_EQUAL_INT(0, flow_refractory_n);
+    TEST_ASSERT_EQUAL_INT(1, FLOW_RENDERS());
+}
+
+/* C in Chores mode is the second chore tick and never opens a gesture. */
+void test_swap10_c_in_chores_mode_is_a_tick_and_opens_no_gesture(void) {
+    flow_tick_clock(flow_at(15, 0));
+    flow_arm_chore_wake(BTN_C);
+    flow_select_ok = true; /* armed: a fall-through to the swap would be loud */
+
+    TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_button());
+
+    TEST_ASSERT_GREATER_OR_EQUAL_INT(1, flow_log_count(EV_CHORE_ACK));
+    TEST_ASSERT_EQUAL_INT(1, flow_ack_idx);
+    TEST_ASSERT_EQUAL_INT(0, flow_count_n);
+    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_SELECT_SLOT));
+    TEST_ASSERT_EQUAL_INT_MESSAGE(0, flow_refractory_n, "C kept its 300 ms window in Chores mode");
+}
+
+/* A mode toggle within the wake: A is the wake press, then C. C is not a swap
+   there (the checklist is the screen, and no ack has applied yet), and it must
+   not open a gesture or touch its window. */
+void test_swap11_a_mode_toggle_wake_never_opens_a_swap_gesture_for_a_later_c(void) {
+    flow_tick_clock(flow_at(15, 0));
+    flow_mode = APP_MODE_TIMERS;
+    flow_chore_count = 3;
+    flow_wakeup_btn = BTN_A;
+    flow_select_ok = true;
+    flow_burst_add(BTN_C, 100);
+
+    TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_button());
+
+    TEST_ASSERT_EQUAL_INT(APP_MODE_CHORES, (int)flow_mode);
+    TEST_ASSERT_EQUAL_INT(0, flow_count_n);
+    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_SELECT_SLOT));
+    TEST_ASSERT_EQUAL_INT(0, flow_refractory_n);
+}
+
+/* A swap during a Screen Break is allowed, and crosses the full-screen
+   inversion, so its paint is a FULL — the existing promotion, unchanged. */
+void test_swap12_a_swap_during_a_screen_break_is_allowed_and_paints_full(void) {
+    flow_arm_swap_wake();
+    flow_state = TIMER_BREAK;
+    flow_state_at_select = TIMER_IDLE;
+
+    TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_button());
+
+    TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_SELECT_SLOT));
+    TEST_ASSERT_EQUAL_INT(1, flow_active_slot);
+    TEST_ASSERT_EQUAL_INT(1, FLOW_RENDERS());
+    TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_FULL_REFRESH));
+    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_PARTIAL));
+}
+
+void test_swap13_landing_on_an_expired_timer_does_not_refire_its_alert(void) {
+    flow_arm_swap_wake();
+    flow_state_at_select = TIMER_EXPIRED;
+
+    TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_button());
+
+    TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_SELECT_SLOT));
+    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_ALERT_EXPIRY));
+    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_TIMESUP));
+    TEST_ASSERT_EQUAL_INT(1, FLOW_RENDERS());
+}
+
+/* OTHER BUTTONS DURING THE GESTURE stay latched while it runs — neither
+   ending it, nor joining it, nor stretching its window — and are then dropped
+   by the handler's existing stale-edge drain, exactly as a B made during any
+   other Timers-mode button wake is. Nothing acts on them. */
+void test_swap14_other_buttons_pressed_mid_gesture_stay_latched_and_are_then_dropped(void) {
+    flow_arm_swap_wake();
+    flow_b_result = BTN_B_STARTED; /* armed: acting on the B would be loud */
+    flow_burst_add(BTN_B, 100);
+    flow_burst_add(BTN_D, 160);
+    flow_burst_add(BTN_A, 200);
+
+    TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_button());
+
+    TEST_ASSERT_EQUAL_INT(3, flow_burst_delivered);
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE((1u << BTN_B) | (1u << BTN_D) | (1u << BTN_A), flow_latch_mask_at_select,
+                                    "the gesture consumed another button's press");
+    TEST_ASSERT_EQUAL_UINT32_MESSAGE(SWAP_Q, flow_select_slot_at_ms, "another button's press moved the window");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(1, flow_count_n, "another button's press joined the count");
+    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_B_APPLY));
+    TEST_ASSERT_EQUAL_INT(0, flow_log_count(EV_A_APPLY)); /* nor did the A act, though C was the wake press */
+    TEST_ASSERT_EQUAL_UINT8_MESSAGE(0, flow_latch_residue(), "a mid-gesture press survived the drain");
+    TEST_ASSERT_EQUAL_INT(1, FLOW_RENDERS());
+}
+
+/* WHEN THE SHORT WINDOW IS IN FORCE: installed when the gesture opens, put
+   back when it closes, C only, and never in the cases above where no gesture
+   opens (8-11 assert that). */
+void test_swap15_the_short_window_is_installed_for_c_only_while_the_gesture_runs(void) {
+    flow_arm_swap_wake();
+    flow_burst_add(BTN_C, 100);
+
+    TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_button());
+
+    TEST_ASSERT_EQUAL_INT(2, flow_refractory_n);
+    TEST_ASSERT_EQUAL_INT(BTN_C, flow_refractory_btn[0]);
+    TEST_ASSERT_EQUAL_INT64(BUTTON_LATCH_SWAP_REFRACTORY_US, flow_refractory_us[0]);
+    TEST_ASSERT_EQUAL_INT(BTN_C, flow_refractory_btn[1]);
+    TEST_ASSERT_EQUAL_INT64_MESSAGE(BUTTON_LATCH_REFRACTORY_US, flow_refractory_us[1],
+                                    "the default was not put back for the rest of the wake");
+    TEST_ASSERT_TRUE(flow_log_at_nth(EV_SWAP_REFRACTORY, 1) < flow_log_at(EV_SWAP_COUNT));
+    TEST_ASSERT_TRUE_MESSAGE(flow_log_at_nth(EV_SWAP_REFRACTORY, 2) > flow_log_at_nth(EV_SWAP_COUNT, 2),
+                             "the default came back before the gesture ended");
+    TEST_ASSERT_TRUE_MESSAGE(flow_log_at_nth(EV_SWAP_REFRACTORY, 2) < flow_log_at(EV_SELECT_SLOT) ||
+                                 flow_log_at_nth(EV_SWAP_REFRACTORY, 2) < flow_log_at(EV_PARTIAL),
+                             "the default came back after the paint");
+}
+
+/* A TAP RHYTHM THE LONG WINDOW WOULD HALVE. Presses 160 ms apart, all past
+   the seeded wake press's window; the 300 ms default would refuse every other
+   one (320 -> 480 is 160 ms) and count three, not four. */
+void test_swap16_taps_160_ms_apart_all_count_under_the_short_window(void) {
+    flow_arm_swap_wake();
+    flow_enable_all_timers();
+    flow_edge_clock_is_real = true;
+    flow_burst_add(BTN_C, 320);
+    flow_burst_add(BTN_C, 480);
+    flow_burst_add(BTN_C, 640);
+
+    TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_button());
+
+    TEST_ASSERT_EQUAL_INT_MESSAGE(4, flow_count_n, "a 160 ms tap was lost to the refractory window");
+    TEST_ASSERT_EQUAL_INT(4, flow_active_slot);
+}
+
+/* ONE TAP IS ONE COUNT — the failure here is skipping two timers for one
+   press. The wake press is seeded; its release bounce arrives AFTER the first
+   poll's level sample reopened the gate, past the 10 ms settle anchor and past
+   the short window (140 ms). Only the seeded press's own (default) window
+   rejects it. Had the seed taken the short figure, this edge counts and the
+   candidate skips a timer. */
+void test_swap17_a_wake_press_release_bounce_after_a_reopening_sample_never_counts(void) {
+    flow_arm_swap_wake();
+    flow_edge_clock_is_real = true;
+    flow_burst_add(BTN_C, 140); /* the bounce, not a second tap */
+
+    TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_button());
+
+    TEST_ASSERT_EQUAL_INT(1, flow_burst_delivered);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(1, flow_count_n, "the release bounce counted as a second press");
+    TEST_ASSERT_EQUAL_INT(1, flow_active_slot);
+}
+
+/* The release gate and the settle anchor still run first: a bounce 5 ms
+   after the sample is refused whatever window is in force. */
+void test_swap18_a_bounce_inside_the_settle_window_never_counts(void) {
+    flow_arm_swap_wake();
+    flow_enable_all_timers();
+    flow_edge_clock_is_real = true;
+    flow_burst_add(BTN_C, 320); /* a real second tap */
+    flow_burst_add(BTN_C, 340); /* its bounce, one poll later: inside the short window */
+
+    TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_button());
+
+    TEST_ASSERT_EQUAL_INT(2, flow_count_n);
+}
+
 int main(void) {
     UNITY_BEGIN();
     RUN_TEST(test_ev_a_b_press_in_the_final_minute_expiry_window_is_repainted_and_published);
@@ -13999,5 +14499,23 @@ int main(void) {
     RUN_TEST(test_chime_never_fires_from_a_same_day_restore);
     RUN_TEST(test_chime_never_fires_from_a_tick_wake_in_chore_mode);
     RUN_TEST(test_chime_never_fires_from_a_non_chore_button_wake);
+    RUN_TEST(test_swap1_a_lone_c_press_commits_once_after_the_quiet_window_and_paints_once);
+    RUN_TEST(test_swap2_n_presses_are_one_commit_and_one_partial_paint);
+    RUN_TEST(test_swap3_the_candidate_wraps_through_screen);
+    RUN_TEST(test_swap4_a_full_lap_commits_nothing_paints_nothing_and_puts_the_strip_back);
+    RUN_TEST(test_swap5_a_full_lap_still_paints_when_the_day_rolled_over);
+    RUN_TEST(test_swap6_a_full_lap_still_paints_a_break_end_the_glass_has_not_shown);
+    RUN_TEST(test_swap7_budget_exhaustion_commits_the_candidate_it_has_reached);
+    RUN_TEST(test_swap8_c_is_refused_while_the_active_timer_is_running);
+    RUN_TEST(test_swap9_with_no_extra_timers_c_behaves_as_it_did);
+    RUN_TEST(test_swap10_c_in_chores_mode_is_a_tick_and_opens_no_gesture);
+    RUN_TEST(test_swap11_a_mode_toggle_wake_never_opens_a_swap_gesture_for_a_later_c);
+    RUN_TEST(test_swap12_a_swap_during_a_screen_break_is_allowed_and_paints_full);
+    RUN_TEST(test_swap13_landing_on_an_expired_timer_does_not_refire_its_alert);
+    RUN_TEST(test_swap14_other_buttons_pressed_mid_gesture_stay_latched_and_are_then_dropped);
+    RUN_TEST(test_swap15_the_short_window_is_installed_for_c_only_while_the_gesture_runs);
+    RUN_TEST(test_swap16_taps_160_ms_apart_all_count_under_the_short_window);
+    RUN_TEST(test_swap17_a_wake_press_release_bounce_after_a_reopening_sample_never_counts);
+    RUN_TEST(test_swap18_a_bounce_inside_the_settle_window_never_counts);
     return UNITY_END();
 }

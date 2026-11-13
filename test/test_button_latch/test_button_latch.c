@@ -284,6 +284,22 @@ void test_reset_restores_every_default_window(void) {
    high phase of the ringing), past the short window and past the 10 ms
    settle anchor of that sample: only the seeded long window rejects it. */
 void test_a_seeded_wake_press_keeps_the_long_window_when_the_short_one_is_set(void) {
+    /* The setter FIRST, then the seed: the order the wake does NOT use
+       (arming runs before the gesture installs anything), and the only one in
+       which a seed that took the configured window would differ. */
+    button_latch_reset();
+    button_latch_set_refractory(2, SHORT_WINDOW_US);
+    button_latch_seed_press(2, T0_US);
+    button_latch_note_levels(0, T0_US + SHORT_WINDOW_US + 10000); /* up, mid-ring: the gate reopens */
+    button_latch_record(2, T0_US + SHORT_WINDOW_US + 25000);      /* 15 ms on: past the settle AND the short window */
+    TEST_ASSERT_EQUAL_UINT8(0, button_latch_take());              /* one tap is one press */
+    button_latch_record(2, T0_US + BUTTON_LATCH_REFRACTORY_US);   /* a real second tap, past the long window */
+    TEST_ASSERT_EQUAL_UINT8(1u << 2, button_latch_take());
+}
+
+/* ...and in the order the wake does use: armed first, the short window
+   installed afterwards (a gesture opening). The seed is already stamped. */
+void test_a_seeded_wake_press_keeps_the_long_window_when_the_short_one_is_set_after_arming(void) {
     button_latch_begin(2, 0, T0_US);
     button_latch_set_refractory(2, SHORT_WINDOW_US);
     button_latch_note_levels(0, T0_US + SHORT_WINDOW_US + 10000); /* up, mid-ring: the gate reopens */
@@ -685,6 +701,7 @@ int main(void) {
     RUN_TEST(test_a_nonsense_window_or_button_is_ignored);
     RUN_TEST(test_reset_restores_every_default_window);
     RUN_TEST(test_a_seeded_wake_press_keeps_the_long_window_when_the_short_one_is_set);
+    RUN_TEST(test_a_seeded_wake_press_keeps_the_long_window_when_the_short_one_is_set_after_arming);
     RUN_TEST(test_an_accepted_press_under_the_short_window_still_has_the_settle_backstop);
     RUN_TEST(test_the_release_gate_still_refuses_under_the_short_window);
     RUN_TEST(test_a_rejected_edge_does_not_extend_the_short_window);

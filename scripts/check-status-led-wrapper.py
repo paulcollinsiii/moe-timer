@@ -1,5 +1,9 @@
 #!/usr/bin/env python3
-"""Exactly one status_led_show_timer_state() call in main/wake_flow.c.
+"""Exactly one status_led_show_timer_state() call in main/wake_flow.c, and
+Button C's count display released on every path out of its gesture.
+
+(The second invariant is at the bottom of this docstring's WHY, under "THE
+COUNT DISPLAY"; the first is what the rest of it is about.)
 
 WHY THIS EXISTS
 ---------------
@@ -34,6 +38,17 @@ invariant, and a new site is caught the moment it is written.
 The wrapper's own comment already claimed "it is checkable by grep, which a
 list of 'these sites are unreachable in chore mode' arguments is not".  This
 is that grep, so the claim is enforced rather than merely made.
+
+THE COUNT DISPLAY (the sixth claimant, status_led.h)
+----------------------------------------------------
+status_led_swap_count_show() paints all four pixels for Button C's
+counted-clicks gesture, and pixels 1-3 have no state painter to overwrite
+them. So it may be called only from wake_flow_swap_count_gesture(), and that
+function must call neopixel_stop() and then the wrapper after its last
+count frame: a path that shows the count and leaves would leave magenta
+lit until sleep. A file that never calls it is fine (the fixtures in the
+test suite are such files); one that calls it with no owning function, or
+from anywhere else, fails.
 
 WHAT COUNTS AS A CALL
 ---------------------
@@ -116,6 +131,61 @@ def find_calls(src):
     return [src.count("\n", 0, m.start()) + 1 for m in pattern.finditer(src)]
 
 
+# THE SIXTH CLAIMANT (status_led.h): Button C's count display takes the WHOLE
+# strip, including pixels 1-3 that no state painter owns, so a path that shows
+# the count and then leaves without releasing it leaves magenta pixels lit
+# until sleep. The release is a wipe (neopixel_stop) followed by the one status
+# wrapper, and it has to be in the same function as the show, after the last
+# one, so a path out of the gesture cannot skip it.
+COUNT_FUNC = "status_led_swap_count_show"
+GESTURE = "wake_flow_swap_count_gesture"
+RELEASE_CALLS = ("neopixel_stop", WRAPPER)
+
+
+def call_positions(src, name):
+    pattern = re.compile(r"\b" + re.escape(name) + r"\s*\(")
+    return [m.start() for m in pattern.finditer(src)]
+
+
+def function_span(src, name):
+    """(start, end) of the definition of `name`, braces matched; None if absent."""
+    m = re.search(r"\b" + re.escape(name) + r"\s*\([^;{}]*\)\s*\{", src)
+    if not m:
+        return None
+    depth = 0
+    for i in range(m.end() - 1, len(src)):
+        if src[i] == "{":
+            depth += 1
+        elif src[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return (m.start(), i + 1)
+    return None
+
+
+def count_display_problems(src):
+    """What is wrong with the count display's use, as human sentences (empty = fine)."""
+    shows = call_positions(src, COUNT_FUNC)
+    if not shows:
+        return []  # not in this file: nothing to hold
+    span = function_span(src, GESTURE)
+    if span is None:
+        return [f"{COUNT_FUNC}() is called but {GESTURE}() is not defined: the count display has no owner"]
+    problems = []
+    for pos in shows:
+        if not (span[0] <= pos < span[1]):
+            line = src.count("\n", 0, pos) + 1
+            problems.append(f"line {line}: {COUNT_FUNC}() is called outside {GESTURE}()")
+    inside = [p for p in shows if span[0] <= p < span[1]]
+    if inside:
+        last = max(inside)
+        body = src[last : span[1]]
+        for name in RELEASE_CALLS:
+            if not call_positions(body, name):
+                problems.append(f"{GESTURE}() has no {name}() after its last {COUNT_FUNC}(): the strip is never released")
+    return problems
+
+
 def check(path):
     try:
         with open(path, "r", encoding="utf-8") as fh:
@@ -124,7 +194,20 @@ def check(path):
         print(f"{path}: cannot read the file this gate is about: {exc}")
         return 1
 
-    lines = find_calls(strip_comments_and_strings(raw))
+    stripped = strip_comments_and_strings(raw)
+    count_problems = count_display_problems(stripped)
+    if count_problems:
+        print(f"{path}: the count display's strip contract is broken (status_led.h, the sixth claimant):")
+        for p in count_problems:
+            print(f"  {p}")
+        print(
+            f"\nButton C's count display writes all four pixels. Show it only from {GESTURE}(), and end\n"
+            f"that function with neopixel_stop() followed by {WRAPPER}() so pixels 1-3 are wiped\n"
+            f"and the state pixel is repainted on every path out."
+        )
+        return 1
+
+    lines = find_calls(stripped)
     if len(lines) == EXPECTED:
         return 0
 

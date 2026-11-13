@@ -78,7 +78,7 @@ repos:
   - repo: local
     hooks:
       - id: status-led-wrapper
-        name: one status_led_show_timer_state() call in wake_flow.c
+        name: one status_led_show_timer_state() call in wake_flow.c, count display released
         language: script
         entry: scripts/check-status-led-wrapper.py
         files: ^main/wake_flow\.c$
