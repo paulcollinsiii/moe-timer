@@ -50,10 +50,11 @@ Scanned 2026-10-01.
 Two layer-1 modules call out. Both stay in layer 1 because their tests are
 about the pure table, and the impure part is a thin application of it:
 
-- `status_led.c`: `status_led_for_state()` and `chores_led_for()` are pure
-  tables. Their two wrappers drive the pixel: `status_led_show_timer_state()`
-  reads `timer_get_state()` (layer 2) and calls `neopixel_status_pixel()`,
-  and `chores_led_show()` calls `neopixel_highpri_pixel()` (both layer 3).
+- `status_led.c`: `status_led_for_state()`, `chores_led_for()` and
+  `status_led_swap_count_for()` are pure tables. Their wrappers drive the
+  pixels: `status_led_show_timer_state()` reads `timer_get_state()` (layer 2)
+  and calls `neopixel_status_pixel()`, and `chores_led_show()` and
+  `status_led_swap_count_show()` call `neopixel_highpri_pixel()` (both layer 3).
 - `button_actions.c`: the outcome map is pure, but it applies itself. It
   calls timer mutators, including `timer_start`, `timer_pause`,
   `timer_resume`, `timer_reload`, `timer_set_mode`, `timer_chore_set_acked`,

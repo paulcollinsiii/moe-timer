@@ -3719,7 +3719,8 @@ void wake_flow_handle_button_wake(void) {
     s_gesture_defers_release_publish = true;
 
     switch (btn) {
-        /* A rides with B and C: same dispatch, same tail. It shares their
+        /* A rides with B (and with C in Chores mode, below): same dispatch,
+           same tail. It shares their
            arm rather than getting one of its own because there is nothing
            of the wake to special-case — the mode is a render selector, so
            a toggle owes the panel the same repaint a swap does and

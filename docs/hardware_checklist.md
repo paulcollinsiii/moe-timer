@@ -42,6 +42,16 @@ or quiet hours from HA instead of rebuilding. Never erase NVS.
   it only when it can swap timers (extra timers configured, none running)
   or tick chore 2 on the checklist. Where A or C should not wake it, press
   B from the same state as a control.
+- [ ] **Counted clicks on C (needs two or more extra timers).** From sleep on
+  the timer screen with nothing running, tap C once. → The leftmost LED lights
+  magenta (Screen is 1, so the next timer shows 2: the LED beside it), and
+  about 0.7 s later the panel repaints once on the next timer. Then tap C
+  three to four times at a natural pace (150-250 ms apart). → Each tap
+  advances the binary count (3 is two LEDs, 4 is the third from the left), the
+  panel repaints once, 0.7 s after the last tap, on the timer you counted to.
+  Tap C once per timer to go all the way round. → No selection change and no
+  repaint, and the LEDs go back to the state pixel only. Twenty single taps:
+  none may skip two timers.
 - [ ] **Held-button dismissal.** Dismiss a sounding alarm with one button
   and keep holding it past the next sleep. Repeat with two buttons held
   together. → The held button's action never fires. The log shows

@@ -70,6 +70,15 @@ later:
   through the latch, so `buttons_watch_begin()` seeds its window
   (`button_latch_begin()`) from the EXT1 status. A deliberate re-press of the same button faster than that is
   lost, by design.
+- The window is **per button**. Every button defaults to 300 ms, and
+  `buttons_set_refractory()` changes one button's. The only caller is Button
+  C's counted-clicks gesture: while it runs (the wake press is C and the mode
+  is Timers) C uses `BUTTON_LATCH_SWAP_REFRACTORY_US` (120 ms) so a person can
+  tap at 150-250 ms, and the default is put back when the gesture ends. In
+  Chores mode C is the second chore tick and keeps 300 ms. The figure in force
+  is stamped when a press is accepted, and the seeded wake press always opens
+  the default window, so its own release bounce can never count as a second
+  tap. Both figures are starting values, to be settled on the bench.
 - When several presses are waiting, `button_latch_pick()` takes them in the
   order B > C > D > A, so the time-sensitive action wins and a mode toggle
   can never swallow a start (S22). That order is the only guard against the
@@ -98,6 +107,21 @@ Who may light which pixel depends on the mode, and `include/status_led.h`
 is the authority: on the timer screen pixel 0 shows the timer state and
 pixel 3 the network window; on the chore checklist all four belong to the
 chores. Quiet hours and the status brightness are applied inside the driver.
+
+A sixth claimant takes all four for a moment: Button C's count display. While
+the counted-clicks gesture runs, the strip shows the candidate timer's place in
+binary, least significant bit on the leftmost pixel (driver index 3, because the
+strip runs opposite the buttons). The bit-to-pixel mapping is
+`neopixel_binary4_pixel_lit()`, the same one the last-15-seconds countdown
+draws with, so the two read alike. The count is magenta (25, 0, 25), the one
+colour nothing else on the strip uses, and it is HIGHPRI like the chore strip:
+the pixels are the only feedback until the panel paints, so quiet hours do not
+mute it (the brightness setting still applies). When the gesture ends,
+`wake_flow_swap_count_gesture()` wipes the strip (`neopixel_stop()`) and repaints
+the state pixel through the one status wrapper; `scripts/check-status-led-wrapper.py`
+holds that release. Nothing can compete for the strip meanwhile: the gesture only
+opens when the selected timer is not running, so there is no countdown or expiry
+to run, and no network window opens inside it.
 
 ## Audio
 

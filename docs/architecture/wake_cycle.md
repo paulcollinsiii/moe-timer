@@ -64,8 +64,10 @@ setup route ─▶ day rollover ─▶ lock gates ─▶ break-end drain ─▶ 
   (`CONFIG_MAGTAG_RUNNING_SYNC_INTERVAL_MIN`,
   `CONFIG_MAGTAG_IDLE_SYNC_INTERVAL_MIN`), never during a break. It then
   waits up to 25 s so the render lands on the minute. A button wake runs the
-  press: B, A and C through one dispatch; D syncs on the timer screen and
-  ticks chore 3 on the checklist. A start, a resume or a D sync paints
+  press: B, A and C through one dispatch, except that C on the timer screen
+  opens the counted-clicks gesture instead (a count of presses, one commit, one
+  paint; [timers](../behavior/timers_and_schedule.md#switching-timers-with-c));
+  D syncs on the timer screen and ticks chore 3 on the checklist. A start, a resume or a D sync paints
   early ([network_and_ha.md](network_and_ha.md#one-window-in-order)). A
   pause, an expiry and the chore-release edge each owe HA a window of their
   own, opened after the paint and after any audio

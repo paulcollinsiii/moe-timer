@@ -64,7 +64,10 @@
    toggle of field finding 3. */
 #define BUTTON_LATCH_RELEASE_SETTLE_US 10000
 
-/* THE SAME-BUTTON REFRACTORY WINDOW: after a press of button X is accepted,
+/* THE SAME-BUTTON REFRACTORY WINDOW — THE DEFAULT FOR EVERY BUTTON (one
+   button's can be changed: button_latch_set_refractory, below; today only C's,
+   while its counted-clicks gesture runs, BUTTON_LATCH_SWAP_REFRACTORY_US).
+   After a press of button X is accepted,
    every further edge on X is ignored until this long after it. Edges on the
    OTHER buttons are untouched, so tapping a second chore right after the
    first is instant. It is measured from the last ACCEPTED press (and from the
