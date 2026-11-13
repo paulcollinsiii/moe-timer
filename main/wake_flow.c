@@ -126,14 +126,14 @@ static const char *TAG = "wake_flow";
    reaches it after a dispatched press, and the tail in turn calls the
    expiry alert and the break-end drain that are declared further down.
    Returns the screen kind it built the frame for, which only the post-join
-   re-render reads (finish_action_and_render says why); the _as form is the
+   re-render reads (finish_action_and_render_painting says why); the _as form is the
    chore tail's, which alone can know that a break end is already on the
    glass (wake_flow_repaint_chore_acks_until_quiet says why). */
 static display_screen_t render_action_result(button_id_t btn, timer_state_t before, time_t now, bool selection_changed);
 static display_screen_t render_action_result_as(button_id_t btn, timer_state_t before, time_t now,
                                                 bool selection_changed, bool break_end_on_glass);
 
-/* The post-join repaint, shared by finish_action_and_render and the owed
+/* The post-join repaint, shared by finish_action_and_render_painting and the owed
    publish window (both defined below). `shown` is the screen the paint
    before the join built its frame for, meaningful only when `have_shown`. */
 static void wake_flow_repaint_after_join(timer_state_t painted, net_finish_t nf, bool have_shown,
@@ -184,7 +184,7 @@ static bool s_release_publish_deferred;
 
 /* End the deferral and owe what it held. Called by the gesture's last act
    and by the one path that sleeps before reaching it (the break branch of
-   finish_or_break). */
+   finish_or_break_painting). */
 static void wake_flow_release_deferred_publish(void) {
     s_gesture_defers_release_publish = false;
     if (s_release_publish_deferred) {
@@ -251,8 +251,8 @@ static bool wake_flow_open_event_window(void) {
     return true;
 }
 
-/* For a tail that posts the snapshot itself (finish_action_and_render, the
-   break-start branch of finish_or_break): open the owed window, if any, so
+/* For a tail that posts the snapshot itself (finish_action_and_render_painting,
+   the break-start branch of finish_or_break_painting): open the owed window, if any, so
    the tail's own post_stats / join serve it. */
 static void wake_flow_open_owed_window(void) {
     if (!s_event_publish_owed) {
@@ -727,8 +727,8 @@ static void wake_flow_paint_chore_strip(void) {
    chore mode" arguments is not, and those arguments rot. The grep is a
    pre-commit hook (scripts/check-status-led-wrapper.py), so the claim in
    the sentence above is enforced rather than merely made: reverting any
-   one of the twelve call sites to a raw call fails the commit. Before that
-   hook existed ten of the twelve were unpinned — the wrapper was correct
+   one of the thirteen call sites to a raw call fails the commit. Before that
+   hook existed ten of the twelve then in the file were unpinned — the wrapper was correct
    and nothing would have noticed it becoming incorrect.
 
    It exists because THE TWO PAINTERS COLLIDE ON PIXEL 0. status_led.c
@@ -1517,7 +1517,7 @@ static void wake_flow_coalesce_chore_acks(time_t *now, uint32_t *spent_ms) {
    promotion exists to put the break end ON the glass; once a render has
    painted it, a later tick of a box is an ordinary partial. A break end
    drained BEFORE this loop has already been painted by the handler's render
-   (finish_or_break), and one drained inside it — by an ack, which re-asserts
+   (finish_or_break_painting), and one drained inside it — by an ack, which re-asserts
    chore mode — is painted by the very next render, which is still promoted.
    Scoped to this loop because it is the only caller that paints the same
    layout repeatedly in one wake; the other callers keep the wake-sticky
@@ -2412,7 +2412,7 @@ bool wake_flow_maybe_start_break(time_t now) {
        APP_MODE_CHORES after the break-end drain, so the checklist now
        survives a break end as well as a mode toggle — this site is after
        every one of those re-asserts, because the dispatch that performs
-       them has returned by the time finish_or_break() gets here.
+       them has returned by the time finish_or_break_painting() gets here.
 
        Fixing it HERE and not by reordering display_screen_for(): design
        4.2 wants chore mode reachable throughout a break ("BREAK is not
@@ -3022,7 +3022,7 @@ static void finish_action_and_render_painting(button_id_t btn, timer_state_t bef
 }
 
 /* Re-render when the join changed what the panel shows (see the comment in
-   finish_action_and_render above, which is where the cases are listed). An
+   finish_action_and_render_painting above, which is where the cases are listed). An
    ALERTED join already repainted the whole display and is never painted
    again. `have_shown` false is the owed-window caller, which has no frame
    of its own to compare against: the screen kind is then judged from the
@@ -3105,7 +3105,7 @@ static void wake_flow_repaint_after_join(timer_state_t painted, net_finish_t nf,
    window. */
 static void finish_or_break_painting(button_id_t btn, timer_state_t before, time_t now, bool selection_changed,
                                      bool paint) {
-    /* Note the ordering: this runs BEFORE finish_action_and_render, whose
+    /* Note the ordering: this runs BEFORE finish_action_and_render_painting, whose
        tick is what would detect an expiry. A RUNNING slot past its wall
        (a press that landed after it) is expired at the wall by the break's
        start, which swallows the expiry alarm exactly as the tick-side sites
@@ -3590,8 +3590,8 @@ void wake_flow_handle_timer_tick(void) {
        so re-checking HERE — after the render switch — is what yields
        expiry-then-break in one wake, which is the order the alerts have
        to arrive in. This is the only call site that provides that
-       ordering: finish_or_break has the opposite shape, its break gate
-       running before the tick in finish_action_and_render. A no-op unless
+       ordering: finish_or_break_painting has the opposite shape, its break
+       gate running before the tick in finish_action_and_render_painting. A no-op unless
        the balance is genuinely over, so it costs nothing on every other
        path.
 
@@ -3961,7 +3961,7 @@ void wake_flow_handle_button_wake(void) {
        where nobody pressed anything; only a take that APPLIES opens a quiet
        window, and M2-T15 made that window come BEFORE the repaint rather
        than the repaint following at once — see the helper.
-       The repaint is render_action_result and NOT finish_action_and_render:
+       The repaint is render_action_result and NOT finish_action_and_render_painting:
        the MQTT phase was released and joined by the tail above, and doing
        that twice would post the stat snapshot twice. */
     wake_flow_repaint_chore_acks_until_quiet(&now, &chore_spent_ms);

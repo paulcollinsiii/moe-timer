@@ -49,7 +49,7 @@ and published after.
 
 | Event | Marked | Served |
 |-------|--------|--------|
-| Pause (B, any wake path; the awake pause poll; a B press in a join) | `wake_flow_dispatch_button_action`, `wake_flow_poll_pause_button`, `wake_flow_poll_button_b_action` | After the render by `finish_action_and_render`; after the refresh in the final-minute watch; after the render in the tick handler |
+| Pause (B, any wake path; the awake pause poll; a B press in a join) | `wake_flow_dispatch_button_action`, `wake_flow_poll_pause_button`, `wake_flow_poll_button_b_action` | After the render by `finish_action_and_render_painting`; after the refresh in the final-minute watch; after the render in the tick handler |
 | Expiry | end of `wake_flow_fire_expiry_alert`, after the alarm and the repaint | The same consumers |
 | Chore release (`BTN_ACK_RELEASED`) | `wake_flow_apply_chore_ack`, after the reward chime; on a button wake held until the gesture's last paint | After the gesture's last repaint, one window for the whole gesture |
 | A reload (B on an EXPIRED reloadable slot) | the B arm of the dispatch | The same consumers as a pause |
@@ -67,7 +67,7 @@ when the state moved or the join reports a change (never after an `ALERTED`
 join, which already repainted), and serves the debt the join raised with one
 follow-up window. A follow-up opens only while the awake failsafe leaves room
 for a window (`wake_flow_headroom_for_window`); debt past that, or raised on a
-path that sleeps straight away (the break branch of `finish_or_break`, the
+path that sleeps straight away (the break branch of `finish_or_break_painting`, the
 tick handler's fast-path break), is left to the next sync.
 
 **Budgets.** One window is `WAKE_FLOW_EVENT_WINDOW_MS`, derived from the

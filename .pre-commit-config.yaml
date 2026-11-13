@@ -71,9 +71,9 @@ repos:
   # collide. It was the GATE's pixel until M2-HW2 inverted the strip; the mapping
   # is a permutation, so pixel 0 always belongs to some slot either way.
   # wake_flow.c funnels all
-  # twelve of its status paints through one wrapper and keeps exactly one raw
+  # thirteen of its status paints through one wrapper and keeps exactly one raw
   # call (inside that wrapper). Review reverted each site in turn and TEN of the
-  # twelve survived the whole host suite, two of them the last LED paint before
+  # twelve it then had survived the whole host suite, two of them the last LED paint before
   # sleep on a chore-reachable path. The scanner carries the reasoning.
   - repo: local
     hooks:

@@ -170,6 +170,39 @@ class TestTheCountDisplayClaimant(GateCase):
         )
         self.assertFails(WRAPPER + body, "never released")
 
+    def test_an_early_return_between_the_last_show_and_the_release_fails(self):
+        """The release names appear after the last show, so a name-presence
+        check passes; the path that returns before them leaves magenta lit."""
+        body = GESTURE.replace(
+            "    neopixel_stop();\n",
+            "    if (bail()) {\n        return SWAP_GESTURE_HOME;\n    }\n    neopixel_stop();\n",
+        )
+        self.assertFails(WRAPPER + body, "a return between the last", "leaves the strip lit")
+
+    def test_the_wrapper_before_the_wipe_fails(self):
+        """The wipe clears pixels the wrapper has just painted, so the state
+        pixel is dark: the order is part of the contract."""
+        body = GESTURE.replace(
+            "    neopixel_stop();\n    wake_flow_show_status_leds();\n",
+            "    wake_flow_show_status_leds();\n    neopixel_stop();\n",
+        )
+        self.assertFails(WRAPPER + body, "wake_flow_show_status_leds", "before neopixel_stop")
+
+    def test_a_release_inside_a_dead_branch_fails(self):
+        body = GESTURE.replace(
+            "    neopixel_stop();\n    wake_flow_show_status_leds();\n",
+            "    if (0) {\n        neopixel_stop();\n        wake_flow_show_status_leds();\n    }\n",
+        )
+        self.assertFails(WRAPPER + body, "not an unconditional statement")
+
+    def test_a_release_guarded_without_braces_fails(self):
+        body = GESTURE.replace("    neopixel_stop();\n", "    if (committed) neopixel_stop();\n")
+        self.assertFails(WRAPPER + body, "neopixel_stop", "not an unconditional statement")
+
+    def test_a_return_after_the_release_is_fine(self):
+        """The ordinary tail: release, log, return."""
+        self.assertClean(WRAPPER + GESTURE.replace("    return", "    ESP_LOGI(TAG, \"done\");\n    return"))
+
     def test_a_show_with_no_gesture_function_at_all_fails(self):
         self.assertFails(WRAPPER + "void f(void) { status_led_swap_count_show(1); }\n", "has no owner")
 

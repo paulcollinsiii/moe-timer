@@ -269,9 +269,9 @@ add_test(NAME test_check_log_args
 # scripts/check-status-led-wrapper.py is the chore-gate gate: exactly one raw
 # status_led_show_timer_state() call in wake_flow.c, because that function
 # writes the pixel the chore checklist puts its gate on and the file funnels
-# all twelve of its status paints through one wrapper to keep them apart.
+# all thirteen of its status paints through one wrapper to keep them apart.
 # Python and registered here for the same two reasons as the two above. It
-# exists because review reverted each of those twelve sites in turn and TEN
+# exists because review reverted each of the twelve sites it then had in turn and TEN
 # survived the entire host suite -- so the thing this file is really testing
 # is a gate that was added after a near miss, which is exactly the kind that
 # needs its own tests.

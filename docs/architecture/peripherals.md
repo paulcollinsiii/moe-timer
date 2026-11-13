@@ -127,8 +127,11 @@ colour nothing else on the strip uses, and it is HIGHPRI like the chore strip:
 the pixels are the only feedback until the panel paints, so quiet hours do not
 mute it (the brightness setting still applies). When the gesture ends,
 `wake_flow_swap_count_gesture()` wipes the strip (`neopixel_stop()`) and repaints
-the state pixel through the one status wrapper; `scripts/check-status-led-wrapper.py`
-holds that release. Nothing can compete for the strip meanwhile: the gesture only
+the state pixel through the one status wrapper. `scripts/check-status-led-wrapper.py`
+checks the shape of that release: after the last count frame, the wipe and then
+the wrapper are unconditional statements of that function, in that order, with
+no `return` before them. It does not follow a `goto` or prove that every path
+reaches them; the host test pins the behaviour. Nothing can compete for the strip meanwhile: the gesture only
 opens when the selected timer is not running, so there is no countdown or expiry
 to run, and no network window opens inside it.
 

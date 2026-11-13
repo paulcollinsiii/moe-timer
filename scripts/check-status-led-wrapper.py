@@ -19,21 +19,21 @@ cannot enforce for itself.
 
 `wake_flow.c` enforces it by funnelling every status paint through one
 wrapper, `wake_flow_show_status_leds()`, which repaints the checklist instead
-on any wake that claimed the strip.  Twelve call sites go through it and
+on any wake that claimed the strip.  Thirteen call sites go through it and
 exactly one raw call remains -- the one inside the wrapper.
 
 That is the whole guarantee, and until this script existed NOTHING CHECKED
-IT.  An adversarial review of M2-T8 reverted each of the twelve sites to a
-raw `status_led_show_timer_state()` in turn and **ten of the twelve
-survived** the entire host suite: the wrapper was correct, and nothing would
-have noticed it becoming incorrect.  Two of the ten survivors were the LAST
-LED paint before deep sleep on a chore-reachable path, so a wrong colour
+IT.  An adversarial review of M2-T8 reverted each of the twelve sites the file
+had then to a raw `status_led_show_timer_state()` in turn and **ten of the
+twelve survived** the entire host suite: the wrapper was correct, and nothing
+would have noticed it becoming incorrect.  Two of the ten survivors were the
+LAST LED paint before deep sleep on a chore-reachable path, so a wrong colour
 would have stayed lit on the device until the next wake.
 
-Twelve tests would be the other way to close that, and a worse one: each
+One test per site would be the other way to close that, and a worse one: each
 would pin one site by its effects, none would say what the invariant IS, and
-a thirteenth site added later would arrive unpinned.  This says the
-invariant, and a new site is caught the moment it is written.
+a site added later would arrive unpinned.  This says the invariant, and a new
+site is caught the moment it is written.
 
 The wrapper's own comment already claimed "it is checkable by grep, which a
 list of 'these sites are unreachable in chore mode' arguments is not".  This
@@ -43,12 +43,17 @@ THE COUNT DISPLAY (the sixth claimant, status_led.h)
 ----------------------------------------------------
 status_led_swap_count_show() paints all four pixels for Button C's
 counted-clicks gesture, and pixels 1-3 have no state painter to overwrite
-them. So it may be called only from wake_flow_swap_count_gesture(), and that
-function must call neopixel_stop() and then the wrapper after its last
-count frame: a path that shows the count and leaves would leave magenta
-lit until sleep. A file that never calls it is fine (the fixtures in the
-test suite are such files); one that calls it with no owning function, or
-from anywhere else, fails.
+them. So it may be called only from wake_flow_swap_count_gesture(), and a
+path that shows the count and leaves would leave magenta lit until sleep.
+What is checked, exactly: after the LAST count frame, in that function's
+top-level statement sequence, comes neopixel_stop() and then the wrapper, each
+an unconditional statement of its own (not inside a nested block, not guarded
+by a brace-less if/else), in that order, with no `return` between the last
+frame and the release. NOT checked: a goto, a longjmp, or a `break` out of an
+enclosing construct, and that every path reaches the release; the host test
+pins the behaviour. A file that never calls the count display is fine (the
+fixtures in the test suite are such files); one that calls it with no owning
+function, or from anywhere else, fails.
 
 WHAT COUNTS AS A CALL
 ---------------------
@@ -65,7 +70,7 @@ LIMITATIONS, recorded so the next reader knows the gate's edges:
   * The check is per-file and keyed on a path, so MOVING the wrapper to
     another translation unit would pass this gate while breaking the
     invariant.  That is deliberate: the invariant is about wake_flow.c
-    specifically, because that is the file with twelve paint sites in it,
+    specifically, because that is the file with thirteen paint sites in it,
     and a move is a design change that should be reviewed rather than
     silently blessed.  The file must exist, though -- a missing target is a
     failure, not a pass, so deleting or renaming it cannot quietly retire
@@ -178,11 +183,68 @@ def count_display_problems(src):
             problems.append(f"line {line}: {COUNT_FUNC}() is called outside {GESTURE}()")
     inside = [p for p in shows if span[0] <= p < span[1]]
     if inside:
-        last = max(inside)
-        body = src[last : span[1]]
-        for name in RELEASE_CALLS:
-            if not call_positions(body, name):
-                problems.append(f"{GESTURE}() has no {name}() after its last {COUNT_FUNC}(): the strip is never released")
+        problems.extend(release_problems(src, span, max(inside)))
+    return problems
+
+
+def brace_depth(src, span, pos):
+    """Brace depth at `pos` inside the function: 1 is its top-level statement sequence."""
+    open_at = src.index("{", span[0])
+    depth = 0
+    for i in range(open_at, pos):
+        if src[i] == "{":
+            depth += 1
+        elif src[i] == "}":
+            depth -= 1
+    return depth
+
+
+def starts_a_statement(src, pos):
+    """True when the call at `pos` begins a statement: the previous significant
+    character ends one (`;`) or opens/closes a block. `if (x) call();` has a
+    `)` before it and `else call();` an `e`, so neither passes."""
+    i = pos - 1
+    while i >= 0 and src[i].isspace():
+        i -= 1
+    return i >= 0 and src[i] in ";{}"
+
+
+def release_problems(src, span, last_show):
+    """The release after the last count frame, as human sentences.
+
+    What this checks, and nothing more: after the last show, in the function's
+    top-level statement sequence, comes neopixel_stop() and then the wrapper,
+    each as an unconditional statement of its own (not inside a nested block,
+    not guarded by a brace-less `if`/`else`), in that order, with no `return`
+    between the last show and the release. It does not follow a goto, a
+    longjmp or a `break` out of an enclosing construct, and it does not prove
+    that every path reaches the release; the host test pins the behaviour.
+    """
+    problems = []
+    found = {}
+    for name in RELEASE_CALLS:
+        after = [p for p in call_positions(src, name) if last_show < p < span[1]]
+        if not after:
+            problems.append(f"{GESTURE}() has no {name}() after its last {COUNT_FUNC}(): the strip is never released")
+            continue
+        pos = after[0]
+        found[name] = pos
+        if brace_depth(src, span, pos) != 1 or not starts_a_statement(src, pos):
+            line = src.count("\n", 0, pos) + 1
+            problems.append(
+                f"line {line}: {name}() after the last {COUNT_FUNC}() is not an unconditional statement of "
+                f"{GESTURE}(): a path can skip the release"
+            )
+    if len(found) == len(RELEASE_CALLS):
+        wipe, wrapper = found[RELEASE_CALLS[0]], found[RELEASE_CALLS[1]]
+        if wrapper < wipe:
+            problems.append(
+                f"{WRAPPER}() is called before {RELEASE_CALLS[0]}(): the wipe darkens the state pixel it just painted"
+            )
+        for m in re.finditer(r"\breturn\b", src[last_show : max(wipe, wrapper)]):
+            line = src.count("\n", 0, last_show + m.start()) + 1
+            problems.append(f"line {line}: a return between the last {COUNT_FUNC}() and the release leaves the strip lit")
+            break
     return problems
 
 
