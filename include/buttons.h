@@ -37,6 +37,10 @@ uint8_t buttons_take_pressed_mask(uint8_t mask);
    section the other latch calls take, because the ISR reads the window. Used
    by the counted-clicks gesture on Button C (wake_flow.c) and nothing else. */
 void buttons_set_refractory(button_id_t btn, int64_t us);
+/* Set ONE button's release settle (button_latch.h) the same way; pass
+   BUTTON_LATCH_RELEASE_SETTLE_US to put the default back. Installed and put
+   back with the refractory window, by the same caller and for the same reason. */
+void buttons_set_settle(button_id_t btn, int64_t us);
 
 /* ---- BOOT (GPIO0) — deliberately NOT a fifth button_id_t ----------------
 

@@ -45,7 +45,10 @@
    RELEASE-TO-PRESS gap, a press is lost whenever g < (P - R) + this window.
    The measure is RELEASE-to-press, not press-to-press: the hold in between is
    the person's. A window as wide as the 50 ms poll cadence loses every gap up
-   to 50 ms and some up to 100 ms; 10 ms keeps that loss small.
+   to 50 ms and some up to 100 ms; 10 ms keeps that loss small. This is the
+   DEFAULT: one button's can be changed (button_latch_set_settle; today only
+   C's, BUTTON_LATCH_SWAP_SETTLE_US, while its counted-clicks gesture runs), and
+   "this window" above is then that button's.
 
    10 ms BECAUSE THAT IS THE FIGURE THIS BOARD ALREADY TRUSTS FOR THESE
    PADS, not because it is a round number: buttons.c waits exactly it
@@ -109,8 +112,28 @@
    as two; then a rapid run of taps, each of which should count). Too long
    loses deliberate fast taps; too short lets the release bounce of a
    slow tap through, which in the gesture is skipping two timers instead of
-   one. Not a Kconfig knob, for the reason the default is not one. */
+   one. Not a Kconfig knob, for the reason the default is not one.
+
+   WHAT 120 ms DOES NOT COVER, which is why it travels with a longer settle
+   (below): a tap held longer than the window has left it behind by the time
+   the pad is released, so its release bounce is judged by the release gate
+   and the settle anchor alone, and the 10 ms default is shorter than a dome's
+   ringing can run. The 300 ms window covered that for every hold up to 300 ms;
+   the shorter one covers it only up to 120 ms. */
 #define BUTTON_LATCH_SWAP_REFRACTORY_US 120000
+
+/* THE SETTLE THAT GOES WITH IT: button C's, while the counted-clicks gesture
+   runs, and installed and put back with BUTTON_LATCH_SWAP_REFRACTORY_US
+   (button_latch_set_settle, below). Every other button, and C at any other
+   time, keeps BUTTON_LATCH_RELEASE_SETTLE_US.
+
+   30 ms IS A STARTING FIGURE, TO BE SETTLED ON THE BENCH, and the trade is
+   stated rather than hidden: the shortest release-to-press gap that still
+   counts becomes the poll (20 ms) plus this (30 ms), against 20 + 10 at the
+   default. Wider closes more of the ringing and costs a faster tap; the bench
+   check is 20 single taps held 150-250 ms (none may count as two), then a
+   rapid run (each should count). */
+#define BUTTON_LATCH_SWAP_SETTLE_US 30000
 
 #ifdef __cplusplus
 extern "C" {
@@ -128,6 +151,15 @@ void button_latch_reset(void);
    record reads the window from the ISR, so the caller holds the same critical
    section it holds for the other latch calls. */
 void button_latch_set_refractory(int btn, int64_t us);
+/* The same for the release settle (BUTTON_LATCH_RELEASE_SETTLE_US is the
+   default): the settle the NEXT accepted press of `btn` will be judged by once
+   it is released. Stamped at acceptance exactly like the window, so a change
+   never reaches into a press already accepted, and the EXT1 wake press seeded
+   by button_latch_seed_press always carries the default. Pass
+   BUTTON_LATCH_RELEASE_SETTLE_US to put the default back; button_latch_reset
+   does too. An out-of-range button or a figure of zero or less is ignored.
+   Same context rules as button_latch_set_refractory. */
+void button_latch_set_settle(int btn, int64_t us);
 /* Open the refractory window for a press that was accepted WITHOUT passing
    through button_latch_record: the EXT1 wake press, which wake handling
    consumes directly. Call it after button_latch_reset and before the ISRs are

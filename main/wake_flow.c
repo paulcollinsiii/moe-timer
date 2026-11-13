@@ -1575,6 +1575,15 @@ typedef enum {
     SWAP_GESTURE_HOME,        /* the count came round to the timer it started on: nothing written */
 } swap_gesture_t;
 
+/* C's press guard for the gesture: the short refractory window AND the longer
+   release settle, installed together when the gesture opens and put back
+   together on the way out (button_latch.h says what each is for). One helper
+   so the two can never be separated. */
+static void wake_flow_swap_press_guard(bool counting) {
+    buttons_set_refractory(BTN_C, counting ? BUTTON_LATCH_SWAP_REFRACTORY_US : BUTTON_LATCH_REFRACTORY_US);
+    buttons_set_settle(BTN_C, counting ? BUTTON_LATCH_SWAP_SETTLE_US : BUTTON_LATCH_RELEASE_SETTLE_US);
+}
+
 static swap_gesture_t wake_flow_swap_count_gesture(void) {
     if (!timer_swap_allowed()) {
         /* Today's refusal, with today's feedback: no strip, no wait, and the
@@ -1585,7 +1594,7 @@ static swap_gesture_t wake_flow_swap_count_gesture(void) {
         return SWAP_GESTURE_REFUSED;
     }
     int candidate = timer_slot_after(timer_active_slot());
-    buttons_set_refractory(BTN_C, BUTTON_LATCH_SWAP_REFRACTORY_US);
+    wake_flow_swap_press_guard(true);
     status_led_swap_count_show((uint8_t)timer_slot_ordinal(candidate));
 
     uint32_t idle_ms = 0;  /* since the last press counted: the sliding window */
@@ -1608,7 +1617,7 @@ static swap_gesture_t wake_flow_swap_count_gesture(void) {
         }
     }
 
-    buttons_set_refractory(BTN_C, BUTTON_LATCH_REFRACTORY_US);
+    wake_flow_swap_press_guard(false);
     const bool committed = timer_select_slot(candidate);
     neopixel_stop(); /* wipe the count; pixels 1-3 have no state painter to overwrite them */
     wake_flow_show_status_leds();

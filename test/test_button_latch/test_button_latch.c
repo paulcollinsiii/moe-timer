@@ -324,6 +324,137 @@ void test_an_accepted_press_under_the_short_window_still_has_the_settle_backstop
     TEST_ASSERT_EQUAL_UINT8(0, button_latch_take());
 }
 
+/* THE PER-BUTTON SETTLE (the gesture's release-bounce cover for a hold between
+   the short window and the long one). A press held past BUTTON_LATCH_SWAP_-
+   REFRACTORY_US has left that window behind by the time it is released, so a
+   level sample landing in a HIGH phase of the release ringing reopens the gate
+   and only the settle anchor stands between the next bounce edge and a second
+   count. The default 10 ms settle is shorter than a real dome's ringing;
+   BUTTON_LATCH_SWAP_SETTLE_US is the gesture's.
+
+   The scenario: a press accepted at T0, held 200 ms, a poll reading "up" at
+   T0+200 ms mid-ring, and the next bounce edge GAP_US after that sample. */
+#define SWAP_SETTLE_US BUTTON_LATCH_SWAP_SETTLE_US
+
+static uint8_t held_pad_bounce(bool gesture_settle, int64_t gap_us) {
+    button_latch_reset();
+    button_latch_set_refractory(2, SHORT_WINDOW_US);
+    if (gesture_settle) {
+        button_latch_set_settle(2, SWAP_SETTLE_US);
+    }
+    button_latch_record(2, T0_US);
+    button_latch_take();
+    button_latch_note_levels(0, T0_US + 200000);
+    button_latch_record(2, T0_US + 200000 + gap_us);
+    return button_latch_take();
+}
+
+void test_the_gesture_settle_refuses_a_release_bounce_edge_15_ms_after_the_sample(void) {
+    TEST_ASSERT_EQUAL_UINT8(0, held_pad_bounce(true, 15000));
+}
+
+void test_the_gesture_settle_refuses_a_release_bounce_edge_25_ms_after_the_sample(void) {
+    TEST_ASSERT_EQUAL_UINT8(0, held_pad_bounce(true, 25000));
+}
+
+/* The same two edges with the DEFAULT settle are counted: this is what proves
+   the two cases above are not vacuous (the hole they close is real). */
+void test_the_default_settle_lets_both_of_those_edges_through(void) {
+    TEST_ASSERT_EQUAL_UINT8(1u << 2, held_pad_bounce(false, 15000));
+    TEST_ASSERT_EQUAL_UINT8(1u << 2, held_pad_bounce(false, 25000));
+}
+
+/* The trade, pinned from both sides: the shortest release-to-press gap that
+   still counts is the poll plus this settle, so the edge AT the settle counts. */
+void test_a_genuine_press_at_the_settle_edge_still_counts(void) {
+    TEST_ASSERT_EQUAL_UINT8(0, held_pad_bounce(true, SWAP_SETTLE_US - 1));
+    TEST_ASSERT_EQUAL_UINT8(1u << 2, held_pad_bounce(true, SWAP_SETTLE_US));
+}
+
+void test_the_settle_is_longer_than_the_default_and_shorter_than_the_short_window(void) {
+    TEST_ASSERT_TRUE(SWAP_SETTLE_US > BUTTON_LATCH_RELEASE_SETTLE_US);
+    TEST_ASSERT_TRUE(SWAP_SETTLE_US < SHORT_WINDOW_US);
+}
+
+void test_a_settle_change_touches_only_the_named_button(void) {
+    button_latch_set_settle(2, SWAP_SETTLE_US);
+    button_latch_record(1, T0_US);
+    button_latch_take();
+    button_latch_note_levels(0, T0_US + 400000);    /* past B's 300 ms window: only the settle is left */
+    button_latch_record(1, T0_US + 400000 + 15000); /* B keeps the 10 ms settle */
+    TEST_ASSERT_EQUAL_UINT8(1u << 1, button_latch_take());
+}
+
+/* A change never reaches into a settle already running: it is stamped when the
+   press is ACCEPTED, exactly like the window. */
+void test_putting_the_default_settle_back_does_not_shorten_a_running_one(void) {
+    button_latch_set_refractory(2, SHORT_WINDOW_US);
+    button_latch_set_settle(2, SWAP_SETTLE_US);
+    button_latch_record(2, T0_US); /* accepted under the gesture's settle */
+    button_latch_take();
+    button_latch_set_settle(2, BUTTON_LATCH_RELEASE_SETTLE_US); /* the gesture ends */
+    button_latch_note_levels(0, T0_US + 200000);
+    button_latch_record(2, T0_US + 200000 + 20000);
+    TEST_ASSERT_EQUAL_UINT8(0, button_latch_take());
+}
+
+void test_installing_the_gesture_settle_does_not_lengthen_a_running_default_one(void) {
+    button_latch_set_refractory(2, SHORT_WINDOW_US);
+    button_latch_record(2, T0_US); /* accepted under the default settle */
+    button_latch_take();
+    button_latch_set_settle(2, SWAP_SETTLE_US);
+    button_latch_note_levels(0, T0_US + 200000);
+    button_latch_record(2, T0_US + 200000 + 20000);
+    TEST_ASSERT_EQUAL_UINT8(1u << 2, button_latch_take());
+}
+
+void test_a_nonsense_settle_or_button_is_ignored(void) {
+    button_latch_set_settle(-1, SWAP_SETTLE_US);
+    button_latch_set_settle(4, SWAP_SETTLE_US);
+    button_latch_set_settle(2, 0);
+    button_latch_set_settle(2, -5); /* zero would switch the anchor off */
+    button_latch_set_refractory(2, SHORT_WINDOW_US);
+    button_latch_record(2, T0_US);
+    button_latch_take();
+    button_latch_note_levels(0, T0_US + 200000);
+    button_latch_record(2, T0_US + 200000 + 5000);
+    TEST_ASSERT_EQUAL_UINT8(0, button_latch_take()); /* the 10 ms default is still there */
+}
+
+void test_reset_restores_the_default_settle(void) {
+    button_latch_set_settle(2, SWAP_SETTLE_US);
+    button_latch_reset();
+    button_latch_set_refractory(2, SHORT_WINDOW_US);
+    button_latch_record(2, T0_US);
+    button_latch_take();
+    button_latch_note_levels(0, T0_US + 200000);
+    button_latch_record(2, T0_US + 200000 + 15000);
+    TEST_ASSERT_EQUAL_UINT8(1u << 2, button_latch_take());
+}
+
+/* THE REFRACTORY WINDOW'S RUNNING-WINDOW RULE, both directions (the existing
+   case above pins only the shortening one at 121 ms). */
+void test_a_press_under_the_default_window_keeps_it_after_the_short_one_is_set(void) {
+    button_latch_record(2, T0_US);
+    button_latch_take();
+    button_latch_set_refractory(2, SHORT_WINDOW_US);
+    button_latch_note_levels(0, T0_US + 60000);
+    button_latch_record(2, T0_US + SHORT_WINDOW_US - 20000); /* inside the short window too */
+    TEST_ASSERT_EQUAL_UINT8(0, button_latch_take());
+    button_latch_record(2, T0_US + SHORT_WINDOW_US + 30000); /* past the short one, inside the long */
+    TEST_ASSERT_EQUAL_UINT8(0, button_latch_take());
+}
+
+void test_a_press_under_the_short_window_keeps_it_after_the_default_is_put_back(void) {
+    button_latch_set_refractory(2, SHORT_WINDOW_US);
+    button_latch_record(2, T0_US);
+    button_latch_take();
+    button_latch_set_refractory(2, BUTTON_LATCH_REFRACTORY_US);
+    button_latch_note_levels(0, T0_US + 60000);
+    button_latch_record(2, T0_US + 150000); /* past 120 ms, inside 300 ms */
+    TEST_ASSERT_EQUAL_UINT8(1u << 2, button_latch_take());
+}
+
 /* The release gate and the settle anchor run BEFORE the window in effect
    matters: a press the gate refuses is refused at any window. */
 void test_the_release_gate_still_refuses_under_the_short_window(void) {
@@ -708,6 +839,18 @@ int main(void) {
     RUN_TEST(test_the_release_gate_is_per_button);
     RUN_TEST(test_a_button_seeded_as_held_rejects_its_release_bounce);
     RUN_TEST(test_a_button_seeded_as_up_accepts_its_first_press);
+    RUN_TEST(test_the_gesture_settle_refuses_a_release_bounce_edge_15_ms_after_the_sample);
+    RUN_TEST(test_the_gesture_settle_refuses_a_release_bounce_edge_25_ms_after_the_sample);
+    RUN_TEST(test_the_default_settle_lets_both_of_those_edges_through);
+    RUN_TEST(test_a_genuine_press_at_the_settle_edge_still_counts);
+    RUN_TEST(test_the_settle_is_longer_than_the_default_and_shorter_than_the_short_window);
+    RUN_TEST(test_a_settle_change_touches_only_the_named_button);
+    RUN_TEST(test_putting_the_default_settle_back_does_not_shorten_a_running_one);
+    RUN_TEST(test_installing_the_gesture_settle_does_not_lengthen_a_running_default_one);
+    RUN_TEST(test_a_nonsense_settle_or_button_is_ignored);
+    RUN_TEST(test_reset_restores_the_default_settle);
+    RUN_TEST(test_a_press_under_the_default_window_keeps_it_after_the_short_one_is_set);
+    RUN_TEST(test_a_press_under_the_short_window_keeps_it_after_the_default_is_put_back);
     RUN_TEST(test_repeated_release_samples_do_not_push_the_anchor_forward);
     RUN_TEST(test_note_levels_ignores_bits_above_the_four_buttons);
     RUN_TEST(test_debounce_windows_are_per_button);

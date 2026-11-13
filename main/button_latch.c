@@ -27,7 +27,8 @@ static bool s_released_seen[BUTTON_LATCH_COUNT];
    contact is still chattering; anchoring here rejects the falling edge that
    follows it a millisecond later, which the press-edge anchor above cannot
    (it is a whole hold duration away by then). Its window is
-   BUTTON_LATCH_RELEASE_SETTLE_US, kept short on purpose — see
+   the button's settle (s_settle_us below: BUTTON_LATCH_RELEASE_SETTLE_US
+   unless button_latch_set_settle changed it), kept short on purpose — see
    button_latch.h for the press a wider one would cost. Zero means "no
    observation to anchor on", exactly as it does for s_last_edge_us. */
 static int64_t s_released_us[BUTTON_LATCH_COUNT];
@@ -40,6 +41,11 @@ static int64_t s_released_us[BUTTON_LATCH_COUNT];
    SEEDED press (below) open the default window whatever the setter says. */
 static int64_t s_cfg_window_us[BUTTON_LATCH_COUNT];
 static int64_t s_window_us[BUTTON_LATCH_COUNT];
+/* THE PER-BUTTON SETTLE, the same two-array shape for the same reasons: the
+   figure button_latch_set_settle last asked for, and the figure the last
+   accepted press stamped, which is what the release anchor is judged against. */
+static int64_t s_cfg_settle_us[BUTTON_LATCH_COUNT];
+static int64_t s_settle_us[BUTTON_LATCH_COUNT];
 
 void button_latch_reset(void) {
     s_mask = 0;
@@ -49,7 +55,17 @@ void button_latch_reset(void) {
         s_released_seen[i] = true;
         s_cfg_window_us[i] = BUTTON_LATCH_REFRACTORY_US;
         s_window_us[i] = BUTTON_LATCH_REFRACTORY_US;
+        s_cfg_settle_us[i] = BUTTON_LATCH_RELEASE_SETTLE_US;
+        s_settle_us[i] = BUTTON_LATCH_RELEASE_SETTLE_US;
     }
+}
+
+void button_latch_set_settle(int btn, int64_t us) {
+    /* Zero or less would switch the release anchor off, re-admitting the
+       bounce edge the gate's anchor exists to reject; ignore it. */
+    if (btn < 0 || btn >= BUTTON_LATCH_COUNT || us <= 0)
+        return;
+    s_cfg_settle_us[btn] = us;
 }
 
 void button_latch_set_refractory(int btn, int64_t us) {
@@ -71,6 +87,7 @@ void button_latch_seed_press(int btn, int64_t t_us) {
        began a boot earlier and anchors at reset, so nothing here knows when
        its release will ring; the long window is the one that covers it. */
     s_window_us[btn] = BUTTON_LATCH_REFRACTORY_US;
+    s_settle_us[btn] = BUTTON_LATCH_RELEASE_SETTLE_US;
 }
 
 void button_latch_begin(int wake_btn, uint8_t held_mask, int64_t t_us) {
@@ -94,10 +111,11 @@ void button_latch_record(int btn, int64_t t_us) {
        press; it also rejects any chatter on the press itself. */
     if (s_last_edge_us[btn] != 0 && t_us - s_last_edge_us[btn] < s_window_us[btn])
         return;
-    if (s_released_us[btn] != 0 && t_us - s_released_us[btn] < BUTTON_LATCH_RELEASE_SETTLE_US)
+    if (s_released_us[btn] != 0 && t_us - s_released_us[btn] < s_settle_us[btn])
         return;
     s_last_edge_us[btn] = t_us;
     s_window_us[btn] = s_cfg_window_us[btn]; /* the window THIS press opens */
+    s_settle_us[btn] = s_cfg_settle_us[btn]; /* and the settle its release will be judged by */
     s_released_seen[btn] = false;
     s_released_us[btn] = 0;
     s_mask |= (uint8_t)(1u << btn);

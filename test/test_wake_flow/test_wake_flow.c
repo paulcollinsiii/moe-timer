@@ -115,6 +115,7 @@ typedef enum {
     EV_SELECT_SLOT,     /* timer_select_slot(): the gesture's one commit */
     EV_SWAP_COUNT,      /* status_led_swap_count_show(): a count frame on the strip */
     EV_SWAP_REFRACTORY, /* buttons_set_refractory() */
+    EV_SWAP_SETTLE,     /* buttons_set_settle() */
     /* the break gate */
     EV_CFG_INTERVAL,
     EV_CFG_DURATION,
@@ -795,6 +796,15 @@ static void flow_burst_add(button_id_t btn, int32_t at_ms) {
     flow_burst_n++;
 }
 
+/* A PAD HELD DOWN FOR A WHILE, which the level samples (every take) see: the
+   pads in `flow_hold_mask` read DOWN from `flow_hold_from_ms` up to but not
+   including `flow_hold_to_ms` (the suite's delay total), and up either side.
+   It is what puts a real hold between a press and its release inside a gesture,
+   so a poll can land in the first high phase of the release. Zero mask is off. */
+static uint8_t flow_hold_mask;
+static int32_t flow_hold_from_ms;
+static int32_t flow_hold_to_ms;
+
 /* How many times each take ran — the polling cadence of a loop is part of
    its contract (100 ms in the grid wait, 250 ms in both watches) and a
    total delay alone cannot tell 30 polls of 100 ms from 3 of 1000 ms. */
@@ -1150,6 +1160,22 @@ void buttons_set_refractory(button_id_t btn, int64_t us) {
         flow_refractory_n++;
     }
     button_latch_set_refractory((int)btn, us);
+}
+
+/* ...and buttons_set_settle(), the release settle installed and put back with
+   it. Recorded in order for the same reason. */
+static int flow_settle_btn[FLOW_REFRACTORY_MAX];
+static int64_t flow_settle_us[FLOW_REFRACTORY_MAX];
+static int flow_settle_n;
+
+void buttons_set_settle(button_id_t btn, int64_t us) {
+    flow_log_push(EV_SWAP_SETTLE);
+    if (flow_settle_n < FLOW_REFRACTORY_MAX) {
+        flow_settle_btn[flow_settle_n] = (int)btn;
+        flow_settle_us[flow_settle_n] = us;
+        flow_settle_n++;
+    }
+    button_latch_set_settle((int)btn, us);
 }
 
 /* net_window.c's "the checklist owns the strip this wake, drop the sync
@@ -2109,6 +2135,10 @@ static void flow_deferred_press_due(void) {
         flow_press(flow_burst_btn[flow_burst_next]);
         flow_burst_next++;
     }
+    if (flow_hold_mask != 0) {
+        const int32_t now_ms = (int32_t)mock_delay_total_ms();
+        flow_held_now = (now_ms >= flow_hold_from_ms && now_ms < flow_hold_to_ms) ? flow_hold_mask : 0;
+    }
     if (flow_deferred_press_ms < 0 || (int32_t)mock_delay_total_ms() < flow_deferred_press_ms)
         return;
     flow_deferred_press_ms = -1; /* one press, not one per delay */
@@ -2382,6 +2412,8 @@ void setUp(void) {
     flow_select_slot_at_ms = 0;
     flow_latch_mask_at_select = 0;
     flow_refractory_n = 0;
+    flow_settle_n = 0;
+    flow_hold_mask = 0;
     for (int i = 0; i < TIMER_SLOT_COUNT; i++) {
         flow_slot_enabled[i] = (i < 3); /* Screen, slot 1, Piano (2): a lap is three timers */
     }
@@ -13568,6 +13600,27 @@ void test_ev_the_release_window_follows_the_whole_chore_gesture(void) {
 #define SWAP_Q ((uint32_t)CONFIG_MAGTAG_SWAP_COUNT_QUIET_MS)
 #define SWAP_BUDGET ((uint32_t)CONFIG_MAGTAG_SWAP_COUNT_BUDGET_MS)
 
+/* THE DEFAULT IS PUT BACK ON EVERY EXIT, and before the commit: the last
+   refractory figure set for C and the last settle set for C are the defaults,
+   and both precede the commit (EV_SELECT_SLOT is called on a lap home too: it
+   is the call that refuses). Moving the restore after the commit, or doing it
+   only when the commit succeeds, is exactly what this catches. */
+static void flow_assert_swap_guard_put_back_before_the_commit(void) {
+    TEST_ASSERT_GREATER_THAN_INT(0, flow_refractory_n);
+    TEST_ASSERT_GREATER_THAN_INT(0, flow_settle_n);
+    TEST_ASSERT_EQUAL_INT(BTN_C, flow_refractory_btn[flow_refractory_n - 1]);
+    TEST_ASSERT_EQUAL_INT64_MESSAGE(BUTTON_LATCH_REFRACTORY_US, flow_refractory_us[flow_refractory_n - 1],
+                                    "the last refractory figure set for C is not the default");
+    TEST_ASSERT_EQUAL_INT(BTN_C, flow_settle_btn[flow_settle_n - 1]);
+    TEST_ASSERT_EQUAL_INT64_MESSAGE(BUTTON_LATCH_RELEASE_SETTLE_US, flow_settle_us[flow_settle_n - 1],
+                                    "the last settle set for C is not the default");
+    TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_SELECT_SLOT));
+    TEST_ASSERT_TRUE_MESSAGE(flow_log_at_nth(EV_SWAP_REFRACTORY, flow_refractory_n) < flow_log_at(EV_SELECT_SLOT),
+                             "the refractory default came back after the commit");
+    TEST_ASSERT_TRUE_MESSAGE(flow_log_at_nth(EV_SWAP_SETTLE, flow_settle_n) < flow_log_at(EV_SELECT_SLOT),
+                             "the settle default came back after the commit");
+}
+
 static void flow_arm_swap_wake(void) {
     flow_tick_clock(flow_at(15, 0));
     flow_wakeup_btn = BTN_C;
@@ -13664,6 +13717,7 @@ void test_swap4_a_full_lap_commits_nothing_paints_nothing_and_puts_the_strip_bac
     TEST_ASSERT_TRUE(last_count < flow_log_at(EV_PIXELS_OFF));
     TEST_ASSERT_TRUE_MESSAGE(flow_log_at(EV_PIXELS_OFF) < flow_log_at_nth(EV_LED, 2),
                              "the state pixel was not repainted after the count was wiped");
+    flow_assert_swap_guard_put_back_before_the_commit(); /* a lap home puts the default back too */
 }
 
 /* ...unless something else this wake owes the glass a paint. */
@@ -13707,6 +13761,7 @@ void test_swap7_budget_exhaustion_commits_the_candidate_it_has_reached(void) {
     TEST_ASSERT_EQUAL_INT(17 % TIMER_SLOT_COUNT, flow_active_slot); /* lap of five */
     TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_SELECT_SLOT));
     TEST_ASSERT_EQUAL_INT(1, FLOW_RENDERS());
+    flow_assert_swap_guard_put_back_before_the_commit(); /* a spent budget puts it back too */
 }
 
 /* Refused while the active timer is RUNNING: today's feedback, no gesture. */
@@ -13841,9 +13896,24 @@ void test_swap15_the_short_window_is_installed_for_c_only_while_the_gesture_runs
     TEST_ASSERT_TRUE(flow_log_at_nth(EV_SWAP_REFRACTORY, 1) < flow_log_at(EV_SWAP_COUNT));
     TEST_ASSERT_TRUE_MESSAGE(flow_log_at_nth(EV_SWAP_REFRACTORY, 2) > flow_log_at_nth(EV_SWAP_COUNT, 2),
                              "the default came back before the gesture ended");
-    TEST_ASSERT_TRUE_MESSAGE(flow_log_at_nth(EV_SWAP_REFRACTORY, 2) < flow_log_at(EV_SELECT_SLOT) ||
-                                 flow_log_at_nth(EV_SWAP_REFRACTORY, 2) < flow_log_at(EV_PARTIAL),
-                             "the default came back after the paint");
+    flow_assert_swap_guard_put_back_before_the_commit();
+}
+
+/* THE SETTLE TRAVELS WITH THE WINDOW: installed when the gesture opens, put
+   back with it on the way out, C only. */
+void test_swap15b_the_gesture_settle_is_installed_and_put_back_with_the_window(void) {
+    flow_arm_swap_wake();
+    flow_burst_add(BTN_C, 100);
+
+    TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_button());
+
+    TEST_ASSERT_EQUAL_INT(2, flow_settle_n);
+    TEST_ASSERT_EQUAL_INT(BTN_C, flow_settle_btn[0]);
+    TEST_ASSERT_EQUAL_INT64(BUTTON_LATCH_SWAP_SETTLE_US, flow_settle_us[0]);
+    TEST_ASSERT_EQUAL_INT(BTN_C, flow_settle_btn[1]);
+    TEST_ASSERT_EQUAL_INT64(BUTTON_LATCH_RELEASE_SETTLE_US, flow_settle_us[1]);
+    TEST_ASSERT_TRUE(flow_log_at_nth(EV_SWAP_SETTLE, 1) < flow_log_at(EV_SWAP_COUNT));
+    TEST_ASSERT_TRUE(flow_log_at_nth(EV_SWAP_SETTLE, 2) > flow_log_at_nth(EV_SWAP_COUNT, 2));
 }
 
 /* A TAP RHYTHM THE LONG WINDOW WOULD HALVE. Presses 160 ms apart, all past
@@ -13881,9 +13951,11 @@ void test_swap17_a_wake_press_release_bounce_after_a_reopening_sample_never_coun
     TEST_ASSERT_EQUAL_INT(1, flow_active_slot);
 }
 
-/* The release gate and the settle anchor still run first: a bounce 5 ms
-   after the sample is refused whatever window is in force. */
-void test_swap18_a_bounce_inside_the_settle_window_never_counts(void) {
+/* A bounce one poll after a counted tap lands 20 ms on, well inside the short
+   window: it is the WINDOW that refuses it (the pad here reads up throughout,
+   so the settle anchor and the window both stand from the same instant, and
+   the next case is the one that isolates the settle). */
+void test_swap18_a_bounce_one_poll_after_a_counted_tap_never_counts(void) {
     flow_arm_swap_wake();
     flow_enable_all_timers();
     flow_edge_clock_is_real = true;
@@ -13893,6 +13965,30 @@ void test_swap18_a_bounce_inside_the_settle_window_never_counts(void) {
     TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_button());
 
     TEST_ASSERT_EQUAL_INT(2, flow_count_n);
+}
+
+/* A TAP HELD PAST THE SHORT WINDOW: the case the 120 ms window alone does not
+   cover, and the first in this suite to hold the pad inside a gesture
+   (flow_held_now is non-zero from 320 to 500 ms). The second tap lands at 320
+   and the pad stays down 180 ms, past the 120 ms window; the poll at 500 reads
+   it up in a high phase of the release ringing, and the next bounce edge lands
+   20 ms after that sample — outside the default 10 ms settle, inside the
+   gesture's 30. Counted, it would skip a timer for one tap. */
+void test_swap19_a_held_tap_whose_release_rings_past_the_default_settle_counts_once(void) {
+    flow_arm_swap_wake();
+    flow_enable_all_timers();
+    flow_edge_clock_is_real = true;
+    flow_burst_add(BTN_C, 320);
+    flow_hold_mask = (uint8_t)(1u << BTN_C);
+    flow_hold_from_ms = 320;
+    flow_hold_to_ms = 500;
+    flow_burst_add(BTN_C, 510); /* delivered at the 520 poll: 20 ms after the 500 sample */
+
+    TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_button());
+
+    TEST_ASSERT_EQUAL_INT(2, flow_burst_delivered);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(2, flow_count_n, "the release bounce of a held tap counted as another press");
+    TEST_ASSERT_EQUAL_INT(2, flow_active_slot);
 }
 
 int main(void) {
@@ -14520,8 +14616,10 @@ int main(void) {
     RUN_TEST(test_swap13_landing_on_an_expired_timer_does_not_refire_its_alert);
     RUN_TEST(test_swap14_other_buttons_pressed_mid_gesture_stay_latched_and_are_then_dropped);
     RUN_TEST(test_swap15_the_short_window_is_installed_for_c_only_while_the_gesture_runs);
+    RUN_TEST(test_swap15b_the_gesture_settle_is_installed_and_put_back_with_the_window);
     RUN_TEST(test_swap16_taps_160_ms_apart_all_count_under_the_short_window);
     RUN_TEST(test_swap17_a_wake_press_release_bounce_after_a_reopening_sample_never_counts);
-    RUN_TEST(test_swap18_a_bounce_inside_the_settle_window_never_counts);
+    RUN_TEST(test_swap18_a_bounce_one_poll_after_a_counted_tap_never_counts);
+    RUN_TEST(test_swap19_a_held_tap_whose_release_rings_past_the_default_settle_counts_once);
     return UNITY_END();
 }
