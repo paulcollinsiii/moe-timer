@@ -739,6 +739,27 @@ class TestVariants(unittest.TestCase):
         self.assertIn("6x6", msg)
         self.assertIn("6x7", msg)
 
+    def test_the_header_says_the_count_is_not_a_constant_expression(self):
+        self.run_main()
+        h = self.text(self.h)
+        self.assertIn("not a\n   constant expression", h)
+        self.assertLess(h.index("constant expression"), h.index("extern const unsigned"))
+
+    def test_an_override_variant_of_another_size_is_refused_at_every_number(self):
+        # the size check is not a first-variant check: .2 and .3 are judged too
+        self.save(self.sprites, "alpha.1.png", (8, 4), [])
+        for n in (1, 2, 3):
+            self.save(self.over, "alpha.%d.png" % n, (8, 4), [])
+        for n in (1, 2, 3):
+            bad = "alpha.%d.png" % n
+            self.save(self.over, bad, (8, 5), [])
+            msg = self.refuse(["--override-dir", self.over])
+            self.assertIn(os.path.join(self.over, bad), msg, bad)
+            self.assertIn("8x4", msg, bad)
+            self.assertIn("8x5", msg, bad)
+            self.save(self.over, bad, (8, 4), [])
+        self.assertEqual(self.run_main(["--override-dir", self.over]), 0)
+
     def test_a_gap_in_the_numbering_is_refused_naming_the_slot_and_the_missing_number(self):
         self.save(self.sprites, "alpha.1.png", (8, 4), [])
         self.save(self.sprites, "alpha.3.png", (8, 4), [])

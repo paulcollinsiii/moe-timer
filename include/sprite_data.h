@@ -2,6 +2,11 @@
 #pragma once
 #include "sprite.h"
 
+/* SPRITE_<NAME>_VARIANT_COUNT is a const object the generated C defines, not a
+   constant expression: it cannot size an array, sit in a _Static_assert or
+   initialise a static. Read it at run time. The header never changes when a
+   variant is added; only the C does. */
+
 extern const sprite_t SPRITE_BEDTIME;
 extern const sprite_t *const SPRITE_BEDTIME_VARIANTS[];
 extern const unsigned SPRITE_BEDTIME_VARIANT_COUNT;
