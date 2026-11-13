@@ -288,3 +288,15 @@ CONFIG_COMPILER_OPTIMIZATION_SIZE=y
 # -Os that grows libmbed-builtin by 10.7 KB and libtfpsacrypto by 6.4 KB
 # (map, before/after), and makes the TLS handshake faster.
 CONFIG_MBEDTLS_COMPILER_OPTIMIZATION_PERF=y
+
+# PROVISIONAL, its own commit so it reverts alone: mbedTLS client only (no TLS
+# server). The only TLS the device speaks is as a client: the OTA HTTPS fetch
+# (ota_ca.pem) and optional MQTT over TLS. Setup mode serves plain HTTP: protocomm
+# security 2 (SRP6a) over protocomm_httpd, ESP_HTTPS_SERVER_ENABLE is off, no
+# source in main/ or managed_components/ touches esp_https_server, httpd_ssl or
+# esp_tls_cfg_server_t, and the WPA supplicant is built TLS-client-only
+# (WPA_MBEDTLS_TLS_CLIENT). NOT YET PROVEN ON THE DEVICE: the owner must run
+# setup mode on an erased-NVS board (AP + QR, phone provisioning, MQTT form,
+# first connect) before this is relied on; if anything in that run fails to
+# bring up TLS, revert this commit.
+CONFIG_MBEDTLS_TLS_CLIENT_ONLY=y
