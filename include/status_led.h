@@ -12,10 +12,11 @@ extern "C" {
 
 /* ---- who owns the four status pixels ------------------------------------
 
-   There are NEOPIXEL_COUNT == 4 status pixels and FIVE claimants on them,
+   There are NEOPIXEL_COUNT == 4 status pixels and SIX claimants on them,
    so the allocation is MODE-DEPENDENT rather than fixed. Two claim a
-   single pixel each and are what the mode table below is about; three
-   take the whole strip, and two of THOSE cut across every mode:
+   single pixel each and are what the mode table below is about; four
+   take the whole strip, and two of THOSE cut across every mode (the sixth,
+   Button C's count display, is its own paragraph after them):
 
      Timer modes   pixel 0   timer state — NP_STATE_PIXEL, below.
                    pixel 3   WiFi/NTP window — net_window.c's own
@@ -86,7 +87,49 @@ extern "C" {
 
    If that line moves, the countdown will paint over the checklist and
    nothing here will notice — it does not go through wake_flow's
-   status-paint wrapper, because it is not a status paint. */
+   status-paint wrapper, because it is not a status paint.
+
+   THE SIXTH CLAIMANT: BUTTON C'S COUNT DISPLAY — status_led_swap_count_show(),
+   below. It takes the WHOLE strip (all four pixels written, dark ones
+   included) for the length of one counted-clicks gesture on a Button C wake
+   in Timers mode, and nowhere else. It is a Timers-mode claimant, so it
+   never meets the chore strip: C in Chores mode is the second chore tick and
+   opens no gesture. Who it can meet, and what happens:
+
+     timer-state pixel 0   status_led_show_timer_state() writes pixel 0, which
+                           the count uses as bit 3. wake_flow_show_status_leds()
+                           is not called while the gesture runs (the loop paints
+                           only the count), so there is no collision DURING it;
+                           AFTER it the strip is released (below) and the
+                           wrapper repaints the state pixel.
+     net_window sync pixel (pixel 3 = bit 0) no window opens inside the
+                           gesture: it runs before the commit's paint and
+                           join, so the window the tail may owe opens after
+                           the strip has been released.
+     countdown / expiry    cannot run inside it. The gesture is entered only
+                           when the active slot is not RUNNING, and at most
+                           one slot RUNNING means nothing is counting down or
+                           about to expire (S2). A background Screen Break
+                           can END inside it; that drain happens in the
+                           commit's render, after the strip is released.
+     quiet hours           the count is HIGHPRI, like the chore strip, and for
+                           the same reason: the strip is the only feedback
+                           until the panel paints. It bypasses the mute and
+                           not the dimmer.
+     the power gate        a HIGHPRI post raises the gate (neopixel.c). The
+                           release below drops it again, so a gesture that
+                           ends in quiet hours leaves the gate HIGH with a
+                           dark strip, and sleep entry drops it regardless
+                           (neopixel_stop_sync, system invariant S42).
+
+   WHAT THE STRIP RETURNS TO. wake_flow_swap_release_strip() posts
+   neopixel_stop() (everything off, gate HIGH — the same wipe the countdown
+   does before a state repaint) and then goes through the one status-paint
+   wrapper, so pixel 0 shows the state of the timer now selected and pixels
+   1-3 are dark. That happens on every exit: a commit, a full lap that lands
+   home, and a budget that runs out. It is also the only way back: the count
+   writes pixels 1-3 which no state painter owns. The colour is magenta
+   (25,0,25), which is no other claimant's (test_status_led pins it). */
 #define NP_STATE_PIXEL 0
 
 /* THERE IS NO PRE-PRESS HOLD. The chore ack and Button B's start/resume flip
@@ -295,6 +338,34 @@ chores_led_t chores_led_for(uint8_t mask, uint8_t n, bool released);
      strip from the state the acks left. THAT is the property to preserve:
      an ack burst must never be the LAST strip paint of a wake. */
 void chores_led_show(uint8_t mask, uint8_t n, bool released);
+
+/* ---- Button C's count display ---------------------------------------------
+
+   The four pixels as physical pixels, like chores_led_t, but not a chore
+   thing — a strip of four colours, index i = driver pixel i. */
+typedef struct {
+    status_led_rgb_t px[NEOPIXEL_COUNT];
+} status_led_strip_t;
+
+/* The strip for a timer's 1-based ordinal among enabled timers (Screen = 1;
+   timer_slot_ordinal), in binary, least significant bit on the physically
+   leftmost pixel — driver index 3, because the strip runs opposite the
+   buttons. The bit-to-pixel mapping is neopixel_binary4_pixel_lit(), the one
+   the last-15-seconds countdown uses, not a second copy. Lit pixels are
+   magenta (25,0,25); dark pixels are explicitly (0,0,0), so the caller can
+   write every pixel and leave none holding another claimant's colour. Only
+   the low four bits are shown (15 timers); 0 is a dark strip. Pure: no clock,
+   no NVS, no globals, no GPIO. */
+status_led_strip_t status_led_swap_count_for(uint8_t ordinal);
+
+/* Paint status_led_swap_count_for(ordinal)'s four pixels over neopixel.c,
+   HIGHPRI class (quiet hours do not mute it; the dimmer applies). See the
+   sixth-claimant paragraph at the top of this header for who it can meet and
+   what the strip returns to. CALLER CONTRACT: wake_flow.c's counted-clicks
+   gesture only, on a Button C wake in Timers mode; it does not repaint the
+   state pixel itself and must be followed by the release
+   (wake_flow_swap_release_strip) on every path out. */
+void status_led_swap_count_show(uint8_t ordinal);
 
 #ifdef __cplusplus
 }

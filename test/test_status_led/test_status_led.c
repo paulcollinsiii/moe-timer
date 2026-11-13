@@ -481,8 +481,145 @@ void test_the_timer_state_pixel_stays_status_class(void) {
     TEST_ASSERT_EQUAL_INT_MESSAGE(0, stub_hi_calls, "the timer state pixel was promoted past quiet hours");
 }
 
+/* ---- Button C's count display (status_led_swap_count_for) ---------------
+
+   The timer's 1-based ordinal in binary, least significant bit on the
+   PHYSICALLY LEFTMOST pixel, which is driver index 3 (the strip runs
+   opposite the buttons: neopixel.h, status_led.c's k_chore_pixel). The
+   mapping is neopixel_binary4_pixel_lit(), the one the last-15-seconds
+   countdown draws with and the owner verified on the board on 2026-09-22. */
+
+#define SWAP_ON (status_led_swap_count_for(1).px[3]) /* the lit colour, read off the leftmost pixel */
+
+static void assert_strip(uint8_t ordinal, bool p0, bool p1, bool p2, bool p3) {
+    const bool want[NEOPIXEL_COUNT] = {p0, p1, p2, p3};
+    status_led_strip_t s = status_led_swap_count_for(ordinal);
+    for (int i = 0; i < NEOPIXEL_COUNT; i++) {
+        const status_led_rgb_t on = SWAP_ON;
+        if (want[i]) {
+            ASSERT_RGB(on.r, on.g, on.b, s.px[i]);
+        } else {
+            ASSERT_RGB(0, 0, 0, s.px[i]);
+        }
+    }
+}
+
+void test_swap_count_one_lights_only_the_leftmost_pixel(void) {
+    assert_strip(1, false, false, false, true); /* driver index 3 is leftmost */
+}
+
+void test_swap_count_two_lights_the_pixel_to_its_right(void) {
+    assert_strip(2, false, false, true, false);
+}
+
+void test_swap_count_three_lights_both(void) {
+    assert_strip(3, false, false, true, true);
+}
+
+void test_swap_count_four_and_five(void) {
+    assert_strip(4, false, true, false, false);
+    assert_strip(5, false, true, false, true);
+}
+
+void test_swap_count_fifteen_lights_the_whole_strip(void) {
+    assert_strip(15, true, true, true, true);
+}
+
+void test_swap_count_zero_is_a_dark_strip(void) {
+    assert_strip(0, false, false, false, false);
+}
+
+void test_swap_count_matches_the_countdowns_mapping_for_every_value(void) {
+    for (uint8_t v = 0; v < 16; v++) {
+        status_led_strip_t s = status_led_swap_count_for(v);
+        for (int i = 0; i < NEOPIXEL_COUNT; i++) {
+            const bool lit = s.px[i].r != 0 || s.px[i].g != 0 || s.px[i].b != 0;
+            TEST_ASSERT_EQUAL_MESSAGE(neopixel_binary4_pixel_lit(i, v), lit,
+                                      "pixel disagrees with the countdown's mapping");
+        }
+    }
+}
+
+/* The mapping, restated as the owner's sentence rather than as a shift: bit 0
+   on index 3 and bit 3 on index 0 (neopixel.h's verified-on-hardware note). */
+void test_the_shared_mapping_puts_bit_zero_on_index_three(void) {
+    TEST_ASSERT_TRUE(neopixel_binary4_pixel_lit(3, 1));
+    TEST_ASSERT_FALSE(neopixel_binary4_pixel_lit(0, 1));
+    TEST_ASSERT_TRUE(neopixel_binary4_pixel_lit(0, 8));
+    TEST_ASSERT_FALSE(neopixel_binary4_pixel_lit(3, 8));
+}
+
+/* THE COLOUR CANNOT BE MISTAKEN FOR ANOTHER CLAIMANT'S: not any timer state
+   colour, not the chore strip's two, not the countdown's light green, not the
+   sync pixel's blue / green / red. */
+void test_the_count_colour_is_distinct_from_every_other_claimants(void) {
+    const status_led_rgb_t on = SWAP_ON;
+    const status_led_rgb_t others[] = {
+        status_led_for_state(TIMER_RUNNING),
+        status_led_for_state(TIMER_PAUSED),
+        status_led_for_state(TIMER_EXPIRED),
+        status_led_for_state(TIMER_BREAK),
+        status_led_for_state(TIMER_IDLE),
+        CHORES_LED_DONE,
+        CHORES_LED_TODO,
+        {20, 60, 20}, /* the last-15-seconds countdown (wake_flow.c) */
+        {0, 0, 20},   /* net_window.c: window open */
+        {0, 20, 0},   /* net_window.c: NTP ok */
+        {30, 0, 0},   /* net_window.c: failure */
+    };
+    for (size_t i = 0; i < sizeof others / sizeof others[0]; i++) {
+        const bool same = on.r == others[i].r && on.g == others[i].g && on.b == others[i].b;
+        TEST_ASSERT_FALSE_MESSAGE(same, "the count colour equals another claimant's");
+    }
+    /* Magenta: red and blue together, no green. Every other colour above is
+       either green-bearing, or red alone, or blue alone. */
+    TEST_ASSERT_GREATER_THAN_UINT8(0, on.r);
+    TEST_ASSERT_GREATER_THAN_UINT8(0, on.b);
+    TEST_ASSERT_EQUAL_UINT8(0, on.g);
+}
+
+/* Quiet hours: a counted click is a deliberate press by someone standing at
+   the device, and the strip is the only feedback until the panel paints, so
+   it goes out HIGHPRI like the chore strip, and every pixel is written. */
+void test_swap_count_show_writes_all_four_pixels_highpri_only(void) {
+    status_led_swap_count_show(3);
+    TEST_ASSERT_EQUAL_INT(4, stub_hi_calls);
+    TEST_ASSERT_EQUAL_INT(0, stub_status_calls);
+    bool seen[NEOPIXEL_COUNT] = {false};
+    for (int k = 0; k < 4; k++) {
+        TEST_ASSERT_GREATER_OR_EQUAL_INT(0, stub_seen_idx[k]);
+        TEST_ASSERT_LESS_THAN_INT(NEOPIXEL_COUNT, stub_seen_idx[k]);
+        seen[stub_seen_idx[k]] = true;
+    }
+    for (int i = 0; i < NEOPIXEL_COUNT; i++) {
+        TEST_ASSERT_TRUE_MESSAGE(seen[i], "a pixel was left holding its previous colour");
+    }
+}
+
+void test_swap_count_show_paints_what_the_pure_function_says(void) {
+    status_led_strip_t want = status_led_swap_count_for(6);
+    status_led_swap_count_show(6);
+    for (int k = 0; k < 4; k++) {
+        const int idx = stub_seen_idx[k];
+        TEST_ASSERT_EQUAL_UINT8(want.px[idx].r, stub_seen_r[k]);
+        TEST_ASSERT_EQUAL_UINT8(want.px[idx].g, stub_seen_g[k]);
+        TEST_ASSERT_EQUAL_UINT8(want.px[idx].b, stub_seen_b[k]);
+    }
+}
+
 int main(void) {
     UNITY_BEGIN();
+    RUN_TEST(test_swap_count_one_lights_only_the_leftmost_pixel);
+    RUN_TEST(test_swap_count_two_lights_the_pixel_to_its_right);
+    RUN_TEST(test_swap_count_three_lights_both);
+    RUN_TEST(test_swap_count_four_and_five);
+    RUN_TEST(test_swap_count_fifteen_lights_the_whole_strip);
+    RUN_TEST(test_swap_count_zero_is_a_dark_strip);
+    RUN_TEST(test_swap_count_matches_the_countdowns_mapping_for_every_value);
+    RUN_TEST(test_the_shared_mapping_puts_bit_zero_on_index_three);
+    RUN_TEST(test_the_count_colour_is_distinct_from_every_other_claimants);
+    RUN_TEST(test_swap_count_show_writes_all_four_pixels_highpri_only);
+    RUN_TEST(test_swap_count_show_paints_what_the_pure_function_says);
     RUN_TEST(test_running_is_green);
     RUN_TEST(test_paused_is_amber);
     RUN_TEST(test_expired_is_red);
