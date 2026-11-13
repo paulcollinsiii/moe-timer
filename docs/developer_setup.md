@@ -35,7 +35,7 @@ code .
 
 VS Code finds `.devcontainer/devcontainer.json` and offers **Reopen in
 Container**. The first image build takes a while: it downloads about 2 GB to
-bake ESP-IDF v6.0.1 and the ESP32-S2 toolchain into the image, along with `uv`
+bake ESP-IDF v6.0.3 and the ESP32-S2 toolchain into the image, along with `uv`
 for the Python tools. The toolchain lives in the image (`~/esp/esp-idf`,
 `~/.espressif`), not in a volume, so a container rebuild reuses the cached
 layer. Only a `--no-cache` image rebuild downloads it again, and

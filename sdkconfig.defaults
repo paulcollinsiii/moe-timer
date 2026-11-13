@@ -26,7 +26,10 @@ CONFIG_ESP_CONSOLE_USB_CDC=y
 # coredump — victim frame esp_flash_read() under the NVS read in
 # timer_persist_save(), i.e. the deep-sleep path, so the window opened on
 # EVERY sleep entry and fired ~3x a night whenever host USB traffic hit it.
-# Still unfixed upstream: v6.0.2 and master ship the same linker.lf.
+# The linker.lf of ESP-IDF v6.0.3 (the pinned version) still lists neither
+# function, and puts even the ISR itself under noflash only while this symbol
+# is y. With it n, ISR_FLAG is 0: the ISR is an ordinary one that the
+# cache-off window masks, so the fault cannot occur.
 #
 # n is also the stock IDF default (esp_stdio/Kconfig: "default n") and saves
 # ~1 kB RAM. Ordinary ESP_LOGx over USB CDC is NOT affected — that goes
