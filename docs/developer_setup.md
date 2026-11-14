@@ -315,10 +315,11 @@ the C tests cite) and the screen goldens it names.
 
 Every label takes its font from `include/ui_fonts.h` (`UI_FONT_12` ...
 `UI_FONT_48`). The set behind those names is the `MAGTAG_FONT_SET` Kconfig
-choice; the default is LVGL's stock 4 bpp Montserrat. The other sets are 1 bpp
-fonts generated into `main/fonts/<set>/` and compiled only when selected. The
+choice; the default is `term` (Terminus 12/16/18, Liberation Sans 28/48, all
+1 bpp). The other 1 bpp sets are generated into `main/fonts/<set>/` and
+compiled only when selected; `stock` is LVGL's 4 bpp Montserrat. The
 host golden renderer takes the same switch as a CMake cache variable
-(`cmake -S test -B test/build-fonts-term -DMAGTAG_FONT_SET=term`); only the
+(`cmake -S test -B test/build-fonts-stock -DMAGTAG_FONT_SET=stock`); only the
 default set matches the committed goldens.
 
 To regenerate, edit the code points in `include/ui_font_ranges.h` or the faces

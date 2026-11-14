@@ -554,25 +554,25 @@ void display_screens_build_main(const display_state_t *st) {
 
    The figures below are MEASURED ink rows (inclusive) on the 128 px panel —
    first/last row actually painted, not LVGL box extents, which for a
-   48 pt label overstate the glyphs by 9 rows at each end:
+   48 pt label overstate the glyphs:
 
      element               ink rows     box y
-     "SCREEN BREAK" 18pt     4..16       0     (centred on the column)
-     countdown 48pt         26..59      17     (m:ss / mm:ss / h:mm:ss)
+     "SCREEN BREAK" 18pt     3..14       0     (centred on the column)
+     countdown 48pt         24..56      24     (m:ss / mm:ss / h:mm:ss)
      break bar              68..83      68     (192 x 16)
-     chore line 16pt        89..104     88     (only with a chore list)
-     bottom row 16pt       109..124     BOTTOM -2 (unchanged)
+     chore line 16pt        92..101     88     (only with a chore list)
+     bottom row 16pt       108..123     BOTTOM -2 (unchanged)
 
-   The chore line's rows 89..104 are the '/' of "Chores 0/3", which
-   ascends and descends two rows past the 12-row letters (91..102); the tick
-   form paints only 91..102. Gutters between bands: 9 / 8 / 5 / 4 rows, and
-   4 is the gutter the screen has always run at, so this is no tighter than
-   it has been. test_the_break_chore_line_clears_the_countdown_and_the_row
+   The countdown sits 24 rows down, so its ink starts where CLEAN_BANDS
+   band 1 starts and a blank 9-row gutter separates it from the title; the
+   title is static and the countdown repaints every tick, so they must not
+   share a band. Gutters between bands: 9 / 11 / 8 / 6 rows.
+   test_the_break_chore_line_clears_the_countdown_and_the_row
    measures the bands off the framebuffer and fails if any two touch,
    because on e-ink overlapping white-on-black text is unreadable and a
    regenerated golden would record the overlap as the new correct answer.
-   The art's box ends at row 107 and the bottom row starts at 109: one blank
-   row (a test pins that no ink crosses it).
+   The art's box ends at row 107 and the bottom row's ink starts at 108
+   (a test pins that no ink crosses the box's edge).
 
    With no list the same stack stands and the chore band is simply empty;
    the frozen screen time moves to cell A of the bottom row as before.
@@ -596,7 +596,7 @@ void display_screens_build_main(const display_state_t *st) {
 #define BREAK_COL_X 100
 #define BREAK_COL_W 192
 #define BREAK_TITLE_Y 0
-#define BREAK_COUNTDOWN_Y 17
+#define BREAK_COUNTDOWN_Y 24
 #define BREAK_BAR_Y 68
 #define BREAK_BAR_H 16
 #define BREAK_CHORE_LINE_Y 88
@@ -761,9 +761,9 @@ void display_screens_build_break(const display_state_t *st, const sprite_t *art)
            overprinting the prompt. test_the_break_chore_line_items_never_
            meet sweeps to the 7-day horizon.
 
-           HEIGHT: the letters and digits are 12 ink rows (91..102) and
-           '/' paints 89..104, between the bar (ends 83) and the button
-           row (starts 109): gutters of 5 and 4 rows. The column's three
+           HEIGHT: the line's ink is rows 92..101, between the bar (ends
+           83) and the button row (starts 108): gutters of 8 and 6 rows.
+           The column's three
            bands and the row used to be packed into the full-width screen
            with no room for '/', which is why the prompt used to read
            "2 of 3"; the column has the rows now. */
@@ -789,7 +789,7 @@ void display_screens_build_break(const display_state_t *st, const sprite_t *art)
 
     /* Cell A. With a list, the mode toggle finally gets its label; without
        one, the cell carries the frozen screen time as it always has.
-       The art's box ends at row 107, one row above this row (109..124).
+       The art's box ends at row 107, one row above this row (108..123).
        Either way this is NOT one cell's worth of width, and the two
        overrun differently:
          "Chores"      renders x 5..59  — 5 px past the A/B midline (54)
@@ -1116,9 +1116,9 @@ void display_screens_build_charge_me(const sprite_t *art) {
 #define BEDTIME_COL_X 120
 #define BEDTIME_COL_W 172
 #define BEDTIME_ART_SCALE 4
-#define BEDTIME_TITLE_Y 10    /* "Bed Time" label top: ink rows 14..34 */
-#define BEDTIME_GREETING_Y 54 /* "Goodnight!" label top: ink rows 58..83 (measured off the golden) */
-#define BEDTIME_LINE_Y -2     /* bottom line: offset from the bottom edge, ink rows 108..125 */
+#define BEDTIME_TITLE_Y 10    /* "Bed Time" label top: ink rows 10..29 */
+#define BEDTIME_GREETING_Y 54 /* "Goodnight!" label top: ink rows 54..79 */
+#define BEDTIME_LINE_Y -2     /* bottom line: offset from the bottom edge, ink rows 111..122 */
 
 void display_screens_build_bedtime(const sprite_t *art) {
     lv_obj_t *scr = fresh_screen(true);

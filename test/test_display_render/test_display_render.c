@@ -474,17 +474,42 @@ static int break_ink_bands(int *tops, int *bots, int max) {
    e-ink and MAGTAG_WRITE_GOLDEN would record the overlap as the new
    correct answer — so the bands are pinned exactly and the gutters are
    asserted separately. The same rows are what display.c's CLEAN_BANDS
-   cut up (notes file: which band covers which element). */
-#define BREAK_BAND_TITLE_TOP 4
-#define BREAK_BAND_TITLE_BOT 16
-#define BREAK_BAND_COUNT_TOP 26
-#define BREAK_BAND_COUNT_BOT 59
+   cut up (notes file: which band covers which element).
+
+   Each element owns a WINDOW of rows its ink must stay inside. The windows
+   are the layout contract and do not depend on the font: a face moves the
+   ink inside its window, never out of it. The title's window ends where
+   CLEAN_BANDS band 0 ends (the title is static and must never share a band
+   with the countdown that is repainted every tick); the countdown's starts
+   where band 1 starts. The bar is a drawn box, so its window is exact. */
+#define BREAK_BAND_TITLE_TOP 0
+#define BREAK_BAND_TITLE_BOT 23
+#define BREAK_BAND_COUNT_TOP 24
+#define BREAK_BAND_COUNT_BOT 63
 #define BREAK_BAND_BAR_TOP 68
 #define BREAK_BAND_BAR_BOT 83
-#define BREAK_BAND_CHORE_TOP 89 /* the '/' tip; the letters and digits are 91..102 */
-#define BREAK_BAND_CHORE_BOT 104
-#define BREAK_BAND_ROW_TOP 109
-#define BREAK_BAND_ROW_BOT 124
+#define BREAK_BAND_CHORE_TOP 88
+#define BREAK_BAND_CHORE_BOT 107
+#define BREAK_BAND_ROW_TOP 108
+#define BREAK_BAND_ROW_BOT (VER - 1)
+/* The blank rows between the title and the countdown. The break screen once
+   ran them together; this is the floor that keeps them readable apart. */
+#define BREAK_TITLE_COUNT_GUTTER 6
+
+static void assert_break_bands_in_windows(const int *tops, const int *bots, const int (*win)[2], int n) {
+    for (int i = 0; i < n; i++) {
+        char msg[112];
+        snprintf(msg, sizeof(msg), "band %d is rows %d..%d, outside its window %d..%d", i, tops[i], bots[i], win[i][0],
+                 win[i][1]);
+        TEST_ASSERT_TRUE_MESSAGE(tops[i] >= win[i][0] && bots[i] <= win[i][1], msg);
+    }
+    TEST_ASSERT_EQUAL_INT_MESSAGE(BREAK_BAND_BAR_TOP, tops[2], "the bar is a drawn box and sits exactly");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(BREAK_BAND_BAR_BOT, bots[2], "the bar is a drawn box and sits exactly");
+    char msg[112];
+    snprintf(msg, sizeof(msg), "title ends at row %d, countdown starts at row %d: under %d blank rows", bots[0],
+             tops[1], BREAK_TITLE_COUNT_GUTTER);
+    TEST_ASSERT_TRUE_MESSAGE(tops[1] - bots[0] - 1 >= BREAK_TITLE_COUNT_GUTTER, msg);
+}
 
 void test_the_break_chore_line_clears_the_countdown_and_the_row(void) {
     display_state_t st = break_chore_state(3, 2);
@@ -503,12 +528,7 @@ void test_the_break_chore_line_clears_the_countdown_and_the_row(void) {
                             {BREAK_BAND_BAR_TOP, BREAK_BAND_BAR_BOT},
                             {BREAK_BAND_CHORE_TOP, BREAK_BAND_CHORE_BOT},
                             {BREAK_BAND_ROW_TOP, BREAK_BAND_ROW_BOT}};
-    for (int i = 0; i < 5; i++) {
-        char msg[96];
-        snprintf(msg, sizeof(msg), "band %d is rows %d..%d, expected %d..%d", i, tops[i], bots[i], want[i][0],
-                 want[i][1]);
-        TEST_ASSERT_TRUE_MESSAGE(tops[i] == want[i][0] && bots[i] == want[i][1], msg);
-    }
+    assert_break_bands_in_windows(tops, bots, want, 5);
 
     /* 4 is the gutter the screen has always run at between its countdown
        and its row, so it is the floor every pair of bands has to clear. */
@@ -535,14 +555,11 @@ void test_the_break_screen_without_chores_keeps_the_same_bands_minus_the_chore_l
     int tops[8], bots[8];
     int n = break_ink_bands(tops, bots, 8);
     TEST_ASSERT_EQUAL_INT_MESSAGE(4, n, "no chore list: title / countdown / bar / button row");
-    TEST_ASSERT_EQUAL_INT(BREAK_BAND_TITLE_TOP, tops[0]);
-    TEST_ASSERT_EQUAL_INT(BREAK_BAND_TITLE_BOT, bots[0]);
-    TEST_ASSERT_EQUAL_INT(BREAK_BAND_COUNT_TOP, tops[1]);
-    TEST_ASSERT_EQUAL_INT(BREAK_BAND_COUNT_BOT, bots[1]);
-    TEST_ASSERT_EQUAL_INT(BREAK_BAND_BAR_TOP, tops[2]);
-    TEST_ASSERT_EQUAL_INT(BREAK_BAND_BAR_BOT, bots[2]);
-    TEST_ASSERT_EQUAL_INT(BREAK_BAND_ROW_TOP, tops[3]);
-    TEST_ASSERT_EQUAL_INT(BREAK_BAND_ROW_BOT, bots[3]);
+    const int want[4][2] = {{BREAK_BAND_TITLE_TOP, BREAK_BAND_TITLE_BOT},
+                            {BREAK_BAND_COUNT_TOP, BREAK_BAND_COUNT_BOT},
+                            {BREAK_BAND_BAR_TOP, BREAK_BAND_BAR_BOT},
+                            {BREAK_BAND_ROW_TOP, BREAK_BAND_ROW_BOT}};
+    assert_break_bands_in_windows(tops, bots, want, 4);
 }
 
 /* The countdown at its widest, in both formats, stays inside the column:
@@ -2485,21 +2502,19 @@ void test_the_bedtime_words_never_overlap_the_art(void) {
     TEST_ASSERT_TRUE_MESSAGE(bottom_top >= box_b + 2, msg);
 }
 
-/* The ink rows of the three text lines, as laid out and approved (white ink
-   on black): "Bed Time" 14..34, "Goodnight!" 58..84, the bottom line
-   110..125. The golden measures 58..83 for "Goodnight!" (the mockup's
-   extra descender row), inside the one-row MOCK_TOL. They do not depend on
-   the art. The golden alone guards them blindly; this pins each within
-   MOCK_TOL rows. The bottom line's top is
-   looser: the layout was drawn with 16-row 18 pt glyphs, LVGL's Montserrat 18
-   are 18, so the bottom edge is matched and the top sits 2 rows higher. */
-#define MOCK_BEDTIME_TOP 14
-#define MOCK_BEDTIME_BOT 34
-#define MOCK_GOODNIGHT_TOP 58
-#define MOCK_GOODNIGHT_BOT 84
-#define MOCK_LINE_TOP 110
-#define MOCK_LINE_BOT 125
-#define MOCK_TOL 1
+/* The ink rows of the three text lines (white ink on black). The layout
+   contract is a WINDOW per line, not the rows a particular face happens to
+   paint: a font moves the ink inside its window, never out of it, and the
+   windows keep the lines clear of each other and of the art's box (which
+   ends at row 95; it does not depend on the text). The golden alone guards
+   the rows blindly; this keeps a font change from silently crowding them. */
+#define BEDTIME_TITLE_WIN_TOP BEDTIME_ART_Y
+#define BEDTIME_TITLE_WIN_BOT (BEDTIME_GREETING_Y - 1)
+#define BEDTIME_GREET_WIN_TOP BEDTIME_GREETING_Y
+#define BEDTIME_GREET_WIN_BOT 99
+#define BEDTIME_LINE_WIN_TOP 100
+#define BEDTIME_LINE_WIN_BOT (VER - 1)
+#define BEDTIME_LINE_GUTTER 8 /* blank rows between two lines of text */
 
 static void ink_rows(int x0, int y0, int y1, int *top, int *bot) {
     *top = -1;
@@ -2516,24 +2531,26 @@ static void ink_rows(int x0, int y0, int y1, int *top, int *bot) {
     }
 }
 
-static void assert_rows_near(const char *what, int top, int bot, int want_top, int want_bot, int top_tol) {
+static void assert_rows_within(const char *what, int top, int bot, int win_top, int win_bot) {
     char msg[96];
-    snprintf(msg, sizeof(msg), "%s ink rows %d..%d, approved %d..%d", what, top, bot, want_top, want_bot);
-    TEST_ASSERT_TRUE_MESSAGE(top >= want_top - top_tol && top <= want_top + top_tol, msg);
-    TEST_ASSERT_TRUE_MESSAGE(bot >= want_bot - MOCK_TOL && bot <= want_bot + MOCK_TOL, msg);
+    snprintf(msg, sizeof(msg), "%s ink rows %d..%d, window %d..%d", what, top, bot, win_top, win_bot);
+    TEST_ASSERT_TRUE_MESSAGE(top >= 0 && bot >= 0, msg); /* it painted at all */
+    TEST_ASSERT_TRUE_MESSAGE(top >= win_top && bot <= win_bot, msg);
 }
 
-void test_the_bedtime_text_rows_match_the_approved_layout(void) {
+void test_the_bedtime_text_rows_stay_in_their_windows(void) {
     display_screens_build_bedtime(NULL);
     lv_refr_now(s_disp);
-    int top, bot;
-    /* the words live right of the art, above the bottom line (rows < 100) */
-    ink_rows(BEDTIME_COL_X, 0, 40, &top, &bot);
-    assert_rows_near("Bed Time", top, bot, MOCK_BEDTIME_TOP, MOCK_BEDTIME_BOT, MOCK_TOL);
-    ink_rows(BEDTIME_COL_X, 41, 99, &top, &bot);
-    assert_rows_near("Goodnight!", top, bot, MOCK_GOODNIGHT_TOP, MOCK_GOODNIGHT_BOT, MOCK_TOL);
-    ink_rows(0, 100, VER - 1, &top, &bot);
-    assert_rows_near("bottom line", top, bot, MOCK_LINE_TOP, MOCK_LINE_BOT, 2);
+    int t0, b0, t1, b1, t2, b2;
+    /* the words live right of the art, above the bottom line */
+    ink_rows(BEDTIME_COL_X, 0, BEDTIME_TITLE_WIN_BOT, &t0, &b0);
+    assert_rows_within("Bed Time", t0, b0, BEDTIME_TITLE_WIN_TOP, BEDTIME_TITLE_WIN_BOT);
+    ink_rows(BEDTIME_COL_X, BEDTIME_GREET_WIN_TOP, BEDTIME_GREET_WIN_BOT, &t1, &b1);
+    assert_rows_within("Goodnight!", t1, b1, BEDTIME_GREET_WIN_TOP, BEDTIME_GREET_WIN_BOT);
+    ink_rows(0, BEDTIME_LINE_WIN_TOP, BEDTIME_LINE_WIN_BOT, &t2, &b2);
+    assert_rows_within("bottom line", t2, b2, BEDTIME_LINE_WIN_TOP, BEDTIME_LINE_WIN_BOT);
+    TEST_ASSERT_TRUE_MESSAGE(t1 - b0 - 1 >= BEDTIME_LINE_GUTTER, "Bed Time and Goodnight! are crowded together");
+    TEST_ASSERT_TRUE_MESSAGE(t2 - b1 - 1 >= BEDTIME_LINE_GUTTER, "Goodnight! and the bottom line are crowded together");
 }
 
 /* ---- the chore checklist (design §2.4) ---------------------------------- */
@@ -3145,24 +3162,32 @@ static lv_obj_t *locked_label(void) {
     return NULL;
 }
 
-/* The margin between the last glyph and the divider, on the TIGHTEST
-   block the config domain can produce — an 8 min day with chore_free 6
-   withholds 2 min, which is 70 px of the 280, allotting exactly 62 px,
-   and "0/1 - 2 min" measures exactly 62. Zero slack anywhere in the
-   sweep, so the margin here is precisely LOCKED_LABEL_PAD on each side
-   and one pixel of drift in either direction fails.
+static int32_t text_w_12(const char *txt);
 
-   Deliberately NOT the 46 px block this test used before the fit ladder
-   landed. 46 px allots 38 px and the narrowest rung ("10 min") needs 39,
-   so the painter now draws NO LABEL there — and a corridor scan with no
-   label in it passes for the wrong reason. The old version asserted the
-   margin of a label that, before the ladder, was a half-rendered "0/3 C"
-   and, after it, does not exist. Hence the explicit text assertion
-   below: this test must fail, not pass, if the ladder ever stops
-   drawing here. */
+/* The margin between the last glyph and the divider, on the TIGHTEST
+   block the pair rung can fill: one exactly as wide as that rung's
+   measured text plus LOCKED_LABEL_PAD on each side. The block's width is
+   found from the font (the pair rung "0/1 - 2 min" is measured, then the
+   allocation is searched until the 2 min withholding is exactly that many
+   px of the 280), so the test holds for any face: zero slack anywhere,
+   the margin is precisely LOCKED_LABEL_PAD on each side and one pixel of
+   drift in either direction fails.
+
+   Deliberately NOT a block narrower than the narrowest rung. There the
+   painter draws NO LABEL, and a corridor scan with no label in it passes
+   for the wrong reason. Hence the explicit text assertion below: this test
+   must fail, not pass, if the ladder ever stops drawing here. */
 void test_the_locked_label_cannot_overstrike_the_free_tranche(void) {
+    const int32_t pair_w = text_w_12("0/1 - 2 min");
+    const uint32_t want_px = (uint32_t)pair_w + 2 * LOCKED_LABEL_PAD;
+    uint32_t alloc = 0;
+    for (uint32_t a = 121; a <= 3600 && alloc == 0; a++) {
+        if (display_bar_split((int32_t)a, a, 120).locked_px == want_px)
+            alloc = a;
+    }
+    TEST_ASSERT_NOT_EQUAL_MESSAGE(0, alloc, "no allocation puts a 2 min withholding at the pair rung's width");
     display_state_t st = gated_state(1, 0x00, 120);
-    st.allocation_sec = 480;
+    st.allocation_sec = alloc;
     st.remaining_sec = 0;
     display_screens_build_main(&st);
     lv_refr_now(s_disp);
@@ -3170,7 +3195,7 @@ void test_the_locked_label_cannot_overstrike_the_free_tranche(void) {
     /* Anti-vacuity: the corridor below is white whether the label fits or
        was never drawn, so pin which rung is on the glass. */
     lv_obj_t *lbl = locked_label();
-    TEST_ASSERT_NOT_NULL_MESSAGE(lbl, "no label on a 70 px block - the corridor scan below would pass vacuously");
+    TEST_ASSERT_NOT_NULL_MESSAGE(lbl, "no label on the tightest block - the corridor scan below would pass vacuously");
     TEST_ASSERT_EQUAL_STRING_MESSAGE("0/1 - 2 min", lv_label_get_text(lbl),
                                      "the tightest-fitting rung is not the one being measured");
 
@@ -3178,12 +3203,13 @@ void test_the_locked_label_cannot_overstrike_the_free_tranche(void) {
        the boundary — everywhere else it is the left edge of the fill and
        black on black. Row 29 is above the label, so the block's interior
        is clean there and the two border columns stand alone.
-       Block object is 70 + 2*2 = 74 px at x=6, so it spans x=6..79 and
-       its right border — the divider — is x=78,79. */
-    static const struct {
+       The block object is want_px + 2*2 wide at x=6, so its right border
+       — the divider — is the last two columns. */
+    const int32_t div0 = MAIN_BAR_X + (int32_t)want_px + MAIN_BAR_BORDER; /* first divider column */
+    const struct {
         int32_t x;
         int expect;
-    } EDGE[] = {{77, 1}, {78, 0}, {79, 0}, {80, 1}}; /* interior | divider | free */
+    } EDGE[] = {{div0 - 1, 1}, {div0, 0}, {div0 + 1, 0}, {div0 + 2, 1}}; /* interior | divider | free */
     for (size_t i = 0; i < sizeof(EDGE) / sizeof(EDGE[0]); i++) {
         int bit = (s_captured[29 * (HOR / 8) + EDGE[i].x / 8] >> (7 - (EDGE[i].x & 7))) & 1;
         char msg[96];
@@ -3201,18 +3227,19 @@ void test_the_locked_label_cannot_overstrike_the_free_tranche(void) {
        glyph and the divider, so the block reads as a box with a word in
        it rather than as text wedged against a line.
 
-       x 74..77 is that margin (block interior 8..77, label from x=12 and
-       exactly 62 px wide, so ink ends at x=73); x 80..287 is the free
-       tranche, which the clip and the fit both have to keep white.
-       Bounds are the constants, not measured edges. */
+       div0-4..div0-1 is that margin (the label starts at x=12 and is
+       exactly the pair rung's width, so ink ends LOCKED_LABEL_PAD short of
+       the divider); div0+2..287 is the free tranche, which the clip and
+       the fit both have to keep white. Bounds are the constants, not
+       measured edges. */
     for (int32_t y = 28; y <= 47; y++) {
-        for (int32_t x = 74; x <= 287; x++) {
-            if (x > 77 && x < 80)
+        for (int32_t x = div0 - LOCKED_LABEL_PAD; x <= 287; x++) {
+            if (x >= div0 && x < div0 + 2)
                 continue; /* the divider itself: black by design */
             int bit = (s_captured[y * (HOR / 8) + x / 8] >> (7 - (x & 7))) & 1;
             char msg[112];
-            snprintf(msg, sizeof(msg), "ink at x=%d y=%d - the locked label spilled out of a 70 px block%s", (int)x,
-                     (int)y, (x <= 77) ? " (into the divider's margin)" : "");
+            snprintf(msg, sizeof(msg), "ink at x=%d y=%d - the locked label spilled out of its block%s", (int)x, (int)y,
+                     (x < div0) ? " (into the divider's margin)" : "");
             TEST_ASSERT_EQUAL_HEX8_MESSAGE(1, bit, msg); /* LVGL I1: 1 = white */
         }
     }
@@ -3549,7 +3576,7 @@ int main(void) {
     RUN_TEST(test_the_bedtime_screen_fits_the_panel);
     RUN_TEST(test_the_bedtime_screen_paints_the_art_at_the_left_at_four_times_its_size);
     RUN_TEST(test_the_bedtime_words_never_overlap_the_art);
-    RUN_TEST(test_the_bedtime_text_rows_match_the_approved_layout);
+    RUN_TEST(test_the_bedtime_text_rows_stay_in_their_windows);
     RUN_TEST(test_chore_screen_one_acked);
     RUN_TEST(test_chore_screen_all_acked);
     RUN_TEST(test_chore_screen_two_chores);
