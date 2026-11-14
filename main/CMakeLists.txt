@@ -64,8 +64,12 @@ endif()
 
 # UI fonts: the generated 1 bpp sources (ui_font_term_<px>.c). Regenerate
 # with tools/gen_fonts.py.
-file(GLOB UI_FONT_SRCS CONFIGURE_DEPENDS RELATIVE "${CMAKE_CURRENT_SOURCE_DIR}"
-     "${CMAKE_CURRENT_SOURCE_DIR}/fonts/*.c")
+set(UI_FONT_SRCS
+    "fonts/ui_font_term_12.c"
+    "fonts/ui_font_term_16.c"
+    "fonts/ui_font_term_18.c"
+    "fonts/ui_font_term_28.c"
+    "fonts/ui_font_term_48.c")
 
 idf_component_register(
     SRCS

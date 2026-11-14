@@ -163,10 +163,8 @@ CONFIG_LV_FONT_DEFAULT_UNSCII_8=y
 # LVGL size trim: the panel renders 1-bit (LV_COLOR_FORMAT_I1) and the UI only ever creates
 # lv_label and lv_bar widgets (display_screens.c) — no LV_SYMBOL, no flex/grid
 # layout, no shadow/transform. Every other widget, layout engine and the
-# observer/examples/demos code is dead weight; LVGL is the single largest
-# archive in the image (about 258 KB of text and rodata at -Os, 181 KB of it
-# rodata, mostly the five Montserrat fonts; map of 2026-11-13) so trimming it is the main lever against the
-# 85 % slot guard. LV_DRAW_SW_COMPLEX is turned off, see its line below.
+# observer/examples/demos code is dead weight, and trimming LVGL is a main
+# lever against the 85 % slot guard. LV_DRAW_SW_COMPLEX is turned off, see its line below.
 # CONFIG_LV_USE_ANIMIMG is not set
 # CONFIG_LV_USE_ARC is not set
 # CONFIG_LV_USE_ARCLABEL is not set
