@@ -102,7 +102,7 @@ typedef enum {
    BIT(ESP_SLEEP_WAKEUP_EXT1) from the same enum as the decode, so drift
    moves both sides of the comparison together and every wake-cause test
    keeps passing while asserting the inverse of what the silicon does.
-   Values are esp_sleep.h's as of IDF 6.0.1. If IDF ever renumbers, the
+   Values are esp_sleep.h's as of IDF 6.0.3. If IDF ever renumbers, the
    firmware build is where you want to find out. */
 _Static_assert(ESP_SLEEP_WAKEUP_EXT1 == 3, "wake-cause decode assumes IDF's numbering; host fallback mirrors it");
 _Static_assert(ESP_SLEEP_WAKEUP_TIMER == 4, "wake-cause decode assumes IDF's numbering; host fallback mirrors it");
