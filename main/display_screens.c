@@ -931,8 +931,8 @@ void display_screens_build_chores(const display_state_t *st) {
 #define TIMESUP_ART_X 2
 #define TIMESUP_COL_X 180 /* right column: 180..295 */
 #define TIMESUP_COL_W 116
-#define TIMESUP_TIMES_Y 26
-#define TIMESUP_UP_Y 60
+#define TIMESUP_TIMES_Y 30
+#define TIMESUP_UP_Y 69
 
 void display_screens_build_timesup(const sprite_t *art) {
     lv_obj_t *scr = fresh_screen(false);
@@ -966,7 +966,7 @@ void display_screens_build_sync_failed(void) {
    off the edges, since LVGL clips rather than wraps. */
 void display_screens_build_no_clock(void) {
     lv_obj_t *scr = fresh_screen(false);
-    make_label(scr, "No Clock", UI_FONT_28, LV_ALIGN_TOP_MID, 0, 2);
+    make_label(scr, "No Clock", UI_FONT_28, LV_ALIGN_TOP_MID, 0, 6);
     make_label(scr, "Time not synced - check WiFi", UI_FONT_16, LV_ALIGN_TOP_MID, 0, 44);
     make_label(scr, "No screen time until it syncs", UI_FONT_12, LV_ALIGN_TOP_MID, 0, 70);
     make_label(scr, "Press D to retry", UI_FONT_16, LV_ALIGN_BOTTOM_MID, 0, -4);
@@ -993,8 +993,9 @@ void display_screens_build_no_clock(void) {
 #define CHARGE_ART_X 8
 #define CHARGE_COL_X 124 /* right column: 124..287, centred on x=206 */
 #define CHARGE_COL_W 164
-#define CHARGE_TEXT_Y 14
-#define BATT_W 56 /* body, nub excluded */
+#define CHARGE_TEXT_Y 18
+#define CHARGE_LINE_SPACE 4 /* 28 pt line height 26 packs the two lines; +4 leaves a 5-row gutter */
+#define BATT_W 56           /* body, nub excluded */
 #define BATT_H 24
 #define BATT_BORDER 3
 #define BATT_NUB_W 5
@@ -1097,6 +1098,7 @@ void display_screens_build_charge_me(const sprite_t *art) {
     lv_obj_t *words = make_label(scr, "Charge\nme!", UI_FONT_28, LV_ALIGN_TOP_LEFT, CHARGE_COL_X, CHARGE_TEXT_Y);
     lv_obj_set_width(words, CHARGE_COL_W);
     lv_obj_set_style_text_align(words, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_line_space(words, CHARGE_LINE_SPACE, 0);
 
     build_empty_battery(scr, BATT_X, BATT_Y);
 }
@@ -1169,7 +1171,7 @@ void display_screens_build_config_error(day_type_t day_type, uint16_t chore_free
     lv_obj_t *scr = fresh_screen(false);
     char buf[64];
 
-    make_label(scr, "Config Error", UI_FONT_28, LV_ALIGN_TOP_MID, 0, 2);
+    make_label(scr, "Config Error", UI_FONT_28, LV_ALIGN_TOP_MID, 0, 6);
 
     /* NAMES THE PAIR, which is what makes the fix possible without a
        laptop and is the one thing distinguishing this from the
@@ -1371,8 +1373,8 @@ void display_screens_build_setup(const char *ap_ssid, const char *ap_password, c
    least frequent paint on the panel, so the cadence has no say over it. */
 void display_screens_build_setup_release(void) {
     lv_obj_t *scr = fresh_screen(false);
-    make_label(scr, "Release to", UI_FONT_28, LV_ALIGN_TOP_MID, 0, 24);
-    make_label(scr, "enter setup", UI_FONT_28, LV_ALIGN_TOP_MID, 0, 64);
+    make_label(scr, "Release to", UI_FONT_28, LV_ALIGN_TOP_MID, 0, 28);
+    make_label(scr, "enter setup", UI_FONT_28, LV_ALIGN_TOP_MID, 0, 68);
 }
 
 /* ---- the end-of-session screens: what will actually retry setup -------- */

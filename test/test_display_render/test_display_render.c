@@ -2119,6 +2119,80 @@ void test_the_charge_me_screen_fits_the_panel(void) {
     TEST_ASSERT_TRUE_MESSAGE(bottom <= VER - 3, msg);
 }
 
+/* "Charge" over "me!" must read as two lines, not one block: the label's line
+   pitch is the font's, so a face with a tight line height packs them (term
+   28 pt once left 1 blank row, stock 5). The words stay clear of the battery
+   below. Ink here is dark on white. */
+#define CHARGE_LINE_GUTTER 5 /* blank rows between the two lines */
+void test_the_charge_me_words_keep_a_gutter_between_lines(void) {
+    display_screens_build_charge_me(NULL);
+    lv_refr_now(s_disp);
+    int tops[4], bots[4], n = 0;
+    bool in = false;
+    for (int y = 0; y < BATT_Y; y++) {
+        bool row = false;
+        for (int x = CHARGE_COL_X; x < HOR && !row; x++)
+            row = !white_px(x, y);
+        if (row && !in && n < 4)
+            tops[n] = y;
+        if (!row && in)
+            bots[n++] = y - 1;
+        in = row;
+    }
+    char msg[96];
+    snprintf(msg, sizeof(msg), "%d ink bands above the battery row (want 2)", n);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(2, n, msg);
+    int gutter = tops[1] - bots[0] - 1;
+    snprintf(msg, sizeof(msg), "gutter between the lines %d rows (bands %d..%d, %d..%d)", gutter, tops[0], bots[0],
+             tops[1], bots[1]);
+    TEST_ASSERT_TRUE_MESSAGE(gutter >= CHARGE_LINE_GUTTER, msg);
+    TEST_ASSERT_TRUE_MESSAGE(BATT_Y - bots[1] - 1 >= 16, msg); /* clear of the battery */
+}
+
+static void assert_rows_within(const char *what, int top, int bot, int win_top, int win_bot);
+
+/* Dark-ink rows of x0.. between y0 and y1 (the upright screens). */
+static void dark_rows(int x0, int y0, int y1, int *top, int *bot) {
+    *top = *bot = -1;
+    for (int y = y0; y <= y1; y++) {
+        for (int x = x0; x < HOR; x++) {
+            if (!white_px(x, y)) {
+                if (*top < 0)
+                    *top = y;
+                *bot = y;
+                break;
+            }
+        }
+    }
+}
+
+/* The 28 pt titles sit where the screens were laid out for them: a face with
+   a smaller ascent paints higher in the same label box, so the label offsets
+   are tuned and these windows catch a title drifting to the panel edge. */
+void test_the_28pt_titles_keep_their_vertical_placement(void) {
+    int t, b;
+    display_screens_build_no_clock();
+    lv_refr_now(s_disp);
+    dark_rows(0, 0, 36, &t, &b);
+    assert_rows_within("No Clock title", t, b, 5, 30);
+    display_screens_build_config_error(DAY_WEEKDAY, 120, 60);
+    lv_refr_now(s_disp);
+    dark_rows(0, 0, 40, &t, &b);
+    assert_rows_within("Config Error title", t, b, 5, 34);
+    display_screens_build_setup_release();
+    lv_refr_now(s_disp);
+    dark_rows(0, 0, 55, &t, &b);
+    assert_rows_within("Release to", t, b, 28, 50);
+    dark_rows(0, 60, VER - 1, &t, &b);
+    assert_rows_within("enter setup", t, b, 68, 96);
+    display_screens_build_timesup(NULL);
+    lv_refr_now(s_disp);
+    dark_rows(TIMESUP_COL_X + 2, 0, 56, &t, &b);
+    assert_rows_within("TIME'S", t, b, 29, 52);
+    dark_rows(TIMESUP_COL_X + 2, 57, 127, &t, &b);
+    assert_rows_within("UP!", t, b, 66, 104);
+}
+
 /* A golden alone would freeze a screen with a missing sprite as correct. The
    art's ink must fill its box exactly (x 8..112, y 3..124: CHARGE_ART_X,
    centred in 128 px, 105x122) and nothing else may be left of the right
@@ -3563,6 +3637,8 @@ int main(void) {
     RUN_TEST(test_ota_screen_lines_fit_the_panel);
     RUN_TEST(test_charge_me_screen);
     RUN_TEST(test_the_charge_me_screen_fits_the_panel);
+    RUN_TEST(test_the_charge_me_words_keep_a_gutter_between_lines);
+    RUN_TEST(test_the_28pt_titles_keep_their_vertical_placement);
     RUN_TEST(test_the_charge_me_screen_paints_the_art_at_the_left);
     RUN_TEST(test_timesup_screen);
     RUN_TEST(test_the_timesup_screen_fits_the_panel_but_for_the_art_bottom_bleed);
