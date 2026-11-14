@@ -91,17 +91,18 @@ static lv_obj_t *make_label(lv_obj_t *parent, const char *text, const lv_font_t 
    raw out of NVS, so no character budget bounds them. */
 #define CONFIG_ERR_LINE_MAX_W 280
 /* The status row's left half, against the state word right-aligned at
-   x=292. "TIME'S UP" is the widest state word at 62 px, so it starts at
-   x=230; allowing 6 px of gap leaves x=224, and from the left margin at
-   x=4 that is 220. Measured against the real font in
+   x=292. "TIME'S UP" is the widest state word at 54 px, so it starts at
+   x=238; the cap leaves x=224, a 14 px gap, from the left margin at x=4
+   that is 220. Measured against the real font in
    test_mode_row_fits_beside_the_state_word, not guessed.
 
    This is a geometric BACKSTOP, not a width the worst line fits inside.
-   Uncapped, "Weekday - 1440 min (-240 min today)" ends at exactly x=230:
-   it abuts "TIME'S UP" with no gap rather than overstriking it, and the
-   cap does not make it fit — it clips the last 6 px, which is the closing
-   paren. The cap's job is that the two strings never touch, whatever the
-   row is asked to carry.
+   Uncapped, "Weekday - 1440 min (-240 min today)" ends at x=214, 24 px
+   short of "TIME'S UP", so the cap does not touch it; it clips only the
+   longer rows (a long timer name with its counter, or a week of stacked
+   grants), which would otherwise run into the state word. The cap's job
+   is that the two strings never touch, whatever the row is asked to
+   carry.
 
    And it can be asked to carry more than that line. The suffix's
    magnitude is a RUNNING TOTAL of everything applied today, so the
@@ -228,8 +229,8 @@ static void build_main_header(lv_obj_t *scr, const display_state_t *st) {
    hold a word. What actually decides whether a label is drawn is
    build_locked_block's fit ladder below, and the threshold is the
    MEASURED width of the narrowest rung, so it moves with the figure:
-   "40 min" is 43 px and needs a 51 px block, a one-digit "9 min" 34 px
-   and 42, "240 min" 50 px and 58. Below its own threshold each figure
+   "40 min" is 36 px and needs a 44 px block, a one-digit "9 min" 30 px
+   and 38, "240 min" 42 px and 50. Below its own threshold each figure
    draws nothing at all.
 
    An empty outline is a true statement, and a lossy one: the withheld
@@ -286,7 +287,7 @@ static void build_main_header(lv_obj_t *scr, const display_state_t *st) {
 
    THE LABEL MUST NOT BE CLIPPED. The block's width is a config decision
    (withheld / allocation of 280 px), not a layout one, and §4.1's
-   sentence needs a 127 px block for a two-digit figure and 134 for a
+   sentence needs a 122 px block for a two-digit figure and 128 for a
    three-digit one; a 60 min day with chore_free 40
    gives 93 px, where clipping renders "0/3 Chores - 2" for 20 locked
    minutes — a complete, plausible, wrong number, which is worse than no
@@ -404,7 +405,7 @@ static void build_main_status(lv_obj_t *scr, const display_state_t *st) {
 
        Two independent limits keep this off the 28 pt remaining time,
        which starts at x=180 in the worst case: the DISPLAY_VERSION_MAX
-       budget (12 digits -> ends x=164, 16 px clear) and cap_width()'s
+       budget (12 digits -> ends x=145, 35 px clear) and cap_width()'s
        geometric backstop at 168 px, which holds for any glyph mix.
        Buffer: 3 (symbol, a 3-byte UTF-8 private-use codepoint) + 1 + 3
        ("100") + 1 ('%') + 4 (gap + 'v') + 12 (budget) = 24 bytes + NUL,
@@ -493,7 +494,7 @@ static void build_main_status(lv_obj_t *scr, const display_state_t *st) {
 
    LEFT-ANCHORED, NOT CENTRED ON BTN_MID_OFS(0), for the reason the chore
    screen's "Timers" records at its own call: button A's centre is only
-   17 px in (BTN_X0), so a ~41 px label centred on it starts at x=-4 and
+   17 px in (BTN_X0), so a ~36 px label centred on it starts at x=-1 and
    loses its first glyph off the panel. Measured there, not guessed; this
    is the same geometry and takes the same answer.
 
@@ -602,7 +603,7 @@ void display_screens_build_main(const display_state_t *st) {
 #define BREAK_CHORE_LINE_Y 88
 /* The widest chore prompt ("Chores 0/3", measured, CHORE_MAX is 3) and the
    width left for the right-hand "Screen h:mm" beside it. */
-#define BREAK_PROMPT_MAX_W 86
+#define BREAK_PROMPT_MAX_W 80
 #define BREAK_SCREEN_MAX_W (BREAK_COL_W - BREAK_PROMPT_MAX_W)
 
 void display_screens_build_break(const display_state_t *st, const sprite_t *art) {
@@ -720,7 +721,7 @@ void display_screens_build_break(const display_state_t *st, const sprite_t *art)
            its right edge (x 292, the panel's usual 4 px margin). The
            frozen time is on this line rather than in the row below
            because it cannot BE in that row any more — "Screen 1:30" is
-           90 px and centred over button B it spans x 46..136, which runs
+           88 px and centred over button B it spans x 47..135, which runs
            into "Chores" at one end and the swap hint at the other. The
            design's mock draws it over B; the measurement says only three
            items fit that row, so the fourth moved up.
@@ -737,27 +738,25 @@ void display_screens_build_break(const display_state_t *st, const sprite_t *art)
            advance — '0' is 3 px wider than '1' — so neither side's worst
            case can be reasoned about from the character count. The
            column is 192 px (the figure takes the rest of the panel):
-             "Chores 0 of 3"   105 px  + "Screen 20:00" 106 px = 211 > 192
-             "Chores 0/3"       86 px  + "Screen 20:00" 106 px = 192, no gap
+             "Chores 0 of 3"   104 px  + "Screen 20:00"  96 px = 200 > 192
+             "Chores 0/3"       80 px  + "Screen 20:00"  96 px = 176, 16 gap
            so the plan's "Chores 1 of 3" does not fit at the widest values
            and the prompt is "Chores 1/3" (display_format_chore_prompt).
-           Even that leaves a gap only while the hour is one digit: the
-           boxes are at least 9 px apart under 10 h, and from 10 h they
-           abut (0..3 px).
+           The gap narrows as the hour gains digits: the boxes are at
+           least 24 px apart under 10 h, and from 10 h they are 8 px apart.
 
            THE FROZEN TIME IS NOT BOUNDED BY THE ALLOCATION (24 h,
            CFG_BOUND_ALLOC_HI): remaining_sec is the allocation PLUS
            grants (a cmd grant is up to GRANT_MAX_MINUTES and they stack,
            one per network window), and the snapshot accepts up to
            SNAPSHOT_MAX_HORIZON_SEC (7 days), so "Screen 168:00" is
-           reachable. Uncapped it is 119 px wide and would overstrike the
-           prompt from 40 h (2 px at 2400 min, 8 px at 100 h). So the
-           right-hand label is capped at BREAK_SCREEN_MAX_W — the column
+           reachable. It is 104 px wide, which this face still fits beside
+           the prompt (8 px apart); a wider face would overstrike it. So
+           the right-hand label is capped at BREAK_SCREEN_MAX_W — the column
            less the widest prompt, i.e. exactly the widest time that does
            not touch it — and clips (cap_width()) instead of growing left.
-           Up to "Screen 20:00" the cap changes nothing, so every
-           ordinary value renders exactly as before; beyond it the label
-           loses its trailing digits, which is the lesser evil next to
+           With the compiled face the cap never binds; beyond it the label
+           would lose its trailing digits, which is the lesser evil next to
            overprinting the prompt. test_the_break_chore_line_items_never_
            meet sweeps to the 7-day horizon.
 
@@ -790,10 +789,11 @@ void display_screens_build_break(const display_state_t *st, const sprite_t *art)
     /* Cell A. With a list, the mode toggle finally gets its label; without
        one, the cell carries the frozen screen time as it always has.
        The art's box ends at row 107, one row above this row (108..123).
-       Either way this is NOT one cell's worth of width, and the two
-       overrun differently:
-         "Chores"      renders x 5..59  — 5 px past the A/B midline (54)
-         "Screen 1:30" renders x 5..91  — all of A and most of B, ending
+       Either way this is not always one cell's worth of width, and the
+       two differ:
+         "Chores"      renders x 4..52  — inside cell A (the A/B midline
+                                          is 54)
+         "Screen 1:30" renders x 4..92  — all of A and most of B, ending
                                           on B's button centre
        Both are safe for the same single reason: cell B carries no label on
        this screen, because the break is still enforced for the Screen
@@ -844,8 +844,9 @@ void display_screens_build_break(const display_state_t *st, const sprite_t *art)
 #define CHORE_NAME_X 32
 /* Geometric cap for a name, which is the ONLY thing that can bound its
    rendered width: chores.h measured exactly this trap (a byte budget
-   cannot, because glyph advances differ — 20 'W' at 16 pt render 360 px
-   against a 296 px panel). From the name column to a 4 px right margin:
+   cannot, because glyph advances differ — 20 'W' at 16 pt in a
+   proportional face such as Montserrat render 360 px against a 296 px
+   panel). From the name column to a 4 px right margin:
    296 - 32 - 4. cap_width() clips rather than wraps, so an over-long name
    cannot push itself down into the next row's band. */
 #define CHORE_NAME_MAX_W 260
@@ -891,8 +892,8 @@ void display_screens_build_chores(const display_state_t *st) {
        established that chores are configured and no timer is RUNNING, which
        is exactly button_a_toggle_allowed()'s rule, so A really will act.
        A's label is LEFT-ALIGNED, not centred on its button like the other
-       three. Button A's centre is only 17 px in (BTN_X0), so a 41 px
-       "Timers" centred there starts at x=-4 and loses its first glyph off
+       three. Button A's centre is only 17 px in (BTN_X0), so a 36 px
+       "Timers" centred there starts at x=-1 and loses its first glyph off
        the panel — measured, by test_the_chore_button_row_fits_its_cells
        before this line read BOTTOM_LEFT. The break screen's bottom row
        already anchors its cell-A item at x=4 for the same reason, and
@@ -1201,9 +1202,9 @@ void display_screens_build_ota(const char *from_version, const char *to_version)
     char ver[DISPLAY_VERSION_MAX + 1];
 
     /* Title case, not the plan's "UPDATING FIRMWARE": all caps at 28 pt
-       measures 327 px against a 296 px panel, so LVGL would clip the tail
-       off "FIRMWARE" (a content-sized label does not wrap). Title case is
-       279 px — 8 px of margin each side — and matches the other big
+       measures about 305 px against a 296 px panel, so LVGL would clip the
+       tail off "FIRMWARE" (a content-sized label does not wrap). Title case
+       is 238 px — 29 px of margin each side — and matches the other big
        headlines in this tree ("Charge Me!", "Bed Time"). The render test
        pins the width. */
     make_label(scr, "Updating Firmware", UI_FONT_28, LV_ALIGN_TOP_MID, 0, 6);
@@ -1219,8 +1220,8 @@ void display_screens_build_ota(const char *from_version, const char *to_version)
        direction. */
     display_format_version(ver, sizeof(ver), to_version);
     snprintf(buf, sizeof(buf), "Installing v%s", (ver[0] != '\0') ? ver : "?");
-    /* 18 pt is the binding line: untruncated it clips off the panel at 21
-       characters (measured 303 px against 296). */
+    /* 18 pt is the binding line: untruncated it clips off the panel at 33
+       characters (9 px each, 297 px against 296). */
     cap_width(make_label(scr, buf, UI_FONT_18, LV_ALIGN_TOP_MID, 0, 66), OTA_LINE_MAX_W);
 
     /* Honest rather than strictly necessary — the write goes to the
@@ -1348,10 +1349,9 @@ void display_screens_build_setup(const char *ap_ssid, const char *ap_password, c
     make_label(scr, "Password:", UI_FONT_12, LV_ALIGN_TOP_LEFT, SETUP_TEXT_X, SETUP_PW_LABEL_Y);
 
     /* The largest compiled size that fits the column for a typical draw —
-       measured, not assumed: 28 pt already clips a sample password (201 px
-       natural against a 178 px column), so 18 pt is the ceiling, at 129 px
-       for that same string (the column is 173 px since the QR block grew
-       to 111 px, still ample). AP_PASS_ALPHABET (setup_session.c) still
+       measured, not assumed: 28 pt already clips a sample password (about
+       189 px natural against the 173 px column), so 18 pt is the ceiling,
+       at 90 px for that same string (still ample). AP_PASS_ALPHABET (setup_session.c) still
        includes 'W'/'w'/'M'/'m', so a cap_width() backstop stays on this
        label the same as every other variable-content line in this tree —
        NOT because ten of the alphabet's widest glyph in a row is the only

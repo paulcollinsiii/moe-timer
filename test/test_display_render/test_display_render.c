@@ -856,13 +856,12 @@ static int break_chore_line(int32_t *left, int32_t *right, const char **text, in
 /* The chore line shares a 192 px column. With a one-digit hour the worst
    pairing ("Chores 0/3" + "Screen 9:59"-ish, found by sweep) leaves
    BREAK_CHORE_GAP_MIN px or more between the two boxes. From 10 h the time
-   gains a digit (~13 px) and the box gap shrinks to 0..3 px. Frozen time
-   is NOT bounded by CFG_BOUND_ALLOC_HI (24 h): grants stack on the
-   allocation and a snapshot may carry 7 days. Uncapped, the time would
-   overstrike the prompt from 40 h (-2 px at 2400 min); the painter caps
-   the label's width (BREAK_SCREEN_MAX_W), so out to the 7-day horizon the
-   boxes abut at worst (gap >= 0) and never overlap. The test pins both
-   tiers so a change to either shows. */
+   gains a digit and the box gap shrinks (8 px with the compiled face).
+   Frozen time is NOT bounded by CFG_BOUND_ALLOC_HI (24 h): grants stack on
+   the allocation and a snapshot may carry 7 days. The painter caps the
+   label's width (BREAK_SCREEN_MAX_W), so out to the 7-day horizon the
+   boxes abut at worst (gap >= 0) and never overlap, whatever face is
+   compiled in. The test pins both tiers so a change to either shows. */
 #define BREAK_CHORE_GAP_MIN 8
 #define BREAK_CHORE_ONE_DIGIT_HOURS_MIN 600
 #define BREAK_CHORE_HORIZON_MIN (7 * 24 * 60)
@@ -875,11 +874,11 @@ static int break_chore_line(int32_t *left, int32_t *right, const char **text, in
    characters.
 
    NEITHER SIDE'S WORST CASE IS THE OBVIOUS ONE, and both were found by
-   sweeping rather than by reading the strings. The digits of this font do
-   not share an advance — '0' is 3 px wider than '1' — so "Screen 12:30"
-   is NOT the widest frozen time below the cap ("Screen 20:00" is, by 7 px;
-   longer ones are clipped to the same width) and the
-   widest prompt is the one with the most zeros in it. Both prompt forms
+   sweeping rather than by reading the strings. In a proportional face
+   the digits do not share an advance ('0' is 3 px wider than '1' in the
+   stock Montserrat), so the widest frozen time and the widest prompt are
+   the ones with the most zeros in them; the sweep finds them whatever the
+   face is. Both prompt forms
    are rendered too, because the tick form is the shorter and it is the
    count form that decides the worst case. */
 void test_the_break_chore_line_items_never_meet(void) {
@@ -1466,12 +1465,14 @@ static void measure_battery_row(const display_state_t *st, int32_t *batt_right, 
 /* Every version this row can be asked to render, against the widest the
    28 pt remaining time ever gets. OTA_VERSION_MAX (ota_policy.h) is 32, so
    31 characters is publishable and therefore reachable — untruncated it
-   overstruck the time label by 106 px, which on 1 bpp e-ink is two black
+   would run into the time label, which on 1 bpp e-ink is two black
    strings on top of each other, not a graceful clip.
 
    The pathological rows are the point: a character budget alone cannot
-   bound the rendered width (a 12 pt digit advances ~8 px, 'W' ~14), which
-   is why the label also carries a hard width cap. */
+   bound the rendered width of a proportional face (in the stock
+   Montserrat a 12 pt digit advances ~8 px, 'W' ~14; the monospaced
+   Terminus advances 6 px for all), which is why the label also carries a
+   hard width cap. */
 static const struct {
     const char *ver;
     const char *what;
@@ -2043,8 +2044,8 @@ void test_ota_screen(void) {
     assert_matches_golden("ota");
 }
 
-/* Design margin for the OTA screen: the 28 pt title renders 279 px on a
-   296 px panel, i.e. 8 px a side. Asserting merely "<= HOR" would let a
+/* Design margin for the OTA screen: a line may use the panel less 8 px a
+   side (the 28 pt title renders 238 px, well inside). Asserting merely "<= HOR" would let a
    296 px line pass while silently eating that margin, so the bound is the
    margin, not the panel. */
 #define OTA_MAX_LINE_W (HOR - 16)
@@ -2071,11 +2072,11 @@ static void assert_ota_lines_fit(const char *from, const char *to) {
 
 void test_ota_screen_lines_fit_the_panel(void) {
     /* The 28 pt "Updating Firmware" title is the widest fixed string on
-       any screen in this tree (279 px; the plan's all-caps "UPDATING
-       FIRMWARE" measured 327 and would have been clipped, which is why
+       any screen in this tree (238 px; the plan's all-caps "UPDATING
+       FIRMWARE" measures about 305 and would be clipped, which is why
        the title is mixed case). The 18 pt "Installing v..." line is the
-       widest VARIABLE one — untruncated it left the panel at 21
-       characters (303 px) and reached 426 px at 31. Drive both the
+       widest VARIABLE one — untruncated it leaves the panel at 33
+       characters (9 px each). Drive both the
        ordinary and the maximum-length cases. */
     assert_ota_lines_fit("1.10.10-rc1", "1.10.11-rc2");
     for (size_t i = 0; i < sizeof(VERSION_CASES) / sizeof(VERSION_CASES[0]); i++) {
