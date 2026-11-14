@@ -41,13 +41,16 @@
    HA entities this firmware normally reports the breadcrumb through are
    silent for the whole soak. Two things stand in for them:
 
-     - THE CONSOLE. The panic backtrace itself, which this build prints
-       (CONFIG_ESP_SYSTEM_PANIC_PRINT_REBOOT=y, a 3 s reboot delay, and
-       CONFIG_ESP_CONSOLE_USB_CDC_SUPPORT_ETS_PRINTF=y so it survives USB
-       CDC), plus the "PANIC #n: phase ..." line that panic_diag_commit()
-       logs on the boot AFTER a panic. That second line is the whole
-       point of the exercise: it is the subdivided phase, printed, one
-       boot later, without needing a network at all.
+     - THE CONSOLE. In the default build the ROM panic backtrace is NOT on
+       the USB CDC console: CONFIG_ESP_CONSOLE_USB_CDC_SUPPORT_ETS_PRINTF
+       is n (see sdkconfig.defaults), so ets_printf has no USB output.
+       What the console does carry is the "PANIC #n: phase ..." line that
+       panic_diag_commit() logs on the boot AFTER a panic. That line is
+       the whole point of the exercise: it is the subdivided phase,
+       printed, one boot later, without needing a network at all.
+       Setting the symbol to y for a soak brings the backtrace back and
+       also reintroduces the panic that sdkconfig.defaults describes
+       while USB-attached, so it contaminates the measurement.
 
      - NVS. panic_diag_commit() still bumps `panic_cnt` and still files
        the breadcrumb blob, because esp_restart() reports ESP_RST_SW and
@@ -130,8 +133,8 @@
         Below 10 % the charge lock swallows the loop; see above.
      1. Change the 0 below to 1, by hand.
      2. Rebuild and flash over USB, with a serial monitor attached.
-     3. Watch for a backtrace, then for the "PANIC #n: phase BOOT_*" line
-        on the following boot.
+     3. Watch for the "PANIC #n: phase BOOT_*" line on the boot after
+        each panic (no backtrace is printed in the default build).
      4. Change it back to 0 before committing anything else. It ships at
         0, always. */
 #define MAGTAG_PANIC_SOAK 0

@@ -170,6 +170,13 @@ idf.py -B /tmp/build.probe -D SDKCONFIG=/tmp/sdkconfig.probe reconfigure
 
 What was actually compiled is in `build/config/sdkconfig.h`.
 
+**When the ESP-IDF version moves**, also generate a fresh config in a scratch
+build directory (the probe above, but without copying `sdkconfig`: point
+`-D SDKCONFIG` at a path that does not exist yet) and diff it against your
+`sdkconfig`. An existing `sdkconfig` hides every changed Kconfig default, so a new
+clone would build a different firmware. Pin each default you want to keep in
+`sdkconfig.defaults`.
+
 ---
 
 ## Building
