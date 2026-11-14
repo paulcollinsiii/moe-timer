@@ -439,10 +439,9 @@ static bool break_row_has_ink(int y) {
 }
 
 /* Runs of painted rows in the right column, top to bottom; returns how
-   many. A run of fewer than 3 blank rows does not end a band: '/' paints
-   only its tips two rows above and below the cap height of the chore line
-   ("Chores 0/3"), and those tips belong to that line, not to a band of
-   their own. Every real gutter on this screen is 4 rows or more. */
+   many. A run of fewer than 3 blank rows does not end a band, so a gap
+   inside one line of text never splits it. Every real gutter on this
+   screen is 4 rows or more. */
 #define BREAK_BAND_MIN_GAP 3
 static int break_ink_bands(int *tops, int *bots, int max) {
     int n = 0;
@@ -469,16 +468,18 @@ static int break_ink_bands(int *tops, int *bots, int max) {
 
 /* The right column's stack: title, countdown, bar, chore line, button row,
    MEASURED off the framebuffer (ink rows, inclusive) rather than from LVGL
-   box extents, which overstate a 48 pt label by 9 rows each end. The
-   failure mode is silent — overlapping white-on-black text is unreadable on
-   e-ink and MAGTAG_WRITE_GOLDEN would record the overlap as the new
-   correct answer — so the bands are pinned exactly and the gutters are
-   asserted separately. The same rows are what display.c's CLEAN_BANDS
+   box extents, which overstate the ink (the 48 pt box is taller than its
+   digits). The failure mode is silent — overlapping white-on-black text is
+   unreadable on e-ink and MAGTAG_WRITE_GOLDEN would record the overlap as
+   the new correct answer — so each band is held to its window and the
+   gutters are asserted separately. The same rows are what display.c's CLEAN_BANDS
    cut up (notes file: which band covers which element).
 
    Each element owns a WINDOW of rows its ink must stay inside. The windows
-   are the layout contract and do not depend on the font: a face moves the
-   ink inside its window, never out of it. The title's window ends where
+   are the layout contract, but they are sized for the term set: a face
+   moves the ink inside its window only if its metrics fit (under
+   -DMAGTAG_FONT_SET=stock the 48 pt countdown and the chore line overrun
+   theirs, so these tests fail there; see the Kconfig help). The title's window ends where
    CLEAN_BANDS band 0 ends (the title is static and must never share a band
    with the countdown that is repainted every tick); the countdown's starts
    where band 1 starts. The bar is a drawn box, so its window is exact. */

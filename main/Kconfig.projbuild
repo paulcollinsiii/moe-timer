@@ -653,6 +653,12 @@ menu "MagTag Timer"
             tools/gen_fonts.py, compiled only when selected. They exist
             to be compared on the panel.
 
+            The screen layout (label offsets, fit ladders, the break
+            screen's row windows) is laid out and tested for TERM only.
+            Under STOCK the host render tests fail (4 tests), under MONT1
+            1 test, under LIB none; the screens still paint, but nothing
+            keeps their rows apart.
+
         config MAGTAG_FONT_SET_STOCK
             bool "LVGL stock Montserrat (4 bpp)"
 
