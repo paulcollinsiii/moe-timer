@@ -274,14 +274,11 @@ void display_format_chore_count(char *buf, size_t len, uint8_t acked, uint8_t co
    "n/m" RATHER THAN "n of m", and that is a measurement and not a
    preference. The break screen's chore line shares the right column
    (192 px, beside the break art) with the frozen screen time, and
-   "Chores 0 of 3" (105 px) plus "Screen 20:00" (106 px) does not fit;
+   "Chores 0 of 3" (104 px) plus "Screen 20:00" (96 px) does not fit;
    "Chores 0/3" is the shorter form the layout plan named for exactly this
    case (see display_screens.c, which has the arithmetic, and the cap that
    keeps even longer frozen times, up to the 7-day snapshot horizon, off
-   the prompt). '/' ascends and descends past this font's cap height:
-   "Chores 2/3" paints 17 ink rows where "Chores 2 of 3" would paint 12,
-   which the old full-width layout could not afford; the column's chore
-   band now has the rows. The checklist header still says "n of 3".
+   the prompt). The checklist header still says "n of 3".
 
    THE TICK IS LAST. Leading, it would shove "Chores" rightwards the
    moment the list was finished, and a word that moves on e-ink reads as
@@ -329,8 +326,8 @@ void display_format_chore_prompt(char *buf, size_t len, uint8_t acked, uint8_t c
    rather than to be unreachable, because "0/3 - 60 min" on a block that
    is the whole bar still states two numbers the day has.
 
-   " - " and not the design's "·": the built-in Montserrat faces carry
-   ASCII, and display_format_mode_line already spells the same separator
+   " - " and not the design's "·": the UI faces carry printable
+   ASCII, the degree sign and the bullet, and display_format_mode_line already spells the same separator
    this way on the row below. A middle dot would render as a missing
    glyph on the one screen the family reads every day.
 

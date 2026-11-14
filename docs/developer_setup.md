@@ -311,6 +311,25 @@ Changing a template is different: edit the PNG in `tools/sprites/`, run
 ink counts in `test/test_gen_sprites/test_gen_sprites.py` (the single source
 the C tests cite) and the screen goldens it names.
 
+### UI fonts
+
+Every label takes its font from `include/ui_fonts.h` (`UI_FONT_12` ...
+`UI_FONT_48`). The set behind those names is the `MAGTAG_FONT_SET` Kconfig
+choice; the default is `term` (Terminus 12/16/18, Liberation Sans 28/48, all
+1 bpp). The other 1 bpp sets are generated into `main/fonts/<set>/` and
+compiled only when selected; `stock` is LVGL's 4 bpp Montserrat. The
+host golden renderer takes the same switch as a CMake cache variable
+(`cmake -S test -B test/build-fonts-stock -DMAGTAG_FONT_SET=stock`); only the
+default set matches the committed goldens.
+
+To regenerate, edit the code points in `include/ui_font_ranges.h` or the faces
+in `tools/gen_fonts.py`, then run `uv run tools/gen_fonts.py [set]` (needs
+Node: it runs a pinned `npx lv_font_conv`) and commit the C. The firmware and
+host builds never need Node. `test_ui_fonts` checks every generated font
+against the ranges and the ranges against what `display_screens.c` draws.
+`uv run tools/font_sheets.py` renders every screen under every set to
+`docs/planning/fonts/<set>.png`.
+
 ## Flashing and monitoring
 
 1. Put the MagTag in download mode: hold **Boot**, press **Reset**, release
@@ -436,6 +455,8 @@ fix formatting, run `clang-format -i <file>`.
 | `tools/check_slot_size.py` | The build-size guard. Every build runs it. |
 | `tools/gen_ha_dashboard.py` | Print the HA setup steps, the config-publishing automation and the dashboard YAML. Run with `uv run`. Usage: [Running it](home_assistant/dashboard.md#running-it). |
 | `tools/gen_sprites.py` | Run-length encode `tools/sprites/*.png` into `main/sprite_data.c` and `include/sprite_data.h`. Run with `uv run`; `--check` exits 1 when the committed C is stale; `--override-dir` merges private art over the templates (see [Lock-screen art](#lock-screen-art)). |
+| `tools/gen_fonts.py` | Generate the 1 bpp UI fonts under `main/fonts/` with a pinned `npx lv_font_conv`. Run with `uv run` (see [UI fonts](#ui-fonts)). |
+| `tools/font_sheets.py` | Render every screen under each font set into contact-sheet PNGs. Run with `uv run`. |
 | `tools/ha_devices.example.yaml` | Template for `tools/ha_devices.yaml` (gitignored), the device list `gen_ha_dashboard.py` reads. |
 | `tools/ha/magtag_publish_config.yaml` | The HA automation that publishes each device's config document. Install: [Setup step 4](home_assistant/setup.md#4-install-the-config-publishing-automation). |
 

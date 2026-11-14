@@ -315,12 +315,12 @@ void display_format_countdown(char *buf, size_t len, int32_t remaining_sec);
    next refresh.
 
    Width bites in both places. With no chore list the figure sits in cell
-   A of the button row: "Screen 12:30:00" is a 125 px box from a left
-   margin at x=4, so it runs to x=129 and over the swap hint, whose box
-   starts at x=114 — it genuinely does not fit. With a list the figure
+   A of the button row: "Screen 12:30:00" is a 120 px box from a left
+   margin at x=4, so it runs to x=124, the first column of the widest swap
+   hint (box x=124..206) with no gap — it genuinely does not fit. With a list the figure
    moves to the chore line under the bar (§2.6), right-aligned in the
-   192 px right column beside "Chores 0/3"; "Screen 20:00" already
-   leaves 0 px there, so the seconds would not fit either. The value is
+   192 px right column beside "Chores 0/3"; "Screen 20:00" leaves 16 px
+   there, so the seconds ("Screen 20:00:00", 120 px) would not fit. The value is
    not bounded by the 24 h allocation (grants stack on it, and a snapshot
    may carry up to 7 days): the painter caps the label's width so it
    cannot reach the prompt, clipping the trailing digits. Clamps at
@@ -348,12 +348,14 @@ void display_format_swap_hint(char *buf, size_t len, const char *name);
 
    12 is measured, not guessed. A manifest may publish up to 31
    characters, and the digit curve is the realistic worst case for a
-   version: at 12 digits the battery row ends at x=164 against the 28 pt
-   remaining time starting at x=180, and "Installing v" renders 243 px on
-   a 296 px panel. Note a character budget CANNOT bound rendered width on
-   its own — a 12 pt digit advances ~8 px but 'W' ~14, so an all-'W'
-   version overstrikes at 8 characters — which is why the labels also
-   carry a geometric cap in display_screens.c. */
+   version: at 12 digits the battery row ends at x=145 against the 28 pt
+   remaining time starting at x=180, and "Installing v" plus 12 digits
+   renders exactly 216 px (24 characters at 9 px) on a 296 px panel. Note a character budget cannot
+   bound rendered width on a proportional face (the 12 pt Terminus face
+   advances 6 px for every glyph, so it happens to here, but a font that
+   advances 'W' wider than a digit would overstrike at a few characters),
+   which is why the labels also carry a geometric cap in
+   display_screens.c. */
 #define DISPLAY_VERSION_MAX 12
 void display_format_version(char *buf, size_t len, const char *version);
 /* Mode line for an extra timer: "Meditation - 10 min", or with the day's
@@ -495,10 +497,9 @@ void display_format_chore_count(char *buf, size_t len, uint8_t acked, uint8_t co
 
    IT IS "2/3" AND NOT "2 of 3" (the checklist header's wording) because
    of what the widths measure: the break screen's chore line shares a
-   192 px column with the frozen screen time, and "Chores 0 of 3" (105 px)
-   plus "Screen 20:00" (106 px) does not fit. '/' paints 17 ink
-   rows where letters and digits paint 12; the column's chore band has the
-   rows — display_screens.c carries that arithmetic.
+   192 px column with the frozen screen time, and "Chores 0 of 3" (104 px)
+   plus "Screen 20:00" (96 px) does not fit. display_screens.c carries
+   that arithmetic.
 
    THE TICK GOES LAST. A leading tick would shift "Chores" rightwards the
    instant the list was finished, and on e-ink a word that moves reads as
@@ -537,8 +538,8 @@ typedef enum {
        chore_free == 0 and the block IS the bar, where the text is all
        there is and has to say what the chores are for. §4.1's form. */
     DISPLAY_LOCKED_FORM_FULL = 0,
-    /* "0/3 - 40 min": both figures, the noun dropped. Roughly 46 px
-       narrower, and the step that carries the common 93 px block. */
+    /* "0/3 - 40 min": both figures, the noun dropped. 42 px narrower
+       (7 characters at 6 px), and the step that carries the common 93 px block. */
     DISPLAY_LOCKED_FORM_PAIR,
     /* "40 min": the figure the block's own width is a picture of, so the
        last rung that adds anything a reader cannot already see. Below
