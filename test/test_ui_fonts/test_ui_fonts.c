@@ -1,5 +1,5 @@
 /* The generated 1 bpp UI fonts against what the screens draw.
-   Three claims, for every set under main/fonts/ and every size:
+   Three claims, for every font under main/fonts/:
      1. each font is 1 bpp and carries every code point of
         include/ui_font_ranges.h (and nothing a 28/48 size was subset away);
      2. its stamped lv_font_conv command line names exactly those ranges, so a
@@ -15,11 +15,7 @@
 
 #include "lvgl.h"
 #include "ui_font_ranges.h"
-
-#define FONTS(X, set) X(set, 12) X(set, 16) X(set, 18) X(set, 28) X(set, 48)
-extern const lv_font_t ui_font_mont1_12, ui_font_mont1_16, ui_font_mont1_18, ui_font_mont1_28, ui_font_mont1_48;
-extern const lv_font_t ui_font_term_12, ui_font_term_16, ui_font_term_18, ui_font_term_28, ui_font_term_48;
-extern const lv_font_t ui_font_lib_12, ui_font_lib_16, ui_font_lib_18, ui_font_lib_28, ui_font_lib_48;
+#include "ui_fonts.h"
 
 typedef struct {
     const char *set;
@@ -27,8 +23,8 @@ typedef struct {
     const lv_font_t *font;
 } font_entry_t;
 
-#define ENTRY(set, px) {#set, px, &ui_font_##set##_##px},
-static const font_entry_t FONT_TABLE[] = {FONTS(ENTRY, mont1) FONTS(ENTRY, term) FONTS(ENTRY, lib)};
+#define ENTRY(px) {"term", px, UI_FONT_##px},
+static const font_entry_t FONT_TABLE[] = {ENTRY(12) ENTRY(16) ENTRY(18) ENTRY(28) ENTRY(48)};
 #define FONT_COUNT (sizeof(FONT_TABLE) / sizeof(FONT_TABLE[0]))
 
 static const char *range_of(int px) {
@@ -116,6 +112,13 @@ void test_every_font_is_1bpp_and_carries_its_ranges(void) {
     }
 }
 
+/* A label with no explicit font, the theme and the style defaults resolve to
+   LVGL's default font; it must be ours, not a stock Montserrat. */
+void test_lvgl_default_font_is_the_12_px_ui_font(void) {
+    TEST_ASSERT_EQUAL_PTR(UI_FONT_12, lv_font_get_default());
+    TEST_ASSERT_EQUAL_PTR(UI_FONT_12, LV_FONT_DEFAULT);
+}
+
 void test_the_subset_sizes_carry_nothing_else(void) {
     static const uint32_t ABSENT[] = {'a', 'z', 'Z', '@', 0xF00C, 0xF240};
     for (size_t i = 0; i < FONT_COUNT; i++) {
@@ -144,7 +147,7 @@ void test_each_generated_file_was_made_from_the_current_ranges(void) {
     for (size_t i = 0; i < FONT_COUNT; i++) {
         const font_entry_t *e = &FONT_TABLE[i];
         char path[512];
-        snprintf(path, sizeof(path), "%s/main/fonts/%s/ui_font_%s_%d.c", SRC_DIR, e->set, e->set, e->px);
+        snprintf(path, sizeof(path), "%s/main/fonts/ui_font_%s_%d.c", SRC_DIR, e->set, e->px);
         read_file(path, text, sizeof(text));
         const char *opts = strstr(text, " * Opts:");
         TEST_ASSERT_NOT_NULL_MESSAGE(opts, path);
@@ -288,6 +291,7 @@ int main(void) {
     lv_init();
     UNITY_BEGIN();
     RUN_TEST(test_every_font_is_1bpp_and_carries_its_ranges);
+    RUN_TEST(test_lvgl_default_font_is_the_12_px_ui_font);
     RUN_TEST(test_the_subset_sizes_carry_nothing_else);
     RUN_TEST(test_each_generated_file_was_made_from_the_current_ranges);
     RUN_TEST(test_the_text_sizes_cover_printable_ascii);

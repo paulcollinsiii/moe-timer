@@ -1,8 +1,8 @@
 /* LVGL configuration for the HOST golden-render tests (test_display_render).
    Everything not set here falls back to lv_conf_internal.h defaults; the
    options below mirror what the firmware build sets via Kconfig so host
-   renders match the panel: clib stdlib, the montserrat sizes the layouts
-   use, and I1 software-render support for the 1bpp e-ink framebuffer. */
+   renders match the panel: clib stdlib, the default font, and I1 software-render support for the 1bpp e-ink
+   framebuffer. */
 #ifndef LV_CONF_HOST_H
 #define LV_CONF_HOST_H
 
@@ -116,11 +116,11 @@
      host, right after such a style change, is more likely this divergence
      than a real bug. */
 
-#define LV_FONT_MONTSERRAT_12 1
-#define LV_FONT_MONTSERRAT_14 1
-#define LV_FONT_MONTSERRAT_16 1
-#define LV_FONT_MONTSERRAT_18 1
-#define LV_FONT_MONTSERRAT_28 1
-#define LV_FONT_MONTSERRAT_48 1
+/* No stock Montserrat is built in (14 is the one LVGL enables unless told
+   otherwise). The default font is the generated 12 px one, as on the device
+   (main/CMakeLists.txt); the library carries it, see test/CMakeLists.txt. */
+#define LV_FONT_MONTSERRAT_14 0
+#define LV_FONT_CUSTOM_DECLARE LV_FONT_DECLARE(ui_font_term_12)
+#define LV_FONT_DEFAULT &ui_font_term_12
 
 #endif /* LV_CONF_HOST_H */

@@ -43,7 +43,13 @@ endfunction()
 # ---- display golden-render suite: real LVGL compiled for the host ----
 file(GLOB_RECURSE LVGL_SRCS CONFIGURE_DEPENDS
     ${CMAKE_CURRENT_SOURCE_DIR}/../managed_components/lvgl__lvgl/src/*.c)
-add_library(lvgl_host STATIC ${LVGL_SRCS})
+# The generated UI fonts (main/fonts/) live in this library: LVGL's default
+# font is ui_font_term_12 (mocks/lv_conf_host.h), so LVGL itself references
+# them. lv_font_conv's output includes "lvgl/lvgl.h" unless told lvgl.h is on
+# the include path directly.
+file(GLOB UI_FONT_SRCS CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/../main/fonts/*.c)
+set_source_files_properties(${UI_FONT_SRCS} PROPERTIES COMPILE_DEFINITIONS LV_LVGL_H_INCLUDE_SIMPLE)
+add_library(lvgl_host STATIC ${LVGL_SRCS} ${UI_FONT_SRCS})
 target_include_directories(lvgl_host PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}/../managed_components/lvgl__lvgl)
 target_compile_definitions(lvgl_host PUBLIC
@@ -55,41 +61,17 @@ target_compile_definitions(lvgl_host PUBLIC
 # sprite.c and the committed sprite_data.c (generated from the TEMPLATES in
 # tools/sprites; never from a private sprites.local/): the four lock-screen
 # art slots are painted from them.
-# The UI font set the screens draw with: the host twin of the firmware's
-# CONFIG_MAGTAG_FONT_SET choice (include/ui_fonts.h). The default, term,
-# is what the committed goldens are rendered with; any other set is for
-# tools/font_sheets.py (MAGTAG_DUMP_DIR) and fails the golden compare.
-#   cmake -S test -B test/build-fonts-stock -DMAGTAG_FONT_SET=stock
-set(MAGTAG_FONT_SET "term" CACHE STRING "UI font set: stock, mont1, term or lib")
-set(UI_FONT_DEFS "")
-set(UI_FONT_SRCS "")
-if(NOT MAGTAG_FONT_SET STREQUAL "stock")
-  string(TOUPPER "${MAGTAG_FONT_SET}" UI_FONT_SET_UPPER)
-  file(GLOB UI_FONT_SRCS CONFIGURE_DEPENDS
-      ${CMAKE_CURRENT_SOURCE_DIR}/../main/fonts/${MAGTAG_FONT_SET}/*.c)
-  if(NOT UI_FONT_SRCS)
-    message(FATAL_ERROR "MAGTAG_FONT_SET=${MAGTAG_FONT_SET}: no main/fonts/${MAGTAG_FONT_SET}/*.c")
-  endif()
-  set(UI_FONT_DEFS CONFIG_MAGTAG_FONT_SET_${UI_FONT_SET_UPPER}=1)
-endif()
-
 add_host_test(test_display_render
     EXTRA_DEFS GOLDEN_DIR="${CMAKE_CURRENT_SOURCE_DIR}/test_display_render/golden"
-               LV_LVGL_H_INCLUDE_SIMPLE ${UI_FONT_DEFS}
-    EXTRA_SRCS ${UI_FONT_SRCS}
-               ${CMAKE_CURRENT_SOURCE_DIR}/../main/qr_render.c
+    EXTRA_SRCS ${CMAKE_CURRENT_SOURCE_DIR}/../main/qr_render.c
                ${CMAKE_CURRENT_SOURCE_DIR}/../main/sprite.c
                ${CMAKE_CURRENT_SOURCE_DIR}/../main/sprite_data.c
                ${CMAKE_CURRENT_SOURCE_DIR}/../lib/qrcodegen/qrcodegen.c
     EXTRA_INCLUDES ${CMAKE_CURRENT_SOURCE_DIR}/../lib/qrcodegen
     EXTRA_LIBS lvgl_host m)
 
-# Every generated font set at once (their symbols are per-set), whatever
-# MAGTAG_FONT_SET the render suite uses.
-file(GLOB ALL_UI_FONT_SRCS CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/../main/fonts/*/*.c)
 add_host_test(test_ui_fonts
-    EXTRA_DEFS SRC_DIR="${CMAKE_CURRENT_SOURCE_DIR}/.." LV_LVGL_H_INCLUDE_SIMPLE
-    EXTRA_SRCS ${ALL_UI_FONT_SRCS}
+    EXTRA_DEFS SRC_DIR="${CMAKE_CURRENT_SOURCE_DIR}/.."
     EXTRA_LIBS lvgl_host m)
 
 add_host_test(test_sprite)

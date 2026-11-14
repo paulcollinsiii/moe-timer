@@ -9,8 +9,8 @@
    Why each size holds what it holds (display_screens.c is the only caller):
 
    12  user text (timer name, status hint, firmware version, AP SSID), so
-       full printable ASCII, plus the two non-ASCII code points the stock
-       Montserrat builds carry (degree sign, bullet). Symbols: the five
+       full printable ASCII, plus two non-ASCII code points (degree sign,
+       bullet). Symbols: the five
        battery levels, play, pause, right arrow, refresh, tick.
    16  chore names and the swap hint are user text: as 12. Symbols: tick
        (chore rows), right arrow (swap hint), refresh (sync).
