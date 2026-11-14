@@ -271,12 +271,13 @@ CONFIG_LV_DRAW_SW_COMPLEX=n
 # heap would be handed out to those mallocs.
 CONFIG_SPIRAM_MEMTEST=n
 
-# Interrupt watchdog stays at 300 ms. ESP-IDF v6.0.3 defaults it to 800 ms
-# whenever SPIRAM is enabled (v6.0.1 did so only on the ESP32), which this
-# board is. The device has been built, soaked and measured with 300 ms, so a
-# fresh clone is pinned to the same value instead of silently taking the
-# longer one. Raising it is a decision to make on the bench, not by default.
-CONFIG_ESP_INT_WDT_TIMEOUT_MS=300
+# Interrupt watchdog at 800 ms, ESP-IDF v6.0.3's default whenever SPIRAM is
+# enabled, which this board is. Flash writes (NVS, OTA) run with the cache off
+# and interrupts held, and PSRAM lengthens those windows; a shorter timeout
+# risks rebooting a healthy device mid-write. A genuine hang is still caught,
+# 0.8 s in instead of 0.3 s, which no behaviour of this device depends on.
+# Pinned so a later IDF default change cannot move it silently.
+CONFIG_ESP_INT_WDT_TIMEOUT_MS=800
 
 # Compile the app and every IDF component for size (-Os) instead of the
 # debug-friendly -Og. The image budget is the binding constraint (85 % slot
