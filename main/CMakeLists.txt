@@ -63,8 +63,8 @@ if(NOT CMAKE_BUILD_EARLY_EXPANSION)
 endif()
 
 # UI fonts: the generated 1 bpp sources of the selected set only
-# (CONFIG_MAGTAG_FONT_SET_<SET>; the default set is LVGL's stock font and
-# adds nothing). Regenerate with tools/gen_fonts.py.
+# (CONFIG_MAGTAG_FONT_SET_<SET>; the stock set is LVGL's font and adds
+# nothing). Regenerate with tools/gen_fonts.py.
 set(UI_FONT_SRCS "")
 foreach(font_set mont1 term lib)
     string(TOUPPER "${font_set}" font_set_upper)

@@ -56,11 +56,11 @@ target_compile_definitions(lvgl_host PUBLIC
 # tools/sprites; never from a private sprites.local/): the four lock-screen
 # art slots are painted from them.
 # The UI font set the screens draw with: the host twin of the firmware's
-# CONFIG_MAGTAG_FONT_SET choice (include/ui_fonts.h). The default, stock,
+# CONFIG_MAGTAG_FONT_SET choice (include/ui_fonts.h). The default, term,
 # is what the committed goldens are rendered with; any other set is for
 # tools/font_sheets.py (MAGTAG_DUMP_DIR) and fails the golden compare.
-#   cmake -S test -B test/build-fonts-term -DMAGTAG_FONT_SET=term
-set(MAGTAG_FONT_SET "stock" CACHE STRING "UI font set: stock, mont1, term or lib")
+#   cmake -S test -B test/build-fonts-stock -DMAGTAG_FONT_SET=stock
+set(MAGTAG_FONT_SET "term" CACHE STRING "UI font set: stock, mont1, term or lib")
 set(UI_FONT_DEFS "")
 set(UI_FONT_SRCS "")
 if(NOT MAGTAG_FONT_SET STREQUAL "stock")
