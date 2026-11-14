@@ -35,7 +35,7 @@ code .
 
 VS Code finds `.devcontainer/devcontainer.json` and offers **Reopen in
 Container**. The first image build takes a while: it downloads about 2 GB to
-bake ESP-IDF v6.0.1 and the ESP32-S2 toolchain into the image, along with `uv`
+bake ESP-IDF v6.0.3 and the ESP32-S2 toolchain into the image, along with `uv`
 for the Python tools. The toolchain lives in the image (`~/esp/esp-idf`,
 `~/.espressif`), not in a volume, so a container rebuild reuses the cached
 layer. Only a `--no-cache` image rebuild downloads it again, and
@@ -169,6 +169,13 @@ idf.py -B /tmp/build.probe -D SDKCONFIG=/tmp/sdkconfig.probe reconfigure
 ```
 
 What was actually compiled is in `build/config/sdkconfig.h`.
+
+**When the ESP-IDF version moves**, also generate a fresh config in a scratch
+build directory (the probe above, but without copying `sdkconfig`: point
+`-D SDKCONFIG` at a path that does not exist yet) and diff it against your
+`sdkconfig`. An existing `sdkconfig` hides every changed Kconfig default, so a new
+clone would build a different firmware. Pin each default you want to keep in
+`sdkconfig.defaults`.
 
 ---
 

@@ -26,7 +26,10 @@ CONFIG_ESP_CONSOLE_USB_CDC=y
 # coredump — victim frame esp_flash_read() under the NVS read in
 # timer_persist_save(), i.e. the deep-sleep path, so the window opened on
 # EVERY sleep entry and fired ~3x a night whenever host USB traffic hit it.
-# Still unfixed upstream: v6.0.2 and master ship the same linker.lf.
+# The linker.lf of ESP-IDF v6.0.3 (the pinned version) still lists neither
+# function, and puts even the ISR itself under noflash only while this symbol
+# is y. With it n, ISR_FLAG is 0: the ISR is an ordinary one that the
+# cache-off window masks, so the fault cannot occur.
 #
 # n is also the stock IDF default (esp_stdio/Kconfig: "default n") and saves
 # ~1 kB RAM. Ordinary ESP_LOGx over USB CDC is NOT affected — that goes
@@ -268,6 +271,13 @@ CONFIG_LV_DRAW_SW_COMPLEX=n
 # heap would be handed out to those mallocs.
 CONFIG_SPIRAM_MEMTEST=n
 
+# Interrupt watchdog stays at 300 ms. ESP-IDF v6.0.3 defaults it to 800 ms
+# whenever SPIRAM is enabled (v6.0.1 did so only on the ESP32), which this
+# board is. The device has been built, soaked and measured with 300 ms, so a
+# fresh clone is pinned to the same value instead of silently taking the
+# longer one. Raising it is a decision to make on the bench, not by default.
+CONFIG_ESP_INT_WDT_TIMEOUT_MS=300
+
 # Compile the app and every IDF component for size (-Os) instead of the
 # debug-friendly -Og. The image budget is the binding constraint (85 % slot
 # guard) and nothing in this firmware is CPU-bound: the long waits are the
@@ -298,3 +308,10 @@ CONFIG_COMPILER_OPTIMIZATION_SIZE=y
 # (git revert alone does NOT work on a checkout whose sdkconfig already holds
 # the new value: an unmarked sdkconfig line beats this file).
 CONFIG_MBEDTLS_TLS_CLIENT_ONLY=y
+
+# No cross-signed verification in the certificate bundle. The firmware never
+# calls esp_crt_bundle_attach (the OTA fetch pins certs/ota_ca.pem), so the
+# option would only add code and about 1 KB of transient handshake heap.
+# ESP-IDF v6.0.3 turned it on by default, and it selects
+# MBEDTLS_X509_TRUSTED_CERT_CALLBACK, which then also stays off.
+CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_CROSS_SIGNED_VERIFY=n
