@@ -697,8 +697,8 @@ void test_the_break_elements_sit_inside_the_clean_bands_that_cover_them(void) {
    4 * BREAK_INK white pixels, exactly, inside its 92x104 box, in every cell
    of §2.6's matrix — so the labels never paint over it — and nothing else
    is ever drawn above the box's bottom edge left of the column. (The bottom
-   row's cell A and the centred footer start at row 109, one row below the
-   box.) */
+   row's cell A starts at row 108, the row right below the box, which ends at
+   row 107; the centred footer's ink starts at row 110.) */
 #define BREAK_INK 1105
 void test_the_break_screen_paints_the_art_at_the_left_at_twice_its_size(void) {
     TEST_ASSERT_TRUE_MESSAGE(BREAK_ART_X + 2 * (int)SPRITE_BREAK.w <= BREAK_COL_X,
@@ -789,9 +789,9 @@ static int break_bottom_row(int32_t *left, int32_t *right, const char **text, in
    it looks — see there.
 
    It is also why the frozen screen time is NOT in this row in the chore
-   cells. "Screen 1:30" is 90 px; put it over button B and it spans
-   x=46..136, which collides with "Chores" at one end and the swap hint at
-   the other. It moved to the line above instead. */
+   cells. "Screen 1:30" is 88 px; put it over button B and it spans
+   x=47..135, which collides with "Chores" (box ends x=52) at one end and
+   the swap hint (box starts x=124) at the other. It moved to the line above instead. */
 void test_the_break_chore_row_fits_its_cells(void) {
     display_state_t st = break_chore_state(3, 2);
     st.swap_next_name = "Woodwind lesson"; /* the widest hint the budget allows */
@@ -804,7 +804,7 @@ void test_the_break_chore_row_fits_its_cells(void) {
     TEST_ASSERT_EQUAL_STRING_MESSAGE("Chores", text[0], "cell A does not offer the checklist");
     /* A COARSE UPPER BOUND, deliberately, and not the thing that keeps
        the two apart. BTN_X0 + 3*BTN_PITCH/2 is the B/C midline at x=128;
-       the widest hint the budget allows already starts at x=114, 14 px
+       the widest hint the budget allows already starts at x=124, 4 px
        LEFT of it, so a 120 px cell-A label would satisfy this and still
        paint over the hint. Non-overlap is the adjacency loop's job (see
        the header comment). What this adds that the loop cannot is a bound
@@ -875,11 +875,10 @@ static int break_chore_line(int32_t *left, int32_t *right, const char **text, in
    characters.
 
    NEITHER SIDE'S WORST CASE IS THE OBVIOUS ONE, and both were found by
-   sweeping rather than by reading the strings. In a proportional face
-   the digits do not share an advance ('0' is 3 px wider than '1' in the
-   stock Montserrat), so the widest frozen time and the widest prompt are
-   the ones with the most zeros in them; the sweep finds them whatever the
-   face is. Both prompt forms
+   sweeping rather than by reading the strings. The compiled 16 pt face is
+   monospace, so the widest frozen time and the widest prompt are simply the
+   longest ones; in a proportional face they would be the ones with the most
+   wide digits, and the sweep finds them whatever the face is. Both prompt forms
    are rendered too, because the tick form is the shorter and it is the
    count form that decides the worst case. */
 void test_the_break_chore_line_items_never_meet(void) {
@@ -2727,8 +2726,9 @@ void test_chore_rows_are_fixed_whatever_the_list_holds(void) {
 }
 
 /* chores.h states the trap and refuses to solve it: CHORE_NAME_MAX is a
-   STORAGE cap in bytes and cannot bound rendered width — 20 'W' at 16 pt
-   measure 360 px against a 296 px panel. So the display layer carries a
+   STORAGE cap in bytes and cannot bound rendered width wherever glyph
+   advances differ (20 'W' at 16 pt are 360 px in a proportional face; the
+   compiled monospace face makes them 160 px against a 296 px panel). So the display layer carries a
    geometric cap, and this is the measurement that says it holds. Both
    halves are asserted: the object stops at the cap, and the DRAWING stops
    with it (LV_LABEL_LONG_CLIP, not LONG_DOT, which would wrap a
@@ -2799,9 +2799,9 @@ void test_a_stale_ack_bit_above_the_count_changes_no_pixel(void) {
 }
 
 /* The bottom row is four independent items on a 296 px panel, and the one
-   that can go wrong is cell A: "Timers" is 41 px of text where the main
+   that can go wrong is cell A: "Timers" is 36 px of text where the main
    screen's A cell is empty, and button A's centre is only 17 px in
-   (BTN_X0), so CENTRING it on its button starts it at x=-4 and eats the
+   (BTN_X0), so CENTRING it on its button starts it at x=-1 and eats the
    'T'. This test is what caught that — it failed on the first build and is
    why the label is left-aligned. Written as on-panel + non-overlapping
    rather than "narrower than BTN_PITCH", because a left-anchored cell is
@@ -2904,7 +2904,7 @@ void test_main_chore_fully_gated(void) {
 
    60 min day with chore_free 40 — a perfectly ordinary configuration —
    withholds 20 min, and withheld/allocation of 280 px is 93. The full
-   sentence needs 127 px there, so the old painter drew "0/3 Chores - 2":
+   sentence needs 114 px there, so the old painter drew "0/3 Chores - 2":
    a complete, plausible statement that 2 minutes were locked when 20
    were. This golden holds the rung the ladder drops to instead,
    "0/3 - 20 min" at 72 px inside the 85 px the block allots. */
@@ -2999,7 +2999,8 @@ static int frame_diff_rows(const uint8_t *a, const uint8_t *b, int r0, int r1) {
 }
 
 /* Everything above the bottom button row. The row's labels are anchored
-   at y=-2 and measure rows 113..122 (printed by
+   at y=-2; their ink is rows 113..125 (the symbol glyphs; the "Chores"
+   text is rows 116..123, printed by
    test_the_main_chore_label_clears_the_status_row_and_button_b); 110 is
    the anchor's own box top and so is the conservative boundary — a
    literal, not an expression over the source constants, so a mistake in
@@ -3074,8 +3075,8 @@ void test_the_locked_block_vanishes_when_the_day_releases(void) {
 
         /* And the row below: a released day still has a list, so cell A
            still offers it — and nothing ELSE in the row may move. Bytes
-           0..5 are x=0..47, which contains the 43 px "Chores" label at
-           x=4 (ending at x=47) with cell B's ink well clear of it.
+           0..5 are x=0..47, which contains the 36 px "Chores" label at
+           x=4 (ink ending at x=38) with cell B's ink well clear of it.
 
            The clearance argued from the geometry rather than from one
            label's measured x, because cell B's width is NOT fixed — it is
@@ -3085,7 +3086,7 @@ void test_the_locked_block_vanishes_when_the_day_releases(void) {
            fixed: every cell-B label is CENTRED on button B, at
            BTN_MID_OFS(1) = BTN_X0 + BTN_PITCH = x 91. Ink symmetric about
            91 can only reach x=47 once the label is 88 px wide, and the
-           widest of the three ("Reload" at 12 pt, ~42 px) is less than
+           widest of the three ("Reload" at 12 pt, 36 px) is less than
            half that. So the split at byte 5 is safe for every B label,
            present and added later, rather than for the one on screen. */
         int outside = 0, inside = 0;

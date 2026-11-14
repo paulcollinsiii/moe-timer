@@ -81,8 +81,8 @@ static lv_obj_t *make_label(lv_obj_t *parent, const char *text, const lv_font_t 
    left-aligned at x=4 and must stay clear of the 28 pt remaining time,
    whose left edge bottoms out at x=180: 4 + 168 = 172, 8 px clear. The
    OTA screen's two version lines are centred on a 296 px panel: 280
-   leaves 8 px each side, matching the margin the 28 pt title already
-   renders with. */
+   leaves 8 px each side; the 28 pt title (238 px, ink x 31..264) renders
+   with 29. */
 #define BATT_ROW_MAX_W 168
 #define OTA_LINE_MAX_W 280
 /* The config-error screen's pair line, centred on a 296 px panel like the
@@ -159,7 +159,9 @@ static void build_main_header(lv_obj_t *scr, const display_state_t *st) {
     strftime(date_buf, sizeof(date_buf), "%a %b %d", &tm);
     snprintf(buf, sizeof(buf), "%s  %s", date_buf, time_buf);
     lv_obj_t *hdr = make_label(scr, buf, UI_FONT_12, LV_ALIGN_TOP_LEFT, 4, 3);
-    /* At 12 pt the ':' hugs the preceding digit — open it up slightly */
+    /* 1 px of tracking on the 12 pt header: Terminus 12 advances 6 px, so
+       the glyphs sit 7 px apart. Every header width measured below
+       includes it. */
     lv_obj_set_style_text_letter_space(hdr, 1, 0);
 
     if (st->break_banner) {
@@ -167,7 +169,7 @@ static void build_main_header(lv_obj_t *scr, const display_state_t *st) {
            Last-sync slot (the least load-bearing thing in the header) and
            echoes the break screen's inversion, so "the break is still on"
            reads at a glance. 16 pt: 12 pt white-on-black is illegible on
-           this panel. Measured extent is rows 3..20, cols 182..291 —
+           this panel. Measured extent is rows 3..20, cols 196..291 —
            inside the header CLEAN_BAND's framebuffer bytes 0..2, which
            run to row 23 (see display.c). A chip reaching row 24 would
            share byte 3 with the progress-bar band and the ghost-cleaning
@@ -561,7 +563,8 @@ void display_screens_build_main(const display_state_t *st) {
      "SCREEN BREAK" 18pt     3..14       0     (centred on the column)
      countdown 48pt         24..56      24     (m:ss / mm:ss / h:mm:ss)
      break bar              68..83      68     (192 x 16)
-     chore line 16pt        92..101     88     (only with a chore list)
+     chore line 16pt        92..101     88     (only with a chore list; the tick
+                                               form paints 90..101)
      bottom row 16pt       108..123     BOTTOM -2 (unchanged)
 
    The countdown sits 24 rows down, so its ink starts where CLEAN_BANDS
@@ -734,9 +737,9 @@ void display_screens_build_break(const display_state_t *st, const sprite_t *art)
 
            WIDTH, measured on the built objects (LVGL box extents, which
            is what the render test reads) over EVERY string either side
-           can produce, because the digits of this font do not share one
-           advance — '0' is 3 px wider than '1' — so neither side's worst
-           case can be reasoned about from the character count. The
+           can produce. The 16 pt face is monospace (8 px a glyph), so
+           the width follows the character count, but the test sweeps the
+           strings rather than trust that. The
            column is 192 px (the figure takes the rest of the panel):
              "Chores 0 of 3"   104 px  + "Screen 20:00"  96 px = 200 > 192
              "Chores 0/3"       80 px  + "Screen 20:00"  96 px = 176, 16 gap
@@ -760,12 +763,10 @@ void display_screens_build_break(const display_state_t *st, const sprite_t *art)
            overprinting the prompt. test_the_break_chore_line_items_never_
            meet sweeps to the 7-day horizon.
 
-           HEIGHT: the line's ink is rows 92..101, between the bar (ends
-           83) and the button row (starts 108): gutters of 8 and 6 rows.
-           The column's three
-           bands and the row used to be packed into the full-width screen
-           with no room for '/', which is why the prompt used to read
-           "2 of 3"; the column has the rows now. */
+           HEIGHT: the line's ink is rows 92..101 ("Chores 0/3"; the tick
+           form paints 90..101), between the bar (ends 83) and the button
+           row (starts 108): gutters of 8 above and 6 below (the tick form leaves
+           6 and 6). */
         display_format_chore_prompt(buf, sizeof(buf), st->chore_acked, st->chore_count);
         make_label(scr, buf, UI_FONT_16, LV_ALIGN_TOP_LEFT, BREAK_COL_X, BREAK_CHORE_LINE_Y);
 
@@ -791,10 +792,10 @@ void display_screens_build_break(const display_state_t *st, const sprite_t *art)
        The art's box ends at row 107, one row above this row (108..123).
        Either way this is not always one cell's worth of width, and the
        two differ:
-         "Chores"      renders x 4..52  — inside cell A (the A/B midline
-                                          is 54)
-         "Screen 1:30" renders x 4..92  — all of A and most of B, ending
-                                          on B's button centre
+         "Chores"      box x 4..52, ink 5..50 — inside cell A (the A/B
+                                          midline is 54)
+         "Screen 1:30" box x 4..92, ink 5..90 — all of A and most of B,
+                                          ending at B's button centre (91)
        Both are safe for the same single reason: cell B carries no label on
        this screen, because the break is still enforced for the Screen
        timer and display_button_b_label() yields nothing for TIMER_BREAK.
@@ -1137,8 +1138,8 @@ void display_screens_build_bedtime(const sprite_t *art) {
     lv_obj_set_style_text_align(night, LV_TEXT_ALIGN_CENTER, 0);
 
     /* Single centered line, 18 pt: 16 pt strokes shredded into fragments
-       by the inverted 1 bpp render (no bold Montserrat exists in LVGL),
-       and 20 pt overruns the 296 px panel. */
+       by the inverted 1 bpp render (the UI faces have no bold weight),
+       and no 20 pt size is compiled. */
     make_label(scr, "Brush teeth | Get water bottles", UI_FONT_18, LV_ALIGN_BOTTOM_MID, 0, BEDTIME_LINE_Y);
 }
 
@@ -1351,9 +1352,9 @@ void display_screens_build_setup(const char *ap_ssid, const char *ap_password, c
     make_label(scr, "Password:", UI_FONT_12, LV_ALIGN_TOP_LEFT, SETUP_TEXT_X, SETUP_PW_LABEL_Y);
 
     /* The largest compiled size that fits the column for a typical draw —
-       measured, not assumed: 28 pt already clips a sample password (about
-       189 px natural against the 173 px column), so 18 pt is the ceiling,
-       at 90 px for that same string (still ample). AP_PASS_ALPHABET (setup_session.c) still
+       measured, not assumed: 28 pt can clip a long password against the
+       173 px column, so 18 pt (9 px a glyph) is the ceiling.
+       AP_PASS_ALPHABET (setup_session.c) still
        includes 'W'/'w'/'M'/'m', so a cap_width() backstop stays on this
        label the same as every other variable-content line in this tree —
        NOT because ten of the alphabet's widest glyph in a row is the only

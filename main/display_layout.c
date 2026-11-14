@@ -326,8 +326,8 @@ void display_format_chore_prompt(char *buf, size_t len, uint8_t acked, uint8_t c
    rather than to be unreachable, because "0/3 - 60 min" on a block that
    is the whole bar still states two numbers the day has.
 
-   " - " and not the design's "·": the built-in Montserrat faces carry
-   ASCII, and display_format_mode_line already spells the same separator
+   " - " and not the design's "·": the UI faces carry printable
+   ASCII, the degree sign and the bullet, and display_format_mode_line already spells the same separator
    this way on the row below. A middle dot would render as a missing
    glyph on the one screen the family reads every day.
 
