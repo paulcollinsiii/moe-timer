@@ -62,17 +62,16 @@ if(NOT CMAKE_BUILD_EARLY_EXPANSION)
     endif()
 endif()
 
-# UI fonts: the generated 1 bpp sources of the selected set only
-# (CONFIG_MAGTAG_FONT_SET_<SET>; the stock set is LVGL's font and adds
-# nothing). Regenerate with tools/gen_fonts.py.
-set(UI_FONT_SRCS "")
-foreach(font_set mont1 term lib)
-    string(TOUPPER "${font_set}" font_set_upper)
-    if(CONFIG_MAGTAG_FONT_SET_${font_set_upper})
-        file(GLOB UI_FONT_SRCS CONFIGURE_DEPENDS RELATIVE "${CMAKE_CURRENT_SOURCE_DIR}"
-             "${CMAKE_CURRENT_SOURCE_DIR}/fonts/${font_set}/*.c")
-    endif()
-endforeach()
+# UI fonts: the generated 1 bpp sources (ui_font_term_<px>.c). Regenerate
+# with tools/gen_fonts.py. The list is explicit because a glob is not allowed
+# in this file; the host build globs main/fonts/*.c (test/CMakeLists.txt), so
+# a new face must be added here as well as generated.
+set(UI_FONT_SRCS
+    "fonts/ui_font_term_12.c"
+    "fonts/ui_font_term_16.c"
+    "fonts/ui_font_term_18.c"
+    "fonts/ui_font_term_28.c"
+    "fonts/ui_font_term_48.c")
 
 idf_component_register(
     SRCS
@@ -233,6 +232,14 @@ endif()
 
 # lv_font_conv's output includes "lvgl/lvgl.h" unless told lvgl.h is on the
 # include path directly, which it is for every component that requires lvgl.
-if(UI_FONT_SRCS)
-    set_source_files_properties(${UI_FONT_SRCS} PROPERTIES COMPILE_DEFINITIONS LV_LVGL_H_INCLUDE_SIMPLE)
-endif()
+set_source_files_properties(${UI_FONT_SRCS} PROPERTIES COMPILE_DEFINITIONS LV_LVGL_H_INCLUDE_SIMPLE)
+
+# LVGL's default font (what a label with no explicit font, the theme and the
+# style defaults resolve to) is our 12 px font, so no stock Montserrat is
+# referenced. LVGL's Kconfig can only pick a built-in font for this, so the
+# choice is made here; lv_conf_internal.h takes a LV_FONT_DEFAULT given on the
+# command line. The host build does the same in test/mocks/lv_conf_host.h.
+idf_component_get_property(LVGL_LIB lvgl__lvgl COMPONENT_LIB)
+target_compile_definitions(${LVGL_LIB} PUBLIC
+    "LV_FONT_CUSTOM_DECLARE=LV_FONT_DECLARE(ui_font_term_12)"
+    "LV_FONT_DEFAULT=&ui_font_term_12")

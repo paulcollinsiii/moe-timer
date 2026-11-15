@@ -87,8 +87,7 @@ static display_state_t base_state(void) {
 
 /* MAGTAG_DUMP_DIR: write the captured frame to <dir>/<name>.bin and report
    true; unset, do nothing and report false. This is how tools/font_sheets.py
-   gets the screens rendered under another font set (-DMAGTAG_FONT_SET=...),
-   whose frames differ from the goldens by design. The goldens are never
+   gets the rendered screens for its contact sheet. The goldens are never
    touched on this path. */
 static bool dump_frame(const char *name) {
     const char *dump_dir = getenv("MAGTAG_DUMP_DIR");
@@ -476,10 +475,8 @@ static int break_ink_bands(int *tops, int *bots, int max) {
    cut up (notes file: which band covers which element).
 
    Each element owns a WINDOW of rows its ink must stay inside. The windows
-   are the layout contract, but they are sized for the term set: a face
-   moves the ink inside its window only if its metrics fit (under
-   -DMAGTAG_FONT_SET=stock the 48 pt countdown and the chore line overrun
-   theirs, so these tests fail there; see the Kconfig help). The title's window ends where
+   are the layout contract, sized for the term fonts: a different face
+   moves the ink inside its window only if its metrics fit. The title's window ends where
    CLEAN_BANDS band 0 ends (the title is static and must never share a band
    with the countdown that is repainted every tick); the countdown's starts
    where band 1 starts. The bar is a drawn box, so its window is exact. */
@@ -1469,8 +1466,8 @@ static void measure_battery_row(const display_state_t *st, int32_t *batt_right, 
    strings on top of each other, not a graceful clip.
 
    The pathological rows are the point: a character budget alone cannot
-   bound the rendered width of a proportional face (in the stock
-   Montserrat a 12 pt digit advances ~8 px, 'W' ~14; the monospaced
+   bound the rendered width of a proportional face (in LVGL's built-in
+   Montserrat 12 a digit advances ~8 px, 'W' ~14; the monospaced
    Terminus advances 6 px for all), which is why the label also carries a
    hard width cap. */
 static const struct {
@@ -2121,7 +2118,7 @@ void test_the_charge_me_screen_fits_the_panel(void) {
 
 /* "Charge" over "me!" must read as two lines, not one block: the label's line
    pitch is the font's, so a face with a tight line height packs them (term
-   28 pt once left 1 blank row, stock 5). The words stay clear of the battery
+   28 pt once left 1 blank row). The words stay clear of the battery
    below. Ink here is dark on white. */
 #define CHARGE_LINE_GUTTER 5 /* blank rows between the two lines */
 void test_the_charge_me_words_keep_a_gutter_between_lines(void) {
@@ -3524,7 +3521,7 @@ void test_the_bedtime_screen_paints_the_variant_it_is_given(void) {
 }
 
 /* ---- sheet-only frames (MAGTAG_DUMP_DIR) -------------------------------
-   Worst-case text for judging a font set by eye. They have no golden: with
+   Worst-case text for judging the fonts by eye. They have no golden: with
    MAGTAG_DUMP_DIR unset they render and pass, with it set they dump. */
 
 static void render_for_the_sheet(const char *name) {

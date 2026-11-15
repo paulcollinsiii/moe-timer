@@ -100,3 +100,15 @@ add_custom_target(magtag_check_slot_size
     DEPENDS gen_project_binary partition_table_bin
     VERBATIM)
 add_dependencies(app magtag_check_slot_size)
+
+# Stock-font guard: the linked image must hold no lv_font_montserrat_* or
+# lv_font_unscii_* symbol. main/CMakeLists.txt makes ui_font_term_12 LVGL's
+# default font with a compile definition; this fails the build if that
+# definition ever stops taking effect. Reads the linker map, so it runs after
+# the link, like the slot guard. Covered by test/test_check_stock_fonts/.
+add_custom_target(magtag_check_stock_fonts
+    COMMAND ${magtag_python} ${CMAKE_CURRENT_LIST_DIR}/tools/check_stock_fonts.py
+            --map "${magtag_build_dir}/${CMAKE_PROJECT_NAME}.map"
+    DEPENDS gen_project_binary
+    VERBATIM)
+add_dependencies(app magtag_check_stock_fonts)

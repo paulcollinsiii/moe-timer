@@ -314,21 +314,24 @@ the C tests cite) and the screen goldens it names.
 ### UI fonts
 
 Every label takes its font from `include/ui_fonts.h` (`UI_FONT_12` ...
-`UI_FONT_48`). The set behind those names is the `MAGTAG_FONT_SET` Kconfig
-choice; the default is `term` (Terminus 12/16/18, Liberation Sans 28/48, all
-1 bpp). The other 1 bpp sets are generated into `main/fonts/<set>/` and
-compiled only when selected; `stock` is LVGL's 4 bpp Montserrat. The
-host golden renderer takes the same switch as a CMake cache variable
-(`cmake -S test -B test/build-fonts-stock -DMAGTAG_FONT_SET=stock`); only the
-default set matches the committed goldens.
+`UI_FONT_48`). They are the one font set, `term`: Terminus 12/16/18 and
+Liberation Sans 28/48, all 1 bpp, generated into `main/fonts/`. There is no
+font Kconfig option and no host switch; the committed goldens are rendered
+with this set. LVGL's own Montserrat fonts are not enabled and not linked.
+`main/CMakeLists.txt` sets `LV_FONT_DEFAULT` to `ui_font_term_12` with a
+compile definition on the LVGL component. The
+`CONFIG_LV_FONT_DEFAULT_UNSCII_8` line in `sdkconfig.defaults` is only a
+placeholder, because LVGL's Kconfig choice needs a member; the definition
+overrides it. Every build runs `tools/check_stock_fonts.py`, which fails if the
+linker map holds any `lv_font_montserrat` or `lv_font_unscii` symbol.
 
 To regenerate, edit the code points in `include/ui_font_ranges.h` or the faces
-in `tools/gen_fonts.py`, then run `uv run tools/gen_fonts.py [set]` (needs
-Node: it runs a pinned `npx lv_font_conv`) and commit the C. The firmware and
-host builds never need Node. `test_ui_fonts` checks every generated font
-against the ranges and the ranges against what `display_screens.c` draws.
-`uv run tools/font_sheets.py` renders every screen under every set to
-`docs/planning/fonts/<set>.png`.
+in `tools/gen_fonts.py`, then run `uv run tools/gen_fonts.py` (needs Node: it
+runs a pinned `npx lv_font_conv`) and commit the C. The firmware and host
+builds never need Node. `test_ui_fonts` checks every generated font against
+the ranges and the ranges against what `display_screens.c` draws.
+`uv run tools/font_sheets.py` renders every screen into one contact-sheet
+PNG. `docs/planning/fonts/` keeps the sheets the set was picked from.
 
 ## Flashing and monitoring
 
@@ -453,10 +456,11 @@ fix formatting, run `clang-format -i <file>`.
 | `tools/flash_assets.sh` | Write or erase the custom alert WAV in the `assets` partition. |
 | `tools/push_firmware.sh` | Publish a built image, its ELF and the OTA manifest. |
 | `tools/check_slot_size.py` | The build-size guard. Every build runs it. |
+| `tools/check_stock_fonts.py` | The stock-font guard: fails the build if an LVGL Montserrat or UNSCII font is linked. Every build runs it. |
 | `tools/gen_ha_dashboard.py` | Print the HA setup steps, the config-publishing automation and the dashboard YAML. Run with `uv run`. Usage: [Running it](home_assistant/dashboard.md#running-it). |
 | `tools/gen_sprites.py` | Run-length encode `tools/sprites/*.png` into `main/sprite_data.c` and `include/sprite_data.h`. Run with `uv run`; `--check` exits 1 when the committed C is stale; `--override-dir` merges private art over the templates (see [Lock-screen art](#lock-screen-art)). |
 | `tools/gen_fonts.py` | Generate the 1 bpp UI fonts under `main/fonts/` with a pinned `npx lv_font_conv`. Run with `uv run` (see [UI fonts](#ui-fonts)). |
-| `tools/font_sheets.py` | Render every screen under each font set into contact-sheet PNGs. Run with `uv run`. |
+| `tools/font_sheets.py` | Render every screen into one contact-sheet PNG. Run with `uv run`. |
 | `tools/ha_devices.example.yaml` | Template for `tools/ha_devices.yaml` (gitignored), the device list `gen_ha_dashboard.py` reads. |
 | `tools/ha/magtag_publish_config.yaml` | The HA automation that publishes each device's config document. Install: [Setup step 4](home_assistant/setup.md#4-install-the-config-publishing-automation). |
 

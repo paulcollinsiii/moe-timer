@@ -146,28 +146,25 @@ CONFIG_MAGTAG_QUIET_START_HHMM=2230
 CONFIG_MAGTAG_QUIET_END_HHMM=800
 CONFIG_MAGTAG_STATUS_LED_BRIGHTNESS=100
 
-# Larger font for the inverted break-screen footer (12 pt renders poorly
-# white-on-black on e-ink)
-CONFIG_LV_FONT_MONTSERRAT_16=y
-CONFIG_LV_FONT_MONTSERRAT_18=y
-
 # LVGL: 1-bit rendering for the e-paper panel
 CONFIG_LV_COLOR_DEPTH_1=y
 # Use the C library allocator instead of LVGL's 64 KB static pool — the
 # static pool overflows ESP32-S2 DRAM once the WiFi stack is linked in.
 CONFIG_LV_USE_CLIB_MALLOC=y
-CONFIG_LV_FONT_MONTSERRAT_12=y
-CONFIG_LV_FONT_MONTSERRAT_28=y
-CONFIG_LV_FONT_MONTSERRAT_48=y
-CONFIG_LV_FONT_DEFAULT_MONTSERRAT_12=y
+# Fonts: the screens draw with the generated 1 bpp fonts in main/fonts/
+# (include/ui_fonts.h), and LVGL's default font is ui_font_term_12, set by a
+# compile definition in main/CMakeLists.txt (LVGL's Kconfig can only pick a
+# built-in font). No stock Montserrat is enabled. LVGL's default-font choice
+# has no "none", so it names the smallest built-in font (UNSCII 8, which the
+# definition overrides and which is not referenced, so the linker drops it).
+# CONFIG_LV_FONT_MONTSERRAT_14 is not set
+CONFIG_LV_FONT_DEFAULT_UNSCII_8=y
 
 # LVGL size trim: the panel renders 1-bit (LV_COLOR_FORMAT_I1) and the UI only ever creates
-# lv_label and lv_bar widgets (display_screens.c) — no LV_SYMBOL, no flex/grid
+# lv_label and lv_bar widgets (display_screens.c; LV_SYMBOL_* are only string constants) — no flex/grid
 # layout, no shadow/transform. Every other widget, layout engine and the
-# observer/examples/demos code is dead weight; LVGL is the single largest
-# archive in the image (about 258 KB of text and rodata at -Os, 181 KB of it
-# rodata, mostly the five Montserrat fonts; map of 2026-11-13) so trimming it is the main lever against the
-# 85 % slot guard. LV_DRAW_SW_COMPLEX is turned off, see its line below.
+# observer/examples/demos code is dead weight, and trimming LVGL is a main
+# lever against the 85 % slot guard. LV_DRAW_SW_COMPLEX is turned off, see its line below.
 # CONFIG_LV_USE_ANIMIMG is not set
 # CONFIG_LV_USE_ARC is not set
 # CONFIG_LV_USE_ARCLABEL is not set

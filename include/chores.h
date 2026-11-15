@@ -49,7 +49,7 @@ extern "C" {
    comment (include/display.h:244-247): a character budget cannot bound
    rendered width on its own, because glyph advances differ. The same
    measurement for a proportional face on this row, taken from
-   lv_font_montserrat_16's own glyph table: 'W' advances exactly 18.00 px,
+   LVGL's built-in Montserrat 16 (not linked in this firmware): 'W' advances exactly 18.00 px,
    so 20 of them render 360 px — 64 px past a bare 296 px panel, and only
    14 fit once a 32 px tick column is subtracted. (The monospaced Terminus
    16 face advances 8 px for every glyph, so 20 of anything are 160 px.)
