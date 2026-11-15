@@ -113,7 +113,7 @@ void test_every_font_is_1bpp_and_carries_its_ranges(void) {
 }
 
 /* A label with no explicit font, the theme and the style defaults resolve to
-   LVGL's default font; it must be ours, not a stock Montserrat. */
+   LVGL's default font; it must be ours, not an LVGL built-in. */
 void test_lvgl_default_font_is_the_12_px_ui_font(void) {
     TEST_ASSERT_EQUAL_PTR(UI_FONT_12, lv_font_get_default());
     TEST_ASSERT_EQUAL_PTR(UI_FONT_12, LV_FONT_DEFAULT);

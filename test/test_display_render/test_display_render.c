@@ -1466,8 +1466,8 @@ static void measure_battery_row(const display_state_t *st, int32_t *batt_right, 
    strings on top of each other, not a graceful clip.
 
    The pathological rows are the point: a character budget alone cannot
-   bound the rendered width of a proportional face (in the stock
-   Montserrat a 12 pt digit advances ~8 px, 'W' ~14; the monospaced
+   bound the rendered width of a proportional face (in LVGL's built-in
+   Montserrat 12 a digit advances ~8 px, 'W' ~14; the monospaced
    Terminus advances 6 px for all), which is why the label also carries a
    hard width cap. */
 static const struct {

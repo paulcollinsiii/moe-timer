@@ -161,7 +161,7 @@ CONFIG_LV_USE_CLIB_MALLOC=y
 CONFIG_LV_FONT_DEFAULT_UNSCII_8=y
 
 # LVGL size trim: the panel renders 1-bit (LV_COLOR_FORMAT_I1) and the UI only ever creates
-# lv_label and lv_bar widgets (display_screens.c) — no LV_SYMBOL, no flex/grid
+# lv_label and lv_bar widgets (display_screens.c; LV_SYMBOL_* are only string constants) — no flex/grid
 # layout, no shadow/transform. Every other widget, layout engine and the
 # observer/examples/demos code is dead weight, and trimming LVGL is a main
 # lever against the 85 % slot guard. LV_DRAW_SW_COMPLEX is turned off, see its line below.

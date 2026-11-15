@@ -1,8 +1,9 @@
 /* LVGL configuration for the HOST golden-render tests (test_display_render).
    Everything not set here falls back to lv_conf_internal.h defaults; the
-   options below mirror what the firmware build sets via Kconfig so host
-   renders match the panel: clib stdlib, the default font, and I1 software-render support for the 1bpp e-ink
-   framebuffer. */
+   options below mirror what the firmware build sets (via Kconfig, and for the
+   default font via a compile definition in main/CMakeLists.txt) so host
+   renders match the panel: clib stdlib, the default font, and I1
+   software-render support for the 1bpp e-ink framebuffer. */
 #ifndef LV_CONF_HOST_H
 #define LV_CONF_HOST_H
 

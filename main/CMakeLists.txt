@@ -63,7 +63,9 @@ if(NOT CMAKE_BUILD_EARLY_EXPANSION)
 endif()
 
 # UI fonts: the generated 1 bpp sources (ui_font_term_<px>.c). Regenerate
-# with tools/gen_fonts.py.
+# with tools/gen_fonts.py. The list is explicit because a glob is not allowed
+# in this file; the host build globs main/fonts/*.c (test/CMakeLists.txt), so
+# a new face must be added here as well as generated.
 set(UI_FONT_SRCS
     "fonts/ui_font_term_12.c"
     "fonts/ui_font_term_16.c"
