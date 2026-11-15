@@ -46,7 +46,9 @@ file(GLOB_RECURSE LVGL_SRCS CONFIGURE_DEPENDS
 # The generated UI fonts (main/fonts/) live in this library: LVGL's default
 # font is ui_font_term_12 (mocks/lv_conf_host.h), so LVGL itself references
 # them. lv_font_conv's output includes "lvgl/lvgl.h" unless told lvgl.h is on
-# the include path directly.
+# the include path directly. The glob picks up every main/fonts/*.c; the
+# firmware lists the same files by name in UI_FONT_SRCS in main/CMakeLists.txt
+# (a glob is not allowed there), so adding a face means editing that list too.
 file(GLOB UI_FONT_SRCS CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/../main/fonts/*.c)
 set_source_files_properties(${UI_FONT_SRCS} PROPERTIES COMPILE_DEFINITIONS LV_LVGL_H_INCLUDE_SIMPLE)
 add_library(lvgl_host STATIC ${LVGL_SRCS} ${UI_FONT_SRCS})
@@ -264,6 +266,13 @@ find_package(Python3 REQUIRED COMPONENTS Interpreter)
 add_test(NAME test_check_slot_size
          COMMAND ${Python3_EXECUTABLE}
                  ${CMAKE_CURRENT_SOURCE_DIR}/test_check_slot_size/test_check_slot_size.py)
+
+# tools/check_stock_fonts.py is the sibling guard (no lv_font_montserrat or
+# lv_font_unscii symbol in the linked image), tested the same way and for the
+# same reason: its failing case needs a map the real build cannot produce.
+add_test(NAME test_check_stock_fonts
+         COMMAND ${Python3_EXECUTABLE}
+                 ${CMAKE_CURRENT_SOURCE_DIR}/test_check_stock_fonts/test_check_stock_fonts.py)
 
 # scripts/check-log-args.py is the HAZ-1 gate: no function call inside an
 # ESP_LOGx argument list, because ESP_LOGx wraps its arguments in a
