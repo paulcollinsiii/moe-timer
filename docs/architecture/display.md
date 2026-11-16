@@ -91,12 +91,14 @@ to the text lines.
 
 **The four lock-screen art slots (charge, time's up, break, bed time) are drawn
 the same way.**
-`tools/sprites/charge.png` (105x122, 1-bit), `timesup.png` (178x124, 1-bit),
-`break.png` (46x52, 1-bit) and `bedtime.png` (29x23, 1-bit) are the public
-templates; a private copy in `sprites.local/` can replace any of them at build
-time (see [Lock-screen art](../developer_setup.md#lock-screen-art)).
+`tools/sprites/charge.png` (148x124, 1-bit), `timesup.png` (187x126, 1-bit),
+`break.png` (46x52, 1-bit) and `bedtime.png` (32x25, 1-bit) are the public
+templates, each padded to its slot's maximum size (the largest box its screen
+leaves for art); a private copy in `sprites.local/`, up to that size, can
+replace any of them at build time, and a smaller one is padded on the slot's
+grow sides (see [Lock-screen art](../developer_setup.md#lock-screen-art)).
 `tools/gen_sprites.py` run-length encodes them into the committed
-`main/sprite_data.c` (about 0.8 KB, 1.0 KB, 0.2 KB and 0.06 KB of flash),
+`main/sprite_data.c` (about 0.8 KB, 1.0 KB, 0.2 KB and 0.07 KB of flash),
 `uv run tools/gen_sprites.py --check` fails when the two disagree, and
 `test_gen_sprites` round-trips each template PNG and compares it with its screen golden.
 `sprite.c` walks the runs with no LVGL and no scratch buffer; a draw handler in
@@ -104,14 +106,14 @@ time (see [Lock-screen art](../developer_setup.md#lock-screen-art)).
 The handler takes an integer scale and the ink colour per object: the charge
 and time's-up art draw at 1x in black, the break screen's art at 2x (each art
 pixel a 2x2 block, 92x104 on the panel) in white, because that screen is
-inverted, and the bed-time screen's art at 4x (116x92) in white for the same reason. The
+inverted, and the bed-time screen's art at 4x (128x100) in white for the same reason. The
 bed-time screen is a full refresh only, so it needs no `CLEAN_BANDS` entry.
 The break screen partial-refreshes in place, but its layout needs no band of its
 own in `CLEAN_BANDS`: the four bands jointly cover every byte of every row, the
 art is static, and a host test maps each changing element to its band.
 Edit the PNG and regenerate; never edit the generated C. The time's-up art is
 placed flush with the bottom edge and its ink may run off it (the template's
-alarm clock is cropped there on purpose), the one place ink may touch a panel
+alarm clock is cut off there on purpose), the one place ink may touch a panel
 edge; a host test pins the exact count for the template.
 
 **A slot can hold several pictures** (`<slot>.png`, `<slot>.1.png`, ...; the

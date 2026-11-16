@@ -4,8 +4,9 @@
 # holds any <slot>.png, the sprite data is instead generated into the build
 # directory from the templates with those files merged over them
 # (tools/gen_sprites.py --override-dir), and the committed copy is not
-# compiled. Slots are fixed in name and size; the generator refuses a
-# mismatch, so a bad override fails the build rather than the screen. See
+# compiled. Slots are fixed in name and maximum size; the generator pads a
+# smaller override and refuses an unknown name or a larger image, so a bad
+# override fails the build rather than the screen. See
 # docs/developer_setup.md ("Lock-screen art").
 set(SPRITE_DATA_SRCS "sprite_data.c")
 if(NOT CMAKE_BUILD_EARLY_EXPANSION)
