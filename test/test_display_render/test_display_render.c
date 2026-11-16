@@ -2089,9 +2089,10 @@ void test_charge_me_screen(void) {
     assert_matches_golden("charge_me");
 }
 
-/* The charge art is a 105x122 bitmap on a 128 px panel, so unlike a label it can
+/* The charge art's slot is 148x124 on a 128 px panel, so unlike a label it can
    touch an edge by arithmetic alone. Same margins as the no-clock screen's
-   fit test on the sides, and the same 2 px clear on the top and bottom. */
+   fit test on the sides, and the same 2 px clear on the top and bottom
+   (the slot's 124 rows are what that rule leaves). */
 void test_the_charge_me_screen_fits_the_panel(void) {
     display_screens_build_charge_me(NULL);
     lv_refr_now(s_disp);
@@ -2191,34 +2192,36 @@ void test_the_28pt_titles_keep_their_vertical_placement(void) {
 }
 
 /* A golden alone would freeze a screen with a missing sprite as correct. The
-   art's ink must fill its box exactly (x 8..112, y 3..124: CHARGE_ART_X,
-   centred in 128 px, 105x122) and nothing else may be left of the right
-   column (x 124). 3034 is the ink count of tools/sprites/charge.png;
+   art's ink must lie inside its box (the 148x124 slot at CHARGE_ART_X,
+   centred in 128 px: x 8..155, y 2..125), exactly the PNG's count, and
+   nothing else may be left of the box's right edge. The words' column
+   (CHARGE_COL_X 124, its text centred) starts inside the box, because the
+   slot was grown to the words' INK, not their label box:
+   test_the_lock_art_boxes_keep_a_gutter_to_every_other_element holds the
+   4 px between the two. 3034 is the ink count of tools/sprites/charge.png;
    test_gen_sprites.py (TestCharge.INK) is the single source and asserts the
    PNG still has it, so a PNG edit fails there first and names every place
    to update. */
 void test_the_charge_me_screen_paints_the_art_at_the_left(void) {
-    /* CHARGE_COL_X is a literal (an extern struct field is no constant
-       expression), so the art's right edge is checked against it here */
-    TEST_ASSERT_TRUE_MESSAGE(CHARGE_ART_X + (int)SPRITE_CHARGE.w <= CHARGE_COL_X,
-                             "the right column overlaps the art's box");
     display_screens_build_charge_me(NULL);
     lv_refr_now(s_disp);
+    const int bx = CHARGE_ART_X, by = (VER - SPRITE_CHARGE.h) / 2;
+    const int br = bx + SPRITE_CHARGE.w, bb = by + SPRITE_CHARGE.h; /* exclusive */
     int art_ink = 0, stray_ink = 0, right_ink = 0;
     for (int y = 0; y < VER; y++) {
         for (int x = 0; x < HOR; x++) {
             if (((s_captured[y * (HOR / 8) + x / 8] >> (7 - (x & 7))) & 1) == 0) {
-                if (x >= 124)
-                    right_ink++;
-                else if (x >= 8 && x <= 112 && y >= 3 && y <= 124)
+                if (x >= bx && x < br && y >= by && y < bb)
                     art_ink++;
+                else if (x >= br)
+                    right_ink++;
                 else
                     stray_ink++;
             }
         }
     }
     TEST_ASSERT_EQUAL_INT_MESSAGE(3034, art_ink, "the art's ink is not exactly its PNG's inside its box");
-    TEST_ASSERT_EQUAL_INT_MESSAGE(0, stray_ink, "ink left of the right column outside the art's box");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(0, stray_ink, "ink left of the art box's right edge outside the box");
     TEST_ASSERT_TRUE_MESSAGE(right_ink > 0, "no words or battery on the right");
 }
 
@@ -2289,17 +2292,18 @@ void test_a_sprite_takes_its_ink_colour_from_the_caller(void) {
 }
 
 /* The one screen where ink MAY reach an edge, and only one edge: the
-   time's-up art is cropped open at the bottom, so its ink may run off the
-   panel on purpose (the template's alarm clock does, in 12 pixels). That is
-   the stated exception to the fit rule, so it is asserted rather than
+   time's-up art is open at the bottom, so its ink may run off the panel on
+   purpose (the template's alarm clock does, in 12 pixels). That is the
+   stated exception to the fit rule, so it is asserted rather than
    tolerated: ink IS on the bottom row, inside the sprite's columns
-   (x 2..179), and nowhere else on it. Everything else keeps the charge
-   lock's rule: no ink on the left, right or top edge (2 px clear), and the
-   words, which start at x 180, stay 2 px off every edge including the
-   bottom. */
+   (x 2..188, the 187-wide slot), and nowhere else on it. Everything else
+   keeps the charge lock's rule: no ink on the left, right or top edge (2 px
+   clear; the slot's 126 rows are what that leaves), and the words, right of
+   the art's box, stay 2 px off every edge including the bottom. */
 void test_the_timesup_screen_fits_the_panel_but_for_the_art_bottom_bleed(void) {
     display_screens_build_timesup(NULL);
     lv_refr_now(s_disp);
+    const int art_r = TIMESUP_ART_X + (int)SPRITE_TIMESUP.w; /* exclusive */
     int text_left = HOR, text_right = -1, text_top = VER, text_bottom = -1;
     int edge_ink = 0, bottom_sprite_ink = 0, bottom_text_ink = 0;
     for (int y = 0; y < VER; y++) {
@@ -2309,12 +2313,12 @@ void test_the_timesup_screen_fits_the_panel_but_for_the_art_bottom_bleed(void) {
             if (x < 2 || x > HOR - 3 || y < 2)
                 edge_ink++;
             if (y == VER - 1) {
-                if (x >= TIMESUP_ART_X && x < TIMESUP_COL_X)
+                if (x >= TIMESUP_ART_X && x < art_r)
                     bottom_sprite_ink++;
                 else
                     bottom_text_ink++;
             }
-            if (x >= TIMESUP_COL_X) {
+            if (x >= art_r) {
                 if (x < text_left)
                     text_left = x;
                 if (x > text_right)
@@ -2330,7 +2334,7 @@ void test_the_timesup_screen_fits_the_panel_but_for_the_art_bottom_bleed(void) {
     snprintf(msg, sizeof(msg), "words span x=%d..%d y=%d..%d on a %dx%d panel", text_left, text_right, text_top,
              text_bottom, HOR, VER);
     TEST_ASSERT_EQUAL_INT_MESSAGE(0, edge_ink, "ink within 2 px of the left, right or top edge");
-    TEST_ASSERT_TRUE_MESSAGE(text_left >= 182, msg);
+    TEST_ASSERT_TRUE_MESSAGE(text_left >= art_r + 4, msg); /* the 4 px gutter to the art's box */
     TEST_ASSERT_TRUE_MESSAGE(text_right <= HOR - 3, msg);
     TEST_ASSERT_TRUE_MESSAGE(text_top >= 2, msg);
     TEST_ASSERT_TRUE_MESSAGE(text_bottom <= VER - 3, msg);
@@ -2344,21 +2348,24 @@ void test_the_timesup_screen_fits_the_panel_but_for_the_art_bottom_bleed(void) {
 }
 
 /* A golden alone would freeze a screen with a missing sprite as correct.
-   The art's ink must fill its box exactly (x 2..179, y 4..127: TIMESUP_ART_X,
-   flush with the bottom, 178x124) and nothing else may be left of x 180.
-   5048 is the ink count of tools/sprites/timesup.png; test_gen_sprites.py
-   (TestTimesUp.INK) is the single source and asserts the PNG still has it,
-   so a PNG edit fails there first and names every place to update. The words must be two bands, TIME'S above UP!, both
-   centred in the space right of the sprite (the column TIMESUP_COL_X wide
-   TIMESUP_COL_W; measured bands y 31..50 and y 69..102). The column constants
-   are literals in display_screens.c (an extern struct field is no constant
-   expression), so the sprite's right edge is checked against them here. */
+   The art's ink must lie inside its box (the 187x126 slot at TIMESUP_ART_X,
+   flush with the bottom: x 2..188, y 2..127), exactly the PNG's count, and
+   nothing else may be left of the box's right edge. 5048 is the ink count
+   of tools/sprites/timesup.png; test_gen_sprites.py (TestTimesUp.INK) is the
+   single source and asserts the PNG still has it, so a PNG edit fails there
+   first and names every place to update. The words must be two bands,
+   TIME'S above UP!, both centred on the column TIMESUP_COL_X wide
+   TIMESUP_COL_W (measured bands y 31..50 and y 69..102). That label column
+   starts inside the art's box (the slot was grown to the words' INK, not
+   their label box), so the box/word separation is an ink test: the words'
+   ink keeps 4 px off the box
+   (test_the_timesup_screen_fits_the_panel_but_for_the_art_bottom_bleed and
+   test_the_lock_art_boxes_keep_a_gutter_to_every_other_element). */
 void test_the_timesup_screen_paints_the_art_at_the_left_and_the_words_at_the_right(void) {
-    TEST_ASSERT_TRUE_MESSAGE(TIMESUP_ART_X + (int)SPRITE_TIMESUP.w <= TIMESUP_COL_X,
-                             "the words' column overlaps the art's box");
     TEST_ASSERT_TRUE_MESSAGE(TIMESUP_COL_X + TIMESUP_COL_W <= HOR, "the words' column runs off the panel");
     display_screens_build_timesup(NULL);
     lv_refr_now(s_disp);
+    const int art_r = TIMESUP_ART_X + (int)SPRITE_TIMESUP.w; /* exclusive */
     int art_ink = 0, stray_ink = 0, right_ink = 0;
     /* per row of the column: its ink extent, for the two-band centring check */
     int band_min[2] = {HOR, HOR}, band_max[2] = {-1, -1}, bands = 0;
@@ -2368,7 +2375,7 @@ void test_the_timesup_screen_paints_the_art_at_the_left_and_the_words_at_the_rig
         for (int x = 0; x < HOR; x++) {
             if (!captured_ink(x, y))
                 continue;
-            if (x >= TIMESUP_COL_X) {
+            if (x >= art_r) {
                 right_ink++;
                 if (x < row_min)
                     row_min = x;
@@ -2395,7 +2402,7 @@ void test_the_timesup_screen_paints_the_art_at_the_left_and_the_words_at_the_rig
         }
     }
     TEST_ASSERT_EQUAL_INT_MESSAGE(5048, art_ink, "the art's ink is not exactly its PNG's inside its box");
-    TEST_ASSERT_EQUAL_INT_MESSAGE(0, stray_ink, "ink left of the right column outside the art's box");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(0, stray_ink, "ink left of the art box's right edge outside the box");
     TEST_ASSERT_EQUAL_INT_MESSAGE(2, bands, "the words are not exactly two bands (TIME'S above UP!)");
     /* ink centre within 1 px of the column midpoint: compare doubled values,
        |(min+max) - (2*COL_X + COL_W - 1)| <= 2 */
@@ -2472,19 +2479,21 @@ void test_the_bedtime_screen_fits_the_panel(void) {
 /* The bed-time art: BEDTIME_INK (222, the ink count of
    tools/sprites/bedtime.png; test_gen_sprites.py TestBedtime.INK is the
    single source and asserts the PNG still has it) art pixels at 4x = 16 *
-   BEDTIME_INK white pixels, exactly, inside its 116x92 box at
-   (BEDTIME_ART_X, BEDTIME_ART_Y). */
+   BEDTIME_INK white pixels, exactly, inside its 128x100 box (the 32x25
+   slot at 4x) at (BEDTIME_ART_X, BEDTIME_ART_Y), and no other ink left of
+   the box's right edge above its bottom. The words' label column
+   (BEDTIME_COL_X 120) starts inside the box: the slot was grown to the
+   words' INK, and test_the_bedtime_words_never_overlap_the_art holds the
+   gutter between the two. */
 #define BEDTIME_INK 222
 void test_the_bedtime_screen_paints_the_art_at_the_left_at_four_times_its_size(void) {
-    TEST_ASSERT_TRUE_MESSAGE(BEDTIME_ART_X + BEDTIME_ART_SCALE * (int)SPRITE_BEDTIME.w <= BEDTIME_COL_X,
-                             "the words' column overlaps the art's box");
     TEST_ASSERT_TRUE_MESSAGE(BEDTIME_COL_X + BEDTIME_COL_W <= HOR, "the words' column runs off the panel");
     display_screens_build_bedtime(NULL);
     lv_refr_now(s_disp);
     const int box_w = BEDTIME_ART_SCALE * SPRITE_BEDTIME.w, box_h = BEDTIME_ART_SCALE * SPRITE_BEDTIME.h;
     int in_box = 0, left_stray = 0;
     for (int y = 0; y < VER; y++) {
-        for (int x = 0; x < BEDTIME_COL_X; x++) {
+        for (int x = 0; x < BEDTIME_ART_X + box_w; x++) {
             if (!white_px(x, y))
                 continue;
             if (x >= BEDTIME_ART_X && x < BEDTIME_ART_X + box_w && y >= BEDTIME_ART_Y && y < BEDTIME_ART_Y + box_h)
@@ -2495,14 +2504,14 @@ void test_the_bedtime_screen_paints_the_art_at_the_left_at_four_times_its_size(v
     }
     TEST_ASSERT_EQUAL_INT_MESSAGE(BEDTIME_ART_SCALE * BEDTIME_ART_SCALE * BEDTIME_INK, in_box,
                                   "the art's ink is not exactly its PNG at 4x inside its box");
-    TEST_ASSERT_EQUAL_INT_MESSAGE(0, left_stray, "stray ink left of the words' column outside the art's box");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(0, left_stray, "stray ink left of the art box's right edge outside the box");
 }
 
 /* The art and the words never overlap. Render the art alone, then the whole
    screen: inside the art's box the two must be pixel-identical (a word
    crossing the box would add ink there), the two words must be exactly two
-   bands that sit entirely right of the box and centre on the column, and the
-   bottom line must start at least 2 rows below the box. */
+   bands that sit entirely right of the box, 4 px clear of it, and centre on
+   the column, and the bottom line must start at least 4 rows below the box. */
 static uint8_t s_art_alone[FB_BYTES];
 
 void test_the_bedtime_words_never_overlap_the_art(void) {
@@ -2563,28 +2572,29 @@ void test_the_bedtime_words_never_overlap_the_art(void) {
         char msg[96];
         snprintf(msg, sizeof(msg), "band %d ink x=%d..%d overlaps the art's box or is off the column centre", b,
                  band_min[b], band_max[b]);
-        /* the column starts at the box's right edge, so the words' ink must
-           clear the box by 2 px (box right edge x = box_r - 1) */
-        TEST_ASSERT_TRUE_MESSAGE(band_min[b] >= box_r - 1 + 2, msg);
+        /* the label column starts inside the box, so the words' INK must
+           clear it: 4 blank columns after the box's right edge (box_r - 1) */
+        TEST_ASSERT_TRUE_MESSAGE(band_min[b] >= box_r + 4, msg);
         int off = (band_min[b] + band_max[b]) - (2 * BEDTIME_COL_X + BEDTIME_COL_W - 1);
         TEST_ASSERT_TRUE_MESSAGE(off >= -2 && off <= 2, msg);
     }
     char msg[64];
     snprintf(msg, sizeof(msg), "the bottom line starts at row %d, box ends at %d", bottom_top, box_b - 1);
-    TEST_ASSERT_TRUE_MESSAGE(bottom_top >= box_b + 2, msg);
+    TEST_ASSERT_TRUE_MESSAGE(bottom_top >= box_b + 4, msg);
 }
 
 /* The ink rows of the three text lines (white ink on black). The layout
    contract is a WINDOW per line, not the rows a particular face happens to
    paint: a font moves the ink inside its window, never out of it, and the
    windows keep the lines clear of each other and of the art's box (which
-   ends at row 95; it does not depend on the text). The golden alone guards
+   ends at row 103, so the bottom line's window opens 4 rows below it; the
+   box does not depend on the text). The golden alone guards
    the rows blindly; this keeps a font change from silently crowding them. */
 #define BEDTIME_TITLE_WIN_TOP BEDTIME_ART_Y
 #define BEDTIME_TITLE_WIN_BOT (BEDTIME_GREETING_Y - 1)
 #define BEDTIME_GREET_WIN_TOP BEDTIME_GREETING_Y
 #define BEDTIME_GREET_WIN_BOT 99
-#define BEDTIME_LINE_WIN_TOP 100
+#define BEDTIME_LINE_WIN_TOP 108
 #define BEDTIME_LINE_WIN_BOT (VER - 1)
 #define BEDTIME_LINE_GUTTER 8 /* blank rows between two lines of text */
 
@@ -3520,6 +3530,78 @@ void test_the_bedtime_screen_paints_the_variant_it_is_given(void) {
     check_variant_paints_in_its_box(vb_bedtime, &SPRITE_BEDTIME, BEDTIME_ART_X, BEDTIME_ART_Y, BEDTIME_ART_SCALE, true);
 }
 
+/* ---- the art slots are their max size ---------------------------------
+   Each slot (SPRITE_<SLOT>.w x .h, times the screen's scale) is the largest
+   box the layout leaves for art: any ink a custom picture puts anywhere in
+   it stays readable beside the rest. Rendered with the template art, the
+   box must sit on the panel 2 px off every edge (the fit tests' rule; the
+   time's-up box is flush with the bottom edge on purpose, the bleed) and
+   every pixel of ink OUTSIDE the box -- the words, the bar, the battery, the
+   bottom row -- must stay `gutter` px clear of it on every side and
+   `below` px clear under it. `below` is 4 everywhere but the break screen:
+   its box predates this rule and its bottom row's ink starts 2 rows under
+   it (row 110 under a box ending at 107); at 2x the slot cannot grow a
+   row without touching it, nor a column without touching the bar at x 100. */
+static void assert_art_box_has_its_gutter(const char *what, int bx, int by, int bw, int bh, bool white_ink, int below,
+                                          bool bottom_flush) {
+    const int gutter = 4;
+    char msg[128];
+    snprintf(msg, sizeof msg, "%s: box x %d..%d, y %d..%d is not 2 px inside the panel", what, bx, bx + bw - 1, by,
+             by + bh - 1);
+    TEST_ASSERT_TRUE_MESSAGE(bx >= 2 && by >= 2 && bx + bw <= HOR - 2, msg);
+    TEST_ASSERT_TRUE_MESSAGE(bottom_flush ? by + bh == VER : by + bh <= VER - 2, msg);
+    int near = 0, nx = -1, ny = -1;
+    for (int y = 0; y < VER; y++) {
+        for (int x = 0; x < HOR; x++) {
+            if ((((s_captured[y * (HOR / 8) + x / 8] >> (7 - (x & 7))) & 1) != 0) != white_ink)
+                continue;
+            const bool inside = x >= bx && x < bx + bw && y >= by && y < by + bh;
+            const bool close = x >= bx - gutter && x < bx + bw + gutter && y >= by - gutter && y < by + bh + below;
+            if (!inside && close) {
+                if (!near++) {
+                    nx = x;
+                    ny = y;
+                }
+            }
+        }
+    }
+    snprintf(msg, sizeof msg, "%s: %d ink pixels within the gutter of the art box (first at %d,%d)", what, near, nx,
+             ny);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(0, near, msg);
+}
+
+void test_the_lock_art_boxes_keep_a_gutter_to_every_other_element(void) {
+    display_screens_build_charge_me(NULL);
+    lv_refr_now(s_disp);
+    assert_art_box_has_its_gutter("charge", CHARGE_ART_X, (VER - SPRITE_CHARGE.h) / 2, SPRITE_CHARGE.w, SPRITE_CHARGE.h,
+                                  false, 4, false);
+
+    display_screens_build_timesup(NULL);
+    lv_refr_now(s_disp);
+    assert_art_box_has_its_gutter("timesup", TIMESUP_ART_X, VER - SPRITE_TIMESUP.h, SPRITE_TIMESUP.w, SPRITE_TIMESUP.h,
+                                  false, 0, true);
+
+    display_screens_build_bedtime(NULL);
+    lv_refr_now(s_disp);
+    assert_art_box_has_its_gutter("bedtime", BEDTIME_ART_X, BEDTIME_ART_Y, BEDTIME_ART_SCALE * SPRITE_BEDTIME.w,
+                                  BEDTIME_ART_SCALE * SPRITE_BEDTIME.h, true, 4, false);
+
+    /* the break screen's fullest cells: three chores and a swap hint, and
+       the bare screen */
+    const struct {
+        uint8_t count, outstanding;
+        const char *swap;
+    } cells[] = {{3, 2, "Woodwind lesson"}, {3, 0, "Piano"}, {0, 0, NULL}};
+    for (size_t v = 0; v < sizeof cells / sizeof cells[0]; v++) {
+        display_state_t st = break_chore_state(cells[v].count, cells[v].outstanding);
+        st.swap_next_name = cells[v].swap;
+        display_screens_build_break(&st, NULL);
+        lv_refr_now(s_disp);
+        assert_art_box_has_its_gutter("break", BREAK_ART_X, BREAK_ART_Y, 2 * SPRITE_BREAK.w, 2 * SPRITE_BREAK.h, true,
+                                      2, false);
+    }
+}
+
 /* ---- sheet-only frames (MAGTAG_DUMP_DIR) -------------------------------
    Worst-case text for judging the fonts by eye. They have no golden: with
    MAGTAG_DUMP_DIR unset they render and pass, with it set they dump. */
@@ -3676,6 +3758,7 @@ int main(void) {
     RUN_TEST(test_the_timesup_screen_paints_the_variant_it_is_given);
     RUN_TEST(test_the_break_screen_paints_the_variant_it_is_given);
     RUN_TEST(test_the_bedtime_screen_paints_the_variant_it_is_given);
+    RUN_TEST(test_the_lock_art_boxes_keep_a_gutter_to_every_other_element);
     RUN_TEST(test_sheet_main_long_timer_name);
     RUN_TEST(test_sheet_main_widest_digits);
     RUN_TEST(test_sheet_chores_long_names);
