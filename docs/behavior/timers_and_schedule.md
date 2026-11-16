@@ -115,7 +115,7 @@ build default; `CONFIG_MAGTAG_FULL_REFRESH_EVERY_N` changes it.)
 ### Switching timers with C
 
 C counts. The press that wakes the device starts a count, and each further
-press within a short pause (700 ms by default,
+press within a short pause (1 s by default,
 `CONFIG_MAGTAG_SWAP_COUNT_QUIET_MS`) moves on one more timer, wrapping through
 Screen. The four LEDs show where you have got to as a binary number: the
 timer's place among the enabled timers, Screen = 1, with the least significant
@@ -134,9 +134,9 @@ Things to know:
 
 - **A single press now waits out the pause before the panel repaints.** The
   device cannot tell one press from the first of several until the pause has
-  passed, so the repaint comes about 0.7 s after the press instead of
+  passed, so the repaint comes about 1 s after the press instead of
   straight away. The LEDs answer at once.
-- **The count ends after 6 s at most**
+- **The count ends after 9 s at most**
   (`CONFIG_MAGTAG_SWAP_COUNT_BUDGET_MS`), whatever you are still pressing, and
   selects the timer it has reached.
 - **Two kinds of press start a count:** the press that wakes the device, and

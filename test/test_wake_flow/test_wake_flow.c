@@ -13802,7 +13802,7 @@ void test_swap2_n_presses_are_one_commit_and_one_partial_paint(void) {
 
 /* THE COMMIT PAINTS THE CLOCK AS IT IS WHEN THE GESTURE ENDS, not as it was
    when the press arrived. The wake read the clock before the gesture, and the
-   gesture then waits 0.7 to 6 s: a count that crosses a minute boundary must
+   gesture then waits 1 to 9 s at the defaults: a count that crosses a minute boundary must
    paint the new minute (the chore coalescer and the D arm re-read for the
    same reason). The harness clock advances with the gesture's delays. */
 void test_swap3a_a_gesture_that_crosses_a_minute_paints_the_minute_it_ended_in(void) {
