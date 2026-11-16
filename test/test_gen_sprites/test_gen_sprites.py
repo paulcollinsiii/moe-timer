@@ -24,8 +24,16 @@ What is pinned, and why each matters:
     copy, so a PNG edited without regenerating cannot ship; it compares
     against the templates only, never a private sprites.local/;
   - --override-dir (TestOverride): an override replaces the template of the
-    same name, must match its size, must name a slot, and never changes the
-    generated header.
+    same name, must name a slot, and never changes the generated header;
+  - THE SLOT SIZE (TestSmallerImages, TestSlotAnchors, TestBlankTemplates):
+    each template is padded to its slot's MAX size, which is the size every
+    generated sprite has. An image (override or variant) may be smaller in
+    either dimension and is padded with background, placed by the slot's
+    vertical anchor and, for charge and break, inset by the room their slots
+    grew past the old art (SLOT_INSET), so art of an old slot size lands
+    where it always did; one larger than its slot is refused. tools/sprites/templates/<slot>.png is a blank image of each
+    slot's exact size, and the template art still lands on the same panel
+    pixels it always did (INK_BOX).
 """
 
 from __future__ import annotations
@@ -52,6 +60,8 @@ CHARGE_PNG = os.path.join(ROOT, "tools", "sprites", "charge.png")
 TIMESUP_PNG = os.path.join(ROOT, "tools", "sprites", "timesup.png")
 BREAK_PNG = os.path.join(ROOT, "tools", "sprites", "break.png")
 BEDTIME_PNG = os.path.join(ROOT, "tools", "sprites", "bedtime.png")
+BLANK_DIR = os.path.join(ROOT, "tools", "sprites", "templates")
+PANEL_H = 128  # DISP_VER
 
 
 def runs_of(rle):
@@ -123,11 +133,19 @@ class SpriteChecks:
 
     A subclass must set:
       PNG     path of the source art
-      DIMS    (w, h) of the PNG
+      DIMS    (w, h) of the PNG: the slot's max size (the template is padded
+              to it with background)
       INK     the PNG's ink count, hard-coded in the C suites
       IDENT   the C stem: <ident>_rle / SPRITE_<IDENT>
       GOLDEN  the screen golden (stem, no .bin) that holds it
       BOX     (x, y, w, h) where the golden holds the sprite (w, h scaled)
+      INK_BOX (x0, y0, x1, y1) inclusive: the panel pixels the template's ink
+              spans, pinned from before the slots were padded to their max,
+              so padding can never move the art
+      OLD_DIMS, OLD_ORIGIN  the template's size and panel origin before the
+              padding: an override of that size (the owner's existing art)
+              must still land at OLD_ORIGIN, which for charge and break is
+              inside the grown slot (the slot's inset, gen_sprites.SLOT_INSET)
       C_SITES a message naming every C test that asserts INK, and the golden
               to regenerate, shown when the ink count drifts
     and define placement(src), which reads the sprite's (x, y) out of
@@ -135,7 +153,7 @@ class SpriteChecks:
     moved call fails here) and returns it.
     """
 
-    PNG = DIMS = INK = IDENT = GOLDEN = BOX = C_SITES = None
+    PNG = DIMS = INK = IDENT = GOLDEN = BOX = INK_BOX = OLD_DIMS = OLD_ORIGIN = C_SITES = None
     RLE_LEN = None  # when set: the encoded stream length, pinned in the C suite too
     SCALE = 1  # integer draw scale: each art pixel is SCALE x SCALE on the panel
     INVERTED = False  # True: white ink on a black screen (the break screen)
@@ -204,6 +222,29 @@ class SpriteChecks:
         self.assertEqual(bad[:5], [], "golden differs from the PNG at (x, y) above")
         self.assertEqual((sx, sy, w * k, h * k), self.BOX)
 
+    def test_the_template_ink_lands_on_the_panel_pixels_it_always_did(self):
+        # the slot was padded to its max with background on its grow sides,
+        # never by moving the art: the ink's panel extent is pinned
+        with open(os.path.join(ROOT, "main", "display_screens.c")) as f:
+            sx, sy = self.placement(f.read())
+        w, _h, px = g.load_png(self.PNG)
+        k = self.SCALE
+        xs = [i % w for i, v in enumerate(px) if v]
+        ys = [i // w for i, v in enumerate(px) if v]
+        got = (sx + min(xs) * k, sy + min(ys) * k, sx + max(xs) * k + k - 1, sy + max(ys) * k + k - 1)
+        self.assertEqual(got, self.INK_BOX)
+
+    def test_an_override_of_the_old_size_lands_at_the_old_origin(self):
+        # gen_sprites.pad_offset() places a smaller image inside the slot;
+        # the template is the art padded exactly as an override of its old
+        # size would be, so the owner's existing art does not move
+        w, h, _px = g.load_png(self.PNG)
+        dx, dy = g.pad_offset(self.IDENT, w, h, self.OLD_DIMS[0], self.OLD_DIMS[1])
+        with open(os.path.join(ROOT, "main", "display_screens.c")) as f:
+            sx, sy = self.placement(f.read())
+        k = self.SCALE
+        self.assertEqual((sx + dx * k, sy + dy * k), self.OLD_ORIGIN)
+
     def test_the_committed_c_holds_that_stream(self):
         w, h, px = g.load_png(self.PNG)
         rle = g.encode(w, h, px)
@@ -223,11 +264,13 @@ class SpriteChecks:
 class TestCharge(SpriteChecks, unittest.TestCase):
     __test__ = True
     PNG = CHARGE_PNG
-    DIMS = (105, 122)
+    DIMS = (154, 124)
     INK = 3034
     IDENT = "charge"
     GOLDEN = "charge_me"
-    BOX = (8, 3, 105, 122)
+    BOX = (2, 2, 154, 124)
+    INK_BOX = (20, 5, 112, 124)
+    OLD_DIMS, OLD_ORIGIN = (105, 122), (8, 3)
     C_SITES = (
         "test/test_sprite/test_sprite.c (test_the_generated_charge_art_decodes_to_the_png_dimensions_and_ink_count), "
         "test/test_display_render/test_display_render.c "
@@ -248,11 +291,13 @@ class TestCharge(SpriteChecks, unittest.TestCase):
 class TestTimesUp(SpriteChecks, unittest.TestCase):
     __test__ = True
     PNG = TIMESUP_PNG
-    DIMS = (178, 124)
+    DIMS = (187, 126)
     INK = 5048
     IDENT = "timesup"
     GOLDEN = "timesup"
-    BOX = (2, 4, 178, 124)
+    BOX = (2, 2, 187, 126)
+    INK_BOX = (4, 10, 178, 127)
+    OLD_DIMS, OLD_ORIGIN = (178, 124), (2, 4)
     BLEED = 12  # ink pixels on the art's last row (= the panel's bottom row)
     C_SITES = (
         "test/test_sprite/test_sprite.c (test_the_generated_timesup_art_decodes_to_the_png_dimensions_and_ink_count), "
@@ -263,7 +308,7 @@ class TestTimesUp(SpriteChecks, unittest.TestCase):
     )
 
     def placement(self, src):
-        # TIMESUP_ART_X, flush with the bottom edge (the template is cropped by it on purpose)
+        # TIMESUP_ART_X, flush with the bottom edge (the template's art is cut off by it on purpose)
         x = int(re.search(r"#define TIMESUP_ART_X (\d+)", src).group(1))
         self.assertRegex(
             src,
@@ -285,14 +330,16 @@ class TestTimesUp(SpriteChecks, unittest.TestCase):
 class TestBreak(SpriteChecks, unittest.TestCase):
     __test__ = True
     PNG = BREAK_PNG
-    DIMS = (46, 52)
+    DIMS = (47, 53)
     INK = 1105
     RLE_LEN = 205
     IDENT = "break"
     GOLDEN = "break_screen"
     SCALE = 2
     INVERTED = True
-    BOX = (4, 4, 92, 104)
+    BOX = (2, 2, 94, 106)
+    INK_BOX = (8, 8, 91, 105)
+    OLD_DIMS, OLD_ORIGIN = (46, 52), (4, 4)
     C_SITES = (
         "test/test_sprite/test_sprite.c (test_the_generated_break_art_decodes_to_the_png_dimensions_and_ink_count), "
         "test/test_display_render/test_display_render.c "
@@ -314,14 +361,16 @@ class TestBreak(SpriteChecks, unittest.TestCase):
 class TestBedtime(SpriteChecks, unittest.TestCase):
     __test__ = True
     PNG = BEDTIME_PNG
-    DIMS = (29, 23)
+    DIMS = (32, 25)
     INK = 222
-    RLE_LEN = 60
+    RLE_LEN = 73
     IDENT = "bedtime"
     GOLDEN = "bedtime"
     SCALE = 4
     INVERTED = True
-    BOX = (4, 4, 116, 92)
+    BOX = (4, 4, 128, 100)
+    INK_BOX = (4, 4, 119, 95)
+    OLD_DIMS, OLD_ORIGIN = (29, 23), (4, 4)
     C_SITES = (
         "test/test_sprite/test_sprite.c (test_the_generated_bedtime_art_decodes_to_the_png_dimensions_and_ink_count), "
         "test/test_display_render/test_display_render.c "
@@ -447,8 +496,9 @@ class TestOverride(unittest.TestCase):
     """--override-dir: private art merged over the templates, slot by slot.
 
     Two templates (alpha 8x4, beta 6x6). An override must name an existing
-    slot and match its template's size exactly; everything else is refused
-    with the file, the expected and the actual size.
+    slot and be no larger than its template in either dimension; a larger
+    one is refused with the file, the slot's size and its own (the padding of
+    a smaller one is TestSmallerImages').
     """
 
     def setUp(self):
@@ -527,7 +577,7 @@ class TestOverride(unittest.TestCase):
         self.assertIn("beta", msg)
         self.assertFalse(os.path.exists(self.c))
 
-    def test_a_size_mismatch_is_refused_naming_expected_and_actual(self):
+    def test_an_override_larger_than_its_slot_is_refused_naming_both_sizes(self):
         self.save(self.over, "alpha", (9, 4), [])
         with self.assertRaises(SystemExit) as cm:
             g.main(self.args + ["--override-dir", self.over])
@@ -626,7 +676,8 @@ class TestOverride(unittest.TestCase):
 class TestVariants(unittest.TestCase):
     """<slot>.<n>.png variants, in the templates and in the override directory.
 
-    Rules pinned here: a variant must have exactly its slot's base size; the
+    Rules pinned here: a variant may not be larger than its slot's base size
+    (a smaller one is padded: TestSmallerImages); the
     numbering is 1, 2, ... without a gap (variant 0 is <slot>.png); an
     override file REPLACES the template file of the same slot and number, and
     an override number the template lacks EXTENDS the slot; the emitted
@@ -724,7 +775,7 @@ class TestVariants(unittest.TestCase):
         self.run_main()
         self.assertNotIn("VARIANT_1", self.text(self.h))
 
-    def test_a_variant_of_another_size_is_refused_naming_the_file_and_both_sizes(self):
+    def test_a_variant_larger_than_its_slot_is_refused_naming_the_file_and_both_sizes(self):
         self.save(self.sprites, "alpha.1.png", (9, 4), [])
         msg = self.refuse()
         self.assertIn(os.path.join(self.sprites, "alpha.1.png"), msg)
@@ -732,7 +783,7 @@ class TestVariants(unittest.TestCase):
         self.assertIn("9x4", msg)
         self.assertFalse(os.path.exists(self.c))
 
-    def test_an_override_variant_of_another_size_is_refused_too(self):
+    def test_an_override_variant_larger_than_its_slot_is_refused_too(self):
         self.save(self.over, "beta.1.png", (6, 7), [])
         msg = self.refuse(["--override-dir", self.over])
         self.assertIn(os.path.join(self.over, "beta.1.png"), msg)
@@ -745,7 +796,7 @@ class TestVariants(unittest.TestCase):
         self.assertIn("not a\n   constant expression", h)
         self.assertLess(h.index("constant expression"), h.index("extern const unsigned"))
 
-    def test_an_override_variant_of_another_size_is_refused_at_every_number(self):
+    def test_an_override_variant_larger_than_its_slot_is_refused_at_every_number(self):
         # the size check is not a first-variant check: .2 and .3 are judged too
         self.save(self.sprites, "alpha.1.png", (8, 4), [])
         for n in (1, 2, 3):
@@ -876,6 +927,245 @@ class TestVariants(unittest.TestCase):
         for slot in ("charge", "timesup", "break", "bedtime"):
             self.assertEqual(self.count(c, slot), 1, slot)
             self.assertEqual(self.table(c, slot), ["&SPRITE_%s" % slot.upper()])
+
+
+class TestSmallerImages(unittest.TestCase):
+    """An image smaller than its slot is padded to the slot's size.
+
+    Every slot is 8x6 here, named after the real ones so each placement is
+    exercised: bedtime is anchored top-left (padded right and below); break
+    top-left inset by (1, 1) (one column left and one row above, as room
+    allows, the rest right and below); charge inset 6 columns from the left
+    as room allows and vertically centred (the odd row going below); timesup
+    bottom-left (padded right and above). A slot the generator has no
+    placement for (alpha) is top-left. The generated sprite always has the
+    slot's size, so the layouts never see an override's own size.
+    """
+
+    SW, SH = 8, 6
+    # where a 5x3 image lands in an 8x6 slot: (columns left of it, rows above)
+    OFFS = {"break": (1, 1), "bedtime": (0, 0), "charge": (3, 1), "timesup": (0, 3), "alpha": (0, 0)}
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.sprites = os.path.join(self.tmp, "sprites")
+        self.over = os.path.join(self.tmp, "over")
+        os.mkdir(self.sprites)
+        os.mkdir(self.over)
+        for slot in self.OFFS:
+            self.save(self.sprites, slot + ".png", (self.SW, self.SH), [(7, 5)])
+        self.c = os.path.join(self.tmp, "sprite_data.c")
+        self.h = os.path.join(self.tmp, "sprite_data.h")
+        self.args = ["--sprites-dir", self.sprites, "--c-out", self.c, "--h-out", self.h]
+
+    @staticmethod
+    def save(d, fname, size, ink):
+        im = Image.new("1", size, 1)
+        for p in ink:
+            im.putpixel(p, 0)
+        im.save(os.path.join(d, fname))
+
+    def run_main(self, extra=()):
+        with contextlib.redirect_stderr(io.StringIO()), contextlib.redirect_stdout(io.StringIO()):
+            return g.main(self.args + list(extra))
+
+    def refuse(self, extra=()):
+        with self.assertRaises(SystemExit) as cm:
+            self.run_main(extra)
+        return str(cm.exception.code)
+
+    def stream(self, ident):
+        with open(self.c) as f:
+            c = f.read()
+        m = re.search(r"static const uint8_t %s_rle\[\] = \{(.*?)\};" % ident, c, re.S)
+        self.assertIsNotNone(m, "%s_rle not emitted" % ident)
+        return c, [int(t) for t in re.findall(r"\d+", m.group(1))]
+
+    def slot_rle(self, ink):
+        return g.encode(self.SW, self.SH, [1 if (x, y) in ink else 0 for y in range(self.SH) for x in range(self.SW)])
+
+    def test_a_smaller_override_is_placed_per_slot(self):
+        art = [(0, 0), (4, 2)]  # corners of a 5x3 image
+        for slot in self.OFFS:
+            self.save(self.over, slot + ".png", (5, 3), art)
+        self.assertEqual(self.run_main(["--override-dir", self.over]), 0)
+        for slot, (left, top) in self.OFFS.items():
+            c, got = self.stream(slot)
+            self.assertEqual(got, self.slot_rle({(x + left, y + top) for x, y in art}), slot)
+            self.assertIn("{8, 6, %s_rle," % slot, c, slot)
+
+    def test_only_the_smaller_dimension_is_padded(self):
+        # full width, short: padded vertically only; full height, narrow:
+        # padded horizontally only, never moved down
+        self.save(self.over, "timesup.png", (8, 2), [(7, 1)])
+        self.save(self.over, "bedtime.png", (3, 6), [(2, 5)])
+        self.save(self.over, "break.png", (8, 4), [(7, 3)])
+        self.run_main(["--override-dir", self.over])
+        self.assertEqual(self.stream("timesup")[1], self.slot_rle({(7, 5)}))
+        self.assertEqual(self.stream("bedtime")[1], self.slot_rle({(2, 5)}))
+        # full width: no room for break's inset column, but its inset row
+        self.assertEqual(self.stream("break")[1], self.slot_rle({(7, 4)}))
+
+    def test_an_inset_is_clamped_to_the_room_the_image_leaves(self):
+        # charge's 6-column inset in an 8-wide slot: min(6, 8 - w)
+        for w, left in ((1, 6), (2, 6), (3, 5), (7, 1), (8, 0)):
+            self.save(self.over, "charge.png", (w, 6), [(0, 0)])
+            self.run_main(["--override-dir", self.over])
+            self.assertEqual(self.stream("charge")[1], self.slot_rle({(left, 0)}), "w=%d" % w)
+        # break's one-row inset: min(1, 6 - h)
+        for h, top in ((5, 1), (6, 0)):
+            self.save(self.over, "break.png", (8, h), [(0, 0)])
+            self.run_main(["--override-dir", self.over])
+            self.assertEqual(self.stream("break")[1], self.slot_rle({(0, top)}), "h=%d" % h)
+
+    def test_the_centred_slot_puts_the_odd_row_below(self):
+        # (H - h) // 2 above: the layout centres with (DISP_VER - h) / 2,
+        # which rounds the same way
+        for h, top in ((5, 0), (4, 1), (3, 1), (2, 2), (1, 2)):
+            self.save(self.over, "charge.png", (8, h), [(0, 0)])
+            self.run_main(["--override-dir", self.over])
+            self.assertEqual(self.stream("charge")[1], self.slot_rle({(0, top)}), "h=%d" % h)
+
+    def test_a_smaller_template_variant_is_padded_too(self):
+        self.save(self.sprites, "timesup.1.png", (2, 2), [(1, 1)])
+        self.assertEqual(self.run_main(), 0)
+        c, got = self.stream("timesup_1")
+        self.assertEqual(got, self.slot_rle({(1, 5)}))
+        self.assertIn("SPRITE_TIMESUP_VARIANT_1 = {8, 6,", c)
+
+    def test_a_smaller_override_variant_is_padded_too(self):
+        self.save(self.over, "bedtime.1.png", (2, 2), [(1, 1)])
+        self.assertEqual(self.run_main(["--override-dir", self.over]), 0)
+        self.assertEqual(self.stream("bedtime_1")[1], self.slot_rle({(1, 1)}))
+
+    def test_an_image_larger_than_its_slot_in_either_dimension_is_refused(self):
+        for size in ((9, 6), (8, 7), (9, 3), (2, 7)):
+            path = os.path.join(self.over, "charge.png")
+            self.save(self.over, "charge.png", size, [])
+            msg = self.refuse(["--override-dir", self.over])
+            self.assertIn(path, msg, size)
+            self.assertIn("%dx%d" % size, msg, size)
+            self.assertIn("8x6", msg, size)
+            os.remove(path)
+        self.save(self.sprites, "break.1.png", (8, 7), [])
+        msg = self.refuse()
+        self.assertIn(os.path.join(self.sprites, "break.1.png"), msg)
+        self.assertIn("8x7", msg)
+        self.assertIn("8x6", msg)
+
+    def test_pad_offset_is_the_placement(self):
+        for slot, off in self.OFFS.items():
+            self.assertEqual(g.pad_offset(slot, 8, 6, 5, 3), off, slot)
+
+
+class TestSlotAnchors(unittest.TestCase):
+    """The generator's placement per slot agrees with the layout's.
+
+    display_screens.c puts the charge art at y = (DISP_VER - h) / 2 and the
+    time's-up art at y = DISP_VER - h, with h the slot's height. A smaller
+    image padded by pad_offset() must put its own top row exactly where the
+    layout would have put an image of its height, so the owner's art at the
+    old size lands on the same pixels as before. Horizontally (and for break
+    vertically too) the charge and break slots grew past where their art
+    used to start, so pad_offset() insets a smaller image by the growth
+    (gen_sprites.SLOT_INSET), as far as the image leaves room. (The
+    placement() regexes in TestCharge / TestTimesUp pin the layout's
+    formulas.)
+    """
+
+    def slot(self, png):
+        w, h, _px = g.load_png(png)
+        return w, h
+
+    def test_every_shipped_slot_has_an_anchor(self):
+        slots = {g.parse_name(f)[0] for f in g.list_pngs(g.DEFAULT_SPRITES)}
+        self.assertEqual(slots, set(g.SLOT_ANCHOR))
+
+    def test_the_charge_anchor_matches_the_centred_placement_at_every_height(self):
+        sw, sh = self.slot(CHARGE_PNG)
+        for h in range(1, sh + 1):
+            _dx, dy = g.pad_offset("charge", sw, sh, sw, h)
+            self.assertEqual((PANEL_H - sh) // 2 + dy, (PANEL_H - h) // 2, "h=%d" % h)
+
+    def test_the_timesup_anchor_keeps_the_art_flush_with_the_bottom_at_every_height(self):
+        sw, sh = self.slot(TIMESUP_PNG)
+        for h in range(1, sh + 1):
+            _dx, dy = g.pad_offset("timesup", sw, sh, sw, h)
+            self.assertEqual(PANEL_H - sh + dy, PANEL_H - h, "h=%d" % h)
+
+    def test_the_bedtime_anchor_is_the_top_left_corner(self):
+        sw, sh = self.slot(BEDTIME_PNG)
+        self.assertEqual(g.pad_offset("bedtime", sw, sh, 1, 1), (0, 0))
+
+    @staticmethod
+    def define(name):
+        with open(os.path.join(ROOT, "main", "display_screens.c")) as f:
+            return int(re.search(r"#define %s (\d+)" % name, f.read()).group(1))
+
+    def test_a_charge_image_up_to_148_wide_keeps_the_old_x8(self):
+        # the slot grew 6 columns LEFT (x 8 -> 2) to the panel's 2 px edge
+        # margin; the inset keeps narrower art where it always was, and only
+        # an image wider than 148 reaches into the new columns
+        sw, sh = self.slot(CHARGE_PNG)
+        x0 = self.define("CHARGE_ART_X")
+        for w in range(1, sw + 1):
+            dx, _dy = g.pad_offset("charge", sw, sh, w, sh)
+            self.assertEqual(x0 + dx, 8 if w <= 148 else 2 + sw - w, "w=%d" % w)
+
+    def test_a_break_image_up_to_46x52_keeps_the_old_4_4(self):
+        # the slot grew one art pixel (2 panel px) left and up, to (2, 2);
+        # each inset is one art pixel, clamped to the room the image leaves
+        sw, sh = self.slot(BREAK_PNG)
+        x0, y0 = self.define("BREAK_ART_X"), self.define("BREAK_ART_Y")
+        for w in range(1, sw + 1):
+            for h in range(1, sh + 1):
+                dx, dy = g.pad_offset("break", sw, sh, w, h)
+                want = (4 if w <= 46 else 2, 4 if h <= 52 else 2)
+                self.assertEqual((x0 + 2 * dx, y0 + 2 * dy), want, "%dx%d" % (w, h))
+
+    def test_every_inset_names_a_shipped_slot(self):
+        self.assertLessEqual(set(g.SLOT_INSET), set(g.SLOT_ANCHOR))
+
+
+class TestBlankTemplates(unittest.TestCase):
+    """tools/sprites/templates/<slot>.png: a blank canvas per slot, exactly
+    the slot's max size, for drawing private art on. It is not a sprite:
+    the generator reads only the files directly in tools/sprites/."""
+
+    SLOTS = ("charge", "timesup", "break", "bedtime")
+
+    def test_there_is_one_blank_template_per_slot_and_nothing_else(self):
+        self.assertEqual(sorted(os.listdir(BLANK_DIR)), sorted(s + ".png" for s in self.SLOTS))
+
+    def test_each_is_a_blank_1bit_image_of_its_slots_exact_size(self):
+        for slot in self.SLOTS:
+            path = os.path.join(BLANK_DIR, slot + ".png")
+            with Image.open(path) as im:
+                self.assertEqual(im.mode, "1", slot)
+            w, h, px = g.load_png(path)
+            sw, sh, _ = g.load_png(os.path.join(g.DEFAULT_SPRITES, slot + ".png"))
+            self.assertEqual((w, h), (sw, sh), slot)
+            self.assertEqual(sum(px), 0, "%s: the template has ink" % slot)
+
+    def test_the_generator_does_not_read_a_subdirectory_as_sprites(self):
+        self.assertNotIn("templates", g.list_pngs(g.DEFAULT_SPRITES))
+        with tempfile.TemporaryDirectory() as tmp:
+            sprites = os.path.join(tmp, "sprites")
+            os.makedirs(os.path.join(sprites, "templates"))
+            Image.new("1", (4, 4), 1).save(os.path.join(sprites, "alpha.png"))
+            Image.new("1", (4, 4), 1).save(os.path.join(sprites, "templates", "zeta.png"))
+            c, h, _ = g.build(sprites)
+            self.assertNotIn("ZETA", c + h)
+
+    def test_a_blank_template_copied_as_an_override_builds_a_blank_slot(self):
+        with tempfile.TemporaryDirectory() as over:
+            shutil.copy(os.path.join(BLANK_DIR, "timesup.png"), over)
+            c, _h, replaced = g.build(g.DEFAULT_SPRITES, over)
+        self.assertEqual(replaced, ["timesup"])
+        sw, sh, _ = g.load_png(TIMESUP_PNG)
+        m = re.search(r"timesup_rle\[\] = \{(.*?)\};", c, re.S)
+        self.assertEqual([int(t) for t in re.findall(r"\d+", m.group(1))], g.encode(sw, sh, [0] * (sw * sh)))
 
 
 if __name__ == "__main__":

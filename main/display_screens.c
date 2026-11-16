@@ -548,10 +548,18 @@ void display_screens_build_main(const display_state_t *st) {
 
 /* ---- Screen Break layout (inverted), design §2.6 -----------------------
 
-   Two columns. At the left the break art (SPRITE_BREAK, a 46x52 slot; the
+   Two columns. At the left the break art (SPRITE_BREAK, a 47x53 slot; the
    template is a meditating figure, see docs/developer_setup.md) drawn at
-   2x, WHITE on the black screen, at (4, 4): a 92x104 box, x 4..95,
-   y 4..107. At the right, a 192 px column x 100..291 holding the title,
+   2x, WHITE on the black screen, at (2, 2): a 94x106 box, x 2..95,
+   y 2..107. That is the slot's max size: one more art pixel is 2 panel px,
+   which would take the box past the panel's 2 px edge margin (left, up) or
+   bring it to the bar's ink at x 100 (right) or the bottom row's ink under
+   the art's columns at y 110 (down; the 4 px gutter the other slots keep
+   below is 2 here). The template art fills x 8..91, y 8..105 of it, where
+   it was before the slot grew from 46x52 at (4, 4); gen_sprites.py insets
+   a smaller image one art pixel from the left and top (SLOT_INSET), so art
+   of the old size still lands at (4, 4). At the
+   right, a 192 px column x 100..291 holding the title,
    countdown, bar and chore line. The art is static between partial
    refreshes: nothing here repaints it.
 
@@ -565,7 +573,9 @@ void display_screens_build_main(const display_state_t *st) {
      break bar              68..83      68     (192 x 16)
      chore line 16pt        92..101     88     (only with a chore list; the tick
                                                form paints 90..101)
-     bottom row 16pt       108..123     BOTTOM -2 (unchanged)
+     bottom row 16pt       108..123     BOTTOM -2 (unchanged; the whole row:
+                                               under the art's columns, x < 100,
+                                               its ink starts at 110)
 
    The countdown sits 24 rows down, so its ink starts where CLEAN_BANDS
    band 1 starts and a blank 9-row gutter separates it from the title; the
@@ -575,8 +585,13 @@ void display_screens_build_main(const display_state_t *st) {
    measures the bands off the framebuffer and fails if any two touch,
    because on e-ink overlapping white-on-black text is unreadable and a
    regenerated golden would record the overlap as the new correct answer.
-   The art's box ends at row 107 and the bottom row's ink starts at 108
-   (a test pins that no ink crosses the box's edge).
+   The art's box ends at row 107. The bottom row's ink starts at 108 only
+   at its right end (x 235..246, in the cells that have a row); under the
+   art's columns it starts at 110
+   (the centred footer; cell A's starts at 112), which leaves the 2-row
+   gutter below the box (a test pins that no ink crosses the box's edge,
+   and test_the_lock_art_boxes_keep_a_gutter_to_every_other_element the
+   gutter).
 
    With no list the same stack stands and the chore band is simply empty;
    the frozen screen time moves to cell A of the bottom row as before.
@@ -595,8 +610,8 @@ void display_screens_build_main(const display_state_t *st) {
      band 3 rows 88..127  the chore line, the bottom row / footer
    The countdown straddles bands 1 and 2, which is fine: no band shares a
    framebuffer byte with another. */
-#define BREAK_ART_X 4
-#define BREAK_ART_Y 4
+#define BREAK_ART_X 2
+#define BREAK_ART_Y 2
 #define BREAK_COL_X 100
 #define BREAK_COL_W 192
 #define BREAK_TITLE_Y 0
@@ -789,7 +804,8 @@ void display_screens_build_break(const display_state_t *st, const sprite_t *art)
 
     /* Cell A. With a list, the mode toggle finally gets its label; without
        one, the cell carries the frozen screen time as it always has.
-       The art's box ends at row 107, one row above this row (108..123).
+       The art's box ends at row 107, one row above this row (ink 108..123
+       across the row; under the art's columns cell A's starts at 112).
        Either way this is not always one cell's worth of width, and the
        two differ:
          "Chores"      box x 4..52, ink 5..50 — inside cell A (the A/B
@@ -910,12 +926,14 @@ void display_screens_build_chores(const display_state_t *st) {
 
 /* ---- Time's up -----------------------------------------------------------
 
-   SPRITE_TIMESUP (a 178x124 slot, tools/sprites/timesup.png; the template is
+   SPRITE_TIMESUP (a 187x126 slot, tools/sprites/timesup.png; the template is
    a shocked alarm clock) sits at the left, FLUSH WITH THE BOTTOM EDGE
-   (y = 128 - 124 = 4): the template is cropped open at the bottom, so its
-   ink may run off the panel's bottom row (the bleed rule: ink on that row
-   only inside the art's own columns; the template has 12 such pixels).
-   "TIME'S" (28 pt) over "UP!" (48 pt) are centred in the space to its
+   (y = 128 - 126 = 2): the box is open at the bottom, so its ink may run
+   off the panel's bottom row (the bleed rule: ink on that row only inside
+   the art's own columns; the template has 12 such pixels). The slot is the
+   max box: x 2..188 stops 4 px short of the words' ink (x 193), y 2 keeps
+   the top edge's 2 px clear; the template art fills x 4..178, y 10..127 of
+   it. "TIME'S" (28 pt) over "UP!" (48 pt) are centred on the column to its
    right. The sprite is painted by the same sprite_draw_cb() /
    build_sprite() the charge lock uses (defined below, with the charge art;
    build_sprite() is forward-declared at the top of the file), at scale 1
@@ -926,11 +944,13 @@ void display_screens_build_chores(const display_state_t *st) {
    test_the_timesup_screen_fits_the_panel_but_for_the_art_bottom_bleed
    pins the one edge exception; the bitmap's ink count is the PNG's.
 
-   TIMESUP_COL_X is a literal because SPRITE_TIMESUP.w is an extern field,
-   not a constant expression; the paint test asserts that
-   TIMESUP_ART_X + SPRITE_TIMESUP.w <= TIMESUP_COL_X. */
+   TIMESUP_COL_X is the words' LABEL column, its text centred; it starts
+   inside the art's box (the slot was grown to the words' ink, not their
+   label box), so the two are kept apart by ink, not by the constants: the
+   fit and gutter tests in test_display_render.c hold the words' ink 4 px
+   right of the box. */
 #define TIMESUP_ART_X 2
-#define TIMESUP_COL_X 180 /* right column: 180..295 */
+#define TIMESUP_COL_X 180 /* label column: 180..295 */
 #define TIMESUP_COL_W 116
 #define TIMESUP_TIMES_Y 30
 #define TIMESUP_UP_Y 69
@@ -975,10 +995,15 @@ void display_screens_build_no_clock(void) {
 
 /* ---- Battery lock (<= 10%): "Charge me!" --------------------------------
 
-   The charge art (SPRITE_CHARGE, a 105x122 slot, tools/sprites/charge.png;
+   The charge art (SPRITE_CHARGE, a 154x124 slot, tools/sprites/charge.png;
    the template is a sad battery holding its plug) sits at the left,
    vertically centred; "Charge me!" and a nearly-empty battery outline (one
-   bar) fill the right column. The panel says only this until the pack
+   bar) fill the right column. The slot is the max box: x 2..155 keeps 2 px
+   off the left edge and stops 4 px short of the words' ink (x 160), and
+   124 rows centred (y 2..125) keep 2 px off the top and bottom edges.
+   CHARGE_COL_X is the words' label
+   column, which starts inside that box; the gutter is held on the ink by
+   test_display_render.c. The panel says only this until the pack
    charges back above the warn band.
 
    Not inverted: thin 1-3 px lines, which white-on-black shreds on this
@@ -987,12 +1012,15 @@ void display_screens_build_no_clock(void) {
    cannot fit two lines plus the battery in 128 px, so the words use the
    28 pt already enabled.
 
-   Margins: the bitmap is cropped tight to the ink (ink in its first and
-   last row and column), so the 3 px top/bottom and 8 px left gaps come only
-   from the placement; they keep the lines off the panel edge
-   (test_the_charge_me_screen_fits_the_panel). */
-#define CHARGE_ART_X 8
-#define CHARGE_COL_X 124 /* right column: 124..287, centred on x=206 */
+   Margins: the 2 px left, top and bottom gaps come from the placement, and
+   keep a custom picture's ink off the panel edge
+   (test_the_charge_me_screen_fits_the_panel holds the template's); the
+   template art itself fills x 20..112, y 5..124 of the box. The slot grew
+   6 columns left of where it began (148 wide at x 8); gen_sprites.py insets
+   a smaller image up to 6 columns from the left (SLOT_INSET), so art 148
+   wide or narrower still starts at x 8. */
+#define CHARGE_ART_X 2
+#define CHARGE_COL_X 124 /* label column: 124..287, centred on x=206 */
 #define CHARGE_COL_W 164
 #define CHARGE_TEXT_Y 18
 #define CHARGE_LINE_SPACE 4 /* 28 pt line height 26 packs the two lines; +4 leaves a 5-row gutter */
@@ -1107,17 +1135,26 @@ void display_screens_build_charge_me(const sprite_t *art) {
 /* Bed Time lock: inverted like the break screen (night-appropriate and
    unmistakably "not in service"); stays until day rollover.
 
-   The bed-time art (SPRITE_BEDTIME, a 29x23 slot, tools/sprites/bedtime.png;
+   The bed-time art (SPRITE_BEDTIME, a 32x25 slot, tools/sprites/bedtime.png;
    the template is a bed with zzz) is drawn at BEDTIME_ART_SCALE (4), WHITE
-   on the black screen, at (4, 4): a 116x92 box, x 4..119, y 4..95. The
-   words sit in the space to its right, a 172 px column x 120..291, "Bed Time"
-   over "Goodnight!", both 28 pt (48 pt "Bed Time" beside the art overruns the
-   panel). The brush-teeth line runs along the bottom, below the box. This
+   on the black screen, at (4, 4): a 128x100 box, x 4..131, y 4..103, the
+   max the words leave (their ink starts at x 137, the bottom line's at
+   y 111; one more art pixel right or down crosses the 4 px gutter, one
+   more left or up, 4 panel px, runs off the panel). A 26th row would fit
+   only at BEDTIME_ART_Y 3 (y 3..106, a 4 px gutter to 111), and that moves
+   the template art a panel pixel up -- or, padded a row on top to stay
+   put, 3 px down -- either way changing the golden; so the slot stays
+   32x25. The template art fills x 4..119, y 4..95 of it. The words are
+   centred on a 172 px label column x 120..291 (it starts inside the box;
+   the gutter is held on the ink by test_display_render.c), "Bed Time" over
+   "Goodnight!",
+   both 28 pt (48 pt "Bed Time" beside the art overruns the panel). The
+   brush-teeth line runs along the bottom, below the box. This
    screen only ever arrives through a full refresh (display_bedtime), so it
    has no CLEAN_BANDS entry. */
 #define BEDTIME_ART_X 4
 #define BEDTIME_ART_Y 4
-#define BEDTIME_COL_X 120
+#define BEDTIME_COL_X 120 /* label column: 120..291 */
 #define BEDTIME_COL_W 172
 #define BEDTIME_ART_SCALE 4
 #define BEDTIME_TITLE_Y 10    /* "Bed Time" label top: ink rows 10..29 */

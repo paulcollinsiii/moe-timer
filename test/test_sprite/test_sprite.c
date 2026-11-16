@@ -202,40 +202,42 @@ static void assert_generated_sprite(const sprite_t *s, uint16_t w, uint16_t h, u
     TEST_ASSERT_EQUAL_UINT16(s->rle_len, it.i);
 }
 
-/* The charge slot: 105x122 with 3034 ink pixels, the ink count of
-   tools/sprites/charge.png (the screen's copy is in test_display_render.c). */
+/* The charge slot: 154x124 (its max size; the template art is padded to it)
+   with 3034 ink pixels, the ink count of tools/sprites/charge.png (the
+   screen's copy is in test_display_render.c). */
 void test_the_generated_charge_art_decodes_to_the_png_dimensions_and_ink_count(void) {
-    assert_generated_sprite(&SPRITE_CHARGE, 105, 122, 3034);
+    assert_generated_sprite(&SPRITE_CHARGE, 154, 124, 3034);
 }
 
-/* The time's-up slot: 178x124 with 5048 ink pixels, the ink count of
+/* The time's-up slot: 187x126 (its max size) with 5048 ink pixels, the ink count of
    tools/sprites/timesup.png (the screen's copy is in test_display_render.c).
    Its stream opens with 255,0 pairs (a long blank top), so it takes the
    continuation path the other slots do not; the synthetic tests above cover
    that path too. */
 void test_the_generated_timesup_art_decodes_to_the_png_dimensions_and_ink_count(void) {
-    assert_generated_sprite(&SPRITE_TIMESUP, 178, 124, 5048);
+    assert_generated_sprite(&SPRITE_TIMESUP, 187, 126, 5048);
 }
 
-/* The break slot: 46x52 with 1105 ink pixels, the ink count of
+/* The break slot: 47x53 (its max size; the template art is padded to it)
+   with 1105 ink pixels, the ink count of
    tools/sprites/break.png (the screen's copy is in test_display_render.c).
    It is drawn at 2x, but the scale lives in the screen's paint, not in the
    data: the stream is the 1x art. The rle_len is pinned so a re-encode that
    changes the stream is a visible diff; test_gen_sprites.py (TestBreak.RLE_LEN)
    pins the same 205 from the PNG, so the two cannot drift apart. */
 void test_the_generated_break_art_decodes_to_the_png_dimensions_and_ink_count(void) {
-    assert_generated_sprite(&SPRITE_BREAK, 46, 52, 1105);
+    assert_generated_sprite(&SPRITE_BREAK, 47, 53, 1105);
     TEST_ASSERT_EQUAL_UINT16(205, SPRITE_BREAK.rle_len);
 }
 
-/* The bed-time slot: 29x23 with 222 ink pixels, the ink count of
+/* The bed-time slot: 32x25 (its max size) with 222 ink pixels, the ink count of
    tools/sprites/bedtime.png (the screen's copy is in test_display_render.c).
    Drawn at 4x, white on black; the stream is the 1x art. rle_len is pinned
-   like the break slot's (60, also pinned by TestBedtime.RLE_LEN in
+   like the break slot's (73, also pinned by TestBedtime.RLE_LEN in
    test_gen_sprites.py). */
 void test_the_generated_bedtime_art_decodes_to_the_png_dimensions_and_ink_count(void) {
-    assert_generated_sprite(&SPRITE_BEDTIME, 29, 23, 222);
-    TEST_ASSERT_EQUAL_UINT16(60, SPRITE_BEDTIME.rle_len);
+    assert_generated_sprite(&SPRITE_BEDTIME, 32, 25, 222);
+    TEST_ASSERT_EQUAL_UINT16(73, SPRITE_BEDTIME.rle_len);
 }
 
 /* The committed (template) data has one picture per slot: the table holds

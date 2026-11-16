@@ -16,12 +16,28 @@ named SPRITE_<NAME> from the file name. The PNG is the asset; the C is never
 edited by hand, and --check (run by test_gen_sprites) fails when the two
 disagree, so an edited PNG cannot ship without its regenerated data.
 
+THE SLOT SIZE. A template's <slot>.png is the slot's MAX size: the box the
+screen layout leaves for the art (main/display_screens.c says how each was
+measured), the template art padded out to it with background. Every sprite
+the generator emits for the slot has exactly that size, so the layouts only
+ever see SPRITE_<NAME>.w/.h. Any other image for the slot -- a variant, an
+override -- may be SMALLER in either dimension: it is padded with background
+to the slot's size, placed by pad_offset() -- vertically at the slot's anchor
+(SLOT_ANCHOR: at the top, centred, or at the bottom), horizontally at the
+slot's left edge, except that charge and break keep a smaller image inset by
+the room their slots grew past their old art (SLOT_INSET: charge 6 columns,
+break one art pixel left and up, each clamped to the room the image leaves),
+so art at an old slot size lands exactly where it always did. An image
+larger than the slot in either dimension is refused with the
+file, its size and the slot's. tools/sprites/templates/<slot>.png is a blank
+image of each slot's exact size, for drawing on; the generator reads only the
+files directly in the sprites directory, so that subdirectory is not a slot.
+
 A slot may have more than one picture. <slot>.png is variant 0 and
 <slot>.1.png, <slot>.2.png ... are variants 1, 2 ...: numbered without a gap,
-without leading zeros, and each exactly the size of <slot>.png (the layouts
-use SPRITE_<NAME>.w/.h and literals such as TIMESUP_COL_X, so a variant of
-another size is refused with the file and both sizes). Per slot the C also
-holds the table `SPRITE_<NAME>_VARIANTS[]` (index = variant number) and
+without leading zeros, and each no larger than <slot>.png (padded like an
+override when smaller). Per slot the C also holds the table
+`SPRITE_<NAME>_VARIANTS[]` (index = variant number) and
 `SPRITE_<NAME>_VARIANT_COUNT`; the lock screens pick one per lock episode
 (main/sprite_pick.c).
 
@@ -34,9 +50,9 @@ does not name stay, so dropping sprites.local/charge.1.png gives the charge
 screen the template art plus that one extra; to show ONLY your own art for a
 slot, override every variant the template has. A slot is fixed in name and
 size (the screen layouts are built around the art), so a file that names no
-slot, or whose width and height differ from the slot's base image, is refused
-with the file, the expected and the actual size. The numbering is checked
-after the merge. main/CMakeLists.txt runs this into the build
+slot, or that is wider or taller than the slot's base image, is refused with
+the file, the slot's size and its own. The numbering is checked after the
+merge. main/CMakeLists.txt runs this into the build
 directory (with --no-header, so the source tree's header is never touched)
 when sprites.local/ holds PNGs; the committed C never contains overrides, and
 --check ignores them. Any file there whose name ends in .png in any letter
@@ -81,6 +97,33 @@ MAX_VARIANT = 254  # the variant INDEX is a byte on the device (sprite_pick.h); 
 BYTES_PER_LINE = 16
 MAX_RLE_LEN = 0xFFFF  # sprite_t.rle_len is a uint16_t
 MAX_DIM = 0xFFFF  # sprite_t.w and .h are uint16_t
+
+# Where a SMALLER image sits inside its slot (pad_offset). Two tables:
+#
+# SLOT_ANCHOR, the vertical anchor, follows how main/display_screens.c places
+# the slot:
+#   "top"     break (BREAK_ART_X/_Y) and bedtime (BEDTIME_ART_X/_Y): the
+#             top-left corner is fixed; the image goes at the top (less the
+#             slot's top inset, below), padded below
+#   "middle"  charge, y = (DISP_VER - h) / 2: padded above and below, the
+#             odd row below, which is the rounding of that division
+#   "bottom"  timesup, y = DISP_VER - h (flush with the bottom edge):
+#             padded above
+# A slot not listed (only test fixtures) is "top".
+#
+# SLOT_INSET, (left, top) in ART pixels: how far in from the slot's top-left
+# corner a smaller image starts, each clamped to the room the image leaves
+# (left = min(inset, slot w - image w), likewise top; a "middle" or "bottom"
+# slot ignores the top inset). The charge and break slots were grown past
+# the corner their art used to start at -- charge 6 columns left (CHARGE_ART_X
+# 8 -> 2, to the panel's 2 px edge margin), break one art pixel left and up
+# (BREAK_ART_X/_Y 4 -> 2 at 2x) -- and the inset is that growth, so an image
+# no larger than the old slot (charge 148 wide, break 46x52) lands on the
+# panel exactly where it always did, and only a larger one reaches into the
+# new room. Everything else in the image's placement is padding on the
+# right and bottom. A slot not listed has no inset.
+SLOT_ANCHOR = {"break": "top", "bedtime": "top", "charge": "middle", "timesup": "bottom"}
+SLOT_INSET = {"charge": (6, 0), "break": (1, 1)}
 
 
 def load_png(path):
@@ -246,8 +289,8 @@ def claim(seen, symbol, slot):
 def load_slots(sprites_dir):
     """The templates: {slot name: {n: (file, w, h, pixels)}}, n = 0 for <slot>.png.
 
-    A variant is checked against its slot's base image; a slot with variants
-    but no base is refused.
+    A variant is fitted to its slot's base image (padded when smaller,
+    refused when larger); a slot with variants but no base is refused.
     """
     slots = {}
     paths = {}
@@ -265,17 +308,45 @@ def load_slots(sprites_dir):
             first = paths[(name, min(variants))]
             sys.exit("gen_sprites: %s: slot %r has no %s.png, the base image every variant is sized by" % (first, name, name))
         _bf, bw, bh, _bpx = variants[0]
-        for n, (_f, w, h, _px) in variants.items():
-            if (w, h) != (bw, bh):
-                sys.exit(variant_size_error(paths[(name, n)], name, bw, bh, w, h))
+        for n, (f, w, h, px) in list(variants.items()):
+            variants[n] = fit(paths[(name, n)], name, bw, bh, f, w, h, px)
     return slots
 
 
-def variant_size_error(path, name, bw, bh, w, h):
-    return (
-        "gen_sprites: %s: slot %r is %dx%d (its base image), this file is %dx%d; "
-        "every variant must match its slot's base size" % (path, name, bw, bh, w, h)
-    )
+def pad_offset(slot, sw, sh, w, h):
+    """(dx, dy): where a w x h image sits inside its sw x sh slot, in art px.
+
+    dx is the slot's left inset clamped to the room (SLOT_INSET); dy follows
+    the slot's SLOT_ANCHOR, a "top" slot's inset clamped likewise. Assumes
+    w <= sw and h <= sh.
+    """
+    inset_x, inset_y = SLOT_INSET.get(slot, (0, 0))
+    dx = min(inset_x, sw - w)
+    anchor = SLOT_ANCHOR.get(slot, "top")
+    if anchor == "bottom":
+        return dx, sh - h
+    if anchor == "middle":
+        return dx, (sh - h) // 2
+    return dx, min(inset_y, sh - h)
+
+
+def fit(path, slot, sw, sh, f, w, h, px):
+    """The image (f, w, h, px) as a slot-sized (f, sw, sh, px'): padded with
+    background on the slot's grow sides (pad_offset). An image larger than
+    the slot in either dimension is refused with the file and both sizes."""
+    if w > sw or h > sh:
+        sys.exit(
+            "gen_sprites: %s: this file is %dx%d, larger than slot %r (%dx%d, the size of its base image); "
+            "an image may be at most its slot's size in each dimension (a smaller one is padded)"
+            % (path, w, h, slot, sw, sh)
+        )
+    if (w, h) == (sw, sh):
+        return f, w, h, px
+    dx, dy = pad_offset(slot, sw, sh, w, h)
+    out = [0] * (sw * sh)
+    for y in range(h):
+        out[(y + dy) * sw + dx : (y + dy) * sw + dx + w] = px[y * w : (y + 1) * w]
+    return f, sw, sh, out
 
 
 def merge_overrides(slots, override_dir):
@@ -285,9 +356,10 @@ def merge_overrides(slots, override_dir):
     variant n when it has one and ADDS variant n when it does not. A template
     variant the override dir does not name stays. Returns the touched slot
     names, sorted. A slot is fixed in name and size: every layout is built
-    around its art, so a file that names no slot, or whose w x h differs from
-    the slot's base size, is refused. The numbering is checked after the
-    merge (check_numbering), so an override can fill a template's gap.
+    around its art, so a file that names no slot, or that is larger than the
+    slot's base size, is refused; a smaller one is padded (fit). The
+    numbering is checked after the merge (check_numbering), so an override
+    can fill a template's gap.
     """
     if not os.path.isdir(override_dir):
         sys.exit("gen_sprites: --override-dir %s is not a directory" % override_dir)
@@ -305,14 +377,7 @@ def merge_overrides(slots, override_dir):
         except ValueError as e:
             sys.exit("gen_sprites: %s" % e)
         _tf, tw, th, _tpx = slots[name][0]
-        if (w, h) != (tw, th):
-            if n == 0:
-                sys.exit(
-                    "gen_sprites: %s: slot %r is %dx%d, this file is %dx%d; an override must match its template's size"
-                    % (path, name, tw, th, w, h)
-                )
-            sys.exit(variant_size_error(path, name, tw, th, w, h))
-        slots[name][n] = (f, w, h, px)
+        slots[name][n] = fit(path, name, tw, th, f, w, h, px)
         replaced.add(name)
     return sorted(replaced)
 
@@ -373,7 +438,7 @@ def main(argv=None):
     ap.add_argument(
         "--override-dir",
         help="merge <slot>.png and <slot>.<n>.png files from this directory over the templates "
-        "(each the size of its slot's <slot>.png); ignored by --check",
+        "(each at most the size of its slot's <slot>.png; smaller is padded); ignored by --check",
     )
     args = ap.parse_args(argv)
 

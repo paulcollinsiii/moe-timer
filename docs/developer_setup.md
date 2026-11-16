@@ -203,17 +203,44 @@ accepted. The comment above that line explains why.
 
 ### Lock-screen art
 
-Four lock screens carry a bitmap. Each is a fixed **slot**: a name, a size and
-a place on the panel, with the layout built around it. The repo ships original
-template art for all four in `tools/sprites/`; you can replace any of them with
-your own at build time, without touching tracked files.
+Four lock screens carry a bitmap. Each is a fixed **slot**: a name, a maximum
+size and a place on the panel, with the layout built around it. The repo ships
+original template art for all four in `tools/sprites/`; you can replace any of
+them with your own at build time, without touching tracked files.
 
-| Slot (file) | Size (w x h) | Drawn at | Ink on screen | Shows | Template |
-|---|---|---|---|---|---|
-| `charge.png` | 105x122 | 1x | black on white | the battery lock: `Charge me!` beside it | a sad battery holding its plug |
-| `timesup.png` | 178x124 | 1x, flush with the bottom edge | black on white | the expiry screen: `TIME'S UP!` beside it | a shocked alarm clock, cropped by the bottom edge |
-| `break.png` | 46x52 | 2x (92x104) | white on black | the screen break: countdown and bar beside it | a meditating figure with sparkles |
-| `bedtime.png` | 29x23 | 4x (116x92) | white on black | the Bed Time lock: `Bed Time` and `Goodnight!` beside it | a bed with zzz |
+The size below is the slot's **maximum**: the largest box the screen leaves
+for art. As a rule that box keeps 4 px clear of every other element's ink and
+2 px off the panel edges, and one more art pixel on any side would break the
+rule. Two slots differ, on purpose:
+
+- **break** keeps only 2 px above the bottom row: under the art's columns that
+  row's ink starts at y 110, and the box ends at y 107. The box is in 2x2
+  steps, so it cannot reach a 4 px gutter there without losing a row.
+- **timesup** has no bottom margin: the box runs to the panel's last row, so
+  its art may bleed off the bottom edge (the template's clock does).
+
+The template PNGs are that size, their art padded with white.
+
+| Slot (file) | Max size (w x h) | Drawn at | Box on the panel | A smaller image goes | Ink on screen | Shows | Template |
+|---|---|---|---|---|---|---|---|
+| `charge.png` | 154x124 | 1x | x 2..155, y 2..125 | 6 px in from the left edge (fewer when wider than 148), centred vertically | black on white | the battery lock: `Charge me!` beside it | a sad battery holding its plug |
+| `timesup.png` | 187x126 | 1x, flush with the bottom edge | x 2..188, y 2..127 | to the bottom-left corner | black on white | the expiry screen: `TIME'S UP!` beside it | a shocked alarm clock, cut off by the bottom edge |
+| `break.png` | 47x53 | 2x (94x106) | x 2..95, y 2..107 | 1 art pixel in from the left and top (none on a side where it is full size) | white on black | the screen break: countdown and bar beside it | a meditating figure with sparkles |
+| `bedtime.png` | 32x25 | 4x (128x100) | x 4..131, y 4..103 | to the top-left corner | white on black | the Bed Time lock: `Bed Time` and `Goodnight!` beside it | a bed with zzz |
+
+The charge and break slots grew past where their art used to start (charge was
+148 wide at x 8, break 46x52 at (4, 4)). The inset in the "goes" column is that
+growth, so art drawn at the old size lands on exactly the same panel pixels as
+before; only a larger image reaches into the new room.
+
+**Blank templates.** `tools/sprites/templates/<slot>.png` is an all-white
+1-bit PNG of each slot's exact maximum size. To draw your own, copy one into
+`sprites.local/` as `<slot>.png` (or `<slot>.<n>.png` for another variant) and
+draw in black. You can crop it to any size up to the template's; a smaller
+image is padded with white and placed as the "goes" column says. The break
+and bed-time templates are in native art pixels, before the screen scales
+them: each pixel you draw is a 2x2 (break) or 4x4 (bed time) block on the
+panel.
 
 A slot file is a **1-bit PNG, black = ink** (mode `1`; an RGB or greyscale PNG
 is refused). "Ink on screen" is how that ink is painted: the break and bed-time
@@ -237,12 +264,12 @@ went in:
 -- Lock-screen art: overriding slots from sprites.local/: timesup
 ```
 
-**The size is exact.** An override must be the same width and height as its
-template, because the text and the other elements are laid out around that
-box and do not move. `tools/gen_sprites.py` fails the build, naming the file,
-the expected size and the actual size, when a PNG has the wrong size, is not
+**The size is a maximum.** An override may be as large as its slot and no
+larger, because the text and the other elements are laid out around that box
+and do not move. `tools/gen_sprites.py` fails the build, naming the file, its
+size and the slot's, when a PNG is wider or taller than its slot, is not
 1-bit, or has a name that is not one of the four slots. A tracked layout
-change (a new size) is a code change, not an override: it needs new layout
+change (a new maximum) is a code change, not an override: it needs new layout
 constants, test numbers and goldens.
 
 **More than one picture per slot.** `<slot>.png` is variant 0; add
@@ -256,9 +283,9 @@ time's-up alert; an OTA or panic restart is the one thing that redraws it) (see
 - The numbers start at 1 and have no gap, no leading zeros and no `.0`;
   `charge.3.png` without `charge.2.png` fails the build, naming the missing
   file. The highest number is 254.
-- Every variant has exactly the size of the slot's base image (the table above),
-  for the same reason as the base. A mismatch fails the build with the file and
-  both sizes.
+- Every variant is at most the size of the slot (the table above) and is
+  padded like an override when smaller. A larger one fails the build with the
+  file and both sizes.
 - A file in `sprites.local/` is merged over the template file by file, by number:
   `charge.png` replaces variant 0, `charge.2.png` replaces the template's variant
   2 if it has one and adds variant 2 if it does not. A template variant you do not
@@ -267,7 +294,7 @@ time's-up alert; an OTA or panic restart is the one thing that redraws it) (see
   slot, override every variant the template has.
 
 ```bash
-cp ~/second_battery.png sprites.local/charge.1.png   # a 105x122 1-bit PNG
+cp ~/second_battery.png sprites.local/charge.1.png   # a 1-bit PNG up to 154x124
 idf.py build        # "overriding slots from sprites.local/: charge"
 ```
 
