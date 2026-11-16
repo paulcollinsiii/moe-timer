@@ -38,7 +38,8 @@ static int64_t s_released_us[BUTTON_LATCH_COUNT];
    the window the LAST accepted press opened, stamped at acceptance, which is
    the figure button_latch_record compares against. Stamping is what keeps a
    change from reaching into a window already running, and it is what lets a
-   SEEDED press (below) open the default window whatever the setter says. */
+   SEEDED press (below) open the default window whatever the setter says.
+   button_latch_restamp_running is the one call that reaches in, on purpose. */
 static int64_t s_cfg_window_us[BUTTON_LATCH_COUNT];
 static int64_t s_window_us[BUTTON_LATCH_COUNT];
 /* THE PER-BUTTON SETTLE, the same two-array shape for the same reasons: the
@@ -83,11 +84,20 @@ void button_latch_seed_press(int btn, int64_t t_us) {
     s_last_edge_us[btn] = t_us != 0 ? t_us : 1;
     s_released_seen[btn] = false;
     s_released_us[btn] = 0;
-    /* ALWAYS the default window, never the configured one. The wake press
-       began a boot earlier and anchors at reset, so nothing here knows when
-       its release will ring; the long window is the one that covers it. */
+    /* The default window, never the configured one: nothing has configured
+       this wake yet. A caller that later knows better (the counted-clicks
+       gesture) restamps it with button_latch_restamp_running. */
     s_window_us[btn] = BUTTON_LATCH_REFRACTORY_US;
     s_settle_us[btn] = BUTTON_LATCH_RELEASE_SETTLE_US;
+}
+
+void button_latch_restamp_running(int btn) {
+    if (btn < 0 || btn >= BUTTON_LATCH_COUNT)
+        return;
+    /* The anchors and the gate stay as they are: only the figures they are
+       judged by change. */
+    s_window_us[btn] = s_cfg_window_us[btn];
+    s_settle_us[btn] = s_cfg_settle_us[btn];
 }
 
 void button_latch_begin(int wake_btn, uint8_t held_mask, int64_t t_us) {

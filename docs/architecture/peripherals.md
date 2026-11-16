@@ -81,10 +81,14 @@ later:
   then judged by the settle alone. Both are put back when the gesture ends. In
   Chores mode C is the second chore tick and keeps 300 ms and 10 ms. The
   figures in force are stamped when a press is accepted, so a change never
-  reaches into a press already counted. The seeded wake press always carries
-  the defaults: its 300 ms window covers its own release bounce for a hold of
-  up to about 300 ms after the buttons arm, and a longer hold is judged by the
-  10 ms settle alone. The price of the longer settle is that the shortest
+  reaches into a press already counted. The one exception is the seeded wake
+  press: it starts with the defaults, and when the gesture opens it restamps
+  that press with 120 ms and 30 ms (`buttons_restamp_running()`), so the tap
+  right after it is not refused by 300 ms. Its own release bounce is still
+  refused the way every counted tap's is: a pad held at arming keeps the gate
+  shut until a sample sees it up and the 30 ms settle runs from that sample,
+  and a pad already up at arming was released before it, with the window and
+  settle both running from arming. The price of the longer settle is that the shortest
   release-to-press gap that still counts becomes the 20 ms poll plus 30 ms,
   against 20 plus 10. All four figures are starting values, to be settled on
   the bench.

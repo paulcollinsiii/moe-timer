@@ -432,6 +432,65 @@ void test_reset_restores_the_default_settle(void) {
     TEST_ASSERT_EQUAL_UINT8(1u << 2, button_latch_take());
 }
 
+/* RESTAMPING THE RUNNING PRESS (button_latch_restamp_running): what the
+   counted-clicks gesture does for the wake press it opens on, so the tap after
+   the wake press meets the short window instead of the seed's 300 ms. */
+static void arm_and_install_the_gesture_guard(uint8_t held_mask) {
+    button_latch_begin(2, held_mask, T0_US);
+    button_latch_set_refractory(2, SHORT_WINDOW_US);
+    button_latch_set_settle(2, SWAP_SETTLE_US);
+    button_latch_restamp_running(2);
+}
+
+void test_a_restamped_seed_lets_a_tap_through_past_the_short_window(void) {
+    arm_and_install_the_gesture_guard(0);                   /* a quick tap: up at arming */
+    button_latch_record(2, T0_US + SHORT_WINDOW_US + 1000); /* well inside the seed's 300 ms */
+    TEST_ASSERT_EQUAL_UINT8(1u << 2, button_latch_take());
+}
+
+/* Pad already up at arming: the window and the settle both run from arming, and
+   an edge inside the short window is still refused. */
+void test_a_restamped_seed_still_refuses_an_edge_inside_the_short_window(void) {
+    arm_and_install_the_gesture_guard(0);
+    button_latch_record(2, T0_US + SHORT_WINDOW_US - 1);
+    TEST_ASSERT_EQUAL_UINT8(0, button_latch_take());
+}
+
+/* THE BOUNCE CHECK FOR A WAKE PRESS HELD THROUGH THE BOOT. The gate is shut at
+   arming; a sample reads the pad up mid-ring past the short window, and the
+   next bounce edge lands 20 ms after it: past the 10 ms settle the seed was
+   stamped with, inside the gesture's 30 ms. The restamp carries the gesture's
+   settle, so it is refused; the edge at the settle counts. */
+void test_a_restamped_seed_judges_its_release_by_the_gesture_settle(void) {
+    arm_and_install_the_gesture_guard((uint8_t)(1u << 2)); /* still held at arming */
+    const int64_t up_us = T0_US + SHORT_WINDOW_US + 80000;
+    button_latch_note_levels(0, up_us);
+    button_latch_record(2, up_us + 20000);
+    TEST_ASSERT_EQUAL_UINT8(0, button_latch_take());
+    button_latch_record(2, up_us + SWAP_SETTLE_US);
+    TEST_ASSERT_EQUAL_UINT8(1u << 2, button_latch_take());
+}
+
+/* Restamping changes the running figures and nothing else: the gate stays shut
+   on a pad nobody has seen up, and other buttons are untouched. */
+void test_a_restamp_does_not_open_the_release_gate(void) {
+    arm_and_install_the_gesture_guard((uint8_t)(1u << 2));
+    button_latch_record(2, T0_US + 10 * SHORT_WINDOW_US); /* never seen released */
+    TEST_ASSERT_EQUAL_UINT8(0, button_latch_take());
+}
+
+void test_a_restamp_touches_only_the_named_button(void) {
+    button_latch_reset();
+    button_latch_seed_press(1, T0_US);
+    button_latch_note_levels(0, T0_US);
+    button_latch_set_refractory(1, SHORT_WINDOW_US);
+    button_latch_restamp_running(2);
+    button_latch_restamp_running(-1);
+    button_latch_restamp_running(4);
+    button_latch_record(1, T0_US + SHORT_WINDOW_US + 1000);
+    TEST_ASSERT_EQUAL_UINT8(0, button_latch_take()); /* B's seed keeps 300 ms */
+}
+
 /* THE REFRACTORY WINDOW'S RUNNING-WINDOW RULE, both directions (the existing
    case above pins only the shortening one at 121 ms). */
 void test_a_press_under_the_default_window_keeps_it_after_the_short_one_is_set(void) {
@@ -834,6 +893,11 @@ int main(void) {
     RUN_TEST(test_a_seeded_wake_press_keeps_the_long_window_when_the_short_one_is_set);
     RUN_TEST(test_a_seeded_wake_press_keeps_the_long_window_when_the_short_one_is_set_after_arming);
     RUN_TEST(test_an_accepted_press_under_the_short_window_still_has_the_settle_backstop);
+    RUN_TEST(test_a_restamped_seed_lets_a_tap_through_past_the_short_window);
+    RUN_TEST(test_a_restamped_seed_still_refuses_an_edge_inside_the_short_window);
+    RUN_TEST(test_a_restamped_seed_judges_its_release_by_the_gesture_settle);
+    RUN_TEST(test_a_restamp_does_not_open_the_release_gate);
+    RUN_TEST(test_a_restamp_touches_only_the_named_button);
     RUN_TEST(test_the_release_gate_still_refuses_under_the_short_window);
     RUN_TEST(test_a_rejected_edge_does_not_extend_the_short_window);
     RUN_TEST(test_the_release_gate_is_per_button);

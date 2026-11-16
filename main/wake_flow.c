@@ -1592,8 +1592,11 @@ static void wake_flow_repaint_chore_acks_until_quiet(time_t *now, uint32_t *spen
    has run; the mode cannot change inside the gesture, because the only
    mode button, A, is not acted on while it runs), and put back before the
    commit on EVERY exit. The wake press that opened it was seeded into the latch
-   at the default window, and stays there (button_latch_seed_press says why), so
-   its own release bounce can never read as a second count.
+   at the default window when the buttons armed; installing the guard restamps
+   it with the short window and the gesture's settle, so a tap 120 ms or more
+   after arming counts. Its own release bounce is still refused, by the release
+   gate and the settle exactly as for every counted tap
+   (button_latch_restamp_running says why).
 
    WHAT HAPPENS TO OTHER BUTTONS: they are not taken here (the take is masked
    to C), so a B, D or A pressed mid-gesture stays latched for its whole
@@ -1624,10 +1627,17 @@ typedef enum {
 /* C's press guard for the gesture: the short refractory window AND the longer
    release settle, installed together when the gesture opens and put back
    together on the way out (button_latch.h says what each is for). One helper
-   so the two can never be separated. */
+   so the two can never be separated. Installing it also restamps the press
+   already running on C (the seeded wake press, on a button wake) so the tap
+   right after it meets the short window, not the seed's 300 ms. Putting it
+   back does not restamp: the last counted tap keeps the guard it was counted
+   under. */
 static void wake_flow_swap_press_guard(bool counting) {
     buttons_set_refractory(BTN_C, counting ? BUTTON_LATCH_SWAP_REFRACTORY_US : BUTTON_LATCH_REFRACTORY_US);
     buttons_set_settle(BTN_C, counting ? BUTTON_LATCH_SWAP_SETTLE_US : BUTTON_LATCH_RELEASE_SETTLE_US);
+    if (counting) {
+        buttons_restamp_running(BTN_C);
+    }
 }
 
 static swap_gesture_t wake_flow_swap_count_gesture(void) {

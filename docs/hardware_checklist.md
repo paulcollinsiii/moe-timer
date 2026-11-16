@@ -50,7 +50,7 @@ or quiet hours from HA instead of rebuilding. Never erase NVS.
   the panel repaints once on the next timer. Then tap C three to four times at
   a natural pace (150-250 ms apart). **Start counting once the strip lights:**
   taps made while the device is still booting are not counted, and neither is a
-  second tap in the first 300 ms after the buttons arm. → Each tap advances the
+  second tap in the first 120 ms after the buttons arm. → Each tap advances the
   binary count (3 is the two leftmost LEDs, 4 is the third from the left), the
   panel repaints once, 1 s after the last tap, on the timer you counted to.
   Tap C once per timer to go all the way round. → No selection change and no

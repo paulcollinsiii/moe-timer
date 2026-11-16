@@ -41,6 +41,10 @@ void buttons_set_refractory(button_id_t btn, int64_t us);
    BUTTON_LATCH_RELEASE_SETTLE_US to put the default back. Installed and put
    back with the refractory window, by the same caller and for the same reason. */
 void buttons_set_settle(button_id_t btn, int64_t us);
+/* Restamp the press already running on `btn` with the window and settle set
+   above (button_latch_restamp_running), under the same critical section. Used
+   by the counted-clicks gesture when it opens, and nothing else. */
+void buttons_restamp_running(button_id_t btn);
 
 /* ---- BOOT (GPIO0) — deliberately NOT a fifth button_id_t ----------------
 
