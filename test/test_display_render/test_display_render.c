@@ -691,11 +691,12 @@ void test_the_break_elements_sit_inside_the_clean_bands_that_cover_them(void) {
 
 /* The break art: BREAK_INK (1105, the ink count of tools/sprites/break.png;
    test_gen_sprites.py TestBreak.INK is the single source) art pixels at 2x =
-   4 * BREAK_INK white pixels, exactly, inside its 92x104 box, in every cell
+   4 * BREAK_INK white pixels, exactly, inside its 94x106 box, in every cell
    of §2.6's matrix — so the labels never paint over it — and nothing else
-   is ever drawn above the box's bottom edge left of the column. (The bottom
-   row's cell A starts at row 108, the row right below the box, which ends at
-   row 107; the centred footer's ink starts at row 110.) */
+   is ever drawn above the box's bottom edge left of the column. (The box
+   ends at row 107. Under its columns the centred footer's ink starts at
+   row 110 and cell A's at 112; the bottom row's ink reaches up to 108 only
+   at its right end, x 235..246.) */
 #define BREAK_INK 1105
 void test_the_break_screen_paints_the_art_at_the_left_at_twice_its_size(void) {
     TEST_ASSERT_TRUE_MESSAGE(BREAK_ART_X + 2 * (int)SPRITE_BREAK.w <= BREAK_COL_X,
@@ -2089,10 +2090,11 @@ void test_charge_me_screen(void) {
     assert_matches_golden("charge_me");
 }
 
-/* The charge art's slot is 148x124 on a 128 px panel, so unlike a label it can
+/* The charge art's slot is 154x124 on a 128 px panel, so unlike a label it can
    touch an edge by arithmetic alone. Same margins as the no-clock screen's
    fit test on the sides, and the same 2 px clear on the top and bottom
-   (the slot's 124 rows are what that rule leaves). */
+   (the slot's 124 rows are what that rule leaves, and its left edge sits
+   on the 2 px left margin). */
 void test_the_charge_me_screen_fits_the_panel(void) {
     display_screens_build_charge_me(NULL);
     lv_refr_now(s_disp);
@@ -2192,8 +2194,8 @@ void test_the_28pt_titles_keep_their_vertical_placement(void) {
 }
 
 /* A golden alone would freeze a screen with a missing sprite as correct. The
-   art's ink must lie inside its box (the 148x124 slot at CHARGE_ART_X,
-   centred in 128 px: x 8..155, y 2..125), exactly the PNG's count, and
+   art's ink must lie inside its box (the 154x124 slot at CHARGE_ART_X,
+   centred in 128 px: x 2..155, y 2..125), exactly the PNG's count, and
    nothing else may be left of the box's right edge. The words' column
    (CHARGE_COL_X 124, its text centred) starts inside the box, because the
    slot was grown to the words' INK, not their label box:
@@ -3539,35 +3541,84 @@ void test_the_bedtime_screen_paints_the_variant_it_is_given(void) {
    every pixel of ink OUTSIDE the box -- the words, the bar, the battery, the
    bottom row -- must stay `gutter` px clear of it on every side and
    `below` px clear under it. `below` is 4 everywhere but the break screen:
-   its box predates this rule and its bottom row's ink starts 2 rows under
-   it (row 110 under a box ending at 107); at 2x the slot cannot grow a
-   row without touching it, nor a column without touching the bar at x 100. */
-static void assert_art_box_has_its_gutter(const char *what, int bx, int by, int bw, int bh, bool white_ink, int below,
-                                          bool bottom_flush) {
+   its box predates this rule and the bottom row's ink under the art's
+   columns starts 2 rows below it (row 110, the centred footer, under a box
+   ending at 107); at 2x the slot cannot grow a row without touching it, nor
+   a column without touching the bar at x 100. */
+
+/* The panel-edge rule for an art box: 2 px inside every edge, but for a
+   bottom-flush box, which must end exactly on the panel's last row. */
+static bool art_box_on_the_panel(int bx, int by, int bw, int bh, bool bottom_flush) {
+    return bx >= 2 && by >= 2 && bx + bw <= HOR - 2 && (bottom_flush ? by + bh == VER : by + bh <= VER - 2);
+}
+
+/* How many screen-colour ink pixels that are NOT the art (outside the drawn
+   box ox, oy, ow, oh) lie inside the box bx, by, bw, bh or within its
+   gutter: 4 px left, right and above, `below` px under it. The first is
+   returned in *nx, *ny. Counting ink inside (bx..) too means a grown box
+   that swallows another element is caught, not excused as "inside". */
+static int art_box_crowding(int bx, int by, int bw, int bh, int ox, int oy, int ow, int oh, bool white_ink, int below,
+                            int *nx, int *ny) {
     const int gutter = 4;
-    char msg[128];
-    snprintf(msg, sizeof msg, "%s: box x %d..%d, y %d..%d is not 2 px inside the panel", what, bx, bx + bw - 1, by,
-             by + bh - 1);
-    TEST_ASSERT_TRUE_MESSAGE(bx >= 2 && by >= 2 && bx + bw <= HOR - 2, msg);
-    TEST_ASSERT_TRUE_MESSAGE(bottom_flush ? by + bh == VER : by + bh <= VER - 2, msg);
-    int near = 0, nx = -1, ny = -1;
+    int near = 0;
+    *nx = *ny = -1;
     for (int y = 0; y < VER; y++) {
         for (int x = 0; x < HOR; x++) {
             if ((((s_captured[y * (HOR / 8) + x / 8] >> (7 - (x & 7))) & 1) != 0) != white_ink)
                 continue;
-            const bool inside = x >= bx && x < bx + bw && y >= by && y < by + bh;
+            const bool art = x >= ox && x < ox + ow && y >= oy && y < oy + oh;
             const bool close = x >= bx - gutter && x < bx + bw + gutter && y >= by - gutter && y < by + bh + below;
-            if (!inside && close) {
+            if (!art && close) {
                 if (!near++) {
-                    nx = x;
-                    ny = y;
+                    *nx = x;
+                    *ny = y;
                 }
             }
         }
     }
+    return near;
+}
+
+static void assert_art_box_has_its_gutter(const char *what, int bx, int by, int bw, int bh, bool white_ink, int below,
+                                          bool bottom_flush) {
+    char msg[128];
+    snprintf(msg, sizeof msg, "%s: box x %d..%d, y %d..%d is not 2 px inside the panel", what, bx, bx + bw - 1, by,
+             by + bh - 1);
+    TEST_ASSERT_TRUE_MESSAGE(art_box_on_the_panel(bx, by, bw, bh, bottom_flush), msg);
+    int nx, ny;
+    const int near = art_box_crowding(bx, by, bw, bh, bx, by, bw, bh, white_ink, below, &nx, &ny);
     snprintf(msg, sizeof msg, "%s: %d ink pixels within the gutter of the art box (first at %d,%d)", what, near, nx,
              ny);
     TEST_ASSERT_EQUAL_INT_MESSAGE(0, near, msg);
+}
+
+/* The slot is the MAX: the same box grown by one art pixel (`scale` panel
+   px, the smallest step a sprite can grow) on any one side -- left, up,
+   right or down, each tried alone -- must break a rule the box above keeps:
+   leave the panel's 2 px margin (or, for the bottom-flush time's-up box, run
+   off the panel), or bring the box within its gutter of other ink. A grown
+   box that keeps every rule means the slot left room on the table. */
+static void assert_art_box_cannot_grow(const char *what, int bx, int by, int bw, int bh, int scale, bool white_ink,
+                                       int below, bool bottom_flush) {
+    const struct {
+        const char *side;
+        int dx, dy, dw, dh;
+    } grow[] = {
+        {"left", -scale, 0, scale, 0},
+        {"up", 0, -scale, 0, scale},
+        {"right", 0, 0, scale, 0},
+        {"down", 0, 0, 0, scale},
+    };
+    for (size_t i = 0; i < sizeof grow / sizeof grow[0]; i++) {
+        const int gx = bx + grow[i].dx, gy = by + grow[i].dy, gw = bw + grow[i].dw, gh = bh + grow[i].dh;
+        int nx, ny;
+        const bool fits = art_box_on_the_panel(gx, gy, gw, gh, bottom_flush) &&
+                          art_box_crowding(gx, gy, gw, gh, bx, by, bw, bh, white_ink, below, &nx, &ny) == 0;
+        char msg[160];
+        snprintf(msg, sizeof msg, "%s: one art px more %s (x %d..%d, y %d..%d) keeps every rule", what, grow[i].side,
+                 gx, gx + gw - 1, gy, gy + gh - 1);
+        TEST_ASSERT_FALSE_MESSAGE(fits, msg);
+    }
 }
 
 void test_the_lock_art_boxes_keep_a_gutter_to_every_other_element(void) {
@@ -3600,6 +3651,35 @@ void test_the_lock_art_boxes_keep_a_gutter_to_every_other_element(void) {
         assert_art_box_has_its_gutter("break", BREAK_ART_X, BREAK_ART_Y, 2 * SPRITE_BREAK.w, 2 * SPRITE_BREAK.h, true,
                                       2, false);
     }
+}
+
+void test_no_lock_art_box_can_grow_by_one_art_pixel(void) {
+    display_screens_build_charge_me(NULL);
+    lv_refr_now(s_disp);
+    assert_art_box_cannot_grow("charge", CHARGE_ART_X, (VER - SPRITE_CHARGE.h) / 2, SPRITE_CHARGE.w, SPRITE_CHARGE.h, 1,
+                               false, 4, false);
+
+    display_screens_build_timesup(NULL);
+    lv_refr_now(s_disp);
+    assert_art_box_cannot_grow("timesup", TIMESUP_ART_X, VER - SPRITE_TIMESUP.h, SPRITE_TIMESUP.w, SPRITE_TIMESUP.h, 1,
+                               false, 0, true);
+
+    display_screens_build_bedtime(NULL);
+    lv_refr_now(s_disp);
+    assert_art_box_cannot_grow("bedtime", BEDTIME_ART_X, BEDTIME_ART_Y, BEDTIME_ART_SCALE * SPRITE_BEDTIME.w,
+                               BEDTIME_ART_SCALE * SPRITE_BEDTIME.h, BEDTIME_ART_SCALE, true, 4, false);
+
+    /* the bare screen: the slot must fit every cell, so the cell that stops
+       a side is enough. Its centred footer (ink from row 110) comes closest
+       under the art -- cell A's ink starts at 112 -- so it is the one that
+       binds downwards; the bar (x 100) and the panel edges bind the rest in
+       every cell. */
+    display_state_t st = break_chore_state(0, 0);
+    st.swap_next_name = NULL;
+    display_screens_build_break(&st, NULL);
+    lv_refr_now(s_disp);
+    assert_art_box_cannot_grow("break", BREAK_ART_X, BREAK_ART_Y, 2 * SPRITE_BREAK.w, 2 * SPRITE_BREAK.h, 2, true, 2,
+                               false);
 }
 
 /* ---- sheet-only frames (MAGTAG_DUMP_DIR) -------------------------------
@@ -3759,6 +3839,7 @@ int main(void) {
     RUN_TEST(test_the_break_screen_paints_the_variant_it_is_given);
     RUN_TEST(test_the_bedtime_screen_paints_the_variant_it_is_given);
     RUN_TEST(test_the_lock_art_boxes_keep_a_gutter_to_every_other_element);
+    RUN_TEST(test_no_lock_art_box_can_grow_by_one_art_pixel);
     RUN_TEST(test_sheet_main_long_timer_name);
     RUN_TEST(test_sheet_main_widest_digits);
     RUN_TEST(test_sheet_chores_long_names);

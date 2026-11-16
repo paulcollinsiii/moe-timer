@@ -22,10 +22,13 @@ measured), the template art padded out to it with background. Every sprite
 the generator emits for the slot has exactly that size, so the layouts only
 ever see SPRITE_<NAME>.w/.h. Any other image for the slot -- a variant, an
 override -- may be SMALLER in either dimension: it is padded with background
-on the sides where the slot grows, so it sticks to the slot's anchor
-(SLOT_ANCHOR: never moved right; at the top, centred vertically, or at the
-bottom) and lands exactly where the layout would have put an image of its own
-size. An image larger than the slot in either dimension is refused with the
+to the slot's size, placed by pad_offset() -- vertically at the slot's anchor
+(SLOT_ANCHOR: at the top, centred, or at the bottom), horizontally at the
+slot's left edge, except that charge and break keep a smaller image inset by
+the room their slots grew past their old art (SLOT_INSET: charge 6 columns,
+break one art pixel left and up, each clamped to the room the image leaves),
+so art at an old slot size lands exactly where it always did. An image
+larger than the slot in either dimension is refused with the
 file, its size and the slot's. tools/sprites/templates/<slot>.png is a blank
 image of each slot's exact size, for drawing on; the generator reads only the
 files directly in the sprites directory, so that subdirectory is not a slot.
@@ -95,18 +98,32 @@ BYTES_PER_LINE = 16
 MAX_RLE_LEN = 0xFFFF  # sprite_t.rle_len is a uint16_t
 MAX_DIM = 0xFFFF  # sprite_t.w and .h are uint16_t
 
-# Where each slot's art is anchored on its screen (main/display_screens.c),
-# which decides the sides a smaller image is padded on. Every slot is
-# anchored at its left edge (the layouts grow the box rightwards), so the
-# padding is always on the right; vertically:
+# Where a SMALLER image sits inside its slot (pad_offset). Two tables:
+#
+# SLOT_ANCHOR, the vertical anchor, follows how main/display_screens.c places
+# the slot:
 #   "top"     break (BREAK_ART_X/_Y) and bedtime (BEDTIME_ART_X/_Y): the
-#             top-left corner is fixed, padded below
+#             top-left corner is fixed; the image goes at the top (less the
+#             slot's top inset, below), padded below
 #   "middle"  charge, y = (DISP_VER - h) / 2: padded above and below, the
 #             odd row below, which is the rounding of that division
 #   "bottom"  timesup, y = DISP_VER - h (flush with the bottom edge):
 #             padded above
 # A slot not listed (only test fixtures) is "top".
+#
+# SLOT_INSET, (left, top) in ART pixels: how far in from the slot's top-left
+# corner a smaller image starts, each clamped to the room the image leaves
+# (left = min(inset, slot w - image w), likewise top; a "middle" or "bottom"
+# slot ignores the top inset). The charge and break slots were grown past
+# the corner their art used to start at -- charge 6 columns left (CHARGE_ART_X
+# 8 -> 2, to the panel's 2 px edge margin), break one art pixel left and up
+# (BREAK_ART_X/_Y 4 -> 2 at 2x) -- and the inset is that growth, so an image
+# no larger than the old slot (charge 148 wide, break 46x52) lands on the
+# panel exactly where it always did, and only a larger one reaches into the
+# new room. Everything else in the image's placement is padding on the
+# right and bottom. A slot not listed has no inset.
 SLOT_ANCHOR = {"break": "top", "bedtime": "top", "charge": "middle", "timesup": "bottom"}
+SLOT_INSET = {"charge": (6, 0), "break": (1, 1)}
 
 
 def load_png(path):
@@ -297,17 +314,20 @@ def load_slots(sprites_dir):
 
 
 def pad_offset(slot, sw, sh, w, h):
-    """(dx, dy): where a w x h image sits inside its sw x sh slot.
+    """(dx, dy): where a w x h image sits inside its sw x sh slot, in art px.
 
-    dx is always 0 (every slot is anchored at its left edge); dy follows the
-    slot's SLOT_ANCHOR. Assumes w <= sw and h <= sh.
+    dx is the slot's left inset clamped to the room (SLOT_INSET); dy follows
+    the slot's SLOT_ANCHOR, a "top" slot's inset clamped likewise. Assumes
+    w <= sw and h <= sh.
     """
+    inset_x, inset_y = SLOT_INSET.get(slot, (0, 0))
+    dx = min(inset_x, sw - w)
     anchor = SLOT_ANCHOR.get(slot, "top")
     if anchor == "bottom":
-        return 0, sh - h
+        return dx, sh - h
     if anchor == "middle":
-        return 0, (sh - h) // 2
-    return 0, 0
+        return dx, (sh - h) // 2
+    return dx, min(inset_y, sh - h)
 
 
 def fit(path, slot, sw, sh, f, w, h, px):

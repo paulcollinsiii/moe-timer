@@ -202,11 +202,11 @@ static void assert_generated_sprite(const sprite_t *s, uint16_t w, uint16_t h, u
     TEST_ASSERT_EQUAL_UINT16(s->rle_len, it.i);
 }
 
-/* The charge slot: 148x124 (its max size; the template art is padded to it)
+/* The charge slot: 154x124 (its max size; the template art is padded to it)
    with 3034 ink pixels, the ink count of tools/sprites/charge.png (the
    screen's copy is in test_display_render.c). */
 void test_the_generated_charge_art_decodes_to_the_png_dimensions_and_ink_count(void) {
-    assert_generated_sprite(&SPRITE_CHARGE, 148, 124, 3034);
+    assert_generated_sprite(&SPRITE_CHARGE, 154, 124, 3034);
 }
 
 /* The time's-up slot: 187x126 (its max size) with 5048 ink pixels, the ink count of
@@ -218,7 +218,7 @@ void test_the_generated_timesup_art_decodes_to_the_png_dimensions_and_ink_count(
     assert_generated_sprite(&SPRITE_TIMESUP, 187, 126, 5048);
 }
 
-/* The break slot: 46x52 (its max size: the layout has no room to grow it)
+/* The break slot: 47x53 (its max size; the template art is padded to it)
    with 1105 ink pixels, the ink count of
    tools/sprites/break.png (the screen's copy is in test_display_render.c).
    It is drawn at 2x, but the scale lives in the screen's paint, not in the
@@ -226,7 +226,7 @@ void test_the_generated_timesup_art_decodes_to_the_png_dimensions_and_ink_count(
    changes the stream is a visible diff; test_gen_sprites.py (TestBreak.RLE_LEN)
    pins the same 205 from the PNG, so the two cannot drift apart. */
 void test_the_generated_break_art_decodes_to_the_png_dimensions_and_ink_count(void) {
-    assert_generated_sprite(&SPRITE_BREAK, 46, 52, 1105);
+    assert_generated_sprite(&SPRITE_BREAK, 47, 53, 1105);
     TEST_ASSERT_EQUAL_UINT16(205, SPRITE_BREAK.rle_len);
 }
 
