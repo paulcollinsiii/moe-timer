@@ -218,26 +218,25 @@ void test_the_generated_timesup_art_decodes_to_the_png_dimensions_and_ink_count(
     assert_generated_sprite(&SPRITE_TIMESUP, 187, 126, 5048);
 }
 
-/* The break slot: 47x53 (its max size; the template art is padded to it)
-   with 1105 ink pixels, the ink count of
-   tools/sprites/break.png (the screen's copy is in test_display_render.c).
-   It is drawn at 2x, but the scale lives in the screen's paint, not in the
-   data: the stream is the 1x art. The rle_len is pinned so a re-encode that
+/* The break slot: 94x106 (its max size; the template art is padded to it)
+   with 4420 ink pixels, the ink count of tools/sprites/break.png (the
+   screen's copy is in test_display_render.c). It is drawn 1:1, white on
+   black, like every sprite. The rle_len is pinned so a re-encode that
    changes the stream is a visible diff; test_gen_sprites.py (TestBreak.RLE_LEN)
-   pins the same 205 from the PNG, so the two cannot drift apart. */
+   pins the same 413 from the PNG, so the two cannot drift apart. */
 void test_the_generated_break_art_decodes_to_the_png_dimensions_and_ink_count(void) {
-    assert_generated_sprite(&SPRITE_BREAK, 47, 53, 1105);
-    TEST_ASSERT_EQUAL_UINT16(205, SPRITE_BREAK.rle_len);
+    assert_generated_sprite(&SPRITE_BREAK, 94, 106, 4420);
+    TEST_ASSERT_EQUAL_UINT16(413, SPRITE_BREAK.rle_len);
 }
 
-/* The bed-time slot: 32x25 (its max size) with 222 ink pixels, the ink count of
-   tools/sprites/bedtime.png (the screen's copy is in test_display_render.c).
-   Drawn at 4x, white on black; the stream is the 1x art. rle_len is pinned
-   like the break slot's (73, also pinned by TestBedtime.RLE_LEN in
+/* The bed-time slot: 131x105 (its max size) with 3552 ink pixels, the ink
+   count of tools/sprites/bedtime.png (the screen's copy is in
+   test_display_render.c). Drawn 1:1, white on black. rle_len is pinned
+   like the break slot's (305, also pinned by TestBedtime.RLE_LEN in
    test_gen_sprites.py). */
 void test_the_generated_bedtime_art_decodes_to_the_png_dimensions_and_ink_count(void) {
-    assert_generated_sprite(&SPRITE_BEDTIME, 32, 25, 222);
-    TEST_ASSERT_EQUAL_UINT16(73, SPRITE_BEDTIME.rle_len);
+    assert_generated_sprite(&SPRITE_BEDTIME, 131, 105, 3552);
+    TEST_ASSERT_EQUAL_UINT16(305, SPRITE_BEDTIME.rle_len);
 }
 
 /* The committed (template) data has one picture per slot: the table holds

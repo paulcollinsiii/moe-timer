@@ -63,7 +63,7 @@ static lv_obj_t *fresh_screen(bool inverted) {
 
 /* Defined with the sprite screens below; the break screen (above them in
    this file) and the time's-up / charge screens all paint through it. */
-static void build_sprite(lv_obj_t *scr, const sprite_t *spr, int32_t x, int32_t y, int32_t scale, lv_color_t ink);
+static void build_sprite(lv_obj_t *scr, const sprite_t *spr, int32_t x, int32_t y, lv_color_t ink);
 
 /* The create/text/font/align quartet — every label on every screen. */
 static lv_obj_t *make_label(lv_obj_t *parent, const char *text, const lv_font_t *font, lv_align_t align, int32_t x,
@@ -548,17 +548,18 @@ void display_screens_build_main(const display_state_t *st) {
 
 /* ---- Screen Break layout (inverted), design §2.6 -----------------------
 
-   Two columns. At the left the break art (SPRITE_BREAK, a 47x53 slot; the
-   template is a meditating figure, see docs/developer_setup.md) drawn at
-   2x, WHITE on the black screen, at (2, 2): a 94x106 box, x 2..95,
-   y 2..107. That is the slot's max size: one more art pixel is 2 panel px,
-   which would take the box past the panel's 2 px edge margin (left, up) or
-   bring it to the bar's ink at x 100 (right) or the bottom row's ink under
-   the art's columns at y 110 (down; the 4 px gutter the other slots keep
-   below is 2 here). The template art fills x 8..91, y 8..105 of it, where
-   it was before the slot grew from 46x52 at (4, 4); gen_sprites.py insets
-   a smaller image one art pixel from the left and top (SLOT_INSET), so art
-   of the old size still lands at (4, 4). At the
+   Two columns. At the left the break art (SPRITE_BREAK, a 94x106 slot; the
+   template is a meditating figure, see docs/developer_setup.md) drawn 1:1,
+   WHITE on the black screen, at (2, 2): a 94x106 box, x 2..95,
+   y 2..107. That is the slot's max size: one more pixel would take the box
+   past the panel's 2 px edge margin (left, up) or bring it to the bar's
+   ink at x 100 (right, the 4 px gutter) or the bottom row's ink under the
+   art's columns at y 110 (down; the 4 px gutter the other slots keep
+   below is 2 here, kept from the layout's original 2x art). The template
+   art fills x 8..91, y 8..105 of it, where it was before the slot grew
+   from 92x104 at (4, 4); gen_sprites.py insets a smaller image 2 px from
+   the left and top (SLOT_INSET), so art of that old size still lands at
+   (4, 4). At the
    right, a 192 px column x 100..291 holding the title,
    countdown, bar and chore line. The art is static between partial
    refreshes: nothing here repaints it.
@@ -705,8 +706,8 @@ void display_screens_build_break(const display_state_t *st, const sprite_t *art)
     const bool has_chores = st->chore_count > 0;
     const bool has_swap = st->swap_next_name != NULL;
 
-    /* The art is static: white ink on the black screen, drawn at 2x. */
-    build_sprite(scr, art ? art : &SPRITE_BREAK, BREAK_ART_X, BREAK_ART_Y, 2, lv_color_white());
+    /* The art is static: white ink on the black screen, drawn 1:1. */
+    build_sprite(scr, art ? art : &SPRITE_BREAK, BREAK_ART_X, BREAK_ART_Y, lv_color_white());
 
     /* Right column: title, countdown and bar are centred on it. */
     lv_obj_t *title = make_label(scr, "SCREEN BREAK", UI_FONT_18, LV_ALIGN_TOP_LEFT, BREAK_COL_X, BREAK_TITLE_Y);
@@ -936,8 +937,8 @@ void display_screens_build_chores(const display_state_t *st) {
    it. "TIME'S" (28 pt) over "UP!" (48 pt) are centred on the column to its
    right. The sprite is painted by the same sprite_draw_cb() /
    build_sprite() the charge lock uses (defined below, with the charge art;
-   build_sprite() is forward-declared at the top of the file), at scale 1
-   in black.
+   build_sprite() is forward-declared at the top of the file), 1:1 in
+   black.
 
    Not inverted (thin 1-3 px lines, as the charge lock). Full refresh only
    (display_timesup()), so no CLEAN_BANDS entry.
@@ -957,7 +958,7 @@ void display_screens_build_chores(const display_state_t *st) {
 
 void display_screens_build_timesup(const sprite_t *art) {
     lv_obj_t *scr = fresh_screen(false);
-    build_sprite(scr, art ? art : &SPRITE_TIMESUP, TIMESUP_ART_X, DISP_VER - SPRITE_TIMESUP.h, 1, lv_color_black());
+    build_sprite(scr, art ? art : &SPRITE_TIMESUP, TIMESUP_ART_X, DISP_VER - SPRITE_TIMESUP.h, lv_color_black());
 
     lv_obj_t *times = make_label(scr, "TIME'S", UI_FONT_28, LV_ALIGN_TOP_LEFT, TIMESUP_COL_X, TIMESUP_TIMES_Y);
     lv_obj_set_width(times, TIMESUP_COL_W);
@@ -1038,17 +1039,16 @@ void display_screens_build_no_clock(void) {
    sprite.c, so no scratch bitmap is allocated and no new draw path reaches
    the I1 side. The sprite comes from the event's user data.
 
-   Two things are per-object rather than per-sprite, so one callback serves
-   black-on-white and white-on-black and 1x and 2x without a second decoder:
-   the ink colour is the object's text colour (set by build_sprite(), so it
-   follows the screen and is never hard-coded here) and the integer scale is
-   the object's user data. Each run of len px at (x, y) becomes a
-   len*scale x scale rect at (x*scale, y*scale). */
+   The ink colour is per-object rather than per-sprite, so one callback
+   serves black-on-white and white-on-black without a second decoder: it is
+   the object's text colour (set by build_sprite(), so it follows the screen
+   and is never hard-coded here). Every sprite is drawn 1:1: art pixel (x, y)
+   is panel pixel (x, y) of the object, so each run of len px at (x, y)
+   becomes a len x 1 rect at (x, y). */
 static void sprite_draw_cb(lv_event_t *e) {
     lv_layer_t *layer = lv_event_get_layer(e);
     lv_obj_t *obj = lv_event_get_current_target(e);
     const sprite_t *spr = lv_event_get_user_data(e);
-    const int32_t k = (int32_t)(intptr_t)lv_obj_get_user_data(obj);
 
     lv_area_t coords;
     lv_obj_get_coords(obj, &coords);
@@ -1062,22 +1062,17 @@ static void sprite_draw_cb(lv_event_t *e) {
     uint16_t x, y, len;
     sprite_iter_init(&it, spr);
     while (sprite_iter_next(&it, &x, &y, &len)) {
-        lv_area_t a = {.x1 = coords.x1 + x * k,
-                       .y1 = coords.y1 + y * k,
-                       .x2 = coords.x1 + (x + len) * k - 1,
-                       .y2 = coords.y1 + (y + 1) * k - 1};
+        lv_area_t a = {.x1 = coords.x1 + x, .y1 = coords.y1 + y, .x2 = coords.x1 + x + len - 1, .y2 = coords.y1 + y};
         lv_draw_rect(layer, &dsc, &a);
     }
 }
 
-/* A plain lv_obj the size of the sprite times `scale` (an integer >= 1),
-   painted in `ink` by sprite_draw_cb(); the background is transparent, so
-   only the ink is drawn on whatever the screen is (white or inverted). */
-static void build_sprite(lv_obj_t *scr, const sprite_t *spr, int32_t x, int32_t y, int32_t scale, lv_color_t ink) {
-    if (scale < 1)
-        scale = 1; /* callers pass literals; a zero would make a 0x0 box */
+/* A plain lv_obj the size of the sprite, painted in `ink` by
+   sprite_draw_cb(); the background is transparent, so only the ink is drawn
+   on whatever the screen is (white or inverted). */
+static void build_sprite(lv_obj_t *scr, const sprite_t *spr, int32_t x, int32_t y, lv_color_t ink) {
     lv_obj_t *o = lv_obj_create(scr);
-    lv_obj_set_size(o, spr->w * scale, spr->h * scale);
+    lv_obj_set_size(o, spr->w, spr->h);
     lv_obj_align(o, LV_ALIGN_TOP_LEFT, x, y);
     lv_obj_clear_flag(o, LV_OBJ_FLAG_SCROLLABLE);
     lv_obj_set_style_pad_all(o, 0, 0);
@@ -1085,7 +1080,6 @@ static void build_sprite(lv_obj_t *scr, const sprite_t *spr, int32_t x, int32_t 
     lv_obj_set_style_border_width(o, 0, 0);
     lv_obj_set_style_bg_opa(o, LV_OPA_TRANSP, 0);
     lv_obj_set_style_text_color(o, ink, 0);
-    lv_obj_set_user_data(o, (void *)(intptr_t)scale);
     lv_obj_add_event_cb(o, sprite_draw_cb, LV_EVENT_DRAW_MAIN, (void *)spr);
 }
 
@@ -1122,7 +1116,7 @@ static void build_empty_battery(lv_obj_t *scr, int32_t x, int32_t y) {
 
 void display_screens_build_charge_me(const sprite_t *art) {
     lv_obj_t *scr = fresh_screen(false);
-    build_sprite(scr, art ? art : &SPRITE_CHARGE, CHARGE_ART_X, (DISP_VER - SPRITE_CHARGE.h) / 2, 1, lv_color_black());
+    build_sprite(scr, art ? art : &SPRITE_CHARGE, CHARGE_ART_X, (DISP_VER - SPRITE_CHARGE.h) / 2, lv_color_black());
 
     lv_obj_t *words = make_label(scr, "Charge\nme!", UI_FONT_28, LV_ALIGN_TOP_LEFT, CHARGE_COL_X, CHARGE_TEXT_Y);
     lv_obj_set_width(words, CHARGE_COL_W);
@@ -1135,16 +1129,15 @@ void display_screens_build_charge_me(const sprite_t *art) {
 /* Bed Time lock: inverted like the break screen (night-appropriate and
    unmistakably "not in service"); stays until day rollover.
 
-   The bed-time art (SPRITE_BEDTIME, a 32x25 slot, tools/sprites/bedtime.png;
-   the template is a bed with zzz) is drawn at BEDTIME_ART_SCALE (4), WHITE
-   on the black screen, at (4, 4): a 128x100 box, x 4..131, y 4..103, the
-   max the words leave (their ink starts at x 137, the bottom line's at
-   y 111; one more art pixel right or down crosses the 4 px gutter, one
-   more left or up, 4 panel px, runs off the panel). A 26th row would fit
-   only at BEDTIME_ART_Y 3 (y 3..106, a 4 px gutter to 111), and that moves
-   the template art a panel pixel up -- or, padded a row on top to stay
-   put, 3 px down -- either way changing the golden; so the slot stays
-   32x25. The template art fills x 4..119, y 4..95 of it. The words are
+   The bed-time art (SPRITE_BEDTIME, a 131x105 slot, tools/sprites/bedtime.png;
+   the template is a bed with zzz) is drawn 1:1, WHITE on the black screen,
+   at (2, 2): a 131x105 box, x 2..132, y 2..106, the max the words leave
+   (their ink starts at x 137, the bottom line's at y 111; one more pixel
+   right or down crosses the 4 px gutter, one more left or up runs off the
+   panel's 2 px edge margin). The template art fills x 4..119, y 4..95 of
+   it, where it was when the slot was 32x25 drawn at 4x from (4, 4);
+   gen_sprites.py insets a smaller image 2 px from the left and top
+   (SLOT_INSET), so art of that old size still lands at (4, 4). The words are
    centred on a 172 px label column x 120..291 (it starts inside the box;
    the gutter is held on the ink by test_display_render.c), "Bed Time" over
    "Goodnight!",
@@ -1152,18 +1145,17 @@ void display_screens_build_charge_me(const sprite_t *art) {
    brush-teeth line runs along the bottom, below the box. This
    screen only ever arrives through a full refresh (display_bedtime), so it
    has no CLEAN_BANDS entry. */
-#define BEDTIME_ART_X 4
-#define BEDTIME_ART_Y 4
+#define BEDTIME_ART_X 2
+#define BEDTIME_ART_Y 2
 #define BEDTIME_COL_X 120 /* label column: 120..291 */
 #define BEDTIME_COL_W 172
-#define BEDTIME_ART_SCALE 4
 #define BEDTIME_TITLE_Y 10    /* "Bed Time" label top: ink rows 10..29 */
 #define BEDTIME_GREETING_Y 54 /* "Goodnight!" label top: ink rows 54..79 */
 #define BEDTIME_LINE_Y -2     /* bottom line: offset from the bottom edge, ink rows 111..122 */
 
 void display_screens_build_bedtime(const sprite_t *art) {
     lv_obj_t *scr = fresh_screen(true);
-    build_sprite(scr, art ? art : &SPRITE_BEDTIME, BEDTIME_ART_X, BEDTIME_ART_Y, BEDTIME_ART_SCALE, lv_color_white());
+    build_sprite(scr, art ? art : &SPRITE_BEDTIME, BEDTIME_ART_X, BEDTIME_ART_Y, lv_color_white());
 
     /* Two labels, not one two-line label: the gap between the words is
        wider than the font's line height. */
