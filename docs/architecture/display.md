@@ -91,12 +91,15 @@ to the text lines.
 
 **The four lock-screen art slots (charge, time's up, break, bed time) are drawn
 the same way.**
-`tools/sprites/charge.png` (148x124, 1-bit), `timesup.png` (187x126, 1-bit),
-`break.png` (46x52, 1-bit) and `bedtime.png` (32x25, 1-bit) are the public
+`tools/sprites/charge.png` (154x124, 1-bit), `timesup.png` (187x126, 1-bit),
+`break.png` (47x53, 1-bit) and `bedtime.png` (32x25, 1-bit) are the public
 templates, each padded to its slot's maximum size (the largest box its screen
-leaves for art); a private copy in `sprites.local/`, up to that size, can
-replace any of them at build time, and a smaller one is padded on the slot's
-grow sides (see [Lock-screen art](../developer_setup.md#lock-screen-art)).
+leaves for art: 4 px clear of other ink and 2 px off the panel edges, except
+that the break box keeps only 2 px above its bottom row and the time's-up box
+runs to the bottom edge on purpose); a private copy in `sprites.local/`, up to
+that size, can replace any of them at build time, and a smaller one is padded
+so that art of an older, smaller slot size lands where it always did (see
+[Lock-screen art](../developer_setup.md#lock-screen-art)).
 `tools/gen_sprites.py` run-length encodes them into the committed
 `main/sprite_data.c` (about 0.8 KB, 1.0 KB, 0.2 KB and 0.07 KB of flash),
 `uv run tools/gen_sprites.py --check` fails when the two disagree, and
@@ -105,7 +108,7 @@ grow sides (see [Lock-screen art](../developer_setup.md#lock-screen-art)).
 `display_screens.c` paints each ink run with one `lv_draw_rect`, as the QR does.
 The handler takes an integer scale and the ink colour per object: the charge
 and time's-up art draw at 1x in black, the break screen's art at 2x (each art
-pixel a 2x2 block, 92x104 on the panel) in white, because that screen is
+pixel a 2x2 block, 94x106 on the panel) in white, because that screen is
 inverted, and the bed-time screen's art at 4x (128x100) in white for the same reason. The
 bed-time screen is a full refresh only, so it needs no `CLEAN_BANDS` entry.
 The break screen partial-refreshes in place, but its layout needs no band of its

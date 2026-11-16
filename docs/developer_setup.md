@@ -209,22 +209,35 @@ original template art for all four in `tools/sprites/`; you can replace any of
 them with your own at build time, without touching tracked files.
 
 The size below is the slot's **maximum**: the largest box the screen leaves
-for art, 4 px clear of every other element's ink and 2 px off the panel edges.
+for art. As a rule that box keeps 4 px clear of every other element's ink and
+2 px off the panel edges, and one more art pixel on any side would break the
+rule. Two slots differ, on purpose:
+
+- **break** keeps only 2 px above the bottom row: under the art's columns that
+  row's ink starts at y 110, and the box ends at y 107. The box is in 2x2
+  steps, so it cannot reach a 4 px gutter there without losing a row.
+- **timesup** has no bottom margin: the box runs to the panel's last row, so
+  its art may bleed off the bottom edge (the template's clock does).
+
 The template PNGs are that size, their art padded with white.
 
-| Slot (file) | Max size (w x h) | Drawn at | A smaller image sticks to | Ink on screen | Shows | Template |
-|---|---|---|---|---|---|---|
-| `charge.png` | 148x124 | 1x | the left edge, centred vertically | black on white | the battery lock: `Charge me!` beside it | a sad battery holding its plug |
-| `timesup.png` | 187x126 | 1x, flush with the bottom edge | the bottom-left corner | black on white | the expiry screen: `TIME'S UP!` beside it | a shocked alarm clock, cut off by the bottom edge |
-| `break.png` | 46x52 | 2x (92x104) | the top-left corner | white on black | the screen break: countdown and bar beside it | a meditating figure with sparkles |
-| `bedtime.png` | 32x25 | 4x (128x100) | the top-left corner | white on black | the Bed Time lock: `Bed Time` and `Goodnight!` beside it | a bed with zzz |
+| Slot (file) | Max size (w x h) | Drawn at | Box on the panel | A smaller image goes | Ink on screen | Shows | Template |
+|---|---|---|---|---|---|---|---|
+| `charge.png` | 154x124 | 1x | x 2..155, y 2..125 | 6 px in from the left edge (fewer when wider than 148), centred vertically | black on white | the battery lock: `Charge me!` beside it | a sad battery holding its plug |
+| `timesup.png` | 187x126 | 1x, flush with the bottom edge | x 2..188, y 2..127 | to the bottom-left corner | black on white | the expiry screen: `TIME'S UP!` beside it | a shocked alarm clock, cut off by the bottom edge |
+| `break.png` | 47x53 | 2x (94x106) | x 2..95, y 2..107 | 1 art pixel in from the left and top (none on a side where it is full size) | white on black | the screen break: countdown and bar beside it | a meditating figure with sparkles |
+| `bedtime.png` | 32x25 | 4x (128x100) | x 4..131, y 4..103 | to the top-left corner | white on black | the Bed Time lock: `Bed Time` and `Goodnight!` beside it | a bed with zzz |
+
+The charge and break slots grew past where their art used to start (charge was
+148 wide at x 8, break 46x52 at (4, 4)). The inset in the "goes" column is that
+growth, so art drawn at the old size lands on exactly the same panel pixels as
+before; only a larger image reaches into the new room.
 
 **Blank templates.** `tools/sprites/templates/<slot>.png` is an all-white
 1-bit PNG of each slot's exact maximum size. To draw your own, copy one into
 `sprites.local/` as `<slot>.png` (or `<slot>.<n>.png` for another variant) and
 draw in black. You can crop it to any size up to the template's; a smaller
-image is padded with white on the right and away from the edge it sticks to
-(the column above), so it lands where the screen anchors the art. The break
+image is padded with white and placed as the "goes" column says. The break
 and bed-time templates are in native art pixels, before the screen scales
 them: each pixel you draw is a 2x2 (break) or 4x4 (bed time) block on the
 panel.
@@ -281,7 +294,7 @@ time's-up alert; an OTA or panic restart is the one thing that redraws it) (see
   slot, override every variant the template has.
 
 ```bash
-cp ~/second_battery.png sprites.local/charge.1.png   # a 1-bit PNG up to 148x124
+cp ~/second_battery.png sprites.local/charge.1.png   # a 1-bit PNG up to 154x124
 idf.py build        # "overriding slots from sprites.local/: charge"
 ```
 
