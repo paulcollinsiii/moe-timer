@@ -1148,7 +1148,7 @@ _Static_assert(SWAP_COUNT_POLL_MS * 1000u < BUTTON_LATCH_SWAP_REFRACTORY_US,
 
 /* THE WORST CASE THE BUDGET ALLOWS, in two layers. Every term is a bound and
    not an estimate of a typical wake, and the figures below are at the Kconfig
-   defaults (quiet 700 ms, budget 6000 ms, break alarm 3 cycles, one event
+   defaults (quiet 1000 ms, budget 9000 ms, break alarm 3 cycles, one event
    window 42.5 s, one full paint 4 s). The test build overrides the swap knobs
    (410 / 1750), so it exercises the arithmetic but not these figures.
 
@@ -1170,7 +1170,7 @@ _Static_assert(SWAP_COUNT_POLL_MS * 1000u < BUTTON_LATCH_SWAP_REFRACTORY_US,
      event window    the ONE window the tail serves (WAKE_FLOW_EVENT_WINDOW_MS,
                      the worst case of its timeouts); a swap raises no debt of
                      its own, but a B press in an earlier join poll can have.
-   No chime term: a swap plays no sound. 6000 + 11600 + 42500 = 60.1 s against
+   No chime term: a swap plays no sound. 9000 + 11600 + 42500 = 63.1 s against
    the 90 s half-failsafe.
 
    LAYER TWO, EACH ENTRY PATH WITH WHAT PRECEDES THE GESTURE ON IT, held under
@@ -1178,14 +1178,16 @@ _Static_assert(SWAP_COUNT_POLL_MS * 1000u < BUTTON_LATCH_SWAP_REFRACTORY_US,
    named):
      the EXT1 wake press   the rollover's own network window, which runs ahead
                            of it on the first press after midnight
-                           (wake_flow_handle_day_rollover): 42.5 + 60.1 =
-                           102.6 s;
+                           (wake_flow_handle_day_rollover): 42.5 + 63.1 =
+                           105.6 s;
      a latched C on a tick wake   the rollover's window and the wake's own sync
                            window (the rollover resets next_ntp_sync, so the
                            sync follows it), the render-grid wait
                            (WAKE_FLOW_GRID_WAIT_MAX_SEC) and the minute's own
-                           paint, then the gesture: 42.5 + 42.5 + 25 + 4 + 60.1
-                           = 174.1 s.
+                           paint, then the gesture: 42.5 + 42.5 + 25 + 4 + 63.1
+                           = 177.1 s. This is the tightest of the three: at a
+                           180 s failsafe it admits a budget of at most 11.9 s,
+                           above the Kconfig range's 10 s ceiling.
    WHAT NEITHER LAYER CHARGES, stated so that nobody reads more into the assert
    than it says: the follow-up window of an owed-window chain (WAKE_FLOW_OWED_-
    WINDOWS_MAX is 2) is admitted by wake_flow_headroom_for_window() against the
@@ -1198,7 +1200,7 @@ _Static_assert(SWAP_COUNT_POLL_MS * 1000u < BUTTON_LATCH_SWAP_REFRACTORY_US,
    the gesture (maybe_wait_for_event), bounded by SLEEP_PLAN_WATCH_SEC and the
    failsafe. A tick wake that stacks all of those is over the failsafe with or
    without a gesture — the failsafe is the arbiter there, and the gesture adds
-   only its 6 s of waiting to it. */
+   only its 9 s of waiting to it. */
 #define SWAP_COUNT_WORST_TAIL_MS \
     WAKE_FLOW_MAX_U32(2u * WAKE_FLOW_WORST_PAINT_MS, WAKE_FLOW_BREAK_ALERT_MS + 1u * WAKE_FLOW_WORST_PAINT_MS)
 #define SWAP_COUNT_WORST_GESTURE_MS \
@@ -1590,8 +1592,11 @@ static void wake_flow_repaint_chore_acks_until_quiet(time_t *now, uint32_t *spen
    has run; the mode cannot change inside the gesture, because the only
    mode button, A, is not acted on while it runs), and put back before the
    commit on EVERY exit. The wake press that opened it was seeded into the latch
-   at the default window, and stays there (button_latch_seed_press says why), so
-   its own release bounce can never read as a second count.
+   at the default window when the buttons armed; installing the guard restamps
+   it with the short window and the gesture's settle, so a tap 120 ms or more
+   after arming counts. Its own release bounce is still refused, by the release
+   gate and the settle exactly as for every counted tap
+   (button_latch_restamp_running says why).
 
    WHAT HAPPENS TO OTHER BUTTONS: they are not taken here (the take is masked
    to C), so a B, D or A pressed mid-gesture stays latched for its whole
@@ -1622,10 +1627,17 @@ typedef enum {
 /* C's press guard for the gesture: the short refractory window AND the longer
    release settle, installed together when the gesture opens and put back
    together on the way out (button_latch.h says what each is for). One helper
-   so the two can never be separated. */
+   so the two can never be separated. Installing it also restamps the press
+   already running on C (the seeded wake press, on a button wake) so the tap
+   right after it meets the short window, not the seed's 300 ms. Putting it
+   back does not restamp: the last counted tap keeps the guard it was counted
+   under. */
 static void wake_flow_swap_press_guard(bool counting) {
     buttons_set_refractory(BTN_C, counting ? BUTTON_LATCH_SWAP_REFRACTORY_US : BUTTON_LATCH_REFRACTORY_US);
     buttons_set_settle(BTN_C, counting ? BUTTON_LATCH_SWAP_SETTLE_US : BUTTON_LATCH_RELEASE_SETTLE_US);
+    if (counting) {
+        buttons_restamp_running(BTN_C);
+    }
 }
 
 static swap_gesture_t wake_flow_swap_count_gesture(void) {
@@ -2126,7 +2138,7 @@ static bool wake_flow_presses_are_the_locks(void) {
    timer to go to) and answers REFUSED when it does not open.
 
    `now` is re-read HERE, after the gesture, and is what the caller must paint
-   with: the gesture waited 0.7 to 6 s, and a paint that carried the clock from
+   with: the gesture waited 1 to 9 s, and a paint that carried the clock from
    before it would show the minute the press arrived in.
 
    `glass_current` is the tick wake: its minute render ran after the rollover

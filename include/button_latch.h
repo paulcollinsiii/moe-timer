@@ -103,9 +103,11 @@
    tap C at 150-250 ms, and the 300 ms window above would register about every
    other tap. wake_flow installs it with button_latch_set_refractory() when
    the gesture opens (the wake press is C, and the mode is Timers — in Chores
-   mode C is the second chore tick and keeps 300 ms), and puts the default back
-   when the gesture closes. Every other button, and C at any other time, keeps
-   BUTTON_LATCH_REFRACTORY_US.
+   mode C is the second chore tick and keeps 300 ms), restamps the press already
+   running with it (button_latch_restamp_running: on a button wake that is the
+   seeded wake press, so the tap right after it is judged by this window too),
+   and puts the default back when the gesture closes. Every other button, and C
+   at any other time, keeps BUTTON_LATCH_REFRACTORY_US.
 
    120 ms IS A STARTING FIGURE, and so is the 300 ms it shortens: BOTH ARE TO
    BE SETTLED ON THE BENCH (20 single taps of C in Timers mode, none may count
@@ -142,11 +144,11 @@ extern "C" {
 void button_latch_reset(void);
 /* Change ONE button's refractory window: the window the NEXT accepted press
    of `btn` will open. Pass BUTTON_LATCH_REFRACTORY_US to put the default back.
-   A window already running keeps the figure it was opened with, and the EXT1
-   wake press seeded by button_latch_seed_press ALWAYS opens the default
-   whatever this has set, because its release can ring at any moment relative
-   to the boot. button_latch_reset restores every button's default, so a
-   wake starts from 300 ms everywhere. An out-of-range button or a window of
+   A window already running keeps the figure it was opened with unless
+   button_latch_restamp_running is called, and the EXT1 wake press seeded by
+   button_latch_seed_press opens the default whatever this has set.
+   button_latch_reset restores every button's default, so a wake starts from
+   300 ms everywhere. An out-of-range button or a window of
    zero or less is ignored (a zero would turn the guard off). Task context:
    record reads the window from the ISR, so the caller holds the same critical
    section it holds for the other latch calls. */
@@ -154,12 +156,26 @@ void button_latch_set_refractory(int btn, int64_t us);
 /* The same for the release settle (BUTTON_LATCH_RELEASE_SETTLE_US is the
    default): the settle the NEXT accepted press of `btn` will be judged by once
    it is released. Stamped at acceptance exactly like the window, so a change
-   never reaches into a press already accepted, and the EXT1 wake press seeded
-   by button_latch_seed_press always carries the default. Pass
+   never reaches into a press already accepted (unless
+   button_latch_restamp_running is called), and the EXT1 wake press seeded by
+   button_latch_seed_press starts with the default. Pass
    BUTTON_LATCH_RELEASE_SETTLE_US to put the default back; button_latch_reset
    does too. An out-of-range button or a figure of zero or less is ignored.
    Same context rules as button_latch_set_refractory. */
 void button_latch_set_settle(int btn, int64_t us);
+/* Restamp the press already RUNNING on `btn` (the last accepted one, or the
+   seeded wake press) with the window and settle the setters above last asked
+   for, so it is judged by them from now on. The anchors and the release gate
+   are left alone: only the figures change. The counted-clicks gesture calls it
+   after installing C's short window and longer settle, so the tap right after
+   the wake press is not refused by the seed's 300 ms. That is safe for the
+   wake press's own release bounce for the same reason it is safe for every
+   counted tap: a pad still held at arming keeps the gate shut until a sample
+   sees it up, and the settle then runs from that sample; a pad already up at
+   arming was released before it, and the window and settle both run from
+   arming. An out-of-range button is a no-op. Same context rules as
+   button_latch_set_refractory. */
+void button_latch_restamp_running(int btn);
 /* Open the refractory window for a press that was accepted WITHOUT passing
    through button_latch_record: the EXT1 wake press, which wake handling
    consumes directly. Call it after button_latch_reset and before the ISRs are

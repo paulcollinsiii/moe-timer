@@ -115,6 +115,12 @@ void buttons_set_settle(button_id_t btn, int64_t us) {
     portEXIT_CRITICAL(&s_latch_mux);
 }
 
+void buttons_restamp_running(button_id_t btn) {
+    portENTER_CRITICAL(&s_latch_mux);
+    button_latch_restamp_running((int)btn);
+    portEXIT_CRITICAL(&s_latch_mux);
+}
+
 uint8_t buttons_take_pressed(void) {
     buttons_note_levels();
     portENTER_CRITICAL(&s_latch_mux);

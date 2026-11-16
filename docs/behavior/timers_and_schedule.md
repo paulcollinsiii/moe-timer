@@ -115,7 +115,7 @@ build default; `CONFIG_MAGTAG_FULL_REFRESH_EVERY_N` changes it.)
 ### Switching timers with C
 
 C counts. The press that wakes the device starts a count, and each further
-press within a short pause (700 ms by default,
+press within a short pause (1 s by default,
 `CONFIG_MAGTAG_SWAP_COUNT_QUIET_MS`) moves on one more timer, wrapping through
 Screen. The four LEDs show where you have got to as a binary number: the
 timer's place among the enabled timers, Screen = 1, with the least significant
@@ -134,11 +134,15 @@ Things to know:
 
 - **A single press now waits out the pause before the panel repaints.** The
   device cannot tell one press from the first of several until the pause has
-  passed, so the repaint comes about 0.7 s after the press instead of
+  passed, so the repaint comes about 1 s after the press instead of
   straight away. The LEDs answer at once.
-- **The count ends after 6 s at most**
+- **The count ends after 9 s at most**
   (`CONFIG_MAGTAG_SWAP_COUNT_BUDGET_MS`), whatever you are still pressing, and
   selects the timer it has reached.
+- **Once the count has ended, further taps are ignored** until the device is
+  back asleep. The pause after your last tap ends it, and taps made during the
+  repaint that follows do nothing. Wait for the LEDs to go out, then press
+  again.
 - **Two kinds of press start a count:** the press that wakes the device, and
   a press made while a minute wake is already awake (during its sync, its wait
   for the minute, or its repaint), which the wake acts on when it has finished.
@@ -146,8 +150,9 @@ Things to know:
   you made, they are a single press, so the count begins from the timer after
   the selected one and only taps made once the LEDs show the count are added.
 - **Taps made while the device is waking are not counted,** and neither is a
-  second tap within 300 ms of the device arming its buttons (the wake press
-  keeps the ordinary 300 ms). Start counting once the LEDs light.
+  second tap within 120 ms of the device arming its buttons (the wake press
+  gets the same 120 ms as every counted tap). Start counting once the LEDs
+  light.
 - **A press during a break's last seconds still moves exactly one timer.** That
   wait ends at the first press it acts on, so it does not count.
 - **C taps are accepted closer together** while counting: 120 ms between two

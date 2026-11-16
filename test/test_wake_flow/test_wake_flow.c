@@ -1192,6 +1192,17 @@ void buttons_set_settle(button_id_t btn, int64_t us) {
     button_latch_set_settle((int)btn, us);
 }
 
+/* ...and buttons_restamp_running(), which the gesture calls once it has
+   installed both. Counted, and passed to the real latch. */
+static int flow_restamp_n;
+static int flow_restamp_btn;
+
+void buttons_restamp_running(button_id_t btn) {
+    flow_restamp_n++;
+    flow_restamp_btn = (int)btn;
+    button_latch_restamp_running((int)btn);
+}
+
 /* net_window.c's "the checklist owns the strip this wake, drop the sync
    pixel" latch. Counted rather than modelled: what net_window does with
    it is four early returns around neopixel_status_pixel() calls this
@@ -2431,6 +2442,8 @@ void setUp(void) {
     flow_latch_mask_at_select = 0;
     flow_refractory_n = 0;
     flow_settle_n = 0;
+    flow_restamp_n = 0;
+    flow_restamp_btn = -1;
     flow_hold_mask = 0;
     for (int i = 0; i < TIMER_SLOT_COUNT; i++) {
         flow_slot_enabled[i] = (i < 3); /* Screen, slot 1, Piano (2): a lap is three timers */
@@ -13802,7 +13815,7 @@ void test_swap2_n_presses_are_one_commit_and_one_partial_paint(void) {
 
 /* THE COMMIT PAINTS THE CLOCK AS IT IS WHEN THE GESTURE ENDS, not as it was
    when the press arrived. The wake read the clock before the gesture, and the
-   gesture then waits 0.7 to 6 s: a count that crosses a minute boundary must
+   gesture then waits 1 to 9 s at the defaults: a count that crosses a minute boundary must
    paint the new minute (the chore coalescer and the D arm re-read for the
    same reason). The harness clock advances with the gesture's delays. */
 void test_swap3a_a_gesture_that_crosses_a_minute_paints_the_minute_it_ended_in(void) {
@@ -13831,6 +13844,40 @@ void test_swap3_the_candidate_wraps_through_screen(void) {
     TEST_ASSERT_EQUAL_UINT8_MESSAGE(1, flow_count_seen[0], "the first step off the last timer is Screen, ordinal 1");
     TEST_ASSERT_EQUAL_UINT8(2, flow_count_seen[1]);
     TEST_ASSERT_EQUAL_INT(1, flow_active_slot);
+}
+
+/* A COUNT THAT COMES ROUND PAST WHERE IT STARTED KEEPS GOING, and a tap that
+   lands exactly as the window lapses still counts. From the last timer, four
+   candidates on a three-timer lap: Screen, slot 1, Piano (the start, passed
+   and not stopped at), Screen. Each tap lands one full quiet window after the
+   one before it, so the take that ends each window is the one that finds it;
+   the commit is the last candidate, one window after the last tap (4 x 410 ms
+   is inside the test build's 1750 ms budget, so the window ends it). */
+void test_swap3b_a_slow_count_passes_its_start_and_commits_where_it_ends(void) {
+    _Static_assert(4u * CONFIG_MAGTAG_SWAP_COUNT_QUIET_MS < CONFIG_MAGTAG_SWAP_COUNT_BUDGET_MS,
+                   "the budget would end this count before its last window");
+    _Static_assert((int64_t)CONFIG_MAGTAG_SWAP_COUNT_QUIET_MS * 1000 > BUTTON_LATCH_SWAP_REFRACTORY_US,
+                   "the first tap, one window after arming, would meet the wake press's refractory window");
+    flow_arm_swap_wake();
+    flow_active_slot = FLOW_PIANO;
+    flow_edge_clock_is_real = true;
+    for (int i = 1; i <= 3; i++)
+        flow_burst_add(BTN_C, (int32_t)(i * SWAP_Q));
+
+    TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_button());
+
+    TEST_ASSERT_EQUAL_INT_MESSAGE(3, flow_burst_delivered, "a press was never delivered");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(4, flow_count_n, "a tap at the window's edge, or the one on the start, was lost");
+    const uint8_t want[4] = {1, 2, 3, 1}; /* Screen, slot 1, Piano (the start), Screen */
+    for (int i = 0; i < 4; i++) {
+        TEST_ASSERT_EQUAL_UINT8(want[i], flow_count_seen[i]);
+        TEST_ASSERT_EQUAL_UINT32((uint32_t)i * SWAP_Q, flow_count_at[i]);
+    }
+    TEST_ASSERT_EQUAL_INT_MESSAGE(FLOW_SCREEN, flow_active_slot,
+                                  "the count stopped at its start instead of going round");
+    TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_SELECT_SLOT));
+    TEST_ASSERT_EQUAL_UINT32(4u * SWAP_Q, flow_select_slot_at_ms);
+    TEST_ASSERT_EQUAL_INT(1, FLOW_RENDERS());
 }
 
 /* A full lap lands on the start: no state write, no paint, strip put back. */
@@ -14084,6 +14131,8 @@ void test_swap15_the_short_window_is_installed_for_c_only_while_the_gesture_runs
     TEST_ASSERT_TRUE_MESSAGE(flow_log_at_nth(EV_SWAP_REFRACTORY, 2) > flow_log_at_nth(EV_SWAP_COUNT, 2),
                              "the default came back before the gesture ended");
     flow_assert_swap_guard_put_back_before_the_commit();
+    TEST_ASSERT_EQUAL_INT_MESSAGE(1, flow_restamp_n, "the running press is restamped once, when the guard goes in");
+    TEST_ASSERT_EQUAL_INT(BTN_C, flow_restamp_btn);
 }
 
 /* THE SETTLE TRAVELS WITH THE WINDOW: installed when the gesture opens, put
@@ -14103,9 +14152,9 @@ void test_swap15b_the_gesture_settle_is_installed_and_put_back_with_the_window(v
     TEST_ASSERT_TRUE(flow_log_at_nth(EV_SWAP_SETTLE, 2) > flow_log_at_nth(EV_SWAP_COUNT, 2));
 }
 
-/* A TAP RHYTHM THE LONG WINDOW WOULD HALVE. Presses 160 ms apart, all past
-   the seeded wake press's window; the 300 ms default would refuse every other
-   one (320 -> 480 is 160 ms) and count three, not four. */
+/* A TAP RHYTHM THE LONG WINDOW WOULD HALVE. Presses 160 ms apart; the 300 ms
+   default would refuse every other one (320 -> 480 is 160 ms) and count three,
+   not four. */
 void test_swap16_taps_160_ms_apart_all_count_under_the_short_window(void) {
     flow_arm_swap_wake();
     flow_enable_all_timers();
@@ -14120,21 +14169,67 @@ void test_swap16_taps_160_ms_apart_all_count_under_the_short_window(void) {
     TEST_ASSERT_EQUAL_INT(4, flow_active_slot);
 }
 
-/* ONE TAP IS ONE COUNT — the failure here is skipping two timers for one
-   press. The wake press is seeded; its release bounce arrives AFTER the first
-   poll's level sample reopened the gate, past the 10 ms settle anchor and past
-   the short window (140 ms). Only the seeded press's own (default) window
-   rejects it. Had the seed taken the short figure, this edge counts and the
-   candidate skips a timer. */
+/* THE TAP RIGHT AFTER THE WAKE PRESS COUNTS. The wake press was seeded when the
+   buttons armed (the run's start here), and the gesture gives it the short
+   window when it opens, the same as every press it counts. A person tapping
+   every 200 ms has the next tap land 200 ms after arming: the seed's 300 ms
+   default would refuse it, and four taps would count three. */
+void test_swap16b_a_tap_200_ms_after_the_buttons_arm_counts(void) {
+    flow_arm_swap_wake();
+    flow_enable_all_timers();
+    flow_edge_clock_is_real = true;
+    flow_burst_add(BTN_C, 200);
+    flow_burst_add(BTN_C, 400);
+    flow_burst_add(BTN_C, 600);
+
+    TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_button());
+
+    TEST_ASSERT_EQUAL_INT(3, flow_burst_delivered);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(4, flow_count_n, "the tap after the wake press met the seed's 300 ms window");
+    TEST_ASSERT_EQUAL_INT(4, flow_active_slot);
+}
+
+/* ONE TAP IS ONE COUNT, for the wake press too — the failure here is skipping
+   two timers for one press, now that the wake press carries the short window.
+   The pad is still HELD when the buttons arm (a press that outlasts the boot),
+   so the release gate is shut. It comes up at 200 ms; the poll there reads it
+   up in a high phase of the ringing and reopens the gate, and the next bounce
+   edge lands at the 220 poll: past the 120 ms window (measured from arming),
+   past the default 10 ms settle, inside the gesture's 30 ms. Only the settle
+   the gesture gave the seeded press refuses it. The tap at 400 is real and
+   counts, which is what keeps the refusal from being vacuous. */
 void test_swap17_a_wake_press_release_bounce_after_a_reopening_sample_never_counts(void) {
     flow_arm_swap_wake();
+    flow_enable_all_timers();
     flow_edge_clock_is_real = true;
-    flow_burst_add(BTN_C, 140); /* the bounce, not a second tap */
+    flow_held_now = (uint8_t)(1u << BTN_C); /* still down when the buttons arm */
+    flow_hold_mask = (uint8_t)(1u << BTN_C);
+    flow_hold_from_ms = 0;
+    flow_hold_to_ms = 200;
+    flow_burst_add(BTN_C, 210); /* the bounce, delivered at the 220 poll */
+    flow_burst_add(BTN_C, 400); /* a real second tap */
+
+    TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_button());
+
+    TEST_ASSERT_EQUAL_INT(2, flow_burst_delivered);
+    TEST_ASSERT_EQUAL_INT_MESSAGE(2, flow_count_n, "the wake press's release bounce counted as another press");
+    TEST_ASSERT_EQUAL_INT(2, flow_active_slot);
+}
+
+/* ...and when the wake press was a quick tap, already up when the buttons arm:
+   arming reads the pad up and anchors the settle there, and the 120 ms window
+   runs from the same instant, so any ringing left over from a release that
+   finished before arming has to outlast both. An edge 100 ms on is refused. */
+void test_swap17b_a_wake_tap_already_up_at_arming_does_not_count_twice(void) {
+    flow_arm_swap_wake();
+    flow_enable_all_timers();
+    flow_edge_clock_is_real = true;
+    flow_burst_add(BTN_C, 100); /* ringing, not a tap: inside the 120 ms window */
 
     TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_button());
 
     TEST_ASSERT_EQUAL_INT(1, flow_burst_delivered);
-    TEST_ASSERT_EQUAL_INT_MESSAGE(1, flow_count_n, "the release bounce counted as a second press");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(1, flow_count_n, "an edge inside the wake press's window counted");
     TEST_ASSERT_EQUAL_INT(1, flow_active_slot);
 }
 
@@ -14958,6 +15053,7 @@ int main(void) {
     RUN_TEST(test_swap5b_the_same_during_a_break_repaints_partial_not_full);
     RUN_TEST(test_swap2_n_presses_are_one_commit_and_one_partial_paint);
     RUN_TEST(test_swap3_the_candidate_wraps_through_screen);
+    RUN_TEST(test_swap3b_a_slow_count_passes_its_start_and_commits_where_it_ends);
     RUN_TEST(test_swap4_a_full_lap_commits_nothing_paints_nothing_and_puts_the_strip_back);
     RUN_TEST(test_swap5_a_full_lap_still_paints_when_the_day_rolled_over);
     RUN_TEST(test_swap6_a_full_lap_still_paints_a_break_end_the_glass_has_not_shown);
@@ -14972,7 +15068,9 @@ int main(void) {
     RUN_TEST(test_swap15_the_short_window_is_installed_for_c_only_while_the_gesture_runs);
     RUN_TEST(test_swap15b_the_gesture_settle_is_installed_and_put_back_with_the_window);
     RUN_TEST(test_swap16_taps_160_ms_apart_all_count_under_the_short_window);
+    RUN_TEST(test_swap16b_a_tap_200_ms_after_the_buttons_arm_counts);
     RUN_TEST(test_swap17_a_wake_press_release_bounce_after_a_reopening_sample_never_counts);
+    RUN_TEST(test_swap17b_a_wake_tap_already_up_at_arming_does_not_count_twice);
     RUN_TEST(test_swap18_a_bounce_one_poll_after_a_counted_tap_never_counts);
     RUN_TEST(test_swap19_a_held_tap_whose_release_rings_past_the_default_settle_counts_once);
     RUN_TEST(test_swap20_a_latched_c_on_a_tick_wake_opens_the_gesture_and_commits_once);
