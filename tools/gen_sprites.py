@@ -353,9 +353,10 @@ def warn_if_old_scaled_art(path, slot, sw, sh, w, h):
     if w <= ow and h <= oh and sw >= ow * k and sh >= oh * k:
         print(
             "gen_sprites: warning: %s: this file is %dx%d, small enough to be art for the old %dx%d %s slot, which "
-            "was drawn at %dx. Sprites are drawn 1:1 now (the slot is %dx%d), so it will look %d times smaller; "
-            "enlarge it by %d (nearest-neighbour) to keep its size"
-            % (path, w, h, ow, oh, slot, k, sw, sh, k, k),
+            "was drawn at %dx. Sprites are drawn 1:1 now (the slot is %dx%d). If this was drawn for the old %dx "
+            "%s slot, it now draws %d times smaller; enlarge it by %d (nearest-neighbour). If it was drawn 1:1, "
+            "ignore this, or pad it with white past %dx%d in width or height to silence it"
+            % (path, w, h, ow, oh, slot, k, sw, sh, k, slot, k, k, ow, oh),
             file=sys.stderr,
         )
 

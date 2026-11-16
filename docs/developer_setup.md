@@ -245,6 +245,9 @@ art the size it was, enlarge it by 2 (break) or 4 (bed time) with
 **nearest-neighbour** (no smoothing, so every pixel becomes an exact 2x2 or 4x4
 block) and save it as a 1-bit PNG; it then lands on the very same panel pixels
 as before. Art that was already drawn at 1x (charge, time's up) needs no change.
+The warning is a guess from the file's size alone: small art that was drawn 1:1
+is legal and stays as it is. To silence the warning for such a file, pad it
+with white past 47x53 (break) or 32x25 (bed time) in width or height.
 
 **Blank templates.** `tools/sprites/templates/<slot>.png` is an all-white
 1-bit PNG of each slot's exact maximum size. To draw your own, copy one into

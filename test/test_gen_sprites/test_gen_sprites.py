@@ -13,8 +13,8 @@ What is pinned, and why each matters:
     255,0,rest, decoding back to the same pixels (the C decoder in
     main/sprite.c implements the same rules; test_sprite covers it);
   - THE ROUND TRIP: each shipped TEMPLATE (tools/sprites/charge.png,
-    timesup.png, break.png, bedtime.png; the last two drawn at 2x and 4x,
-    white on black) encodes and decodes to exactly itself, its screen golden
+    timesup.png, break.png, bedtime.png; the last two drawn 1:1, white
+    on black) encodes and decodes to exactly itself, its screen golden
     holds it pixel for pixel at the placement display_screens.c names, and
     the committed main/sprite_data.c holds exactly that stream (the C suite
     cannot read PNGs, so this is where "the sprite in flash is the art" is
@@ -158,7 +158,7 @@ class SpriteChecks:
 
     PNG = DIMS = INK = IDENT = GOLDEN = BOX = INK_BOX = OLD_DIMS = OLD_ORIGIN = C_SITES = None
     RLE_LEN = None  # when set: the encoded stream length, pinned in the C suite too
-    INVERTED = False  # True: white ink on a black screen (the break screen)
+    INVERTED = False  # True: white ink on a black screen (the break and bedtime screens)
     __test__ = False
 
     def placement(self, src):
@@ -1096,6 +1096,13 @@ class TestOldScaleWarning(unittest.TestCase):
             self.assertIn(os.path.join(self.over, slot + ".png"), msg, (slot, size))
             self.assertIn("%dx%d" % size, msg, (slot, size))
             self.assertIn("%dx" % k, msg, (slot, size))
+            # conditional, not a fact: small art drawn 1:1 is legal too
+            self.assertIn("If this was drawn for the old", msg, (slot, size))
+            self.assertIn("it now draws %d times smaller; enlarge it by %d" % (k, k), msg, (slot, size))
+            self.assertIn("If it was drawn 1:1, ignore this", msg, (slot, size))
+            ow, oh = {"break": (47, 53), "bedtime": (32, 25)}[slot]
+            self.assertIn("pad it with white past %dx%d in width or height to silence it" % (ow, oh), msg, (slot, size))
+            self.assertNotIn("it will look", msg, (slot, size))
 
     def test_an_image_past_the_old_slot_in_either_dimension_does_not_warn(self):
         for slot, size in (("break", (48, 53)), ("break", (47, 54)), ("break", (94, 106)), ("bedtime", (33, 25)),
