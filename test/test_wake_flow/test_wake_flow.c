@@ -13833,6 +13833,38 @@ void test_swap3_the_candidate_wraps_through_screen(void) {
     TEST_ASSERT_EQUAL_INT(1, flow_active_slot);
 }
 
+/* A COUNT THAT COMES ROUND PAST WHERE IT STARTED KEEPS GOING, and a tap that
+   lands exactly as the window lapses still counts. From the last timer, four
+   candidates on a three-timer lap: Screen, slot 1, Piano (the start, passed
+   and not stopped at), Screen. Each tap lands one full quiet window after the
+   one before it, so the take that ends each window is the one that finds it;
+   the commit is the last candidate, one window after the last tap (4 x 410 ms
+   is inside the test build's 1750 ms budget, so the window ends it). */
+void test_swap3b_a_slow_count_passes_its_start_and_commits_where_it_ends(void) {
+    _Static_assert(4u * CONFIG_MAGTAG_SWAP_COUNT_QUIET_MS < CONFIG_MAGTAG_SWAP_COUNT_BUDGET_MS,
+                   "the budget would end this count before its last window");
+    flow_arm_swap_wake();
+    flow_active_slot = FLOW_PIANO;
+    flow_edge_clock_is_real = true;
+    for (int i = 1; i <= 3; i++)
+        flow_burst_add(BTN_C, (int32_t)(i * SWAP_Q));
+
+    TEST_ASSERT_EQUAL_INT(FLOW_WAKE_SLEPT, flow_run_button());
+
+    TEST_ASSERT_EQUAL_INT_MESSAGE(3, flow_burst_delivered, "a press was never delivered");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(4, flow_count_n, "a tap at the window's edge, or the one on the start, was lost");
+    const uint8_t want[4] = {1, 2, 3, 1}; /* Screen, slot 1, Piano (the start), Screen */
+    for (int i = 0; i < 4; i++) {
+        TEST_ASSERT_EQUAL_UINT8(want[i], flow_count_seen[i]);
+        TEST_ASSERT_EQUAL_UINT32((uint32_t)i * SWAP_Q, flow_count_at[i]);
+    }
+    TEST_ASSERT_EQUAL_INT_MESSAGE(FLOW_SCREEN, flow_active_slot,
+                                  "the count stopped at its start instead of going round");
+    TEST_ASSERT_EQUAL_INT(1, flow_log_count(EV_SELECT_SLOT));
+    TEST_ASSERT_EQUAL_UINT32(4u * SWAP_Q, flow_select_slot_at_ms);
+    TEST_ASSERT_EQUAL_INT(1, FLOW_RENDERS());
+}
+
 /* A full lap lands on the start: no state write, no paint, strip put back. */
 void test_swap4_a_full_lap_commits_nothing_paints_nothing_and_puts_the_strip_back(void) {
     flow_arm_swap_wake(); /* three timers: wake press, then two more, is a lap */
@@ -14958,6 +14990,7 @@ int main(void) {
     RUN_TEST(test_swap5b_the_same_during_a_break_repaints_partial_not_full);
     RUN_TEST(test_swap2_n_presses_are_one_commit_and_one_partial_paint);
     RUN_TEST(test_swap3_the_candidate_wraps_through_screen);
+    RUN_TEST(test_swap3b_a_slow_count_passes_its_start_and_commits_where_it_ends);
     RUN_TEST(test_swap4_a_full_lap_commits_nothing_paints_nothing_and_puts_the_strip_back);
     RUN_TEST(test_swap5_a_full_lap_still_paints_when_the_day_rolled_over);
     RUN_TEST(test_swap6_a_full_lap_still_paints_a_break_end_the_glass_has_not_shown);
