@@ -689,17 +689,17 @@ void test_the_break_elements_sit_inside_the_clean_bands_that_cover_them(void) {
     }
 }
 
-/* The break art: BREAK_INK (1105, the ink count of tools/sprites/break.png;
-   test_gen_sprites.py TestBreak.INK is the single source) art pixels at 2x =
-   4 * BREAK_INK white pixels, exactly, inside its 94x106 box, in every cell
+/* The break art: BREAK_INK (4420, the ink count of tools/sprites/break.png;
+   test_gen_sprites.py TestBreak.INK is the single source) white pixels,
+   exactly, inside its 94x106 box (the slot, drawn 1:1), in every cell
    of §2.6's matrix — so the labels never paint over it — and nothing else
    is ever drawn above the box's bottom edge left of the column. (The box
    ends at row 107. Under its columns the centred footer's ink starts at
    row 110 and cell A's at 112; the bottom row's ink reaches up to 108 only
    at its right end, x 235..246.) */
-#define BREAK_INK 1105
-void test_the_break_screen_paints_the_art_at_the_left_at_twice_its_size(void) {
-    TEST_ASSERT_TRUE_MESSAGE(BREAK_ART_X + 2 * (int)SPRITE_BREAK.w <= BREAK_COL_X,
+#define BREAK_INK 4420
+void test_the_break_screen_paints_the_art_at_the_left(void) {
+    TEST_ASSERT_TRUE_MESSAGE(BREAK_ART_X + (int)SPRITE_BREAK.w <= BREAK_COL_X,
                              "the right column overlaps the art's box");
     /* the matrix of §2.6: {chore_count, outstanding, swap hint} */
     const struct {
@@ -711,7 +711,7 @@ void test_the_break_screen_paints_the_art_at_the_left_at_twice_its_size(void) {
         st.swap_next_name = cells[v].swap;
         display_screens_build_break(&st, NULL);
         lv_refr_now(s_disp);
-        const int box_w = 2 * SPRITE_BREAK.w, box_h = 2 * SPRITE_BREAK.h;
+        const int box_w = SPRITE_BREAK.w, box_h = SPRITE_BREAK.h;
         int in_box = 0, stray = 0;
         for (int y = 0; y < VER; y++) {
             for (int x = 0; x < BREAK_COL_X; x++) {
@@ -724,8 +724,8 @@ void test_the_break_screen_paints_the_art_at_the_left_at_twice_its_size(void) {
             }
         }
         char msg[96];
-        snprintf(msg, sizeof(msg), "variant %d: art ink %d, expected %d", (int)v, in_box, 4 * BREAK_INK);
-        TEST_ASSERT_EQUAL_INT_MESSAGE(4 * BREAK_INK, in_box, msg);
+        snprintf(msg, sizeof(msg), "variant %d: art ink %d, expected %d", (int)v, in_box, BREAK_INK);
+        TEST_ASSERT_EQUAL_INT_MESSAGE(BREAK_INK, in_box, msg);
         snprintf(msg, sizeof(msg), "variant %d: %d stray ink pixels beside the art", (int)v, stray);
         TEST_ASSERT_EQUAL_INT_MESSAGE(0, stray, msg);
     }
@@ -2236,15 +2236,16 @@ static bool captured_ink(int x, int y) {
     return ((s_captured[y * (HOR / 8) + x / 8] >> (7 - (x & 7))) & 1) == 0; /* LVGL I1: 1 = white */
 }
 
-/* ---- the sprite draw path's scale and colour --------------------------
-   build_sprite() takes an integer scale and the ink colour, so the break
-   screen's 2x white-on-black art and the charge / time's up 1x black share
-   one decoder and one callback. A hand-built 3x2 sprite pins both, because
-   the real art cannot say which of "scale" and "colour" a defect is in:
+/* ---- the sprite draw path's placement and colour -----------------------
+   build_sprite() takes the ink colour, so the white-on-black break and
+   bed-time art and the black charge / time's up art share one decoder and
+   one callback; every sprite is drawn 1:1. A hand-built 3x2 sprite pins
+   both, because the real art cannot say which of "placement" and "colour"
+   a defect is in:
        . # #
        # . .          (one ink run that wraps across the row end)
-   Ink must be exactly the art pixels, each a scale x scale block at
-   (x + art_x * scale, y + art_y * scale), and nothing else. */
+   Ink must be exactly the art pixels, art pixel (ax, ay) at panel pixel
+   (x0 + ax, y0 + ay), and nothing else. */
 static const uint8_t TINY_RLE[] = {1, 3, 2};
 static const sprite_t TINY = {3, 2, TINY_RLE, sizeof TINY_RLE};
 
@@ -2253,44 +2254,37 @@ static bool tiny_art_ink(int ax, int ay) {
 }
 
 /* want_white: the ink bit value in the capture (1 on the inverted screen) */
-static void assert_tiny_painted_exactly(int x0, int y0, int scale, int want_ink_bit) {
+static void assert_tiny_painted_exactly(int x0, int y0, int want_ink_bit) {
     int ink = 0;
     for (int y = 0; y < VER; y++) {
         for (int x = 0; x < HOR; x++) {
             const int bit = (s_captured[y * (HOR / 8) + x / 8] >> (7 - (x & 7))) & 1;
-            const int ax = (x - x0) / scale, ay = (y - y0) / scale;
+            const int ax = x - x0, ay = y - y0;
             const bool inside = x >= x0 && y >= y0 && ax < TINY.w && ay < TINY.h;
             const bool want = inside && tiny_art_ink(ax, ay);
             char msg[80];
-            snprintf(msg, sizeof(msg), "pixel (%d,%d) at scale %d is %s", x, y, scale, want ? "missing" : "stray");
+            snprintf(msg, sizeof(msg), "pixel (%d,%d) is %s", x, y, want ? "missing" : "stray");
             TEST_ASSERT_EQUAL_INT_MESSAGE(want ? want_ink_bit : !want_ink_bit, bit, msg);
             ink += (bit == want_ink_bit);
         }
     }
-    TEST_ASSERT_EQUAL_INT_MESSAGE(3 * scale * scale, ink, "wrong total ink for the scaled sprite");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(3, ink, "wrong total ink for the sprite");
 }
 
-void test_a_sprite_drawn_at_scale_2_paints_each_art_pixel_as_a_2x2_block(void) {
+void test_a_sprite_paints_each_art_pixel_as_one_panel_pixel(void) {
     lv_obj_t *scr = fresh_screen(false);
-    build_sprite(scr, &TINY, 10, 20, 2, lv_color_black());
+    build_sprite(scr, &TINY, 10, 20, lv_color_black());
     lv_refr_now(s_disp);
-    assert_tiny_painted_exactly(10, 20, 2, 0);
-}
-
-void test_a_sprite_drawn_at_scale_1_is_unscaled(void) {
-    lv_obj_t *scr = fresh_screen(false);
-    build_sprite(scr, &TINY, 10, 20, 1, lv_color_black());
-    lv_refr_now(s_disp);
-    assert_tiny_painted_exactly(10, 20, 1, 0);
+    assert_tiny_painted_exactly(10, 20, 0);
 }
 
 void test_a_sprite_takes_its_ink_colour_from_the_caller(void) {
     /* The inverted break screen: white ink on black. A callback with the
        colour hard-coded black would paint nothing visible here. */
     lv_obj_t *scr = fresh_screen(true);
-    build_sprite(scr, &TINY, 10, 20, 2, lv_color_white());
+    build_sprite(scr, &TINY, 10, 20, lv_color_white());
     lv_refr_now(s_disp);
-    assert_tiny_painted_exactly(10, 20, 2, 1);
+    assert_tiny_painted_exactly(10, 20, 1);
 }
 
 /* The one screen where ink MAY reach an edge, and only one edge: the
@@ -2478,21 +2472,21 @@ void test_the_bedtime_screen_fits_the_panel(void) {
     TEST_ASSERT_EQUAL_INT_MESSAGE(0, edge_ink, msg);
 }
 
-/* The bed-time art: BEDTIME_INK (222, the ink count of
+/* The bed-time art: BEDTIME_INK (3552, the ink count of
    tools/sprites/bedtime.png; test_gen_sprites.py TestBedtime.INK is the
-   single source and asserts the PNG still has it) art pixels at 4x = 16 *
-   BEDTIME_INK white pixels, exactly, inside its 128x100 box (the 32x25
-   slot at 4x) at (BEDTIME_ART_X, BEDTIME_ART_Y), and no other ink left of
-   the box's right edge above its bottom. The words' label column
-   (BEDTIME_COL_X 120) starts inside the box: the slot was grown to the
-   words' INK, and test_the_bedtime_words_never_overlap_the_art holds the
-   gutter between the two. */
-#define BEDTIME_INK 222
-void test_the_bedtime_screen_paints_the_art_at_the_left_at_four_times_its_size(void) {
+   single source and asserts the PNG still has it) white pixels, exactly,
+   inside its 131x105 box (the slot, drawn 1:1) at (BEDTIME_ART_X,
+   BEDTIME_ART_Y), and no other ink left of the box's right edge above its
+   bottom. The words' label column (BEDTIME_COL_X 120) starts inside the
+   box: the slot was grown to the words' INK, and
+   test_the_bedtime_words_never_overlap_the_art holds the gutter between
+   the two. */
+#define BEDTIME_INK 3552
+void test_the_bedtime_screen_paints_the_art_at_the_left(void) {
     TEST_ASSERT_TRUE_MESSAGE(BEDTIME_COL_X + BEDTIME_COL_W <= HOR, "the words' column runs off the panel");
     display_screens_build_bedtime(NULL);
     lv_refr_now(s_disp);
-    const int box_w = BEDTIME_ART_SCALE * SPRITE_BEDTIME.w, box_h = BEDTIME_ART_SCALE * SPRITE_BEDTIME.h;
+    const int box_w = SPRITE_BEDTIME.w, box_h = SPRITE_BEDTIME.h;
     int in_box = 0, left_stray = 0;
     for (int y = 0; y < VER; y++) {
         for (int x = 0; x < BEDTIME_ART_X + box_w; x++) {
@@ -2504,8 +2498,7 @@ void test_the_bedtime_screen_paints_the_art_at_the_left_at_four_times_its_size(v
                 left_stray++; /* above the box's bottom edge, outside it */
         }
     }
-    TEST_ASSERT_EQUAL_INT_MESSAGE(BEDTIME_ART_SCALE * BEDTIME_ART_SCALE * BEDTIME_INK, in_box,
-                                  "the art's ink is not exactly its PNG at 4x inside its box");
+    TEST_ASSERT_EQUAL_INT_MESSAGE(BEDTIME_INK, in_box, "the art's ink is not exactly its PNG inside its box");
     TEST_ASSERT_EQUAL_INT_MESSAGE(0, left_stray, "stray ink left of the art box's right edge outside the box");
 }
 
@@ -2518,14 +2511,13 @@ static uint8_t s_art_alone[FB_BYTES];
 
 void test_the_bedtime_words_never_overlap_the_art(void) {
     lv_obj_t *scr = fresh_screen(true);
-    build_sprite(scr, &SPRITE_BEDTIME, BEDTIME_ART_X, BEDTIME_ART_Y, BEDTIME_ART_SCALE, lv_color_white());
+    build_sprite(scr, &SPRITE_BEDTIME, BEDTIME_ART_X, BEDTIME_ART_Y, lv_color_white());
     lv_refr_now(s_disp);
     memcpy(s_art_alone, s_captured, FB_BYTES);
 
     display_screens_build_bedtime(NULL);
     lv_refr_now(s_disp);
-    const int box_r = BEDTIME_ART_X + BEDTIME_ART_SCALE * (int)SPRITE_BEDTIME.w,
-              box_b = BEDTIME_ART_Y + BEDTIME_ART_SCALE * (int)SPRITE_BEDTIME.h;
+    const int box_r = BEDTIME_ART_X + (int)SPRITE_BEDTIME.w, box_b = BEDTIME_ART_Y + (int)SPRITE_BEDTIME.h;
     for (int y = BEDTIME_ART_Y; y < box_b; y++) {
         for (int x = BEDTIME_ART_X; x < box_r; x++) {
             bool alone = ((s_art_alone[y * (HOR / 8) + x / 8] >> (7 - (x & 7))) & 1) != 0;
@@ -2589,14 +2581,14 @@ void test_the_bedtime_words_never_overlap_the_art(void) {
    contract is a WINDOW per line, not the rows a particular face happens to
    paint: a font moves the ink inside its window, never out of it, and the
    windows keep the lines clear of each other and of the art's box (which
-   ends at row 103, so the bottom line's window opens 4 rows below it; the
+   ends at row 106, so the bottom line's window opens 4 rows below it; the
    box does not depend on the text). The golden alone guards
    the rows blindly; this keeps a font change from silently crowding them. */
-#define BEDTIME_TITLE_WIN_TOP BEDTIME_ART_Y
+#define BEDTIME_TITLE_WIN_TOP 4 /* the top margin the title has always had; not tied to the art's box */
 #define BEDTIME_TITLE_WIN_BOT (BEDTIME_GREETING_Y - 1)
 #define BEDTIME_GREET_WIN_TOP BEDTIME_GREETING_Y
 #define BEDTIME_GREET_WIN_BOT 99
-#define BEDTIME_LINE_WIN_TOP 108
+#define BEDTIME_LINE_WIN_TOP 111 /* the art box's last row (106) + the 4 px gutter + 1 */
 #define BEDTIME_LINE_WIN_BOT (VER - 1)
 #define BEDTIME_LINE_GUTTER 8 /* blank rows between two lines of text */
 
@@ -3476,7 +3468,7 @@ static void vb_break(const sprite_t *a) {
    variant puts exactly its own ink inside the art's box; and everything
    outside the box is byte-identical to the base paint, so a variant changes
    the art and nothing else. `white_ink`: the screen is inverted. */
-static void check_variant_paints_in_its_box(variant_builder_t build, const sprite_t *base, int bx, int by, int scale,
+static void check_variant_paints_in_its_box(variant_builder_t build, const sprite_t *base, int bx, int by,
                                             bool white_ink) {
     static uint8_t base_fb[FB_BYTES], null_fb[FB_BYTES];
     uint8_t rle[512]; /* the largest slot (timesup) needs ~140 bytes of continuations */
@@ -3498,7 +3490,7 @@ static void check_variant_paints_in_its_box(variant_builder_t build, const sprit
         for (int x = 0; x < HOR; x++) {
             const bool now = (((s_captured[y * (HOR / 8) + x / 8] >> (7 - (x & 7))) & 1) != 0) == white_ink;
             const bool was = (((base_fb[y * (HOR / 8) + x / 8] >> (7 - (x & 7))) & 1) != 0) == white_ink;
-            const bool inside = x >= bx && x < bx + scale * base->w && y >= by && y < by + scale * base->h;
+            const bool inside = x >= bx && x < bx + base->w && y >= by && y < by + base->h;
             if (inside) {
                 in_box += now;
                 in_box_diff += now != was;
@@ -3507,7 +3499,7 @@ static void check_variant_paints_in_its_box(variant_builder_t build, const sprit
             }
         }
     }
-    const int expected = scale * scale * base->w * (y1 - y0);
+    const int expected = base->w * (y1 - y0);
     char msg[96];
     snprintf(msg, sizeof msg, "variant ink in its box: %d, expected %d", in_box, expected);
     TEST_ASSERT_EQUAL_INT_MESSAGE(expected, in_box, msg);
@@ -3517,34 +3509,34 @@ static void check_variant_paints_in_its_box(variant_builder_t build, const sprit
 }
 
 void test_the_charge_me_screen_paints_the_variant_it_is_given(void) {
-    check_variant_paints_in_its_box(vb_charge, &SPRITE_CHARGE, CHARGE_ART_X, (VER - SPRITE_CHARGE.h) / 2, 1, false);
+    check_variant_paints_in_its_box(vb_charge, &SPRITE_CHARGE, CHARGE_ART_X, (VER - SPRITE_CHARGE.h) / 2, false);
 }
 
 void test_the_timesup_screen_paints_the_variant_it_is_given(void) {
-    check_variant_paints_in_its_box(vb_timesup, &SPRITE_TIMESUP, TIMESUP_ART_X, VER - SPRITE_TIMESUP.h, 1, false);
+    check_variant_paints_in_its_box(vb_timesup, &SPRITE_TIMESUP, TIMESUP_ART_X, VER - SPRITE_TIMESUP.h, false);
 }
 
 void test_the_break_screen_paints_the_variant_it_is_given(void) {
-    check_variant_paints_in_its_box(vb_break, &SPRITE_BREAK, BREAK_ART_X, BREAK_ART_Y, 2, true);
+    check_variant_paints_in_its_box(vb_break, &SPRITE_BREAK, BREAK_ART_X, BREAK_ART_Y, true);
 }
 
 void test_the_bedtime_screen_paints_the_variant_it_is_given(void) {
-    check_variant_paints_in_its_box(vb_bedtime, &SPRITE_BEDTIME, BEDTIME_ART_X, BEDTIME_ART_Y, BEDTIME_ART_SCALE, true);
+    check_variant_paints_in_its_box(vb_bedtime, &SPRITE_BEDTIME, BEDTIME_ART_X, BEDTIME_ART_Y, true);
 }
 
 /* ---- the art slots are their max size ---------------------------------
-   Each slot (SPRITE_<SLOT>.w x .h, times the screen's scale) is the largest
-   box the layout leaves for art: any ink a custom picture puts anywhere in
-   it stays readable beside the rest. Rendered with the template art, the
-   box must sit on the panel 2 px off every edge (the fit tests' rule; the
-   time's-up box is flush with the bottom edge on purpose, the bleed) and
-   every pixel of ink OUTSIDE the box -- the words, the bar, the battery, the
-   bottom row -- must stay `gutter` px clear of it on every side and
-   `below` px clear under it. `below` is 4 everywhere but the break screen:
-   its box predates this rule and the bottom row's ink under the art's
-   columns starts 2 rows below it (row 110, the centred footer, under a box
-   ending at 107); at 2x the slot cannot grow a row without touching it, nor
-   a column without touching the bar at x 100. */
+   Each slot (SPRITE_<SLOT>.w x .h, drawn 1:1) is the largest box the layout
+   leaves for art: any ink a custom picture puts anywhere in it stays
+   readable beside the rest. Rendered with the template art, the box must
+   sit on the panel 2 px off every edge (the fit tests' rule; the time's-up
+   box is flush with the bottom edge on purpose, the bleed) and every pixel
+   of ink OUTSIDE the box -- the words, the bar, the battery, the bottom
+   row -- must stay `gutter` px clear of it on every side and `below` px
+   clear under it. `below` is 4 everywhere but the break screen: its box
+   predates this rule and the bottom row's ink under the art's columns
+   starts 2 rows below it (row 110, the centred footer, under a box ending
+   at 107); the slot cannot grow a row without touching it, nor a column
+   without touching the bar at x 100. */
 
 /* The panel-edge rule for an art box: 2 px inside every edge, but for a
    bottom-flush box, which must end exactly on the panel's last row. */
@@ -3592,22 +3584,22 @@ static void assert_art_box_has_its_gutter(const char *what, int bx, int by, int 
     TEST_ASSERT_EQUAL_INT_MESSAGE(0, near, msg);
 }
 
-/* The slot is the MAX: the same box grown by one art pixel (`scale` panel
-   px, the smallest step a sprite can grow) on any one side -- left, up,
+/* The slot is the MAX: the same box grown by one art pixel (one panel px,
+   the smallest step a sprite can grow) on any one side -- left, up,
    right or down, each tried alone -- must break a rule the box above keeps:
    leave the panel's 2 px margin (or, for the bottom-flush time's-up box, run
    off the panel), or bring the box within its gutter of other ink. A grown
    box that keeps every rule means the slot left room on the table. */
-static void assert_art_box_cannot_grow(const char *what, int bx, int by, int bw, int bh, int scale, bool white_ink,
-                                       int below, bool bottom_flush) {
+static void assert_art_box_cannot_grow(const char *what, int bx, int by, int bw, int bh, bool white_ink, int below,
+                                       bool bottom_flush) {
     const struct {
         const char *side;
         int dx, dy, dw, dh;
     } grow[] = {
-        {"left", -scale, 0, scale, 0},
-        {"up", 0, -scale, 0, scale},
-        {"right", 0, 0, scale, 0},
-        {"down", 0, 0, 0, scale},
+        {"left", -1, 0, 1, 0},
+        {"up", 0, -1, 0, 1},
+        {"right", 0, 0, 1, 0},
+        {"down", 0, 0, 0, 1},
     };
     for (size_t i = 0; i < sizeof grow / sizeof grow[0]; i++) {
         const int gx = bx + grow[i].dx, gy = by + grow[i].dy, gw = bw + grow[i].dw, gh = bh + grow[i].dh;
@@ -3634,8 +3626,8 @@ void test_the_lock_art_boxes_keep_a_gutter_to_every_other_element(void) {
 
     display_screens_build_bedtime(NULL);
     lv_refr_now(s_disp);
-    assert_art_box_has_its_gutter("bedtime", BEDTIME_ART_X, BEDTIME_ART_Y, BEDTIME_ART_SCALE * SPRITE_BEDTIME.w,
-                                  BEDTIME_ART_SCALE * SPRITE_BEDTIME.h, true, 4, false);
+    assert_art_box_has_its_gutter("bedtime", BEDTIME_ART_X, BEDTIME_ART_Y, SPRITE_BEDTIME.w, SPRITE_BEDTIME.h, true, 4,
+                                  false);
 
     /* the break screen's fullest cells: three chores and a swap hint, and
        the bare screen */
@@ -3648,26 +3640,26 @@ void test_the_lock_art_boxes_keep_a_gutter_to_every_other_element(void) {
         st.swap_next_name = cells[v].swap;
         display_screens_build_break(&st, NULL);
         lv_refr_now(s_disp);
-        assert_art_box_has_its_gutter("break", BREAK_ART_X, BREAK_ART_Y, 2 * SPRITE_BREAK.w, 2 * SPRITE_BREAK.h, true,
-                                      2, false);
+        assert_art_box_has_its_gutter("break", BREAK_ART_X, BREAK_ART_Y, SPRITE_BREAK.w, SPRITE_BREAK.h, true, 2,
+                                      false);
     }
 }
 
 void test_no_lock_art_box_can_grow_by_one_art_pixel(void) {
     display_screens_build_charge_me(NULL);
     lv_refr_now(s_disp);
-    assert_art_box_cannot_grow("charge", CHARGE_ART_X, (VER - SPRITE_CHARGE.h) / 2, SPRITE_CHARGE.w, SPRITE_CHARGE.h, 1,
+    assert_art_box_cannot_grow("charge", CHARGE_ART_X, (VER - SPRITE_CHARGE.h) / 2, SPRITE_CHARGE.w, SPRITE_CHARGE.h,
                                false, 4, false);
 
     display_screens_build_timesup(NULL);
     lv_refr_now(s_disp);
-    assert_art_box_cannot_grow("timesup", TIMESUP_ART_X, VER - SPRITE_TIMESUP.h, SPRITE_TIMESUP.w, SPRITE_TIMESUP.h, 1,
+    assert_art_box_cannot_grow("timesup", TIMESUP_ART_X, VER - SPRITE_TIMESUP.h, SPRITE_TIMESUP.w, SPRITE_TIMESUP.h,
                                false, 0, true);
 
     display_screens_build_bedtime(NULL);
     lv_refr_now(s_disp);
-    assert_art_box_cannot_grow("bedtime", BEDTIME_ART_X, BEDTIME_ART_Y, BEDTIME_ART_SCALE * SPRITE_BEDTIME.w,
-                               BEDTIME_ART_SCALE * SPRITE_BEDTIME.h, BEDTIME_ART_SCALE, true, 4, false);
+    assert_art_box_cannot_grow("bedtime", BEDTIME_ART_X, BEDTIME_ART_Y, SPRITE_BEDTIME.w, SPRITE_BEDTIME.h, true, 4,
+                               false);
 
     /* the bare screen: the slot must fit every cell, so the cell that stops
        a side is enough. Its centred footer (ink from row 110) comes closest
@@ -3678,8 +3670,7 @@ void test_no_lock_art_box_can_grow_by_one_art_pixel(void) {
     st.swap_next_name = NULL;
     display_screens_build_break(&st, NULL);
     lv_refr_now(s_disp);
-    assert_art_box_cannot_grow("break", BREAK_ART_X, BREAK_ART_Y, 2 * SPRITE_BREAK.w, 2 * SPRITE_BREAK.h, 2, true, 2,
-                               false);
+    assert_art_box_cannot_grow("break", BREAK_ART_X, BREAK_ART_Y, SPRITE_BREAK.w, SPRITE_BREAK.h, true, 2, false);
 }
 
 /* ---- sheet-only frames (MAGTAG_DUMP_DIR) -------------------------------
@@ -3759,7 +3750,7 @@ int main(void) {
     RUN_TEST(test_the_break_screen_without_chores_keeps_the_same_bands_minus_the_chore_line);
     RUN_TEST(test_the_break_countdown_fits_the_column_in_every_format);
     RUN_TEST(test_the_break_elements_sit_inside_the_clean_bands_that_cover_them);
-    RUN_TEST(test_the_break_screen_paints_the_art_at_the_left_at_twice_its_size);
+    RUN_TEST(test_the_break_screen_paints_the_art_at_the_left);
     RUN_TEST(test_the_break_chore_row_fits_its_cells);
     RUN_TEST(test_the_break_row_without_a_swap_keeps_its_chore_cell);
     RUN_TEST(test_the_break_chore_line_items_never_meet);
@@ -3804,15 +3795,14 @@ int main(void) {
     RUN_TEST(test_timesup_screen);
     RUN_TEST(test_the_timesup_screen_fits_the_panel_but_for_the_art_bottom_bleed);
     RUN_TEST(test_the_timesup_screen_paints_the_art_at_the_left_and_the_words_at_the_right);
-    RUN_TEST(test_a_sprite_drawn_at_scale_2_paints_each_art_pixel_as_a_2x2_block);
-    RUN_TEST(test_a_sprite_drawn_at_scale_1_is_unscaled);
+    RUN_TEST(test_a_sprite_paints_each_art_pixel_as_one_panel_pixel);
     RUN_TEST(test_a_sprite_takes_its_ink_colour_from_the_caller);
     RUN_TEST(test_sync_failed_screen);
     RUN_TEST(test_no_clock_screen);
     RUN_TEST(test_the_no_clock_screen_fits_the_panel);
     RUN_TEST(test_bedtime_screen);
     RUN_TEST(test_the_bedtime_screen_fits_the_panel);
-    RUN_TEST(test_the_bedtime_screen_paints_the_art_at_the_left_at_four_times_its_size);
+    RUN_TEST(test_the_bedtime_screen_paints_the_art_at_the_left);
     RUN_TEST(test_the_bedtime_words_never_overlap_the_art);
     RUN_TEST(test_the_bedtime_text_rows_stay_in_their_windows);
     RUN_TEST(test_chore_screen_one_acked);

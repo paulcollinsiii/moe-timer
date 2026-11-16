@@ -13,8 +13,8 @@ What is pinned, and why each matters:
     255,0,rest, decoding back to the same pixels (the C decoder in
     main/sprite.c implements the same rules; test_sprite covers it);
   - THE ROUND TRIP: each shipped TEMPLATE (tools/sprites/charge.png,
-    timesup.png, break.png, bedtime.png; the last two drawn at 2x and 4x,
-    white on black) encodes and decodes to exactly itself, its screen golden
+    timesup.png, break.png, bedtime.png; the last two drawn 1:1, white
+    on black) encodes and decodes to exactly itself, its screen golden
     holds it pixel for pixel at the placement display_screens.c names, and
     the committed main/sprite_data.c holds exactly that stream (the C suite
     cannot read PNGs, so this is where "the sprite in flash is the art" is
@@ -29,9 +29,12 @@ What is pinned, and why each matters:
     each template is padded to its slot's MAX size, which is the size every
     generated sprite has. An image (override or variant) may be smaller in
     either dimension and is padded with background, placed by the slot's
-    vertical anchor and, for charge and break, inset by the room their slots
-    grew past the old art (SLOT_INSET), so art of an old slot size lands
-    where it always did; one larger than its slot is refused. tools/sprites/templates/<slot>.png is a blank image of each
+    vertical anchor and, for charge, break and bedtime, inset by the room
+    their slots grew past the old art (SLOT_INSET), so art of an old slot size
+    lands where it always did; one larger than its slot is refused, and an
+    image that would fit the OLD 2x/4x break/bedtime slot draws a warning
+    (TestOldScaleWarning). Every sprite is drawn 1:1: an art pixel is a panel
+    pixel. tools/sprites/templates/<slot>.png is a blank image of each
     slot's exact size, and the template art still lands on the same panel
     pixels it always did (INK_BOX).
 """
@@ -138,7 +141,7 @@ class SpriteChecks:
       INK     the PNG's ink count, hard-coded in the C suites
       IDENT   the C stem: <ident>_rle / SPRITE_<IDENT>
       GOLDEN  the screen golden (stem, no .bin) that holds it
-      BOX     (x, y, w, h) where the golden holds the sprite (w, h scaled)
+      BOX     (x, y, w, h) where the golden holds the sprite (the slot's box)
       INK_BOX (x0, y0, x1, y1) inclusive: the panel pixels the template's ink
               spans, pinned from before the slots were padded to their max,
               so padding can never move the art
@@ -155,8 +158,7 @@ class SpriteChecks:
 
     PNG = DIMS = INK = IDENT = GOLDEN = BOX = INK_BOX = OLD_DIMS = OLD_ORIGIN = C_SITES = None
     RLE_LEN = None  # when set: the encoded stream length, pinned in the C suite too
-    SCALE = 1  # integer draw scale: each art pixel is SCALE x SCALE on the panel
-    INVERTED = False  # True: white ink on a black screen (the break screen)
+    INVERTED = False  # True: white ink on a black screen (the break and bedtime screens)
     __test__ = False
 
     def placement(self, src):
@@ -204,23 +206,19 @@ class SpriteChecks:
         with Image.open(self.PNG) as im:
             w, h = im.size
             png = [[im.getpixel((x, y)) == 0 for x in range(w)] for y in range(h)]
-        k = self.SCALE
         bad = []
         for y in range(h):
             for x in range(w):
-                ink = png[y][x]
-                # each art pixel is a k x k block on the panel
-                for dy in range(k):
-                    for dx in range(k):
-                        gx, gy = sx + x * k + dx, sy + y * k + dy
-                        bit = (gold[gy * stride + gx // 8] >> (7 - (gx & 7))) & 1
-                        # upright screens: ink is a 0 bit; the inverted
-                        # break screen draws white (1) ink on black
-                        gold_ink = (bit == 1) if self.INVERTED else (bit == 0)
-                        if ink != gold_ink:
-                            bad.append((x, y))
+                # drawn 1:1: art pixel (x, y) is panel pixel (sx + x, sy + y)
+                gx, gy = sx + x, sy + y
+                bit = (gold[gy * stride + gx // 8] >> (7 - (gx & 7))) & 1
+                # upright screens: ink is a 0 bit; the inverted
+                # lock screens draw white (1) ink on black
+                gold_ink = (bit == 1) if self.INVERTED else (bit == 0)
+                if png[y][x] != gold_ink:
+                    bad.append((x, y))
         self.assertEqual(bad[:5], [], "golden differs from the PNG at (x, y) above")
-        self.assertEqual((sx, sy, w * k, h * k), self.BOX)
+        self.assertEqual((sx, sy, w, h), self.BOX)
 
     def test_the_template_ink_lands_on_the_panel_pixels_it_always_did(self):
         # the slot was padded to its max with background on its grow sides,
@@ -228,10 +226,9 @@ class SpriteChecks:
         with open(os.path.join(ROOT, "main", "display_screens.c")) as f:
             sx, sy = self.placement(f.read())
         w, _h, px = g.load_png(self.PNG)
-        k = self.SCALE
         xs = [i % w for i, v in enumerate(px) if v]
         ys = [i // w for i, v in enumerate(px) if v]
-        got = (sx + min(xs) * k, sy + min(ys) * k, sx + max(xs) * k + k - 1, sy + max(ys) * k + k - 1)
+        got = (sx + min(xs), sy + min(ys), sx + max(xs), sy + max(ys))
         self.assertEqual(got, self.INK_BOX)
 
     def test_an_override_of_the_old_size_lands_at_the_old_origin(self):
@@ -242,8 +239,7 @@ class SpriteChecks:
         dx, dy = g.pad_offset(self.IDENT, w, h, self.OLD_DIMS[0], self.OLD_DIMS[1])
         with open(os.path.join(ROOT, "main", "display_screens.c")) as f:
             sx, sy = self.placement(f.read())
-        k = self.SCALE
-        self.assertEqual((sx + dx * k, sy + dy * k), self.OLD_ORIGIN)
+        self.assertEqual((sx + dx, sy + dy), self.OLD_ORIGIN)
 
     def test_the_committed_c_holds_that_stream(self):
         w, h, px = g.load_png(self.PNG)
@@ -283,7 +279,7 @@ class TestCharge(SpriteChecks, unittest.TestCase):
         x = int(re.search(r"#define CHARGE_ART_X (\d+)", src).group(1))
         self.assertRegex(
             src,
-            r"build_sprite\(\s*scr,\s*art\s*\?\s*art\s*:\s*&SPRITE_CHARGE,\s*CHARGE_ART_X,\s*\(DISP_VER\s*-\s*SPRITE_CHARGE\.h\)\s*/\s*2,\s*1,\s*lv_color_black\(\)\s*\)",
+            r"build_sprite\(\s*scr,\s*art\s*\?\s*art\s*:\s*&SPRITE_CHARGE,\s*CHARGE_ART_X,\s*\(DISP_VER\s*-\s*SPRITE_CHARGE\.h\)\s*/\s*2,\s*lv_color_black\(\)\s*\)",
         )
         return x, (128 - self.DIMS[1]) // 2
 
@@ -313,7 +309,7 @@ class TestTimesUp(SpriteChecks, unittest.TestCase):
         self.assertRegex(
             src,
             r"build_sprite\(\s*scr,\s*art\s*\?\s*art\s*:\s*&SPRITE_TIMESUP,\s*TIMESUP_ART_X,\s*"
-            r"DISP_VER\s*-\s*SPRITE_TIMESUP\.h,\s*1,\s*lv_color_black\(\)\s*\)",
+            r"DISP_VER\s*-\s*SPRITE_TIMESUP\.h,\s*lv_color_black\(\)\s*\)",
         )
         return x, 128 - self.DIMS[1]
 
@@ -330,30 +326,29 @@ class TestTimesUp(SpriteChecks, unittest.TestCase):
 class TestBreak(SpriteChecks, unittest.TestCase):
     __test__ = True
     PNG = BREAK_PNG
-    DIMS = (47, 53)
-    INK = 1105
-    RLE_LEN = 205
+    DIMS = (94, 106)
+    INK = 4420
+    RLE_LEN = 413
     IDENT = "break"
     GOLDEN = "break_screen"
-    SCALE = 2
     INVERTED = True
     BOX = (2, 2, 94, 106)
     INK_BOX = (8, 8, 91, 105)
-    OLD_DIMS, OLD_ORIGIN = (46, 52), (4, 4)
+    OLD_DIMS, OLD_ORIGIN = (92, 104), (4, 4)  # the pre-max 46x52 art at 2x
     C_SITES = (
         "test/test_sprite/test_sprite.c (test_the_generated_break_art_decodes_to_the_png_dimensions_and_ink_count), "
         "test/test_display_render/test_display_render.c "
-        "(test_the_break_screen_paints_the_art_at_the_left_at_twice_its_size), and this test; "
+        "(test_the_break_screen_paints_the_art_at_the_left), and this test; "
         "then regenerate the six break_screen*.bin goldens"
     )
 
     def placement(self, src):
-        # BREAK_ART_X / BREAK_ART_Y, drawn at 2x, WHITE ink (the screen is inverted)
+        # BREAK_ART_X / BREAK_ART_Y, drawn 1:1, WHITE ink (the screen is inverted)
         x = int(re.search(r"#define BREAK_ART_X (\d+)", src).group(1))
         y = int(re.search(r"#define BREAK_ART_Y (\d+)", src).group(1))
         self.assertRegex(
             src,
-            r"build_sprite\(\s*scr,\s*art\s*\?\s*art\s*:\s*&SPRITE_BREAK,\s*BREAK_ART_X,\s*BREAK_ART_Y,\s*2,\s*lv_color_white\(\)\s*\)",
+            r"build_sprite\(\s*scr,\s*art\s*\?\s*art\s*:\s*&SPRITE_BREAK,\s*BREAK_ART_X,\s*BREAK_ART_Y,\s*lv_color_white\(\)\s*\)",
         )
         return x, y
 
@@ -361,31 +356,29 @@ class TestBreak(SpriteChecks, unittest.TestCase):
 class TestBedtime(SpriteChecks, unittest.TestCase):
     __test__ = True
     PNG = BEDTIME_PNG
-    DIMS = (32, 25)
-    INK = 222
-    RLE_LEN = 73
+    DIMS = (131, 105)
+    INK = 3552
+    RLE_LEN = 305
     IDENT = "bedtime"
     GOLDEN = "bedtime"
-    SCALE = 4
     INVERTED = True
-    BOX = (4, 4, 128, 100)
+    BOX = (2, 2, 131, 105)
     INK_BOX = (4, 4, 119, 95)
-    OLD_DIMS, OLD_ORIGIN = (29, 23), (4, 4)
+    OLD_DIMS, OLD_ORIGIN = (116, 92), (4, 4)  # the pre-max 29x23 art at 4x
     C_SITES = (
         "test/test_sprite/test_sprite.c (test_the_generated_bedtime_art_decodes_to_the_png_dimensions_and_ink_count), "
         "test/test_display_render/test_display_render.c "
-        "(test_the_bedtime_screen_paints_the_art_at_the_left_at_four_times_its_size), and this test; "
+        "(test_the_bedtime_screen_paints_the_art_at_the_left), and this test; "
         "then regenerate the golden bedtime.bin"
     )
 
     def placement(self, src):
-        # BEDTIME_ART_X / BEDTIME_ART_Y, drawn at 4x, WHITE ink (the screen is inverted)
+        # BEDTIME_ART_X / BEDTIME_ART_Y, drawn 1:1, WHITE ink (the screen is inverted)
         x = int(re.search(r"#define BEDTIME_ART_X (\d+)", src).group(1))
         y = int(re.search(r"#define BEDTIME_ART_Y (\d+)", src).group(1))
-        self.assertEqual(4, int(re.search(r"#define BEDTIME_ART_SCALE (\d+)", src).group(1)))
         self.assertRegex(
             src,
-            r"build_sprite\(\s*scr,\s*art\s*\?\s*art\s*:\s*&SPRITE_BEDTIME,\s*BEDTIME_ART_X,\s*BEDTIME_ART_Y,\s*BEDTIME_ART_SCALE,\s*lv_color_white\(\)\s*\)",
+            r"build_sprite\(\s*scr,\s*art\s*\?\s*art\s*:\s*&SPRITE_BEDTIME,\s*BEDTIME_ART_X,\s*BEDTIME_ART_Y,\s*lv_color_white\(\)\s*\)",
         )
         return x, y
 
@@ -933,9 +926,9 @@ class TestSmallerImages(unittest.TestCase):
     """An image smaller than its slot is padded to the slot's size.
 
     Every slot is 8x6 here, named after the real ones so each placement is
-    exercised: bedtime is anchored top-left (padded right and below); break
-    top-left inset by (1, 1) (one column left and one row above, as room
-    allows, the rest right and below); charge inset 6 columns from the left
+    exercised: break and bedtime are anchored top-left inset by (2, 2) (two
+    columns in and two rows down, as room allows, the rest right and below);
+    charge inset 6 columns from the left
     as room allows and vertically centred (the odd row going below); timesup
     bottom-left (padded right and above). A slot the generator has no
     placement for (alpha) is top-left. The generated sprite always has the
@@ -944,7 +937,7 @@ class TestSmallerImages(unittest.TestCase):
 
     SW, SH = 8, 6
     # where a 5x3 image lands in an 8x6 slot: (columns left of it, rows above)
-    OFFS = {"break": (1, 1), "bedtime": (0, 0), "charge": (3, 1), "timesup": (0, 3), "alpha": (0, 0)}
+    OFFS = {"break": (2, 2), "bedtime": (2, 2), "charge": (3, 1), "timesup": (0, 3), "alpha": (0, 0)}
 
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
@@ -1003,9 +996,10 @@ class TestSmallerImages(unittest.TestCase):
         self.save(self.over, "break.png", (8, 4), [(7, 3)])
         self.run_main(["--override-dir", self.over])
         self.assertEqual(self.stream("timesup")[1], self.slot_rle({(7, 5)}))
-        self.assertEqual(self.stream("bedtime")[1], self.slot_rle({(2, 5)}))
-        # full width: no room for break's inset column, but its inset row
-        self.assertEqual(self.stream("break")[1], self.slot_rle({(7, 4)}))
+        # full height: no room for bedtime's inset row, but its inset columns
+        self.assertEqual(self.stream("bedtime")[1], self.slot_rle({(4, 5)}))
+        # full width: no room for break's inset columns, but its inset rows
+        self.assertEqual(self.stream("break")[1], self.slot_rle({(7, 5)}))
 
     def test_an_inset_is_clamped_to_the_room_the_image_leaves(self):
         # charge's 6-column inset in an 8-wide slot: min(6, 8 - w)
@@ -1013,11 +1007,16 @@ class TestSmallerImages(unittest.TestCase):
             self.save(self.over, "charge.png", (w, 6), [(0, 0)])
             self.run_main(["--override-dir", self.over])
             self.assertEqual(self.stream("charge")[1], self.slot_rle({(left, 0)}), "w=%d" % w)
-        # break's one-row inset: min(1, 6 - h)
-        for h, top in ((5, 1), (6, 0)):
-            self.save(self.over, "break.png", (8, h), [(0, 0)])
-            self.run_main(["--override-dir", self.over])
-            self.assertEqual(self.stream("break")[1], self.slot_rle({(0, top)}), "h=%d" % h)
+        # break's and bedtime's two-row and two-column insets: min(2, room)
+        for slot in ("break", "bedtime"):
+            for h, top in ((3, 2), (4, 2), (5, 1), (6, 0)):
+                self.save(self.over, slot + ".png", (8, h), [(0, 0)])
+                self.run_main(["--override-dir", self.over])
+                self.assertEqual(self.stream(slot)[1], self.slot_rle({(0, top)}), "%s h=%d" % (slot, h))
+            for w, left in ((5, 2), (6, 2), (7, 1), (8, 0)):
+                self.save(self.over, slot + ".png", (w, 6), [(0, 0)])
+                self.run_main(["--override-dir", self.over])
+                self.assertEqual(self.stream(slot)[1], self.slot_rle({(left, 0)}), "%s w=%d" % (slot, w))
 
     def test_the_centred_slot_puts_the_odd_row_below(self):
         # (H - h) // 2 above: the layout centres with (DISP_VER - h) / 2,
@@ -1037,7 +1036,7 @@ class TestSmallerImages(unittest.TestCase):
     def test_a_smaller_override_variant_is_padded_too(self):
         self.save(self.over, "bedtime.1.png", (2, 2), [(1, 1)])
         self.assertEqual(self.run_main(["--override-dir", self.over]), 0)
-        self.assertEqual(self.stream("bedtime_1")[1], self.slot_rle({(1, 1)}))
+        self.assertEqual(self.stream("bedtime_1")[1], self.slot_rle({(3, 3)}))  # inset (2, 2)
 
     def test_an_image_larger_than_its_slot_in_either_dimension_is_refused(self):
         for size in ((9, 6), (8, 7), (9, 3), (2, 7)):
@@ -1047,6 +1046,7 @@ class TestSmallerImages(unittest.TestCase):
             self.assertIn(path, msg, size)
             self.assertIn("%dx%d" % size, msg, size)
             self.assertIn("8x6", msg, size)
+            self.assertNotIn("scale", msg.lower(), size)  # every sprite is 1:1
             os.remove(path)
         self.save(self.sprites, "break.1.png", (8, 7), [])
         msg = self.refuse()
@@ -1057,6 +1057,71 @@ class TestSmallerImages(unittest.TestCase):
     def test_pad_offset_is_the_placement(self):
         for slot, off in self.OFFS.items():
             self.assertEqual(g.pad_offset(slot, 8, 6, 5, 3), off, slot)
+
+
+class TestOldScaleWarning(unittest.TestCase):
+    """break and bedtime were once drawn at 2x and 4x, from 47x53 and 32x25
+    art. Every sprite is 1:1 now, so such a file would silently come out tiny:
+    an image that fits the old slot, in a slot big enough to be the new one,
+    draws a warning (not an error: a small picture is legal) naming the
+    factor. Nothing else warns."""
+
+    SLOTS = {"break": (94, 106), "bedtime": (131, 105), "charge": (154, 124)}
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, self.tmp)
+        self.sprites = os.path.join(self.tmp, "sprites")
+        self.over = os.path.join(self.tmp, "over")
+        os.mkdir(self.sprites)
+        os.mkdir(self.over)
+        for slot, size in self.SLOTS.items():
+            Image.new("1", size, 1).save(os.path.join(self.sprites, slot + ".png"))
+        self.args = [
+            "--sprites-dir", self.sprites, "--c-out", os.path.join(self.tmp, "s.c"),
+            "--h-out", os.path.join(self.tmp, "s.h"), "--override-dir", self.over,
+        ]  # fmt: skip
+
+    def warnings(self, slot, size):
+        Image.new("1", size, 1).save(os.path.join(self.over, slot + ".png"))
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
+            self.assertEqual(g.main(self.args), 0, "a small image is warned about, never refused")
+        return err.getvalue()
+
+    def test_an_image_the_size_of_the_old_slot_warns_with_its_factor(self):
+        for slot, size, k in (("break", (47, 53), 2), ("break", (46, 52), 2), ("bedtime", (32, 25), 4), ("bedtime", (29, 23), 4)):
+            msg = self.warnings(slot, size)
+            self.assertIn("warning", msg, (slot, size))
+            self.assertIn(os.path.join(self.over, slot + ".png"), msg, (slot, size))
+            self.assertIn("%dx%d" % size, msg, (slot, size))
+            self.assertIn("%dx" % k, msg, (slot, size))
+            # conditional, not a fact: small art drawn 1:1 is legal too
+            self.assertIn("If this was drawn for the old", msg, (slot, size))
+            self.assertIn("it now draws %d times smaller; enlarge it by %d" % (k, k), msg, (slot, size))
+            self.assertIn("If it was drawn 1:1, ignore this", msg, (slot, size))
+            ow, oh = {"break": (47, 53), "bedtime": (32, 25)}[slot]
+            self.assertIn("pad it with white past %dx%d in width or height to silence it" % (ow, oh), msg, (slot, size))
+            self.assertNotIn("it will look", msg, (slot, size))
+
+    def test_an_image_past_the_old_slot_in_either_dimension_does_not_warn(self):
+        for slot, size in (("break", (48, 53)), ("break", (47, 54)), ("break", (94, 106)), ("bedtime", (33, 25)),
+                           ("bedtime", (32, 26)), ("bedtime", (131, 105))):
+            self.assertEqual(self.warnings(slot, size), "", (slot, size))
+
+    def test_a_slot_that_never_scaled_does_not_warn(self):
+        self.assertEqual(self.warnings("charge", (40, 30)), "")
+
+    def test_a_slot_too_small_to_be_the_new_one_does_not_warn(self):
+        # the 8x6 fixtures of TestSmallerImages are not the shipped slots
+        Image.new("1", (8, 6), 1).save(os.path.join(self.sprites, "break.png"))
+        self.assertEqual(self.warnings("break", (5, 3)), "")
+
+    def test_the_templates_themselves_do_not_warn(self):
+        err = io.StringIO()
+        with contextlib.redirect_stderr(err), contextlib.redirect_stdout(io.StringIO()):
+            g.build(g.DEFAULT_SPRITES)
+        self.assertEqual(err.getvalue(), "")
 
 
 class TestSlotAnchors(unittest.TestCase):
@@ -1094,9 +1159,9 @@ class TestSlotAnchors(unittest.TestCase):
             _dx, dy = g.pad_offset("timesup", sw, sh, sw, h)
             self.assertEqual(PANEL_H - sh + dy, PANEL_H - h, "h=%d" % h)
 
-    def test_the_bedtime_anchor_is_the_top_left_corner(self):
+    def test_the_bedtime_anchor_is_the_top_left_corner_inset_by_2(self):
         sw, sh = self.slot(BEDTIME_PNG)
-        self.assertEqual(g.pad_offset("bedtime", sw, sh, 1, 1), (0, 0))
+        self.assertEqual(g.pad_offset("bedtime", sw, sh, 1, 1), (2, 2))
 
     @staticmethod
     def define(name):
@@ -1113,16 +1178,32 @@ class TestSlotAnchors(unittest.TestCase):
             dx, _dy = g.pad_offset("charge", sw, sh, w, sh)
             self.assertEqual(x0 + dx, 8 if w <= 148 else 2 + sw - w, "w=%d" % w)
 
-    def test_a_break_image_up_to_46x52_keeps_the_old_4_4(self):
-        # the slot grew one art pixel (2 panel px) left and up, to (2, 2);
-        # each inset is one art pixel, clamped to the room the image leaves
+    def test_a_break_image_up_to_92x104_keeps_the_old_4_4(self):
+        # the slot grew 2 panel px left and up, to (2, 2) (the old 2x slot's
+        # one art pixel); each inset is clamped to the room the image leaves
         sw, sh = self.slot(BREAK_PNG)
         x0, y0 = self.define("BREAK_ART_X"), self.define("BREAK_ART_Y")
         for w in range(1, sw + 1):
             for h in range(1, sh + 1):
                 dx, dy = g.pad_offset("break", sw, sh, w, h)
-                want = (4 if w <= 46 else 2, 4 if h <= 52 else 2)
-                self.assertEqual((x0 + 2 * dx, y0 + 2 * dy), want, "%dx%d" % (w, h))
+                # room left of the 2 px inset: all of it from 2 px up, else what there is
+                want = (4 if sw - w >= 2 else 2 + sw - w, 4 if sh - h >= 2 else 2 + sh - h)
+                self.assertEqual((x0 + dx, y0 + dy), want, "%dx%d" % (w, h))
+                if w <= 92 and h <= 104:
+                    self.assertEqual((x0 + dx, y0 + dy), (4, 4), "%dx%d" % (w, h))
+
+    def test_a_bedtime_image_up_to_128x100_keeps_the_old_4_4(self):
+        # the 4x slot's art (32x25 art pixels = 128x100) started at (4, 4);
+        # the 1x slot starts at (2, 2) and insets a smaller image by 2
+        sw, sh = self.slot(BEDTIME_PNG)
+        x0, y0 = self.define("BEDTIME_ART_X"), self.define("BEDTIME_ART_Y")
+        for w in range(1, sw + 1):
+            for h in range(1, sh + 1):
+                dx, dy = g.pad_offset("bedtime", sw, sh, w, h)
+                want = (4 if sw - w >= 2 else 2 + sw - w, 4 if sh - h >= 2 else 2 + sh - h)
+                self.assertEqual((x0 + dx, y0 + dy), want, "%dx%d" % (w, h))
+                if w <= 128 and h <= 100:
+                    self.assertEqual((x0 + dx, y0 + dy), (4, 4), "%dx%d" % (w, h))
 
     def test_every_inset_names_a_shipped_slot(self):
         self.assertLessEqual(set(g.SLOT_INSET), set(g.SLOT_ANCHOR))

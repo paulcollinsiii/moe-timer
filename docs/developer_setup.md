@@ -214,33 +214,46 @@ for art. As a rule that box keeps 4 px clear of every other element's ink and
 rule. Two slots differ, on purpose:
 
 - **break** keeps only 2 px above the bottom row: under the art's columns that
-  row's ink starts at y 110, and the box ends at y 107. The box is in 2x2
-  steps, so it cannot reach a 4 px gutter there without losing a row.
+  row's ink starts at y 110, and the box ends at y 107. The box has always
+  ended there, so it stays; a 4 px gutter would cost it two rows.
 - **timesup** has no bottom margin: the box runs to the panel's last row, so
   its art may bleed off the bottom edge (the template's clock does).
 
-The template PNGs are that size, their art padded with white.
+The template PNGs are that size, their art padded with white. **Every sprite is
+drawn 1:1: one image pixel is one panel pixel**, so you draw at the panel's
+resolution and the size below is also the size on the panel.
 
-| Slot (file) | Max size (w x h) | Drawn at | Box on the panel | A smaller image goes | Ink on screen | Shows | Template |
-|---|---|---|---|---|---|---|---|
-| `charge.png` | 154x124 | 1x | x 2..155, y 2..125 | 6 px in from the left edge (fewer when wider than 148), centred vertically | black on white | the battery lock: `Charge me!` beside it | a sad battery holding its plug |
-| `timesup.png` | 187x126 | 1x, flush with the bottom edge | x 2..188, y 2..127 | to the bottom-left corner | black on white | the expiry screen: `TIME'S UP!` beside it | a shocked alarm clock, cut off by the bottom edge |
-| `break.png` | 47x53 | 2x (94x106) | x 2..95, y 2..107 | 1 art pixel in from the left and top (none on a side where it is full size) | white on black | the screen break: countdown and bar beside it | a meditating figure with sparkles |
-| `bedtime.png` | 32x25 | 4x (128x100) | x 4..131, y 4..103 | to the top-left corner | white on black | the Bed Time lock: `Bed Time` and `Goodnight!` beside it | a bed with zzz |
+| Slot (file) | Size = size on the panel (w x h) | Box on the panel | A smaller image goes | Ink on screen | Shows | Template |
+|---|---|---|---|---|---|---|
+| `charge.png` | 154x124 | x 2..155, y 2..125 | 6 px in from the left edge (fewer when wider than 148), centred vertically | black on white | the battery lock: `Charge me!` beside it | a sad battery holding its plug |
+| `timesup.png` | 187x126, flush with the bottom edge | x 2..188, y 2..127 | to the bottom-left corner | black on white | the expiry screen: `TIME'S UP!` beside it | a shocked alarm clock, cut off by the bottom edge |
+| `break.png` | 94x106 | x 2..95, y 2..107 | 2 px in from the left and top (none on a side where it is full size) | white on black | the screen break: countdown and bar beside it | a meditating figure with sparkles |
+| `bedtime.png` | 131x105 | x 2..132, y 2..106 | 2 px in from the left and top (none on a side where it is full size) | white on black | the Bed Time lock: `Bed Time` and `Goodnight!` beside it | a bed with zzz |
 
-The charge and break slots grew past where their art used to start (charge was
-148 wide at x 8, break 46x52 at (4, 4)). The inset in the "goes" column is that
-growth, so art drawn at the old size lands on exactly the same panel pixels as
-before; only a larger image reaches into the new room.
+The charge, break and bed-time slots grew past where their art used to start
+(charge was 148 wide at x 8; break was 46x52 art drawn at 2x, so 92x104 at
+(4, 4); bed time was 29x23 art drawn at 4x, so 116x92 at (4, 4)). The inset in
+the "goes" column is that growth, so art drawn at the old size lands on exactly
+the same panel pixels as before; only a larger image reaches into the new room.
+
+**Old break and bed-time art was drawn at 2x and 4x.** Until the scaling was
+removed, `break.png` was a 47x53 image the screen enlarged 2x and `bedtime.png`
+a 32x25 image enlarged 4x, so a custom file of those sizes (or smaller) now
+comes out half or a quarter of its old size. The build warns about any
+break or bed-time image that would fit the old 47x53 / 32x25 box. To keep such
+art the size it was, enlarge it by 2 (break) or 4 (bed time) with
+**nearest-neighbour** (no smoothing, so every pixel becomes an exact 2x2 or 4x4
+block) and save it as a 1-bit PNG; it then lands on the very same panel pixels
+as before. Art that was already drawn at 1x (charge, time's up) needs no change.
+The warning is a guess from the file's size alone: small art that was drawn 1:1
+is legal and stays as it is. To silence the warning for such a file, pad it
+with white past 47x53 (break) or 32x25 (bed time) in width or height.
 
 **Blank templates.** `tools/sprites/templates/<slot>.png` is an all-white
 1-bit PNG of each slot's exact maximum size. To draw your own, copy one into
 `sprites.local/` as `<slot>.png` (or `<slot>.<n>.png` for another variant) and
 draw in black. You can crop it to any size up to the template's; a smaller
-image is padded with white and placed as the "goes" column says. The break
-and bed-time templates are in native art pixels, before the screen scales
-them: each pixel you draw is a 2x2 (break) or 4x4 (bed time) block on the
-panel.
+image is padded with white and placed as the "goes" column says.
 
 A slot file is a **1-bit PNG, black = ink** (mode `1`; an RGB or greyscale PNG
 is refused). "Ink on screen" is how that ink is painted: the break and bed-time

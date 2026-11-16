@@ -24,10 +24,14 @@ ever see SPRITE_<NAME>.w/.h. Any other image for the slot -- a variant, an
 override -- may be SMALLER in either dimension: it is padded with background
 to the slot's size, placed by pad_offset() -- vertically at the slot's anchor
 (SLOT_ANCHOR: at the top, centred, or at the bottom), horizontally at the
-slot's left edge, except that charge and break keep a smaller image inset by
-the room their slots grew past their old art (SLOT_INSET: charge 6 columns,
-break one art pixel left and up, each clamped to the room the image leaves),
-so art at an old slot size lands exactly where it always did. An image
+slot's left edge, except that charge, break and bedtime keep a smaller image
+inset by the room their slots grew past their old art (SLOT_INSET: charge 6
+columns, break and bedtime 2 columns and 2 rows, each clamped to the room the
+image leaves), so art at an old slot size lands exactly where it always did.
+Every sprite is drawn 1:1: an art pixel is a panel pixel, so draw at panel
+resolution. (break and bedtime were once drawn at 2x and 4x from 47x53 and
+32x25 art; such a file is still accepted but draws a warning, as it would now
+come out tiny -- enlarge it by 2 or 4, nearest-neighbour.) An image
 larger than the slot in either dimension is refused with the
 file, its size and the slot's. tools/sprites/templates/<slot>.png is a blank
 image of each slot's exact size, for drawing on; the generator reads only the
@@ -111,19 +115,27 @@ MAX_DIM = 0xFFFF  # sprite_t.w and .h are uint16_t
 #             padded above
 # A slot not listed (only test fixtures) is "top".
 #
-# SLOT_INSET, (left, top) in ART pixels: how far in from the slot's top-left
-# corner a smaller image starts, each clamped to the room the image leaves
-# (left = min(inset, slot w - image w), likewise top; a "middle" or "bottom"
-# slot ignores the top inset). The charge and break slots were grown past
-# the corner their art used to start at -- charge 6 columns left (CHARGE_ART_X
-# 8 -> 2, to the panel's 2 px edge margin), break one art pixel left and up
-# (BREAK_ART_X/_Y 4 -> 2 at 2x) -- and the inset is that growth, so an image
-# no larger than the old slot (charge 148 wide, break 46x52) lands on the
-# panel exactly where it always did, and only a larger one reaches into the
-# new room. Everything else in the image's placement is padding on the
-# right and bottom. A slot not listed has no inset.
+# SLOT_INSET, (left, top) in pixels (art pixels are panel pixels): how far in
+# from the slot's top-left corner a smaller image starts, each clamped to the
+# room the image leaves (left = min(inset, slot w - image w), likewise top; a
+# "middle" or "bottom" slot ignores the top inset). The charge, break and
+# bedtime slots were grown past the corner their art used to start at --
+# charge 6 columns left (CHARGE_ART_X 8 -> 2, to the panel's 2 px edge
+# margin), break and bedtime 2 px left and up (their art started at (4, 4)
+# and the slots now start at the 2 px margin) -- and the inset is that
+# growth, so an image no larger than the old slot (charge 148 wide, break
+# 92x104, bedtime 128x100) lands on the panel exactly where it always did,
+# and only a larger one reaches into the new room. Everything else in the
+# image's placement is padding on the right and bottom. A slot not listed
+# has no inset.
 SLOT_ANCHOR = {"break": "top", "bedtime": "top", "charge": "middle", "timesup": "bottom"}
-SLOT_INSET = {"charge": (6, 0), "break": (1, 1)}
+SLOT_INSET = {"charge": (6, 0), "break": (2, 2), "bedtime": (2, 2)}
+
+# break and bedtime were once drawn scaled, from small art: break 2x from
+# 47x53, bedtime 4x from 32x25. Every sprite is 1:1 now, so a file that fits
+# the old art box is almost certainly an old-size file that would come out
+# tiny; fit() warns about it. slot -> (old w, old h, the factor to enlarge by).
+OLD_SCALED_ART = {"break": (47, 53, 2), "bedtime": (32, 25, 4)}
 
 
 def load_png(path):
@@ -314,7 +326,7 @@ def load_slots(sprites_dir):
 
 
 def pad_offset(slot, sw, sh, w, h):
-    """(dx, dy): where a w x h image sits inside its sw x sh slot, in art px.
+    """(dx, dy): where a w x h image sits inside its sw x sh slot, in px (1 art px = 1 panel px).
 
     dx is the slot's left inset clamped to the room (SLOT_INSET); dy follows
     the slot's SLOT_ANCHOR, a "top" slot's inset clamped likewise. Assumes
@@ -330,6 +342,25 @@ def pad_offset(slot, sw, sh, w, h):
     return dx, min(inset_y, sh - h)
 
 
+def warn_if_old_scaled_art(path, slot, sw, sh, w, h):
+    """Warn (on stderr; the image is accepted) about a break or bedtime image
+    that fits the OLD art box of the slot's former 2x / 4x draw, in a slot big
+    enough to be the 1:1 one: it would now come out tiny. See OLD_SCALED_ART."""
+    old = OLD_SCALED_ART.get(slot)
+    if not old:
+        return
+    ow, oh, k = old
+    if w <= ow and h <= oh and sw >= ow * k and sh >= oh * k:
+        print(
+            "gen_sprites: warning: %s: this file is %dx%d, small enough to be art for the old %dx%d %s slot, which "
+            "was drawn at %dx. Sprites are drawn 1:1 now (the slot is %dx%d). If this was drawn for the old %dx "
+            "%s slot, it now draws %d times smaller; enlarge it by %d (nearest-neighbour). If it was drawn 1:1, "
+            "ignore this, or pad it with white past %dx%d in width or height to silence it"
+            % (path, w, h, ow, oh, slot, k, sw, sh, k, slot, k, k, ow, oh),
+            file=sys.stderr,
+        )
+
+
 def fit(path, slot, sw, sh, f, w, h, px):
     """The image (f, w, h, px) as a slot-sized (f, sw, sh, px'): padded with
     background on the slot's grow sides (pad_offset). An image larger than
@@ -340,6 +371,7 @@ def fit(path, slot, sw, sh, f, w, h, px):
             "an image may be at most its slot's size in each dimension (a smaller one is padded)"
             % (path, w, h, slot, sw, sh)
         )
+    warn_if_old_scaled_art(path, slot, sw, sh, w, h)
     if (w, h) == (sw, sh):
         return f, w, h, px
     dx, dy = pad_offset(slot, sw, sh, w, h)
